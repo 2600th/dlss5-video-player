@@ -1,0 +1,43 @@
+# Build output
+/build/
+/out/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/*.sln
+/*.vcxproj*
+
+# Downloaded dependencies / local runtime packs
+/external/
+/streamline/
+/Streamline/
+
+# Runtime files that should not be committed
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.addon64
+ReShade.ini
+ReShadePreset.ini
+DLSSVideoPlayer.ini
+DLSSVideoPlayer.log
+ReShade.log
+
+# Local archives / generated checksums
+*.zip
+*.7z
+*.rar
+*.sha256
+*_SHA256.txt
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+.DS_Store

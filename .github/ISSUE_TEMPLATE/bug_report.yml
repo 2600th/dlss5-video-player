@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible player, decoder, D3D12 or DLSS issue
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Player version / commit
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and NVIDIA driver
+  - type: input
+    id: video
+    attributes:
+      label: Video container / codec / resolution / FPS
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. Open...\n2. Seek...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Attach DLSSVideoPlayer.log and ReShade.log when relevant. Remove private paths/data if needed.
+  - type: checkboxes
+    id: extras
+    attributes:
+      label: Environment
+      options:
+        - label: ReShade is installed
+        - label: RenoDX DLSS 5 add-on is installed
+        - label: The issue also happens without ReShade

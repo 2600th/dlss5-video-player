@@ -1,0 +1,41 @@
+name: build-windows
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone NVIDIA DLSS SDK
+        shell: cmd
+        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git external\DLSS
+
+      - name: Configure
+        shell: cmd
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build Release
+        shell: cmd
+        run: cmake --build build --config Release --parallel
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DLSSVideoPlayer-windows-x64
+          if-no-files-found: error
+          path: |
+            build/Release/DLSSVideoPlayer.exe
+            build/Release/nvngx_dlss.dll
+            build/Release/languages/**
+            LICENSE
+            README.md
