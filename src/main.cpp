@@ -556,7 +556,7 @@ private:
 
     void Unload() {
         m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_cachedStatus.clear();
-        if(m_viewport)ShowWindow(m_viewport,SW_HIDE); UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
+        if(m_viewport)ShowWindow(m_viewport,SW_HIDE);RefreshHoverForCurrentLayout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
@@ -673,11 +673,11 @@ private:
 
     void Layout(){
         if(!m_hwnd||!m_viewport||!m_renderWnd)return;RECT c{};GetClientRect(m_hwnd,&c);int W=static_cast<int>(std::max<LONG>(1,c.right-c.left)),H=static_cast<int>(std::max<LONG>(1,c.bottom-c.top));
-        if(!m_loaded){MoveWindow(m_viewport,0,0,W,H,TRUE);return;}
+        if(!m_loaded){MoveWindow(m_viewport,0,0,W,H,TRUE);RefreshHoverForCurrentLayout();InvalidateControls();return;}
         int areaH=std::max(1,H-ControlHeight());MoveWindow(m_viewport,0,0,W,areaH,TRUE);double ar=m_dar>0?m_dar:16.0/9.0;double areaAr=double(W)/areaH;int rw=0,rh=0;
         if(m_fill){if(areaAr>ar){rw=W;rh=int(std::lround(W/ar));}else{rh=areaH;rw=int(std::lround(areaH*ar));}}else{if(areaAr>ar){rh=areaH;rw=int(std::lround(areaH*ar));}else{rw=W;rh=int(std::lround(W/ar));}}
         SetWindowPos(m_renderWnd,nullptr,(W-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOZORDER|SWP_NOACTIVATE);
-        InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
+        RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
     }
 
     RECT TimelineRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(24),c.right-Dip(18),c.bottom-Dip(14)};}
@@ -699,18 +699,25 @@ private:
         if(!m_hwnd)return;const auto volume=VolumeRect();if(!volume)return;
         RECT dirty=*volume;InflateRect(&dirty,Dip(7),Dip(9));RECT c{};GetClientRect(m_hwnd,&c);dirty.right=c.right-Dip(16);InvalidateRect(m_hwnd,&dirty,FALSE);
     }
+    void InvalidateToolbarAction(ToolbarAction action){
+        if(!m_hwnd||action==ToolbarAction::None)return;const auto items=FocusableItems();
+        for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
+    }
     void UpdateCachedStatus(){
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd&&m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}
     }
-    ToolbarAction HoverActionAt(int x,int y)const{
-        const auto items=FocusableItems();const ToolbarAction action=HitTestToolbar(items,POINT{x,y});
-        return ToolbarActionEnabled(action)?action:ToolbarAction::None;
+    ToolbarAction ToolbarActionAt(int x,int y)const{
+        const auto items=FocusableItems();return ResolveToolbarHover(items,POINT{x,y},ToolbarState());
     }
     void SetHoverAction(ToolbarAction action){
         if(action==m_hoverAction)return;const auto items=FocusableItems();
         const auto dirty=HoverDirtyRectangles(items,m_hoverAction,action);m_hoverAction=action;
         for(const RECT& rect:dirty)InvalidateRect(m_hwnd,&rect,FALSE);
+    }
+    void RefreshHoverForCurrentLayout(){
+        const ToolbarAction action=(m_mouseX==-999||m_mouseY==-999)?ToolbarAction::None:ToolbarActionAt(m_mouseX,m_mouseY);
+        SetHoverAction(action);
     }
 
     struct ToolbarButtonContent{UiIcon icon;std::wstring label;bool enabled;bool active;};
@@ -783,16 +790,26 @@ private:
     }
 
     void Paint(){
-        PAINTSTRUCT ps{};HDC windowDc=BeginPaint(m_hwnd,&ps);RECT client{};GetClientRect(m_hwnd,&client);
-        const int width=std::max<LONG>(1,client.right-client.left),height=std::max<LONG>(1,client.bottom-client.top);
-        HDC memoryDc=CreateCompatibleDC(windowDc);HBITMAP bitmap=CreateCompatibleBitmap(windowDc,width,height);
-        if(memoryDc&&bitmap){
-            const HGDIOBJ previousBitmap=SelectObject(memoryDc,bitmap);RenderUi(memoryDc,client);
-            const int paintWidth=std::max<LONG>(0,ps.rcPaint.right-ps.rcPaint.left),paintHeight=std::max<LONG>(0,ps.rcPaint.bottom-ps.rcPaint.top);
-            if(paintWidth>0&&paintHeight>0)BitBlt(windowDc,ps.rcPaint.left,ps.rcPaint.top,paintWidth,paintHeight,memoryDc,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);
-            SelectObject(memoryDc,previousBitmap);
-        }
-        if(bitmap)DeleteObject(bitmap);if(memoryDc)DeleteDC(memoryDc);EndPaint(m_hwnd,&ps);
+        PAINTSTRUCT ps{};SetLastError(ERROR_SUCCESS);HDC windowDc=BeginPaint(m_hwnd,&ps);
+        if(!windowDc){const DWORD error=GetLastError();LOG("BeginPaint failed winerr="<<error);EndPaint(m_hwnd,&ps);return;}
+        RECT client{};if(!GetClientRect(m_hwnd,&client)){const DWORD error=GetLastError();LOG("GetClientRect during paint failed winerr="<<error);EndPaint(m_hwnd,&ps);return;}
+        const auto layout=LayoutPaintBuffer(client,ps.rcPaint);if(!layout){EndPaint(m_hwnd,&ps);return;}
+
+        HDC memoryDc=nullptr;HBITMAP bitmap=nullptr;HGDIOBJ previousBitmap=nullptr;POINT previousOrigin{};bool bitmapSelected=false,viewportAdjusted=false,buffered=false;const char* failedStage=nullptr;DWORD failedError=ERROR_SUCCESS;
+        const auto recordFailure=[&](const char* stage){if(!failedStage){failedStage=stage;failedError=GetLastError();}};
+
+        SetLastError(ERROR_SUCCESS);memoryDc=CreateCompatibleDC(windowDc);if(!memoryDc)recordFailure("CreateCompatibleDC");
+        if(!failedStage){SetLastError(ERROR_SUCCESS);bitmap=CreateCompatibleBitmap(windowDc,layout->width,layout->height);if(!bitmap)recordFailure("CreateCompatibleBitmap");}
+        if(!failedStage){SetLastError(ERROR_SUCCESS);previousBitmap=SelectObject(memoryDc,bitmap);if(!previousBitmap||previousBitmap==HGDI_ERROR)recordFailure("SelectObject(bitmap)");else bitmapSelected=true;}
+        if(!failedStage){SetLastError(ERROR_SUCCESS);if(!SetViewportOrgEx(memoryDc,layout->viewportOrigin.x,layout->viewportOrigin.y,&previousOrigin))recordFailure("SetViewportOrgEx");else viewportAdjusted=true;}
+        if(!failedStage){RenderUi(memoryDc,client);SetLastError(ERROR_SUCCESS);if(!SetViewportOrgEx(memoryDc,previousOrigin.x,previousOrigin.y,nullptr))recordFailure("restore viewport origin");else viewportAdjusted=false;}
+        if(!failedStage){SetLastError(ERROR_SUCCESS);if(!BitBlt(windowDc,layout->paintBounds.left,layout->paintBounds.top,layout->width,layout->height,memoryDc,0,0,SRCCOPY))recordFailure("BitBlt");else buffered=true;}
+
+        if(viewportAdjusted)SetViewportOrgEx(memoryDc,previousOrigin.x,previousOrigin.y,nullptr);
+        if(bitmapSelected)SelectObject(memoryDc,previousBitmap);
+        if(bitmap)DeleteObject(bitmap);if(memoryDc)DeleteDC(memoryDc);
+        if(!buffered){LOG("Buffered parent paint fallback after "<<(failedStage?failedStage:"unknown failure")<<" winerr="<<failedError);RenderUi(windowDc,client);}
+        EndPaint(m_hwnd,&ps);
     }
 
     void RegisterOverlayHotkeys(){
@@ -881,8 +898,8 @@ private:
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);
         if(!m_loaded){const RECT openRect=EmptyOpenRect();if(PtIn(openRect,x,y)){m_focusedToolbarAction=ToolbarAction::Open;m_pressedToolbarAction=ToolbarAction::Open;SetCapture(m_hwnd);InvalidateRect(m_hwnd,&openRect,FALSE);}return;}
-        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_muted=false;m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
-        const auto items=ToolbarItems();const ToolbarAction action=HitTestToolbar(items,POINT{x,y});if(action!=ToolbarAction::None){m_focusedToolbarAction=action;if(ToolbarActionEnabled(action)){m_pressedToolbarAction=action;SetCapture(m_hwnd);}InvalidateControls();}
+        if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
+        const auto items=ToolbarItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);InvalidateControls();}
     }
 
     void MouseUp(int x,int y){
@@ -891,11 +908,11 @@ private:
         const ToolbarAction pressed=m_pressedToolbarAction;if(pressed==ToolbarAction::None)return;
         m_pressedToolbarAction=ToolbarAction::None;if(GetCapture()==m_hwnd)ReleaseCapture();
         if(!m_loaded){const RECT openRect=EmptyOpenRect();InvalidateRect(m_hwnd,&openRect,FALSE);if(pressed==ToolbarAction::Open&&PtIn(openRect,x,y))ActivateToolbarAction(pressed,openRect);return;}
-        const auto items=ToolbarItems();const ToolbarAction released=HitTestToolbar(items,POINT{x,y});InvalidateControls();if(released==pressed){for(const auto& item:items)if(item.action==pressed){ActivateToolbarAction(pressed,item.bounds);break;}}
+        const auto items=ToolbarItems();const ToolbarAction released=ResolveToolbarHover(items,POINT{x,y},ToolbarState());InvalidateControls();if(released==pressed){for(const auto& item:items)if(item.action==pressed){ActivateToolbarAction(pressed,item.bounds);break;}}
     }
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
-    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));if(volume==m_volume&&!m_muted)return;m_volume=volume;m_audio.SetVolume(m_volume);InvalidateVolumeControls();}
-    void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateControls();}
+    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;m_audio.SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
+    void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
     void Rehook(){if(m_renderer){m_renderer->RequestDLSSRecreate();m_dlssReset=true;}}
     void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;if(Load(p))RequestSeek(keep,wasPlaying);}}
@@ -922,7 +939,7 @@ private:
         }
         case WM_SIZE:Layout();return 0;
         case WM_PAINT:Paint();return 0;
-        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(HoverActionAt(m_mouseX,m_mouseY));return 0;}
+        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));return 0;}
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
@@ -930,7 +947,7 @@ private:
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{HDROP d=reinterpret_cast<HDROP>(w);wchar_t p[32768]{};UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);if(count>0&&DragQueryFileW(d,0,p,static_cast<UINT>(std::size(p))))Load(p);DragFinish(d);return 0;}
-        case WM_MOUSEWHEEL:{if(m_loaded){m_muted=false;float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;m_volume=std::clamp(m_volume+step,0.0f,1.0f);m_audio.SetVolume(m_volume);InvalidateControls();}return 0;}
+        case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;m_audio.SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:

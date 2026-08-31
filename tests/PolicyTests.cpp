@@ -395,6 +395,63 @@ void changed_hover_action_dirties_only_present_old_and_new_actions_test()
     CHECK(absent.empty());
 }
 
+void hover_resolution_tracks_layout_action_changes_and_disappearance_test()
+{
+    const POINT point{35, 35};
+    const ToolbarAvailability available{true, false, true};
+    const std::array oldLayout{
+        ToolbarItem{ToolbarAction::Open, RECT{10, 20, 80, 56}, false},
+    };
+    const std::array changedLayout{
+        ToolbarItem{ToolbarAction::PlayPause, RECT{10, 20, 80, 56}, false},
+    };
+    const std::array<ToolbarItem, 0> disappearedLayout{};
+
+    CHECK_EQ(ToolbarAction::Open,
+             ResolveToolbarHover(oldLayout, point, available));
+    CHECK_EQ(ToolbarAction::PlayPause,
+             ResolveToolbarHover(changedLayout, point, available));
+    CHECK_EQ(ToolbarAction::None,
+             ResolveToolbarHover(disappearedLayout, point, available));
+
+    const ToolbarAvailability disabledTransport{true, true, true};
+    CHECK_EQ(ToolbarAction::None,
+             ResolveToolbarHover(changedLayout, point, disabledTransport));
+}
+
+void paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test()
+{
+    const RECT client{0, 0, 3840, 2160};
+    const auto partial = LayoutPaintBuffer(client, RECT{3011, 1990, 3039, 2018});
+    CHECK(partial.has_value());
+    if (partial) {
+        CHECK_EQ(3011L, partial->paintBounds.left);
+        CHECK_EQ(1990L, partial->paintBounds.top);
+        CHECK_EQ(3039L, partial->paintBounds.right);
+        CHECK_EQ(2018L, partial->paintBounds.bottom);
+        CHECK_EQ(28, partial->width);
+        CHECK_EQ(28, partial->height);
+        CHECK_EQ(-3011L, partial->viewportOrigin.x);
+        CHECK_EQ(-1990L, partial->viewportOrigin.y);
+    }
+
+    const auto clipped = LayoutPaintBuffer(client, RECT{-20, 2140, 50, 2200});
+    CHECK(clipped.has_value());
+    if (clipped) {
+        CHECK_EQ(0L, clipped->paintBounds.left);
+        CHECK_EQ(2140L, clipped->paintBounds.top);
+        CHECK_EQ(50L, clipped->paintBounds.right);
+        CHECK_EQ(2160L, clipped->paintBounds.bottom);
+        CHECK_EQ(50, clipped->width);
+        CHECK_EQ(20, clipped->height);
+        CHECK_EQ(0L, clipped->viewportOrigin.x);
+        CHECK_EQ(-2140L, clipped->viewportOrigin.y);
+    }
+
+    CHECK(!LayoutPaintBuffer(client, RECT{4000, 2300, 4010, 2310}).has_value());
+    CHECK(!LayoutPaintBuffer(client, RECT{120, 120, 120, 160}).has_value());
+}
+
 void tabler_glyph_mapping_uses_the_pinned_css_codepoints_test()
 {
     CHECK_EQ(L'\xfaf7', GlyphForIcon(UiIcon::Open));
@@ -1343,6 +1400,8 @@ int main()
     toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
     unchanged_hover_action_has_no_dirty_rectangles_test();
     changed_hover_action_dirties_only_present_old_and_new_actions_test();
+    hover_resolution_tracks_layout_action_changes_and_disappearance_test();
+    paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test();
     tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
     native_button_palette_has_distinct_interaction_states_test();
     active_button_small_text_meets_wcag_contrast_test();

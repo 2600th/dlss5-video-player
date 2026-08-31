@@ -231,3 +231,28 @@ std::vector<RECT> HoverDirtyRectangles(std::span<const ToolbarItem> items,
     appendBounds(newAction);
     return dirty;
 }
+
+ToolbarAction ResolveToolbarHover(std::span<const ToolbarItem> items,
+                                  POINT point,
+                                  ToolbarAvailability availability)
+{
+    const ToolbarAction action = HitTestToolbar(items, point);
+    return IsToolbarActionEnabled(action, availability) ? action : ToolbarAction::None;
+}
+
+std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds)
+{
+    const RECT clipped{
+        std::max(clientBounds.left, paintBounds.left),
+        std::max(clientBounds.top, paintBounds.top),
+        std::min(clientBounds.right, paintBounds.right),
+        std::min(clientBounds.bottom, paintBounds.bottom),
+    };
+    if (clipped.right <= clipped.left || clipped.bottom <= clipped.top) return std::nullopt;
+    return PaintBufferLayout{
+        clipped,
+        static_cast<int>(clipped.right - clipped.left),
+        static_cast<int>(clipped.bottom - clipped.top),
+        POINT{-clipped.left, -clipped.top},
+    };
+}

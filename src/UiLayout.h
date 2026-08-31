@@ -23,6 +23,13 @@ struct ToolbarAvailability {
     bool rendererReady{false};
 };
 
+struct PaintBufferLayout {
+    RECT paintBounds{};
+    int width{};
+    int height{};
+    POINT viewportOrigin{};
+};
+
 inline constexpr int kToolbarSpacingDip = 4;
 inline constexpr int kToolbarMinHitHeightDip = 36;
 inline constexpr int kToolbarCornerRadiusDip = 8;
@@ -41,3 +48,7 @@ ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
 std::vector<RECT> HoverDirtyRectangles(std::span<const ToolbarItem> items,
                                        ToolbarAction oldAction,
                                        ToolbarAction newAction);
+ToolbarAction ResolveToolbarHover(std::span<const ToolbarItem> items,
+                                  POINT point,
+                                  ToolbarAvailability availability);
+std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds);
