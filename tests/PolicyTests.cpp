@@ -6,6 +6,7 @@
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
+#include "RuntimeLifetime.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -22,6 +23,31 @@ namespace {
 constexpr std::string_view kNeuralAddon = "DLSS 5 Neural Rendering@renodx-dlss5.addon64";
 constexpr std::string_view kNeuralAddonName = "DLSS 5 Neural Rendering";
 constexpr std::string_view kNeuralAddonFilename = "renodx-dlss5.addon64";
+
+void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
+{
+    std::vector<int> observed;
+    struct OwnedPlayer {
+        std::vector<int>& order;
+        ~OwnedPlayer() { order.push_back(1); }
+    };
+
+    const int result = RunPlayerRuntime(
+        [&] {
+            OwnedPlayer player{observed};
+            return 27;
+        },
+        [&] { observed.push_back(2); },
+        [&] { observed.push_back(3); });
+
+    CHECK_EQ(27, result);
+    CHECK_EQ(size_t{3}, observed.size());
+    if (observed.size() == 3) {
+        CHECK_EQ(1, observed[0]);
+        CHECK_EQ(2, observed[1]);
+        CHECK_EQ(3, observed[2]);
+    }
+}
 
 void write_binary_file(const std::filesystem::path& path, std::string_view content)
 {
@@ -1598,6 +1624,7 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 int main()
 {
     harness_sanity_test();
+    runtime_shutdown_releases_player_before_media_foundation_and_com_test();
     toolbar_layout_selects_stable_action_sets_for_width_modes_test();
     toolbar_layout_preserves_group_separation_test();
     toolbar_layout_scales_hit_height_and_avoids_overlap_test();

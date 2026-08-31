@@ -31,6 +31,7 @@
 #include "Log.h"
 #include "ReShadeConfig.h"
 #include "RuntimePolicy.h"
+#include "RuntimeLifetime.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -995,4 +996,37 @@ private:
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;
 };
 
-int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){EnablePerMonitorDpiAwareness();AppOptions options=ParseArgs();if(!options.argumentsOk){FailBootstrap(options.argumentError);return 1;}const StartupResult startup=RunNeuralAddonBootstrap(options);if(startup==StartupResult::ExitSuccess)return 0;if(startup==StartupResult::ExitFailure)return 1;if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(std::move(options));if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}
+int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
+{
+    EnablePerMonitorDpiAwareness();
+    AppOptions options=ParseArgs();
+    if(!options.argumentsOk){FailBootstrap(options.argumentError);return 1;}
+    const StartupResult startup=RunNeuralAddonBootstrap(options);
+    if(startup==StartupResult::ExitSuccess)return 0;
+    if(startup==StartupResult::ExitFailure)return 1;
+    if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;
+    if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}
+
+    return RunPlayerRuntime(
+        [&]() -> int {
+            PlayerApp app(std::move(options));
+            if(!app.Create(hi))return 1;
+
+            MSG msg{};
+            bool quit=false;
+            while(app.Running()&&!quit){
+                while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){
+                    if(msg.message==WM_QUIT){quit=true;break;}
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                if(quit)break;
+                app.Tick();
+                if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());
+                else WaitMessage();
+            }
+            return 0;
+        },
+        [] { MFShutdown(); },
+        [] { CoUninitialize(); });
+}
