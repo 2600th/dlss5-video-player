@@ -145,6 +145,21 @@ void disabled_addons_collapses_only_exact_target_duplicates_test()
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
 
+void disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64, renodx-dlss5.addon64,  other.addon64\n";
+    constexpr std::string_view enabledExpected =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64,  other.addon64\n";
+
+    CHECK_EQ(std::string(enabledExpected), UpdateDisabledAddonsIni(input, kNeuralAddon, false));
+    CHECK_EQ(std::string(input), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
+    CHECK_EQ(std::string(input), UpdateDisabledAddonsIni(
+        UpdateDisabledAddonsIni(input, kNeuralAddon, true), kNeuralAddon, true));
+}
+
 void configure_neural_addon_is_idempotent_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
@@ -208,7 +223,37 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
     CHECK(!duplicateResult.error.empty());
     CHECK_EQ(std::string(duplicateInput), read_binary_file(path));
 
+    constexpr std::string_view crossSectionDuplicateInput =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64\n"
+        "[aDdOn]\n"
+        "DisabledAddons=renodx-dlss5.addon64\n";
+    write_binary_file(path, crossSectionDuplicateInput);
+    const ConfigUpdate crossSectionResult = ConfigureNeuralAddon(path, true);
+    CHECK(!crossSectionResult.ok);
+    CHECK(!crossSectionResult.changed);
+    CHECK(!crossSectionResult.addonEnabled);
+    CHECK(!crossSectionResult.error.empty());
+    CHECK_EQ(std::string(crossSectionDuplicateInput), read_binary_file(path));
+
     std::filesystem::remove(path, removeError);
+}
+
+void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
+{
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-directory";
+    std::error_code removeError;
+    std::filesystem::remove_all(path, removeError);
+    std::filesystem::create_directory(path, removeError);
+
+    const ConfigUpdate result = ConfigureNeuralAddon(path, true);
+    CHECK(!result.ok);
+    CHECK(!result.changed);
+    CHECK(!result.addonEnabled);
+    CHECK(!result.error.empty());
+    CHECK(std::filesystem::is_directory(path));
+
+    std::filesystem::remove_all(path, removeError);
 }
 
 } // namespace
@@ -223,8 +268,10 @@ int main()
     disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test();
     disabled_addons_removes_only_exact_target_entries_test();
     disabled_addons_collapses_only_exact_target_duplicates_test();
+    disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test();
     configure_neural_addon_is_idempotent_test();
     configure_neural_addon_fails_closed_for_malformed_ini_test();
+    configure_neural_addon_rejects_non_regular_path_before_replacement_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

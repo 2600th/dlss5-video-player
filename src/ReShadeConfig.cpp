@@ -6,7 +6,9 @@
 #include <cctype>
 #include <cwchar>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <vector>
 
 namespace {
@@ -127,7 +129,7 @@ std::string UpdateList(std::string_view list, std::string_view addonName, bool d
 
     size_t targetCount = 0;
     for (const std::string_view entry : entries) {
-        if (entry == addonName) {
+        if (Trim(entry) == addonName) {
             ++targetCount;
         }
     }
@@ -142,7 +144,7 @@ std::string UpdateList(std::string_view list, std::string_view addonName, bool d
     std::vector<std::string_view> retained;
     bool keptTarget = false;
     for (const std::string_view entry : entries) {
-        if (entry != addonName) {
+        if (Trim(entry) != addonName) {
             retained.push_back(entry);
         } else if (disabled && !keptTarget) {
             retained.push_back(entry);
@@ -167,22 +169,16 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
     for (size_t index = 0; index < lines.size(); ++index) {
         const Line& line = lines[index];
         const std::string_view content = ini.substr(line.begin, line.contentEnd - line.begin);
-        if (IsSection(content, "ADDON")) {
-            if (inAddonSection) {
-                addonSectionEnd = line.begin;
-                inAddonSection = false;
-            }
-            if (addonHeader == std::string_view::npos) {
-                addonHeader = index;
-                inAddonSection = true;
-            }
-            continue;
-        }
         const std::string_view trimmed = Trim(content);
-        if (!trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']') {
-            if (inAddonSection) {
+        const bool isAddonSection = IsSection(content, "ADDON");
+        const bool isAnySection = !trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']';
+        if (isAnySection) {
+            if (inAddonSection && addonSectionEnd == ini.size()) {
                 addonSectionEnd = line.begin;
-                inAddonSection = false;
+            }
+            inAddonSection = isAddonSection;
+            if (isAddonSection && addonHeader == std::string_view::npos) {
+                addonHeader = index;
             }
             continue;
         }
@@ -306,15 +302,31 @@ std::string UpdateDisabledAddonsIni(std::string_view ini, std::string_view addon
 
 ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool enable)
 {
+    std::error_code sizeError;
+    const uintmax_t fileSize = std::filesystem::file_size(iniPath, sizeError);
+    if (sizeError || fileSize > static_cast<uintmax_t>(std::string{}.max_size())
+        || fileSize > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+        return {false, false, false, L"Unable to determine a readable ReShade.ini size"};
+    }
+
     std::ifstream input(iniPath, std::ios::binary);
     if (!input) {
         return {false, false, false, L"Unable to open ReShade.ini"};
     }
-    const std::string original{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-    if (input.bad()) {
+    std::string original(static_cast<size_t>(fileSize), '\0');
+    if (!original.empty()) {
+        input.read(original.data(), static_cast<std::streamsize>(original.size()));
+    }
+    if (!input || input.gcount() != static_cast<std::streamsize>(original.size())) {
         return {false, false, false, L"Unable to read ReShade.ini"};
     }
+    if (input.peek() != std::char_traits<char>::eof() || input.bad()) {
+        return {false, false, false, L"ReShade.ini changed while it was being read"};
+    }
     input.close();
+    if (input.fail()) {
+        return {false, false, false, L"Unable to close ReShade.ini after reading"};
+    }
 
     constexpr std::string_view neuralAddon = "renodx-dlss5.addon64";
     const ParsedUpdate updated = ParseAndUpdate(original, neuralAddon, !enable);
