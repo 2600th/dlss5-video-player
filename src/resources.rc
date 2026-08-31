@@ -1,0 +1,5 @@
+#include <windows.h>
+#include "resources.h"
+
+IDI_DLSS_VIDEO_PLAYER ICON "../assets/DLSSVideoPlayer.ico"
+IDR_TABLER_ICONS_FONT RCDATA "../assets/tabler/tabler-icons.ttf"

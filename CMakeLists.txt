@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.11.0 LANGUAGES CXX)
+project(DLSSVideoPlayer VERSION 0.11.0 LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -25,6 +25,8 @@ set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
+    src/resources.h
+    src/resources.rc
     src/AppMenu.cpp
     src/AppMenu.h
     src/VideoDecoder.cpp

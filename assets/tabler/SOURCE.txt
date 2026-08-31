@@ -1,0 +1,6 @@
+Package: @tabler/icons-webfont
+Version: 3.46.0
+Source: https://registry.npmjs.org/@tabler/icons-webfont/-/icons-webfont-3.46.0.tgz
+Integrity: sha512-aQouIxJQb+F5cRsHo/FW5qSILDuU7pd7d86JjmSUCMgpJhBeRuyovnfJlQeyuug2gHz0jFaosl4GNYo3SLnjrQ==
+License: MIT (see LICENSE)
+Committed files: dist/fonts/tabler-icons.ttf, dist/tabler-icons.css, LICENSE

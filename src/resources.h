@@ -1,0 +1,4 @@
+#pragma once
+
+#define IDI_DLSS_VIDEO_PLAYER 101
+#define IDR_TABLER_ICONS_FONT 201

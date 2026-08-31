@@ -14,6 +14,10 @@ The one-click build reuses an installed FFmpeg or downloads a Windows FFmpeg bui
 
 ReShade is optional for native DLSS SR but required for the experimental RenoDX DLSS 5 workflow described in the documentation. ReShade is a separate project.
 
+## Tabler Icons
+
+The embedded UI font and application icon are derived from Tabler Icons 3.46.0, copyright (c) 2020-2026 Paweł Kuna, and distributed under the MIT License. The pinned source metadata and complete license text are in `assets/tabler/SOURCE.txt` and `assets/tabler/LICENSE`.
+
 ## RenoDX / experimental DLSS 5 runtime
 
 `renodx-dlss5.addon64`, `nvngx_dlssnr.dll` and related experimental runtime files are not included in this repository. Users obtain and use them separately under the terms applicable to those files.
