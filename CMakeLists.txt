@@ -39,6 +39,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/Localization.h
     src/RuntimePolicy.cpp
     src/RuntimePolicy.h
+    src/ReShadeConfig.cpp
+    src/ReShadeConfig.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -91,6 +93,8 @@ if(BUILD_TESTING)
         tests/TestSupport.h
         src/RuntimePolicy.cpp
         src/RuntimePolicy.h
+        src/ReShadeConfig.cpp
+        src/ReShadeConfig.h
     )
     target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
