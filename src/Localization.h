@@ -42,6 +42,7 @@ private:
             {L"adjustments.reset", L"Reset"}, {L"adjustments.close", L"Close"},
             {L"idle.title", L"Play a video with DLSS"}, {L"idle.subtitle", L"Drop a file here or choose a source"}, {L"idle.open", L"Open file"},
             {L"idle.youtube", L"Open YouTube URL"}, {L"idle.youtube_unavailable", L"Unavailable in this build; YouTube support is not installed yet."},
+            {L"idle.youtube_unavailable_compact", L"YouTube unavailable in this build."},
             {L"dialog.title", L"Open video"}, {L"dialog.all_ffmpeg", L"All files (FFmpeg auto-detect)"}, {L"dialog.supported", L"Common video files"}, {L"dialog.all", L"All files"},
             {L"error.decode", L"Could not open this video. Check the file and bundled FFmpeg files, then try again."},
             {L"error.renderer", L"DLSS is unavailable. Update the NVIDIA driver or use safe mode, then try again."},

@@ -98,15 +98,15 @@ IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi)
     const int availableHeight = std::max(1, height - 2 * gutter);
     if (stacked && totalHeight > availableHeight) {
         subtitleHeight = 0;
-        const int compactGap = std::min(DipToPixels(6, dpi), availableHeight / 20);
+        const int compactGap = std::min(DipToPixels(4, dpi), availableHeight / 20);
         headerGap = compactGap;
         actionGap = compactGap;
         reasonGap = compactGap;
-        titleHeight = std::min(DipToPixels(28, dpi), availableHeight / 5);
-        reasonHeight = std::min(DipToPixels(28, dpi), availableHeight / 5);
-        const int buttonSpace = std::max(2, availableHeight - titleHeight - reasonHeight -
-                                            headerGap - actionGap - reasonGap);
-        buttonHeight = std::max(1, buttonSpace / 2);
+        buttonHeight = DipToPixels(kToolbarMinHitHeightDip, dpi);
+        const int reserved = buttonHeight * 2 + headerGap + actionGap + reasonGap;
+        const int textHeight = std::max(0, availableHeight - reserved);
+        titleHeight = std::min(DipToPixels(24, dpi), textHeight / 2);
+        reasonHeight = std::max(0, textHeight - titleHeight);
         actionBlockHeight = buttonHeight * 2 + actionGap;
         totalHeight = titleHeight + headerGap + actionBlockHeight + reasonGap + reasonHeight;
     }
@@ -196,6 +196,20 @@ int MinimumToolbarClientWidth(UINT dpi)
     const std::span<const ToolbarDefinition* const> selected{required};
     return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
            LayoutWidth(selected, kToolbarSmallestWidthDip, dpi);
+}
+
+int MinimumIdleClientHeight(UINT dpi)
+{
+    return DipToPixels(150, dpi);
+}
+
+RECT ClampWindowRectToMinimumTrackSize(RECT suggested, POINT minimumTrackSize)
+{
+    suggested.right = suggested.left +
+        std::max<LONG>(suggested.right - suggested.left, minimumTrackSize.x);
+    suggested.bottom = suggested.top +
+        std::max<LONG>(suggested.bottom - suggested.top, minimumTrackSize.y);
+    return suggested;
 }
 
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point)
@@ -343,15 +357,17 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
     }
     if (!status.mediaLoaded) return {};
 
-    const wchar_t* runtime = L"Scaler fallback";
-    if (status.runtimeMode == PlayerRuntimeMode::NeuralAddonExperimental) {
-        runtime = L"Neural addon enabled (experimental)";
-    } else if (status.runtimeMode == PlayerRuntimeMode::DlssSrSafeMode) {
-        runtime = L"DLSS SR safe mode";
+    const wchar_t* configuration = L"Neural addon unavailable";
+    if (status.runtimeConfiguration == PlayerRuntimeConfiguration::NeuralAddonExperimental) {
+        configuration = L"Neural addon enabled (experimental)";
+    } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::DlssSrSafeMode) {
+        configuration = L"DLSS SR safe mode";
     }
+    const wchar_t* dlssState = status.dlssState == PlayerDlssState::Active
+        ? L"DLSS SR active" : L"Scaler fallback";
 
     std::wstringstream text;
-    text << runtime
+    text << configuration << L" \u00b7 " << dlssState
          << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
          << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
          << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight
@@ -379,7 +395,30 @@ std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
     return prefix + std::wstring(mediaTitle.substr(0, mediaCharacters - 1)) + L"\u2026";
 }
 
-bool AcceptRehookConfirmation(int dialogResult)
+PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
+                                               bool neuralAddonConfigured,
+                                               bool dlssEnabled,
+                                               bool dlssFeatureCreated)
 {
-    return dialogResult == IDYES;
+    PlayerRuntimeStatus status{};
+    if (safeMode) {
+        status.configuration = PlayerRuntimeConfiguration::DlssSrSafeMode;
+    } else if (neuralAddonConfigured) {
+        status.configuration = PlayerRuntimeConfiguration::NeuralAddonExperimental;
+    }
+    status.dlssState = dlssEnabled && dlssFeatureCreated
+        ? PlayerDlssState::Active : PlayerDlssState::ScalerFallback;
+    return status;
+}
+
+bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& requestRecreate)
+{
+    if (dialogResult != IDYES || !requestRecreate) return false;
+    requestRecreate();
+    return true;
+}
+
+bool YouTubePlaybackAvailable()
+{
+    return false;
 }

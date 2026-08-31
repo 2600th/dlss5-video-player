@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <optional>
 #include <string>
@@ -36,10 +37,20 @@ struct IdleSurfaceLayout {
     bool stacked{false};
 };
 
-enum class PlayerRuntimeMode {
+enum class PlayerRuntimeConfiguration {
     NeuralAddonExperimental,
     DlssSrSafeMode,
+    NeuralAddonUnavailable,
+};
+
+enum class PlayerDlssState {
+    Active,
     ScalerFallback,
+};
+
+struct PlayerRuntimeStatus {
+    PlayerRuntimeConfiguration configuration{PlayerRuntimeConfiguration::NeuralAddonUnavailable};
+    PlayerDlssState dlssState{PlayerDlssState::ScalerFallback};
 };
 
 enum class PlayerStatusActivity {
@@ -50,7 +61,8 @@ enum class PlayerStatusActivity {
 struct PlayerStatusSnapshot {
     bool mediaLoaded{false};
     PlayerStatusActivity activity{PlayerStatusActivity::None};
-    PlayerRuntimeMode runtimeMode{PlayerRuntimeMode::ScalerFallback};
+    PlayerRuntimeConfiguration runtimeConfiguration{PlayerRuntimeConfiguration::NeuralAddonUnavailable};
+    PlayerDlssState dlssState{PlayerDlssState::ScalerFallback};
     uint32_t sourceWidth{};
     uint32_t sourceHeight{};
     uint32_t inputWidth{};
@@ -80,6 +92,8 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
 IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi);
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point);
 int MinimumToolbarClientWidth(UINT dpi);
+int MinimumIdleClientHeight(UINT dpi);
+RECT ClampWindowRectToMinimumTrackSize(RECT suggested, POINT minimumTrackSize);
 std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT dpi,
                                       std::span<const ToolbarItem> toolbarItems);
 bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availability);
@@ -100,4 +114,9 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
 std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
                                     std::wstring_view mediaTitle,
                                     size_t maxCharacters);
-bool AcceptRehookConfirmation(int dialogResult);
+PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
+                                               bool neuralAddonConfigured,
+                                               bool dlssEnabled,
+                                               bool dlssFeatureCreated);
+bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& requestRecreate);
+bool YouTubePlaybackAvailable();

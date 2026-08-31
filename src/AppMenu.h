@@ -34,7 +34,13 @@ inline constexpr UINT IDM_FULLSCREEN = 402;
 inline constexpr UINT IDM_VIDEO_ADJUSTMENTS = 403;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 
-HMENU CreateMenuBar(const Localizer& localizer);
+enum class PlayerCommandRoute {
+    KeyDown,
+    NativeMenu,
+};
+
+HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
+bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 
 } // namespace app_menu

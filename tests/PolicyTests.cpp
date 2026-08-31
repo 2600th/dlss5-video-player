@@ -361,17 +361,32 @@ void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
     CHECK(small.actions[0].bounds.bottom <= small.actions[1].bounds.top);
     CHECK(small.youtubeReason.bottom <= 360);
 
-    const IdleSurfaceLayout tiny = LayoutIdleSurface(244, 180, 96);
-    for (const auto& action : tiny.actions) {
-        CHECK(action.bounds.top >= 0);
-        CHECK(action.bounds.bottom <= 180);
-        CHECK(action.bounds.bottom > action.bounds.top);
+    struct HeightCase { UINT dpi; int clientHeight; int hitHeight; };
+    constexpr HeightCase heights[]{
+        {96, 150, 36},
+        {120, 188, 45},
+        {144, 225, 54},
+        {192, 300, 72},
+    };
+    for (const auto& test : heights) {
+        CHECK_EQ(test.clientHeight, MinimumIdleClientHeight(test.dpi));
+        const IdleSurfaceLayout shortLayout = LayoutIdleSurface(
+            MinimumToolbarClientWidth(test.dpi), test.clientHeight, test.dpi);
+        CHECK(shortLayout.stacked);
+        CHECK_EQ(shortLayout.subtitle.top, shortLayout.subtitle.bottom);
+        for (const auto& action : shortLayout.actions) {
+            CHECK(action.bounds.top >= 0);
+            CHECK(action.bounds.bottom <= test.clientHeight);
+            CHECK(action.bounds.bottom - action.bounds.top >= test.hitHeight);
+        }
+        CHECK(shortLayout.youtubeReason.top >= shortLayout.actions[1].bounds.bottom);
+        CHECK(shortLayout.youtubeReason.bottom >= shortLayout.youtubeReason.top);
+        CHECK(shortLayout.youtubeReason.bottom <= test.clientHeight);
     }
-    CHECK(tiny.youtubeReason.top >= tiny.actions[1].bounds.bottom);
-    CHECK(tiny.youtubeReason.bottom >= tiny.youtubeReason.top);
-    CHECK(tiny.youtubeReason.bottom <= 180);
 
-    const ToolbarAvailability intermediate{false, false, false, false};
+    const bool youtubeAvailable = YouTubePlaybackAvailable();
+    CHECK(!youtubeAvailable);
+    const ToolbarAvailability intermediate{false, false, false, youtubeAvailable};
     CHECK(IsToolbarActionEnabled(ToolbarAction::Open, intermediate));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::OpenYouTube, intermediate));
     CHECK_EQ(ToolbarAction::Open,
@@ -387,6 +402,23 @@ void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
              NextFocusableToolbarAction(small.actions, ToolbarAction::Open, false, later));
 }
 
+void dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test()
+{
+    const RECT tooSmall{120, 80, 520, 300};
+    const RECT clamped = ClampWindowRectToMinimumTrackSize(tooSmall, POINT{451, 361});
+    CHECK_EQ(120L, clamped.left);
+    CHECK_EQ(80L, clamped.top);
+    CHECK_EQ(571L, clamped.right);
+    CHECK_EQ(441L, clamped.bottom);
+
+    const RECT alreadyLarge{120, 80, 700, 600};
+    const RECT unchanged = ClampWindowRectToMinimumTrackSize(alreadyLarge, POINT{451, 361});
+    CHECK_EQ(alreadyLarge.left, unchanged.left);
+    CHECK_EQ(alreadyLarge.top, unchanged.top);
+    CHECK_EQ(alreadyLarge.right, unchanged.right);
+    CHECK_EQ(alreadyLarge.bottom, unchanged.bottom);
+}
+
 void player_status_formats_exact_runtime_and_playback_states_test()
 {
     PlayerStatusSnapshot status{};
@@ -397,7 +429,8 @@ void player_status_formats_exact_runtime_and_playback_states_test()
 
     status.activity = PlayerStatusActivity::None;
     status.mediaLoaded = true;
-    status.runtimeMode = PlayerRuntimeMode::NeuralAddonExperimental;
+    status.runtimeConfiguration = PlayerRuntimeConfiguration::NeuralAddonExperimental;
+    status.dlssState = PlayerDlssState::Active;
     status.sourceWidth = 1920;
     status.sourceHeight = 1080;
     status.inputWidth = 1280;
@@ -408,13 +441,27 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.renderedFps = 58.4;
     status.sourceFps = 59.94;
     status.droppedFrames = 3;
-    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
+    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR active \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
              BuildPlayerStatusText(status));
 
-    status.runtimeMode = PlayerRuntimeMode::DlssSrSafeMode;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7"));
-    status.runtimeMode = PlayerRuntimeMode::ScalerFallback;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"Scaler fallback \u00b7"));
+    status.runtimeConfiguration = PlayerRuntimeConfiguration::DlssSrSafeMode;
+    status.dlssState = PlayerDlssState::Active;
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR active \u00b7"));
+    status.dlssState = PlayerDlssState::ScalerFallback;
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 Scaler fallback \u00b7"));
+
+    const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, true, true);
+    CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralActive.configuration);
+    CHECK_EQ(PlayerDlssState::Active, neuralActive.dlssState);
+    const PlayerRuntimeStatus neuralFallback = ResolvePlayerRuntimeStatus(false, true, false, true);
+    CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralFallback.configuration);
+    CHECK_EQ(PlayerDlssState::ScalerFallback, neuralFallback.dlssState);
+    const PlayerRuntimeStatus safeActive = ResolvePlayerRuntimeStatus(true, false, true, true);
+    CHECK_EQ(PlayerRuntimeConfiguration::DlssSrSafeMode, safeActive.configuration);
+    CHECK_EQ(PlayerDlssState::Active, safeActive.dlssState);
+    const PlayerRuntimeStatus safeFallback = ResolvePlayerRuntimeStatus(true, false, true, false);
+    CHECK_EQ(PlayerRuntimeConfiguration::DlssSrSafeMode, safeFallback.configuration);
+    CHECK_EQ(PlayerDlssState::ScalerFallback, safeFallback.dlssState);
 }
 
 void long_media_title_is_bounded_with_a_real_ellipsis_test()
@@ -434,6 +481,7 @@ void recovery_copy_and_rehook_confirmation_are_actionable_test()
     const std::wstring decode = localizer.Get(L"error.decode");
     const std::wstring renderer = localizer.Get(L"error.renderer");
     const std::wstring rehook = localizer.Get(L"rehook.confirm");
+    const std::wstring compactYoutubeReason = localizer.Get(L"idle.youtube_unavailable_compact");
     CHECK(decode.find(L"bundled FFmpeg") != std::wstring::npos);
     CHECK(decode.find(L"try again") != std::wstring::npos);
     CHECK(renderer.find(L"NVIDIA driver") != std::wstring::npos);
@@ -441,9 +489,18 @@ void recovery_copy_and_rehook_confirmation_are_actionable_test()
     CHECK(rehook.find(L"reset playback") != std::wstring::npos);
     CHECK(rehook.find(L"hang") != std::wstring::npos);
     CHECK(rehook.find(L"experimental neural add-on") != std::wstring::npos);
-    CHECK(!AcceptRehookConfirmation(IDNO));
-    CHECK(!AcceptRehookConfirmation(IDCANCEL));
-    CHECK(AcceptRehookConfirmation(IDYES));
+    CHECK_EQ(std::wstring(L"YouTube unavailable in this build."), compactYoutubeReason);
+    int recreateRequests = 0;
+    const auto request = [&] { ++recreateRequests; };
+    CHECK(!ExecuteGuardedRehook(IDNO, request));
+    CHECK(!ExecuteGuardedRehook(IDCANCEL, request));
+    CHECK_EQ(0, recreateRequests);
+    CHECK(ExecuteGuardedRehook(IDYES, request));
+    CHECK_EQ(1, recreateRequests);
+    CHECK(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown, VK_F6));
+    CHECK(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu, app_menu::IDM_REHOOK));
+    CHECK(!app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown, 'R'));
+    CHECK(!app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu, app_menu::IDM_OPEN));
 }
 
 void unchanged_hover_action_has_no_dirty_rectangles_test()
@@ -675,7 +732,7 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
 void player_menu_is_english_only_and_retains_advanced_commands_test()
 {
     Localizer localizer;
-    const HMENU menu = app_menu::CreateMenuBar(localizer);
+    const HMENU menu = app_menu::CreateMenuBar(localizer, YouTubePlaybackAvailable());
     CHECK(menu != nullptr);
 
     std::vector<MenuEntry> entries;
@@ -705,6 +762,29 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     }
 
     if (menu) DestroyMenu(menu);
+}
+
+void youtube_availability_drives_real_menu_and_idle_action_consistently_test()
+{
+    Localizer localizer;
+    for (const bool available : {false, true}) {
+        const HMENU menu = app_menu::CreateMenuBar(localizer, available);
+        CHECK(menu != nullptr);
+        std::vector<MenuEntry> entries;
+        if (menu) collect_menu_entries(menu, entries);
+        bool found = false;
+        for (const auto& entry : entries) {
+            if (entry.command != app_menu::IDM_OPEN_YOUTUBE) continue;
+            found = true;
+            const bool disabled = (entry.state & (MFS_DISABLED | MFS_GRAYED)) != 0;
+            CHECK_EQ(!available, disabled);
+        }
+        CHECK(found);
+        ToolbarAvailability state{};
+        state.youtubeAvailable = available;
+        CHECK_EQ(available, IsToolbarActionEnabled(ToolbarAction::OpenYouTube, state));
+        if (menu) DestroyMenu(menu);
+    }
 }
 
 std::filesystem::path executable_directory()
@@ -1526,6 +1606,7 @@ int main()
     volume_slider_never_intersects_compact_or_threshold_toolbar_test();
     toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
     idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test();
+    dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test();
     player_status_formats_exact_runtime_and_playback_states_test();
     long_media_title_is_bounded_with_a_real_ellipsis_test();
     recovery_copy_and_rehook_confirmation_are_actionable_test();
@@ -1540,6 +1621,7 @@ int main()
     failed_icon_font_uses_label_only_presentation_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
+    youtube_availability_drives_real_menu_and_idle_action_consistently_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();

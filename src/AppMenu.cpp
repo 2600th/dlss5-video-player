@@ -20,7 +20,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     return menu;
 }
 
-HMENU CreateMenuBar(const Localizer& localizer)
+HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), dlss = CreatePopupMenu(), quality = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
@@ -29,7 +29,7 @@ HMENU CreateMenuBar(const Localizer& localizer)
     };
     add(file, IDM_OPEN, L"menu.open");
     const std::wstring youtubeName = localizer.Get(L"menu.open_youtube");
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_OPEN_YOUTUBE, youtubeName.c_str());
+    AppendMenuW(file, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED), IDM_OPEN_YOUTUBE, youtubeName.c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
     add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
@@ -40,6 +40,11 @@ HMENU CreateMenuBar(const Localizer& localizer)
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
     return bar;
+}
+
+bool RoutesToRehook(PlayerCommandRoute route, UINT value)
+{
+    return route == PlayerCommandRoute::KeyDown ? value == VK_F6 : value == IDM_REHOOK;
 }
 
 } // namespace app_menu
