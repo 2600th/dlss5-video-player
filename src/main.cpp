@@ -74,29 +74,31 @@ struct AppOptions {
     bool addonBootstrapRestarted=false;
     bool neuralAddonRequested=false;
     bool neuralAddonConfigured=false;
+    bool argumentsOk=false;
     DetectedGpu detectedGpu;
     std::vector<std::wstring> userArguments;
+    std::wstring argumentError;
     std::wstring file;
 };
 
 static AppOptions ParseArgs() {
     AppOptions o; int argc=0; LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);
-    if (!argv) return o;
-    for(int i=1;i<argc;++i) {
-        std::wstring argument=argv[i];
-        if(argument==L"--addon-bootstrap-restarted") { o.addonBootstrapRestarted=true; continue; }
-        o.userArguments.push_back(argument);
-        if(argument==L"--safe-mode") o.safeMode=true;
-    }
-    for(int i=1;i<argc;++i) {
-        std::wstring a=argv[i];
-        if(a==L"--addon-bootstrap-restarted" || a==L"--safe-mode") {
+    const RuntimeArguments runtimeArguments=ParseRuntimeArguments(argc,argv);
+    if(argv)LocalFree(argv);
+    if(!runtimeArguments.ok){o.argumentError=runtimeArguments.error;return o;}
+    o.argumentsOk=true;
+    o.safeMode=runtimeArguments.safeMode;
+    o.addonBootstrapRestarted=runtimeArguments.addonBootstrapRestarted;
+    o.userArguments=runtimeArguments.userArguments;
+    for(size_t i=0;i<o.userArguments.size();++i) {
+        const std::wstring& a=o.userArguments[i];
+        if(a==L"--safe-mode") {
             continue;
-        } else if(a==L"--output" && i+1<argc) {
-            std::wstring v=argv[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
+        } else if(a==L"--output" && i+1<o.userArguments.size()) {
+            std::wstring v=o.userArguments[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
             if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); }
-        } else if(a==L"--quality" && i+1<argc) {
-            std::wstring q=argv[++i]; std::transform(q.begin(),q.end(),q.begin(),::towlower);
+        } else if(a==L"--quality" && i+1<o.userArguments.size()) {
+            std::wstring q=o.userArguments[++i]; std::transform(q.begin(),q.end(),q.begin(),::towlower);
             if(q==L"auto") { o.qualityExplicit=false; }
             else {
                 o.qualityExplicit=true;
@@ -108,7 +110,7 @@ static AppOptions ParseArgs() {
             }
         } else if(!a.empty() && a[0]!=L'-') o.file=a;
     }
-    LocalFree(argv); return o;
+    return o;
 }
 
 enum class StartupResult { Continue, ExitSuccess, ExitFailure };
@@ -160,16 +162,19 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     options.detectedGpu=DetectHighPerformanceGpu();
     options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
     const ConfigUpdate update=ConfigureNeuralAddon(executable.parent_path()/L"ReShade.ini",options.neuralAddonRequested);
-    const bool priorEnabled=update.changed?!update.addonEnabled:update.addonEnabled;
-    const BootstrapAction action=DecideBootstrap(options.neuralAddonRequested,priorEnabled,options.addonBootstrapRestarted,update.ok);
+    const BootstrapAction action=DecideBootstrapFromObservedUpdate(
+        options.neuralAddonRequested,
+        update.previousAddonEnabled,
+        update.addonEnabled,
+        options.addonBootstrapRestarted,
+        update.ok);
     if(!update.ok) return FailBootstrap(update.error);
     if(update.addonEnabled!=options.neuralAddonRequested) return FailBootstrap(L"ReShade.ini still reports the wrong neural add-on state after the update attempt");
     options.neuralAddonConfigured=update.addonEnabled;
 
     if(action==BootstrapAction::Fail) return FailBootstrap(L"The neural add-on required a second correction after the bootstrap restart marker");
     if(action==BootstrapAction::Relaunch) {
-        std::vector<std::wstring> arguments=options.userArguments;
-        arguments.push_back(L"--addon-bootstrap-restarted");
+        const std::vector<std::wstring> arguments=BuildBootstrapRelaunchArguments(options.userArguments);
         std::wstring launchError;
         if(!LaunchSameExecutable(arguments,launchError)) return FailBootstrap(launchError);
         LOG("Neural addon configuration changed; relaunched before renderer creation.");
@@ -694,8 +699,7 @@ private:
     void RestartInSafeMode(){
         const int answer=MessageBoxW(m_hwnd,L"Restart the player in DLSS SR safe mode?\n\nThis disables the experimental neural add-on for this launch.",L"Restart in DLSS SR safe mode",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
         if(answer!=IDYES)return;
-        std::vector<std::wstring> arguments=m_opt.userArguments;
-        if(std::find(arguments.begin(),arguments.end(),L"--safe-mode")==arguments.end())arguments.push_back(L"--safe-mode");
+        const std::vector<std::wstring> arguments=BuildSafeModeRestartArguments(m_opt.userArguments);
         std::wstring launchError;
         if(!LaunchSameExecutable(arguments,launchError)){
             LOG("Safe-mode restart failed: "<<WideToUtf8(launchError));
@@ -757,4 +761,4 @@ private:
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0,m_uiTick=0;
 };
 
-int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){AppOptions options=ParseArgs();const StartupResult startup=RunNeuralAddonBootstrap(options);if(startup==StartupResult::ExitSuccess)return 0;if(startup==StartupResult::ExitFailure)return 1;if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(std::move(options));if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}
+int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){AppOptions options=ParseArgs();if(!options.argumentsOk){FailBootstrap(options.argumentError);return 1;}const StartupResult startup=RunNeuralAddonBootstrap(options);if(startup==StartupResult::ExitSuccess)return 0;if(startup==StartupResult::ExitFailure)return 1;if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(std::move(options));if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}

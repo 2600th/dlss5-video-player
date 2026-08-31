@@ -7,6 +7,7 @@
 struct ConfigUpdate {
     bool ok{false};
     bool changed{false};
+    bool previousAddonEnabled{false};
     bool addonEnabled{false};
     std::wstring error;
 };
@@ -17,6 +18,12 @@ std::string UpdateDisabledAddonsIni(
     std::string_view ini,
     std::string_view addonName,
     bool disabled);
+
+ConfigUpdate EvaluateNeuralAddonConfigUpdate(
+    std::string_view previousIni,
+    std::string_view finalIni,
+    bool changed,
+    bool desiredEnabled);
 
 ConfigUpdate ConfigureNeuralAddon(
     const std::filesystem::path& iniPath,

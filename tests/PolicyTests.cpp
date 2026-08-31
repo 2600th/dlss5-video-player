@@ -141,6 +141,113 @@ void windows_command_line_quoting_round_trip_test()
     }
 }
 
+void runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test()
+{
+    const wchar_t* argv[] = {
+        L"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe",
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"quoted\"value",
+        L"--safe-mode",
+        L"--addon-bootstrap-restarted",
+        L"--safe-mode",
+        L"--addon-bootstrap-restarted",
+    };
+    const std::vector<std::wstring> expected = {
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"quoted\"value",
+        L"--safe-mode",
+    };
+
+    const RuntimeArguments parsed = ParseRuntimeArguments(static_cast<int>(std::size(argv)), argv);
+    CHECK(parsed.ok);
+    CHECK(parsed.safeMode);
+    CHECK(parsed.addonBootstrapRestarted);
+    CHECK(parsed.error.empty());
+    CHECK_EQ(expected.size(), parsed.userArguments.size());
+    if (parsed.userArguments.size() == expected.size()) {
+        for (size_t index = 0; index < expected.size(); ++index) {
+            CHECK_EQ(expected[index], parsed.userArguments[index]);
+        }
+    }
+
+    const RuntimeArguments failed = ParseRuntimeArguments(0, nullptr);
+    CHECK(!failed.ok);
+    CHECK(!failed.safeMode);
+    CHECK(!failed.addonBootstrapRestarted);
+    CHECK(failed.userArguments.empty());
+    CHECK(!failed.error.empty());
+}
+
+void observed_config_bootstrap_decision_test()
+{
+    CHECK_EQ(BootstrapAction::Continue,
+        DecideBootstrapFromObservedUpdate(true, true, true, false, true));
+    CHECK_EQ(BootstrapAction::Continue,
+        DecideBootstrapFromObservedUpdate(false, false, false, true, true));
+    CHECK_EQ(BootstrapAction::Relaunch,
+        DecideBootstrapFromObservedUpdate(true, false, true, false, true));
+    CHECK_EQ(BootstrapAction::Fail,
+        DecideBootstrapFromObservedUpdate(true, false, true, true, true));
+    CHECK_EQ(BootstrapAction::Fail,
+        DecideBootstrapFromObservedUpdate(true, false, false, false, true));
+    CHECK_EQ(BootstrapAction::Fail,
+        DecideBootstrapFromObservedUpdate(false, true, false, false, false));
+}
+
+void restart_argument_lifecycle_and_create_process_command_line_test()
+{
+    const std::vector<std::wstring> contaminated = {
+        L"--future-flag",
+        L"",
+        L"--addon-bootstrap-restarted",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"--safe-mode",
+        L"--safe-mode",
+        L"--addon-bootstrap-restarted",
+    };
+
+    const std::vector<std::wstring> bootstrap = BuildBootstrapRelaunchArguments(contaminated);
+    const std::vector<std::wstring> expectedBootstrap = {
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"--safe-mode",
+        L"--addon-bootstrap-restarted",
+    };
+    CHECK_EQ(expectedBootstrap.size(), bootstrap.size());
+    if (bootstrap.size() == expectedBootstrap.size()) {
+        for (size_t index = 0; index < bootstrap.size(); ++index) {
+            CHECK_EQ(expectedBootstrap[index], bootstrap[index]);
+        }
+    }
+
+    const std::vector<std::wstring> safeMode = BuildSafeModeRestartArguments(contaminated);
+    const std::vector<std::wstring> expectedSafeMode = {
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"--safe-mode",
+    };
+    CHECK_EQ(expectedSafeMode.size(), safeMode.size());
+    if (safeMode.size() == expectedSafeMode.size()) {
+        for (size_t index = 0; index < safeMode.size(); ++index) {
+            CHECK_EQ(expectedSafeMode[index], safeMode[index]);
+        }
+    }
+
+    constexpr std::wstring_view executable = L"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe";
+    constexpr std::wstring_view expectedCommandLine =
+        L"\"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe\" "
+        L"\"--future-flag\" \"\" "
+        L"\"C:\\Videos\\clip with spaces.mp4\" "
+        L"\"--safe-mode\" \"--addon-bootstrap-restarted\"";
+    CHECK_EQ(std::wstring(expectedCommandLine), BuildWindowsCommandLine(executable, bootstrap));
+}
+
 void disabled_addons_creates_missing_addon_section_test()
 {
     constexpr std::string_view input =
@@ -265,11 +372,65 @@ void configure_neural_addon_is_idempotent_test()
     const ConfigUpdate second = ConfigureNeuralAddon(path, true);
     CHECK(second.ok);
     CHECK(!second.changed);
+    CHECK(second.previousAddonEnabled);
     CHECK(second.addonEnabled);
     CHECK(second.error.empty());
     CHECK_EQ(afterFirst, read_binary_file(path));
 
     std::filesystem::remove(path, removeError);
+}
+
+void configure_neural_addon_reports_semantic_state_across_text_canonicalization_test()
+{
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-semantic.ini";
+    std::error_code removeError;
+    std::filesystem::remove(path, removeError);
+
+    constexpr std::string_view missingAddonInput =
+        "[GENERAL]\n"
+        "PresetPath=.\\ReShadePreset.ini\n";
+    write_binary_file(path, missingAddonInput);
+    const ConfigUpdate missingAddon = ConfigureNeuralAddon(path, true);
+    CHECK(missingAddon.ok);
+    CHECK(missingAddon.changed);
+    CHECK(missingAddon.previousAddonEnabled);
+    CHECK(missingAddon.addonEnabled);
+
+    constexpr std::string_view duplicateTargetInput =
+        "[ADDON]\n"
+        "DisabledAddons=renodx-dlss5.addon64,legacy.addon64,renodx-dlss5.addon64\n";
+    write_binary_file(path, duplicateTargetInput);
+    const ConfigUpdate duplicateTarget = ConfigureNeuralAddon(path, false);
+    CHECK(duplicateTarget.ok);
+    CHECK(duplicateTarget.changed);
+    CHECK(!duplicateTarget.previousAddonEnabled);
+    CHECK(!duplicateTarget.addonEnabled);
+
+    std::filesystem::remove(path, removeError);
+}
+
+void evaluated_config_update_observes_actual_final_bytes_test()
+{
+    constexpr std::string_view enabledIni =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64\n";
+    constexpr std::string_view disabledIni =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64\n";
+
+    const ConfigUpdate mismatch = EvaluateNeuralAddonConfigUpdate(enabledIni, disabledIni, true, true);
+    CHECK(!mismatch.ok);
+    CHECK(mismatch.changed);
+    CHECK(mismatch.previousAddonEnabled);
+    CHECK(!mismatch.addonEnabled);
+    CHECK(!mismatch.error.empty());
+
+    const ConfigUpdate observed = EvaluateNeuralAddonConfigUpdate(disabledIni, enabledIni, true, true);
+    CHECK(observed.ok);
+    CHECK(observed.changed);
+    CHECK(!observed.previousAddonEnabled);
+    CHECK(observed.addonEnabled);
+    CHECK(observed.error.empty());
 }
 
 void configure_neural_addon_fails_closed_for_malformed_ini_test()
@@ -342,6 +503,9 @@ int main()
     neural_addon_policy_test();
     bootstrap_action_matrix_test();
     windows_command_line_quoting_round_trip_test();
+    runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
+    observed_config_bootstrap_decision_test();
+    restart_argument_lifecycle_and_create_process_command_line_test();
     disabled_addons_creates_missing_addon_section_test();
     disabled_addons_updates_empty_and_populated_lists_test();
     disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test();
@@ -349,6 +513,8 @@ int main()
     disabled_addons_collapses_only_exact_target_duplicates_test();
     disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test();
     configure_neural_addon_is_idempotent_test();
+    configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
+    evaluated_config_update_observes_actual_final_bytes_test();
     configure_neural_addon_fails_closed_for_malformed_ini_test();
     configure_neural_addon_rejects_non_regular_path_before_replacement_test();
 

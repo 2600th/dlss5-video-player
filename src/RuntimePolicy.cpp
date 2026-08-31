@@ -8,6 +8,8 @@
 namespace {
 
 constexpr uint32_t kNvidiaVendorId = 0x10DE;
+constexpr std::wstring_view kSafeModeArgument = L"--safe-mode";
+constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-restarted";
 
 bool ContainsCaseInsensitive(std::wstring_view text, std::wstring_view needle)
 {
@@ -50,6 +52,35 @@ void AppendQuotedArgument(std::wstring& commandLine, std::wstring_view argument)
     }
     commandLine.append(backslashes * 2, L'\\');
     commandLine.push_back(L'"');
+}
+
+std::vector<std::wstring> SanitizeRestartArguments(
+    const std::vector<std::wstring>& arguments,
+    bool requireSafeMode,
+    bool requireBootstrapMarker)
+{
+    std::vector<std::wstring> sanitized;
+    bool hasSafeMode = false;
+    for (const std::wstring& argument : arguments) {
+        if (argument == kBootstrapMarkerArgument) {
+            continue;
+        }
+        if (argument == kSafeModeArgument) {
+            if (!hasSafeMode) {
+                sanitized.push_back(argument);
+                hasSafeMode = true;
+            }
+            continue;
+        }
+        sanitized.push_back(argument);
+    }
+    if (requireSafeMode && !hasSafeMode) {
+        sanitized.emplace_back(kSafeModeArgument);
+    }
+    if (requireBootstrapMarker) {
+        sanitized.emplace_back(kBootstrapMarkerArgument);
+    }
+    return sanitized;
 }
 
 } // namespace
@@ -119,6 +150,64 @@ BootstrapAction DecideBootstrap(
         return BootstrapAction::Continue;
     }
     return alreadyRestarted ? BootstrapAction::Fail : BootstrapAction::Relaunch;
+}
+
+BootstrapAction DecideBootstrapFromObservedUpdate(
+    bool desiredEnabled,
+    bool previousEnabled,
+    bool currentEnabled,
+    bool alreadyRestarted,
+    bool updateSucceeded)
+{
+    if (!updateSucceeded || currentEnabled != desiredEnabled) {
+        return BootstrapAction::Fail;
+    }
+    return DecideBootstrap(desiredEnabled, previousEnabled, alreadyRestarted, true);
+}
+
+RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv)
+{
+    RuntimeArguments result;
+    if (argc < 1 || argv == nullptr || argv[0] == nullptr) {
+        result.error = L"Unable to parse the process command line";
+        return result;
+    }
+
+    bool hasSafeMode = false;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) {
+            result.error = L"The parsed process command line contained an invalid argument";
+            result.userArguments.clear();
+            return result;
+        }
+        const std::wstring argument(argv[index]);
+        if (argument == kBootstrapMarkerArgument) {
+            result.addonBootstrapRestarted = true;
+            continue;
+        }
+        if (argument == kSafeModeArgument) {
+            result.safeMode = true;
+            if (hasSafeMode) {
+                continue;
+            }
+            hasSafeMode = true;
+        }
+        result.userArguments.push_back(argument);
+    }
+    result.ok = true;
+    return result;
+}
+
+std::vector<std::wstring> BuildBootstrapRelaunchArguments(
+    const std::vector<std::wstring>& userArguments)
+{
+    return SanitizeRestartArguments(userArguments, false, true);
+}
+
+std::vector<std::wstring> BuildSafeModeRestartArguments(
+    const std::vector<std::wstring>& userArguments)
+{
+    return SanitizeRestartArguments(userArguments, true, false);
 }
 
 std::wstring BuildWindowsCommandLine(

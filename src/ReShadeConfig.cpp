@@ -23,6 +23,18 @@ struct ParsedUpdate {
     bool malformed{false};
     std::string error;
     std::string content;
+    bool addonEnabled{true};
+};
+
+struct ReadResult {
+    bool ok{false};
+    std::string content;
+    std::wstring error;
+};
+
+struct WriteResult {
+    bool ok{false};
+    std::wstring error;
 };
 
 std::string_view Trim(std::string_view value)
@@ -154,6 +166,22 @@ std::string UpdateList(std::string_view list, std::string_view addonName, bool d
     return Join(retained);
 }
 
+bool ListContainsAddon(std::string_view list, std::string_view addonName)
+{
+    for (size_t begin = 0;;) {
+        const size_t comma = list.find(',', begin);
+        const std::string_view entry = list.substr(
+            begin, comma == std::string_view::npos ? std::string_view::npos : comma - begin);
+        if (Trim(entry) == addonName) {
+            return true;
+        }
+        if (comma == std::string_view::npos) {
+            return false;
+        }
+        begin = comma + 1;
+    }
+}
+
 ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bool disabled)
 {
     if (ini.find('\0') != std::string_view::npos) {
@@ -229,14 +257,16 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
     const std::string_view line = ini.substr(disabledLine.begin, disabledLine.contentEnd - disabledLine.begin);
     size_t valueStart = 0;
     IsKey(line, "DisabledAddons", valueStart);
-    const std::string updatedList = UpdateList(line.substr(valueStart), addonName, disabled);
+    const std::string_view originalList = line.substr(valueStart);
+    const bool addonEnabled = !ListContainsAddon(originalList, addonName);
+    const std::string updatedList = UpdateList(originalList, addonName, disabled);
     if (updatedList == line.substr(valueStart)) {
-        return {false, {}, std::string(ini)};
+        return {false, {}, std::string(ini), addonEnabled};
     }
 
     std::string content(ini);
     content.replace(disabledLine.begin + valueStart, disabledLine.contentEnd - (disabledLine.begin + valueStart), updatedList);
-    return {false, {}, std::move(content)};
+    return {false, {}, std::move(content), addonEnabled};
 }
 
 std::wstring Win32Error(std::wstring_view operation)
@@ -244,13 +274,43 @@ std::wstring Win32Error(std::wstring_view operation)
     return std::wstring(operation) + L" failed (Win32 error " + std::to_wstring(GetLastError()) + L")";
 }
 
-ConfigUpdate WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_view content, bool addonEnabled)
+ReadResult ReadIniFile(const std::filesystem::path& iniPath)
+{
+    std::error_code sizeError;
+    const uintmax_t fileSize = std::filesystem::file_size(iniPath, sizeError);
+    if (sizeError || fileSize > static_cast<uintmax_t>(std::string{}.max_size())
+        || fileSize > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+        return {false, {}, L"Unable to determine a readable ReShade.ini size"};
+    }
+
+    std::ifstream input(iniPath, std::ios::binary);
+    if (!input) {
+        return {false, {}, L"Unable to open ReShade.ini"};
+    }
+    std::string content(static_cast<size_t>(fileSize), '\0');
+    if (!content.empty()) {
+        input.read(content.data(), static_cast<std::streamsize>(content.size()));
+    }
+    if (!input || input.gcount() != static_cast<std::streamsize>(content.size())) {
+        return {false, {}, L"Unable to read ReShade.ini"};
+    }
+    if (input.peek() != std::char_traits<char>::eof() || input.bad()) {
+        return {false, {}, L"ReShade.ini changed while it was being read"};
+    }
+    input.close();
+    if (input.fail()) {
+        return {false, {}, L"Unable to close ReShade.ini after reading"};
+    }
+    return {true, std::move(content), {}};
+}
+
+WriteResult WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_view content)
 {
     const std::filesystem::path directory = iniPath.has_parent_path() ? iniPath.parent_path() : std::filesystem::current_path();
     std::wstring temporary(MAX_PATH, L'\0');
     const std::wstring prefix = L"RDX";
     if (GetTempFileNameW(directory.c_str(), prefix.c_str(), 0, temporary.data()) == 0) {
-        return {false, false, false, Win32Error(L"Creating ReShade.ini temporary file")};
+        return {false, Win32Error(L"Creating ReShade.ini temporary file")};
     }
     temporary.resize(std::wcslen(temporary.c_str()));
 
@@ -259,7 +319,7 @@ ConfigUpdate WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_v
     if (file == INVALID_HANDLE_VALUE) {
         const std::wstring error = Win32Error(L"Opening ReShade.ini temporary file");
         DeleteFileW(temporary.c_str());
-        return {false, false, false, error};
+        return {false, error};
     }
 
     bool wrote = true;
@@ -278,15 +338,15 @@ ConfigUpdate WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_v
     CloseHandle(file);
     if (!wrote || !flushed) {
         DeleteFileW(temporary.c_str());
-        return {false, false, false, L"Writing ReShade.ini temporary file failed (Win32 error " + std::to_wstring(writeError) + L")"};
+        return {false, L"Writing ReShade.ini temporary file failed (Win32 error " + std::to_wstring(writeError) + L")"};
     }
 
     if (!MoveFileExW(temporary.c_str(), iniPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const std::wstring error = Win32Error(L"Replacing ReShade.ini");
         DeleteFileW(temporary.c_str());
-        return {false, false, false, error};
+        return {false, error};
     }
-    return {true, true, addonEnabled, {}};
+    return {true, {}};
 }
 
 } // namespace
@@ -300,41 +360,52 @@ std::string UpdateDisabledAddonsIni(std::string_view ini, std::string_view addon
     return updated.content;
 }
 
+ConfigUpdate EvaluateNeuralAddonConfigUpdate(
+    std::string_view previousIni,
+    std::string_view finalIni,
+    bool changed,
+    bool desiredEnabled)
+{
+    constexpr std::string_view neuralAddon = "renodx-dlss5.addon64";
+    const ParsedUpdate previous = ParseAndUpdate(previousIni, neuralAddon, !desiredEnabled);
+    if (previous.malformed) {
+        return {false, changed, false, false, std::wstring(previous.error.begin(), previous.error.end())};
+    }
+    const ParsedUpdate final = ParseAndUpdate(finalIni, neuralAddon, !desiredEnabled);
+    if (final.malformed) {
+        return {false, changed, previous.addonEnabled, false, std::wstring(final.error.begin(), final.error.end())};
+    }
+    if (final.addonEnabled != desiredEnabled) {
+        return {false, changed, previous.addonEnabled, final.addonEnabled,
+            L"Observed neural add-on state does not match the requested state"};
+    }
+    return {true, changed, previous.addonEnabled, final.addonEnabled, {}};
+}
+
 ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool enable)
 {
-    std::error_code sizeError;
-    const uintmax_t fileSize = std::filesystem::file_size(iniPath, sizeError);
-    if (sizeError || fileSize > static_cast<uintmax_t>(std::string{}.max_size())
-        || fileSize > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        return {false, false, false, L"Unable to determine a readable ReShade.ini size"};
-    }
-
-    std::ifstream input(iniPath, std::ios::binary);
-    if (!input) {
-        return {false, false, false, L"Unable to open ReShade.ini"};
-    }
-    std::string original(static_cast<size_t>(fileSize), '\0');
-    if (!original.empty()) {
-        input.read(original.data(), static_cast<std::streamsize>(original.size()));
-    }
-    if (!input || input.gcount() != static_cast<std::streamsize>(original.size())) {
-        return {false, false, false, L"Unable to read ReShade.ini"};
-    }
-    if (input.peek() != std::char_traits<char>::eof() || input.bad()) {
-        return {false, false, false, L"ReShade.ini changed while it was being read"};
-    }
-    input.close();
-    if (input.fail()) {
-        return {false, false, false, L"Unable to close ReShade.ini after reading"};
+    const ReadResult originalRead = ReadIniFile(iniPath);
+    if (!originalRead.ok) {
+        return {false, false, false, false, originalRead.error};
     }
 
     constexpr std::string_view neuralAddon = "renodx-dlss5.addon64";
-    const ParsedUpdate updated = ParseAndUpdate(original, neuralAddon, !enable);
+    const ParsedUpdate updated = ParseAndUpdate(originalRead.content, neuralAddon, !enable);
     if (updated.malformed) {
-        return {false, false, false, std::wstring(updated.error.begin(), updated.error.end())};
+        return {false, false, false, false, std::wstring(updated.error.begin(), updated.error.end())};
     }
-    if (updated.content == original) {
-        return {true, false, enable, {}};
+    if (updated.content == originalRead.content) {
+        return EvaluateNeuralAddonConfigUpdate(originalRead.content, originalRead.content, false, enable);
     }
-    return WriteUpdatedIni(iniPath, updated.content, enable);
+
+    const WriteResult write = WriteUpdatedIni(iniPath, updated.content);
+    if (!write.ok) {
+        return {false, false, updated.addonEnabled, false, write.error};
+    }
+    const ReadResult finalRead = ReadIniFile(iniPath);
+    if (!finalRead.ok) {
+        return {false, true, updated.addonEnabled, false,
+            L"Unable to verify updated ReShade.ini: " + finalRead.error};
+    }
+    return EvaluateNeuralAddonConfigUpdate(originalRead.content, finalRead.content, true, enable);
 }
