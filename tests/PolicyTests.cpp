@@ -15,18 +15,49 @@
 
 namespace {
 
-constexpr std::string_view kNeuralAddon = "renodx-dlss5.addon64";
+constexpr std::string_view kNeuralAddon = "DLSS 5 Neural Rendering@renodx-dlss5.addon64";
+constexpr std::string_view kNeuralAddonName = "DLSS 5 Neural Rendering";
+constexpr std::string_view kNeuralAddonFilename = "renodx-dlss5.addon64";
 
 void write_binary_file(const std::filesystem::path& path, std::string_view content)
 {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    CHECK(output.is_open());
+    if (!output.is_open()) return;
     output.write(content.data(), static_cast<std::streamsize>(content.size()));
+    CHECK(output.good());
+    output.flush();
+    CHECK(output.good());
+    output.close();
+    CHECK(!output.fail());
 }
 
 std::string read_binary_file(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
-    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    CHECK(input.is_open());
+    if (!input.is_open()) return {};
+    input.seekg(0, std::ios::end);
+    CHECK(input.good());
+    const std::streamoff size = input.tellg();
+    CHECK(size >= 0);
+    if (size < 0) return {};
+    input.seekg(0, std::ios::beg);
+    CHECK(input.good());
+    std::string content(static_cast<size_t>(size), '\0');
+    if (!content.empty()) input.read(content.data(), static_cast<std::streamsize>(content.size()));
+    CHECK(input.good() || input.eof());
+    CHECK_EQ(static_cast<std::streamsize>(content.size()), input.gcount());
+    input.close();
+    CHECK(!input.fail());
+    return content;
+}
+
+void remove_file_if_present(const std::filesystem::path& path)
+{
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    CHECK(!error);
 }
 
 struct MenuEntry {
@@ -96,8 +127,12 @@ std::filesystem::path executable_directory()
 
 struct RestoredFile {
     explicit RestoredFile(std::filesystem::path file)
-        : path(std::move(file)), existed(std::filesystem::exists(path)), original(existed ? read_binary_file(path) : std::string())
+        : path(std::move(file))
     {
+        std::error_code error;
+        existed = std::filesystem::exists(path, error);
+        CHECK(!error);
+        if (existed) original = read_binary_file(path);
     }
 
     ~RestoredFile()
@@ -111,14 +146,18 @@ struct RestoredFile {
         std::error_code error;
         if (existed) {
             write_binary_file(path, original);
+            CHECK_EQ(original, read_binary_file(path));
         } else {
             std::filesystem::remove(path, error);
+            CHECK(!error);
+            CHECK(!std::filesystem::exists(path, error));
+            CHECK(!error);
         }
         restored = true;
     }
 
     std::filesystem::path path;
-    bool existed;
+    bool existed = false;
     std::string original;
     bool restored = false;
 };
@@ -484,7 +523,7 @@ void disabled_addons_creates_missing_addon_section_test()
         "[GENERAL]\r\n"
         "PresetPath=C:\\Games\\Player\r\n"
         "[ADDON]\r\n"
-        "DisabledAddons=renodx-dlss5.addon64\r\n";
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n";
 
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
@@ -492,13 +531,13 @@ void disabled_addons_creates_missing_addon_section_test()
 void disabled_addons_updates_empty_and_populated_lists_test()
 {
     constexpr std::string_view emptyInput =
-        "[aDdOn]\n"
-        "dIsAbLeDaDdOnS=\n"
+        "[ADDON]\n"
+        "DisabledAddons=\n"
         "[INPUT]\n"
         "KeyMenu=36\n";
     constexpr std::string_view emptyExpected =
-        "[aDdOn]\n"
-        "dIsAbLeDaDdOnS=renodx-dlss5.addon64\n"
+        "[ADDON]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n"
         "[INPUT]\n"
         "KeyMenu=36\n";
     constexpr std::string_view populatedInput =
@@ -506,7 +545,7 @@ void disabled_addons_updates_empty_and_populated_lists_test()
         "DisabledAddons=legacy.addon64,third-party.addon64\n";
     constexpr std::string_view populatedExpected =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,third-party.addon64,renodx-dlss5.addon64\n";
+        "DisabledAddons=legacy.addon64,third-party.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
 
     CHECK_EQ(std::string(emptyExpected), UpdateDisabledAddonsIni(emptyInput, kNeuralAddon, true));
     CHECK_EQ(std::string(populatedExpected), UpdateDisabledAddonsIni(populatedInput, kNeuralAddon, true));
@@ -525,7 +564,7 @@ void disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test()
         "[GENERAL]\r\n"
         "NoReloadOnInit=1\n"
         "[ADDON]\r"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64\r"
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\r"
         "[OVERLAY]\n"
         "TutorialProgress=3\r\n";
 
@@ -536,7 +575,7 @@ void disabled_addons_removes_only_exact_target_entries_test()
 {
     constexpr std::string_view input =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64,renodx-dlss5.addon64.bak,renodx-dlss5.addon64,other.addon64\n";
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64,renodx-dlss5.addon64.bak,DLSS 5 Neural Rendering@renodx-dlss5.addon64,other.addon64\n";
     constexpr std::string_view expected =
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64,renodx-dlss5.addon64.bak,other.addon64\n";
@@ -548,10 +587,10 @@ void disabled_addons_collapses_only_exact_target_duplicates_test()
 {
     constexpr std::string_view input =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64,renodx-dlss5.addon64,renodx-dlss5.addon64.bak\n";
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64,renodx-dlss5.addon64.bak\n";
     constexpr std::string_view expected =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64,renodx-dlss5.addon64.bak\n";
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64,renodx-dlss5.addon64.bak\n";
 
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
@@ -560,7 +599,7 @@ void disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace
 {
     constexpr std::string_view input =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64, renodx-dlss5.addon64,  other.addon64\n";
+        "DisabledAddons=legacy.addon64, DLSS 5 Neural Rendering@renodx-dlss5.addon64,  other.addon64\n";
     constexpr std::string_view enabledExpected =
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64,  other.addon64\n";
@@ -569,6 +608,113 @@ void disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace
     CHECK_EQ(std::string(input), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
     CHECK_EQ(std::string(input), UpdateDisabledAddonsIni(
         UpdateDisabledAddonsIni(input, kNeuralAddon, true), kNeuralAddon, true));
+}
+
+void reshade_68_disabled_addon_token_conformance_test()
+{
+    const std::string canonical = "[ADDON]\nDisabledAddons=" + std::string(kNeuralAddon) + "\n";
+    const std::string registeredName = "[ADDON]\nDisabledAddons=" + std::string(kNeuralAddonName) + "\n";
+    const std::string atFilename = "[ADDON]\nDisabledAddons=@" + std::string(kNeuralAddonFilename) + "\n";
+    const std::string legacyBareFilename = "[ADDON]\nDisabledAddons=" + std::string(kNeuralAddonFilename) + "\n";
+    const std::string wrongCaseCanonical =
+        "[ADDON]\nDisabledAddons=dlss 5 neural rendering@RENODX-DLSS5.ADDON64\n";
+
+    const ConfigUpdate canonicalState = EvaluateNeuralAddonConfigUpdate(canonical, canonical, false, false);
+    CHECK(canonicalState.ok);
+    CHECK(!canonicalState.addonEnabled);
+    const ConfigUpdate nameState = EvaluateNeuralAddonConfigUpdate(registeredName, registeredName, false, false);
+    CHECK(nameState.ok);
+    CHECK(!nameState.addonEnabled);
+    const ConfigUpdate filenameState = EvaluateNeuralAddonConfigUpdate(atFilename, atFilename, false, false);
+    CHECK(filenameState.ok);
+    CHECK(!filenameState.addonEnabled);
+    const ConfigUpdate legacyState = EvaluateNeuralAddonConfigUpdate(
+        legacyBareFilename, legacyBareFilename, false, true);
+    CHECK(legacyState.ok);
+    CHECK(legacyState.addonEnabled);
+    const ConfigUpdate wrongCaseState = EvaluateNeuralAddonConfigUpdate(
+        wrongCaseCanonical, wrongCaseCanonical, false, true);
+    CHECK(wrongCaseState.ok);
+    CHECK(wrongCaseState.addonEnabled);
+}
+
+void reshade_68_aliases_migrate_to_one_canonical_token_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering,@renodx-dlss5.addon64,renodx-dlss5.addon64,dlss 5 neural rendering@RENODX-DLSS5.ADDON64,other.addon64\n";
+    constexpr std::string_view disabledExpected =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64,other.addon64\n";
+    constexpr std::string_view enabledExpected =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64,other.addon64\n";
+
+    const std::string disabled = UpdateDisabledAddonsIni(input, kNeuralAddon, true);
+    CHECK_EQ(std::string(disabledExpected), disabled);
+    CHECK_EQ(disabled, UpdateDisabledAddonsIni(disabled, kNeuralAddon, true));
+    CHECK_EQ(std::string(enabledExpected), UpdateDisabledAddonsIni(input, kNeuralAddon, false));
+}
+
+void reshade_68_section_and_key_lookup_are_case_sensitive_test()
+{
+    constexpr std::string_view wrongCaseSection =
+        "[addon]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
+    constexpr std::string_view wrongCaseSectionExpected =
+        "[addon]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n"
+        "[ADDON]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
+    constexpr std::string_view wrongCaseKey =
+        "[ADDON]\r\n"
+        "disabledaddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n"
+        "KeyOverlay=36\r\n";
+    constexpr std::string_view wrongCaseKeyExpected =
+        "[ADDON]\r\n"
+        "disabledaddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n"
+        "KeyOverlay=36\r\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n";
+
+    CHECK_EQ(std::string(wrongCaseSectionExpected),
+        UpdateDisabledAddonsIni(wrongCaseSection, kNeuralAddon, true));
+    CHECK_EQ(std::string(wrongCaseKeyExpected),
+        UpdateDisabledAddonsIni(wrongCaseKey, kNeuralAddon, true));
+}
+
+void reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test()
+{
+    const std::string input =
+        std::string("\xEF\xBB\xBF") + "[ADDON]\r\nDisabledAddons=" + std::string(kNeuralAddon) + "\r\n";
+    const std::string enabledExpected =
+        std::string("\xEF\xBB\xBF") + "[ADDON]\r\nDisabledAddons=\r\n";
+
+    CHECK_EQ(input, UpdateDisabledAddonsIni(input, kNeuralAddon, true));
+    CHECK_EQ(enabledExpected, UpdateDisabledAddonsIni(input, kNeuralAddon, false));
+    const ConfigUpdate state = EvaluateNeuralAddonConfigUpdate(input, input, false, false);
+    CHECK(state.ok);
+    CHECK(!state.addonEnabled);
+}
+
+void disabled_addons_insertion_uses_target_section_line_ending_test()
+{
+    constexpr std::string_view input =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n"
+        "[ADDON]\n"
+        "KeyOverlay=36\n"
+        "[INPUT]\r\n"
+        "KeyMenu=36\r\n";
+    constexpr std::string_view expected =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n"
+        "[ADDON]\n"
+        "KeyOverlay=36\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n"
+        "[INPUT]\r\n"
+        "KeyMenu=36\r\n";
+
+    CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
 
 void configure_neural_addon_is_idempotent_test()
@@ -580,7 +726,7 @@ void configure_neural_addon_is_idempotent_test()
         "[GENERAL]\n"
         "PresetPath=C:\\Games\\Player\n"
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64\n";
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
     constexpr std::string_view expected =
         "[GENERAL]\n"
         "PresetPath=C:\\Games\\Player\n"
@@ -604,7 +750,7 @@ void configure_neural_addon_is_idempotent_test()
     CHECK(second.error.empty());
     CHECK_EQ(afterFirst, read_binary_file(path));
 
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
 }
 
 void configure_neural_addon_reports_semantic_state_across_text_canonicalization_test()
@@ -625,7 +771,7 @@ void configure_neural_addon_reports_semantic_state_across_text_canonicalization_
 
     constexpr std::string_view duplicateTargetInput =
         "[ADDON]\n"
-        "DisabledAddons=renodx-dlss5.addon64,legacy.addon64,renodx-dlss5.addon64\n";
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64,legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
     write_binary_file(path, duplicateTargetInput);
     const ConfigUpdate duplicateTarget = ConfigureNeuralAddon(path, false);
     CHECK(duplicateTarget.ok);
@@ -633,7 +779,7 @@ void configure_neural_addon_reports_semantic_state_across_text_canonicalization_
     CHECK(!duplicateTarget.previousAddonEnabled);
     CHECK(!duplicateTarget.addonEnabled);
 
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
 }
 
 void evaluated_config_update_observes_actual_final_bytes_test()
@@ -643,7 +789,7 @@ void evaluated_config_update_observes_actual_final_bytes_test()
         "DisabledAddons=legacy.addon64\n";
     constexpr std::string_view disabledIni =
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64\n";
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
 
     const ConfigUpdate mismatch = EvaluateNeuralAddonConfigUpdate(enabledIni, disabledIni, true, true);
     CHECK(!mismatch.ok);
@@ -679,7 +825,7 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
     constexpr std::string_view duplicateInput =
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64\n"
-        "DisabledAddons=renodx-dlss5.addon64\n";
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
     write_binary_file(path, duplicateInput);
     const ConfigUpdate duplicateResult = ConfigureNeuralAddon(path, true);
     CHECK(!duplicateResult.ok);
@@ -691,8 +837,8 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
     constexpr std::string_view crossSectionDuplicateInput =
         "[ADDON]\n"
         "DisabledAddons=legacy.addon64\n"
-        "[aDdOn]\n"
-        "DisabledAddons=renodx-dlss5.addon64\n";
+        "[ADDON]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n";
     write_binary_file(path, crossSectionDuplicateInput);
     const ConfigUpdate crossSectionResult = ConfigureNeuralAddon(path, true);
     CHECK(!crossSectionResult.ok);
@@ -701,7 +847,7 @@ void configure_neural_addon_fails_closed_for_malformed_ini_test()
     CHECK(!crossSectionResult.error.empty());
     CHECK_EQ(std::string(crossSectionDuplicateInput), read_binary_file(path));
 
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
 }
 
 void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
@@ -745,6 +891,11 @@ int main()
     disabled_addons_removes_only_exact_target_entries_test();
     disabled_addons_collapses_only_exact_target_duplicates_test();
     disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test();
+    reshade_68_disabled_addon_token_conformance_test();
+    reshade_68_aliases_migrate_to_one_canonical_token_test();
+    reshade_68_section_and_key_lookup_are_case_sensitive_test();
+    reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test();
+    disabled_addons_insertion_uses_target_section_line_ending_test();
     configure_neural_addon_is_idempotent_test();
     configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
     evaluated_config_update_observes_actual_final_bytes_test();
