@@ -240,6 +240,14 @@ ToolbarAction ResolveToolbarHover(std::span<const ToolbarItem> items,
     return IsToolbarActionEnabled(action, availability) ? action : ToolbarAction::None;
 }
 
+ToolbarAction ResolveToolbarHoverForCursor(std::span<const ToolbarItem> items,
+                                           std::optional<POINT> clientPoint,
+                                           ToolbarAvailability availability)
+{
+    return clientPoint ? ResolveToolbarHover(items, *clientPoint, availability)
+                       : ToolbarAction::None;
+}
+
 std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds)
 {
     const RECT clipped{

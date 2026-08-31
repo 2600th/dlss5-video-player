@@ -51,4 +51,7 @@ std::vector<RECT> HoverDirtyRectangles(std::span<const ToolbarItem> items,
 ToolbarAction ResolveToolbarHover(std::span<const ToolbarItem> items,
                                   POINT point,
                                   ToolbarAvailability availability);
+ToolbarAction ResolveToolbarHoverForCursor(std::span<const ToolbarItem> items,
+                                           std::optional<POINT> clientPoint,
+                                           ToolbarAvailability availability);
 std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds);

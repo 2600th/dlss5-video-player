@@ -419,6 +419,18 @@ void hover_resolution_tracks_layout_action_changes_and_disappearance_test()
              ResolveToolbarHover(changedLayout, point, disabledTransport));
 }
 
+void current_cursor_hover_clears_when_cursor_query_is_unavailable_test()
+{
+    const std::array layout{
+        ToolbarItem{ToolbarAction::Open, RECT{10, 20, 80, 56}, false},
+    };
+    const ToolbarAvailability available{true, false, true};
+    CHECK_EQ(ToolbarAction::Open,
+             ResolveToolbarHoverForCursor(layout, POINT{35, 35}, available));
+    CHECK_EQ(ToolbarAction::None,
+             ResolveToolbarHoverForCursor(layout, std::nullopt, available));
+}
+
 void paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test()
 {
     const RECT client{0, 0, 3840, 2160};
@@ -1401,6 +1413,7 @@ int main()
     unchanged_hover_action_has_no_dirty_rectangles_test();
     changed_hover_action_dirties_only_present_old_and_new_actions_test();
     hover_resolution_tracks_layout_action_changes_and_disappearance_test();
+    current_cursor_hover_clears_when_cursor_query_is_unavailable_test();
     paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test();
     tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
     native_button_palette_has_distinct_interaction_states_test();
