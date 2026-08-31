@@ -26,6 +26,8 @@
 #include "AudioPlayer.h"
 #include "Localization.h"
 #include "Log.h"
+#include "ReShadeConfig.h"
+#include "RuntimePolicy.h"
 
 using Clock = std::chrono::steady_clock;
 using Microsoft::WRL::ComPtr;
@@ -42,6 +44,7 @@ enum : UINT {
     IDM_DLSS=300, IDM_REHOOK, IDM_VIEW_FINAL, IDM_VIEW_INPUT, IDM_VIEW_MV, IDM_VIEW_DEPTH, IDM_VIEW_MASK, IDM_DEPTH_MODE,
     IDM_QUALITY_AUTO=330, IDM_QUALITY_QUALITY, IDM_QUALITY_BALANCED, IDM_QUALITY_PERFORMANCE, IDM_QUALITY_ULTRAPERF, IDM_QUALITY_DLAA,
     IDM_ASPECT_FIT=400, IDM_ASPECT_FILL, IDM_FULLSCREEN, IDM_VIDEO_ADJUSTMENTS,
+    IDM_ADVANCED_SAFE_MODE=450,
     IDM_LANG_BASE=500
 };
 
@@ -67,6 +70,12 @@ struct AppOptions {
     uint32_t maxW=3840, maxH=2160;
     NVSDK_NGX_PerfQuality_Value quality=NVSDK_NGX_PerfQuality_Value_MaxQuality;
     bool qualityExplicit=false;
+    bool safeMode=false;
+    bool addonBootstrapRestarted=false;
+    bool neuralAddonRequested=false;
+    bool neuralAddonConfigured=false;
+    DetectedGpu detectedGpu;
+    std::vector<std::wstring> userArguments;
     std::wstring file;
 };
 
@@ -74,8 +83,16 @@ static AppOptions ParseArgs() {
     AppOptions o; int argc=0; LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if (!argv) return o;
     for(int i=1;i<argc;++i) {
+        std::wstring argument=argv[i];
+        if(argument==L"--addon-bootstrap-restarted") { o.addonBootstrapRestarted=true; continue; }
+        o.userArguments.push_back(argument);
+        if(argument==L"--safe-mode") o.safeMode=true;
+    }
+    for(int i=1;i<argc;++i) {
         std::wstring a=argv[i];
-        if(a==L"--output" && i+1<argc) {
+        if(a==L"--addon-bootstrap-restarted" || a==L"--safe-mode") {
+            continue;
+        } else if(a==L"--output" && i+1<argc) {
             std::wstring v=argv[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
             if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); }
         } else if(a==L"--quality" && i+1<argc) {
@@ -92,6 +109,74 @@ static AppOptions ParseArgs() {
         } else if(!a.empty() && a[0]!=L'-') o.file=a;
     }
     LocalFree(argv); return o;
+}
+
+enum class StartupResult { Continue, ExitSuccess, ExitFailure };
+
+static std::string WideToUtf8(std::wstring_view value) {
+    if(value.empty()) return {};
+    const int size=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+    if(size<=0) return "<wide-string conversion failed>";
+    std::string result(static_cast<size_t>(size),'\0');
+    if(WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),size,nullptr,nullptr)!=size) return "<wide-string conversion failed>";
+    return result;
+}
+
+static std::wstring Win32Error(std::wstring_view operation) {
+    return std::wstring(operation)+L" failed (Win32 error "+std::to_wstring(GetLastError())+L")";
+}
+
+static bool CurrentExecutablePath(std::filesystem::path& executable,std::wstring& error) {
+    std::wstring path(32768,L'\0');
+    const DWORD length=GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));
+    if(length==0 || length>=path.size()) { error=Win32Error(L"Resolving the player executable"); return false; }
+    path.resize(length); executable=std::filesystem::path(path);
+    if(!executable.is_absolute()) { error=L"The player executable path was not absolute"; return false; }
+    return true;
+}
+
+static bool LaunchSameExecutable(const std::vector<std::wstring>& arguments,std::wstring& error) {
+    std::filesystem::path executable;
+    if(!CurrentExecutablePath(executable,error)) return false;
+    std::wstring commandLine=BuildWindowsCommandLine(executable.native(),arguments);
+    STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
+    if(!CreateProcessW(executable.c_str(),commandLine.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)) {
+        error=Win32Error(L"Starting the player"); return false;
+    }
+    CloseHandle(process.hThread); CloseHandle(process.hProcess); return true;
+}
+
+static StartupResult FailBootstrap(std::wstring_view technicalError) {
+    LOG("Neural addon bootstrap failed: " << WideToUtf8(technicalError));
+    MessageBoxW(nullptr,L"The experimental neural add-on could not be configured safely. The player will close.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS Video Player",MB_OK|MB_ICONERROR);
+    return StartupResult::ExitFailure;
+}
+
+static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
+    std::filesystem::path executable;
+    std::wstring pathError;
+    if(!CurrentExecutablePath(executable,pathError)) return FailBootstrap(pathError);
+
+    options.detectedGpu=DetectHighPerformanceGpu();
+    options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
+    const ConfigUpdate update=ConfigureNeuralAddon(executable.parent_path()/L"ReShade.ini",options.neuralAddonRequested);
+    const bool priorEnabled=update.changed?!update.addonEnabled:update.addonEnabled;
+    const BootstrapAction action=DecideBootstrap(options.neuralAddonRequested,priorEnabled,options.addonBootstrapRestarted,update.ok);
+    if(!update.ok) return FailBootstrap(update.error);
+    if(update.addonEnabled!=options.neuralAddonRequested) return FailBootstrap(L"ReShade.ini still reports the wrong neural add-on state after the update attempt");
+    options.neuralAddonConfigured=update.addonEnabled;
+
+    if(action==BootstrapAction::Fail) return FailBootstrap(L"The neural add-on required a second correction after the bootstrap restart marker");
+    if(action==BootstrapAction::Relaunch) {
+        std::vector<std::wstring> arguments=options.userArguments;
+        arguments.push_back(L"--addon-bootstrap-restarted");
+        std::wstring launchError;
+        if(!LaunchSameExecutable(arguments,launchError)) return FailBootstrap(launchError);
+        LOG("Neural addon configuration changed; relaunched before renderer creation.");
+        return StartupResult::ExitSuccess;
+    }
+    LOG("Neural addon configuration verified before renderer creation: desired=" << (options.neuralAddonRequested?"enabled":"disabled") << " gpu=" << WideToUtf8(options.detectedGpu.description));
+    return StartupResult::Continue;
 }
 
 static std::wstring PickVideoFileFallback(HWND owner, const Localizer& loc) {
@@ -385,7 +470,7 @@ private:
     }
 
     HMENU CreateMenuBar() {
-        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),language=CreatePopupMenu();
+        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),advanced=CreatePopupMenu(),language=CreatePopupMenu();
         auto add=[&](HMENU m,UINT id,const wchar_t* key){std::wstring s=T(key);AppendMenuW(m,MF_STRING,id,s.c_str());};
         add(file,IDM_OPEN,L"menu.open"); AppendMenuW(file,MF_SEPARATOR,0,nullptr); add(file,IDM_EXIT,L"menu.exit");
         add(play,IDM_PLAY,L"menu.playpause"); add(play,IDM_STOP,L"menu.stop"); add(play,IDM_BACK10,L"menu.back10"); add(play,IDM_FWD10,L"menu.forward10"); add(play,IDM_MUTE,L"menu.mute");
@@ -393,6 +478,7 @@ private:
         add(video,IDM_VIEW_FINAL,L"menu.final"); add(video,IDM_VIEW_INPUT,L"menu.input"); add(video,IDM_VIEW_MV,L"menu.mv"); add(video,IDM_VIEW_DEPTH,L"menu.depth"); add(video,IDM_VIEW_MASK,L"menu.mask"); AppendMenuW(video,MF_SEPARATOR,0,nullptr); add(video,IDM_FULLSCREEN,L"menu.fullscreen");
         add(quality,IDM_QUALITY_AUTO,L"menu.quality_auto"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_QUALITY,L"Quality"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_BALANCED,L"Balanced"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_PERFORMANCE,L"Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_ULTRAPERF,L"Ultra Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_DLAA,L"DLAA");
         add(dlss,IDM_DLSS,L"menu.dlss_toggle"); add(dlss,IDM_REHOOK,L"menu.rehook"); add(dlss,IDM_DEPTH_MODE,L"menu.depthmode"); std::wstring qualityName=T(L"menu.quality"); AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(quality),qualityName.c_str());
+        AppendMenuW(advanced,MF_STRING,IDM_ADVANCED_SAFE_MODE,L"Restart in DLSS SR safe mode");
         m_languageCodes.clear();
         const auto packs=m_loc.AvailableLanguages();
         for(size_t i=0;i<packs.size()&&i<100;++i){
@@ -401,7 +487,7 @@ private:
             AppendMenuW(language,flags,IDM_LANG_BASE+static_cast<UINT>(i),packs[i].name.c_str());
         }
         std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss"),sLang=T(L"menu.language");
-        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(language),sLang.c_str());
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(advanced),L"Advanced"); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(language),sLang.c_str());
         return bar;
     }
 
@@ -574,7 +660,7 @@ private:
         RECT vr=VolumeRect();HPEN vp=CreatePen(PS_SOLID,4,RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));HBRUSH vb=CreateSolidBrush(RGB(230,232,235));Ellipse(dc,vx-5,(vr.top+vr.bottom)/2-5,vx+5,(vr.top+vr.bottom)/2+5);DeleteObject(vb);
         double shown=m_dragSeek?m_seekPreview:(m_seekPending?m_pendingSeekSec:Position());RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;RECT done=tr;done.right=done.left+int((done.right-done.left)*f);HBRUSH db=CreateSolidBrush(RGB(55,139,226));FillRect(dc,&done,db);DeleteObject(db);int kx=done.right;HBRUSH kb=CreateSolidBrush(RGB(246,246,248));Ellipse(dc,kx-5,tr.top-3,kx+5,tr.bottom+3);DeleteObject(kb);
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,18,c.bottom-50,time.c_str(),int(time.size()));
-        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<L"source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));std::wstring status=st.str();RECT sr{145,c.bottom-53,c.right-205,c.bottom-34};DrawTextW(dc,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+8,vr.top-6,vol.c_str(),int(vol.size()));SelectObject(dc,of);
+        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<RuntimeModeText()<<L"  |  source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));std::wstring status=st.str();RECT sr{145,c.bottom-53,c.right-205,c.bottom-34};DrawTextW(dc,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+8,vr.top-6,vol.c_str(),int(vol.size()));SelectObject(dc,of);
         EndPaint(m_hwnd,&ps);
     }
 
@@ -596,6 +682,28 @@ private:
     }
 
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
+    std::wstring RuntimeModeText()const{
+        const wchar_t* gpu=L"Unsupported GPU";
+        switch(m_opt.detectedGpu.generation){case GpuGeneration::Rtx40Ada:gpu=L"RTX 40 Ada";break;case GpuGeneration::Rtx50Blackwell:gpu=L"RTX 50 Blackwell";break;case GpuGeneration::OtherNvidia:gpu=L"Other NVIDIA";break;case GpuGeneration::Unsupported:break;}
+        std::wstring mode;
+        if(m_opt.safeMode) mode=L"DLSS SR safe mode";
+        else if(m_opt.neuralAddonConfigured) mode=L"Neural addon enabled (experimental)";
+        else mode=L"Neural addon disabled";
+        return std::wstring(gpu)+L" - "+mode;
+    }
+    void RestartInSafeMode(){
+        const int answer=MessageBoxW(m_hwnd,L"Restart the player in DLSS SR safe mode?\n\nThis disables the experimental neural add-on for this launch.",L"Restart in DLSS SR safe mode",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
+        if(answer!=IDYES)return;
+        std::vector<std::wstring> arguments=m_opt.userArguments;
+        if(std::find(arguments.begin(),arguments.end(),L"--safe-mode")==arguments.end())arguments.push_back(L"--safe-mode");
+        std::wstring launchError;
+        if(!LaunchSameExecutable(arguments,launchError)){
+            LOG("Safe-mode restart failed: "<<WideToUtf8(launchError));
+            MessageBoxW(m_hwnd,L"The player could not restart in DLSS SR safe mode.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS Video Player",MB_OK|MB_ICONERROR);
+            return;
+        }
+        DestroyWindow(m_hwnd);
+    }
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);if(!m_loaded){if(PtIn(EmptyOpenRect(),x,y))OpenFromDialog();return;}if(m_seeking)return;
         RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateRect(m_hwnd,nullptr,FALSE);return;}RECT vr=VolumeRect();if(PtIn(vr,x,y)){m_muted=false;m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}
@@ -638,7 +746,7 @@ private:
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;case IDM_REHOOK:Rehook();break;
         case IDM_QUALITY_AUTO:SetQualityMode(true,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_QUALITY:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_BALANCED:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_Balanced);break;case IDM_QUALITY_PERFORMANCE:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxPerf);break;case IDM_QUALITY_ULTRAPERF:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_UltraPerformance);break;case IDM_QUALITY_DLAA:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_DLAA);break;
-        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_MASK:SetDebug(D3D12Renderer::DebugView::BiasMask);break;case IDM_DEPTH_MODE:ToggleDepthMode();break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;
+        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_MASK:SetDebug(D3D12Renderer::DebugView::BiasMask);break;case IDM_DEPTH_MODE:ToggleDepthMode();break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;
         }
     }
 
@@ -649,4 +757,4 @@ private:
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0,m_uiTick=0;
 };
 
-int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(ParseArgs());if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}
+int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){AppOptions options=ParseArgs();const StartupResult startup=RunNeuralAddonBootstrap(options);if(startup==StartupResult::ExitSuccess)return 0;if(startup==StartupResult::ExitFailure)return 1;if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(std::move(options));if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}

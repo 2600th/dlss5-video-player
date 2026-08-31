@@ -3,9 +3,13 @@
 #include "RuntimePolicy.h"
 #include "ReShadeConfig.h"
 
+#include <windows.h>
+#include <shellapi.h>
+
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -62,6 +66,79 @@ void neural_addon_policy_test()
     CHECK(!NeuralAddonDesired(GpuGeneration::Rtx50Blackwell, true));
     CHECK(!NeuralAddonDesired(GpuGeneration::OtherNvidia, false));
     CHECK(!NeuralAddonDesired(GpuGeneration::Unsupported, false));
+}
+
+void bootstrap_action_matrix_test()
+{
+    struct Case {
+        bool desired_enabled;
+        bool config_enabled;
+        bool already_restarted;
+        bool update_succeeded;
+        BootstrapAction expected;
+    };
+
+    constexpr Case cases[] = {
+        {true, true, false, true, BootstrapAction::Continue},
+        {false, false, false, true, BootstrapAction::Continue},
+        {true, true, true, true, BootstrapAction::Continue},
+        {false, false, true, true, BootstrapAction::Continue},
+        {true, false, false, true, BootstrapAction::Relaunch},
+        {false, true, false, true, BootstrapAction::Relaunch},
+        {true, false, true, true, BootstrapAction::Fail},
+        {false, true, true, true, BootstrapAction::Fail},
+        {true, true, false, false, BootstrapAction::Fail},
+        {false, true, false, false, BootstrapAction::Fail},
+        {true, false, true, false, BootstrapAction::Fail},
+    };
+
+    for (const auto& test : cases) {
+        CHECK_EQ(test.expected, DecideBootstrap(
+            test.desired_enabled,
+            test.config_enabled,
+            test.already_restarted,
+            test.update_succeeded));
+    }
+}
+
+void windows_command_line_quoting_round_trip_test()
+{
+    constexpr std::wstring_view executable = L"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe";
+    const std::vector<std::wstring> arguments = {
+        L"movie.mp4",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"",
+        L"--future-option=\"quoted value\"",
+        L"C:\\trailing slash\\",
+        L"plain\\slashes",
+        L"embedded\"quote",
+    };
+    constexpr std::wstring_view expected =
+        L"\"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe\" "
+        L"\"movie.mp4\" "
+        L"\"C:\\Videos\\clip with spaces.mp4\" "
+        L"\"\" "
+        L"\"--future-option=\\\"quoted value\\\"\" "
+        L"\"C:\\trailing slash\\\\\" "
+        L"\"plain\\slashes\" "
+        L"\"embedded\\\"quote\"";
+
+    const std::wstring commandLine = BuildWindowsCommandLine(executable, arguments);
+    CHECK_EQ(std::wstring(expected), commandLine);
+
+    int parsedCount = 0;
+    LPWSTR* parsed = CommandLineToArgvW(commandLine.c_str(), &parsedCount);
+    CHECK(parsed != nullptr);
+    if (parsed) {
+        CHECK_EQ(static_cast<int>(arguments.size() + 1), parsedCount);
+        if (parsedCount == static_cast<int>(arguments.size() + 1)) {
+            CHECK_EQ(std::wstring(executable), std::wstring(parsed[0]));
+            for (size_t index = 0; index < arguments.size(); ++index) {
+                CHECK_EQ(arguments[index], std::wstring(parsed[index + 1]));
+            }
+        }
+        LocalFree(parsed);
+    }
 }
 
 void disabled_addons_creates_missing_addon_section_test()
@@ -263,6 +340,8 @@ int main()
     harness_sanity_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
+    bootstrap_action_matrix_test();
+    windows_command_line_quoting_round_trip_test();
     disabled_addons_creates_missing_addon_section_test();
     disabled_addons_updates_empty_and_populated_lists_test();
     disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test();

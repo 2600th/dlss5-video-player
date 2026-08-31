@@ -30,6 +30,28 @@ bool ContainsCaseInsensitive(std::wstring_view text, std::wstring_view needle)
     return false;
 }
 
+void AppendQuotedArgument(std::wstring& commandLine, std::wstring_view argument)
+{
+    commandLine.push_back(L'"');
+    size_t backslashes = 0;
+    for (const wchar_t character : argument) {
+        if (character == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (character == L'"') {
+            commandLine.append(backslashes * 2 + 1, L'\\');
+            commandLine.push_back(character);
+        } else {
+            commandLine.append(backslashes, L'\\');
+            commandLine.push_back(character);
+        }
+        backslashes = 0;
+    }
+    commandLine.append(backslashes * 2, L'\\');
+    commandLine.push_back(L'"');
+}
+
 } // namespace
 
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description)
@@ -82,4 +104,32 @@ DetectedGpu DetectHighPerformanceGpu()
 
     factory->Release();
     return {};
+}
+
+BootstrapAction DecideBootstrap(
+    bool desiredEnabled,
+    bool configEnabled,
+    bool alreadyRestarted,
+    bool updateSucceeded)
+{
+    if (!updateSucceeded) {
+        return BootstrapAction::Fail;
+    }
+    if (desiredEnabled == configEnabled) {
+        return BootstrapAction::Continue;
+    }
+    return alreadyRestarted ? BootstrapAction::Fail : BootstrapAction::Relaunch;
+}
+
+std::wstring BuildWindowsCommandLine(
+    std::wstring_view executable,
+    const std::vector<std::wstring>& arguments)
+{
+    std::wstring commandLine;
+    AppendQuotedArgument(commandLine, executable);
+    for (const std::wstring& argument : arguments) {
+        commandLine.push_back(L' ');
+        AppendQuotedArgument(commandLine, argument);
+    }
+    return commandLine;
 }
