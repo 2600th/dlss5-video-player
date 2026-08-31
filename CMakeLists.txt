@@ -25,6 +25,8 @@ set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
+    src/AppMenu.cpp
+    src/AppMenu.h
     src/VideoDecoder.cpp
     src/VideoDecoder.h
     src/DLSSBackend.cpp
@@ -86,6 +88,8 @@ if(BUILD_TESTING)
     add_executable(PolicyTests
         tests/PolicyTests.cpp
         tests/TestSupport.h
+        src/AppMenu.h
+        src/AppMenu.cpp
         src/RuntimePolicy.cpp
         src/RuntimePolicy.h
         src/ReShadeConfig.cpp

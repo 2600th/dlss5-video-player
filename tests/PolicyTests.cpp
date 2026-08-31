@@ -3,6 +3,7 @@
 #include "RuntimePolicy.h"
 #include "ReShadeConfig.h"
 #include "Localization.h"
+#include "AppMenu.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -26,6 +27,64 @@ std::string read_binary_file(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+struct MenuEntry {
+    std::wstring text;
+    UINT command;
+};
+
+void collect_menu_entries(HMENU menu, std::vector<MenuEntry>& entries)
+{
+    const int count = GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_STRING | MIIM_ID | MIIM_SUBMENU;
+        GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
+
+        std::wstring text(item.cch + 1, L'\0');
+        item.dwTypeData = text.data();
+        item.cch = static_cast<UINT>(text.size());
+        GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
+        text.resize(item.cch);
+        entries.push_back({std::move(text), item.wID});
+        if (item.hSubMenu) collect_menu_entries(item.hSubMenu, entries);
+    }
+}
+
+bool has_menu_entry(const std::vector<MenuEntry>& entries, std::wstring_view text, UINT command)
+{
+    for (const auto& entry : entries) {
+        if (entry.text == text && entry.command == command) return true;
+    }
+    return false;
+}
+
+bool has_menu_text(const std::vector<MenuEntry>& entries, std::wstring_view text)
+{
+    for (const auto& entry : entries) {
+        if (entry.text == text) return true;
+    }
+    return false;
+}
+
+void player_menu_is_english_only_and_retains_advanced_commands_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer);
+    CHECK(menu != nullptr);
+
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(!has_menu_text(entries, L"Language"));
+    CHECK(has_menu_text(entries, L"Advanced"));
+    CHECK(has_menu_entry(entries, L"Restart in DLSS SR safe mode", app_menu::IDM_ADVANCED_SAFE_MODE));
+    CHECK(has_menu_entry(entries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
+    for (const auto& entry : entries) {
+        CHECK(entry.command < 500 || entry.command >= 600);
+    }
+
+    if (menu) DestroyMenu(menu);
 }
 
 std::filesystem::path executable_directory()
@@ -667,6 +726,7 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 int main()
 {
     harness_sanity_test();
+    player_menu_is_english_only_and_retains_advanced_commands_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
