@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(DLSSVideoPlayer VERSION 0.11.0 LANGUAGES CXX)
 
+include(CTest)
+
 if(NOT WIN32)
     message(FATAL_ERROR "DLSSVideoPlayer currently targets Windows x64 / D3D12 only.")
 endif()
@@ -79,4 +81,17 @@ if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe" AND EXISTS "${FFMPEG_STAGED_DIR}/ffp
             "${FFMPEG_STAGED_DIR}/ffprobe.exe"
             "$<TARGET_FILE_DIR:DLSSVideoPlayer>/ffprobe.exe"
     )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(PolicyTests
+        tests/PolicyTests.cpp
+        tests/TestSupport.h
+    )
+    target_compile_definitions(PolicyTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32)
+    add_test(NAME PolicyTests COMMAND PolicyTests)
 endif()
