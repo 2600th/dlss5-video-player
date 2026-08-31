@@ -2,6 +2,7 @@
 
 #include "RuntimePolicy.h"
 #include "ReShadeConfig.h"
+#include "Localization.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -25,6 +26,69 @@ std::string read_binary_file(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::filesystem::path executable_directory()
+{
+    wchar_t executablePath[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, executablePath, static_cast<DWORD>(std::size(executablePath)));
+    return std::filesystem::path(executablePath, executablePath + length).parent_path();
+}
+
+struct RestoredFile {
+    explicit RestoredFile(std::filesystem::path file)
+        : path(std::move(file)), existed(std::filesystem::exists(path)), original(existed ? read_binary_file(path) : std::string())
+    {
+    }
+
+    ~RestoredFile()
+    {
+        Restore();
+    }
+
+    void Restore()
+    {
+        if (restored) return;
+        std::error_code error;
+        if (existed) {
+            write_binary_file(path, original);
+        } else {
+            std::filesystem::remove(path, error);
+        }
+        restored = true;
+    }
+
+    std::filesystem::path path;
+    bool existed;
+    std::string original;
+    bool restored = false;
+};
+
+void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test()
+{
+    const std::filesystem::path runtimeDirectory = executable_directory();
+    const std::filesystem::path configuration = runtimeDirectory / "DLSSVideoPlayer.ini";
+    const std::filesystem::path languageDirectory = runtimeDirectory / "languages";
+    const std::filesystem::path portuguesePack = languageDirectory / "pt-BR.lang";
+    std::error_code error;
+    const bool languageDirectoryExisted = std::filesystem::exists(languageDirectory);
+    CHECK(!languageDirectoryExisted);
+    std::filesystem::create_directories(languageDirectory, error);
+    CHECK(!error);
+    RestoredFile restoreConfiguration(configuration);
+    RestoredFile restorePortuguesePack(portuguesePack);
+    write_binary_file(configuration, "[General]\r\nLanguage=pt-BR\r\n");
+    write_binary_file(portuguesePack, "app.title=Leitor em Portugues\r\nmenu.file=Arquivo\r\n");
+
+    Localizer localizer;
+    localizer.Initialize();
+
+    CHECK_EQ(std::wstring(L"DLSS Video Player"), localizer.Get(L"app.title"));
+    CHECK_EQ(std::wstring(L"File"), localizer.Get(L"menu.file"));
+
+    restorePortuguesePack.Restore();
+    restoreConfiguration.Restore();
+    if (!languageDirectoryExisted) std::filesystem::remove(languageDirectory, error);
 }
 
 void harness_sanity_test()
@@ -603,6 +667,7 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 int main()
 {
     harness_sanity_test();
+    legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
     bootstrap_action_matrix_test();

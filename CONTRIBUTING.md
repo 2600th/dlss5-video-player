@@ -10,7 +10,7 @@ Contributions are welcome.
 - Keep temporal-resource state transitions explicit and documented.
 - Avoid adding a per-frame `WaitGPU()` to the normal playback path.
 - When changing seek/audio lifetime code, test repeated forward/backward seeking.
-- When changing UI strings, add English defaults and update the Portuguese pack when practical.
+- When changing UI strings, add or update the built-in English defaults.
 
 ## Before opening a pull request
 

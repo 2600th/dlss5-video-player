@@ -48,7 +48,6 @@ jobs:
           Copy-Item external/ffmpeg/bin/ffmpeg.exe $stage/
           Copy-Item external/ffmpeg/bin/ffprobe.exe $stage/
           Copy-Item external/DLSS/lib/Windows_x86_64/rel/nvngx_dlss.dll $stage/
-          Copy-Item languages $stage/languages -Recurse
           Copy-Item docs $stage/docs -Recurse
           Copy-Item README.md,LICENSE,THIRD_PARTY.md,CHANGELOG.md,DLSS5_CHECKLIST.txt,prepare_dlss5_test.bat,inspect_dlssnr.ps1,run_dlss5_test.bat,run_4k_auto.bat,run_4k_quality.bat $stage/
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/DLSSVideoPlayer-$tag-win64.zip" -CompressionLevel Optimal

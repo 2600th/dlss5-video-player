@@ -66,11 +66,6 @@ add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/LICENSE"
         "$<TARGET_FILE_DIR:DLSSVideoPlayer>/LICENSE"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/languages"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/languages"
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/languages"
 )
 
 # The one-click BAT stages these binaries automatically. Keep this optional so
@@ -102,5 +97,6 @@ if(BUILD_TESTING)
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32)
+    add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 endif()

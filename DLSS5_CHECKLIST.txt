@@ -27,7 +27,6 @@ DLSSVideoPlayer.exe
 nvngx_dlss.dll
 ffmpeg.exe
 ffprobe.exe
-languages\
 
 Internal NGX contract:
 Color  = R16G16B16A16_FLOAT, linear, render resolution

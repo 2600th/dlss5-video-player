@@ -251,9 +251,6 @@ copy /y "CHANGELOG.md" "build\Release\CHANGELOG.md" >nul
 copy /y "THIRD_PARTY.md" "build\Release\THIRD_PARTY.md" >nul
 if not exist "build\Release\docs" mkdir "build\Release\docs"
 xcopy /e /i /y "docs\*" "build\Release\docs\" >nul
-if not exist "build\Release\languages" mkdir "build\Release\languages"
-xcopy /e /i /y "languages\*" "build\Release\languages\" >nul
-
 echo.
 echo ================================================================
 echo [OK] build\Release\DLSSVideoPlayer.exe

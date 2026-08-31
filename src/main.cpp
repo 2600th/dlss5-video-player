@@ -44,8 +44,7 @@ enum : UINT {
     IDM_DLSS=300, IDM_REHOOK, IDM_VIEW_FINAL, IDM_VIEW_INPUT, IDM_VIEW_MV, IDM_VIEW_DEPTH, IDM_VIEW_MASK, IDM_DEPTH_MODE,
     IDM_QUALITY_AUTO=330, IDM_QUALITY_QUALITY, IDM_QUALITY_BALANCED, IDM_QUALITY_PERFORMANCE, IDM_QUALITY_ULTRAPERF, IDM_QUALITY_DLAA,
     IDM_ASPECT_FIT=400, IDM_ASPECT_FILL, IDM_FULLSCREEN, IDM_VIDEO_ADJUSTMENTS,
-    IDM_ADVANCED_SAFE_MODE=450,
-    IDM_LANG_BASE=500
+    IDM_ADVANCED_SAFE_MODE=450
 };
 
 
@@ -475,7 +474,7 @@ private:
     }
 
     HMENU CreateMenuBar() {
-        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),advanced=CreatePopupMenu(),language=CreatePopupMenu();
+        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),advanced=CreatePopupMenu();
         auto add=[&](HMENU m,UINT id,const wchar_t* key){std::wstring s=T(key);AppendMenuW(m,MF_STRING,id,s.c_str());};
         add(file,IDM_OPEN,L"menu.open"); AppendMenuW(file,MF_SEPARATOR,0,nullptr); add(file,IDM_EXIT,L"menu.exit");
         add(play,IDM_PLAY,L"menu.playpause"); add(play,IDM_STOP,L"menu.stop"); add(play,IDM_BACK10,L"menu.back10"); add(play,IDM_FWD10,L"menu.forward10"); add(play,IDM_MUTE,L"menu.mute");
@@ -483,23 +482,10 @@ private:
         add(video,IDM_VIEW_FINAL,L"menu.final"); add(video,IDM_VIEW_INPUT,L"menu.input"); add(video,IDM_VIEW_MV,L"menu.mv"); add(video,IDM_VIEW_DEPTH,L"menu.depth"); add(video,IDM_VIEW_MASK,L"menu.mask"); AppendMenuW(video,MF_SEPARATOR,0,nullptr); add(video,IDM_FULLSCREEN,L"menu.fullscreen");
         add(quality,IDM_QUALITY_AUTO,L"menu.quality_auto"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_QUALITY,L"Quality"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_BALANCED,L"Balanced"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_PERFORMANCE,L"Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_ULTRAPERF,L"Ultra Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_DLAA,L"DLAA");
         add(dlss,IDM_DLSS,L"menu.dlss_toggle"); add(dlss,IDM_REHOOK,L"menu.rehook"); add(dlss,IDM_DEPTH_MODE,L"menu.depthmode"); std::wstring qualityName=T(L"menu.quality"); AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(quality),qualityName.c_str());
-        AppendMenuW(advanced,MF_STRING,IDM_ADVANCED_SAFE_MODE,L"Restart in DLSS SR safe mode");
-        m_languageCodes.clear();
-        const auto packs=m_loc.AvailableLanguages();
-        for(size_t i=0;i<packs.size()&&i<100;++i){
-            m_languageCodes.push_back(packs[i].code);
-            UINT flags=MF_STRING|(m_loc.Code()==packs[i].code?MF_CHECKED:MF_UNCHECKED);
-            AppendMenuW(language,flags,IDM_LANG_BASE+static_cast<UINT>(i),packs[i].name.c_str());
-        }
-        std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss"),sLang=T(L"menu.language");
-        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(advanced),L"Advanced"); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(language),sLang.c_str());
+        add(advanced,IDM_ADVANCED_SAFE_MODE,L"menu.safe_mode");
+        std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss"),sAdvanced=T(L"menu.advanced");
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(advanced),sAdvanced.c_str());
         return bar;
-    }
-
-    void ApplyLanguage(const std::wstring& code) {
-        const bool reopenAdjust=(m_adjustWnd!=nullptr);if(m_adjustWnd)DestroyWindow(m_adjustWnd);
-        m_loc.SetLanguage(code,true); HMENU old=GetMenu(m_hwnd),fresh=CreateMenuBar(); SetMenu(m_hwnd,fresh); DrawMenuBar(m_hwnd); if(old)DestroyMenu(old); UpdateTitle(); InvalidateRect(m_hwnd,nullptr,TRUE);
-        if(reopenAdjust)ShowAdjustments();
     }
 
     bool Load(const std::wstring& path) {
@@ -697,7 +683,8 @@ private:
         return std::wstring(gpu)+L" - "+mode;
     }
     void RestartInSafeMode(){
-        const int answer=MessageBoxW(m_hwnd,L"Restart the player in DLSS SR safe mode?\n\nThis disables the experimental neural add-on for this launch.",L"Restart in DLSS SR safe mode",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
+        const std::wstring confirmation=T(L"safe_mode.confirm"),title=T(L"menu.safe_mode");
+        const int answer=MessageBoxW(m_hwnd,confirmation.c_str(),title.c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
         std::wstring launchError;
         const SafeModeRestartOutcome outcome=ExecuteAdvancedSafeModeRestart(
             answer==IDYES,
@@ -705,7 +692,8 @@ private:
             [&](const std::vector<std::wstring>& arguments){return LaunchSameExecutable(arguments,launchError);});
         if(outcome==SafeModeRestartOutcome::LaunchFailed){
             LOG("Safe-mode restart failed: "<<WideToUtf8(launchError));
-            MessageBoxW(m_hwnd,L"The player could not restart in DLSS SR safe mode.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS Video Player",MB_OK|MB_ICONERROR);
+            const std::wstring message=T(L"safe_mode.launch_failed"),appTitle=T(L"app.title");
+            MessageBoxW(m_hwnd,message.c_str(),appTitle.c_str(),MB_OK|MB_ICONERROR);
             return;
         }
         if(outcome==SafeModeRestartOutcome::CloseCurrent)DestroyWindow(m_hwnd);
@@ -748,7 +736,6 @@ private:
     }
 
     void HandleCommand(UINT id){
-        const UINT langEnd=IDM_LANG_BASE+static_cast<UINT>(m_languageCodes.size());if(id>=IDM_LANG_BASE && id<langEnd){ApplyLanguage(m_languageCodes[id-IDM_LANG_BASE]);return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;case IDM_REHOOK:Rehook();break;
         case IDM_QUALITY_AUTO:SetQualityMode(true,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_QUALITY:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_BALANCED:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_Balanced);break;case IDM_QUALITY_PERFORMANCE:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxPerf);break;case IDM_QUALITY_ULTRAPERF:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_UltraPerformance);break;case IDM_QUALITY_DLAA:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_DLAA);break;
@@ -756,7 +743,7 @@ private:
         }
     }
 
-    AppOptions m_opt;Localizer m_loc;std::vector<std::wstring> m_languageCodes;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr;
+    AppOptions m_opt;Localizer m_loc;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;

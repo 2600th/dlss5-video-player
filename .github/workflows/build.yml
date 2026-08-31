@@ -36,6 +36,5 @@ jobs:
           path: |
             build/Release/DLSSVideoPlayer.exe
             build/Release/nvngx_dlss.dll
-            build/Release/languages/**
             LICENSE
             README.md

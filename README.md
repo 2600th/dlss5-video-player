@@ -17,7 +17,7 @@ A Windows x64 video player built around Direct3D 12, FFmpeg and NVIDIA NGX/DLSS.
 - Original display aspect ratio by default, with optional fill/crop.
 - Drag-and-drop, seek bar, volume, mute, fullscreen and common media controls.
 - ReShade-safe global hotkeys for play/pause and comparison workflows.
-- English by default, with external language packs. Portuguese (Brazil) is included.
+- English-only user interface.
 - Image adjustments applied after DLSS: brightness, contrast, saturation, gamma, temperature and tint.
 - Debug views for DLSS input, motion vectors, depth and temporal mask.
 - Paused-frame presentation heartbeat so ReShade remains responsive while the video is paused.
@@ -47,7 +47,6 @@ nvngx_dlssnr.dll
 renodx-dlss5.addon64
 dxgi.dll                 <- ReShade, depending on installation choice
 ReShade.ini
-languages\
 ```
 
 Additional `sl.*.dll` files may also be present when using a Streamline-based experimental package. Keep files from the same package/version together.
@@ -178,7 +177,6 @@ build\Release\DLSSVideoPlayer.exe
 build\Release\nvngx_dlss.dll
 build\Release\ffmpeg.exe
 build\Release\ffprobe.exe
-build\Release\languages\
 ```
 
 The experimental DLSS 5 / RenoDX files are intentionally not part of this repository and are not required to compile the player.
@@ -212,7 +210,6 @@ DLSSVideoPlayer.exe "D:\Videos\sample.mkv" --output 3840x2160 --quality auto
 
 ```text
 src/                    player, decoder, D3D12/NGX and temporal-guide code
-languages/              external language packs
 docs/                    user/developer documentation
 .github/                 GitHub Actions and contribution templates
 build_windows.bat        one-click local Windows build

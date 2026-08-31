@@ -27,7 +27,6 @@ if exist "external\DLSS\lib\Windows_x86_64\rel\nvngx_dlss.dll" (
   copy /y "%SRC%\nvngx_dlss.dll" "%STAGE%\nvngx_dlss.dll" >nul
 )
 
-xcopy /e /i /y "languages\*" "%STAGE%\languages\" >nul
 xcopy /e /i /y "docs\*" "%STAGE%\docs\" >nul
 copy /y "README.md" "%STAGE%\README.md" >nul
 copy /y "LICENSE" "%STAGE%\LICENSE" >nul
