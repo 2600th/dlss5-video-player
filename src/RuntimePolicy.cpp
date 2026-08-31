@@ -210,6 +210,21 @@ std::vector<std::wstring> BuildSafeModeRestartArguments(
     return SanitizeRestartArguments(userArguments, true, false);
 }
 
+SafeModeRestartOutcome ExecuteAdvancedSafeModeRestart(
+    bool confirmed,
+    const std::vector<std::wstring>& userArguments,
+    const std::function<bool(const std::vector<std::wstring>&)>& launch)
+{
+    if (!confirmed) {
+        return SafeModeRestartOutcome::Cancelled;
+    }
+    const std::vector<std::wstring> arguments = BuildSafeModeRestartArguments(userArguments);
+    if (!launch || !launch(arguments)) {
+        return SafeModeRestartOutcome::LaunchFailed;
+    }
+    return SafeModeRestartOutcome::CloseCurrent;
+}
+
 std::wstring BuildWindowsCommandLine(
     std::wstring_view executable,
     const std::vector<std::wstring>& arguments)

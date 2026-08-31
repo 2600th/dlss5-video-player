@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -31,6 +32,12 @@ enum class BootstrapAction {
     Fail,
 };
 
+enum class SafeModeRestartOutcome {
+    Cancelled,
+    LaunchFailed,
+    CloseCurrent,
+};
+
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
 DetectedGpu DetectHighPerformanceGpu();
@@ -50,6 +57,10 @@ std::vector<std::wstring> BuildBootstrapRelaunchArguments(
     const std::vector<std::wstring>& userArguments);
 std::vector<std::wstring> BuildSafeModeRestartArguments(
     const std::vector<std::wstring>& userArguments);
+SafeModeRestartOutcome ExecuteAdvancedSafeModeRestart(
+    bool confirmed,
+    const std::vector<std::wstring>& userArguments,
+    const std::function<bool(const std::vector<std::wstring>&)>& launch);
 std::wstring BuildWindowsCommandLine(
     std::wstring_view executable,
     const std::vector<std::wstring>& arguments);

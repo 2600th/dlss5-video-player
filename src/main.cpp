@@ -698,15 +698,17 @@ private:
     }
     void RestartInSafeMode(){
         const int answer=MessageBoxW(m_hwnd,L"Restart the player in DLSS SR safe mode?\n\nThis disables the experimental neural add-on for this launch.",L"Restart in DLSS SR safe mode",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);
-        if(answer!=IDYES)return;
-        const std::vector<std::wstring> arguments=BuildSafeModeRestartArguments(m_opt.userArguments);
         std::wstring launchError;
-        if(!LaunchSameExecutable(arguments,launchError)){
+        const SafeModeRestartOutcome outcome=ExecuteAdvancedSafeModeRestart(
+            answer==IDYES,
+            m_opt.userArguments,
+            [&](const std::vector<std::wstring>& arguments){return LaunchSameExecutable(arguments,launchError);});
+        if(outcome==SafeModeRestartOutcome::LaunchFailed){
             LOG("Safe-mode restart failed: "<<WideToUtf8(launchError));
             MessageBoxW(m_hwnd,L"The player could not restart in DLSS SR safe mode.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS Video Player",MB_OK|MB_ICONERROR);
             return;
         }
-        DestroyWindow(m_hwnd);
+        if(outcome==SafeModeRestartOutcome::CloseCurrent)DestroyWindow(m_hwnd);
     }
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);if(!m_loaded){if(PtIn(EmptyOpenRect(),x,y))OpenFromDialog();return;}if(m_seeking)return;

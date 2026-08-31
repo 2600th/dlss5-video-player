@@ -248,6 +248,110 @@ void restart_argument_lifecycle_and_create_process_command_line_test()
     CHECK_EQ(std::wstring(expectedCommandLine), BuildWindowsCommandLine(executable, bootstrap));
 }
 
+void advanced_safe_mode_normal_invocation_adds_safe_mode_test()
+{
+    const std::vector<std::wstring> normalArguments = {
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+    };
+    const std::vector<std::wstring> expected = {
+        L"--future-flag",
+        L"",
+        L"C:\\Videos\\clip with spaces.mp4",
+        L"--safe-mode",
+    };
+    int launchCalls = 0;
+    std::vector<std::wstring> launchedArguments;
+
+    const SafeModeRestartOutcome outcome = ExecuteAdvancedSafeModeRestart(
+        true,
+        normalArguments,
+        [&](const std::vector<std::wstring>& arguments) {
+            ++launchCalls;
+            launchedArguments = arguments;
+            return true;
+        });
+
+    CHECK_EQ(SafeModeRestartOutcome::CloseCurrent, outcome);
+    CHECK_EQ(1, launchCalls);
+    CHECK_EQ(expected.size(), launchedArguments.size());
+    if (launchedArguments.size() == expected.size()) {
+        for (size_t index = 0; index < expected.size(); ++index) {
+            CHECK_EQ(expected[index], launchedArguments[index]);
+        }
+    }
+}
+
+void advanced_safe_mode_cancel_keeps_current_open_without_launch_test()
+{
+    int launchCalls = 0;
+    const SafeModeRestartOutcome outcome = ExecuteAdvancedSafeModeRestart(
+        false,
+        {L"--future-flag"},
+        [&](const std::vector<std::wstring>&) {
+            ++launchCalls;
+            return true;
+        });
+
+    CHECK_EQ(SafeModeRestartOutcome::Cancelled, outcome);
+    CHECK_EQ(0, launchCalls);
+}
+
+void advanced_safe_mode_launch_failure_keeps_current_open_test()
+{
+    int launchCalls = 0;
+    const SafeModeRestartOutcome outcome = ExecuteAdvancedSafeModeRestart(
+        true,
+        {L"--future-flag"},
+        [&](const std::vector<std::wstring>& arguments) {
+            ++launchCalls;
+            CHECK_EQ(2u, arguments.size());
+            if (arguments.size() == 2) {
+                CHECK_EQ(std::wstring(L"--future-flag"), arguments[0]);
+                CHECK_EQ(std::wstring(L"--safe-mode"), arguments[1]);
+            }
+            return false;
+        });
+
+    CHECK_EQ(SafeModeRestartOutcome::LaunchFailed, outcome);
+    CHECK_EQ(1, launchCalls);
+}
+
+void advanced_safe_mode_launch_success_closes_with_sanitized_arguments_test()
+{
+    const std::vector<std::wstring> contaminated = {
+        L"--addon-bootstrap-restarted",
+        L"--safe-mode",
+        L"--future-flag",
+        L"--safe-mode",
+    };
+    const std::vector<std::wstring> expected = {
+        L"--safe-mode",
+        L"--future-flag",
+    };
+    int launchCalls = 0;
+    std::vector<std::wstring> launchedArguments;
+
+    const SafeModeRestartOutcome outcome = ExecuteAdvancedSafeModeRestart(
+        true,
+        contaminated,
+        [&](const std::vector<std::wstring>& arguments) {
+            ++launchCalls;
+            launchedArguments = arguments;
+            return true;
+        });
+
+    CHECK_EQ(SafeModeRestartOutcome::CloseCurrent, outcome);
+    CHECK_EQ(1, launchCalls);
+    CHECK_EQ(expected.size(), launchedArguments.size());
+    if (launchedArguments.size() == expected.size()) {
+        for (size_t index = 0; index < expected.size(); ++index) {
+            CHECK_EQ(expected[index], launchedArguments[index]);
+        }
+    }
+}
+
 void disabled_addons_creates_missing_addon_section_test()
 {
     constexpr std::string_view input =
@@ -506,6 +610,10 @@ int main()
     runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
     observed_config_bootstrap_decision_test();
     restart_argument_lifecycle_and_create_process_command_line_test();
+    advanced_safe_mode_normal_invocation_adds_safe_mode_test();
+    advanced_safe_mode_cancel_keeps_current_open_without_launch_test();
+    advanced_safe_mode_launch_failure_keeps_current_open_test();
+    advanced_safe_mode_launch_success_closes_with_sanitized_arguments_test();
     disabled_addons_creates_missing_addon_section_test();
     disabled_addons_updates_empty_and_populated_lists_test();
     disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test();
