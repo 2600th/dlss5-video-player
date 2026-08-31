@@ -58,6 +58,8 @@ void remove_file_if_present(const std::filesystem::path& path)
     std::error_code error;
     std::filesystem::remove(path, error);
     CHECK(!error);
+    CHECK(!std::filesystem::exists(path, error));
+    CHECK(!error);
 }
 
 struct MenuEntry {
@@ -169,7 +171,8 @@ void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin
     const std::filesystem::path languageDirectory = runtimeDirectory / "languages";
     const std::filesystem::path portuguesePack = languageDirectory / "pt-BR.lang";
     std::error_code error;
-    const bool languageDirectoryExisted = std::filesystem::exists(languageDirectory);
+    const bool languageDirectoryExisted = std::filesystem::exists(languageDirectory, error);
+    CHECK(!error);
     CHECK(!languageDirectoryExisted);
     std::filesystem::create_directories(languageDirectory, error);
     CHECK(!error);
@@ -186,7 +189,12 @@ void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin
 
     restorePortuguesePack.Restore();
     restoreConfiguration.Restore();
-    if (!languageDirectoryExisted) std::filesystem::remove(languageDirectory, error);
+    if (!languageDirectoryExisted) {
+        std::filesystem::remove(languageDirectory, error);
+        CHECK(!error);
+        CHECK(!std::filesystem::exists(languageDirectory, error));
+        CHECK(!error);
+    }
 }
 
 void harness_sanity_test()
@@ -720,8 +728,7 @@ void disabled_addons_insertion_uses_target_section_line_ending_test()
 void configure_neural_addon_is_idempotent_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
-    std::error_code removeError;
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
     constexpr std::string_view input =
         "[GENERAL]\n"
         "PresetPath=C:\\Games\\Player\n"
@@ -756,8 +763,7 @@ void configure_neural_addon_is_idempotent_test()
 void configure_neural_addon_reports_semantic_state_across_text_canonicalization_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-semantic.ini";
-    std::error_code removeError;
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
 
     constexpr std::string_view missingAddonInput =
         "[GENERAL]\n"
@@ -778,6 +784,53 @@ void configure_neural_addon_reports_semantic_state_across_text_canonicalization_
     CHECK(duplicateTarget.changed);
     CHECK(!duplicateTarget.previousAddonEnabled);
     CHECK(!duplicateTarget.addonEnabled);
+
+    remove_file_if_present(path);
+}
+
+void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
+{
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "PolicyTests-ReShade-safe-normal.ini";
+    remove_file_if_present(path);
+    constexpr std::string_view legacyInput =
+        "[ADDON]\r\n"
+        "DisabledAddons=legacy.addon64,renodx-dlss5.addon64\r\n";
+    constexpr std::string_view safeExpected =
+        "[ADDON]\r\n"
+        "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n";
+    constexpr std::string_view normalExpected =
+        "[ADDON]\r\n"
+        "DisabledAddons=legacy.addon64\r\n";
+    write_binary_file(path, legacyInput);
+
+    const ConfigUpdate safe = ConfigureNeuralAddon(path, false);
+    CHECK(safe.ok);
+    CHECK(safe.changed);
+    CHECK(safe.previousAddonEnabled);
+    CHECK(!safe.addonEnabled);
+    CHECK_EQ(std::string(safeExpected), read_binary_file(path));
+
+    const ConfigUpdate safeAgain = ConfigureNeuralAddon(path, false);
+    CHECK(safeAgain.ok);
+    CHECK(!safeAgain.changed);
+    CHECK(!safeAgain.previousAddonEnabled);
+    CHECK(!safeAgain.addonEnabled);
+    CHECK_EQ(std::string(safeExpected), read_binary_file(path));
+
+    const ConfigUpdate normal = ConfigureNeuralAddon(path, true);
+    CHECK(normal.ok);
+    CHECK(normal.changed);
+    CHECK(!normal.previousAddonEnabled);
+    CHECK(normal.addonEnabled);
+    CHECK_EQ(std::string(normalExpected), read_binary_file(path));
+
+    const ConfigUpdate normalAgain = ConfigureNeuralAddon(path, true);
+    CHECK(normalAgain.ok);
+    CHECK(!normalAgain.changed);
+    CHECK(normalAgain.previousAddonEnabled);
+    CHECK(normalAgain.addonEnabled);
+    CHECK_EQ(std::string(normalExpected), read_binary_file(path));
 
     remove_file_if_present(path);
 }
@@ -809,8 +862,7 @@ void evaluated_config_update_observes_actual_final_bytes_test()
 void configure_neural_addon_fails_closed_for_malformed_ini_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-malformed.ini";
-    std::error_code removeError;
-    std::filesystem::remove(path, removeError);
+    remove_file_if_present(path);
     constexpr char nulContent[] = "[ADDON]\nDisabledAddons=legacy.addon64\0tail";
     const std::string nulInput{nulContent, sizeof(nulContent) - 1};
     write_binary_file(path, nulInput);
@@ -855,7 +907,11 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade-directory";
     std::error_code removeError;
     std::filesystem::remove_all(path, removeError);
+    CHECK(!removeError);
     std::filesystem::create_directory(path, removeError);
+    CHECK(!removeError);
+    CHECK(std::filesystem::is_directory(path, removeError));
+    CHECK(!removeError);
 
     const ConfigUpdate result = ConfigureNeuralAddon(path, true);
     CHECK(!result.ok);
@@ -865,6 +921,9 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
     CHECK(std::filesystem::is_directory(path));
 
     std::filesystem::remove_all(path, removeError);
+    CHECK(!removeError);
+    CHECK(!std::filesystem::exists(path, removeError));
+    CHECK(!removeError);
 }
 
 } // namespace
@@ -898,6 +957,7 @@ int main()
     disabled_addons_insertion_uses_target_section_line_ending_test();
     configure_neural_addon_is_idempotent_test();
     configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
+    configure_neural_addon_safe_then_normal_observes_reshade_state_test();
     evaluated_config_update_observes_actual_final_bytes_test();
     configure_neural_addon_fails_closed_for_malformed_ini_test();
     configure_neural_addon_rejects_non_regular_path_before_replacement_test();

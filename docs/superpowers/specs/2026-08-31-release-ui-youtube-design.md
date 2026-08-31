@@ -97,15 +97,15 @@ This intentionally targets most consumer RTX 40/50 systems without maintaining a
 
 ### ReShade/RenoDX policy
 
-The packaged `ReShade.ini` leaves `renodx-dlss5.addon64` enabled by default. A current community installer reports that its RenoDX-author custom 310.8 runtime adds RTX 40 support while retaining RTX 50 support. The exact supplied file is version 310.8.0.0 with SHA-256 `28BDC080D28686DECDB63F6F4246B022274916B80AAFDAB266FE0FB63B2B9265`; this project has exercised that file only on an RTX 4080. The RTX 50 target is therefore a best-effort community compatibility goal, not an NVIDIA support statement or a local hardware verification.
+The packaged `ReShade.ini` leaves the `renodx-dlss5.addon64` add-on enabled by default. ReShade 6.8 identifies this external add-on with canonical disabled-list token `DLSS 5 Neural Rendering@renodx-dlss5.addon64`; bootstrap configuration uses exact-case ReShade section/key semantics and migrates older aliases to that token. A current community installer reports that its RenoDX-author custom 310.8 runtime adds RTX 40 support while retaining RTX 50 support. The exact supplied file is version 310.8.0.0 with SHA-256 `28BDC080D28686DECDB63F6F4246B022274916B80AAFDAB266FE0FB63B2B9265`; this project has exercised that file only on an RTX 4080. The RTX 50 target is therefore a best-effort community compatibility goal, not an NVIDIA support statement or a local hardware verification.
 
 Compatibility evidence recorded for this decision: <https://github.com/rakanki911/DLSS5-Swapper/releases/tag/v1.1.1>. That release does not publish a hash proving its embedded DLL is byte-identical to the supplied file, so the package must retain the limitation above.
 
 At process start, before D3D12/NGX initialization:
 
-- **RTX 40 and RTX 50:** ensure `renodx-dlss5.addon64` is enabled unless this launch explicitly requested safe mode.
-- **Other NVIDIA and unsupported:** ensure `renodx-dlss5.addon64` is disabled while preserving normal DLSS SR/fallback behavior.
-- **`--safe-mode`:** ensure `renodx-dlss5.addon64` is disabled for the relaunched session, regardless of GPU generation.
+- **RTX 40 and RTX 50:** ensure the add-on registered as `DLSS 5 Neural Rendering` from `renodx-dlss5.addon64` is enabled unless this launch explicitly requested safe mode.
+- **Other NVIDIA and unsupported:** ensure that add-on is disabled with canonical token `DLSS 5 Neural Rendering@renodx-dlss5.addon64` while preserving normal DLSS SR/fallback behavior.
+- **`--safe-mode`:** ensure that add-on is disabled with the same canonical token for the relaunched session, regardless of GPU generation.
 
 If the required value changes, write the INI and relaunch the same EXE once with an internal bootstrap marker. The first process exits before renderer creation. A matching value proceeds without a restart. Loop prevention is based on the resulting configuration, requested mode, and marker. A later normal launch on RTX 40/50 restores the default neural-enabled policy.
 

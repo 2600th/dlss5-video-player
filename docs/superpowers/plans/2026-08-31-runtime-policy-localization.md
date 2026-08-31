@@ -114,8 +114,8 @@ ConfigUpdate ConfigureNeuralAddon(
 ```
 
 - [ ] Confirm the tests fail before production code exists.
-- [ ] Parse section and key names case-insensitively, but preserve unrelated bytes and line-ending style.
-- [ ] Treat `DisabledAddons` as a comma-separated exact-name set; add/remove only `renodx-dlss5.addon64`, retain other entries, and collapse only exact duplicates of the target.
+- [ ] Model pinned ReShade 6.8 semantics: strip a leading UTF-8 BOM for lookup, match the exact-case `[ADDON]` section and `DisabledAddons` key, and preserve unrelated bytes and the target section's line-ending style.
+- [ ] Treat `DisabledAddons` as a comma-separated set and manage canonical token `DLSS 5 Neural Rendering@renodx-dlss5.addon64`. Migrate/remove the exact registered-name and `@filename` forms plus legacy/wrong-case aliases, retain unrelated entries, and collapse managed duplicates.
 - [ ] Write changed content to a sibling temporary file, flush/close it, then use `MoveFileExW(..., MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`; leave the original untouched on failure.
 - [ ] Return `changed == false` for already-correct content and verify the second update is byte-identical.
 - [ ] Run CTest and inspect a fixture diff to prove unrelated INI settings remain unchanged.

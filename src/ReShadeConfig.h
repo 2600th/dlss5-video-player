@@ -12,8 +12,9 @@ struct ConfigUpdate {
     std::wstring error;
 };
 
-// Throws std::invalid_argument when the INI contains an embedded NUL or more
-// than one DisabledAddons key in its [ADDON] section.
+// Models ReShade 6.8's exact-case [ADDON]/DisabledAddons lookup and UTF-8 BOM
+// handling. Throws std::invalid_argument for embedded NUL or duplicate exact
+// DisabledAddons keys.
 std::string UpdateDisabledAddonsIni(
     std::string_view ini,
     std::string_view addonName,

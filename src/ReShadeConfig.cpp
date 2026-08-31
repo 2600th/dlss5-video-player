@@ -13,6 +13,13 @@
 
 namespace {
 
+constexpr std::string_view kNeuralAddonCanonical =
+    "DLSS 5 Neural Rendering@renodx-dlss5.addon64";
+constexpr std::string_view kNeuralAddonRegisteredName = "DLSS 5 Neural Rendering";
+constexpr std::string_view kNeuralAddonAtFilename = "@renodx-dlss5.addon64";
+constexpr std::string_view kNeuralAddonLegacyFilename = "renodx-dlss5.addon64";
+constexpr std::string_view kUtf8Bom = "\xEF\xBB\xBF";
+
 struct Line {
     size_t begin{};
     size_t contentEnd{};
@@ -85,17 +92,25 @@ std::vector<Line> SplitLines(std::string_view ini)
     return lines;
 }
 
-bool IsSection(std::string_view line, std::string_view sectionName)
+std::string_view StripUtf8Bom(std::string_view value, bool firstLine)
 {
-    line = Trim(line);
+    if (firstLine && value.starts_with(kUtf8Bom)) {
+        value.remove_prefix(kUtf8Bom.size());
+    }
+    return value;
+}
+
+bool IsSection(std::string_view line, std::string_view sectionName, bool firstLine)
+{
+    line = Trim(StripUtf8Bom(line, firstLine));
     return line.size() >= 2 && line.front() == '[' && line.back() == ']'
-        && EqualsIgnoreCase(Trim(line.substr(1, line.size() - 2)), sectionName);
+        && Trim(line.substr(1, line.size() - 2)) == sectionName;
 }
 
 bool IsKey(std::string_view line, std::string_view keyName, size_t& valueStart)
 {
     const size_t equals = line.find('=');
-    if (equals == std::string_view::npos || !EqualsIgnoreCase(Trim(line.substr(0, equals)), keyName)) {
+    if (equals == std::string_view::npos || Trim(line.substr(0, equals)) != keyName) {
         return false;
     }
     valueStart = equals + 1;
@@ -115,16 +130,48 @@ std::string DetectLineEnding(std::string_view ini)
     return "\r\n";
 }
 
-std::string Join(const std::vector<std::string_view>& values)
+std::string_view LineEnding(std::string_view ini, const Line& line)
 {
-    std::string joined;
-    for (size_t index = 0; index < values.size(); ++index) {
-        if (index != 0) {
-            joined.push_back(',');
+    return ini.substr(line.contentEnd, line.end - line.contentEnd);
+}
+
+std::string DetectTargetSectionLineEnding(
+    std::string_view ini,
+    const std::vector<Line>& lines,
+    size_t addonHeader,
+    size_t addonSectionEnd)
+{
+    if (addonHeader != std::string_view::npos) {
+        const std::string_view headerEnding = LineEnding(ini, lines[addonHeader]);
+        if (!headerEnding.empty()) return std::string(headerEnding);
+        for (size_t index = addonHeader + 1; index < lines.size() && lines[index].begin < addonSectionEnd; ++index) {
+            const std::string_view ending = LineEnding(ini, lines[index]);
+            if (!ending.empty()) return std::string(ending);
         }
-        joined.append(values[index]);
     }
-    return joined;
+    return DetectLineEnding(ini);
+}
+
+bool IsNeuralAddon(std::string_view addonName)
+{
+    return addonName == kNeuralAddonCanonical;
+}
+
+bool IsManagedNeuralAlias(std::string_view entry)
+{
+    entry = Trim(entry);
+    return EqualsIgnoreCase(entry, kNeuralAddonCanonical)
+        || EqualsIgnoreCase(entry, kNeuralAddonRegisteredName)
+        || EqualsIgnoreCase(entry, kNeuralAddonAtFilename)
+        || EqualsIgnoreCase(entry, kNeuralAddonLegacyFilename);
+}
+
+bool IsReShadeDisabledNeuralToken(std::string_view entry)
+{
+    entry = Trim(entry);
+    return entry == kNeuralAddonCanonical
+        || entry == kNeuralAddonRegisteredName
+        || entry == kNeuralAddonAtFilename;
 }
 
 std::string UpdateList(std::string_view list, std::string_view addonName, bool disabled)
@@ -139,31 +186,46 @@ std::string UpdateList(std::string_view list, std::string_view addonName, bool d
         begin = comma + 1;
     }
 
+    const bool neuralAddon = IsNeuralAddon(addonName);
     size_t targetCount = 0;
     for (const std::string_view entry : entries) {
-        if (Trim(entry) == addonName) {
+        if (neuralAddon ? IsManagedNeuralAlias(entry) : Trim(entry) == addonName) {
             ++targetCount;
         }
     }
 
-    if ((!disabled && targetCount == 0) || (disabled && targetCount == 1)) {
+    if (!disabled && targetCount == 0) {
         return std::string(list);
+    }
+    if (disabled && targetCount == 1) {
+        for (const std::string_view entry : entries) {
+            if ((neuralAddon ? IsManagedNeuralAlias(entry) : Trim(entry) == addonName)
+                && Trim(entry) == addonName) {
+                return std::string(list);
+            }
+        }
     }
     if (disabled && targetCount == 0) {
         return list.empty() ? std::string(addonName) : std::string(list) + ',' + std::string(addonName);
     }
 
-    std::vector<std::string_view> retained;
+    std::vector<std::string> retained;
     bool keptTarget = false;
     for (const std::string_view entry : entries) {
-        if (Trim(entry) != addonName) {
-            retained.push_back(entry);
+        const bool isTarget = neuralAddon ? IsManagedNeuralAlias(entry) : Trim(entry) == addonName;
+        if (!isTarget) {
+            retained.emplace_back(entry);
         } else if (disabled && !keptTarget) {
-            retained.push_back(entry);
+            retained.emplace_back(addonName);
             keptTarget = true;
         }
     }
-    return Join(retained);
+    std::string joined;
+    for (size_t index = 0; index < retained.size(); ++index) {
+        if (index != 0) joined.push_back(',');
+        joined.append(retained[index]);
+    }
+    return joined;
 }
 
 bool ListContainsAddon(std::string_view list, std::string_view addonName)
@@ -172,7 +234,9 @@ bool ListContainsAddon(std::string_view list, std::string_view addonName)
         const size_t comma = list.find(',', begin);
         const std::string_view entry = list.substr(
             begin, comma == std::string_view::npos ? std::string_view::npos : comma - begin);
-        if (Trim(entry) == addonName) {
+        if (IsNeuralAddon(addonName)
+                ? IsReShadeDisabledNeuralToken(entry)
+                : Trim(entry) == addonName) {
             return true;
         }
         if (comma == std::string_view::npos) {
@@ -197,8 +261,8 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
     for (size_t index = 0; index < lines.size(); ++index) {
         const Line& line = lines[index];
         const std::string_view content = ini.substr(line.begin, line.contentEnd - line.begin);
-        const std::string_view trimmed = Trim(content);
-        const bool isAddonSection = IsSection(content, "ADDON");
+        const std::string_view trimmed = Trim(StripUtf8Bom(content, index == 0));
+        const bool isAddonSection = IsSection(content, "ADDON", index == 0);
         const bool isAnySection = !trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']';
         if (isAnySection) {
             if (inAddonSection && addonSectionEnd == ini.size()) {
@@ -222,7 +286,7 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
         return {true, "[ADDON] contains duplicate DisabledAddons keys"};
     }
 
-    const std::string lineEnding = DetectLineEnding(ini);
+    const std::string lineEnding = DetectTargetSectionLineEnding(ini, lines, addonHeader, addonSectionEnd);
     if (addonHeader == std::string_view::npos) {
         std::string content(ini);
         if (!content.empty() && content.back() != '\r' && content.back() != '\n') {
@@ -366,12 +430,11 @@ ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     bool changed,
     bool desiredEnabled)
 {
-    constexpr std::string_view neuralAddon = "renodx-dlss5.addon64";
-    const ParsedUpdate previous = ParseAndUpdate(previousIni, neuralAddon, !desiredEnabled);
+    const ParsedUpdate previous = ParseAndUpdate(previousIni, kNeuralAddonCanonical, !desiredEnabled);
     if (previous.malformed) {
         return {false, changed, false, false, std::wstring(previous.error.begin(), previous.error.end())};
     }
-    const ParsedUpdate final = ParseAndUpdate(finalIni, neuralAddon, !desiredEnabled);
+    const ParsedUpdate final = ParseAndUpdate(finalIni, kNeuralAddonCanonical, !desiredEnabled);
     if (final.malformed) {
         return {false, changed, previous.addonEnabled, false, std::wstring(final.error.begin(), final.error.end())};
     }
@@ -389,8 +452,7 @@ ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool ena
         return {false, false, false, false, originalRead.error};
     }
 
-    constexpr std::string_view neuralAddon = "renodx-dlss5.addon64";
-    const ParsedUpdate updated = ParseAndUpdate(originalRead.content, neuralAddon, !enable);
+    const ParsedUpdate updated = ParseAndUpdate(originalRead.content, kNeuralAddonCanonical, !enable);
     if (updated.malformed) {
         return {false, false, false, false, std::wstring(updated.error.begin(), updated.error.end())};
     }
