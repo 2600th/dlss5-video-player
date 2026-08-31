@@ -4,6 +4,22 @@
 
 namespace app_menu {
 
+HMENU CreateDebugViewMenu(UINT selectedCommand)
+{
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return nullptr;
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_FINAL, L"Final output\t1");
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");
+    AppendMenuW(menu, MF_STRING, IDM_VIEW_MASK, L"Bias mask\t5");
+    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_MASK) {
+        selectedCommand = IDM_VIEW_FINAL;
+    }
+    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_MASK, selectedCommand, MF_BYCOMMAND);
+    return menu;
+}
+
 HMENU CreateMenuBar(const Localizer& localizer)
 {
     HMENU bar = CreateMenu(), file = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), dlss = CreatePopupMenu(), quality = CreatePopupMenu(), advanced = CreatePopupMenu();

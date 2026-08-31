@@ -47,8 +47,14 @@ struct ButtonVisual {
     bool drawFocus{false};
 };
 
+enum class ButtonPresentation {
+    IconAndLabel,
+    LabelOnly,
+};
+
 wchar_t GlyphForIcon(UiIcon icon);
 ButtonVisual ResolveButtonVisual(ButtonState state);
+ButtonPresentation ResolveButtonPresentation(bool iconFontAvailable);
 
 class UiResources {
 public:

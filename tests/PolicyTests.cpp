@@ -12,6 +12,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <array>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -67,6 +69,7 @@ void remove_file_if_present(const std::filesystem::path& path)
 struct MenuEntry {
     std::wstring text;
     UINT command;
+    UINT state;
 };
 
 void collect_menu_entries(HMENU menu, std::vector<MenuEntry>& entries)
@@ -74,7 +77,7 @@ void collect_menu_entries(HMENU menu, std::vector<MenuEntry>& entries)
     const int count = GetMenuItemCount(menu);
     for (int index = 0; index < count; ++index) {
         MENUITEMINFOW item{sizeof(item)};
-        item.fMask = MIIM_STRING | MIIM_ID | MIIM_SUBMENU;
+        item.fMask = MIIM_STRING | MIIM_ID | MIIM_SUBMENU | MIIM_STATE;
         GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
 
         std::wstring text(item.cch + 1, L'\0');
@@ -82,7 +85,7 @@ void collect_menu_entries(HMENU menu, std::vector<MenuEntry>& entries)
         item.cch = static_cast<UINT>(text.size());
         GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
         text.resize(item.cch);
-        entries.push_back({std::move(text), item.wID});
+        entries.push_back({std::move(text), item.wID, item.fState});
         if (item.hSubMenu) collect_menu_entries(item.hSubMenu, entries);
     }
 }
@@ -287,6 +290,56 @@ void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
     }
 }
 
+bool rectangles_intersect(const RECT& left, const RECT& right)
+{
+    return left.left < right.right && left.right > right.left &&
+           left.top < right.bottom && left.bottom > right.top;
+}
+
+void volume_slider_never_intersects_compact_or_threshold_toolbar_test()
+{
+    for (const int width : {320, 640, 922}) {
+        const auto items = LayoutToolbar(width, 180, 96);
+        CHECK(!LayoutVolumeSlider(width, 180, 96, items).has_value());
+    }
+
+    const auto thresholdItems = LayoutToolbar(923, 180, 96);
+    const auto slider = LayoutVolumeSlider(923, 180, 96, thresholdItems);
+    CHECK(slider.has_value());
+    if (!slider) return;
+    for (const auto& item : thresholdItems) {
+        CHECK(!rectangles_intersect(*slider, item.bounds));
+    }
+    CHECK_EQ(738L, slider->left);
+    CHECK_EQ(828L, slider->right);
+}
+
+void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
+{
+    const std::array idleItems{ToolbarItem{ToolbarAction::Open, RECT{0, 0, 190, 42}, false}};
+    const ToolbarAvailability idle{};
+    CHECK(IsToolbarActionEnabled(ToolbarAction::Open, idle));
+    CHECK_EQ(ToolbarAction::Open,
+             NextFocusableToolbarAction(idleItems, ToolbarAction::None, false, idle));
+    CHECK_EQ(ToolbarAction::Open,
+             NextFocusableToolbarAction(idleItems, ToolbarAction::None, true, idle));
+    CHECK_EQ(ToolbarAction::Open,
+             NextFocusableToolbarAction(idleItems, ToolbarAction::Open, true, idle));
+
+    const auto loadedItems = LayoutToolbar(640, 180, 96);
+    const ToolbarAvailability withoutRenderer{true, false, false};
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleDlss, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::Adjustments, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::DebugView, withoutRenderer));
+    const ToolbarAvailability seeking{true, true, true};
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::Aspect, seeking));
+    CHECK(IsToolbarActionEnabled(ToolbarAction::Adjustments, seeking));
+    CHECK(IsToolbarActionEnabled(ToolbarAction::DebugView, seeking));
+    CHECK_EQ(ToolbarAction::Adjustments,
+             NextFocusableToolbarAction(loadedItems, ToolbarAction::Mute, false,
+                                        seeking));
+}
+
 void tabler_glyph_mapping_uses_the_pinned_css_codepoints_test()
 {
     CHECK_EQ(L'\xfaf7', GlyphForIcon(UiIcon::Open));
@@ -319,11 +372,74 @@ void native_button_palette_has_distinct_interaction_states_test()
     CHECK_EQ(RGB(27, 28, 31), ResolveButtonVisual(state).fill);
     state.pressed = false;
     state.active = true;
-    CHECK_EQ(RGB(55, 139, 226), ResolveButtonVisual(state).fill);
+    const ButtonVisual active = ResolveButtonVisual(state);
+    CHECK_EQ(RGB(55, 139, 226), active.fill);
+    CHECK(active.text != RGB(240, 240, 242));
+    state.hover = true;
+    CHECK_EQ(active.fill, ResolveButtonVisual(state).fill);
+    state.pressed = true;
+    CHECK_EQ(RGB(27, 28, 31), ResolveButtonVisual(state).fill);
+    state.focus = true;
     state.enabled = false;
     const ButtonVisual disabled = ResolveButtonVisual(state);
     CHECK_EQ(RGB(27, 28, 31), disabled.fill);
     CHECK_EQ(RGB(160, 164, 172), disabled.text);
+    CHECK(disabled.drawFocus == state.focus);
+}
+
+double linear_color_channel(BYTE value)
+{
+    const double channel = static_cast<double>(value) / 255.0;
+    return channel <= 0.04045 ? channel / 12.92 : std::pow((channel + 0.055) / 1.055, 2.4);
+}
+
+double contrast_ratio(COLORREF foreground, COLORREF background)
+{
+    const auto luminance = [](COLORREF color) {
+        return 0.2126 * linear_color_channel(GetRValue(color)) +
+               0.7152 * linear_color_channel(GetGValue(color)) +
+               0.0722 * linear_color_channel(GetBValue(color));
+    };
+    const double foregroundLuminance = luminance(foreground);
+    const double backgroundLuminance = luminance(background);
+    return (std::max(foregroundLuminance, backgroundLuminance) + 0.05) /
+           (std::min(foregroundLuminance, backgroundLuminance) + 0.05);
+}
+
+void active_button_small_text_meets_wcag_contrast_test()
+{
+    ButtonState state{};
+    state.active = true;
+    const ButtonVisual active = ResolveButtonVisual(state);
+    CHECK(contrast_ratio(active.text, active.fill) >= 4.5);
+}
+
+void failed_icon_font_uses_label_only_presentation_test()
+{
+    UiResources resources;
+    CHECK(!resources.Load(nullptr));
+    CHECK(resources.CreateIconFont(96) == nullptr);
+    CHECK(ResolveButtonPresentation(false) == ButtonPresentation::LabelOnly);
+    CHECK(ResolveButtonPresentation(true) == ButtonPresentation::IconAndLabel);
+}
+
+void debug_view_popup_contains_all_existing_views_and_selection_test()
+{
+    const HMENU menu = app_menu::CreateDebugViewMenu(app_menu::IDM_VIEW_DEPTH);
+    CHECK(menu != nullptr);
+    CHECK_EQ(5, menu ? GetMenuItemCount(menu) : 0);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Final output\t1", app_menu::IDM_VIEW_FINAL));
+    CHECK(has_menu_entry(entries, L"DLSS input\t2", app_menu::IDM_VIEW_INPUT));
+    CHECK(has_menu_entry(entries, L"Motion vectors\t3", app_menu::IDM_VIEW_MV));
+    CHECK(has_menu_entry(entries, L"Depth\t4", app_menu::IDM_VIEW_DEPTH));
+    CHECK(has_menu_entry(entries, L"Bias mask\t5", app_menu::IDM_VIEW_MASK));
+    for (const auto& entry : entries) {
+        if (entry.command == app_menu::IDM_VIEW_DEPTH) CHECK((entry.state & MFS_CHECKED) != 0);
+        else CHECK((entry.state & MFS_CHECKED) == 0);
+    }
+    if (menu) DestroyMenu(menu);
 }
 
 void player_menu_is_english_only_and_retains_advanced_commands_test()
@@ -1168,8 +1284,13 @@ int main()
     toolbar_layout_scales_hit_height_and_avoids_overlap_test();
     toolbar_hit_testing_is_half_open_and_boundary_stable_test();
     minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
+    volume_slider_never_intersects_compact_or_threshold_toolbar_test();
+    toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
     tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
     native_button_palette_has_distinct_interaction_states_test();
+    active_button_small_text_meets_wcag_contrast_test();
+    failed_icon_font_uses_label_only_presentation_test();
+    debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();

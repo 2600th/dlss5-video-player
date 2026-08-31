@@ -40,7 +40,7 @@ ButtonVisual ResolveButtonVisual(ButtonState state)
     }
     if (state.active) {
         return {ui_palette::PrimaryBlue, RGB(103, 179, 245),
-                ui_palette::PrimaryText, state.focus};
+                ui_palette::Window, state.focus};
     }
     if (state.hover) {
         return {ui_palette::Hover, RGB(93, 97, 104),
@@ -48,6 +48,11 @@ ButtonVisual ResolveButtonVisual(ButtonState state)
     }
     return {ui_palette::Inactive, RGB(75, 78, 84),
             ui_palette::PrimaryText, state.focus};
+}
+
+ButtonPresentation ResolveButtonPresentation(bool iconFontAvailable)
+{
+    return iconFontAvailable ? ButtonPresentation::IconAndLabel : ButtonPresentation::LabelOnly;
 }
 
 UiResources::~UiResources()

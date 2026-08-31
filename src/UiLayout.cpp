@@ -140,3 +140,72 @@ ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point)
     }
     return ToolbarAction::None;
 }
+
+std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT dpi,
+                                      std::span<const ToolbarItem> toolbarItems)
+{
+    if (clientWidth <= 0 || clientHeight <= 0) return std::nullopt;
+    const RECT candidate{
+        clientWidth - DipToPixels(185, dpi),
+        clientHeight - DipToPixels(69, dpi),
+        clientWidth - DipToPixels(95, dpi),
+        clientHeight - DipToPixels(61, dpi),
+    };
+    if (candidate.left < 0 || candidate.top < 0 || candidate.right <= candidate.left ||
+        candidate.bottom <= candidate.top) {
+        return std::nullopt;
+    }
+    for (const auto& item : toolbarItems) {
+        if (candidate.left < item.bounds.right && candidate.right > item.bounds.left &&
+            candidate.top < item.bounds.bottom && candidate.bottom > item.bounds.top) {
+            return std::nullopt;
+        }
+    }
+    return candidate;
+}
+
+bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availability)
+{
+    switch (action) {
+    case ToolbarAction::Open:
+    case ToolbarAction::Fullscreen:
+        return true;
+    case ToolbarAction::Back10:
+    case ToolbarAction::PlayPause:
+    case ToolbarAction::Stop:
+    case ToolbarAction::Forward10:
+    case ToolbarAction::Mute:
+    case ToolbarAction::Aspect:
+        return availability.mediaLoaded && !availability.seeking;
+    case ToolbarAction::ToggleDlss:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady;
+    case ToolbarAction::Adjustments:
+    case ToolbarAction::DebugView:
+        return availability.mediaLoaded && availability.rendererReady;
+    case ToolbarAction::None:
+        return false;
+    }
+    return false;
+}
+
+ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
+                                         ToolbarAction current, bool reverse,
+                                         ToolbarAvailability availability)
+{
+    if (items.empty()) return ToolbarAction::None;
+    int currentIndex = -1;
+    for (size_t index = 0; index < items.size(); ++index) {
+        if (items[index].action == current) {
+            currentIndex = static_cast<int>(index);
+            break;
+        }
+    }
+    for (size_t offset = 0; offset < items.size(); ++offset) {
+        currentIndex = reverse
+            ? (currentIndex <= 0 ? static_cast<int>(items.size()) - 1 : currentIndex - 1)
+            : (currentIndex + 1) % static_cast<int>(items.size());
+        const ToolbarAction candidate = items[static_cast<size_t>(currentIndex)].action;
+        if (IsToolbarActionEnabled(candidate, availability)) return candidate;
+    }
+    return ToolbarAction::None;
+}

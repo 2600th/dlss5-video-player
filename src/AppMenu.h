@@ -34,5 +34,6 @@ inline constexpr UINT IDM_VIDEO_ADJUSTMENTS = 403;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 
 HMENU CreateMenuBar(const Localizer& localizer);
+HMENU CreateDebugViewMenu(UINT selectedCommand);
 
 } // namespace app_menu
