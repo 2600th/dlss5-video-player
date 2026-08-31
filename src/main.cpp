@@ -661,12 +661,13 @@ private:
 
     void UpdateTitle(){
         if(!m_hwnd)return;
-        std::wstring title=T(L"app.title");
+        const std::wstring appTitle=T(L"app.title");
+        std::wstring mediaTitle;
         if(m_loaded&&!m_path.empty()){
-            std::wstring mediaTitle=std::filesystem::path(m_path).stem().wstring();
+            mediaTitle=std::filesystem::path(m_path).stem().wstring();
             if(mediaTitle.empty())mediaTitle=std::filesystem::path(m_path).filename().wstring();
-            if(!mediaTitle.empty())title=L"DLSS Video Player \u2014 "+mediaTitle;
         }
+        const std::wstring title=BuildPlayerWindowTitle(appTitle,mediaTitle,120);
         if(title==m_cachedWindowTitle)return;
         m_cachedWindowTitle=title;SetWindowTextW(m_hwnd,title.c_str());
     }
@@ -681,10 +682,10 @@ private:
     }
 
     RECT TimelineRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(24),c.right-Dip(18),c.bottom-Dip(14)};}
-    RECT EmptyOpenRect()const{RECT c{};GetClientRect(m_hwnd,&c);int cx=(c.left+c.right)/2,cy=(c.top+c.bottom)/2;return RECT{cx-Dip(95),cy+Dip(46),cx+Dip(95),cy+Dip(88)};}
+    IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
-    std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();return{ToolbarItem{ToolbarAction::Open,EmptyOpenRect(),false}};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking,m_renderer!=nullptr};}
+    std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking,m_renderer!=nullptr,false};}
     std::optional<RECT> VolumeRect()const{RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -728,6 +729,7 @@ private:
         const bool enabled=IsToolbarActionEnabled(action,ToolbarState());
         switch(action){
         case ToolbarAction::Open:return{UiIcon::Open,L"Open",enabled,false};
+        case ToolbarAction::OpenYouTube:return{UiIcon::YouTube,T(L"idle.youtube"),enabled,false};
         case ToolbarAction::Back10:return{UiIcon::Rewind,L"10s",enabled,false};
         case ToolbarAction::PlayPause:return{m_playing?UiIcon::Pause:UiIcon::Play,m_playing?L"Pause":L"Play",enabled,m_playing};
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
@@ -776,10 +778,12 @@ private:
     void RenderUi(HDC dc,const RECT& c){
         HBRUSH windowBg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,windowBg);DeleteObject(windowBg);
         if(!m_loaded){
+            const IdleSurfaceLayout idle=IdleLayout();
             SetBkMode(dc,TRANSPARENT);
-            RECT title{40,(c.bottom/2)-62,c.right-40,(c.bottom/2)-18};SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-            RECT sub{40,(c.bottom/2)-17,c.right-40,(c.bottom/2)+24};SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=T(L"idle.subtitle");DrawTextW(dc,ss.c_str(),-1,&sub,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(dc,of);
-            const RECT openRect=EmptyOpenRect();DrawButton(dc,ToolbarAction::Open,UiIcon::Open,T(L"idle.open"),openRect,true,false,m_hoverAction==ToolbarAction::Open,m_pressedToolbarAction==ToolbarAction::Open,GetFocus()==m_hwnd&&m_focusedToolbarAction==ToolbarAction::Open,false);return;
+            SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+            SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=T(L"idle.subtitle");RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
+            for(const auto& item:idle.actions){const auto content=ButtonContent(item.action);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
+            SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);std::wstring reason=T(L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);return;
         }
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
         const auto toolbarItems=ToolbarItems();
@@ -834,18 +838,15 @@ private:
     }
 
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
-    std::wstring RuntimeModeText()const{
-        const wchar_t* gpu=L"Unsupported GPU";
-        switch(m_opt.detectedGpu.generation){case GpuGeneration::Rtx40Ada:gpu=L"RTX 40 Ada";break;case GpuGeneration::Rtx50Blackwell:gpu=L"RTX 50 Blackwell";break;case GpuGeneration::OtherNvidia:gpu=L"Other NVIDIA";break;case GpuGeneration::Unsupported:break;}
-        std::wstring mode;
-        if(m_opt.safeMode) mode=L"DLSS SR safe mode";
-        else if(m_opt.neuralAddonConfigured) mode=L"Neural addon enabled (experimental)";
-        else mode=L"Neural addon disabled";
-        return std::wstring(gpu)+L" - "+mode;
+    PlayerRuntimeMode RuntimeMode()const{
+        if(!m_renderer||!m_renderer->DLSSEnabled()||!m_renderer->DLSSFeatureCreated())return PlayerRuntimeMode::ScalerFallback;
+        if(m_opt.safeMode)return PlayerRuntimeMode::DlssSrSafeMode;
+        return m_opt.neuralAddonConfigured?PlayerRuntimeMode::NeuralAddonExperimental:PlayerRuntimeMode::ScalerFallback;
     }
     std::wstring BuildStatusText()const{
         if(!m_loaded||!m_renderer)return{};
-        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<RuntimeModeText()<<L"  |  source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));return st.str();
+        PlayerStatusSnapshot status{};status.mediaLoaded=true;status.runtimeMode=RuntimeMode();status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
+        std::wstring text=BuildPlayerStatusText(status);if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;return text;
     }
     void RestartInSafeMode(){
         const std::wstring confirmation=T(L"safe_mode.confirm"),title=T(L"menu.safe_mode");
@@ -876,6 +877,7 @@ private:
         if(!ToolbarActionEnabled(action))return;
         switch(action){
         case ToolbarAction::Open:OpenFromDialog();break;
+        case ToolbarAction::OpenYouTube:break;
         case ToolbarAction::Back10:RequestSeek(Position()-10);break;
         case ToolbarAction::PlayPause:TogglePause();break;
         case ToolbarAction::Stop:StopPlayback();break;
@@ -901,7 +903,7 @@ private:
 
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);
-        if(!m_loaded){const RECT openRect=EmptyOpenRect();if(PtIn(openRect,x,y)){m_focusedToolbarAction=ToolbarAction::Open;m_pressedToolbarAction=ToolbarAction::Open;SetCapture(m_hwnd);InvalidateRect(m_hwnd,&openRect,FALSE);}return;}
+        if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
         if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
         const auto items=ToolbarItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);InvalidateControls();}
     }
@@ -911,14 +913,14 @@ private:
         if(m_dragVolume){m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();return;}
         const ToolbarAction pressed=m_pressedToolbarAction;if(pressed==ToolbarAction::None)return;
         m_pressedToolbarAction=ToolbarAction::None;if(GetCapture()==m_hwnd)ReleaseCapture();
-        if(!m_loaded){const RECT openRect=EmptyOpenRect();InvalidateRect(m_hwnd,&openRect,FALSE);if(pressed==ToolbarAction::Open&&PtIn(openRect,x,y))ActivateToolbarAction(pressed,openRect);return;}
+        if(!m_loaded){const auto items=FocusableItems();for(const auto& item:items)if(item.action==pressed){InvalidateRect(m_hwnd,&item.bounds,FALSE);if(PtIn(item.bounds,x,y)&&ToolbarActionEnabled(pressed))ActivateToolbarAction(pressed,item.bounds);break;}return;}
         const auto items=ToolbarItems();const ToolbarAction released=ResolveToolbarHover(items,POINT{x,y},ToolbarState());InvalidateControls();if(released==pressed){for(const auto& item:items)if(item.action==pressed){ActivateToolbarAction(pressed,item.bounds);break;}}
     }
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
     void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;m_audio.SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
-    void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
-    void Rehook(){if(m_renderer){m_renderer->RequestDLSSRecreate();m_dlssReset=true;}}
+    void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();UpdateCachedStatus();InvalidateControls();}
+    void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2);if(!AcceptRehookConfirmation(answer))return;m_renderer->RequestDLSSRecreate();m_dlssReset=true;}
     void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;if(Load(p))RequestSeek(keep,wasPlaying);}}
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
@@ -955,7 +957,7 @@ private:
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(w==VK_F6){Rehook();return 0;}if(w=='D'){ToggleDLSS();return 0;}if(w=='G'){ToggleDepthMode();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(w==VK_F6){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleDLSS();return 0;}if(w=='G'){ToggleDepthMode();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
     }

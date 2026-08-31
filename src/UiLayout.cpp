@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cmath>
+#include <sstream>
 
 namespace {
 
@@ -75,6 +77,72 @@ std::array<const ToolbarDefinition*, kRequiredToolbarItemCount> RequiredToolbarD
 }
 
 } // namespace
+
+IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi)
+{
+    const int width = std::max(1, clientWidth);
+    const int height = std::max(1, clientHeight);
+    const int gutter = std::min(DipToPixels(16, dpi), std::max(0, height / 12));
+    const int buttonWidth = std::min(DipToPixels(180, dpi), std::max(1, width - 2 * gutter));
+    int buttonHeight = DipToPixels(42, dpi);
+    int actionGap = DipToPixels(12, dpi);
+    int titleHeight = DipToPixels(34, dpi);
+    int subtitleHeight = DipToPixels(28, dpi);
+    int reasonHeight = DipToPixels(38, dpi);
+    int headerGap = DipToPixels(14, dpi);
+    int reasonGap = DipToPixels(8, dpi);
+    const bool stacked = width < 2 * buttonWidth + actionGap + 2 * gutter;
+    int actionBlockHeight = stacked ? buttonHeight * 2 + actionGap : buttonHeight;
+    int totalHeight = titleHeight + subtitleHeight + headerGap +
+                      actionBlockHeight + reasonGap + reasonHeight;
+    const int availableHeight = std::max(1, height - 2 * gutter);
+    if (stacked && totalHeight > availableHeight) {
+        subtitleHeight = 0;
+        const int compactGap = std::min(DipToPixels(6, dpi), availableHeight / 20);
+        headerGap = compactGap;
+        actionGap = compactGap;
+        reasonGap = compactGap;
+        titleHeight = std::min(DipToPixels(28, dpi), availableHeight / 5);
+        reasonHeight = std::min(DipToPixels(28, dpi), availableHeight / 5);
+        const int buttonSpace = std::max(2, availableHeight - titleHeight - reasonHeight -
+                                            headerGap - actionGap - reasonGap);
+        buttonHeight = std::max(1, buttonSpace / 2);
+        actionBlockHeight = buttonHeight * 2 + actionGap;
+        totalHeight = titleHeight + headerGap + actionBlockHeight + reasonGap + reasonHeight;
+    }
+    const int top = std::max(gutter, (height - totalHeight) / 2);
+
+    IdleSurfaceLayout layout{};
+    layout.stacked = stacked;
+    layout.title = RECT{gutter, top, width - gutter, top + titleHeight};
+    layout.subtitle = RECT{gutter, layout.title.bottom,
+                           width - gutter, layout.title.bottom + subtitleHeight};
+    const int actionsTop = layout.subtitle.bottom + headerGap;
+    if (stacked) {
+        const int left = (width - buttonWidth) / 2;
+        layout.actions = {
+            ToolbarItem{ToolbarAction::Open,
+                        RECT{left, actionsTop, left + buttonWidth, actionsTop + buttonHeight}, false},
+            ToolbarItem{ToolbarAction::OpenYouTube,
+                        RECT{left, actionsTop + buttonHeight + actionGap,
+                             left + buttonWidth, actionsTop + buttonHeight * 2 + actionGap}, false},
+        };
+    } else {
+        const int blockWidth = buttonWidth * 2 + actionGap;
+        const int left = (width - blockWidth) / 2;
+        layout.actions = {
+            ToolbarItem{ToolbarAction::Open,
+                        RECT{left, actionsTop, left + buttonWidth, actionsTop + buttonHeight}, false},
+            ToolbarItem{ToolbarAction::OpenYouTube,
+                        RECT{left + buttonWidth + actionGap, actionsTop,
+                             left + blockWidth, actionsTop + buttonHeight}, false},
+        };
+    }
+    const int reasonTop = layout.actions[1].bounds.bottom + reasonGap;
+    layout.youtubeReason = RECT{gutter, reasonTop, width - gutter,
+                                std::min(height, reasonTop + reasonHeight)};
+    return layout;
+}
 
 std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT dpi)
 {
@@ -170,6 +238,8 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
     case ToolbarAction::Open:
     case ToolbarAction::Fullscreen:
         return true;
+    case ToolbarAction::OpenYouTube:
+        return availability.youtubeAvailable;
     case ToolbarAction::Back10:
     case ToolbarAction::PlayPause:
     case ToolbarAction::Stop:
@@ -263,4 +333,53 @@ std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paint
         static_cast<int>(clipped.bottom - clipped.top),
         POINT{-clipped.left, -clipped.top},
     };
+}
+
+std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
+{
+    if (status.activity == PlayerStatusActivity::ResolvingYouTube) {
+        // Exact user-visible state: Resolving YouTube…
+        return L"Resolving YouTube\u2026";
+    }
+    if (!status.mediaLoaded) return {};
+
+    const wchar_t* runtime = L"Scaler fallback";
+    if (status.runtimeMode == PlayerRuntimeMode::NeuralAddonExperimental) {
+        runtime = L"Neural addon enabled (experimental)";
+    } else if (status.runtimeMode == PlayerRuntimeMode::DlssSrSafeMode) {
+        runtime = L"DLSS SR safe mode";
+    }
+
+    std::wstringstream text;
+    text << runtime
+         << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
+         << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
+         << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight
+         << L" \u00b7 " << (status.quality.empty() ? L"\u2014" : status.quality)
+         << L" \u00b7 FPS " << static_cast<int>(std::lround(status.renderedFps))
+         << L" rendered / " << static_cast<int>(std::lround(status.sourceFps))
+         << L" source \u00b7 Dropped " << status.droppedFrames;
+    return text.str();
+}
+
+std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
+                                    std::wstring_view mediaTitle,
+                                    size_t maxCharacters)
+{
+    if (mediaTitle.empty()) return std::wstring(appTitle);
+    const std::wstring prefix = std::wstring(appTitle) + L" \u2014 ";
+    const std::wstring complete = prefix + std::wstring(mediaTitle);
+    if (maxCharacters == 0 || complete.size() <= maxCharacters) return complete;
+    if (prefix.size() >= maxCharacters) {
+        if (maxCharacters == 1) return L"\u2026";
+        return std::wstring(appTitle.substr(0, maxCharacters - 1)) + L"\u2026";
+    }
+    const size_t mediaCharacters = maxCharacters - prefix.size();
+    if (mediaCharacters == 1) return prefix + L"\u2026";
+    return prefix + std::wstring(mediaTitle.substr(0, mediaCharacters - 1)) + L"\u2026";
+}
+
+bool AcceptRehookConfirmation(int dialogResult)
+{
+    return dialogResult == IDYES;
 }

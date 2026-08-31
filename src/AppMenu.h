@@ -8,6 +8,7 @@ namespace app_menu {
 
 inline constexpr UINT IDM_OPEN = 100;
 inline constexpr UINT IDM_EXIT = 101;
+inline constexpr UINT IDM_OPEN_YOUTUBE = 102;
 inline constexpr UINT IDM_PLAY = 200;
 inline constexpr UINT IDM_STOP = 201;
 inline constexpr UINT IDM_BACK10 = 202;

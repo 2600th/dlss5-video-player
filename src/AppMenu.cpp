@@ -27,7 +27,10 @@ HMENU CreateMenuBar(const Localizer& localizer)
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
     };
-    add(file, IDM_OPEN, L"menu.open"); AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
+    add(file, IDM_OPEN, L"menu.open");
+    const std::wstring youtubeName = localizer.Get(L"menu.open_youtube");
+    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_OPEN_YOUTUBE, youtubeName.c_str());
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
     add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); add(video, IDM_VIEW_MASK, L"menu.mask"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");

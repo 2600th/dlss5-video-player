@@ -2,12 +2,16 @@
 
 #include <windows.h>
 
+#include <array>
+#include <cstdint>
 #include <span>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 enum class ToolbarAction {
-    Open, Back10, PlayPause, Stop, Forward10, Mute,
+    Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
     ToggleDlss, Aspect, Adjustments, DebugView, Fullscreen, None
 };
 
@@ -21,6 +25,42 @@ struct ToolbarAvailability {
     bool mediaLoaded{false};
     bool seeking{false};
     bool rendererReady{false};
+    bool youtubeAvailable{false};
+};
+
+struct IdleSurfaceLayout {
+    RECT title{};
+    RECT subtitle{};
+    std::array<ToolbarItem, 2> actions{};
+    RECT youtubeReason{};
+    bool stacked{false};
+};
+
+enum class PlayerRuntimeMode {
+    NeuralAddonExperimental,
+    DlssSrSafeMode,
+    ScalerFallback,
+};
+
+enum class PlayerStatusActivity {
+    None,
+    ResolvingYouTube,
+};
+
+struct PlayerStatusSnapshot {
+    bool mediaLoaded{false};
+    PlayerStatusActivity activity{PlayerStatusActivity::None};
+    PlayerRuntimeMode runtimeMode{PlayerRuntimeMode::ScalerFallback};
+    uint32_t sourceWidth{};
+    uint32_t sourceHeight{};
+    uint32_t inputWidth{};
+    uint32_t inputHeight{};
+    uint32_t outputWidth{};
+    uint32_t outputHeight{};
+    std::wstring quality;
+    double renderedFps{};
+    double sourceFps{};
+    uint64_t droppedFrames{};
 };
 
 struct PaintBufferLayout {
@@ -37,6 +77,7 @@ inline constexpr int kToolbarOuterGutterDip = 16;
 inline constexpr int kToolbarGroupGapDip = 12;
 
 std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT dpi);
+IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi);
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point);
 int MinimumToolbarClientWidth(UINT dpi);
 std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT dpi,
@@ -55,3 +96,8 @@ ToolbarAction ResolveToolbarHoverForCursor(std::span<const ToolbarItem> items,
                                            std::optional<POINT> clientPoint,
                                            ToolbarAvailability availability);
 std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds);
+std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
+std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
+                                    std::wstring_view mediaTitle,
+                                    size_t maxCharacters);
+bool AcceptRehookConfirmation(int dialogResult);

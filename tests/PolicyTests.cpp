@@ -340,6 +340,112 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
                                         seeking));
 }
 
+void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
+{
+    const IdleSurfaceLayout wide = LayoutIdleSurface(900, 520, 96);
+    CHECK(!wide.stacked);
+    CHECK_EQ(ToolbarAction::Open, wide.actions[0].action);
+    CHECK_EQ(ToolbarAction::OpenYouTube, wide.actions[1].action);
+    CHECK(wide.actions[0].bounds.right <= wide.actions[1].bounds.left);
+
+    const IdleSurfaceLayout small = LayoutIdleSurface(320, 360, 96);
+    CHECK(small.stacked);
+    for (const auto& action : small.actions) {
+        CHECK(action.bounds.left >= 0);
+        CHECK(action.bounds.top >= 0);
+        CHECK(action.bounds.right <= 320);
+        CHECK(action.bounds.bottom <= 360);
+        CHECK(action.bounds.right > action.bounds.left);
+        CHECK(action.bounds.bottom > action.bounds.top);
+    }
+    CHECK(small.actions[0].bounds.bottom <= small.actions[1].bounds.top);
+    CHECK(small.youtubeReason.bottom <= 360);
+
+    const IdleSurfaceLayout tiny = LayoutIdleSurface(244, 180, 96);
+    for (const auto& action : tiny.actions) {
+        CHECK(action.bounds.top >= 0);
+        CHECK(action.bounds.bottom <= 180);
+        CHECK(action.bounds.bottom > action.bounds.top);
+    }
+    CHECK(tiny.youtubeReason.top >= tiny.actions[1].bounds.bottom);
+    CHECK(tiny.youtubeReason.bottom >= tiny.youtubeReason.top);
+    CHECK(tiny.youtubeReason.bottom <= 180);
+
+    const ToolbarAvailability intermediate{false, false, false, false};
+    CHECK(IsToolbarActionEnabled(ToolbarAction::Open, intermediate));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::OpenYouTube, intermediate));
+    CHECK_EQ(ToolbarAction::Open,
+             NextFocusableToolbarAction(small.actions, ToolbarAction::None, false,
+                                        intermediate));
+    CHECK_EQ(ToolbarAction::Open,
+             NextFocusableToolbarAction(small.actions, ToolbarAction::Open, false,
+                                        intermediate));
+
+    ToolbarAvailability later = intermediate;
+    later.youtubeAvailable = true;
+    CHECK_EQ(ToolbarAction::OpenYouTube,
+             NextFocusableToolbarAction(small.actions, ToolbarAction::Open, false, later));
+}
+
+void player_status_formats_exact_runtime_and_playback_states_test()
+{
+    PlayerStatusSnapshot status{};
+    CHECK(BuildPlayerStatusText(status).empty());
+
+    status.activity = PlayerStatusActivity::ResolvingYouTube;
+    CHECK_EQ(std::wstring(L"Resolving YouTube\u2026"), BuildPlayerStatusText(status));
+
+    status.activity = PlayerStatusActivity::None;
+    status.mediaLoaded = true;
+    status.runtimeMode = PlayerRuntimeMode::NeuralAddonExperimental;
+    status.sourceWidth = 1920;
+    status.sourceHeight = 1080;
+    status.inputWidth = 1280;
+    status.inputHeight = 720;
+    status.outputWidth = 3840;
+    status.outputHeight = 2160;
+    status.quality = L"Quality";
+    status.renderedFps = 58.4;
+    status.sourceFps = 59.94;
+    status.droppedFrames = 3;
+    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
+             BuildPlayerStatusText(status));
+
+    status.runtimeMode = PlayerRuntimeMode::DlssSrSafeMode;
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7"));
+    status.runtimeMode = PlayerRuntimeMode::ScalerFallback;
+    CHECK(BuildPlayerStatusText(status).starts_with(L"Scaler fallback \u00b7"));
+}
+
+void long_media_title_is_bounded_with_a_real_ellipsis_test()
+{
+    const std::wstring longTitle(240, L'X');
+    const std::wstring title = BuildPlayerWindowTitle(L"DLSS Video Player", longTitle, 64);
+    CHECK_EQ(static_cast<size_t>(64), title.size());
+    CHECK(title.starts_with(L"DLSS Video Player \u2014 "));
+    CHECK_EQ(L'\u2026', title.back());
+    CHECK_EQ(std::wstring(L"DLSS Video Player"),
+             BuildPlayerWindowTitle(L"DLSS Video Player", L"", 64));
+}
+
+void recovery_copy_and_rehook_confirmation_are_actionable_test()
+{
+    Localizer localizer;
+    const std::wstring decode = localizer.Get(L"error.decode");
+    const std::wstring renderer = localizer.Get(L"error.renderer");
+    const std::wstring rehook = localizer.Get(L"rehook.confirm");
+    CHECK(decode.find(L"bundled FFmpeg") != std::wstring::npos);
+    CHECK(decode.find(L"try again") != std::wstring::npos);
+    CHECK(renderer.find(L"NVIDIA driver") != std::wstring::npos);
+    CHECK(renderer.find(L"safe mode") != std::wstring::npos);
+    CHECK(rehook.find(L"reset playback") != std::wstring::npos);
+    CHECK(rehook.find(L"hang") != std::wstring::npos);
+    CHECK(rehook.find(L"experimental neural add-on") != std::wstring::npos);
+    CHECK(!AcceptRehookConfirmation(IDNO));
+    CHECK(!AcceptRehookConfirmation(IDCANCEL));
+    CHECK(AcceptRehookConfirmation(IDYES));
+}
+
 void unchanged_hover_action_has_no_dirty_rectangles_test()
 {
     const std::array items{
@@ -576,6 +682,10 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     if (menu) collect_menu_entries(menu, entries);
     CHECK(!has_menu_text(entries, L"Language"));
     CHECK(has_menu_text(entries, L"Advanced"));
+    CHECK(has_menu_entry(entries, L"Open file\tCtrl+O", app_menu::IDM_OPEN));
+    CHECK(has_menu_entry(entries, L"Open YouTube URL\u2026\tCtrl+L", app_menu::IDM_OPEN_YOUTUBE));
+    CHECK(has_menu_entry(entries, L"Stop\tS", app_menu::IDM_STOP));
+    CHECK(has_menu_entry(entries, L"Original aspect ratio (Fit)\tA", app_menu::IDM_ASPECT_FIT));
     CHECK(has_menu_entry(entries, L"Restart in DLSS SR safe mode", app_menu::IDM_ADVANCED_SAFE_MODE));
     CHECK(has_menu_entry(entries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
     HMENU advanced = find_top_level_submenu(menu, L"Advanced");
@@ -584,6 +694,11 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
         std::vector<MenuEntry> advancedEntries;
         collect_menu_entries(advanced, advancedEntries);
         CHECK(has_menu_entry(advancedEntries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
+    }
+    for (const auto& entry : entries) {
+        if (entry.command == app_menu::IDM_OPEN_YOUTUBE) {
+            CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) != 0);
+        }
     }
     for (const auto& entry : entries) {
         CHECK(entry.command < 500 || entry.command >= 600);
@@ -1410,6 +1525,10 @@ int main()
     minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
     volume_slider_never_intersects_compact_or_threshold_toolbar_test();
     toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
+    idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test();
+    player_status_formats_exact_runtime_and_playback_states_test();
+    long_media_title_is_bounded_with_a_real_ellipsis_test();
+    recovery_copy_and_rehook_confirmation_are_actionable_test();
     unchanged_hover_action_has_no_dirty_rectangles_test();
     changed_hover_action_dirties_only_present_old_and_new_actions_test();
     hover_resolution_tracks_layout_action_changes_and_disappearance_test();
