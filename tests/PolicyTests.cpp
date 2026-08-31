@@ -5,6 +5,7 @@
 #include "Localization.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
+#include "UiResources.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -100,6 +101,23 @@ bool has_menu_text(const std::vector<MenuEntry>& entries, std::wstring_view text
         if (entry.text == text) return true;
     }
     return false;
+}
+
+HMENU find_top_level_submenu(HMENU menu, std::wstring_view text)
+{
+    const int count = GetMenuItemCount(menu);
+    for (int index = 0; index < count; ++index) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_STRING | MIIM_SUBMENU;
+        GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
+        std::wstring label(item.cch + 1, L'\0');
+        item.dwTypeData = label.data();
+        item.cch = static_cast<UINT>(label.size());
+        GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item);
+        label.resize(item.cch);
+        if (label == text) return item.hSubMenu;
+    }
+    return nullptr;
 }
 
 std::vector<ToolbarAction> toolbar_actions(const std::vector<ToolbarItem>& items)
@@ -269,6 +287,45 @@ void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
     }
 }
 
+void tabler_glyph_mapping_uses_the_pinned_css_codepoints_test()
+{
+    CHECK_EQ(L'\xfaf7', GlyphForIcon(UiIcon::Open));
+    CHECK_EQ(L'\xfaba', GlyphForIcon(UiIcon::Rewind));
+    CHECK_EQ(L'\xed46', GlyphForIcon(UiIcon::Play));
+    CHECK_EQ(L'\xed45', GlyphForIcon(UiIcon::Pause));
+    CHECK_EQ(L'\xed4a', GlyphForIcon(UiIcon::Stop));
+    CHECK_EQ(L'\xfac2', GlyphForIcon(UiIcon::FastForward));
+    CHECK_EQ(L'\xeb51', GlyphForIcon(UiIcon::Volume));
+    CHECK_EQ(L'\xf1c3', GlyphForIcon(UiIcon::VolumeOff));
+    CHECK_EQ(L'\xf6d7', GlyphForIcon(UiIcon::Sparkles));
+    CHECK_EQ(L'\xea85', GlyphForIcon(UiIcon::Crop));
+    CHECK_EQ(L'\xea03', GlyphForIcon(UiIcon::Adjustments));
+    CHECK_EQ(L'\xea48', GlyphForIcon(UiIcon::Debug));
+    CHECK_EQ(L'\xeaea', GlyphForIcon(UiIcon::Maximize));
+    CHECK_EQ(L'\xec90', GlyphForIcon(UiIcon::YouTube));
+    CHECK_EQ(L'\xea06', GlyphForIcon(UiIcon::Warning));
+}
+
+void native_button_palette_has_distinct_interaction_states_test()
+{
+    const ButtonVisual defaultVisual = ResolveButtonVisual({});
+    CHECK_EQ(RGB(47, 49, 53), defaultVisual.fill);
+    CHECK_EQ(RGB(240, 240, 242), defaultVisual.text);
+
+    ButtonState state{};
+    state.hover = true;
+    CHECK_EQ(RGB(62, 65, 70), ResolveButtonVisual(state).fill);
+    state.pressed = true;
+    CHECK_EQ(RGB(27, 28, 31), ResolveButtonVisual(state).fill);
+    state.pressed = false;
+    state.active = true;
+    CHECK_EQ(RGB(55, 139, 226), ResolveButtonVisual(state).fill);
+    state.enabled = false;
+    const ButtonVisual disabled = ResolveButtonVisual(state);
+    CHECK_EQ(RGB(27, 28, 31), disabled.fill);
+    CHECK_EQ(RGB(160, 164, 172), disabled.text);
+}
+
 void player_menu_is_english_only_and_retains_advanced_commands_test()
 {
     Localizer localizer;
@@ -281,6 +338,13 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     CHECK(has_menu_text(entries, L"Advanced"));
     CHECK(has_menu_entry(entries, L"Restart in DLSS SR safe mode", app_menu::IDM_ADVANCED_SAFE_MODE));
     CHECK(has_menu_entry(entries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
+    HMENU advanced = find_top_level_submenu(menu, L"Advanced");
+    CHECK(advanced != nullptr);
+    if (advanced) {
+        std::vector<MenuEntry> advancedEntries;
+        collect_menu_entries(advanced, advancedEntries);
+        CHECK(has_menu_entry(advancedEntries, L"Recreate NGX / re-hook DLSS 5\tF6", app_menu::IDM_REHOOK));
+    }
     for (const auto& entry : entries) {
         CHECK(entry.command < 500 || entry.command >= 600);
     }
@@ -1104,6 +1168,8 @@ int main()
     toolbar_layout_scales_hit_height_and_avoids_overlap_test();
     toolbar_hit_testing_is_half_open_and_boundary_stable_test();
     minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
+    tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
+    native_button_palette_has_distinct_interaction_states_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
