@@ -1,7 +1,7 @@
 # DLSS Video Player release UI, RTX policy, YouTube, and packaging design
 
 **Date:** 2026-08-31
-**Status:** Approved in chat; awaiting review of this written specification
+**Status:** Approved
 
 ## Objective
 
