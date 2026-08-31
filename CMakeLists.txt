@@ -29,6 +29,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/resources.rc
     src/AppMenu.cpp
     src/AppMenu.h
+    src/UiLayout.cpp
+    src/UiLayout.h
     src/VideoDecoder.cpp
     src/VideoDecoder.h
     src/DLSSBackend.cpp
@@ -92,6 +94,8 @@ if(BUILD_TESTING)
         tests/TestSupport.h
         src/AppMenu.h
         src/AppMenu.cpp
+        src/UiLayout.cpp
+        src/UiLayout.h
         src/RuntimePolicy.cpp
         src/RuntimePolicy.h
         src/ReShadeConfig.cpp

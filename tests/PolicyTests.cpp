@@ -4,6 +4,7 @@
 #include "ReShadeConfig.h"
 #include "Localization.h"
 #include "AppMenu.h"
+#include "UiLayout.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -99,6 +100,128 @@ bool has_menu_text(const std::vector<MenuEntry>& entries, std::wstring_view text
         if (entry.text == text) return true;
     }
     return false;
+}
+
+std::vector<ToolbarAction> toolbar_actions(const std::vector<ToolbarItem>& items)
+{
+    std::vector<ToolbarAction> actions;
+    actions.reserve(items.size());
+    for (const auto& item : items) actions.push_back(item.action);
+    return actions;
+}
+
+const ToolbarItem* find_toolbar_item(const std::vector<ToolbarItem>& items, ToolbarAction action)
+{
+    for (const auto& item : items) {
+        if (item.action == action) return &item;
+    }
+    return nullptr;
+}
+
+void check_toolbar_items_do_not_overlap(const std::vector<ToolbarItem>& items)
+{
+    for (size_t left = 0; left < items.size(); ++left) {
+        for (size_t right = left + 1; right < items.size(); ++right) {
+            const RECT& a = items[left].bounds;
+            const RECT& b = items[right].bounds;
+            CHECK(a.right <= b.left || b.right <= a.left ||
+                  a.bottom <= b.top || b.bottom <= a.top);
+        }
+    }
+}
+
+void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
+{
+    const std::vector<ToolbarAction> requiredNarrow{
+        ToolbarAction::Open,
+        ToolbarAction::PlayPause,
+        ToolbarAction::Mute,
+        ToolbarAction::ToggleDlss,
+        ToolbarAction::Fullscreen,
+    };
+    const std::vector<ToolbarAction> allActions{
+        ToolbarAction::Open,
+        ToolbarAction::Back10,
+        ToolbarAction::PlayPause,
+        ToolbarAction::Stop,
+        ToolbarAction::Forward10,
+        ToolbarAction::Mute,
+        ToolbarAction::ToggleDlss,
+        ToolbarAction::Aspect,
+        ToolbarAction::Adjustments,
+        ToolbarAction::DebugView,
+        ToolbarAction::Fullscreen,
+    };
+
+    const auto narrow = LayoutToolbar(320, 180, 96);
+    CHECK_EQ(requiredNarrow, toolbar_actions(narrow));
+    for (const auto& item : narrow) CHECK(item.compact);
+
+    const auto normal = LayoutToolbar(640, 180, 96);
+    CHECK_EQ(allActions, toolbar_actions(normal));
+    for (const auto& item : normal) CHECK(item.compact);
+
+    const auto wide = LayoutToolbar(1000, 180, 96);
+    CHECK_EQ(allActions, toolbar_actions(wide));
+    for (const auto& item : wide) CHECK(!item.compact);
+}
+
+void toolbar_layout_preserves_group_separation_test()
+{
+    const auto items = LayoutToolbar(1000, 180, 96);
+    const ToolbarItem* back = find_toolbar_item(items, ToolbarAction::Back10);
+    const ToolbarItem* play = find_toolbar_item(items, ToolbarAction::PlayPause);
+    const ToolbarItem* mute = find_toolbar_item(items, ToolbarAction::Mute);
+    const ToolbarItem* dlss = find_toolbar_item(items, ToolbarAction::ToggleDlss);
+    const ToolbarItem* adjustments = find_toolbar_item(items, ToolbarAction::Adjustments);
+    const ToolbarItem* debug = find_toolbar_item(items, ToolbarAction::DebugView);
+    const ToolbarItem* fullscreen = find_toolbar_item(items, ToolbarAction::Fullscreen);
+    CHECK(back && play && mute && dlss && adjustments && debug && fullscreen);
+    if (!(back && play && mute && dlss && adjustments && debug && fullscreen)) return;
+
+    CHECK_EQ(4L, play->bounds.left - back->bounds.right);
+    CHECK_EQ(12L, dlss->bounds.left - mute->bounds.right);
+    CHECK_EQ(12L, debug->bounds.left - adjustments->bounds.right);
+    CHECK_EQ(4L, fullscreen->bounds.left - debug->bounds.right);
+}
+
+void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
+{
+    const auto narrow = LayoutToolbar(320, 180, 96);
+    const auto normal = LayoutToolbar(640, 180, 96);
+    const auto wide = LayoutToolbar(1000, 180, 96);
+    const auto scaled = LayoutToolbar(960, 300, 144);
+
+    for (const auto* items : {&narrow, &normal, &wide}) {
+        CHECK(!items->empty());
+        for (const auto& item : *items) {
+            CHECK(item.bounds.bottom - item.bounds.top >= 36);
+        }
+        check_toolbar_items_do_not_overlap(*items);
+    }
+    CHECK(!scaled.empty());
+    for (const auto& item : scaled) {
+        CHECK(item.bounds.bottom - item.bounds.top >= 54);
+    }
+    check_toolbar_items_do_not_overlap(scaled);
+
+    CHECK_EQ(16L, wide.front().bounds.left);
+    CHECK(wide.back().bounds.right <= 1000 - 16);
+    CHECK_EQ(24L, scaled.front().bounds.left);
+    CHECK(scaled.back().bounds.right <= 960 - 24);
+}
+
+void toolbar_hit_testing_is_half_open_and_boundary_stable_test()
+{
+    const auto items = LayoutToolbar(640, 180, 96);
+    CHECK(!items.empty());
+    for (const auto& item : items) {
+        const LONG middleY = item.bounds.top + (item.bounds.bottom - item.bounds.top) / 2;
+        CHECK_EQ(item.action, HitTestToolbar(items, POINT{item.bounds.left, middleY}));
+        CHECK_EQ(item.action, HitTestToolbar(items, POINT{item.bounds.right - 1, middleY}));
+        CHECK_EQ(ToolbarAction::None, HitTestToolbar(items, POINT{item.bounds.right, middleY}));
+    }
+    CHECK_EQ(ToolbarAction::None, HitTestToolbar(items, POINT{-1, -1}));
 }
 
 void player_menu_is_english_only_and_retains_advanced_commands_test()
@@ -931,6 +1054,10 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
 int main()
 {
     harness_sanity_test();
+    toolbar_layout_selects_stable_action_sets_for_width_modes_test();
+    toolbar_layout_preserves_group_separation_test();
+    toolbar_layout_scales_hit_height_and_avoids_overlap_test();
+    toolbar_hit_testing_is_half_open_and_boundary_stable_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
