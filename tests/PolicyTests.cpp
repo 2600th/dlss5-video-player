@@ -49,6 +49,47 @@ void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
     }
 }
 
+void runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test()
+{
+    std::vector<int> observed;
+    int mediaFoundationShutdowns = 0;
+    int comUninitializations = 0;
+    bool caughtExpectedException = false;
+    struct ExpectedFailure {};
+    struct OwnedPlayer {
+        std::vector<int>& order;
+        ~OwnedPlayer() { order.push_back(1); }
+    };
+
+    try {
+        RunPlayerRuntime(
+            [&]() -> int {
+                OwnedPlayer player{observed};
+                throw ExpectedFailure{};
+            },
+            [&] {
+                ++mediaFoundationShutdowns;
+                observed.push_back(2);
+            },
+            [&] {
+                ++comUninitializations;
+                observed.push_back(3);
+            });
+    } catch (const ExpectedFailure&) {
+        caughtExpectedException = true;
+    }
+
+    CHECK(caughtExpectedException);
+    CHECK_EQ(1, mediaFoundationShutdowns);
+    CHECK_EQ(1, comUninitializations);
+    CHECK_EQ(size_t{3}, observed.size());
+    if (observed.size() == 3) {
+        CHECK_EQ(1, observed[0]);
+        CHECK_EQ(2, observed[1]);
+        CHECK_EQ(3, observed[2]);
+    }
+}
+
 void write_binary_file(const std::filesystem::path& path, std::string_view content)
 {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -1625,6 +1666,7 @@ int main()
 {
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
+    runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
     toolbar_layout_selects_stable_action_sets_for_width_modes_test();
     toolbar_layout_preserves_group_separation_test();
     toolbar_layout_scales_hit_height_and_avoids_overlap_test();
