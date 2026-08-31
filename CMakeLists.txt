@@ -37,6 +37,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/AudioPlayer.h
     src/Log.h
     src/Localization.h
+    src/RuntimePolicy.cpp
+    src/RuntimePolicy.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -87,7 +89,10 @@ if(BUILD_TESTING)
     add_executable(PolicyTests
         tests/PolicyTests.cpp
         tests/TestSupport.h
+        src/RuntimePolicy.cpp
+        src/RuntimePolicy.h
     )
+    target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     )
