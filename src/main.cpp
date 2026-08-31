@@ -59,15 +59,19 @@ static int MinimumPlayerWindowTrackWidth(HWND window, UINT dpi)
     const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
     const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
     const BOOL hasMenu = GetMenu(window) != nullptr;
-    RECT outer{0, 0, MinimumToolbarClientWidth(dpi), 1};
+    const int minimumClientWidth = MinimumToolbarClientWidth(dpi);
+    const RECT client{0, 0, minimumClientWidth, 1};
+    RECT outer = client;
 
     using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
     static const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
-    const BOOL adjusted = adjustForDpi
-        ? adjustForDpi(&outer, style, hasMenu, exStyle, dpi)
-        : AdjustWindowRectEx(&outer, style, hasMenu, exStyle);
-    if (!adjusted) return MinimumToolbarClientWidth(dpi);
+    BOOL adjusted = adjustForDpi && adjustForDpi(&outer, style, hasMenu, exStyle, dpi);
+    if (!adjusted) {
+        outer = client;
+        adjusted = AdjustWindowRectEx(&outer, style, hasMenu, exStyle);
+    }
+    if (!adjusted) return minimumClientWidth;
     return static_cast<int>(outer.right - outer.left);
 }
 
