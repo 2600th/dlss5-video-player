@@ -216,12 +216,57 @@ void toolbar_hit_testing_is_half_open_and_boundary_stable_test()
     const auto items = LayoutToolbar(640, 180, 96);
     CHECK(!items.empty());
     for (const auto& item : items) {
+        const LONG middleX = item.bounds.left + (item.bounds.right - item.bounds.left) / 2;
         const LONG middleY = item.bounds.top + (item.bounds.bottom - item.bounds.top) / 2;
         CHECK_EQ(item.action, HitTestToolbar(items, POINT{item.bounds.left, middleY}));
         CHECK_EQ(item.action, HitTestToolbar(items, POINT{item.bounds.right - 1, middleY}));
         CHECK_EQ(ToolbarAction::None, HitTestToolbar(items, POINT{item.bounds.right, middleY}));
+        CHECK_EQ(item.action, HitTestToolbar(items, POINT{middleX, item.bounds.bottom - 1}));
+        CHECK_EQ(ToolbarAction::None, HitTestToolbar(items, POINT{middleX, item.bounds.bottom}));
     }
     CHECK_EQ(ToolbarAction::None, HitTestToolbar(items, POINT{-1, -1}));
+}
+
+void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
+{
+    struct Case {
+        UINT dpi;
+        int expectedClientWidth;
+        int expectedTargetSize;
+        int expectedGutter;
+    };
+    constexpr Case cases[]{
+        {0, 244, 36, 16},
+        {96, 244, 36, 16},
+        {120, 305, 45, 20},
+        {144, 366, 54, 24},
+        {192, 488, 72, 32},
+    };
+    const std::vector<ToolbarAction> requiredNarrow{
+        ToolbarAction::Open,
+        ToolbarAction::PlayPause,
+        ToolbarAction::Mute,
+        ToolbarAction::ToggleDlss,
+        ToolbarAction::Fullscreen,
+    };
+
+    for (const auto& test : cases) {
+        CHECK_EQ(test.expectedClientWidth, MinimumToolbarClientWidth(test.dpi));
+        const auto items = LayoutToolbar(test.expectedClientWidth, test.expectedTargetSize * 4, test.dpi);
+        CHECK_EQ(requiredNarrow, toolbar_actions(items));
+        CHECK_EQ(static_cast<size_t>(5), items.size());
+        for (const auto& item : items) {
+            CHECK(item.compact);
+            CHECK(item.bounds.right - item.bounds.left >= test.expectedTargetSize);
+            CHECK(item.bounds.bottom - item.bounds.top >= test.expectedTargetSize);
+        }
+        check_toolbar_items_do_not_overlap(items);
+        if (!items.empty()) {
+            CHECK_EQ(static_cast<LONG>(test.expectedGutter), items.front().bounds.left);
+            CHECK_EQ(static_cast<LONG>(test.expectedClientWidth - test.expectedGutter),
+                     items.back().bounds.right);
+        }
+    }
 }
 
 void player_menu_is_english_only_and_retains_advanced_commands_test()
@@ -1058,6 +1103,7 @@ int main()
     toolbar_layout_preserves_group_separation_test();
     toolbar_layout_scales_hit_height_and_avoids_overlap_test();
     toolbar_hit_testing_is_half_open_and_boundary_stable_test();
+    minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();

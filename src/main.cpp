@@ -26,6 +26,7 @@
 #include "AudioPlayer.h"
 #include "Localization.h"
 #include "AppMenu.h"
+#include "UiLayout.h"
 #include "Log.h"
 #include "ReShadeConfig.h"
 #include "RuntimePolicy.h"
@@ -35,6 +36,40 @@ using Clock = std::chrono::steady_clock;
 using Microsoft::WRL::ComPtr;
 using namespace app_menu;
 static constexpr int CONTROL_H = 112;
+
+static UINT ActiveWindowDpi(HWND window)
+{
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpiForWindow) {
+        const UINT dpi = getDpiForWindow(window);
+        if (dpi != 0) return dpi;
+    }
+
+    HDC dc = GetDC(window);
+    if (!dc) return USER_DEFAULT_SCREEN_DPI;
+    const int dpi = GetDeviceCaps(dc, LOGPIXELSX);
+    ReleaseDC(window, dc);
+    return dpi > 0 ? static_cast<UINT>(dpi) : USER_DEFAULT_SCREEN_DPI;
+}
+
+static int MinimumPlayerWindowTrackWidth(HWND window, UINT dpi)
+{
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+    const DWORD exStyle = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+    const BOOL hasMenu = GetMenu(window) != nullptr;
+    RECT outer{0, 0, MinimumToolbarClientWidth(dpi), 1};
+
+    using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static const auto adjustForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    const BOOL adjusted = adjustForDpi
+        ? adjustForDpi(&outer, style, hasMenu, exStyle, dpi)
+        : AdjustWindowRectEx(&outer, style, hasMenu, exStyle);
+    if (!adjusted) return MinimumToolbarClientWidth(dpi);
+    return static_cast<int>(outer.right - outer.left);
+}
 
 static const wchar_t* kVideoPatterns =
     L"*.mp4;*.m4v;*.mov;*.mkv;*.webm;*.avi;*.wmv;*.asf;*.flv;*.f4v;"
@@ -700,6 +735,11 @@ private:
         case WM_ERASEBKGND:return 1;
         case WM_DESTROY:m_running=false;PostQuitMessage(0);return 0;
         case WM_CLOSE:DestroyWindow(h);return 0;
+        case WM_GETMINMAXINFO:{
+            auto* info=reinterpret_cast<MINMAXINFO*>(l);
+            if(info){const UINT dpi=ActiveWindowDpi(h);info->ptMinTrackSize.x=std::max<LONG>(info->ptMinTrackSize.x,MinimumPlayerWindowTrackWidth(h,dpi));}
+            return 0;
+        }
         case WM_SIZE:Layout();return 0;
         case WM_PAINT:Paint();return 0;
         case WM_MOUSEMOVE:m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(m_dragSeek&&GetCapture()==h)m_seekPreview=SecondsFromX(m_mouseX);if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);InvalidateControls();return 0;

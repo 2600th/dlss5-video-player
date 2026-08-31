@@ -31,6 +31,17 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Fullscreen, 54, 2, true},
 };
 
+constexpr size_t RequiredToolbarItemCount()
+{
+    size_t count = 0;
+    for (const auto& definition : kToolbarDefinitions) {
+        if (definition.requiredAtNarrowWidths) ++count;
+    }
+    return count;
+}
+
+constexpr size_t kRequiredToolbarItemCount = RequiredToolbarItemCount();
+
 int DipToPixels(int dip, UINT dpi)
 {
     return MulDiv(dip, static_cast<int>(dpi == 0 ? USER_DEFAULT_SCREEN_DPI : dpi),
@@ -53,6 +64,16 @@ int LayoutWidth(std::span<const ToolbarDefinition* const> definitions, int itemW
     return width;
 }
 
+std::array<const ToolbarDefinition*, kRequiredToolbarItemCount> RequiredToolbarDefinitions()
+{
+    std::array<const ToolbarDefinition*, kRequiredToolbarItemCount> required{};
+    size_t requiredCount = 0;
+    for (const auto& definition : kToolbarDefinitions) {
+        if (definition.requiredAtNarrowWidths) required[requiredCount++] = &definition;
+    }
+    return required;
+}
+
 } // namespace
 
 std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT dpi)
@@ -60,13 +81,9 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
     if (clientWidth <= 0 || clientHeight <= 0) return {};
 
     std::array<const ToolbarDefinition*, kToolbarDefinitions.size()> all{};
-    std::array<const ToolbarDefinition*, 5> required{};
-    size_t requiredCount = 0;
+    const auto required = RequiredToolbarDefinitions();
     for (size_t index = 0; index < kToolbarDefinitions.size(); ++index) {
         all[index] = &kToolbarDefinitions[index];
-        if (kToolbarDefinitions[index].requiredAtNarrowWidths) {
-            required[requiredCount++] = &kToolbarDefinitions[index];
-        }
     }
 
     const int gutter = DipToPixels(kToolbarOuterGutterDip, dpi);
@@ -79,7 +96,7 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
         compact = true;
         itemWidthDip = kToolbarCompactWidthDip;
         if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
-            selected = std::span<const ToolbarDefinition* const>{required.data(), requiredCount};
+            selected = std::span<const ToolbarDefinition* const>{required};
             if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
                 itemWidthDip = kToolbarSmallestWidthDip;
             }
@@ -103,6 +120,14 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
         left += width;
     }
     return items;
+}
+
+int MinimumToolbarClientWidth(UINT dpi)
+{
+    const auto required = RequiredToolbarDefinitions();
+    const std::span<const ToolbarDefinition* const> selected{required};
+    return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
+           LayoutWidth(selected, kToolbarSmallestWidthDip, dpi);
 }
 
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point)

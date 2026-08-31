@@ -24,3 +24,4 @@ inline constexpr int kToolbarGroupGapDip = 12;
 
 std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT dpi);
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point);
+int MinimumToolbarClientWidth(UINT dpi);
