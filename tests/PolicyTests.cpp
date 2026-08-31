@@ -340,6 +340,61 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
                                         seeking));
 }
 
+void unchanged_hover_action_has_no_dirty_rectangles_test()
+{
+    const std::array items{
+        ToolbarItem{ToolbarAction::Open, RECT{10, 20, 80, 56}, false},
+        ToolbarItem{ToolbarAction::PlayPause, RECT{84, 20, 146, 56}, false},
+    };
+
+    CHECK(HoverDirtyRectangles(items, ToolbarAction::Open, ToolbarAction::Open).empty());
+    CHECK(HoverDirtyRectangles(items, ToolbarAction::None, ToolbarAction::None).empty());
+}
+
+void changed_hover_action_dirties_only_present_old_and_new_actions_test()
+{
+    const RECT openBounds{10, 20, 80, 56};
+    const RECT playBounds{84, 20, 146, 56};
+    const std::array items{
+        ToolbarItem{ToolbarAction::Open, openBounds, false},
+        ToolbarItem{ToolbarAction::PlayPause, playBounds, false},
+    };
+
+    const auto changed = HoverDirtyRectangles(items, ToolbarAction::Open,
+                                               ToolbarAction::PlayPause);
+    CHECK_EQ(2u, changed.size());
+    if (changed.size() == 2) {
+        CHECK_EQ(openBounds.left, changed[0].left);
+        CHECK_EQ(openBounds.top, changed[0].top);
+        CHECK_EQ(openBounds.right, changed[0].right);
+        CHECK_EQ(openBounds.bottom, changed[0].bottom);
+        CHECK_EQ(playBounds.left, changed[1].left);
+        CHECK_EQ(playBounds.top, changed[1].top);
+        CHECK_EQ(playBounds.right, changed[1].right);
+        CHECK_EQ(playBounds.bottom, changed[1].bottom);
+    }
+
+    const auto entered = HoverDirtyRectangles(items, ToolbarAction::None,
+                                               ToolbarAction::PlayPause);
+    CHECK_EQ(1u, entered.size());
+    if (entered.size() == 1) {
+        CHECK_EQ(playBounds.left, entered[0].left);
+        CHECK_EQ(playBounds.right, entered[0].right);
+    }
+
+    const auto left = HoverDirtyRectangles(items, ToolbarAction::Open,
+                                            ToolbarAction::None);
+    CHECK_EQ(1u, left.size());
+    if (left.size() == 1) {
+        CHECK_EQ(openBounds.left, left[0].left);
+        CHECK_EQ(openBounds.right, left[0].right);
+    }
+
+    const auto absent = HoverDirtyRectangles(items, ToolbarAction::Stop,
+                                              ToolbarAction::Forward10);
+    CHECK(absent.empty());
+}
+
 void tabler_glyph_mapping_uses_the_pinned_css_codepoints_test()
 {
     CHECK_EQ(L'\xfaf7', GlyphForIcon(UiIcon::Open));
@@ -1286,6 +1341,8 @@ int main()
     minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
     volume_slider_never_intersects_compact_or_threshold_toolbar_test();
     toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
+    unchanged_hover_action_has_no_dirty_rectangles_test();
+    changed_hover_action_dirties_only_present_old_and_new_actions_test();
     tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
     native_button_palette_has_distinct_interaction_states_test();
     active_button_small_text_meets_wcag_contrast_test();

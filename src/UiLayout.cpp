@@ -209,3 +209,25 @@ ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
     }
     return ToolbarAction::None;
 }
+
+std::vector<RECT> HoverDirtyRectangles(std::span<const ToolbarItem> items,
+                                       ToolbarAction oldAction,
+                                       ToolbarAction newAction)
+{
+    if (oldAction == newAction) return {};
+
+    std::vector<RECT> dirty;
+    dirty.reserve(2);
+    const auto appendBounds = [&](ToolbarAction action) {
+        if (action == ToolbarAction::None) return;
+        for (const auto& item : items) {
+            if (item.action == action) {
+                dirty.push_back(item.bounds);
+                return;
+            }
+        }
+    };
+    appendBounds(oldAction);
+    appendBounds(newAction);
+    return dirty;
+}

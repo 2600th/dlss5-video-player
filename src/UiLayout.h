@@ -38,3 +38,6 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
 ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
                                          ToolbarAction current, bool reverse,
                                          ToolbarAvailability availability);
+std::vector<RECT> HoverDirtyRectangles(std::span<const ToolbarItem> items,
+                                       ToolbarAction oldAction,
+                                       ToolbarAction newAction);

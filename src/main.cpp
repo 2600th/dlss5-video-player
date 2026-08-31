@@ -321,7 +321,7 @@ public:
             if(!m_decoder.ReadNext(m_next)){m_haveNext=false;break;}
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
-        if(!m_haveNext){m_playing=false;m_audio.Pause(true);InvalidateRect(m_hwnd,nullptr,FALSE);return;}
+        if(!m_haveNext){m_playing=false;m_audio.Pause(true);InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
         double due=double(m_next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
@@ -332,8 +332,8 @@ public:
         }
         m_currentSec=due; m_guideReset=false; m_dlssReset=false;
         if(!m_decoder.ReadNext(m_next)){m_haveNext=false;m_playing=false;m_audio.Pause(true);}
-        if((++m_uiTick%15)==0) UpdateTitle();
-        InvalidateRect(m_hwnd,nullptr,FALSE);
+        InvalidatePlaybackProgress();
+        UpdateCachedStatus();
     }
 
     bool Running()const{return m_running;}
@@ -550,12 +550,12 @@ private:
         m_renderer->SetColorSettings(m_colorSettings);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
-        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_uiTick=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
-        UpdateTitle();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
+        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
+        UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
-        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();
+        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE); UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -625,7 +625,7 @@ private:
     void RequestSeek(double sec,bool resumeAfter) {
         if(!m_loaded)return; sec=ClampSeek(sec);
         if(!m_seekPending) m_currentSec=Position();
-        m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;m_audio.Pause(true);m_seekPreview=sec;InvalidateRect(m_hwnd,nullptr,FALSE);
+        m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;m_audio.Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
     }
 
     bool PerformSeek(double sec,bool resumeAfter) {
@@ -646,22 +646,29 @@ private:
             m_decoder.Close(); if(m_decoder.Open(m_path))got=readAt(sec,f);
         }
         if(!got){
-            LOG("Seek failed without crashing; playback remains paused.");m_playing=false;m_seeking=false;m_currentSec=sec;UpdateTitle();InvalidateRect(m_hwnd,nullptr,FALSE);return false;
+            LOG("Seek failed without crashing; playback remains paused.");m_playing=false;m_seeking=false;m_currentSec=sec;UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return false;
         }
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;m_seeking=false;return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
         const bool audioOk=m_audio.Start(m_path,m_currentSec);if(audioOk){m_audio.SetVolume(m_muted?0.0f:m_volume);m_audio.Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
-        m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;m_seeking=false;UpdateTitle();InvalidateRect(m_hwnd,nullptr,FALSE);LOG("Seek complete actual="<<m_currentSec);return true;
+        m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;m_seeking=false;UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
-    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=Position();m_playing=false;m_audio.Pause(true);}else{if(!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;m_audio.Pause(false);}InvalidateRect(m_hwnd,nullptr,FALSE);}
+    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=Position();m_playing=false;m_audio.Pause(true);}else{if(!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;m_audio.Pause(false);}InvalidateControls();InvalidatePlaybackProgress();}
     void TogglePause(){SetPaused(m_playing);}
     void StopPlayback(){RequestSeek(0,false);}
 
     void UpdateTitle(){
-        if(!m_hwnd)return; if(!m_loaded||!m_renderer){SetWindowTextW(m_hwnd,T(L"app.title").c_str());return;}
-        std::wstringstream s;s<<L"DLSS Video Player V11 | source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())s<<L" decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();s<<L" | "<<QualityNameW(m_activeQuality)<<L" | DLSS "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L" -> "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L" | "<<m_decoder.BackendName()<<L" | NGX "<<(m_renderer->DLSSFeatureCreated()?L"CREATE OK":(m_renderer->DLSSAvailable()?L"READY":L"FALLBACK"))<<L" | "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L" | result 0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec;SetWindowTextW(m_hwnd,s.str().c_str());
+        if(!m_hwnd)return;
+        std::wstring title=T(L"app.title");
+        if(m_loaded&&!m_path.empty()){
+            std::wstring mediaTitle=std::filesystem::path(m_path).stem().wstring();
+            if(mediaTitle.empty())mediaTitle=std::filesystem::path(m_path).filename().wstring();
+            if(!mediaTitle.empty())title=L"DLSS Video Player \u2014 "+mediaTitle;
+        }
+        if(title==m_cachedWindowTitle)return;
+        m_cachedWindowTitle=title;SetWindowTextW(m_hwnd,title.c_str());
     }
 
     void Layout(){
@@ -680,6 +687,31 @@ private:
     ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking,m_renderer!=nullptr};}
     std::optional<RECT> VolumeRect()const{RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
+
+    RECT TimeTextRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(16),c.bottom-Dip(55),Dip(142),c.bottom-Dip(32)};}
+    RECT StatusRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(143),c.bottom-Dip(55),VolumeRect()?c.right-Dip(203):c.right-Dip(16),c.bottom-Dip(32)};}
+    void InvalidatePlaybackProgress(){
+        if(!m_hwnd||!m_loaded)return;
+        RECT timeline=TimelineRect();InflateRect(&timeline,Dip(6),Dip(4));InvalidateRect(m_hwnd,&timeline,FALSE);
+        const RECT time=TimeTextRect();InvalidateRect(m_hwnd,&time,FALSE);
+    }
+    void InvalidateVolumeControls(){
+        if(!m_hwnd)return;const auto volume=VolumeRect();if(!volume)return;
+        RECT dirty=*volume;InflateRect(&dirty,Dip(7),Dip(9));RECT c{};GetClientRect(m_hwnd,&c);dirty.right=c.right-Dip(16);InvalidateRect(m_hwnd,&dirty,FALSE);
+    }
+    void UpdateCachedStatus(){
+        const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
+        m_cachedStatus=status;if(m_hwnd&&m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}
+    }
+    ToolbarAction HoverActionAt(int x,int y)const{
+        const auto items=FocusableItems();const ToolbarAction action=HitTestToolbar(items,POINT{x,y});
+        return ToolbarActionEnabled(action)?action:ToolbarAction::None;
+    }
+    void SetHoverAction(ToolbarAction action){
+        if(action==m_hoverAction)return;const auto items=FocusableItems();
+        const auto dirty=HoverDirtyRectangles(items,m_hoverAction,action);m_hoverAction=action;
+        for(const RECT& rect:dirty)InvalidateRect(m_hwnd,&rect,FALSE);
+    }
 
     struct ToolbarButtonContent{UiIcon icon;std::wstring label;bool enabled;bool active;};
 
@@ -733,22 +765,34 @@ private:
         if(visual.drawFocus&&action!=ToolbarAction::None){RECT focusRect=r;InflateRect(&focusRect,-Dip(3),-Dip(3));DrawFocusRect(dc,&focusRect);}
     }
 
-    void Paint(){
-        PAINTSTRUCT ps{};HDC dc=BeginPaint(m_hwnd,&ps);RECT c{};GetClientRect(m_hwnd,&c);
+    void RenderUi(HDC dc,const RECT& c){
+        HBRUSH windowBg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,windowBg);DeleteObject(windowBg);
         if(!m_loaded){
-            HBRUSH bg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,bg);DeleteObject(bg);SetBkMode(dc,TRANSPARENT);
+            SetBkMode(dc,TRANSPARENT);
             RECT title{40,(c.bottom/2)-62,c.right-40,(c.bottom/2)-18};SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
             RECT sub{40,(c.bottom/2)-17,c.right-40,(c.bottom/2)+24};SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=T(L"idle.subtitle");DrawTextW(dc,ss.c_str(),-1,&sub,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(dc,of);
-            const RECT openRect=EmptyOpenRect();DrawButton(dc,ToolbarAction::Open,UiIcon::Open,T(L"idle.open"),openRect,true,false,PtIn(openRect,m_mouseX,m_mouseY),m_pressedToolbarAction==ToolbarAction::Open,GetFocus()==m_hwnd&&m_focusedToolbarAction==ToolbarAction::Open,false);EndPaint(m_hwnd,&ps);return;
+            const RECT openRect=EmptyOpenRect();DrawButton(dc,ToolbarAction::Open,UiIcon::Open,T(L"idle.open"),openRect,true,false,m_hoverAction==ToolbarAction::Open,m_pressedToolbarAction==ToolbarAction::Open,GetFocus()==m_hwnd&&m_focusedToolbarAction==ToolbarAction::Open,false);return;
         }
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
         const auto toolbarItems=ToolbarItems();
-        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&PtIn(item.bounds,m_mouseX,m_mouseY);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact);}
+        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));HBRUSH vb=CreateSolidBrush(RGB(230,232,235));const int knob=std::max(3,Dip(5));Ellipse(dc,vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob);DeleteObject(vb);}
         double shown=m_dragSeek?m_seekPreview:(m_seekPending?m_pendingSeekSec:Position());RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;RECT done=tr;done.right=done.left+int((done.right-done.left)*f);HBRUSH db=CreateSolidBrush(RGB(55,139,226));FillRect(dc,&done,db);DeleteObject(db);int kx=done.right;HBRUSH kb=CreateSolidBrush(RGB(246,246,248));Ellipse(dc,kx-5,tr.top-3,kx+5,tr.bottom+3);DeleteObject(kb);
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,Dip(18),c.bottom-Dip(50),time.c_str(),int(time.size()));
-        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<RuntimeModeText()<<L"  |  source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));std::wstring status=st.str();RECT sr{Dip(145),c.bottom-Dip(53),volumeRect?c.right-Dip(205):c.right-Dip(18),c.bottom-Dip(34)};DrawTextW(dc,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+Dip(8),vr.top-Dip(6),vol.c_str(),int(vol.size()));}SelectObject(dc,of);
-        EndPaint(m_hwnd,&ps);
+        RECT sr{Dip(145),c.bottom-Dip(53),volumeRect?c.right-Dip(205):c.right-Dip(18),c.bottom-Dip(34)};DrawTextW(dc,m_cachedStatus.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);if(volumeRect){const RECT& vr=*volumeRect;std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+Dip(8),vr.top-Dip(6),vol.c_str(),int(vol.size()));}SelectObject(dc,of);
+    }
+
+    void Paint(){
+        PAINTSTRUCT ps{};HDC windowDc=BeginPaint(m_hwnd,&ps);RECT client{};GetClientRect(m_hwnd,&client);
+        const int width=std::max<LONG>(1,client.right-client.left),height=std::max<LONG>(1,client.bottom-client.top);
+        HDC memoryDc=CreateCompatibleDC(windowDc);HBITMAP bitmap=CreateCompatibleBitmap(windowDc,width,height);
+        if(memoryDc&&bitmap){
+            const HGDIOBJ previousBitmap=SelectObject(memoryDc,bitmap);RenderUi(memoryDc,client);
+            const int paintWidth=std::max<LONG>(0,ps.rcPaint.right-ps.rcPaint.left),paintHeight=std::max<LONG>(0,ps.rcPaint.bottom-ps.rcPaint.top);
+            if(paintWidth>0&&paintHeight>0)BitBlt(windowDc,ps.rcPaint.left,ps.rcPaint.top,paintWidth,paintHeight,memoryDc,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);
+            SelectObject(memoryDc,previousBitmap);
+        }
+        if(bitmap)DeleteObject(bitmap);if(memoryDc)DeleteDC(memoryDc);EndPaint(m_hwnd,&ps);
     }
 
     void RegisterOverlayHotkeys(){
@@ -777,6 +821,10 @@ private:
         else if(m_opt.neuralAddonConfigured) mode=L"Neural addon enabled (experimental)";
         else mode=L"Neural addon disabled";
         return std::wstring(gpu)+L" - "+mode;
+    }
+    std::wstring BuildStatusText()const{
+        if(!m_loaded||!m_renderer)return{};
+        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<RuntimeModeText()<<L"  |  source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));return st.str();
     }
     void RestartInSafeMode(){
         const std::wstring confirmation=T(L"safe_mode.confirm"),title=T(L"menu.safe_mode");
@@ -846,7 +894,7 @@ private:
         const auto items=ToolbarItems();const ToolbarAction released=HitTestToolbar(items,POINT{x,y});InvalidateControls();if(released==pressed){for(const auto& item:items)if(item.action==pressed){ActivateToolbarAction(pressed,item.bounds);break;}}
     }
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
-    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);m_volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));m_audio.SetVolume(m_volume);InvalidateControls();}
+    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));if(volume==m_volume&&!m_muted)return;m_volume=volume;m_audio.SetVolume(m_volume);InvalidateVolumeControls();}
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateControls();}
     void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
     void Rehook(){if(m_renderer){m_renderer->RequestDLSSRecreate();m_dlssReset=true;}}
@@ -874,8 +922,8 @@ private:
         }
         case WM_SIZE:Layout();return 0;
         case WM_PAINT:Paint();return 0;
-        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h)m_seekPreview=SecondsFromX(m_mouseX);if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);InvalidateControls();return 0;}
-        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;InvalidateControls();return 0;
+        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(HoverActionAt(m_mouseX,m_mouseY));return 0;}
+        case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;InvalidateControls();}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
@@ -901,10 +949,10 @@ private:
 
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false;
-    ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None;
+    ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
-    bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0,m_uiTick=0;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_cachedStatus,m_cachedWindowTitle;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
+    bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;
 };
 
 int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){EnablePerMonitorDpiAwareness();AppOptions options=ParseArgs();if(!options.argumentsOk){FailBootstrap(options.argumentError);return 1;}const StartupResult startup=RunNeuralAddonBootstrap(options);if(startup==StartupResult::ExitSuccess)return 0;if(startup==StartupResult::ExitFailure)return 1;if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}PlayerApp app(std::move(options));if(!app.Create(hi)){MFShutdown();CoUninitialize();return 1;}MSG msg{};bool quit=false;while(app.Running()&&!quit){while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){if(msg.message==WM_QUIT){quit=true;break;}TranslateMessage(&msg);DispatchMessageW(&msg);}if(quit)break;app.Tick();if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());else WaitMessage();}MFShutdown();CoUninitialize();return 0;}
