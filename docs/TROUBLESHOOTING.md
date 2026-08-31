@@ -18,6 +18,13 @@ Confirm that:
 
 Run `prepare_dlss5_test.bat` and inspect `DLSSVideoPlayer.log` plus `ReShade.log`.
 
+The player status describes the configured mode, not a successful neural evaluation:
+
+- `Neural addon enabled (experimental)` means the RTX 40/50 startup policy left the RenoDX add-on enabled.
+- `DLSS SR safe mode` means `--safe-mode` disabled only `renodx-dlss5.addon64`; native signed DLSS Super Resolution remains available.
+
+Use **Advanced > Restart in DLSS SR safe mode** if the experimental path is unstable. A required `ReShade.ini` correction relaunches the player at most once before renderer creation. If `ReShade.ini` is malformed or read-only, startup fails closed and leaves the file unchanged; the exact reason is written to `DLSSVideoPlayer.log`. RTX 50 enablement is covered by policy tests only and has not been hardware-verified on this project's RTX 4080 SUPER development system.
+
 ## Video playback is slower than the source
 
 Use **Auto** DLSS mode first. The player is designed to preserve source time and drop late frames when necessary. The status line shows:

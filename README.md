@@ -34,7 +34,9 @@ Place the required files in the **same folder as `DLSSVideoPlayer.exe`**. In par
 
 You also need **ReShade with add-on support** installed for `DLSSVideoPlayer.exe` using DirectX 10/11/12 mode.
 
-First-run note: I don't remember whether current ReShade builds enable third-party add-ons automatically. Press **Home** to open ReShade, go to the **Add-ons** section and verify that the RenoDX DLSS 5 add-on is enabled.
+At startup, the player updates only ReShade's `[ADDON] DisabledAddons` setting. It enables `renodx-dlss5.addon64` by default on detected RTX 40 and RTX 50 GPUs, and disables it on other or unknown GPUs. If that setting needs correction, the player relaunches itself once before renderer creation. A malformed or read-only `ReShade.ini` fails closed without replacing the file; check `DLSSVideoPlayer.log` for the specific error.
+
+The status row reports the selected configuration as **Neural addon enabled (experimental)** or **DLSS SR safe mode**. It does not prove that the add-on completed neural evaluation; press **Home** and use ReShade's **Add-ons** page for the add-on's own runtime status. RTX 50 behavior is a best-effort target covered by policy tests, not local hardware verification; this project has exercised the supplied runtime on an RTX 4080 SUPER.
 
 A typical DLSS 5 folder looks like this:
 
@@ -59,6 +61,8 @@ Additional `sl.*.dll` files may also be present when using a Streamline-based ex
 4. Open ReShade with **Home** when testing the RenoDX DLSS 5 add-on.
 5. Use **Ctrl+Alt+Space** to pause/resume even while ReShade is capturing normal keyboard/mouse input.
 6. Use **Ctrl+Alt+C** to open Image Adjustments even while the ReShade overlay is open.
+
+If the experimental neural path is unstable, choose **Advanced > Restart in DLSS SR safe mode** or launch with `--safe-mode`. Safe mode disables only `renodx-dlss5.addon64` for that launch and keeps native DLSS Super Resolution available. A later normal launch on an RTX 40/50 GPU restores the default add-on setting, with at most one bootstrap relaunch for either correction.
 
 The player does not force a file picker at startup. It opens in an idle state and waits for drag-and-drop, **Open**, `Ctrl+O`, or a file path passed on the command line.
 
