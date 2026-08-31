@@ -13,6 +13,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <string>
@@ -405,6 +406,47 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     CHECK_EQ(ToolbarAction::Adjustments,
              NextFocusableToolbarAction(loadedItems, ToolbarAction::Mute, false,
                                         seeking));
+}
+
+void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
+{
+    Localizer localizer;
+    const std::wstring idle = localizer.Get(OpenActionLabelKey(true).data());
+    const std::wstring toolbar = localizer.Get(OpenActionLabelKey(false).data());
+
+    CHECK_EQ(std::wstring(L"Open file"), idle);
+    CHECK_EQ(std::wstring(L"Open"), toolbar);
+    CHECK(idle != toolbar);
+    CHECK(idle.find(L"Abrir") == std::wstring::npos);
+    CHECK(toolbar.find(L"Abrir") == std::wstring::npos);
+}
+
+void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
+{
+    const ToolbarAvailability loaded{true, false, true, false};
+    const auto wide = LayoutToolbar(1200, 180, 96);
+    const auto narrow = LayoutToolbar(320, 180, 96);
+    const auto contains = [](std::span<const ToolbarItem> items, ToolbarAction action) {
+        return std::any_of(items.begin(), items.end(),
+                           [action](const ToolbarItem& item) { return item.action == action; });
+    };
+
+    CHECK(contains(wide, ToolbarAction::DebugView));
+    CHECK(!contains(narrow, ToolbarAction::DebugView));
+    CHECK(contains(wide, ToolbarAction::ToggleDlss));
+    CHECK(contains(wide, ToolbarAction::PlayPause));
+
+    CHECK_EQ(ToolbarAction::Open,
+             ReconcileFocusedToolbarAction(narrow, ToolbarAction::DebugView, loaded));
+
+    ToolbarAvailability withoutRenderer = loaded;
+    withoutRenderer.rendererReady = false;
+    CHECK_EQ(ToolbarAction::Open,
+             ReconcileFocusedToolbarAction(wide, ToolbarAction::ToggleDlss,
+                                            withoutRenderer));
+
+    CHECK_EQ(ToolbarAction::PlayPause,
+             ReconcileFocusedToolbarAction(wide, ToolbarAction::PlayPause, loaded));
 }
 
 void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
@@ -1674,6 +1716,8 @@ int main()
     minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
     volume_slider_never_intersects_compact_or_threshold_toolbar_test();
     toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
+    open_action_content_keeps_idle_and_toolbar_copy_distinct_test();
+    focused_toolbar_action_reconciles_layout_and_availability_changes_test();
     idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test();
     dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test();
     player_status_formats_exact_runtime_and_playback_states_test();

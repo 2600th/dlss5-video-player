@@ -272,6 +272,26 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
     return false;
 }
 
+std::wstring_view OpenActionLabelKey(bool idleSurface)
+{
+    return idleSurface ? L"idle.open" : L"button.open";
+}
+
+ToolbarAction ReconcileFocusedToolbarAction(std::span<const ToolbarItem> items,
+                                            ToolbarAction current,
+                                            ToolbarAvailability availability)
+{
+    for (const auto& item : items) {
+        if (item.action == current && IsToolbarActionEnabled(item.action, availability)) {
+            return current;
+        }
+    }
+    for (const auto& item : items) {
+        if (IsToolbarActionEnabled(item.action, availability)) return item.action;
+    }
+    return ToolbarAction::None;
+}
+
 ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
                                          ToolbarAction current, bool reverse,
                                          ToolbarAvailability availability)

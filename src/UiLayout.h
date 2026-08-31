@@ -97,6 +97,10 @@ RECT ClampWindowRectToMinimumTrackSize(RECT suggested, POINT minimumTrackSize);
 std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT dpi,
                                       std::span<const ToolbarItem> toolbarItems);
 bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availability);
+std::wstring_view OpenActionLabelKey(bool idleSurface);
+ToolbarAction ReconcileFocusedToolbarAction(std::span<const ToolbarItem> items,
+                                            ToolbarAction current,
+                                            ToolbarAvailability availability);
 ToolbarAction NextFocusableToolbarAction(std::span<const ToolbarItem> items,
                                          ToolbarAction current, bool reverse,
                                          ToolbarAvailability availability);
