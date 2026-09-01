@@ -57,6 +57,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/NetworkMediaTransaction.h
     src/NeuralCache.cpp
     src/NeuralCache.h
+    src/MediaPipeline.cpp
+    src/MediaPipeline.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -164,6 +166,8 @@ if(BUILD_TESTING)
         tests/TestSupport.h
         src/NeuralCache.cpp
         src/NeuralCache.h
+        src/MediaPipeline.cpp
+        src/MediaPipeline.h
     )
     target_include_directories(NeuralPrerenderTests PRIVATE src)
     target_compile_definitions(NeuralPrerenderTests PRIVATE

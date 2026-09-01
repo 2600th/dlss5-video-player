@@ -1,14 +1,20 @@
 #include "NeuralCache.h"
+#include "MediaPipeline.h"
 #include "TestSupport.h"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <iostream>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -54,6 +60,15 @@ std::string ReadBytes(const std::filesystem::path& path)
     std::ifstream input(path, std::ios::binary);
     CHECK(input.is_open());
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::filesystem::path CurrentExecutable()
+{
+    std::wstring value(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, value.data(), static_cast<DWORD>(value.size()));
+    CHECK(length > 0 && length < value.size());
+    value.resize(length);
+    return value;
 }
 
 NeuralCacheManifest CompleteRenderManifest()
@@ -234,15 +249,191 @@ void interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test()
     CHECK(!unsafe.Clear());
 }
 
+void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
+{
+    const MaterializeRequest materialize{
+        .videoUrl=L"https://r1.googlevideo.com/video?id=abc&token=one two",
+        .audioUrl=L"https://r1.googlevideo.com/audio?id=abc&token=three",
+        .output=LR"(C:\Cache Root\source.partial.mkv)"};
+    const std::vector<std::wstring> expectedMaterialize{
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
+        L"-i", materialize.videoUrl, L"-i", materialize.audioUrl,
+        L"-map", L"0:v:0", L"-map", L"1:a:0?", L"-c", L"copy",
+        L"-f", L"matroska", materialize.output.wstring()};
+    CHECK_EQ(expectedMaterialize, BuildMaterializeArguments(materialize));
+
+    const EncoderSpec encoder{1920, 1080, 60000.0 / 1001.0, EncoderKind::HevcNvenc};
+    const std::vector<std::wstring> arguments = BuildEncoderArguments(
+        encoder, LR"(C:\Cache Root\neural.partial.mkv)");
+    CHECK(std::find(arguments.begin(), arguments.end(), L"hevc_nvenc") != arguments.end());
+    CHECK(std::find(arguments.begin(), arguments.end(), L"pipe:0") != arguments.end());
+    CHECK(std::find(arguments.begin(), arguments.end(), L"cmd.exe") == arguments.end());
+    CHECK(std::find(arguments.begin(), arguments.end(), L"powershell.exe") == arguments.end());
+}
+
+void encoder_frame_contract_and_fallback_policy_are_fail_closed_test()
+{
+    const EncoderSpec valid{2, 2, 30.0, EncoderKind::HevcNvenc};
+    CHECK_EQ(size_t{16}, ExpectedBgraFrameBytes(valid));
+    CHECK_EQ(size_t{0}, ExpectedBgraFrameBytes(EncoderSpec{0, 2, 30.0, EncoderKind::HevcNvenc}));
+    CHECK_EQ(size_t{0}, ExpectedBgraFrameBytes(EncoderSpec{2, 2, 0.0, EncoderKind::HevcNvenc}));
+    CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::StartFailed));
+    CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::WriteFailed));
+    CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::FinishFailed));
+    CHECK(!ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::Cancelled));
+    CHECK(!ShouldRetryWithSoftware(EncoderKind::H264Software, EncodeError::StartFailed));
+}
+
+void owned_media_pipeline_materializes_encodes_probes_and_cancels_test()
+{
+    TempDirectory fixture;
+    const auto executable = CurrentExecutable();
+    std::filesystem::copy_file(executable, fixture.Path() / L"ffmpeg.exe");
+    std::filesystem::copy_file(executable, fixture.Path() / L"ffprobe.exe");
+
+    MediaMaterializer materializer(fixture.Path());
+    const auto source = fixture.Path() / L"source.partial.mkv";
+    const MaterializeResult materialized = materializer.Run(MaterializeRequest{
+        L"https://media.invalid/video", L"https://media.invalid/audio", source}, {});
+    CHECK(materialized.ok);
+    CHECK_EQ(MaterializeError::None, materialized.error);
+    CHECK_EQ(std::string("materialized"), ReadBytes(source));
+
+    RawVideoEncoder encoder(fixture.Path());
+    const EncoderSpec spec{2, 2, 30.0, EncoderKind::HevcNvenc};
+    const auto encoded = fixture.Path() / L"neural.partial.mkv";
+    CHECK_EQ(EncodeError::None, encoder.Start(spec, encoded));
+    const std::array<uint8_t, 15> shortFrame{};
+    CHECK_EQ(EncodeError::InvalidFrame, encoder.WriteFrame(shortFrame));
+    const std::array<uint8_t, 16> frame{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    CHECK_EQ(EncodeError::None, encoder.WriteFrame(frame));
+    CHECK_EQ(EncodeError::None, encoder.Finish());
+    CHECK_EQ(std::string(reinterpret_cast<const char*>(frame.data()), frame.size()),
+             ReadBytes(encoded));
+
+    const ProbeResult probe = ProbeMedia(fixture.Path(), encoded, {});
+    CHECK(probe.ok);
+    CHECK_EQ(uint32_t{2}, probe.width);
+    CHECK_EQ(uint32_t{2}, probe.height);
+    CHECK_EQ(uint64_t{1}, probe.frameCount);
+    CHECK_EQ(int64_t{333333}, probe.duration100ns);
+    CHECK(probe.decodedFinalFrame);
+
+    std::stop_source stop;
+    auto future = std::async(std::launch::async, [&] {
+        return materializer.Run(MaterializeRequest{
+            L"https://media.invalid/hang", L"", fixture.Path() / L"hang.mkv"},
+            stop.get_token());
+    });
+    std::this_thread::sleep_for(50ms);
+    stop.request_stop();
+    CHECK(future.wait_for(2s) == std::future_status::ready);
+    if (future.wait_for(0s) == std::future_status::ready) {
+        const MaterializeResult cancelled = future.get();
+        CHECK(!cancelled.ok);
+        CHECK_EQ(MaterializeError::Cancelled, cancelled.error);
+        CHECK(cancelled.detail.find(L"https://") == std::wstring::npos);
+    }
+}
+
+void encoder_child_inherits_only_its_stdin_pipe_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE unrelated = CreateEventW(&security, TRUE, FALSE, nullptr);
+    CHECK(unrelated != nullptr);
+    const std::wstring value = std::to_wstring(reinterpret_cast<uintptr_t>(unrelated));
+    CHECK(SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_INHERIT_HANDLE", value.c_str()) != FALSE);
+
+    RawVideoEncoder encoder(fixture.Path());
+    const auto output = fixture.Path() / L"isolated.mkv";
+    const EncoderSpec spec{2, 2, 30.0, EncoderKind::H264Software};
+    CHECK_EQ(EncodeError::None, encoder.Start(spec, output));
+    const std::array<uint8_t, 16> frame{};
+    CHECK_EQ(EncodeError::None, encoder.WriteFrame(frame));
+    CHECK_EQ(EncodeError::None, encoder.Finish());
+    CHECK_EQ(static_cast<DWORD>(WAIT_TIMEOUT), WaitForSingleObject(unrelated, 0));
+
+    SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_INHERIT_HANDLE", nullptr);
+    if (unrelated) CloseHandle(unrelated);
+}
+
+void probe_child_inherits_only_its_output_pipe_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffprobe.exe");
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE unrelated = CreateEventW(&security, TRUE, FALSE, nullptr);
+    CHECK(unrelated != nullptr);
+    const std::wstring value = std::to_wstring(reinterpret_cast<uintptr_t>(unrelated));
+    CHECK(SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_INHERIT_HANDLE", value.c_str()) != FALSE);
+
+    const ProbeResult probe = ProbeMedia(fixture.Path(), fixture.Path() / L"isolated.mkv", {});
+    CHECK(probe.ok);
+    CHECK_EQ(static_cast<DWORD>(WAIT_TIMEOUT), WaitForSingleObject(unrelated, 0));
+
+    SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_INHERIT_HANDLE", nullptr);
+    if (unrelated) CloseHandle(unrelated);
+}
+
+int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
+{
+    const std::wstring name = CurrentExecutable().filename().wstring();
+    std::vector<std::wstring_view> arguments;
+    for (int index = 1; index < argc; ++index) arguments.emplace_back(argv[index]);
+    std::array<wchar_t, 64> inheritedValue{};
+    if (GetEnvironmentVariableW(L"DLSS_MEDIA_TEST_INHERIT_HANDLE", inheritedValue.data(),
+                                static_cast<DWORD>(inheritedValue.size())) > 0) {
+        const uintptr_t raw = static_cast<uintptr_t>(_wcstoui64(inheritedValue.data(), nullptr, 10));
+        SetEvent(reinterpret_cast<HANDLE>(raw));
+    }
+    if (_wcsicmp(name.c_str(), L"ffprobe.exe") == 0) {
+        std::cout << "width=2\nheight=2\nnb_read_frames=1\nduration=0.0333333\n";
+        return 0;
+    }
+    if (_wcsicmp(name.c_str(), L"ffmpeg.exe") != 0) return 90;
+    const bool raw = std::find(arguments.begin(), arguments.end(), L"rawvideo") != arguments.end();
+    const bool finalProbe = std::find(arguments.begin(), arguments.end(), L"-sseof") != arguments.end();
+    const bool hang = std::ranges::any_of(arguments, [](std::wstring_view value) {
+        return value.find(L"/hang") != std::wstring_view::npos;
+    });
+    if (hang) {
+        Sleep(INFINITE);
+        return 0;
+    }
+    if (finalProbe) return 0;
+    if (arguments.empty()) return 91;
+    const std::filesystem::path output(arguments.back());
+    if (raw) {
+        const std::string bytes{std::istreambuf_iterator<char>(std::cin),
+                                std::istreambuf_iterator<char>()};
+        WriteBytes(output, bytes);
+    } else {
+        WriteBytes(output, "materialized");
+    }
+    return 0;
+}
+
 } // namespace
 
-int wmain()
+int wmain(int argc, wchar_t* argv[])
 {
+    const std::wstring executableName = CurrentExecutable().filename().wstring();
+    if (_wcsicmp(executableName.c_str(), L"ffmpeg.exe") == 0 ||
+        _wcsicmp(executableName.c_str(), L"ffprobe.exe") == 0)
+        return RunFakeMediaPipelineChild(argc, argv);
     cache_key_changes_for_every_material_input_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
     source_and_render_promotion_are_hash_validated_and_immutable_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
+    media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
+    encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
+    owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
+    encoder_child_inherits_only_its_stdin_pipe_test();
+    probe_child_inherits_only_its_output_pipe_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;
