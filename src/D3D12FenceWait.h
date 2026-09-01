@@ -18,6 +18,14 @@ enum class FenceWaitResult {
     TimedOut,
 };
 
+template<class DeviceRemovedReason>
+FenceWaitResult ClassifyFenceWaitFailure(FenceWaitResult result,
+                                         DeviceRemovedReason&& deviceRemovedReason)
+{
+    if(result==FenceWaitResult::Completed||result==FenceWaitResult::DeviceRemoved)return result;
+    return FAILED(deviceRemovedReason())?FenceWaitResult::DeviceRemoved:result;
+}
+
 template<class CompletedValue, class RegisterEvent, class Wait>
 FenceWaitResult WaitForGPUFenceCompletion(uint64_t value,
                                           ULONGLONG started,
@@ -54,6 +62,22 @@ FenceWaitResult WaitForGPUFenceTeardown(uint64_t value,
     return WaitForGPUFenceCompletion(value,started,
         std::forward<CompletedValue>(completedValue),
         std::forward<RegisterEvent>(registerEvent),std::forward<Wait>(wait));
+}
+
+template<class Signal, class CompletedValue, class RegisterEvent, class Wait,
+         class DeviceRemovedReason>
+FenceWaitResult WaitForGPUFenceTeardown(uint64_t value,
+                                        Signal&& signal,
+                                        CompletedValue&& completedValue,
+                                        RegisterEvent&& registerEvent,
+                                        Wait&& wait,
+                                        DeviceRemovedReason&& deviceRemovedReason)
+{
+    const auto result=WaitForGPUFenceTeardown(
+        value,std::forward<Signal>(signal),std::forward<CompletedValue>(completedValue),
+        std::forward<RegisterEvent>(registerEvent),std::forward<Wait>(wait));
+    return ClassifyFenceWaitFailure(
+        result,std::forward<DeviceRemovedReason>(deviceRemovedReason));
 }
 
 } // namespace d3d12_renderer_detail

@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 enum class NetworkCommitKind {
@@ -67,30 +68,56 @@ bool ExecuteNetworkCandidateTransaction(Factory&& factory,
 {
     std::unique_ptr<Candidate> candidate = std::forward<Factory>(factory)();
     if (!candidate || !std::forward<Validator>(validate)(*candidate)) return false;
-    std::forward<Committer>(commit)(std::move(candidate));
-    return true;
+    using CommitResult=std::invoke_result_t<Committer,std::unique_ptr<Candidate>>;
+    if constexpr(std::is_same_v<CommitResult,bool>)
+        return std::forward<Committer>(commit)(std::move(candidate));
+    else{
+        std::forward<Committer>(commit)(std::move(candidate));
+        return true;
+    }
 }
 
 template<class InstallPrepared, class MakeVisible, class RetireOld, class ActivatePrepared>
-void CommitPreparedAudioHandoff(InstallPrepared&& installPrepared,
+bool CommitPreparedAudioHandoff(InstallPrepared&& installPrepared,
                                 MakeVisible&& makeVisible,
                                 RetireOld&& retireOld,
                                 ActivatePrepared&& activatePrepared)
 {
+    if(!std::forward<MakeVisible>(makeVisible)())return false;
     std::forward<InstallPrepared>(installPrepared)();
-    std::forward<MakeVisible>(makeVisible)();
     std::forward<RetireOld>(retireOld)();
     std::forward<ActivatePrepared>(activatePrepared)();
+    return true;
 }
 
-inline void ShowPreparedRenderWindow(HWND viewport,HWND renderWindow)
+template<class IsWindowCall,class GetClientRectCall,class SetWindowPosCall,
+         class IsWindowVisibleCall>
+bool ShowPreparedRenderWindowWithOperations(HWND viewport,HWND renderWindow,
+                                             IsWindowCall&& isWindow,
+                                             GetClientRectCall&& getClientRect,
+                                             SetWindowPosCall&& setWindowPos,
+                                             IsWindowVisibleCall&& isWindowVisible)
 {
-    if(!viewport||!renderWindow)return;
+    if(!viewport||!renderWindow||!isWindow(viewport)||!isWindow(renderWindow))return false;
     RECT bounds{};
-    if(!GetClientRect(viewport,&bounds))return;
+    if(!getClientRect(viewport,&bounds))return false;
     const int width=std::max<LONG>(1,bounds.right-bounds.left);
     const int height=std::max<LONG>(1,bounds.bottom-bounds.top);
-    SetWindowPos(renderWindow,HWND_TOP,0,0,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
+    if(!setWindowPos(renderWindow,HWND_TOP,0,0,width,height,
+                     SWP_NOACTIVATE|SWP_SHOWWINDOW))return false;
+    return isWindowVisible(renderWindow)!=FALSE;
+}
+
+inline bool ShowPreparedRenderWindow(HWND viewport,HWND renderWindow)
+{
+    return ShowPreparedRenderWindowWithOperations(
+        viewport,renderWindow,
+        [](HWND window){return IsWindow(window);},
+        [](HWND window,RECT* bounds){return GetClientRect(window,bounds);},
+        [](HWND window,HWND insertAfter,int x,int y,int width,int height,UINT flags){
+            return SetWindowPos(window,insertAfter,x,y,width,height,flags);
+        },
+        [](HWND window){return IsWindowVisible(window);});
 }
 
 enum class NetworkReadPosition {

@@ -4,20 +4,28 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include <memory>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
 
 #ifdef D3D12_RENDERER_TESTING
 #include <functional>
-#include <memory>
 struct D3D12RendererTestAccess;
 struct D3D12RendererTestOwnedResource {
     virtual ~D3D12RendererTestOwnedResource()=default;
 };
 #endif
 
+class D3D12Renderer;
+struct D3D12RendererDeleter {
+    void operator()(D3D12Renderer* renderer) const noexcept;
+};
+using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
+D3D12RendererOwner MakeD3D12Renderer();
+
 class D3D12Renderer {
 public:
+    D3D12Renderer()=default;
     enum class DebugView { Final, Input, MotionVectors, Depth, BiasMask };
 
     struct ColorSettings {
@@ -29,7 +37,6 @@ public:
         float tint = 0.0f;         // -1..+1 (green..magenta)
     };
 
-    ~D3D12Renderer();
     bool Initialize(HWND hwnd, uint32_t sourceW, uint32_t sourceH,
                     uint32_t outputW, uint32_t outputH,
                     uint32_t gridW, uint32_t gridH,
@@ -61,6 +68,8 @@ public:
     const ColorSettings& GetColorSettings() const { return m_colorSettings; }
 
 private:
+    friend struct D3D12RendererDeleter;
+    ~D3D12Renderer();
     static constexpr uint32_t FrameCount = 3;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
@@ -87,7 +96,7 @@ private:
     bool WaitForFrameSlot(uint32_t slot);
     void SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
-    void ForceDeviceRemovalForTeardown();
+    d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
     D3D12_CPU_DESCRIPTOR_HANDLE RTV(uint32_t index) const;
@@ -103,7 +112,6 @@ private:
     Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
-    Microsoft::WRL::ComPtr<ID3D12Device5> m_device5;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapchain;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_allocators[FrameCount];
@@ -160,12 +168,13 @@ private:
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;
     bool m_gpuUnusable = false;
+    d3d12_renderer_detail::FenceWaitResult m_lastFenceWaitResult =
+        d3d12_renderer_detail::FenceWaitResult::Completed;
     DLSSBackend m_dlss;
 
 #ifdef D3D12_RENDERER_TESTING
     friend struct D3D12RendererTestAccess;
     std::function<d3d12_renderer_detail::FenceWaitResult()> m_testWaitGPU;
-    std::function<void()> m_testRemoveDevice;
     std::unique_ptr<D3D12RendererTestOwnedResource> m_testOwnedResource;
 #endif
 };
