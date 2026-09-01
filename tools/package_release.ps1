@@ -39,6 +39,18 @@ function Get-Sha256 {
     finally { $stream.Dispose() }
 }
 
+function Get-OrdinalPackageFiles {
+    param([string]$Root)
+    $filesByPath = @{}
+    foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File) {
+        $relative = Get-RelativePackagePath -Root $Root -Path $file.FullName
+        $filesByPath[$relative] = $file
+    }
+    [string[]]$relativePaths = @($filesByPath.Keys)
+    [Array]::Sort($relativePaths, [StringComparer]::Ordinal)
+    foreach ($relative in $relativePaths) { $filesByPath[$relative] }
+}
+
 function Invoke-FreshReleaseBuild {
     $buildDirectory = Join-Path $repositoryRoot 'build'
     $cachePath = Join-Path $buildDirectory 'CMakeCache.txt'
@@ -216,9 +228,7 @@ foreach ($source in $sources) {
     Copy-Item -LiteralPath $source[1] -Destination $destination
 }
 
-$files = @(Get-ChildItem -LiteralPath $stageFull -Recurse -File | Sort-Object {
-    Get-RelativePackagePath -Root $stageFull -Path $_.FullName
-})
+$files = @(Get-OrdinalPackageFiles -Root $stageFull)
 $manifest = New-Object Collections.Generic.List[string]
 $manifest.Add("ProductVersion=$version")
 $manifest.Add('Path|Size|SHA256|Authenticode|Signer')
@@ -238,9 +248,7 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
 try {
-    foreach ($file in Get-ChildItem -LiteralPath $stageFull -Recurse -File | Sort-Object {
-        Get-RelativePackagePath -Root $stageFull -Path $_.FullName
-    }) {
+    foreach ($file in Get-OrdinalPackageFiles -Root $stageFull) {
         $relative = Get-RelativePackagePath -Root $stageFull -Path $file.FullName
         $entry = "$stageName/$relative"
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $entry, [IO.Compression.CompressionLevel]::Optimal) | Out-Null

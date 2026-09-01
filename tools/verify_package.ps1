@@ -50,6 +50,13 @@ function Get-Sha256 {
     finally { $stream.Dispose() }
 }
 
+function Sort-PackagePathsOrdinal {
+    param([string[]]$Paths)
+    [string[]]$sorted = @($Paths)
+    [Array]::Sort($sorted, [StringComparer]::Ordinal)
+    return $sorted
+}
+
 function Get-AuthenticodeRecord {
     param([string]$Path)
     $stream = [IO.File]::OpenRead($Path)
@@ -128,10 +135,11 @@ function Assert-LockedFiles {
 function Assert-Stage {
     param([string]$Root)
     $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
-    $actual = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File | ForEach-Object {
+    $actualUnsorted = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File | ForEach-Object {
         Get-RelativePackagePath -Root $resolvedRoot -Path $_.FullName
-    } | Sort-Object)
-    $expectedSorted = @($expected | Sort-Object)
+    })
+    $actual = @(Sort-PackagePathsOrdinal -Paths $actualUnsorted)
+    $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $expected)
     if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
         $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })
         $unexpected = @($actual | Where-Object { $_ -cnotin $expectedSorted })
