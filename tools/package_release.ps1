@@ -52,7 +52,7 @@ function Invoke-FreshReleaseBuild {
     if (-not $cmakeLine -or -not $homeLine) { throw 'CMakeCache.txt does not identify its CMake command and source tree.' }
     $cmake = $cmakeLine.Substring($cmakeLine.IndexOf('=') + 1)
     $configuredHome = $homeLine.Substring($homeLine.IndexOf('=') + 1)
-    if ([IO.Path]::GetFullPath($configuredHome).TrimEnd('\', '/') -cne [IO.Path]::GetFullPath($repositoryRoot).TrimEnd('\', '/')) {
+    if ([IO.Path]::GetFullPath($configuredHome).TrimEnd('\', '/') -ine [IO.Path]::GetFullPath($repositoryRoot).TrimEnd('\', '/')) {
         throw "The build directory belongs to a different source tree: $configuredHome"
     }
     if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "Configured CMake executable is missing: $cmake" }

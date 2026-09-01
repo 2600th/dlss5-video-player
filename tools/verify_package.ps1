@@ -78,12 +78,28 @@ function Assert-NoSensitiveText {
         @('user home path', '(?i)(?<![:A-Za-z0-9])/(?:Users|home)/[^/\s]+/'),
         @('private key', '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
         @('AWS access key', '\bAKIA[0-9A-Z]{16}\b'),
-        @('GitHub token', '\bgh[pousr]_[A-Za-z0-9]{20,}\b'),
+        @('GitHub token', '\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b'),
         @('bearer token', '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}'),
         @('credential-bearing URL', '(?i)https?://[^\s/@:]+:[^\s/@]+@')
     )
     foreach ($check in $checks) {
         if ($Text -match $check[1]) { throw "$($check[0]) leakage is forbidden in packaged text: $RelativePath" }
+    }
+}
+
+function Assert-ReleaseExecutableIdentity {
+    param([string]$Root)
+    $identity = (Get-Item -LiteralPath (Join-Path $Root 'DLSSVideoPlayer.exe')).VersionInfo
+    $expectedIdentity = @{
+        ProductName = 'DLSS Video Player'
+        FileVersion = "$version.0"
+        ProductVersion = "$version.0"
+        OriginalFilename = 'DLSSVideoPlayer.exe'
+    }
+    foreach ($name in $expectedIdentity.Keys) {
+        if ([string]$identity.$name -cne $expectedIdentity[$name]) {
+            throw "Packaged executable $name mismatch: expected '$($expectedIdentity[$name])', received '$($identity.$name)'."
+        }
     }
 }
 
@@ -133,6 +149,8 @@ function Assert-Stage {
             throw "$configName must not be empty."
         }
     }
+
+    Assert-ReleaseExecutableIdentity -Root $resolvedRoot
 
     foreach ($relative in $actual) {
         if ($relative -match '(?i)(^|[/_.-])pt-br([/_.-]|$)|languages/') {
