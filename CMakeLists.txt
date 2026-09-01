@@ -96,6 +96,18 @@ if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe" AND EXISTS "${FFMPEG_STAGED_DIR}/ffp
     )
 endif()
 
+set(YOUTUBE_STAGED_DIR "${CMAKE_SOURCE_DIR}/external/youtube" CACHE PATH "Path to the pinned yt-dlp and Deno executables")
+if(EXISTS "${YOUTUBE_STAGED_DIR}/yt-dlp.exe" AND EXISTS "${YOUTUBE_STAGED_DIR}/deno.exe")
+    add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${YOUTUBE_STAGED_DIR}/yt-dlp.exe"
+            "$<TARGET_FILE_DIR:DLSSVideoPlayer>/yt-dlp.exe"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${YOUTUBE_STAGED_DIR}/deno.exe"
+            "$<TARGET_FILE_DIR:DLSSVideoPlayer>/deno.exe"
+    )
+endif()
+
 if(BUILD_TESTING)
     add_executable(PolicyTests
         tests/PolicyTests.cpp

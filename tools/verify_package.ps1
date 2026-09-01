@@ -24,6 +24,10 @@ $expected = @(
     'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
 )
 $temporaryRoot = $null
+$maxArchiveEntries = 128
+$maxArchiveEntryBytes = 512MB
+$maxArchiveTotalBytes = 1GB
+$maxCompressionRatio = 250.0
 
 function Get-RelativePackagePath {
     param([string]$Root, [string]$Path)
@@ -63,6 +67,23 @@ function Get-AuthenticodeRecord {
     return [pscustomobject]@{
         Status = [string]$signature.Status
         Signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+    }
+}
+
+function Assert-NoSensitiveText {
+    param([string]$RelativePath, [string]$Text)
+    $checks = @(
+        @('Windows absolute path', '(?i)(?<![A-Za-z0-9+.-])[A-Z]:[\\/]'),
+        @('UNC path', '(?<!:)\\\\[A-Za-z0-9._-]+[\\/]'),
+        @('user home path', '(?i)(?<![:A-Za-z0-9])/(?:Users|home)/[^/\s]+/'),
+        @('private key', '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+        @('AWS access key', '\bAKIA[0-9A-Z]{16}\b'),
+        @('GitHub token', '\bgh[pousr]_[A-Za-z0-9]{20,}\b'),
+        @('bearer token', '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}'),
+        @('credential-bearing URL', '(?i)https?://[^\s/@:]+:[^\s/@]+@')
+    )
+    foreach ($check in $checks) {
+        if ($Text -match $check[1]) { throw "$($check[0]) leakage is forbidden in packaged text: $RelativePath" }
     }
 }
 
@@ -123,6 +144,7 @@ function Assert-Stage {
             if ($text -match '(?i)\bpt-br\b|portugu[eê]s') {
                 throw "Portuguese content marker is forbidden: $relative"
             }
+            Assert-NoSensitiveText -RelativePath $relative -Text $text
         }
     }
 
@@ -160,7 +182,29 @@ try {
         $zipPath = (Resolve-Path -LiteralPath $Zip).Path
         $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
         try {
-            $entryNames = @($archive.Entries | Where-Object { $_.Name } | Select-Object -ExpandProperty FullName)
+            $entries = @($archive.Entries)
+            if ($entries.Count -gt $maxArchiveEntries) {
+                throw "ZIP contains $($entries.Count) entries; maximum is $maxArchiveEntries."
+            }
+            [uint64]$totalUncompressed = 0
+            foreach ($entry in $entries) {
+                [uint64]$length = $entry.Length
+                [uint64]$compressedLength = $entry.CompressedLength
+                if ($length -gt $maxArchiveEntryBytes) {
+                    throw "ZIP entry exceeds the per-file limit: $($entry.FullName)"
+                }
+                if ($totalUncompressed -gt ([uint64]$maxArchiveTotalBytes - $length)) {
+                    throw 'ZIP exceeds the total uncompressed-size limit.'
+                }
+                $totalUncompressed += $length
+                if ($length -ge 1MB) {
+                    if ($compressedLength -eq 0 -or ($length / [double]$compressedLength) -gt $maxCompressionRatio) {
+                        throw "ZIP entry exceeds the compression-ratio limit: $($entry.FullName)"
+                    }
+                }
+            }
+
+            $entryNames = @($entries | Where-Object { $_.Name } | Select-Object -ExpandProperty FullName)
             $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
             foreach ($name in $entryNames) {
                 $normalized = $name.Replace('\', '/')

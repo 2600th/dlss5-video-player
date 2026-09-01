@@ -36,12 +36,12 @@ evaluation; use ReShade's Add-ons panel for observed add-on status.
 
 **File > Examples** contains six fixed public links:
 
-- GTA VI Trailer 2 — Rockstar Games
-- Resident Evil Requiem - Launch Trailer — Resident Evil
-- Battlefield 6 Season 3 Official Gameplay Trailer — Battlefield
-- 2026 Summer Anime Season Trailer — Crunchyroll
-- Spring 2026 Season Official Trailer — Crunchyroll
-- My Hero Academia FINAL SEASON "More" Official Trailer — Crunchyroll
+- [GTA VI Trailer 2 — Rockstar Games](https://www.youtube.com/watch?v=VQRLujxTm3c)
+- [Resident Evil Requiem - Launch Trailer — Resident Evil](https://www.youtube.com/watch?v=9lrThxCoznw)
+- [Battlefield 6 Season 3 Official Gameplay Trailer — Battlefield](https://www.youtube.com/watch?v=XCMr55EjFew)
+- [2026 Summer Anime Season Trailer — Crunchyroll](https://www.youtube.com/watch?v=DWM2IfkzLHo)
+- [Spring 2026 Season Official Trailer — Crunchyroll](https://www.youtube.com/watch?v=7Wc6ugY3meg)
+- [My Hero Academia FINAL SEASON "More" Official Trailer — Crunchyroll](https://www.youtube.com/watch?v=pxbEWUjh6E4)
 
 These are examples, not a live trending feed, and may become unavailable.
 

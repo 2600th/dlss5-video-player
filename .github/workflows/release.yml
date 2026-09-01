@@ -15,6 +15,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Require tag to match VERSION
+        shell: powershell
+        run: |
+          $version = (Get-Content -Raw VERSION).Trim()
+          $expectedTag = "v$version"
+          if ('${{ github.ref_name }}' -cne $expectedTag) {
+            throw "Release tag '${{ github.ref_name }}' does not match VERSION '$version' (expected '$expectedTag')."
+          }
+
       - name: Clone NVIDIA DLSS SDK
         shell: cmd
         run: |
