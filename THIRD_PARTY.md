@@ -20,7 +20,9 @@ The embedded UI font and application icon are derived from Tabler Icons 3.46.0, 
 
 ## yt-dlp
 
-The optional YouTube resolver uses the official yt-dlp 2026.08.19 Windows executable, distributed under the Unlicense. That official executable embeds its EJS support. The executable is fetched from its pinned upstream release and is not committed to this repository.
+The optional YouTube resolver uses the official yt-dlp 2026.08.19 Windows executable. The yt-dlp source project is offered under the Unlicense, but the official PyInstaller executable bundles GPLv3+ components and the combined executable is GPLv3+. See the upstream tag's [Licensing section](https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/README.md#licensing) and [`THIRD_PARTY_LICENSES.txt`](https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/THIRD_PARTY_LICENSES.txt). The executable embeds EJS support, is fetched from its pinned upstream release, and is not committed to this repository.
+
+Any package that redistributes this exact executable must include a complete copy of the tag's upstream `THIRD_PARTY_LICENSES.txt` as `THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt`. The pinned Windows executable does not expose a `--license` option, so packaging must use the tagged notice file and must not present the executable as Unlicense-only.
 
 ## Deno
 

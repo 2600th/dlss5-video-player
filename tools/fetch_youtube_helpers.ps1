@@ -10,6 +10,7 @@ $ytDlpSha256 = '66674953FE251B89F4D08C5F0E35E0728679BD67AB3D7D05C0562AF101DD3E7A
 $denoVersion = '2.9.5'
 $denoUrl = 'https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip'
 $denoSha256 = '171EFAB55AC6B9881FD53EE4C20F8BF3BB1340FFC618483746909014DB12216A'
+$downloadTimeoutSeconds = 120
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $destination = Join-Path $repositoryRoot 'external\youtube'
@@ -22,6 +23,7 @@ $ytDlpDownload = Join-Path $temporaryRoot 'yt-dlp.exe'
 $denoArchive = Join-Path $temporaryRoot 'deno.zip'
 $denoExtracted = Join-Path $temporaryRoot 'deno'
 $destinationBackedUp = $false
+$transactionState = 'Precommit'
 
 function Remove-ScopedDirectory {
     param(
@@ -71,12 +73,28 @@ function Invoke-CheckedVersion {
     return $output
 }
 
+function Invoke-BestEffortCleanup {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Parent,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    try {
+        # TEST-SEAM: before disposable cleanup
+        Remove-ScopedDirectory -Path $Path -Parent $Parent
+    }
+    catch {
+        Write-Warning ("Cleanup could not remove {0} '{1}': {2}" -f $Description, $Path, $_.Exception.Message)
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $temporaryRoot, $denoExtracted -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    Invoke-WebRequest -Uri $ytDlpUrl -OutFile $ytDlpDownload -UseBasicParsing
-    Invoke-WebRequest -Uri $denoUrl -OutFile $denoArchive -UseBasicParsing
+    Invoke-WebRequest -Uri $ytDlpUrl -OutFile $ytDlpDownload -UseBasicParsing -TimeoutSec $downloadTimeoutSeconds
+    Invoke-WebRequest -Uri $denoUrl -OutFile $denoArchive -UseBasicParsing -TimeoutSec $downloadTimeoutSeconds
 
     Assert-Sha256 -Path $ytDlpDownload -Expected $ytDlpSha256 -Name "yt-dlp $ytDlpVersion"
     Assert-Sha256 -Path $denoArchive -Expected $denoSha256 -Name "Deno $denoVersion archive"
@@ -126,34 +144,53 @@ try {
         if (Test-Path -LiteralPath $destination) {
             [IO.Directory]::Move($destination, $backupDestination)
             $destinationBackedUp = $true
+            $transactionState = 'BackupCreated'
         }
+        # TEST-SEAM: before staged destination commit
         [IO.Directory]::Move($stagedDestination, $destination)
+        $transactionState = 'Committed'
     }
     catch {
         $swapFailure = $_
         if ($destinationBackedUp) {
-            Remove-ScopedDirectory -Path $destination -Parent $destinationParent
-            [IO.Directory]::Move($backupDestination, $destination)
-            $destinationBackedUp = $false
+            try {
+                Remove-ScopedDirectory -Path $destination -Parent $destinationParent
+                # TEST-SEAM: before backup restoration
+                [IO.Directory]::Move($backupDestination, $destination)
+                $destinationBackedUp = $false
+                $transactionState = 'Restored'
+            }
+            catch {
+                $restoreFailure = $_
+                $transactionState = 'RestoreFailed'
+                $message = "YouTube helper commit failed: $($swapFailure.Exception.Message) Restoration also failed: $($restoreFailure.Exception.Message) The previous destination backup is preserved at '$backupDestination'."
+                throw (New-Object InvalidOperationException -ArgumentList $message, $restoreFailure.Exception)
+            }
         }
         throw $swapFailure
     }
 
     if ($destinationBackedUp) {
-        Remove-ScopedDirectory -Path $backupDestination -Parent $destinationParent
-        $destinationBackedUp = $false
+        try {
+            # TEST-SEAM: before committed backup cleanup
+            Remove-ScopedDirectory -Path $backupDestination -Parent $destinationParent
+            $destinationBackedUp = Test-Path -LiteralPath $backupDestination
+        }
+        catch {
+            Write-Warning ("YouTube helpers were committed successfully, but the previous destination backup could not be removed and remains at '{0}': {1}" -f $backupDestination, $_.Exception.Message)
+        }
     }
 
     Write-Host "Verified and staged yt-dlp $ytDlpVersion and Deno $denoVersion."
 }
 finally {
-    Remove-ScopedDirectory -Path $temporaryRoot -Parent ([IO.Path]::GetTempPath())
-    Remove-ScopedDirectory -Path $stagedDestination -Parent $destinationParent
-    if ($destinationBackedUp -and -not (Test-Path -LiteralPath $destination)) {
-        [IO.Directory]::Move($backupDestination, $destination)
-        $destinationBackedUp = $false
+    Invoke-BestEffortCleanup -Path $temporaryRoot -Parent ([IO.Path]::GetTempPath()) -Description 'download staging'
+    Invoke-BestEffortCleanup -Path $stagedDestination -Parent $destinationParent -Description 'destination staging'
+
+    if ($transactionState -eq 'RestoreFailed' -and (Test-Path -LiteralPath $backupDestination)) {
+        Write-Warning "Restoration failed; the previous destination backup is intentionally preserved at '$backupDestination'."
     }
-    if (Test-Path -LiteralPath $backupDestination) {
-        Remove-ScopedDirectory -Path $backupDestination -Parent $destinationParent
+    elseif ($transactionState -eq 'Committed' -and $destinationBackedUp -and (Test-Path -LiteralPath $backupDestination)) {
+        Write-Warning "The new YouTube helper pair is committed and usable; cleanup is incomplete because the previous destination backup remains at '$backupDestination'."
     }
 }
