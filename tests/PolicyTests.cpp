@@ -2457,6 +2457,42 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
     }
 }
 
+void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test()
+{
+    ResolverFixture fixture;
+    constexpr int repetitions = 16;
+    DWORD beforeHandles = 0;
+    DWORD afterHandles = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+
+    for (int repetition = 0; repetition < repetitions; ++repetition) {
+        auto resolver = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::seconds{5},
+            YouTubeResolver::FailureStage::PipeHandlesOwned);
+        const auto started = std::chrono::steady_clock::now();
+        const ResolveResult result = resolver->Resolve(L"https://youtu.be/hang", {});
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        CHECK_EQ(ResolveError::StartFailed, result.error);
+        CHECK(elapsed < std::chrono::seconds{2});
+        resolver.reset();
+        CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                           std::chrono::milliseconds{500}));
+
+        size_t entries = 0;
+        std::error_code error;
+        for (std::filesystem::directory_iterator item(fixture.directory, error), end;
+             !error && item != end; item.increment(error)) {
+            ++entries;
+        }
+        CHECK(!error);
+        CHECK_EQ(size_t{2}, entries);
+    }
+
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterHandles) != FALSE);
+    CHECK(afterHandles <= beforeHandles + 2);
+}
+
 void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test()
 {
     ResolverFixture fixture;
@@ -2595,6 +2631,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test();
     youtube_resolver_queued_stop_token_cancels_before_launch_test();
     youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();
+    youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test();
     youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test();
 
     if (test_support::failure_count != 0) {
