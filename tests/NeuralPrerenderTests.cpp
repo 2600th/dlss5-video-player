@@ -1,6 +1,7 @@
 #include "NeuralCache.h"
 #include "MediaPipeline.h"
 #include "OfflineNeuralRenderer.h"
+#include "SynchronizedPlayback.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -566,6 +567,110 @@ void reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_
     CHECK(evidence.laterFailure);CHECK(!evidence.Valid());
 }
 
+class FakeSynchronizedSource final : public ISynchronizedFrameSource {
+public:
+    explicit FakeSynchronizedSource(std::vector<int64_t> timestamps)
+    {
+        for(const auto timestamp:timestamps)
+            frames.push_back(VideoFrame{{uint8_t(timestamp/333333),0,0,255},timestamp,timestamp==0});
+        if(!frames.empty())duration=double(frames.back().timestamp100ns+333333)/10000000.0;
+    }
+    bool Open(const std::filesystem::path&,std::stop_token stop) override
+    { ++opens;index=0;return !failOpen&&!stop.stop_requested(); }
+    void Close() override { ++closes; }
+    VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
+    {
+        if(stop.stop_requested())return VideoReadResult::Cancelled;
+        if(index>=frames.size())return VideoReadResult::EndOfStream;
+        frame=frames[index++];return VideoReadResult::FrameReady;
+    }
+    bool SeekSeconds(double seconds) override
+    {
+        ++seeks;if(failNextSeek){failNextSeek=false;return false;}
+        const int64_t target=static_cast<int64_t>(seconds*10000000.0);
+        index=0;while(index<frames.size()&&frames[index].timestamp100ns<target)++index;return true;
+    }
+    uint32_t Width() const override { return width; }
+    uint32_t Height() const override { return height; }
+    double FrameRate() const override { return fps; }
+    double DurationSeconds() const override { return duration; }
+    std::vector<VideoFrame> frames;size_t index{};uint32_t width{1},height{1};
+    double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},closes{},seeks{};
+};
+
+void synchronized_playback_starts_original_and_switches_same_timestamp_test()
+{
+    FakeSynchronizedSource original({0,333333});FakeSynchronizedSource neural({0,333333});
+    SynchronizedPlayback playback(original,neural);
+    CHECK(playback.Open(L"original.mkv",L"neural.mkv",{}));
+    CHECK_EQ(ComparisonView::Original,playback.View());
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK(playback.VisibleFrame()!=nullptr);if(playback.VisibleFrame())CHECK_EQ(int64_t{0},playback.VisibleFrame()->timestamp100ns);
+    CHECK(playback.SetView(ComparisonView::Neural));
+    CHECK(playback.VisibleFrame()!=nullptr);if(playback.VisibleFrame())CHECK_EQ(int64_t{0},playback.VisibleFrame()->timestamp100ns);
+}
+
+void synchronized_playback_advances_both_streams_under_one_clock_test()
+{
+    FakeSynchronizedSource original({0,333333,666666});FakeSynchronizedSource neural({0,333333,666666});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    for(const int64_t timestamp:{int64_t{0},int64_t{333333},int64_t{666666}}){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(pair){CHECK_EQ(timestamp,pair->timestamp100ns);CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);}
+    }
+}
+
+void synchronized_playback_seek_commits_only_after_both_streams_reach_target_test()
+{
+    FakeSynchronizedSource original({0,333333,666666,999999});
+    FakeSynchronizedSource neural({0,333333,666666,999999});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    neural.failNextSeek=true;CHECK(!playback.SeekSeconds(0.066,{}));
+    CHECK(playback.VisibleFrame()!=nullptr);if(playback.VisibleFrame())CHECK_EQ(int64_t{0},playback.VisibleFrame()->timestamp100ns);
+    CHECK(playback.SeekSeconds(0.066,{}));
+    CHECK(playback.VisibleFrame()!=nullptr);if(playback.VisibleFrame())CHECK_EQ(int64_t{666666},playback.VisibleFrame()->timestamp100ns);
+}
+
+void synchronized_playback_refuses_a_mismatched_neural_frame_beyond_one_frame_test()
+{
+    FakeSynchronizedSource original({0});FakeSynchronizedSource neural({666666});
+    neural.duration=original.duration;
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    CHECK_EQ(SynchronizedReadResult::OutOfSync,playback.ReadNextAvailable({}));
+    CHECK(playback.VisibleFrame()==nullptr);CHECK(!playback.SetView(ComparisonView::Neural));
+}
+
+void synchronized_playback_rejects_incompatible_cached_stream_metadata_test()
+{
+    FakeSynchronizedSource original({0,333333});FakeSynchronizedSource neural({0,333333});
+    neural.fps=29.0;SynchronizedPlayback playback(original,neural);
+    CHECK(!playback.Open(L"o",L"n",{}));CHECK(!playback.NeuralAvailable());
+    neural.fps=30.0;neural.width=2;
+    CHECK(!playback.Open(L"o",L"n",{}));CHECK(!playback.NeuralAvailable());
+}
+
+void synchronized_playback_pause_step_and_eos_apply_to_both_streams_test()
+{
+    FakeSynchronizedSource original({0,333333});FakeSynchronizedSource neural({0,333333});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    playback.SetPaused(true);CHECK_EQ(SynchronizedReadResult::NotReady,playback.ReadNextAvailable({}));
+    CHECK(playback.Step());CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK_EQ(SynchronizedReadResult::NotReady,playback.ReadNextAvailable({}));
+    CHECK(playback.Step());CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK(playback.Step());CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+}
+
+void synchronized_playback_original_only_mode_remains_available_after_cancel_test()
+{
+    FakeSynchronizedSource original({0});FakeSynchronizedSource neural({0});neural.failOpen=true;
+    SynchronizedPlayback playback(original,neural);CHECK(!playback.Open(L"o",L"n",{}));
+    CHECK(playback.Open(L"o",{},{}));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK(!playback.SetView(ComparisonView::Neural));CHECK_EQ(ComparisonView::Original,playback.View());
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -631,6 +736,13 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test();
     reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test();
     reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
+    synchronized_playback_starts_original_and_switches_same_timestamp_test();
+    synchronized_playback_advances_both_streams_under_one_clock_test();
+    synchronized_playback_seek_commits_only_after_both_streams_reach_target_test();
+    synchronized_playback_refuses_a_mismatched_neural_frame_beyond_one_frame_test();
+    synchronized_playback_rejects_incompatible_cached_stream_metadata_test();
+    synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();
+    synchronized_playback_original_only_mode_remains_available_after_cancel_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;
