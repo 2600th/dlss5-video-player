@@ -1,0 +1,7 @@
+Package: @tabler/icons-webfont
+Version: 3.46.0
+Source: https://registry.npmjs.org/@tabler/icons-webfont/-/icons-webfont-3.46.0.tgz
+Integrity: sha512-aQouIxJQb+F5cRsHo/FW5qSILDuU7pd7d86JjmSUCMgpJhBeRuyovnfJlQeyuug2gHz0jFaosl4GNYo3SLnjrQ==
+License: MIT (see LICENSE)
+Committed files: dist/fonts/tabler-icons.ttf, dist/tabler-icons.css, LICENSE
+Application icon derivative: Tabler sparkles glyph (U+F6D7), rendered blue on charcoal as 16, 24, 32, 48, and 256 px ICO frames with Pillow.

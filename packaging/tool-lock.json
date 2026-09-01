@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "entries": [
+    {
+      "name": "ffmpeg.exe",
+      "size": 102856192,
+      "sha256": "72A489ECCD008C2EC2C0A5856C5C75BC3D8BBFA90166C4566865C246445E6AA3",
+      "signatureStatus": "NotSigned",
+      "provenance": "Existing verified FFmpeg Essentials input from the main checkout."
+    },
+    {
+      "name": "ffprobe.exe",
+      "size": 102652416,
+      "sha256": "19202B23C0043F15AD1B7BCE2344F406FD52BD6EFD8F995CE02E7392A1CEC52F",
+      "signatureStatus": "NotSigned",
+      "provenance": "Existing verified FFmpeg Essentials input from the main checkout."
+    },
+    {
+      "name": "yt-dlp.exe",
+      "size": 17840399,
+      "sha256": "66674953FE251B89F4D08C5F0E35E0728679BD67AB3D7D05C0562AF101DD3E7A",
+      "signatureStatus": "NotSigned",
+      "provenance": "Official yt-dlp 2026.08.19 Windows release fetched by the pinned helper script."
+    },
+    {
+      "name": "deno.exe",
+      "size": 97408288,
+      "sha256": "98F8C2A2D470E4CCB04C935C86FF8050817D877762AEC5EAEEB9E409CCB3B9FD",
+      "signatureStatus": "Valid",
+      "signerContains": "Deno Land Inc.",
+      "provenance": "Deno 2.9.5 extracted from the pinned official Windows archive."
+    }
+  ]
+}

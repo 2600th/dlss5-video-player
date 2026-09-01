@@ -1,0 +1,278 @@
+[CmdletBinding(DefaultParameterSetName = 'Stage')]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'Stage')][string]$StageDirectory,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Zip')][string]$Zip
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
+$expected = @(
+    'DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
+    'dxgi.dll', 'ReShade.ini', 'ReShadePreset.ini', 'renodx-dlss5.addon64',
+    'nvngx_dlss.dll', 'nvngx_dlssnr.dll', 'sl.common.dll', 'sl.dlss.dll',
+    'sl.dlss_g.dll', 'sl.dlss_nr.dll', 'sl.interposer.dll', 'sl.nis.dll',
+    'sl.pcl.dll', 'sl.reflex.dll', 'README.md', 'LICENSE', 'THIRD_PARTY.md',
+    'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
+    'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
+    'THIRD_PARTY_LICENSES/experimental-runtime.txt',
+    'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
+    'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/TROUBLESHOOTING.md',
+    'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
+)
+$temporaryRoot = $null
+$maxArchiveEntries = 128
+$maxArchiveEntryBytes = 512MB
+$maxArchiveTotalBytes = 1GB
+$maxCompressionRatio = 250.0
+
+function Get-RelativePackagePath {
+    param([string]$Root, [string]$Path)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    if (-not $pathFull.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Path is outside package root: $pathFull"
+    }
+    return $pathFull.Substring($rootFull.Length).Replace('\', '/')
+}
+
+function Get-Sha256 {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Sort-PackagePathsOrdinal {
+    param([string[]]$Paths)
+    [string[]]$sorted = @($Paths)
+    [Array]::Sort($sorted, [StringComparer]::Ordinal)
+    return $sorted
+}
+
+function Get-AuthenticodeRecord {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 2
+        $read = $stream.Read($header, 0, 2)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    if ($read -ne 2 -or $header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
+        return [pscustomobject]@{ Status = 'N/A'; Signer = '' }
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    return [pscustomobject]@{
+        Status = [string]$signature.Status
+        Signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+    }
+}
+
+function Assert-NoSensitiveText {
+    param([string]$RelativePath, [string]$Text)
+    $checks = @(
+        @('Windows absolute path', '(?i)(?<![A-Za-z0-9+.-])[A-Z]:[\\/]'),
+        @('UNC path', '(?<!:)\\\\[A-Za-z0-9._-]+[\\/]'),
+        @('user home path', '(?i)(?<![:A-Za-z0-9])/(?:Users|home)/[^/\s]+/'),
+        @('private key', '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+        @('AWS access key', '\bAKIA[0-9A-Z]{16}\b'),
+        @('GitHub token', '\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b'),
+        @('bearer token', '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}'),
+        @('credential-bearing URL', '(?i)https?://[^\s/@:]+:[^\s/@]+@')
+    )
+    foreach ($check in $checks) {
+        if ($Text -match $check[1]) { throw "$($check[0]) leakage is forbidden in packaged text: $RelativePath" }
+    }
+}
+
+function Assert-ReleaseExecutableIdentity {
+    param([string]$Root)
+    $identity = (Get-Item -LiteralPath (Join-Path $Root 'DLSSVideoPlayer.exe')).VersionInfo
+    $expectedIdentity = @{
+        ProductName = 'DLSS Video Player'
+        FileVersion = "$version.0"
+        ProductVersion = "$version.0"
+        OriginalFilename = 'DLSSVideoPlayer.exe'
+    }
+    foreach ($name in $expectedIdentity.Keys) {
+        if ([string]$identity.$name -cne $expectedIdentity[$name]) {
+            throw "Packaged executable $name mismatch: expected '$($expectedIdentity[$name])', received '$($identity.$name)'."
+        }
+    }
+}
+
+function Assert-LockedFiles {
+    param([string]$Root)
+    $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
+    foreach ($entry in $runtimeLock.entries) {
+        $path = Join-Path $Root ([string]$entry.destination)
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-Sha256 -Path $path
+        if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
+            throw "Locked runtime mismatch: $($entry.destination)"
+        }
+    }
+    $toolLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\tool-lock.json') -Raw | ConvertFrom-Json
+    foreach ($entry in $toolLock.entries) {
+        $path = Join-Path $Root ([string]$entry.name)
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-Sha256 -Path $path
+        if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
+            throw "Locked helper mismatch: $($entry.name)"
+        }
+    }
+}
+
+function Assert-Stage {
+    param([string]$Root)
+    $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
+    $actualUnsorted = @(Get-ChildItem -LiteralPath $resolvedRoot -Recurse -File | ForEach-Object {
+        Get-RelativePackagePath -Root $resolvedRoot -Path $_.FullName
+    })
+    $actual = @(Sort-PackagePathsOrdinal -Paths $actualUnsorted)
+    $expectedSorted = @(Sort-PackagePathsOrdinal -Paths $expected)
+    if ([string]::Join("`n", $actual) -cne [string]::Join("`n", $expectedSorted)) {
+        $missing = @($expectedSorted | Where-Object { $_ -cnotin $actual })
+        $unexpected = @($actual | Where-Object { $_ -cnotin $expectedSorted })
+        throw "Package allowlist mismatch. Missing=[$([string]::Join(', ', $missing))] Unexpected=[$([string]::Join(', ', $unexpected))]"
+    }
+
+    $knownExecutables = @('DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe')
+    $unexpectedExecutables = @($actual | Where-Object { $_.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) -and $_ -cnotin $knownExecutables })
+    if ($unexpectedExecutables.Count -ne 0) {
+        throw "Unexpected launchable executable(s): $([string]::Join(', ', $unexpectedExecutables))"
+    }
+
+    foreach ($configName in @('ReShade.ini', 'ReShadePreset.ini')) {
+        if ((Get-Item -LiteralPath (Join-Path $resolvedRoot $configName)).Length -eq 0) {
+            throw "$configName must not be empty."
+        }
+    }
+
+    $inOverlaySection = $false
+    $tutorialProgress = $null
+    foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'ReShade.ini')) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(.+)\]$') {
+            $inOverlaySection = $Matches[1] -ieq 'OVERLAY'
+        }
+        elseif ($inOverlaySection -and $trimmed -match '^TutorialProgress\s*=\s*(\d+)\s*$') {
+            $tutorialProgress = $Matches[1]
+        }
+    }
+    if ($tutorialProgress -cne '4') {
+        throw 'ReShade.ini must ship with the ReShade tutorial already dismissed (OVERLAY/TutorialProgress=4).'
+    }
+
+    Assert-ReleaseExecutableIdentity -Root $resolvedRoot
+
+    foreach ($relative in $actual) {
+        if ($relative -match '(?i)(^|[/_.-])pt-br([/_.-]|$)|languages/') {
+            throw "Portuguese/language artifact is forbidden: $relative"
+        }
+        $path = Join-Path $resolvedRoot $relative
+        if ($relative -match '(?i)(\.md|\.txt|\.ini)$' -or $relative -ceq 'LICENSE') {
+            $text = Get-Content -LiteralPath $path -Raw
+            if ($text -match '(?i)\bpt-br\b|portugu[eê]s') {
+                throw "Portuguese content marker is forbidden: $relative"
+            }
+            Assert-NoSensitiveText -RelativePath $relative -Text $text
+        }
+    }
+
+    Assert-LockedFiles -Root $resolvedRoot
+
+    $manifestPath = Join-Path $resolvedRoot 'PACKAGE_MANIFEST.txt'
+    $lines = @(Get-Content -LiteralPath $manifestPath)
+    if ($lines.Count -lt 3 -or $lines[0] -cne "ProductVersion=$version" -or
+        $lines[1] -cne 'Path|Size|SHA256|Authenticode|Signer') {
+        throw 'PACKAGE_MANIFEST.txt has an invalid header.'
+    }
+    $manifestRows = $lines[2..($lines.Count - 1)]
+    $manifestExpected = @($actual | Where-Object { $_ -cne 'PACKAGE_MANIFEST.txt' })
+    if ($manifestRows.Count -ne $manifestExpected.Count) {
+        throw 'PACKAGE_MANIFEST.txt row count does not match the package.'
+    }
+    for ($index = 0; $index -lt $manifestExpected.Count; ++$index) {
+        $relative = $manifestExpected[$index]
+        $path = Join-Path $resolvedRoot $relative
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-Sha256 -Path $path
+        $auth = Get-AuthenticodeRecord -Path $path
+        $expectedLine = "$relative|$($item.Length)|$hash|$($auth.Status)|$($auth.Signer)"
+        if ($manifestRows[$index] -cne $expectedLine) {
+            throw "Manifest mismatch for '$relative'."
+        }
+    }
+
+    Write-Host "Verified allowlisted package with $($actual.Count) files at '$resolvedRoot'."
+}
+
+try {
+    if ($PSCmdlet.ParameterSetName -eq 'Zip') {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zipPath = (Resolve-Path -LiteralPath $Zip).Path
+        $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+        try {
+            $entries = @($archive.Entries)
+            if ($entries.Count -gt $maxArchiveEntries) {
+                throw "ZIP contains $($entries.Count) entries; maximum is $maxArchiveEntries."
+            }
+            [uint64]$totalUncompressed = 0
+            foreach ($entry in $entries) {
+                [uint64]$length = $entry.Length
+                [uint64]$compressedLength = $entry.CompressedLength
+                if ($length -gt $maxArchiveEntryBytes) {
+                    throw "ZIP entry exceeds the per-file limit: $($entry.FullName)"
+                }
+                if ($totalUncompressed -gt ([uint64]$maxArchiveTotalBytes - $length)) {
+                    throw 'ZIP exceeds the total uncompressed-size limit.'
+                }
+                $totalUncompressed += $length
+                if ($length -ge 1MB) {
+                    if ($compressedLength -eq 0 -or ($length / [double]$compressedLength) -gt $maxCompressionRatio) {
+                        throw "ZIP entry exceeds the compression-ratio limit: $($entry.FullName)"
+                    }
+                }
+            }
+
+            $entryNames = @($entries | Where-Object { $_.Name } | Select-Object -ExpandProperty FullName)
+            $seen = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($name in $entryNames) {
+                $normalized = $name.Replace('\', '/')
+                if ($normalized.StartsWith('/') -or $normalized -match '(^|/)\.\.(/|$)' -or $normalized.Contains(':')) {
+                    throw "Unsafe ZIP entry: $name"
+                }
+                if (-not $seen.Add($normalized)) { throw "Duplicate ZIP entry: $name" }
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+        $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('dlss-player-package-verify-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $temporaryRoot | Out-Null
+        [IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $temporaryRoot)
+        $roots = @(Get-ChildItem -LiteralPath $temporaryRoot -Directory)
+        if ($roots.Count -ne 1 -or @(Get-ChildItem -LiteralPath $temporaryRoot -File).Count -ne 0) {
+            throw 'ZIP must contain exactly one top-level release directory.'
+        }
+        Assert-Stage -Root $roots[0].FullName
+    }
+    else {
+        Assert-Stage -Root $StageDirectory
+    }
+}
+finally {
+    if ($temporaryRoot -and (Test-Path -LiteralPath $temporaryRoot)) {
+        [IO.Directory]::Delete($temporaryRoot, $true)
+    }
+}

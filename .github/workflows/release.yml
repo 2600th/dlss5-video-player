@@ -1,0 +1,70 @@
+name: release-windows
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require tag to match VERSION
+        shell: powershell
+        run: |
+          $version = (Get-Content -Raw VERSION).Trim()
+          $expectedTag = "v$version"
+          $actualTag = $env:GITHUB_REF_NAME
+          if ($actualTag -cne $expectedTag) {
+            throw "Release tag '$actualTag' does not match VERSION '$version' (expected '$expectedTag')."
+          }
+
+      - name: Clone NVIDIA DLSS SDK
+        shell: cmd
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
+
+      - name: Require private locked release inputs
+        shell: powershell
+        run: |
+          if (-not (Test-Path external\runtime\nvngx_dlssnr.dll)) {
+            throw 'Private experimental runtime inputs are unavailable. Refusing to assemble a public release from unverified substitutes.'
+          }
+          .\tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination external\runtime -ValidateOnly
+
+      - name: Fetch pinned UI assets and YouTube helpers
+        shell: powershell
+        run: |
+          .\tools\fetch_ui_assets.ps1
+          .\tools\fetch_youtube_helpers.ps1
+
+      - name: Configure
+        shell: cmd
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+
+      - name: Build Release
+        shell: cmd
+        run: cmake --build build --config Release --parallel
+
+      - name: Test Release
+        shell: cmd
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Assemble release package
+        shell: cmd
+        run: package_release.bat
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/DLSSVideoPlayer-v0.12.0-win64.zip

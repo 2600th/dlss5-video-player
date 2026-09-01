@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "310.8.0.0",
+  "entries": [
+    {
+      "sourceName": "nvngx_dlssnr_ada_v51_async.dll",
+      "destination": "nvngx_dlssnr.dll",
+      "size": 165840496,
+      "sha256": "28BDC080D28686DECDB63F6F4246B022274916B80AAFDAB266FE0FB63B2B9265",
+      "fileVersion": "310.8.0.0",
+      "signatureStatus": "HashMismatch",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "User-supplied patched Ada asynchronous DLSS neural-rendering runtime.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
+    },
+    {
+      "sourceName": "nvngx_dlss.dll",
+      "destination": "nvngx_dlss.dll",
+      "size": 58956400,
+      "sha256": "C85F971CE023C9F3492FC7455F0B01A24BA18EA39636407A846902C4360B0B7E",
+      "fileVersion": "310.8.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed DLSS SR runtime from the matching user-supplied Streamline pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
+    },
+    {
+      "sourceName": "dxgi.dll",
+      "destination": "dxgi.dll",
+      "size": 5592064,
+      "sha256": "0CEE63F9C9F13F3AC909C5B4903F4DBB4B719A7AB3B4F13B0DEAF83C814B94F7",
+      "fileVersion": "6.8.0.2155",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "Locally supplied ReShade proxy previously verified with the RenoDX pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#reshade"
+    },
+    {
+      "sourceName": "renodx-dlss5.addon64",
+      "destination": "renodx-dlss5.addon64",
+      "size": 391168,
+      "sha256": "87AEF9DDD937C7241E6BF8D8EFEA0045D63559135E254C60DAB316DB3D3A4AEE",
+      "fileVersion": "0.2026.0827.2036",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "User-supplied RenoDX DLSS 5 add-on.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#renodx--experimental-dlss-5-runtime"
+    },
+    {
+      "sourceName": "sl.common.dll",
+      "destination": "sl.common.dll",
+      "size": 830592,
+      "sha256": "A4B2B5ACBE49FBC6D44DD432CAC19CD53218F698B2539DC7ED0FB268C72CFC8D",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.dlss.dll",
+      "destination": "sl.dlss.dll",
+      "size": 421504,
+      "sha256": "1EB5FB3D6F01D340FE086D981CC2DE4F18AA6D05EE276E5CF28ECD54818DCC8B",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.dlss_g.dll",
+      "destination": "sl.dlss_g.dll",
+      "size": 625792,
+      "sha256": "B8B5EFFD7DEBDB750ABD216DE43385FB653261712BC315D85EBA68811FB3EE02",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.dlss_nr.dll",
+      "destination": "sl.dlss_nr.dll",
+      "size": 401024,
+      "sha256": "9F6672E5E0170DC118A3188D21BDA187E1FC1AA3502895B21AB846D23165C11D",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.interposer.dll",
+      "destination": "sl.interposer.dll",
+      "size": 651392,
+      "sha256": "27B2190057994C0B287C2C5716953BF1586F6499AC12FBBB2092B9AAF8396570",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.nis.dll",
+      "destination": "sl.nis.dll",
+      "size": 1155200,
+      "sha256": "6039E38A1AF56C8E86F3E936596E2DB910BF3D76BBF4268562A3B13763049DFA",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.pcl.dll",
+      "destination": "sl.pcl.dll",
+      "size": 360064,
+      "sha256": "12AA4E76C28A27C735E4ECB3072F44D09428ACB107B70AC38E4BD48DDB05F88D",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    },
+    {
+      "sourceName": "sl.reflex.dll",
+      "destination": "sl.reflex.dll",
+      "size": 382080,
+      "sha256": "ECF12973CDCEC2FFCED2EA77B1C7E45F4D387E7C864DDB5531B66A6F947EFFB3",
+      "fileVersion": "2.13.0.0",
+      "signatureStatus": "Valid",
+      "signerContains": "NVIDIA Corporation",
+      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
+    }
+  ]
+}
