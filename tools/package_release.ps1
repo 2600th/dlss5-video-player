@@ -3,6 +3,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
@@ -27,6 +28,17 @@ function Get-RelativePackagePath {
     return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
+function Get-Sha256 {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
 function Assert-HashLock {
     param([string]$Root, [string]$LockPath, [string]$NameProperty)
     $lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json
@@ -35,7 +47,7 @@ function Assert-HashLock {
         $path = Join-Path $Root $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Locked input is missing: $path" }
         $item = Get-Item -LiteralPath $path
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+        $hash = Get-Sha256 -Path $path
         if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
             throw "Locked input drifted: $name"
         }
@@ -77,7 +89,7 @@ foreach ($entry in $toolLock.entries) {
     $path = Join-Path $root ([string]$entry.name)
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Locked helper is missing: $path" }
     $item = Get-Item -LiteralPath $path
-    $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $hash = Get-Sha256 -Path $path
     if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
         throw "Locked helper drifted: $($entry.name)"
     }
@@ -151,7 +163,7 @@ $manifest.Add("ProductVersion=$version")
 $manifest.Add('Path|Size|SHA256|Authenticode|Signer')
 foreach ($file in $files) {
     $relative = Get-RelativePackagePath -Root $stageFull -Path $file.FullName
-    $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+    $hash = Get-Sha256 -Path $file.FullName
     $auth = Get-AuthenticodeRecord -Path $file.FullName
     $manifest.Add("$relative|$($file.Length)|$hash|$($auth.Status)|$($auth.Signer)")
 }
@@ -176,5 +188,5 @@ try {
 finally { $archive.Dispose() }
 
 & (Join-Path $PSScriptRoot 'verify_package.ps1') -Zip $zipPath
-$zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToUpperInvariant()
+$zipHash = Get-Sha256 -Path $zipPath
 Write-Host "Created '$zipPath' ($((Get-Item -LiteralPath $zipPath).Length) bytes, SHA-256 $zipHash)."

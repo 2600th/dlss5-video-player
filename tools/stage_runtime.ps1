@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $lockPath = Join-Path $repositoryRoot 'packaging\runtime-lock.json'
@@ -24,6 +25,17 @@ function Get-NormalizedVersion {
     return ([Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion -replace ',', '.').Trim()
 }
 
+function Get-Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
 function Assert-LockedFile {
     param(
         [Parameter(Mandatory = $true)]$Entry,
@@ -35,7 +47,7 @@ function Assert-LockedFile {
         throw "Size mismatch for '$($Entry.sourceName)': expected $($Entry.size), received $($item.Length)."
     }
 
-    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $hash = Get-Sha256 -Path $Path
     if ($hash -cne [string]$Entry.sha256) {
         throw "SHA-256 mismatch for '$($Entry.sourceName)': expected $($Entry.sha256), received $hash."
     }

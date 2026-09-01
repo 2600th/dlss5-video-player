@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
@@ -34,6 +35,17 @@ function Get-RelativePackagePath {
     return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
+function Get-Sha256 {
+    param([string]$Path)
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
 function Get-AuthenticodeRecord {
     param([string]$Path)
     $stream = [IO.File]::OpenRead($Path)
@@ -60,7 +72,7 @@ function Assert-LockedFiles {
     foreach ($entry in $runtimeLock.entries) {
         $path = Join-Path $Root ([string]$entry.destination)
         $item = Get-Item -LiteralPath $path
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+        $hash = Get-Sha256 -Path $path
         if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
             throw "Locked runtime mismatch: $($entry.destination)"
         }
@@ -69,7 +81,7 @@ function Assert-LockedFiles {
     foreach ($entry in $toolLock.entries) {
         $path = Join-Path $Root ([string]$entry.name)
         $item = Get-Item -LiteralPath $path
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+        $hash = Get-Sha256 -Path $path
         if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
             throw "Locked helper mismatch: $($entry.name)"
         }
@@ -131,7 +143,7 @@ function Assert-Stage {
         $relative = $manifestExpected[$index]
         $path = Join-Path $resolvedRoot $relative
         $item = Get-Item -LiteralPath $path
-        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
+        $hash = Get-Sha256 -Path $path
         $auth = Get-AuthenticodeRecord -Path $path
         $expectedLine = "$relative|$($item.Length)|$hash|$($auth.Status)|$($auth.Signer)"
         if ($manifestRows[$index] -cne $expectedLine) {

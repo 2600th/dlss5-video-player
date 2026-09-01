@@ -51,7 +51,13 @@ function Assert-Sha256 {
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { $actual = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
     if ($actual -cne $Expected) {
         throw "Integrity check failed for $Name. Expected '$Expected' but received '$actual'."
     }
