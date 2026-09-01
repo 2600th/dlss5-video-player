@@ -14,6 +14,7 @@
 #include "AudioPlayer.h"
 #include "NetworkMediaTransaction.h"
 #include "D3D12FenceWait.h"
+#include "NgxSession.h"
 #include "D3D12Renderer.h"
 #include "ReleasePackagePolicy.h"
 #ifdef small
@@ -4088,6 +4089,89 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
                                        std::chrono::milliseconds{500}));
 }
 
+void ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test()
+{
+    ngx_session_detail::Registry sessions;
+    int device = 0;
+    int initCalls = 0;
+    int shutdownCalls = 0;
+
+    CHECK(sessions.Acquire(&device, [&] { ++initCalls; return true; }));
+    CHECK(sessions.Acquire(&device, [&] { ++initCalls; return true; }));
+    CHECK_EQ(1, initCalls);
+    CHECK_EQ(size_t{2}, sessions.LeaseCount(&device));
+
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+    CHECK_EQ(0, shutdownCalls);
+    CHECK_EQ(size_t{1}, sessions.LeaseCount(&device));
+    CHECK(sessions.Acquire(&device, [&] { ++initCalls; return true; }));
+    CHECK_EQ(1, initCalls);
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+    CHECK_EQ(0, shutdownCalls);
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+    CHECK_EQ(1, shutdownCalls);
+    CHECK_EQ(size_t{0}, sessions.LeaseCount(&device));
+}
+
+void ngx_failed_initialization_never_acquires_a_session_test()
+{
+    ngx_session_detail::Registry sessions;
+    int device = 0;
+    int shutdownCalls = 0;
+
+    CHECK(!sessions.Acquire(&device, [] { return false; }));
+    CHECK_EQ(size_t{0}, sessions.LeaseCount(&device));
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+    CHECK_EQ(0, shutdownCalls);
+}
+
+void ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test()
+{
+    ngx_session_detail::Registry sessions;
+    int device = 0;
+    int initCalls = 0;
+    int shutdownCalls = 0;
+
+    CHECK(sessions.Acquire(&device, [&] { ++initCalls; return true; }));
+    CHECK(sessions.Acquire(&device, [&] { ++initCalls; return true; }));
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+
+    CHECK_EQ(1, initCalls);
+    CHECK_EQ(0, shutdownCalls);
+    CHECK_EQ(size_t{1}, sessions.LeaseCount(&device));
+    sessions.Release(&device, [&] { ++shutdownCalls; });
+    CHECK_EQ(1, shutdownCalls);
+}
+
+void ngx_distinct_devices_own_independent_sessions_test()
+{
+    ngx_session_detail::Registry sessions;
+    int firstDevice = 0;
+    int secondDevice = 0;
+    int initCalls = 0;
+    int shutdownCalls = 0;
+
+    CHECK(sessions.Acquire(&firstDevice, [&] { ++initCalls; return true; }));
+    CHECK(sessions.Acquire(&secondDevice, [&] { ++initCalls; return true; }));
+    CHECK_EQ(2, initCalls);
+    sessions.Release(&firstDevice, [&] { ++shutdownCalls; });
+    CHECK_EQ(1, shutdownCalls);
+    CHECK_EQ(size_t{1}, sessions.LeaseCount(&secondDevice));
+    sessions.Release(&secondDevice, [&] { ++shutdownCalls; });
+    CHECK_EQ(2, shutdownCalls);
+}
+
+void ngx_create_failure_is_not_retried_until_explicit_reset_test()
+{
+    ngx_session_detail::FeatureCreateGate gate;
+    CHECK(gate.ShouldAttempt());
+    gate.RecordFailure();
+    CHECK(!gate.ShouldAttempt());
+    CHECK(!gate.ShouldAttempt());
+    gate.Reset();
+    CHECK(gate.ShouldAttempt());
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[])
@@ -4222,6 +4306,11 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();
     youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test();
     youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test();
+    ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test();
+    ngx_failed_initialization_never_acquires_a_session_test();
+    ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test();
+    ngx_distinct_devices_own_independent_sessions_test();
+    ngx_create_failure_is_not_retried_until_explicit_reset_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

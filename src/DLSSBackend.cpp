@@ -25,15 +25,34 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
 
     // Custom engine/project identity is the officially supported NGX route for
     // non-engine samples. It is intentionally stable across runs.
-    m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
-        "50f09991-2962-44db-bad7-4be06dbbd1d2",
-        NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-        "DLSSVideoPlayer-10.0",
-        logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
-    if (NVSDK_NGX_FAILED(m_lastResult)) {
-        LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
+    // IUnknown identity is stable even if the same singleton device is exposed
+    // through different D3D12 interface pointers during an atomic renderer handoff.
+    IUnknown* deviceIdentity = nullptr;
+    if (!device || FAILED(device->QueryInterface(IID_IUnknown,
+                                                  reinterpret_cast<void**>(&deviceIdentity)))) {
+        m_lastResult = NVSDK_NGX_Result_Fail;
+        LOG("NGX device identity lookup failed.");
         return false;
     }
+    m_sessionKey = deviceIdentity;
+    deviceIdentity->Release();
+
+    const bool sessionAcquired = ngx_session_detail::ProcessRegistry().Acquire(
+        m_sessionKey,
+        [&] {
+            m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
+                "50f09991-2962-44db-bad7-4be06dbbd1d2",
+                NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+                "DLSSVideoPlayer-10.0",
+                logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
+            return !NVSDK_NGX_FAILED(m_lastResult);
+        });
+    if (!sessionAcquired) {
+        LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
+        m_sessionKey = nullptr;
+        return false;
+    }
+    m_sessionLeaseAcquired = true;
     m_initialized = true;
 
     m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&m_params);
@@ -131,7 +150,7 @@ void DLSSBackend::FillCreateParameters() {
 }
 
 bool DLSSBackend::CreateFeature(ID3D12GraphicsCommandList* cmd) {
-    if (!m_params || !cmd) return false;
+    if (!m_params || !cmd || !m_featureCreateGate.ShouldAttempt()) return false;
     if (m_handle) return true;
 
     FillCreateParameters();
@@ -140,6 +159,7 @@ bool DLSSBackend::CreateFeature(ID3D12GraphicsCommandList* cmd) {
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
         LOG("RAW NGX D3D12 CreateFeature failed result=0x" << std::hex << m_lastResult);
         m_handle = nullptr;
+        m_featureCreateGate.RecordFailure();
         return false;
     }
 
@@ -162,6 +182,7 @@ bool DLSSBackend::RecreateFeature(ID3D12GraphicsCommandList* cmd) {
         m_handle = nullptr;
     }
     m_evaluations = 0;
+    m_featureCreateGate.Reset();
     LOG("Recreating RAW NGX DLSS feature for ReShade/RenoDX hook capture.");
     return CreateFeature(cmd);
 }
@@ -322,11 +343,16 @@ void DLSSBackend::Shutdown() {
         NVSDK_NGX_D3D12_DestroyParameters(m_params);
         m_params = nullptr;
     }
-    if (m_initialized) {
-        NVSDK_NGX_D3D12_Shutdown1(m_device);
-        m_initialized = false;
+    if (m_sessionLeaseAcquired) {
+        ngx_session_detail::ProcessRegistry().Release(
+            m_sessionKey,
+            [&] { NVSDK_NGX_D3D12_Shutdown1(m_device); });
+        m_sessionLeaseAcquired = false;
     }
+    m_initialized = false;
+    m_sessionKey = nullptr;
     m_device = nullptr;
     m_available = false;
     m_evaluations = 0;
+    m_featureCreateGate.Reset();
 }

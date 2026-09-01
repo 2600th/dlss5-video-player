@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
+#include "NgxSession.h"
 
 // Direct NGX DLSS-SR host.
 // The player deliberately uses the raw NVSDK_NGX_D3D12_CreateFeature / EvaluateFeature_C
@@ -55,6 +56,7 @@ private:
                                 float jitterY);
 
     ID3D12Device* m_device = nullptr;
+    const void* m_sessionKey = nullptr;
     NVSDK_NGX_Parameter* m_params = nullptr;
     NVSDK_NGX_Handle* m_handle = nullptr;
     uint32_t m_renderW = 0, m_renderH = 0;
@@ -64,7 +66,9 @@ private:
     NVSDK_NGX_PerfQuality_Value m_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
     NVSDK_NGX_Result m_lastResult = NVSDK_NGX_Result_Fail;
     bool m_initialized = false;
+    bool m_sessionLeaseAcquired = false;
     bool m_available = false;
+    ngx_session_detail::FeatureCreateGate m_featureCreateGate;
     uint64_t m_evaluations = 0;
     bool m_lastEvaluationUsedC = true;
 };
