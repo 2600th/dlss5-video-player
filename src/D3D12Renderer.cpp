@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <limits>
 
 using Microsoft::WRL::ComPtr;
 
@@ -102,7 +103,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 }
 
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
-    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+4;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
     D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -242,6 +243,26 @@ bool D3D12Renderer::CreateVideoResources(){
     auto out=Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&out,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&m_dlssOutput)),"Create DLSS output"))return false;
     m_dlssOutput->SetName(L"DLSS_Output_Linear_FP16_UAV");
     srv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;m_device->CreateShaderResourceView(m_dlssOutput.Get(),&srv,SRVCPU(1));
+
+    auto cache=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,m_outputW,m_outputH,
+                     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&cache,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_cacheOutput)),
+        "Create cache output"))return false;
+    m_cacheOutput->SetName(L"Neural_Cache_Output_RGBA8_sRGB");
+    m_device->CreateRenderTargetView(m_cacheOutput.Get(),nullptr,RTV(FrameCount+3));
+    m_device->GetCopyableFootprints(&cache,0,1,0,&m_cacheFootprint,&m_cacheRows,
+                                    &m_cacheRowSize,&m_cacheReadbackBytes);
+    if(!m_cacheReadbackBytes||m_cacheRows!=m_outputH||m_cacheRowSize!=uint64_t{m_outputW}*4u)
+        return false;
+    auto readbackHeap=HeapProps(D3D12_HEAP_TYPE_READBACK);
+    D3D12_RESOURCE_DESC readback{};readback.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+    readback.Width=m_cacheReadbackBytes;readback.Height=1;readback.DepthOrArraySize=1;
+    readback.MipLevels=1;readback.SampleDesc={1,0};readback.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback)),
+        "Create cache readback"))return false;
+    m_cacheReadback->SetName(L"Neural_Cache_Readback_RGBA8");
     LOG("DLSS resource contract ready: Color=R16G16B16A16_FLOAT " << m_renderW << "x" << m_renderH
         << ", MV=R16G16_FLOAT " << m_renderW << "x" << m_renderH
         << ", Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV " << m_renderW << "x" << m_renderH
@@ -364,6 +385,87 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
     return SignalFrameSlot(slot);
+}
+
+bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,
+                                        const float*guideGridRGBA32F,size_t guideBytes,
+                                        uint32_t gridW,uint32_t gridH,
+                                        bool temporalReset,float frameTimeMs,
+                                        CapturedVideoFrame&capture){
+    capture.bgra.clear();capture.width=0;capture.height=0;
+    if(!RenderFrame(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,
+                    temporalReset,frameTimeMs))return false;
+    return CaptureEvaluatedFrame(capture);
+}
+
+bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
+    capture.bgra.clear();capture.width=0;capture.height=0;
+    if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
+    const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
+    if(tightBytes64>std::numeric_limits<size_t>::max())return false;
+    const size_t tightBytes=static_cast<size_t>(tightBytes64);
+#if defined(D3D12_RENDERER_TESTING)
+    if(m_testCacheCapture){
+        std::vector<uint8_t> bytes;
+        if(!m_testCacheCapture(bytes)||bytes.size()!=tightBytes)return false;
+        capture.bgra=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
+        return true;
+    }
+#endif
+    if(m_gpuUnusable||!m_cacheOutput||!m_cacheReadback||!m_dlssOutput||
+       !m_queue||!m_rootSig||!m_psoPresent)return false;
+    const uint32_t slot=m_frameSlot%FrameCount;
+    if(!WaitForFrameSlot(slot))return false;
+    if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
+    auto*cmd=m_cmds[slot].Get();
+    if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
+        return false;
+    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
+    D3D12_VIEWPORT viewport{0,0,float(m_outputW),float(m_outputH),0,1};
+    D3D12_RECT scissor{0,0,LONG(m_outputW),LONG(m_outputH)};
+    cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
+    auto target=RTV(FrameCount+3);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
+    const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(target,black,0,nullptr);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoPresent.Get());
+    cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(1));
+    const ColorSettings identity{};
+    float params[12]={0,0,0,0,identity.brightness,identity.contrast,
+        identity.saturation,identity.gamma,identity.temperature,identity.tint,0,0};
+    cmd->SetGraphicsRoot32BitConstants(1,12,params,0);cmd->DrawInstanced(3,1,0,0);
+    Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,
+            D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=m_cacheReadback.Get();
+    destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint=m_cacheFootprint;
+    D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=m_cacheOutput.Get();
+    source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+    Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,
+            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
+    ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
+    if(!SignalFrameSlot(slot)||!WaitGPUForContinuedUse())return false;
+
+    void*mapped=nullptr;
+    const D3D12_RANGE readRange{static_cast<SIZE_T>(m_cacheFootprint.Offset),
+        static_cast<SIZE_T>(m_cacheFootprint.Offset+m_cacheReadbackBytes)};
+    if(!HR(m_cacheReadback->Map(0,&readRange,&mapped),"Map cache readback"))return false;
+    std::vector<uint8_t> bgra(tightBytes);
+    const auto*base=static_cast<const uint8_t*>(mapped)+m_cacheFootprint.Offset;
+    for(uint32_t y=0;y<m_outputH;++y){
+        const auto*sourceRow=base+size_t(m_cacheFootprint.Footprint.RowPitch)*y;
+        auto*targetRow=bgra.data()+size_t(m_outputW)*4u*y;
+        for(uint32_t x=0;x<m_outputW;++x){
+            targetRow[x*4u+0]=sourceRow[x*4u+2];
+            targetRow[x*4u+1]=sourceRow[x*4u+1];
+            targetRow[x*4u+2]=sourceRow[x*4u+0];
+            targetRow[x*4u+3]=sourceRow[x*4u+3];
+        }
+    }
+    const D3D12_RANGE writtenRange{0,0};m_cacheReadback->Unmap(0,&writtenRange);
+    capture.bgra=std::move(bgra);capture.width=m_outputW;capture.height=m_outputH;
+    return true;
 }
 
 bool D3D12Renderer::PresentCurrent(){

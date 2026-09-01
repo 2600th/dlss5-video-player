@@ -5,6 +5,7 @@
 #include <dxgi1_6.h>
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
 
@@ -22,6 +23,12 @@ struct D3D12RendererDeleter {
 };
 using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
 D3D12RendererOwner MakeD3D12Renderer();
+
+struct CapturedVideoFrame {
+    std::vector<uint8_t> bgra;
+    uint32_t width{};
+    uint32_t height{};
+};
 
 class D3D12Renderer {
 public:
@@ -45,6 +52,11 @@ public:
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
                      bool temporalReset, float frameTimeMs);
+    bool RenderFrameForCache(const uint8_t* bgra, size_t bytes,
+                             const float* guideGridRGBA32F, size_t guideBytes,
+                             uint32_t gridW, uint32_t gridH,
+                             bool temporalReset, float frameTimeMs,
+                             CapturedVideoFrame& capture);
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -96,6 +108,7 @@ private:
     bool WaitForFrameSlot(uint32_t slot);
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
+    bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
@@ -107,7 +120,7 @@ private:
 
     HWND m_hwnd = nullptr;
     uint32_t m_sourceW=0,m_sourceH=0,m_outputW=0,m_outputH=0,m_renderW=0,m_renderH=0,m_gridW=0,m_gridH=0;
-    NVSDK_NGX_PerfQuality_Value m_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    NVSDK_NGX_PerfQuality_Value m_quality = DefaultNeuralCarrierQuality();
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
@@ -145,13 +158,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssOutput;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheOutput;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback;
 
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};
     uint32_t m_numRows=0,m_guideRows=0;
     uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0;
+    uint32_t m_cacheRows=0;
+    uint64_t m_cacheRowSize=0,m_cacheReadbackBytes=0;
 
     bool m_sourceInCopyDest = true;
     bool m_gridInCopyDest = true;
@@ -177,6 +195,7 @@ private:
     std::function<d3d12_renderer_detail::FenceWaitResult()> m_testWaitGPU;
     std::function<HRESULT(uint64_t)> m_testFrameSignal;
     std::function<HRESULT()> m_testDeviceRemovedReason;
+    std::function<bool(std::vector<uint8_t>&)> m_testCacheCapture;
     std::unique_ptr<D3D12RendererTestOwnedResource> m_testOwnedResource;
 #endif
 };

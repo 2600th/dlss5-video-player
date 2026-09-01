@@ -141,6 +141,17 @@ struct D3D12RendererTestAccess {
     static uint64_t FrameFence(const D3D12Renderer& renderer,uint32_t slot){return renderer.m_frameFence[slot];}
     static bool GPUUnusable(const D3D12Renderer& renderer){return renderer.m_gpuUnusable;}
     static d3d12_renderer_detail::FenceWaitResult LastFenceResult(const D3D12Renderer& renderer){return renderer.m_lastFenceWaitResult;}
+    static void ConfigureCacheCapture(D3D12Renderer& renderer,uint32_t width,uint32_t height,
+                                      bool neuralUsed,
+                                      std::function<bool(std::vector<uint8_t>&)> capture)
+    {
+        renderer.m_outputW=width;renderer.m_outputH=height;
+        renderer.m_lastDLSSUsed=neuralUsed;renderer.m_testCacheCapture=std::move(capture);
+    }
+    static bool CaptureEvaluatedFrame(D3D12Renderer& renderer,CapturedVideoFrame& frame)
+    {
+        return renderer.CaptureEvaluatedFrame(frame);
+    }
 };
 
 namespace {
@@ -1968,6 +1979,59 @@ void renderer_frame_signal_success_advances_tracking_once_test()
     CHECK_EQ(uint64_t{21},D3D12RendererTestAccess::FenceValue(*renderer));
     CHECK_EQ(uint64_t{21},D3D12RendererTestAccess::FrameFence(*renderer,0));
     CHECK(!D3D12RendererTestAccess::GPUUnusable(*renderer));
+}
+
+void renderer_cache_capture_requires_a_successful_neural_evaluation_test()
+{
+    auto renderer=MakeD3D12Renderer();int captures=0;
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,false,[&](std::vector<uint8_t>&){++captures;return true;});
+    CapturedVideoFrame frame;frame.bgra.assign(7,0x55);frame.width=9;frame.height=9;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(0,captures);CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);
+    CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_returns_exact_tight_bgra_geometry_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){
+            bytes={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};return true;
+        });
+    CapturedVideoFrame frame;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(uint32_t{2},frame.width);CHECK_EQ(uint32_t{2},frame.height);
+    CHECK_EQ(size_t{16},frame.bgra.size());CHECK_EQ(uint8_t{15},frame.bgra.back());
+
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(17,0);return true;});
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(8,0x44);return false;});
+    CapturedVideoFrame frame;frame.bgra.assign(16,0x22);frame.width=2;frame.height=2;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12Renderer::ColorSettings adjusted{};adjusted.brightness=2.0f;adjusted.contrast=3.0f;
+    adjusted.saturation=0.0f;adjusted.gamma=0.25f;adjusted.temperature=1.0f;adjusted.tint=-1.0f;
+    renderer->SetColorSettings(adjusted);
+    const std::vector<uint8_t> neuralBytes{10,20,30,255};
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,1,1,true,[&](std::vector<uint8_t>& bytes){bytes=neuralBytes;return true;});
+    CapturedVideoFrame frame;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(neuralBytes,frame.bgra);
 }
 
 void gpu_classification_table_test()
@@ -4622,6 +4686,10 @@ int wmain(int argc, wchar_t* argv[])
     renderer_frame_signal_failure_is_cached_without_advancing_tracking_test();
     renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test();
     renderer_frame_signal_success_advances_tracking_once_test();
+    renderer_cache_capture_requires_a_successful_neural_evaluation_test();
+    renderer_cache_capture_returns_exact_tight_bgra_geometry_test();
+    renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test();
+    renderer_cache_capture_does_not_apply_playback_color_adjustments_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
     neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
