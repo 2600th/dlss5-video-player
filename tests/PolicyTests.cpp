@@ -17,6 +17,7 @@
 #include "NgxSession.h"
 #include "D3D12Renderer.h"
 #include "ReleasePackagePolicy.h"
+#include "PlaybackTiming.h"
 #ifdef small
 #undef small
 #endif
@@ -720,6 +721,24 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     CHECK_EQ(PlayerDlssState::ScalerFallback, safeFallback.dlssState);
 }
 
+void playback_timeline_follows_the_presented_frame_test()
+{
+    CHECK_EQ(12.0, playback_timing::TimelinePosition(
+        false, 0.0, false, 0.0, 12.0, 12.08));
+    CHECK_EQ(12.0, playback_timing::PausePosition(12.0, 12.08));
+    CHECK_EQ(18.0, playback_timing::TimelinePosition(
+        true, 18.0, false, 0.0, 12.0, 12.08));
+    CHECK_EQ(24.0, playback_timing::TimelinePosition(
+        false, 0.0, true, 24.0, 12.0, 12.08));
+}
+
+void playback_lateness_is_bounded_to_one_and_a_half_frames_test()
+{
+    CHECK(std::abs(playback_timing::LateFrameThreshold(1.0 / 60.0) - 0.025) < 1e-9);
+    CHECK(std::abs(playback_timing::LateFrameThreshold(1.0 / 30.0) - 0.050) < 1e-9);
+    CHECK(std::abs(playback_timing::LateFrameThreshold(1.0 / 24.0) - 0.0625) < 1e-9);
+}
+
 void long_media_title_is_bounded_with_a_real_ellipsis_test()
 {
     const std::wstring longTitle(240, L'X');
@@ -1048,7 +1067,7 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
         if (selected) CHECK_EQ(command, app_menu::CommandForYouTubeQuality(*selected));
     }
     for (const auto& entry : entries) {
-        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_AUTO,
+        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_1080,
                  (entry.state & MFS_CHECKED) != 0);
     }
 
@@ -4367,6 +4386,8 @@ int wmain(int argc, wchar_t* argv[])
     idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test();
     dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test();
     player_status_formats_exact_runtime_and_playback_states_test();
+    playback_timeline_follows_the_presented_frame_test();
+    playback_lateness_is_bounded_to_one_and_a_half_frames_test();
     long_media_title_is_bounded_with_a_real_ellipsis_test();
     recovery_copy_and_rehook_confirmation_are_actionable_test();
     unchanged_hover_action_has_no_dirty_rectangles_test();
