@@ -20,8 +20,9 @@ jobs:
         run: |
           $version = (Get-Content -Raw VERSION).Trim()
           $expectedTag = "v$version"
-          if ('${{ github.ref_name }}' -cne $expectedTag) {
-            throw "Release tag '${{ github.ref_name }}' does not match VERSION '$version' (expected '$expectedTag')."
+          $actualTag = $env:GITHUB_REF_NAME
+          if ($actualTag -cne $expectedTag) {
+            throw "Release tag '$actualTag' does not match VERSION '$version' (expected '$expectedTag')."
           }
 
       - name: Clone NVIDIA DLSS SDK
