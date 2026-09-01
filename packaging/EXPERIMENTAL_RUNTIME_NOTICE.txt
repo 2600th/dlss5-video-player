@@ -1,0 +1,17 @@
+EXPERIMENTAL DLSS NEURAL-RENDERING RUNTIME
+
+This package includes a modified NVIDIA neural-rendering DLL. Its embedded
+Authenticode signature does not validate (HashMismatch). The ReShade proxy and
+RenoDX add-on are unsigned. These facts are separate from malware detection.
+
+The default configuration enables the RenoDX add-on so RTX 40 and RTX 50 users
+can try the experimental path. It was tested locally only on an RTX 4080. RTX 50
+is an intended best-effort target and was not hardware-tested here.
+
+If the experimental path misbehaves, launch DLSSVideoPlayer.exe with
+--safe-mode from Advanced settings. Safe mode disables the experimental add-on
+without claiming that normal mode successfully evaluated a neural workload.
+
+No NVIDIA, ReShade, RenoDX, or Streamline endorsement is claimed. Redistribution
+permission for the supplied modified/runtime binary set is unresolved; review
+the upstream terms and THIRD_PARTY.md before sharing this package.

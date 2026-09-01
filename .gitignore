@@ -12,6 +12,7 @@
 !/external/youtube/
 /external/youtube/*
 !/external/youtube/README.md
+/external/runtime/
 /streamline/
 /Streamline/
 
@@ -28,6 +29,7 @@ ReShadePreset.ini
 DLSSVideoPlayer.ini
 DLSSVideoPlayer.log
 ReShade.log
+/dist/
 
 # Local archives / generated checksums
 *.zip

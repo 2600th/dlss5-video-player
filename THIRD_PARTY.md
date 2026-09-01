@@ -6,6 +6,16 @@ This repository contains project source code under the MIT License, but it inter
 
 The one-click build clones the official NVIDIA DLSS repository into `external/DLSS`. NVIDIA files are not relicensed by this project. Review NVIDIA's license in that checkout before redistributing NVIDIA binaries.
 
+The experimental package uses the exact NVIDIA-signed DLSS SR 310.8 runtime
+listed in `packaging/runtime-lock.json`, paired with a user-supplied modified
+DLSS neural-rendering DLL whose Authenticode status is `HashMismatch`.
+
+## NVIDIA Streamline
+
+The experimental package may include the exact NVIDIA-signed Streamline 2.13
+runtime files pinned in `packaging/runtime-lock.json`. NVIDIA files remain under
+NVIDIA's applicable terms and are not relicensed by this project.
+
 ## FFmpeg
 
 The one-click build reuses an installed FFmpeg or downloads a Windows FFmpeg build for local use. FFmpeg and distributed builds are governed by their own licenses/configuration.
@@ -13,6 +23,14 @@ The one-click build reuses an installed FFmpeg or downloads a Windows FFmpeg bui
 ## ReShade
 
 ReShade is optional for native DLSS SR but required for the experimental RenoDX DLSS 5 workflow described in the documentation. ReShade is a separate project.
+
+## RenoDX / experimental DLSS 5 runtime
+
+The package configuration enables the separately supplied
+`renodx-dlss5.addon64` by default. The add-on and matching runtime files are
+experimental, not committed to Git, and pinned by exact hash. Redistribution
+permission for the supplied combined binary set remains unresolved; consult the
+upstream projects and `EXPERIMENTAL_RUNTIME_NOTICE.txt` before sharing it.
 
 ## Tabler Icons
 
@@ -27,7 +45,3 @@ Any package that redistributes this exact executable must include a complete cop
 ## Deno
 
 Deno 2.9.5 supplies the JavaScript runtime used by yt-dlp's EJS support. Deno is distributed under the MIT License. The Windows executable is extracted from its pinned official archive and is not committed to this repository.
-
-## RenoDX / experimental DLSS 5 runtime
-
-`renodx-dlss5.addon64`, `nvngx_dlssnr.dll` and related experimental runtime files are not included in this repository. Users obtain and use them separately under the terms applicable to those files.
