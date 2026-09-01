@@ -10,6 +10,8 @@
 #include "YouTubeResolver.h"
 #include "CompletionRegistry.h"
 #include "VideoDecoder.h"
+#include "AudioPlayer.h"
+#include "NetworkMediaTransaction.h"
 #ifdef small
 #undef small
 #endif
@@ -57,6 +59,21 @@ struct VideoDecoderTestAccess {
         settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;
         return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
     }
+};
+
+struct AudioPlayerTestAccess {
+    static std::unique_ptr<AudioPlayer> Create(
+        const std::filesystem::path& helperDirectory,
+        bool failTerminateJob = false,
+        bool forceProcessWaitTimeout = false)
+    {
+        AudioPlayer::Settings settings;
+        settings.helperDirectory=helperDirectory.wstring();settings.disableWaveOut=true;
+        settings.failTerminateJob=failTerminateJob;settings.forceProcessWaitTimeout=forceProcessWaitTimeout;
+        return std::unique_ptr<AudioPlayer>(new AudioPlayer(std::move(settings)));
+    }
+    static double SeekBase(const AudioPlayer& player){return player.m_seekBaseSec;}
+    static uint64_t SubmittedBuffers(const AudioPlayer& player){return player.m_submittedBuffers.load();}
 };
 
 namespace {
@@ -1140,6 +1157,130 @@ void youtube_completion_registry_post_failure_and_concurrency_are_owned_test()
     std::jthread concurrentClearer([&]{while(registering.load()){registry.Clear();Sleep(0);}registry.Clear();});
     std::jthread concurrentTaker([&]{uint64_t token=1;while(registering.load()){registry.Take(token++);Sleep(0);}});
     concurrentProducer.join();concurrentClearer.join();concurrentTaker.join();registry.Clear();CHECK_EQ(size_t{0},registry.Size());
+}
+
+NetworkRenderConfiguration render_configuration(int quality,uint32_t decodeWidth=1280,uint32_t decodeHeight=720,uint32_t inputWidth=1280,uint32_t inputHeight=720)
+{
+    NetworkRenderConfiguration config{};config.sourceWidth=1920;config.sourceHeight=1080;config.decodeWidth=decodeWidth;config.decodeHeight=decodeHeight;config.inputWidth=inputWidth;config.inputHeight=inputHeight;config.outputWidth=1920;config.outputHeight=1080;config.guideWidth=320;config.guideHeight=180;config.quality=quality;return config;
+}
+
+void youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test()
+{
+    const auto active=render_configuration(1);
+    CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::InitialOpen,nullptr,active));
+    CHECK_EQ(NetworkRendererPlan::ReuseActive,SelectNetworkRendererPlan(NetworkCommitKind::Seek,&active,active));
+    auto geometry=active;geometry.decodeWidth=960;geometry.inputWidth=960;
+    CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::Seek,&active,geometry));
+    // MaxPerf, Balanced, MaxQuality, UltraPerformance, and DLAA are every
+    // explicit quality route exposed by the native menu.
+    uint32_t decodeWidth=832;
+    for(const int quality:{0,1,2,3,5}){
+        const auto prepared=render_configuration(quality,decodeWidth,468,decodeWidth,468);
+        CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::QualityReload,&active,prepared));
+        CHECK(prepared.decodeWidth==decodeWidth&&prepared.decodeHeight==468);
+        CHECK(prepared.inputWidth==decodeWidth&&prepared.inputHeight==468);
+        CHECK(prepared.outputWidth==1920&&prepared.outputHeight==1080);
+        CHECK(NetworkPreparedGeometryIsValid(prepared,decodeWidth,468,
+              static_cast<size_t>(decodeWidth)*468*4));
+        CHECK(!NetworkPreparedGeometryIsValid(prepared,decodeWidth+2,468,
+               static_cast<size_t>(decodeWidth)*468*4));
+        CHECK(!NetworkPreparedGeometryIsValid(prepared,decodeWidth,468,
+               static_cast<size_t>(decodeWidth)*468*4-1));
+        decodeWidth+=64;
+    }
+}
+
+void youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test()
+{
+    struct Candidate{int id;};
+    std::vector<int> order;int activeRenderer=10,activeMedia=20,activeAudio=30;
+    const bool failed=ExecuteNetworkCandidateTransaction<Candidate>(
+        [&]{order.push_back(1);return std::make_unique<Candidate>(Candidate{11});},
+        [&](Candidate&){order.push_back(2);return false;},
+        [&](std::unique_ptr<Candidate>){order.push_back(3);activeRenderer=11;activeMedia=21;activeAudio=31;});
+    CHECK(!failed);CHECK_EQ(std::vector<int>({1,2}),order);CHECK_EQ(10,activeRenderer);CHECK_EQ(20,activeMedia);CHECK_EQ(30,activeAudio);
+    order.clear();
+    const bool committed=ExecuteNetworkCandidateTransaction<Candidate>(
+        [&]{order.push_back(1);return std::make_unique<Candidate>(Candidate{12});},
+        [&](Candidate&){order.push_back(2);return true;},
+        [&](std::unique_ptr<Candidate> candidate){order.push_back(3);activeAudio=0;order.push_back(4);activeMedia=22;activeRenderer=candidate->id;order.push_back(5);activeAudio=32;});
+    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3,4,5}),order);CHECK_EQ(12,activeRenderer);CHECK_EQ(22,activeMedia);CHECK_EQ(32,activeAudio);
+}
+
+void youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test()
+{
+    for(const NetworkReadPosition position:{NetworkReadPosition::BeforeRender,NetworkReadPosition::AfterRender}){
+        NetworkReadState state;
+        auto wait=state.Resolve(VideoReadResult::NotReady,position);CHECK_EQ(NetworkReadAction::Wait,wait.action);CHECK(!wait.notify);
+        auto ready=state.Resolve(VideoReadResult::FrameReady,position);CHECK_EQ(NetworkReadAction::UseFrame,ready.action);CHECK(!ready.notify);
+        auto stalled=state.Resolve(VideoReadResult::Stalled,position);CHECK_EQ(NetworkReadAction::StopError,stalled.action);CHECK(stalled.notify);CHECK_EQ(std::wstring_view(L"youtube.error.media_stalled"),stalled.messageKey);
+        auto repeated=state.Resolve(VideoReadResult::Stalled,position);CHECK_EQ(NetworkReadAction::StopError,repeated.action);CHECK(!repeated.notify);
+        state.Reset();auto error=state.Resolve(VideoReadResult::Error,position);CHECK_EQ(NetworkReadAction::StopError,error.action);CHECK(error.notify);CHECK_EQ(std::wstring_view(L"youtube.error.ffmpeg"),error.messageKey);
+        state.Reset();auto ended=state.Resolve(VideoReadResult::EndOfStream,position);CHECK_EQ(NetworkReadAction::StopClean,ended.action);CHECK(!ended.notify);
+        state.Reset();auto cancelled=state.Resolve(VideoReadResult::Cancelled,position);CHECK_EQ(NetworkReadAction::StopCancelled,cancelled.action);CHECK(!cancelled.notify);
+    }
+}
+
+void youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test()
+{
+    struct Prepared {
+        uint64_t generation{};
+        NetworkRenderConfiguration configuration;
+        bool preparationOk{true};
+        int decoder{};
+        int audio{};
+    };
+
+    YouTubeResolutionLifecycle lifecycle;
+    CompletionRegistry<Prepared> registry;
+    const auto activeConfiguration=render_configuration(2);
+    int activeDecoder=10,activeRenderer=20,activeAudio=30;
+
+    const uint64_t firstGeneration=lifecycle.Begin();
+    const uint64_t firstToken=registry.Register(std::make_unique<Prepared>(Prepared{
+        firstGeneration,activeConfiguration,true,11,31}));
+    const uint64_t secondGeneration=lifecycle.Begin();
+    const uint64_t secondToken=registry.Register(std::make_unique<Prepared>(Prepared{
+        secondGeneration,activeConfiguration,true,12,32}));
+    const uint64_t thirdGeneration=lifecycle.Begin();
+    const auto qualityConfiguration=render_configuration(3,960,540,960,540);
+    const uint64_t thirdToken=registry.Register(std::make_unique<Prepared>(Prepared{
+        thirdGeneration,qualityConfiguration,false,13,33}));
+
+    auto first=registry.Take(firstToken);CHECK(first!=nullptr);CHECK(!lifecycle.Complete(first->generation));
+    auto second=registry.Take(secondToken);CHECK(second!=nullptr);CHECK(!lifecycle.Complete(second->generation));
+    auto third=registry.Take(thirdToken);CHECK(third!=nullptr);CHECK(lifecycle.Complete(third->generation));
+    CHECK_EQ(NetworkRendererPlan::CreateCandidate,
+             SelectNetworkRendererPlan(NetworkCommitKind::QualityReload,&activeConfiguration,
+                                       third->configuration));
+    if(!third->preparationOk){
+        CHECK_EQ(10,activeDecoder);CHECK_EQ(20,activeRenderer);CHECK_EQ(30,activeAudio);
+    }
+
+    const uint64_t fourthGeneration=lifecycle.Begin();
+    const uint64_t fourthToken=registry.Register(std::make_unique<Prepared>(Prepared{
+        fourthGeneration,qualityConfiguration,true,14,34}));
+    auto fourth=registry.Take(fourthToken);CHECK(fourth!=nullptr);CHECK(lifecycle.Complete(fourth->generation));
+    std::vector<int> handoff;
+    const bool committed=ExecuteNetworkCandidateTransaction<int>(
+        [&]{return std::make_unique<int>(24);},
+        [&](int& renderer){return renderer==24&&NetworkPreparedGeometryIsValid(
+            fourth->configuration,960,540,static_cast<size_t>(960)*540*4);},
+        [&](std::unique_ptr<int> renderer){
+            CommitPreparedAudioHandoff(
+                [&]{handoff.push_back(1);activeAudio=0;},
+                [&]{handoff.push_back(2);activeDecoder=fourth->decoder;activeRenderer=*renderer;activeAudio=fourth->audio;},
+                [&]{handoff.push_back(3);});
+        });
+    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3}),handoff);
+    CHECK_EQ(14,activeDecoder);CHECK_EQ(24,activeRenderer);CHECK_EQ(34,activeAudio);
+    CHECK(!registry.Take(fourthToken));
+
+    const uint64_t cancelledGeneration=lifecycle.Begin();
+    const uint64_t cancelledToken=registry.Register(std::make_unique<Prepared>(Prepared{
+        cancelledGeneration,activeConfiguration,true,15,35}));
+    lifecycle.Invalidate();registry.Clear();
+    CHECK(!registry.Take(cancelledToken));CHECK(!lifecycle.Complete(cancelledGeneration));
 }
 
 std::filesystem::path executable_directory()
@@ -2308,6 +2449,30 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
     }
 }
 
+void youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test()
+{
+    MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    for(int cycle=0;cycle<8;++cycle){
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,cycle%2==0,cycle%3==0);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",7.5,AudioStartState::Paused));CHECK(audio->Paused());CHECK_EQ(7.5,AudioPlayerTestAccess::SeekBase(*audio));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*audio));
+        const auto started=std::chrono::steady_clock::now();if(cycle%2==0)audio->Stop();else audio.reset();CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+    }
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
+}
+
+void youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test()
+{
+    MediaFixture fixture;auto prepared=AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(prepared->Start(L"https://media.invalid/audiotrickle",12.25,AudioStartState::Paused));CHECK(prepared->Paused());CHECK_EQ(12.25,AudioPlayerTestAccess::SeekBase(*prepared));Sleep(60);CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*prepared));
+    bool oldAudible=true,newAudible=false;std::vector<int> order;
+    CommitPreparedAudioHandoff([&]{CHECK(oldAudible);CHECK(!newAudible);oldAudible=false;order.push_back(1);},[&]{CHECK(!oldAudible);CHECK(!newAudible);order.push_back(2);},[&]{prepared->Pause(false);newAudible=true;order.push_back(3);});
+    CHECK_EQ(std::vector<int>({1,2,3}),order);CHECK(!prepared->Paused());
+    prepared->Stop();
+
+    auto cancelled=AudioPlayerTestAccess::Create(fixture.directory);CHECK(cancelled->Start(L"https://media.invalid/audiohold",4.0,AudioStartState::Paused));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*cancelled));cancelled.reset();
+}
+
 bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds limit)
 {
     const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -2911,9 +3076,15 @@ int wmain(int argc, wchar_t* argv[])
     youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test();
     youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test();
     youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
+    youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test();
+    youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test();
+    youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test();
+    youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
+    youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
+    youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();

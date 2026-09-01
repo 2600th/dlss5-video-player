@@ -32,6 +32,7 @@ public:
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
+    bool DLSSRequested() const { return m_dlssEnabled; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
