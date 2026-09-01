@@ -1092,20 +1092,13 @@ private:
         SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,visual.text);
         const wchar_t glyph=GlyphForIcon(icon);const bool showIcon=ResolveButtonPresentation(m_iconFont!=nullptr)==ButtonPresentation::IconAndLabel&&glyph!=L'\0';
-        const bool stacked=compact&&showIcon;
-        if(showIcon){
-            const HGDIOBJ oldFont=SelectObject(dc,m_iconFont);
-            RECT iconRect=r;
-            if(stacked){iconRect.bottom=iconRect.top+(iconRect.bottom-iconRect.top)*3/5;iconRect.top+=Dip(1);}
-            else{iconRect.right=iconRect.left+Dip(18);iconRect.left+=Dip(1);}
-            DrawTextW(dc,&glyph,1,&iconRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
-            SelectObject(dc,oldFont);
-        }
-        const HGDIOBJ oldFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
-        RECT textRect=r;
-        if(stacked){textRect.top=textRect.top+(textRect.bottom-textRect.top)/2;textRect.left+=Dip(2);textRect.right-=Dip(2);}
-        else if(showIcon){textRect.left+=Dip(18);textRect.right-=Dip(1);}
-        else{InflateRect(&textRect,-Dip(3),0);}
+        const bool stacked=compact&&showIcon;SIZE iconSize{},textSize{};
+        if(showIcon){const HGDIOBJ measured=SelectObject(dc,m_iconFont);GetTextExtentPoint32W(dc,&glyph,1,&iconSize);SelectObject(dc,measured);}
+        const HFONT textFont=m_fontSmall?m_fontSmall:m_font;const HGDIOBJ measuredText=SelectObject(dc,textFont);
+        GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);SelectObject(dc,measuredText);
+        const ButtonContentLayout content=LayoutButtonContent(r,iconSize,textSize,stacked,ActiveWindowDpi(m_hwnd));
+        if(showIcon){const HGDIOBJ oldFont=SelectObject(dc,m_iconFont);RECT iconRect=content.icon;DrawTextW(dc,&glyph,1,&iconRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,oldFont);}
+        const HGDIOBJ oldFont=SelectObject(dc,textFont);RECT textRect=content.text;
         DrawTextW(dc,label.c_str(),-1,&textRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,oldFont);
         if(visual.drawFocus&&action!=ToolbarAction::None){RECT focusRect=r;InflateRect(&focusRect,-Dip(3),-Dip(3));DrawFocusRect(dc,&focusRect);}

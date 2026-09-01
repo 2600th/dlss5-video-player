@@ -1024,6 +1024,69 @@ void failed_icon_font_uses_label_only_presentation_test()
     CHECK(ResolveButtonPresentation(true) == ButtonPresentation::IconAndLabel);
 }
 
+void button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test()
+{
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const int width=MulDiv(180,int(dpi),96),height=MulDiv(40,int(dpi),96);
+        const SIZE icon{MulDiv(17,int(dpi),96),MulDiv(17,int(dpi),96)};
+        const SIZE text{MulDiv(64,int(dpi),96),MulDiv(15,int(dpi),96)};
+        const RECT outer{0,0,width,height};
+        const auto layout=LayoutButtonContent(outer,icon,text,false,dpi);
+        CHECK(outer.bottom-outer.top>=MulDiv(36,int(dpi),96));
+        CHECK(layout.icon.left-outer.left>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(outer.right-layout.text.right>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(layout.icon.top-outer.top>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(outer.bottom-layout.icon.bottom>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(layout.text.top-outer.top>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(outer.bottom-layout.text.bottom>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(layout.text.left-layout.icon.right>=MulDiv(kButtonIconLabelGapDip,int(dpi),96));
+    }
+}
+
+void button_content_layout_centers_combined_icon_and_label_without_outline_contact_test()
+{
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const RECT outer{0,0,MulDiv(220,int(dpi),96),MulDiv(44,int(dpi),96)};
+        const auto layout=LayoutButtonContent(
+            outer,SIZE{MulDiv(18,int(dpi),96),MulDiv(18,int(dpi),96)},
+            SIZE{MulDiv(72,int(dpi),96),MulDiv(16,int(dpi),96)},false,dpi);
+        const int leftSpace=layout.content.left-outer.left;
+        const int rightSpace=outer.right-layout.content.right;
+        CHECK(std::abs(leftSpace-rightSpace)<=1);
+        CHECK(leftSpace>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(layout.icon.right<=layout.text.left);
+    }
+}
+
+void prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test()
+{
+    const auto inside=[](const RECT& inner,const RECT& outer){
+        return inner.left>=outer.left&&inner.top>=outer.top&&inner.right<=outer.right&&
+               inner.bottom<=outer.bottom&&inner.right>=inner.left&&inner.bottom>=inner.top;
+    };
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const int width=MulDiv(640,int(dpi),96),height=MulDiv(420,int(dpi),96);
+        const RECT client{0,0,width,height};const auto layout=LayoutPreRenderSurface(width,height,dpi);
+        for(const RECT rect:{layout.title,layout.phase,layout.resolution,layout.frameCount,
+                             layout.elapsedEta,layout.size,layout.progressTrack,
+                             layout.progressFill,layout.cancelButton})CHECK(inside(rect,client));
+        CHECK(layout.cancelButton.right-layout.cancelButton.left<=MulDiv(120,int(dpi),96));
+        CHECK(layout.cancelButton.bottom-layout.cancelButton.top<=MulDiv(40,int(dpi),96));
+        CHECK(layout.progressFill.left==layout.progressTrack.left);
+    }
+}
+
+void advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test()
+{
+    Localizer localizer;const HMENU menu=app_menu::CreateMenuBar(localizer,true);CHECK(menu!=nullptr);
+    std::vector<MenuEntry> entries;if(menu)collect_menu_entries(menu,entries);
+    CHECK(has_menu_entry(entries,L"Clear Neural Cache",app_menu::IDM_CLEAR_NEURAL_CACHE));
+    CHECK(!has_menu_text(entries,L"720p"));CHECK(!has_menu_text(entries,L"480p"));
+    CHECK_EQ(std::wstring(L"Acquiring"),localizer.Get(L"neural.phase.acquiring"));
+    CHECK_EQ(std::wstring(L"Neural rendered"),localizer.Get(L"neural.view.rendered"));
+    if(menu)DestroyMenu(menu);
+}
+
 void debug_view_popup_contains_all_existing_views_and_selection_test()
 {
     const HMENU menu = app_menu::CreateDebugViewMenu(app_menu::IDM_VIEW_DEPTH);
@@ -4635,6 +4698,10 @@ int wmain(int argc, wchar_t* argv[])
     native_button_palette_has_distinct_interaction_states_test();
     active_button_small_text_meets_wcag_contrast_test();
     failed_icon_font_uses_label_only_presentation_test();
+    button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test();
+    button_content_layout_centers_combined_icon_and_label_without_outline_contact_test();
+    prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test();
+    advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();

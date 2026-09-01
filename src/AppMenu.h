@@ -43,6 +43,7 @@ inline constexpr UINT IDM_YOUTUBE_QUALITY_2160 = 411;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_1440 = 412;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_1080 = 413;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
+inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 
 enum class PlayerCommandRoute {
     KeyDown,

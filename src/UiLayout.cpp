@@ -78,6 +78,95 @@ std::array<const ToolbarDefinition*, kRequiredToolbarItemCount> RequiredToolbarD
 
 } // namespace
 
+ButtonContentLayout LayoutButtonContent(RECT outer,SIZE icon,SIZE text,bool stacked,UINT dpi)
+{
+    const int horizontal=std::max(0,DipToPixels(kButtonHorizontalInsetDip,dpi));
+    const int vertical=std::max(0,DipToPixels(kButtonVerticalInsetDip,dpi));
+    const int gap=std::max(0,DipToPixels(kButtonIconLabelGapDip,dpi));
+    RECT inner{std::min<LONG>(outer.right,outer.left+horizontal),
+               std::min<LONG>(outer.bottom,outer.top+vertical),
+               std::max<LONG>(outer.left,outer.right-horizontal),
+               std::max<LONG>(outer.top,outer.bottom-vertical)};
+    const int availableWidth=std::max<LONG>(0,inner.right-inner.left);
+    const int availableHeight=std::max<LONG>(0,inner.bottom-inner.top);
+    const bool hasIcon=icon.cx>0&&icon.cy>0;
+    const bool hasText=text.cx>0&&text.cy>0;
+    ButtonContentLayout layout{};layout.stacked=stacked&&hasIcon&&hasText;
+    const auto centeredRect=[](RECT bounds,int width,int height){
+        width=std::clamp(width,0,int(bounds.right-bounds.left));
+        height=std::clamp(height,0,int(bounds.bottom-bounds.top));
+        const int left=bounds.left+(int(bounds.right-bounds.left)-width)/2;
+        const int top=bounds.top+(int(bounds.bottom-bounds.top)-height)/2;
+        return RECT{left,top,left+width,top+height};
+    };
+    if(layout.stacked){
+        const int iconHeight=std::min<int>(icon.cy,availableHeight);
+        const int textHeight=std::min<int>(text.cy,std::max(0,availableHeight-iconHeight-gap));
+        const int totalHeight=iconHeight+(iconHeight&&textHeight?gap:0)+textHeight;
+        const int top=inner.top+(availableHeight-totalHeight)/2;
+        const int iconWidth=std::min<int>(icon.cx,availableWidth);
+        const int textWidth=std::min<int>(text.cx,availableWidth);
+        layout.icon=RECT{inner.left+(availableWidth-iconWidth)/2,top,
+                         inner.left+(availableWidth+iconWidth)/2,top+iconHeight};
+        const int textTop=layout.icon.bottom+(iconHeight&&textHeight?gap:0);
+        layout.text=RECT{inner.left+(availableWidth-textWidth)/2,textTop,
+                         inner.left+(availableWidth+textWidth)/2,textTop+textHeight};
+    }else if(hasIcon&&hasText){
+        const int iconWidth=std::min<int>(icon.cx,availableWidth);
+        const int actualGap=std::min(gap,std::max(0,availableWidth-iconWidth));
+        const int textWidth=std::min<int>(text.cx,std::max(0,availableWidth-iconWidth-actualGap));
+        const int totalWidth=iconWidth+actualGap+textWidth;
+        const int left=inner.left+(availableWidth-totalWidth)/2;
+        layout.icon=RECT{left,inner.top+(availableHeight-std::min<int>(icon.cy,availableHeight))/2,
+                         left+iconWidth,inner.top+(availableHeight+std::min<int>(icon.cy,availableHeight))/2};
+        layout.text=RECT{layout.icon.right+actualGap,
+                         inner.top+(availableHeight-std::min<int>(text.cy,availableHeight))/2,
+                         layout.icon.right+actualGap+textWidth,
+                         inner.top+(availableHeight+std::min<int>(text.cy,availableHeight))/2};
+    }else if(hasIcon){
+        layout.icon=centeredRect(inner,icon.cx,icon.cy);layout.text=layout.icon;
+    }else{
+        layout.text=centeredRect(inner,std::min<int>(text.cx,availableWidth),text.cy);
+        layout.icon=layout.text;
+    }
+    layout.content=RECT{std::min(layout.icon.left,layout.text.left),
+                        std::min(layout.icon.top,layout.text.top),
+                        std::max(layout.icon.right,layout.text.right),
+                        std::max(layout.icon.bottom,layout.text.bottom)};
+    return layout;
+}
+
+PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth,int clientHeight,UINT dpi)
+{
+    const int width=std::max(1,clientWidth),height=std::max(1,clientHeight);
+    const int gutter=std::min({DipToPixels(24,dpi),width/8,height/10});
+    const int left=std::clamp(gutter,0,width),right=std::clamp(width-gutter,left,width);
+    const int line=std::max(1,std::min(DipToPixels(24,dpi),height/10));
+    const int gap=std::max(1,std::min(DipToPixels(8,dpi),height/30));
+    const int buttonWidth=std::min(DipToPixels(120,dpi),std::max(0,right-left));
+    const int buttonHeight=std::min(DipToPixels(40,dpi),std::max(1,height-2*gutter));
+    const int buttonTop=std::max(gutter,height-gutter-buttonHeight);
+    const int progressHeight=std::max(1,std::min(DipToPixels(10,dpi),height/24));
+    const int progressBottom=std::max(gutter,buttonTop-gap);
+    const int progressTop=std::max(gutter,progressBottom-progressHeight);
+    const int textBottom=std::max(gutter,progressTop-gap);
+    const int textBlockHeight=std::min(textBottom-gutter,line*6+gap*5);
+    const int textTop=std::max(gutter,textBottom-textBlockHeight);
+    auto row=[&](int index){
+        const int top=std::min(textBottom,textTop+index*(line+gap));
+        return RECT{left,top,right,std::min(textBottom,top+line)};
+    };
+    PreRenderSurfaceLayout layout{};
+    layout.title=row(0);layout.phase=row(1);layout.resolution=row(2);
+    layout.frameCount=row(3);layout.elapsedEta=row(4);layout.size=row(5);
+    layout.progressTrack=RECT{left,progressTop,right,progressBottom};
+    layout.progressFill=layout.progressTrack;layout.progressFill.right=layout.progressFill.left;
+    const int buttonLeft=left+(right-left-buttonWidth)/2;
+    layout.cancelButton=RECT{buttonLeft,buttonTop,buttonLeft+buttonWidth,
+                             std::min(height-gutter,buttonTop+buttonHeight)};
+    return layout;
+}
+
 IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi)
 {
     const int width = std::max(1, clientWidth);

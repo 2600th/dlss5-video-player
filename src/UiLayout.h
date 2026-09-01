@@ -106,6 +106,29 @@ struct PaintBufferLayout {
     POINT viewportOrigin{};
 };
 
+inline constexpr int kButtonHorizontalInsetDip = 10;
+inline constexpr int kButtonVerticalInsetDip = 6;
+inline constexpr int kButtonIconLabelGapDip = 7;
+
+struct ButtonContentLayout {
+    RECT content{};
+    RECT icon{};
+    RECT text{};
+    bool stacked{};
+};
+
+struct PreRenderSurfaceLayout {
+    RECT title{};
+    RECT phase{};
+    RECT resolution{};
+    RECT frameCount{};
+    RECT elapsedEta{};
+    RECT size{};
+    RECT progressTrack{};
+    RECT progressFill{};
+    RECT cancelButton{};
+};
+
 inline constexpr int kToolbarSpacingDip = 4;
 inline constexpr int kToolbarMinHitHeightDip = 36;
 inline constexpr int kToolbarCornerRadiusDip = 8;
@@ -138,6 +161,9 @@ ToolbarAction ResolveToolbarHoverForCursor(std::span<const ToolbarItem> items,
                                            std::optional<POINT> clientPoint,
                                            ToolbarAvailability availability);
 std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds);
+ButtonContentLayout LayoutButtonContent(RECT outer, SIZE icon, SIZE text,
+                                        bool stacked, UINT dpi);
+PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth, int clientHeight, UINT dpi);
 std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
 std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
                                     std::wstring_view mediaTitle,
