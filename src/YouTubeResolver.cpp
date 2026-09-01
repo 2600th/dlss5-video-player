@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -96,9 +97,104 @@ struct VerifiedHelpers {
     UniqueHandle directory;
     UniqueHandle ytDlp;
     UniqueHandle deno;
+    UniqueHandle cacheDirectory;
     std::filesystem::path directoryPath;
     std::filesystem::path ytDlpPath;
+    std::filesystem::path cacheDirectoryPath;
 };
+
+bool create_verified_package_cache(const std::filesystem::path& packageDirectory,
+                                   UniqueHandle& heldHandle,
+                                   std::filesystem::path& canonicalPath)
+{
+    if (!packageDirectory.is_absolute()) return false;
+    const std::filesystem::path requestedPath = packageDirectory / L"youtube-helper-cache";
+    if (!CreateDirectoryW(requestedPath.c_str(), nullptr)) {
+        const DWORD error = GetLastError();
+        if (error != ERROR_ALREADY_EXISTS) return false;
+    }
+
+    UniqueHandle candidate(CreateFileW(
+        requestedPath.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!candidate || GetFileType(candidate.get()) != FILE_TYPE_DISK) return false;
+
+    FILE_ATTRIBUTE_TAG_INFO tagInfo{};
+    if (!GetFileInformationByHandleEx(candidate.get(), FileAttributeTagInfo,
+                                      &tagInfo, sizeof(tagInfo)) ||
+        (tagInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (tagInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        tagInfo.ReparseTag != 0) {
+        return false;
+    }
+
+    canonicalPath = final_normalized_path(candidate.get());
+    if (canonicalPath.empty() ||
+        !same_path_case_insensitive(canonicalPath.parent_path(), packageDirectory) ||
+        !same_path_case_insensitive(canonicalPath.filename(), L"youtube-helper-cache")) {
+        return false;
+    }
+    heldHandle = std::move(candidate);
+    return true;
+}
+
+bool environment_entry_is_named(std::wstring_view entry, std::wstring_view name)
+{
+    const size_t equals = entry.find(L'=', entry.starts_with(L'=') ? 1 : 0);
+    if (equals == std::wstring_view::npos || equals != name.size()) return false;
+    return CompareStringOrdinal(entry.data(), static_cast<int>(equals), name.data(),
+                                static_cast<int>(name.size()), TRUE) == CSTR_EQUAL;
+}
+
+std::optional<std::vector<wchar_t>> child_environment_with_package_cache(
+    const std::filesystem::path& cacheDirectory)
+{
+    if (!cacheDirectory.is_absolute() || cacheDirectory.wstring().find(L'\0') != std::wstring::npos) {
+        return std::nullopt;
+    }
+    LPWCH rawEnvironment = GetEnvironmentStringsW();
+    if (!rawEnvironment) return std::nullopt;
+    const auto freeEnvironment = [](LPWCH value) {
+        if (value) FreeEnvironmentStringsW(value);
+    };
+    const std::unique_ptr<wchar_t, decltype(freeEnvironment)> environment(
+        rawEnvironment, freeEnvironment);
+
+    std::vector<std::wstring> entries;
+    for (const wchar_t* cursor = rawEnvironment; *cursor != L'\0';) {
+        const std::wstring_view entry(cursor);
+        if (!environment_entry_is_named(entry, L"DENO_DIR")) entries.emplace_back(entry);
+        cursor += entry.size() + 1;
+    }
+    entries.emplace_back(L"DENO_DIR=" + cacheDirectory.wstring());
+    std::sort(entries.begin(), entries.end(), [](const std::wstring& left,
+                                                  const std::wstring& right) {
+        const int insensitive = CompareStringOrdinal(
+            left.data(), static_cast<int>(left.size()), right.data(),
+            static_cast<int>(right.size()), TRUE);
+        if (insensitive != CSTR_EQUAL) return insensitive == CSTR_LESS_THAN;
+        return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(),
+                                    static_cast<int>(right.size()), FALSE) == CSTR_LESS_THAN;
+    });
+
+    size_t characters = 1;
+    for (const std::wstring& entry : entries) {
+        if (entry.find(L'\0') != std::wstring::npos ||
+            entry.size() > std::numeric_limits<size_t>::max() - characters - 1) {
+            return std::nullopt;
+        }
+        characters += entry.size() + 1;
+    }
+    std::vector<wchar_t> result;
+    result.reserve(characters);
+    for (const std::wstring& entry : entries) {
+        result.insert(result.end(), entry.begin(), entry.end());
+        result.push_back(L'\0');
+    }
+    result.push_back(L'\0');
+    return result;
+}
 
 bool open_verified_helper(const std::filesystem::path& requestedPath,
                           const std::filesystem::path& canonicalDirectory,
@@ -158,11 +254,20 @@ bool verify_beside_app_helpers(const std::filesystem::path& requestedDirectory,
         return false;
     }
 
+    UniqueHandle cacheDirectory;
+    std::filesystem::path canonicalCacheDirectory;
+    if (!create_verified_package_cache(canonicalDirectory, cacheDirectory,
+                                       canonicalCacheDirectory)) {
+        return false;
+    }
+
     verified.directory = std::move(directory);
     verified.ytDlp = std::move(ytDlp);
     verified.deno = std::move(deno);
+    verified.cacheDirectory = std::move(cacheDirectory);
     verified.directoryPath = canonicalDirectory;
     verified.ytDlpPath = canonicalYtDlp;
+    verified.cacheDirectoryPath = canonicalCacheDirectory;
     return true;
 }
 
@@ -594,6 +699,12 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
 
     const std::vector<std::wstring> arguments =
         build_youtube_resolver_arguments(verifiedHelpers.directoryPath, youtubeUrl);
+    auto childEnvironment =
+        child_environment_with_package_cache(verifiedHelpers.cacheDirectoryPath);
+    if (!childEnvironment) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
     std::wstring commandLine = quote_windows_argument(verifiedHelpers.ytDlpPath.wstring());
     for (const std::wstring& argument : arguments) {
         commandLine.push_back(L' ');
@@ -608,10 +719,10 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     startup.StartupInfo.hStdError = writePipe.get();
     startup.lpAttributeList = attributeList;
     PROCESS_INFORMATION rawProcess{};
-    const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+    const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
                                 EXTENDED_STARTUPINFO_PRESENT;
     if (!CreateProcessW(verifiedHelpers.ytDlpPath.c_str(), commandLine.data(), nullptr, nullptr,
-                        TRUE, creationFlags, nullptr,
+                        TRUE, creationFlags, childEnvironment->data(),
                         verifiedHelpers.directoryPath.c_str(),
                         &startup.StartupInfo, &rawProcess)) {
         return resolver_error(ResolveError::StartFailed,

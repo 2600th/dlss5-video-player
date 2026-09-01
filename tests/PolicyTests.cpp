@@ -2470,6 +2470,36 @@ struct ResolverFixture {
     }
 };
 
+std::wstring read_environment_variable(std::wstring_view name)
+{
+    const DWORD needed = GetEnvironmentVariableW(name.data(), nullptr, 0);
+    if (needed == 0) return {};
+    std::wstring value(needed, L'\0');
+    const DWORD written = GetEnvironmentVariableW(name.data(), value.data(), needed);
+    CHECK(written < needed);
+    if (written >= needed) return {};
+    value.resize(written);
+    return value;
+}
+
+struct ScopedEnvironmentVariable {
+    explicit ScopedEnvironmentVariable(std::wstring_view name, std::wstring_view value)
+        : name(name), previous(read_environment_variable(name))
+    {
+        hadPrevious = !previous.empty();
+        CHECK(SetEnvironmentVariableW(this->name.c_str(), std::wstring(value).c_str()) != FALSE);
+    }
+
+    ~ScopedEnvironmentVariable()
+    {
+        CHECK(SetEnvironmentVariableW(name.c_str(), hadPrevious ? previous.c_str() : nullptr) != FALSE);
+    }
+
+    std::wstring name;
+    std::wstring previous;
+    bool hadPrevious{};
+};
+
 size_t count_named_processes(std::wstring_view executableName);
 bool wait_for_named_process_count(std::wstring_view executableName,size_t expected,std::chrono::milliseconds timeout);
 
@@ -2800,6 +2830,20 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
 
     const std::wstring_view url = argv[11];
+    if (url.find(L"envcapture") != std::wstring_view::npos) {
+        const std::filesystem::path expectedCache =
+            current_test_executable().parent_path() / L"youtube-helper-cache";
+        const std::wstring received = read_environment_variable(L"DENO_DIR");
+        std::error_code cacheEquivalentError;
+        if (received.empty() ||
+            !std::filesystem::equivalent(std::filesystem::path(received), expectedCache,
+                                         cacheEquivalentError) || cacheEquivalentError) {
+            return 95;
+        }
+        write_binary_file(expectedCache / L"resolver-envcapture.marker", "package-local");
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=envcapture\n" << std::flush;
+        return 0;
+    }
     const size_t symlinkAttack = url.find(L"symlinkattack_");
     if (symlinkAttack != std::wstring_view::npos) {
         const std::wstring suffix(url.substr(symlinkAttack + 14));
@@ -2941,6 +2985,25 @@ void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_te
     CHECK_EQ(ResolveError::HelperMissing,
              denoDirectoryResolver->Resolve(L"https://youtu.be/success", {}).error);
 
+    std::filesystem::remove_all(fixture.directory / L"deno.exe", error);
+    CHECK(!error);
+    write_binary_file(fixture.directory / L"deno.exe", "test-only placeholder");
+    const std::filesystem::path cacheLink = fixture.directory / L"youtube-helper-cache";
+    const bool cacheLinkCreated = CreateSymbolicLinkW(
+        cacheLink.c_str(), outsideDirectory.c_str(),
+        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+    if (cacheLinkCreated) {
+        auto cacheLinkResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+        CHECK_EQ(ResolveError::HelperMissing,
+                 cacheLinkResolver->Resolve(L"https://youtu.be/success", {}).error);
+        std::filesystem::remove(cacheLink, error);
+        CHECK(!error);
+    } else {
+        const DWORD errorCode = GetLastError();
+        CHECK(errorCode == ERROR_PRIVILEGE_NOT_HELD || errorCode == ERROR_INVALID_PARAMETER ||
+              errorCode == ERROR_NOT_SUPPORTED);
+    }
+
     std::filesystem::remove_all(outsideDirectory, error);
     CHECK(!error);
     remove_file_if_present(executionMarker);
@@ -2974,6 +3037,37 @@ void youtube_resolver_holds_verified_helpers_against_replacement_until_completio
     worker.join();
     CHECK_EQ(ResolveError::Cancelled, result.error);
     remove_file_if_present(replacement);
+}
+
+void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test()
+{
+    ResolverFixture fixture;
+    const std::filesystem::path callerCache = fixture.directory.parent_path() /
+        (L"PolicyTests-caller-deno-cache-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(GetTickCount64()));
+    std::error_code error;
+    std::filesystem::create_directories(callerCache, error);
+    CHECK(!error);
+    const ScopedEnvironmentVariable inheritedOverride(L"DENO_DIR", callerCache.wstring());
+
+    const std::filesystem::path packageCache = fixture.directory / L"youtube-helper-cache";
+    const std::filesystem::path packageMarker = packageCache / L"resolver-envcapture.marker";
+    const std::filesystem::path callerMarker = callerCache / L"resolver-envcapture.marker";
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    const ResolveResult result = resolver->Resolve(L"https://youtu.be/envcapture", {});
+
+    CHECK(result.ok);
+    CHECK(std::filesystem::is_directory(packageCache, error));
+    CHECK(!error);
+    CHECK_EQ(std::string("package-local"), read_binary_file(packageMarker));
+    CHECK(!std::filesystem::exists(callerMarker, error));
+    CHECK(!error);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+
+    std::filesystem::remove_all(callerCache, error);
+    CHECK(!error);
 }
 
 void youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test()
@@ -3098,7 +3192,7 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
             ++entries;
         }
         CHECK(!error);
-        CHECK_EQ(size_t{2}, entries);
+        CHECK_EQ(size_t{3}, entries);
     }
 
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterHandles) != FALSE);
@@ -3263,6 +3357,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_repeated_runs_leave_process_handle_count_stable_test();
     youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test();
     youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test();
+    youtube_resolver_forces_package_local_deno_cache_over_parent_override_test();
     youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test();
     youtube_resolver_queued_stop_token_cancels_before_launch_test();
     youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();
