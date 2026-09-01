@@ -13,6 +13,18 @@ static std::wstring Q(const std::wstring& s) { return L"\"" + s + L"\""; }
 
 AudioPlayer::~AudioPlayer() { Stop(); }
 
+AudioPlayer::ReaderState::~ReaderState()
+{
+    if (stdoutPipe && !CloseHandle(stdoutPipe)) LOG("Audio: CloseHandle(stdout) failed winerr=" << GetLastError());
+    if (process && !CloseHandle(process)) LOG("Audio: CloseHandle(process) failed winerr=" << GetLastError());
+    if (job && !CloseHandle(job)) LOG("Audio: CloseHandle(job) failed winerr=" << GetLastError());
+    if (waveOut) {
+        const MMRESULT closed = waveOutClose(waveOut);
+        if (closed != MMSYSERR_NOERROR) LOG("Audio: waveOutClose failed result=" << closed);
+    }
+    if (completed && !CloseHandle(completed)) LOG("Audio: CloseHandle(completed) failed winerr=" << GetLastError());
+}
+
 std::wstring AudioPlayer::FindFFmpeg() const {
 #ifdef AUDIO_PLAYER_TESTING
     if(!m_helperDirectory.empty()){
@@ -35,12 +47,15 @@ std::wstring AudioPlayer::FindFFmpeg() const {
 bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, AudioStartState state) {
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
-    m_hasAudioData = false;
-    m_submittedBuffers = 0;
-    m_paused = state == AudioStartState::Paused;
     m_path = videoPath;
     m_ffmpeg = FindFFmpeg();
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
+
+    auto reader=std::make_shared<ReaderState>();
+    reader->disableWaveOut=m_disableWaveOut;
+    reader->paused=state==AudioStartState::Paused;
+    reader->completed=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+    if(!reader->completed){LOG("Audio: CreateEvent(reader completion) failed winerr="<<GetLastError());return false;}
 
     WAVEFORMATEX fmt{};
     fmt.wFormatTag = WAVE_FORMAT_PCM;
@@ -49,20 +64,21 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     fmt.wBitsPerSample = 16;
     fmt.nBlockAlign = fmt.nChannels * fmt.wBitsPerSample / 8;
     fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
-    if(!m_disableWaveOut){
-        if (waveOutOpen(&m_waveOut, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-            m_waveOut = nullptr;LOG("Audio: waveOutOpen failed.");return false;
+    if(!reader->disableWaveOut){
+        if (waveOutOpen(&reader->waveOut, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
+            reader->waveOut = nullptr;LOG("Audio: waveOutOpen failed.");return false;
         }
-        SetVolume(m_volume);
-        if(m_paused&&waveOutPause(m_waveOut)!=MMSYSERR_NOERROR){waveOutClose(m_waveOut);m_waveOut=nullptr;LOG("Audio: initial pause failed.");return false;}
+        DWORD volume=DWORD(m_volume*65535.0f+0.5f);
+        if(waveOutSetVolume(reader->waveOut,MAKELONG(volume,volume))!=MMSYSERR_NOERROR)LOG("Audio: initial volume failed.");
+        if(reader->paused&&waveOutPause(reader->waveOut)!=MMSYSERR_NOERROR){LOG("Audio: initial pause failed.");return false;}
     }
-    if (!StartProcess(seekSeconds)) { if(m_waveOut)waveOutClose(m_waveOut);m_waveOut = nullptr; return false; }
-    m_stop = false;
-    try{m_thread = std::thread(&AudioPlayer::ThreadMain, this);}catch(...){StopProcess();if(m_stdout){CloseHandle(m_stdout);m_stdout=nullptr;}if(m_process){CloseHandle(m_process);m_process=nullptr;}if(m_job){CloseHandle(m_job);m_job=nullptr;}if(m_waveOut){waveOutClose(m_waveOut);m_waveOut=nullptr;}throw;}
+    if (!StartProcess(seekSeconds,reader)) return false;
+    m_reader=reader;
+    try{m_thread=std::thread(&AudioPlayer::ReaderThread,reader);}catch(...){StopProcess(reader);m_reader.reset();throw;}
     return true;
 }
 
-bool AudioPlayer::StartProcess(double seekSeconds) {
+bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderState>& state) {
     SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
     if (!CreatePipe(&readPipe, &writePipe, &sa, 1024 * 1024)) return false;
@@ -88,46 +104,61 @@ bool AudioPlayer::StartProcess(double seekSeconds) {
     if (!ok) { CloseHandle(readPipe);if(job)CloseHandle(job); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << GetLastError()); return false; }
     if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
     if(ResumeThread(pi.hThread)==DWORD(-1)){LOG("Audio: ResumeThread failed winerr="<<GetLastError());if(!TerminateJobObject(job,1))LOG("Audio: failed to terminate suspended job winerr="<<GetLastError());WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
-    CloseHandle(pi.hThread); m_process = pi.hProcess; m_stdout = readPipe;m_job=job;
+    CloseHandle(pi.hThread);state->process=pi.hProcess;state->stdoutPipe=readPipe;state->job=job;
     LOG("Audio: FFmpeg PCM/WaveOut path started at " << seekSeconds << " s.");
     return true;
 }
 
-void AudioPlayer::StopProcess() {
+void AudioPlayer::StopProcess(const std::shared_ptr<ReaderState>& state) {
     // Closing a kill-on-close job is the fallback when the explicit job
     // termination API fails. The process handle remains owned until the reader
     // has exited, so no handle used by ThreadMain is closed concurrently.
-    if(m_job){
+    if(state->job){
         BOOL terminated=FALSE;
 #ifdef AUDIO_PLAYER_TESTING
         if(!m_failTerminateJob)
 #endif
-            terminated=TerminateJobObject(m_job,0);
+            terminated=TerminateJobObject(state->job,0);
         if(!terminated)LOG("Audio: job termination fallback engaged winerr="<<GetLastError());
-        if(!CloseHandle(m_job))LOG("Audio: CloseHandle(job) failed winerr="<<GetLastError());
-        m_job=nullptr;
+        if(!CloseHandle(state->job))LOG("Audio: CloseHandle(job) failed winerr="<<GetLastError());
+        state->job=nullptr;
     }
-    if(m_process){
+    if(state->process){
         DWORD waitResult=WAIT_TIMEOUT;
 #ifdef AUDIO_PLAYER_TESTING
-        if(!m_forceProcessWaitTimeout)
+        if(!m_failInitialProcessWait)
 #endif
-            waitResult=WaitForSingleObject(m_process,500);
+            waitResult=WaitForSingleObject(state->process,200);
         if(waitResult!=WAIT_OBJECT_0){
             if(waitResult==WAIT_FAILED)LOG("Audio: process wait failed winerr="<<GetLastError());
             DWORD code=STILL_ACTIVE;
-            const BOOL queried=GetExitCodeProcess(m_process,&code);
+            BOOL queried=FALSE;
+#ifdef AUDIO_PLAYER_TESTING
+            if(!m_failGetExitCodeProcess)
+#endif
+                queried=GetExitCodeProcess(state->process,&code);
             if(!queried)LOG("Audio: GetExitCodeProcess failed winerr="<<GetLastError());
             if(!queried||code==STILL_ACTIVE){
-                if(!TerminateProcess(m_process,1))LOG("Audio: owned-process fallback termination failed winerr="<<GetLastError());
+                if(!TerminateProcess(state->process,1))LOG("Audio: owned-process fallback termination failed winerr="<<GetLastError());
             }
-            const DWORD finalWait=WaitForSingleObject(m_process,500);
+            DWORD finalWait=WAIT_TIMEOUT;
+#ifdef AUDIO_PLAYER_TESTING
+            if(!m_failFinalProcessWait)
+#endif
+                finalWait=WaitForSingleObject(state->process,200);
             if(finalWait!=WAIT_OBJECT_0)LOG("Audio: owned child did not exit within final bound result="<<finalWait);
         }
     }
 }
 
-void AudioPlayer::ThreadMain() {
+void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
+{
+    try { ThreadMain(state); }
+    catch (...) { LOG("Audio: reader thread stopped after an unexpected exception."); }
+    if(state->completed&&!SetEvent(state->completed))LOG("Audio: SetEvent(reader completion) failed winerr="<<GetLastError());
+}
+
+void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
     constexpr size_t BufferCount = 8;
     constexpr size_t BytesPerBuffer = 16384; // ~85 ms stereo/48k/16-bit
     struct Slot { std::vector<char> bytes; WAVEHDR hdr{}; bool prepared=false; };
@@ -135,43 +166,43 @@ void AudioPlayer::ThreadMain() {
     for (auto& s : slots) { s.bytes.resize(BytesPerBuffer); s.hdr.lpData = s.bytes.data(); s.hdr.dwBufferLength = 0; }
     size_t index = 0;
 
-    while (!m_stop) {
+    while (!state->stop) {
         Slot& s = slots[index];
         if (s.prepared) {
-            while (!m_stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
-            if (m_stop) break;
-            { std::lock_guard<std::mutex> lock(m_waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(m_waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: unprepare failed result="<<unprepared); }
+            while (!state->stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
+            if (state->stop) break;
+            { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(state->waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: unprepare failed result="<<unprepared); }
             s.prepared = false; s.hdr = {}; s.hdr.lpData = s.bytes.data();
         }
 
         size_t total = 0;
-        while (!m_stop && total < BytesPerBuffer) {
+        while (!state->stop && total < BytesPerBuffer) {
             DWORD available=0;
-            if(!PeekNamedPipe(m_stdout,nullptr,0,nullptr,&available,nullptr)){
+            if(!PeekNamedPipe(state->stdoutPipe,nullptr,0,nullptr,&available,nullptr)){
                 const DWORD error=GetLastError();if(error!=ERROR_BROKEN_PIPE)LOG("Audio: PeekNamedPipe failed winerr="<<error);break;
             }
             if(available==0){
-                if(m_process&&WaitForSingleObject(m_process,0)==WAIT_OBJECT_0)break;
+                if(state->process&&WaitForSingleObject(state->process,0)==WAIT_OBJECT_0)break;
                 Sleep(2);continue;
             }
             const DWORD want=static_cast<DWORD>(std::min<size_t>(BytesPerBuffer-total,available));DWORD got=0;
-            if(!ReadFile(m_stdout,s.bytes.data()+total,want,&got,nullptr)){const DWORD error=GetLastError();if(error!=ERROR_OPERATION_ABORTED&&error!=ERROR_BROKEN_PIPE)LOG("Audio: ReadFile failed winerr="<<error);break;}
+            if(!ReadFile(state->stdoutPipe,s.bytes.data()+total,want,&got,nullptr)){const DWORD error=GetLastError();if(error!=ERROR_OPERATION_ABORTED&&error!=ERROR_BROKEN_PIPE)LOG("Audio: ReadFile failed winerr="<<error);break;}
             if(got==0)break;
             total += got;
         }
-        if (m_stop || total == 0) break;
-        m_hasAudioData = true;
-        if(m_disableWaveOut)continue;
+        if (state->stop || total == 0) break;
+        state->hasAudioData = true;
+        if(state->disableWaveOut)continue;
         s.hdr.dwBufferLength = DWORD(total);
         {
-            std::lock_guard<std::mutex> lock(m_waveMutex);
+            std::lock_guard<std::mutex> lock(state->waveMutex);
             // Re-check under the same lock used by Stop() before submitting audio.
             // Once Stop() has set m_stop and reset WaveOut, no late buffer can be queued.
-            if (m_stop) break;
-            if (waveOutPrepareHeader(m_waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
+            if (state->stop) break;
+            if (waveOutPrepareHeader(state->waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
             s.prepared = true;
-            if (waveOutWrite(m_waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
-            if(!m_paused)++m_submittedBuffers;
+            if (waveOutWrite(state->waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
+            if(!state->paused)++state->submittedBuffers;
         }
         index = (index + 1) % BufferCount;
     }
@@ -180,48 +211,54 @@ void AudioPlayer::ThreadMain() {
     // Resetting here would snap TIME_SAMPLES back to zero and make the audio-master clock
     // jump backwards during the last video frames.  Stop()/Seek() already perform an
     // explicit reset, so only the cancellation path should discard queued audio.
-    if (!m_stop && m_waveOut) {
+    if (!state->stop && state->waveOut) {
         for (auto& s : slots) {
             if (!s.prepared) continue;
-            while (!m_stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
+            while (!state->stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
         }
     }
     for (auto& s : slots) {
         if (s.prepared) {
-            { std::lock_guard<std::mutex> lock(m_waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(m_waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: final unprepare failed result="<<unprepared); }
+            { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(state->waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: final unprepare failed result="<<unprepared); }
             s.prepared = false;
         }
     }
 }
 
 double AudioPlayer::PositionSeconds() const {
-    if (!m_waveOut || !m_hasAudioData.load()) return -1.0;
+    const auto state=m_reader;
+    if (!state || !state->waveOut || !state->hasAudioData.load()) return -1.0;
     MMTIME mt{}; mt.wType = TIME_SAMPLES;
-    { std::lock_guard<std::mutex> lock(m_waveMutex);
-      if (waveOutGetPosition(m_waveOut, &mt, sizeof(mt)) != MMSYSERR_NOERROR || mt.wType != TIME_SAMPLES)
+    { std::lock_guard<std::mutex> lock(state->waveMutex);
+      if (waveOutGetPosition(state->waveOut, &mt, sizeof(mt)) != MMSYSERR_NOERROR || mt.wType != TIME_SAMPLES)
           return -1.0; }
     return m_seekBaseSec + double(mt.u.sample) / 48000.0;
 }
 
+bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->waveOut;}
+bool AudioPlayer::HasAudioData() const {const auto state=m_reader;return state&&state->hasAudioData.load();}
+bool AudioPlayer::Paused() const {const auto state=m_reader;return state&&state->paused.load();}
+
 void AudioPlayer::Pause(bool paused) {
-    m_paused = paused;
-    if (!m_waveOut) return;
-    std::lock_guard<std::mutex> lock(m_waveMutex);
-    const MMRESULT result=paused?waveOutPause(m_waveOut):waveOutRestart(m_waveOut);
+    const auto state=m_reader;if(!state)return;
+    state->paused = paused;
+    if (!state->waveOut) return;
+    std::lock_guard<std::mutex> lock(state->waveMutex);
+    const MMRESULT result=paused?waveOutPause(state->waveOut):waveOutRestart(state->waveOut);
     if(result!=MMSYSERR_NOERROR)LOG("Audio: pause/restart failed result="<<result);
 }
 
 void AudioPlayer::SetVolume(float volume01) {
     m_volume = std::clamp(volume01, 0.0f, 1.0f);
-    if (!m_waveOut) return;
+    const auto state=m_reader;if(!state||!state->waveOut)return;
     DWORD v = DWORD(m_volume * 65535.0f + 0.5f);
-    std::lock_guard<std::mutex> lock(m_waveMutex);
-    waveOutSetVolume(m_waveOut, MAKELONG(v, v));
+    std::lock_guard<std::mutex> lock(state->waveMutex);
+    if(waveOutSetVolume(state->waveOut,MAKELONG(v,v))!=MMSYSERR_NOERROR)LOG("Audio: set volume failed.");
 }
 
 bool AudioPlayer::Seek(double seconds) {
     if (m_path.empty()) return false;
-    const bool wasPaused = m_paused.load();
+    const bool wasPaused = Paused();
     const float vol = m_volume;
     std::wstring path = m_path;
     Stop();
@@ -230,31 +267,36 @@ bool AudioPlayer::Seek(double seconds) {
 }
 
 void AudioPlayer::Stop() {
-    m_stop = true;
-    m_hasAudioData = false;
-    m_paused = false;
+    const auto state=m_reader;
+    if(!state){if(m_thread.joinable())m_thread.detach();return;}
+    state->stop = true;
+    state->hasAudioData = false;
+    state->paused = false;
 
-    // First release queued WaveOut buffers, then stop FFmpeg so a worker blocked
-    // in ReadFile sees EOF. Keep BOTH m_stdout and m_waveOut valid until the
-    // worker exits: it still has to unprepare any WAVEHDRs it owns.
-    if (m_waveOut) { std::lock_guard<std::mutex> lock(m_waveMutex);const MMRESULT reset=waveOutReset(m_waveOut);if(reset!=MMSYSERR_NOERROR)LOG("Audio: waveOutReset failed result="<<reset); }
-    StopProcess();
+    // Release queued WaveOut buffers, then stop the owned writer/process tree.
+    // ReaderState keeps every handle and mutex alive if a failed wait forces a
+    // detach; the availability-driven reader then retires and closes them.
+    if (state->waveOut) { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT reset=waveOutReset(state->waveOut);if(reset!=MMSYSERR_NOERROR)LOG("Audio: waveOutReset failed result="<<reset); }
+    StopProcess(state);
     if (m_thread.joinable()) {
         HANDLE readerThread=reinterpret_cast<HANDLE>(m_thread.native_handle());
         if(!CancelSynchronousIo(readerThread)){const DWORD error=GetLastError();if(error!=ERROR_NOT_FOUND)LOG("Audio: CancelSynchronousIo failed winerr="<<error);}
-        DWORD readerWait=WaitForSingleObject(readerThread,500);
+        DWORD readerWait=WAIT_TIMEOUT;
+#ifdef AUDIO_PLAYER_TESTING
+        if(!m_failInitialReaderWait)
+#endif
+            readerWait=WaitForSingleObject(state->completed,200);
         if(readerWait!=WAIT_OBJECT_0){
-            LOG("Audio: reader required final bounded cancellation result="<<readerWait);StopProcess();
+            LOG("Audio: reader required final bounded cancellation result="<<readerWait);StopProcess(state);
             if(!CancelSynchronousIo(readerThread)){const DWORD error=GetLastError();if(error!=ERROR_NOT_FOUND)LOG("Audio: final CancelSynchronousIo failed winerr="<<error);}
-            readerWait=WaitForSingleObject(readerThread,500);
+            readerWait=WAIT_TIMEOUT;
+#ifdef AUDIO_PLAYER_TESTING
+            if(!m_failFinalReaderWait)
+#endif
+                readerWait=WaitForSingleObject(state->completed,200);
         }
-        if(readerWait!=WAIT_OBJECT_0){LOG("Audio: reader violated bounded-exit invariant; terminating to avoid an unbounded join.");std::terminate();}
-        m_thread.join();
+        if(readerWait==WAIT_OBJECT_0)m_thread.join();
+        else{LOG("Audio: retiring reader state after bounded wait failure.");m_thread.detach();}
     }
-
-    if (m_stdout) { if(!CloseHandle(m_stdout))LOG("Audio: CloseHandle(stdout) failed winerr="<<GetLastError());m_stdout = nullptr; }
-    if (m_process) { if(!CloseHandle(m_process))LOG("Audio: CloseHandle(process) failed winerr="<<GetLastError());m_process = nullptr; }
-    if (m_job) { if(!CloseHandle(m_job))LOG("Audio: CloseHandle(job) failed winerr="<<GetLastError());m_job = nullptr; }
-    if (m_waveOut) {const MMRESULT closed=waveOutClose(m_waveOut);if(closed!=MMSYSERR_NOERROR)LOG("Audio: waveOutClose failed result="<<closed);m_waveOut = nullptr; }
-    m_stop = false;
+    m_reader.reset();
 }

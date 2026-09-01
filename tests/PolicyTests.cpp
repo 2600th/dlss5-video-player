@@ -65,15 +65,24 @@ struct AudioPlayerTestAccess {
     static std::unique_ptr<AudioPlayer> Create(
         const std::filesystem::path& helperDirectory,
         bool failTerminateJob = false,
-        bool forceProcessWaitTimeout = false)
+        bool failInitialProcessWait = false,
+        bool failGetExitCodeProcess = false,
+        bool failFinalProcessWait = false,
+        bool failInitialReaderWait = false,
+        bool failFinalReaderWait = false)
     {
         AudioPlayer::Settings settings;
         settings.helperDirectory=helperDirectory.wstring();settings.disableWaveOut=true;
-        settings.failTerminateJob=failTerminateJob;settings.forceProcessWaitTimeout=forceProcessWaitTimeout;
+        settings.failTerminateJob=failTerminateJob;
+        settings.failInitialProcessWait=failInitialProcessWait;
+        settings.failGetExitCodeProcess=failGetExitCodeProcess;
+        settings.failFinalProcessWait=failFinalProcessWait;
+        settings.failInitialReaderWait=failInitialReaderWait;
+        settings.failFinalReaderWait=failFinalReaderWait;
         return std::unique_ptr<AudioPlayer>(new AudioPlayer(std::move(settings)));
     }
     static double SeekBase(const AudioPlayer& player){return player.m_seekBaseSec;}
-    static uint64_t SubmittedBuffers(const AudioPlayer& player){return player.m_submittedBuffers.load();}
+    static uint64_t SubmittedBuffers(const AudioPlayer& player){return player.m_reader?player.m_reader->submittedBuffers.load():0;}
 };
 
 namespace {
@@ -1205,6 +1214,43 @@ void youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back
         [&](Candidate&){order.push_back(2);return true;},
         [&](std::unique_ptr<Candidate> candidate){order.push_back(3);activeAudio=0;order.push_back(4);activeMedia=22;activeRenderer=candidate->id;order.push_back(5);activeAudio=32;});
     CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3,4,5}),order);CHECK_EQ(12,activeRenderer);CHECK_EQ(22,activeMedia);CHECK_EQ(32,activeAudio);
+}
+
+void youtube_compatible_seek_never_touches_active_renderer_before_commit_test()
+{
+    const auto configuration=render_configuration(2);
+    const NetworkPreparedFrameDescriptor readyFrame{
+        1280,720,1280u*4u,static_cast<size_t>(1280)*720*4,true};
+    const NetworkPreparedFrameDescriptor badRowBytes{
+        1280,720,1280u*4u-4u,static_cast<size_t>(1280)*720*4,true};
+    CHECK(NetworkPreparedFrameIsCompatible(configuration,configuration,readyFrame));
+    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,badRowBytes));
+    auto notReady=readyFrame;notReady.decoderReady=false;
+    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,notReady));
+    auto wrongDimensions=readyFrame;wrongDimensions.width=1278;
+    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,wrongDimensions));
+    auto wrongBytes=readyFrame;--wrongBytes.frameBytes;
+    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,wrongBytes));
+    auto differentConfiguration=configuration;++differentConfiguration.outputWidth;
+    CHECK(!NetworkPreparedFrameIsCompatible(configuration,differentConfiguration,readyFrame));
+
+    std::vector<int> order;
+    int activeRendererMutations=0;
+    bool ownershipCommitted=false;
+    const bool rejected=ExecuteCompatibleNetworkSeek(
+        [&]{order.push_back(1);return false;},
+        [&]{order.push_back(2);ownershipCommitted=true;},
+        [&]{order.push_back(3);++activeRendererMutations;return true;});
+    CHECK(!rejected);CHECK_EQ(std::vector<int>({1}),order);
+    CHECK(!ownershipCommitted);CHECK_EQ(0,activeRendererMutations);
+
+    order.clear();
+    const bool committed=ExecuteCompatibleNetworkSeek(
+        [&]{order.push_back(1);return true;},
+        [&]{order.push_back(2);ownershipCommitted=true;},
+        [&]{CHECK(ownershipCommitted);order.push_back(3);++activeRendererMutations;return true;});
+    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3}),order);
+    CHECK(ownershipCommitted);CHECK_EQ(1,activeRendererMutations);
 }
 
 void youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test()
@@ -2461,6 +2507,32 @@ void youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test(
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
 
+void youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test()
+{
+    MediaFixture fixture;
+    const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
+    DWORD beforeHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    for(int cycle=0;cycle<12;++cycle){
+        auto audio=AudioPlayerTestAccess::Create(fixture.directory,true,true,true,true,true,true);
+        CHECK(audio->Start(L"https://media.invalid/audiohold",3.0,AudioStartState::Paused));
+        const auto started=std::chrono::steady_clock::now();
+        if(cycle%3==0){
+            CHECK(audio->Start(L"https://media.invalid/audiohold",4.0,AudioStartState::Paused));
+            audio->Stop();
+        }else if(cycle%3==1){audio->Stop();}else{audio.reset();}
+        CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+        CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,std::chrono::milliseconds{500}));
+    }
+    const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    DWORD afterHandles=0;
+    do{
+        CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
+        if(afterHandles<=beforeHandles+2)break;
+        Sleep(5);
+    }while(std::chrono::steady_clock::now()<handlesDeadline);
+    CHECK(afterHandles<=beforeHandles+2);
+}
+
 void youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test()
 {
     MediaFixture fixture;auto prepared=AudioPlayerTestAccess::Create(fixture.directory);
@@ -3078,12 +3150,14 @@ int wmain(int argc, wchar_t* argv[])
     youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
     youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test();
     youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test();
+    youtube_compatible_seek_never_touches_active_renderer_before_commit_test();
     youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test();
     youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
+    youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();
     youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();

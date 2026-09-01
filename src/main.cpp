@@ -1296,9 +1296,16 @@ private:
         const NetworkRenderConfiguration activeConfiguration=ActiveNetworkConfiguration();const NetworkRenderConfiguration* active=m_loaded&&m_renderer?&activeConfiguration:nullptr;
         const NetworkRendererPlan plan=SelectNetworkRendererPlan(completion->commitKind,active,completion->configuration);
         if(plan==NetworkRendererPlan::ReuseActive){
-            TemporalGuideGenerator validationGuides;
-            if(!m_renderer||!ValidatePreparedFrame(*completion,*m_renderer,validationGuides)){const std::wstring message=T(L"error.frame"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);LOG("Prepared YouTube seek failed validation; active transaction preserved.");return;}
-            InstallPreparedYouTube(*completion,{},true);return;
+            const NetworkPreparedFrameDescriptor frame{
+                completion->decoder->Width(),completion->decoder->Height(),
+                static_cast<size_t>(completion->decoder->Width())*4,
+                completion->firstFrame.bgra.size(),completion->decoder->Ready()};
+            const bool rendered=ExecuteCompatibleNetworkSeek(
+                [&]{return m_renderer&&NetworkPreparedFrameIsCompatible(activeConfiguration,completion->configuration,frame);},
+                [&]{InstallPreparedYouTube(*completion,{},true);},
+                [&]{return RenderVideoFrame(completion->firstFrame,true);});
+            if(!rendered){const std::wstring message=T(L"error.frame"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);LOG("Prepared YouTube seek failed before or immediately after commit without exposing source details.");}
+            return;
         }
         bool candidateCreated=false;
         const bool committed=ExecuteNetworkCandidateTransaction<PreparedRendererCandidate>(

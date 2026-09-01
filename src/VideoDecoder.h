@@ -54,6 +54,7 @@ public:
     double DurationSeconds() const { return m_durationSec; }
     double DisplayAspectRatio() const { return m_displayAspect > 0.0 ? m_displayAspect : (m_height ? double(m_width)/double(m_height) : 16.0/9.0); }
     const std::wstring& Path() const { return m_path; }
+    bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
     const wchar_t* BackendName() const;
 
 private:
