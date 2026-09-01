@@ -8,6 +8,7 @@
 #include "UiResources.h"
 #include "RuntimeLifetime.h"
 #include "YouTubeResolver.h"
+#include "ExampleVideos.h"
 #include "CompletionRegistry.h"
 #include "VideoDecoder.h"
 #include "AudioPlayer.h"
@@ -1093,6 +1094,55 @@ void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
             CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) == 0);
         }
     }
+    if (menu) DestroyMenu(menu);
+}
+
+void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
+{
+    CHECK_EQ(size_t{6}, kExampleVideos.size());
+
+    size_t games = 0;
+    size_t anime = 0;
+    std::vector<std::wstring_view> urls;
+    for (const ExampleVideo& example : kExampleVideos) {
+        CHECK(!example.title.empty());
+        CHECK(!example.channel.empty());
+        CHECK(example.url.starts_with(L"https://www.youtube.com/watch?v="));
+        CHECK(IsSupportedYouTubeUrl(example.url));
+        CHECK(std::find(urls.begin(), urls.end(), example.url) == urls.end());
+        urls.push_back(example.url);
+        if (example.category == ExampleVideoCategory::Games) ++games;
+        if (example.category == ExampleVideoCategory::Anime) ++anime;
+    }
+    CHECK_EQ(size_t{3}, games);
+    CHECK_EQ(size_t{3}, anime);
+
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    HMENU file = find_top_level_submenu(menu, L"File");
+    HMENU examples = find_top_level_submenu(file, L"Examples");
+    HMENU gamesMenu = find_top_level_submenu(examples, L"Games");
+    HMENU animeMenu = find_top_level_submenu(examples, L"Anime");
+    CHECK(file != nullptr);
+    CHECK(examples != nullptr);
+    CHECK(gamesMenu != nullptr);
+    CHECK(animeMenu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    for (size_t index = 0; index < kExampleVideos.size(); ++index) {
+        const UINT command = app_menu::IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index);
+        CHECK(app_menu::ExampleVideoForCommand(command) == &kExampleVideos[index]);
+        CHECK(has_menu_entry(entries, kExampleVideos[index].title,
+                             command));
+    }
+    std::vector<MenuEntry> gameEntries;
+    std::vector<MenuEntry> animeEntries;
+    if (gamesMenu) collect_menu_entries(gamesMenu, gameEntries);
+    if (animeMenu) collect_menu_entries(animeMenu, animeEntries);
+    CHECK_EQ(size_t{3}, gameEntries.size());
+    CHECK_EQ(size_t{3}, animeEntries.size());
+    CHECK(app_menu::ExampleVideoForCommand(app_menu::IDM_OPEN_YOUTUBE) == nullptr);
     if (menu) DestroyMenu(menu);
 }
 
@@ -3146,6 +3196,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test();
     youtube_display_and_log_labels_never_expose_direct_urls_test();
     youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test();
+    fixed_youtube_examples_are_complete_safe_and_menu_routable_test();
     youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test();
     youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
     youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test();

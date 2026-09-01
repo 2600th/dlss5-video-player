@@ -36,6 +36,7 @@
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
 #include "YouTubeResolver.h"
+#include "ExampleVideos.h"
 #include "CompletionRegistry.h"
 #include "NetworkMediaTransaction.h"
 #include "resources.h"
@@ -1243,6 +1244,10 @@ private:
         if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
         const auto url=PromptForYouTubeUrl(m_hwnd,m_loc,m_font);if(url)StartYouTubeResolution(*url);
     }
+    void ActivateExampleVideo(const ExampleVideo& example){
+        if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
+        StartYouTubeResolution(std::wstring(example.url),std::wstring(example.title));
+    }
     std::unique_ptr<PreparedRendererCandidate> CreateRendererCandidate(const YouTubeCompletion& completion){
         auto candidate=std::make_unique<PreparedRendererCandidate>();candidate->configuration=completion.configuration;
         candidate->window=CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,WS_CHILD|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,GetModuleHandleW(nullptr),this);
@@ -1441,6 +1446,7 @@ private:
     void HandleCommand(UINT id){
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
+        if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;
         case IDM_QUALITY_AUTO:SetQualityMode(true,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_QUALITY:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_BALANCED:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_Balanced);break;case IDM_QUALITY_PERFORMANCE:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxPerf);break;case IDM_QUALITY_ULTRAPERF:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_UltraPerformance);break;case IDM_QUALITY_DLAA:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_DLAA);break;

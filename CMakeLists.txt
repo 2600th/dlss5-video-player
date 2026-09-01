@@ -51,6 +51,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/ReShadeConfig.h
     src/YouTubeResolver.cpp
     src/YouTubeResolver.h
+    src/ExampleVideos.h
     src/CompletionRegistry.h
     src/NetworkMediaTransaction.h
 )
@@ -110,6 +111,7 @@ if(BUILD_TESTING)
         src/ReShadeConfig.h
         src/YouTubeResolver.cpp
         src/YouTubeResolver.h
+        src/ExampleVideos.h
         src/VideoDecoder.cpp
         src/VideoDecoder.h
         src/CompletionRegistry.h

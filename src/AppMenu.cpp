@@ -22,7 +22,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), dlss = CreatePopupMenu(), quality = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), games = CreatePopupMenu(), anime = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), dlss = CreatePopupMenu(), quality = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -30,6 +30,18 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(file, IDM_OPEN, L"menu.open");
     const std::wstring youtubeName = localizer.Get(L"menu.open_youtube");
     AppendMenuW(file, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED), IDM_OPEN_YOUTUBE, youtubeName.c_str());
+    for (size_t index = 0; index < kExampleVideos.size(); ++index) {
+        const ExampleVideo& example = kExampleVideos[index];
+        HMENU category = example.category == ExampleVideoCategory::Games ? games : anime;
+        AppendMenuW(category, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED),
+                    IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index), example.title.data());
+    }
+    const std::wstring gamesName = localizer.Get(L"menu.examples_games");
+    const std::wstring animeName = localizer.Get(L"menu.examples_anime");
+    const std::wstring examplesName = localizer.Get(L"menu.examples");
+    AppendMenuW(examples, MF_POPUP, reinterpret_cast<UINT_PTR>(games), gamesName.c_str());
+    AppendMenuW(examples, MF_POPUP, reinterpret_cast<UINT_PTR>(anime), animeName.c_str());
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), examplesName.c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
     add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
@@ -53,6 +65,14 @@ bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown)
     return controlDown && value == 'L';
 }
 
+const ExampleVideo* ExampleVideoForCommand(UINT command)
+{
+    if (command < IDM_EXAMPLE_VIDEO_FIRST) return nullptr;
+    const size_t index = static_cast<size_t>(command - IDM_EXAMPLE_VIDEO_FIRST);
+    if (index >= kExampleVideos.size()) return nullptr;
+    return &kExampleVideos[index];
+}
+
 bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
                                     bool youtubeEnabled)
 {
@@ -65,8 +85,15 @@ bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
     const UINT youtubeState = EnableMenuItem(
         fileMenu, IDM_OPEN_YOUTUBE,
         MF_BYCOMMAND | (youtubeEnabled ? MF_ENABLED : MF_GRAYED));
+    bool examplesUpdated = true;
+    for (size_t index = 0; index < kExampleVideos.size(); ++index) {
+        const UINT state = EnableMenuItem(
+            fileMenu, IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index),
+            MF_BYCOMMAND | (youtubeEnabled ? MF_ENABLED : MF_GRAYED));
+        examplesUpdated = examplesUpdated && state != static_cast<UINT>(-1);
+    }
     return openState != static_cast<UINT>(-1) &&
-           youtubeState != static_cast<UINT>(-1);
+           youtubeState != static_cast<UINT>(-1) && examplesUpdated;
 }
 
 } // namespace app_menu

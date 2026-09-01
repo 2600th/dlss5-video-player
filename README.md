@@ -66,6 +66,21 @@ If the experimental neural path is unstable, choose **Advanced > Restart in DLSS
 
 The player does not force a file picker at startup. It opens in an idle state and waits for drag-and-drop, **Open**, `Ctrl+O`, or a file path passed on the command line.
 
+## Fixed YouTube examples
+
+When the packaged YouTube helpers are available, **File > Examples** offers this fixed list. It does not fetch trending videos at runtime.
+
+| Category | Video | Official channel | URL |
+| --- | --- | --- | --- |
+| Games | Grand Theft Auto V: Official Gameplay Video | Rockstar Games | https://www.youtube.com/watch?v=N-xHcvug3WI |
+| Games | Resident Evil Requiem - Launch Trailer | Resident Evil | https://www.youtube.com/watch?v=9lrThxCoznw |
+| Games | Battlefield 6 Official Multiplayer Gameplay Trailer | Battlefield | https://www.youtube.com/watch?v=wFGEMfyAQtI |
+| Anime | The Apothecary Diaries \| OFFICIAL TRAILER | Crunchyroll | https://www.youtube.com/watch?v=XYNGkSvFT8c |
+| Anime | Tomb Raider King \| Official Trailer | Crunchyroll | https://www.youtube.com/watch?v=vwQY5heVraU |
+| Anime | My Hero Academia FINAL SEASON "More" Official Trailer | Crunchyroll | https://www.youtube.com/watch?v=pxbEWUjh6E4 |
+
+Availability and region access can change. These entries play through the same public, non-DRM YouTube resolver flow as a pasted URL.
+
 ## Controls
 
 | Action | Shortcut |
