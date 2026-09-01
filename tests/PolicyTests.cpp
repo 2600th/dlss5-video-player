@@ -4172,6 +4172,51 @@ void ngx_create_failure_is_not_retried_until_explicit_reset_test()
     CHECK(gate.ShouldAttempt());
 }
 
+void ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test()
+{
+    ngx_session_detail::FeatureCreateGate gate;
+    bool delayedRecreateDone = false;
+    bool recreateRequested = false;
+    int createAttempts = 0;
+    const auto ensureFeature = [&] {
+        if (!gate.ShouldAttempt()) return false;
+        ++createAttempts;
+        gate.RecordFailure();
+        return false;
+    };
+    const auto recreateFeature = [&] {
+        gate.Reset();
+        ++createAttempts;
+        gate.RecordFailure();
+        return false;
+    };
+
+    const auto firstFailure = ngx_session_detail::PrepareFeatureForFrame(
+        true, false, 2, delayedRecreateDone, recreateRequested,
+        ensureFeature, recreateFeature);
+    CHECK(firstFailure.selected);
+    CHECK_EQ(1, createAttempts);
+
+    const auto automaticNextFrame = ngx_session_detail::PrepareFeatureForFrame(
+        true, false, 3, delayedRecreateDone, recreateRequested,
+        ensureFeature, recreateFeature);
+    CHECK(automaticNextFrame.selected);
+    CHECK_EQ(1, createAttempts);
+
+    recreateRequested = true;
+    const auto explicitRehook = ngx_session_detail::PrepareFeatureForFrame(
+        true, false, 4, delayedRecreateDone, recreateRequested,
+        ensureFeature, recreateFeature);
+    CHECK(explicitRehook.selected);
+    CHECK(!recreateRequested);
+    CHECK_EQ(2, createAttempts);
+
+    ngx_session_detail::PrepareFeatureForFrame(
+        true, false, 5, delayedRecreateDone, recreateRequested,
+        ensureFeature, recreateFeature);
+    CHECK_EQ(2, createAttempts);
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[])
@@ -4311,6 +4356,7 @@ int wmain(int argc, wchar_t* argv[])
     ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test();
     ngx_distinct_devices_own_independent_sessions_test();
     ngx_create_failure_is_not_retried_until_explicit_reset_test();
+    ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

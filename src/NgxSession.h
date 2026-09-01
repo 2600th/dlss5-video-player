@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 
@@ -64,5 +65,41 @@ public:
 private:
     bool m_failed = false;
 };
+
+struct FeatureSetupResult {
+    bool selected = false;
+    bool needsFlush = false;
+};
+
+template <typename EnsureFeature, typename RecreateFeature>
+FeatureSetupResult PrepareFeatureForFrame(
+    bool enabled,
+    bool featureCreated,
+    uint64_t framesPresented,
+    bool& delayedRecreateDone,
+    bool& recreateRequested,
+    EnsureFeature&& ensureFeature,
+    RecreateFeature&& recreateFeature)
+{
+    if (!enabled) return {};
+
+    // A user-requested re-hook must reset a failed automatic-create gate before
+    // the ordinary missing-feature path gets another chance to observe it.
+    if (recreateRequested) {
+        const bool needsFlush = recreateFeature();
+        delayedRecreateDone = true;
+        recreateRequested = false;
+        return {true, needsFlush};
+    }
+    if (!featureCreated && framesPresented >= 2) {
+        return {true, ensureFeature()};
+    }
+    if (!delayedRecreateDone && framesPresented >= 60) {
+        const bool needsFlush = recreateFeature();
+        delayedRecreateDone = true;
+        return {true, needsFlush};
+    }
+    return {};
+}
 
 } // namespace ngx_session_detail

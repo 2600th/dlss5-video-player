@@ -310,20 +310,16 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     // and only then evaluate on a fresh list. This mirrors the robust game-style
     // NGX lifetime instead of relying on CreateFeature and EvaluateFeature being
     // accepted back-to-back before the creation commands have reached the GPU.
-    bool needFeatureFlush = false;
-    if (DLSSEnabled() && !m_dlss.FeatureCreated() && m_framesPresented >= 2) {
-        // Intentionally allow one complete Present before the first NGX CreateFeature.
-        // ReShade add-ons finish their swapchain/runtime initialization on that first frame;
-        // creating on frame 2 makes the raw CreateFeature much harder for RenoDX to miss.
-        needFeatureFlush = m_dlss.EnsureFeature(cmd);
-        temporalReset = true;
-        m_recreateRequested = false;
-    } else if (DLSSEnabled() && ((!m_delayedRecreateDone && m_framesPresented >= 60) || m_recreateRequested)) {
-        needFeatureFlush = m_dlss.RecreateFeature(cmd);
-        temporalReset = true;
-        m_delayedRecreateDone = true;
-        m_recreateRequested = false;
-    }
+    // Intentionally allow one complete Present before the first NGX CreateFeature.
+    // ReShade add-ons finish their swapchain/runtime initialization on that first frame;
+    // creating on frame 2 makes the raw CreateFeature much harder for RenoDX to miss.
+    const auto featureSetup = ngx_session_detail::PrepareFeatureForFrame(
+        DLSSEnabled(), m_dlss.FeatureCreated(), m_framesPresented,
+        m_delayedRecreateDone, m_recreateRequested,
+        [&] { return m_dlss.EnsureFeature(cmd); },
+        [&] { return m_dlss.RecreateFeature(cmd); });
+    const bool needFeatureFlush = featureSetup.needsFlush;
+    if (featureSetup.selected) temporalReset = true;
     if (needFeatureFlush) {
         if (!HR(cmd->Close(), "Close command list after NGX CreateFeature")) return false;
         ID3D12CommandList* initLists[] = { cmd };
