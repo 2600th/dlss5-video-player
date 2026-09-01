@@ -55,6 +55,8 @@ private:
             {L"youtube.error.timeout", L"YouTube took too long to respond. Check your connection and try again."},
             {L"youtube.error.cancelled", L"YouTube resolution was cancelled."},
             {L"youtube.error.ffmpeg", L"FFmpeg could not open this YouTube stream. Try another public, non-DRM video."},
+            {L"youtube.error.media_timeout", L"The YouTube stream did not become ready within 20 seconds. Check your connection and try again."},
+            {L"youtube.error.media_stalled", L"The YouTube stream stopped delivering video for 15 seconds. Check your connection and try again."},
             {L"error.decode", L"Could not open this video. Check the file and bundled FFmpeg files, then try again."},
             {L"error.renderer", L"DLSS is unavailable. Update the NVIDIA driver or use safe mode, then try again."},
             {L"error.frame", L"No video frame could be decoded. Try another file."},

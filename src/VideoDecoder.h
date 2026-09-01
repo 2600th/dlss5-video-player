@@ -7,12 +7,28 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <stop_token>
+#include <utility>
 #include "UiLayout.h"
+
+#ifdef VIDEO_DECODER_TESTING
+struct VideoDecoderTestAccess;
+#endif
 
 struct VideoFrame {
     std::vector<uint8_t> bgra;
     int64_t timestamp100ns = 0;
     bool discontinuity = false;
+};
+
+enum class VideoReadResult {
+    FrameReady,
+    NotReady,
+    EndOfStream,
+    Error,
+    Stalled,
+    Cancelled,
 };
 
 class VideoDecoder {
@@ -21,11 +37,14 @@ public:
     ~VideoDecoder();
 
     bool Open(const std::wstring& path,
-              MediaSourceKind sourceKind = MediaSourceKind::LocalFile);
+              MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
+              std::stop_token stop = {});
     void Close();
     bool ReadNext(VideoFrame& out);
+    VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
     bool SeekSeconds(double seconds);
     bool SetDecodeSize(uint32_t width, uint32_t height);
+    void Swap(VideoDecoder& other) noexcept;
 
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
@@ -40,18 +59,20 @@ public:
 private:
     enum class Backend { None, FFmpeg, MediaFoundation };
 
-    bool OpenFFmpeg(const std::wstring& path);
-    bool ProbeFFmpeg(const std::wstring& path);
+    bool OpenFFmpeg(const std::wstring& path, std::stop_token stop);
+    bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
     bool StartFFmpeg(double seekSeconds);
     bool ReadNextFFmpeg(VideoFrame& out);
+    VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
     void StopFFmpeg();
 
     bool OpenMediaFoundation(const std::wstring& path);
     bool ReadNextMediaFoundation(VideoFrame& out);
 
-    static std::wstring FindTool(const wchar_t* exeName);
+    std::wstring FindTool(const wchar_t* exeName) const;
     static bool RunCapture(const std::wstring& exe, const std::wstring& arguments,
-                           std::string& output, DWORD* exitCode = nullptr);
+                           std::string& output, DWORD* exitCode,
+                           std::stop_token stop, std::chrono::milliseconds timeout);
 
     Backend m_backend = Backend::None;
     Microsoft::WRL::ComPtr<IMFSourceReader> m_reader;
@@ -70,6 +91,24 @@ private:
     std::wstring m_ffprobeExe;
     HANDLE m_ffmpegProcess = nullptr;
     HANDLE m_ffmpegStdout = nullptr;
+    HANDLE m_ffmpegJob = nullptr;
     uint64_t m_ffmpegFrameIndex = 0;
     int64_t m_ffmpegSeekBase100ns = 0;
+    MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;
+    std::vector<uint8_t> m_pendingFrame;
+    size_t m_pendingFrameBytes = 0;
+    std::chrono::steady_clock::time_point m_lastFrameByte{};
+    std::chrono::milliseconds m_networkStallTimeout{15000};
+    std::chrono::milliseconds m_probeTimeout{15000};
+#ifdef VIDEO_DECODER_TESTING
+    struct Settings {
+        std::wstring helperDirectory;
+        std::chrono::milliseconds probeTimeout{15000};
+        std::chrono::milliseconds stallTimeout{15000};
+    };
+    explicit VideoDecoder(Settings settings) : m_helperDirectory(std::move(settings.helperDirectory)),
+        m_networkStallTimeout(settings.stallTimeout),m_probeTimeout(settings.probeTimeout) {}
+    friend struct VideoDecoderTestAccess;
+    std::wstring m_helperDirectory;
+#endif
 };

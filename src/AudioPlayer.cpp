@@ -70,12 +70,14 @@ bool AudioPlayer::StartProcess(double seekSeconds) {
          << L" -map 0:a:0? -vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le -f s16le pipe:1";
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
+    HANDLE job=CreateJobObjectW(nullptr,nullptr);if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+    BOOL ok = job&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED,
                              nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe); if (nul) CloseHandle(nul);
-    if (!ok) { CloseHandle(readPipe); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << GetLastError()); return false; }
-    CloseHandle(pi.hThread); m_process = pi.hProcess; m_stdout = readPipe;
+    if (!ok) { CloseHandle(readPipe);if(job)CloseHandle(job); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << GetLastError()); return false; }
+    if(!AssignProcessToJobObject(job,pi.hProcess)){TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
+    ResumeThread(pi.hThread);CloseHandle(pi.hThread); m_process = pi.hProcess; m_stdout = readPipe;m_job=job;
     LOG("Audio: FFmpeg PCM/WaveOut path started at " << seekSeconds << " s.");
     return true;
 }
@@ -89,8 +91,8 @@ void AudioPlayer::StopProcess() {
     if (m_process) {
         DWORD code = 0;
         if (GetExitCodeProcess(m_process, &code) && code == STILL_ACTIVE) {
-            TerminateProcess(m_process, 0);
-            WaitForSingleObject(m_process, 1000);
+            if(m_job)TerminateJobObject(m_job,0);else TerminateProcess(m_process, 0);
+            WaitForSingleObject(m_process, 500);
         }
     }
 }
@@ -201,6 +203,7 @@ void AudioPlayer::Stop() {
 
     if (m_stdout) { CloseHandle(m_stdout); m_stdout = nullptr; }
     if (m_process) { CloseHandle(m_process); m_process = nullptr; }
+    if (m_job) { CloseHandle(m_job); m_job = nullptr; }
     if (m_waveOut) { waveOutClose(m_waveOut); m_waveOut = nullptr; }
     m_stop = false;
 }

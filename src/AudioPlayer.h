@@ -31,6 +31,7 @@ private:
     std::wstring m_ffmpeg;
     HANDLE m_process = nullptr;
     HANDLE m_stdout = nullptr;
+    HANDLE m_job = nullptr;
     HWAVEOUT m_waveOut = nullptr;
     std::thread m_thread;
     mutable std::mutex m_waveMutex;

@@ -36,6 +36,7 @@
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
 #include "YouTubeResolver.h"
+#include "CompletionRegistry.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -328,6 +329,18 @@ static std::optional<std::wstring> PromptForYouTubeUrl(HWND owner, const Localiz
             if (IsWindow(dialog)) DestroyWindow(dialog);
             break;
         }
+        if (message.message == WM_KEYDOWN &&
+            (message.hwnd == dialog || IsChild(dialog, message.hwnd))) {
+            if (message.wParam == VK_RETURN) {
+                SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED),
+                             reinterpret_cast<LPARAM>(state.edit));
+                continue;
+            }
+            if (message.wParam == VK_ESCAPE) {
+                SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
+                continue;
+            }
+        }
         if (!IsDialogMessageW(dialog, &message)) {
             TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -335,6 +348,7 @@ static std::optional<std::wstring> PromptForYouTubeUrl(HWND owner, const Localiz
     }
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
+    SetFocus(owner);
     if (repostQuit) PostQuitMessage(quitCode);
     if (!state.accepted) return std::nullopt;
     return state.url;
@@ -344,6 +358,14 @@ struct YouTubeCompletion {
     uint64_t generation{};
     ResolveResult result;
     std::wstring displayTitle;
+    std::wstring mediaErrorKey;
+    std::unique_ptr<VideoDecoder> decoder;
+    std::unique_ptr<AudioPlayer> audio;
+    VideoFrame firstFrame;
+    NVSDK_NGX_PerfQuality_Value quality{NVSDK_NGX_PerfQuality_Value_MaxQuality};
+    bool isSeek{false};
+    bool resumeAfterSeek{true};
+    double seekSeconds{0.0};
 };
 
 struct AppOptions {
@@ -549,6 +571,12 @@ public:
                 m_lastStaticPresent=nowClock;
             }
         }
+        if(m_loaded&&m_playing&&m_sourceKind==MediaSourceKind::YouTube&&!m_haveNext&&!m_seeking){
+            const VideoReadResult read=m_decoder.ReadNextAvailable(m_next);
+            if(read==VideoReadResult::FrameReady){m_haveNext=true;m_waitingForNetworkFrame=false;}
+            else if(read==VideoReadResult::NotReady){m_waitingForNetworkFrame=true;return;}
+            else{m_waitingForNetworkFrame=false;m_playing=false;Audio().Pause(true);if((read==VideoReadResult::Stalled||read==VideoReadResult::Error)&&!m_networkFailureShown){m_networkFailureShown=true;const std::wstring message=T(read==VideoReadResult::Stalled?L"youtube.error.media_stalled":L"youtube.error.ffmpeg"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);}InvalidateControls();UpdateCachedStatus();return;}
+        }
         if(!m_loaded||!m_playing||!m_haveNext||m_seeking) return;
         double now=Position(); const double frameDur=1.0/std::max(1.0,m_decoder.FrameRate());
         bool dropped=false;
@@ -556,10 +584,11 @@ public:
             double due=double(m_next.timestamp100ns)*1e-7;
             if(now-due <= std::max(0.085,frameDur*2.25)) break;
             VideoFrame skip=std::move(m_next); (void)skip; ++m_droppedFrames; dropped=true;
-            if(!m_decoder.ReadNext(m_next)){m_haveNext=false;break;}
+            if(m_sourceKind==MediaSourceKind::YouTube){const VideoReadResult read=m_decoder.ReadNextAvailable(m_next);if(read!=VideoReadResult::FrameReady){m_haveNext=false;m_waitingForNetworkFrame=read==VideoReadResult::NotReady;break;}}
+            else if(!m_decoder.ReadNext(m_next)){m_haveNext=false;break;}
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
-        if(!m_haveNext){m_playing=false;m_audio.Pause(true);InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
+        if(!m_haveNext){if(m_sourceKind!=MediaSourceKind::YouTube){m_playing=false;Audio().Pause(true);}InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
         double due=double(m_next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
@@ -569,7 +598,8 @@ public:
             if(fpsElapsed>=0.75){m_submitFps=double(m_fpsWindowFrames)/fpsElapsed;m_fpsWindowFrames=0;m_fpsWindowStart=fpsNow;}
         }
         m_currentSec=due; m_guideReset=false; m_dlssReset=false;
-        if(!m_decoder.ReadNext(m_next)){m_haveNext=false;m_playing=false;m_audio.Pause(true);}
+        if(m_sourceKind==MediaSourceKind::YouTube){const VideoReadResult read=m_decoder.ReadNextAvailable(m_next);m_haveNext=read==VideoReadResult::FrameReady;m_waitingForNetworkFrame=read==VideoReadResult::NotReady;if(read==VideoReadResult::Stalled||read==VideoReadResult::Error){m_playing=false;Audio().Pause(true);}}
+        else if(!m_decoder.ReadNext(m_next)){m_haveNext=false;m_playing=false;Audio().Pause(true);}
         InvalidatePlaybackProgress();
         UpdateCachedStatus();
     }
@@ -581,6 +611,8 @@ public:
 
 private:
     std::wstring T(const wchar_t* key)const{return m_loc.Get(key);}
+    AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
+    const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
 
     int Dip(int value)const{return MulDiv(value,static_cast<int>(ActiveWindowDpi(m_hwnd)),USER_DEFAULT_SCREEN_DPI);}
     int ControlHeight()const{return Dip(CONTROL_H_DIP);}
@@ -790,12 +822,12 @@ private:
         m_renderer->SetColorSettings(m_colorSettings);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
-        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(source,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
+        m_haveNext=m_decoder.ReadNext(m_next);Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
         UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
-        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
+        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkFailureShown=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -851,7 +883,7 @@ private:
 
     double Position() const {
         if(!m_loaded)return 0;if(!m_playing)return m_currentSec;
-        double audio=m_audio.PositionSeconds();
+        double audio=Audio().PositionSeconds();
         if(audio>=0.0){double d=m_decoder.DurationSeconds();return d>0?std::clamp(audio,0.0,d):audio;}
         double s=m_playStartSec+std::chrono::duration<double>(Clock::now()-m_playStart).count();double d=m_decoder.DurationSeconds();return d>0?std::clamp(s,0.0,d):std::max(0.0,s);
     }
@@ -863,16 +895,16 @@ private:
     }
 
     void RequestSeek(double sec,bool resumeAfter) {
-        if(!m_loaded)return; sec=ClampSeek(sec);
+        if(!m_loaded)return;sec=ClampSeek(sec);if(m_sourceKind==MediaSourceKind::YouTube){StartYouTubeSeek(sec,resumeAfter);return;}
         if(!m_seekPending) m_currentSec=Position();
-        m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;m_audio.Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
+        m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;Audio().Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
     }
 
     bool PerformSeek(double sec,bool resumeAfter) {
         if(!m_loaded||m_seeking)return false;SetSeeking(true);sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
         // Seek is deliberately transactional and performed from Tick(), never from a mouse message.
         // Shut down the audio producer first, wait for GPU work, then restart the video decoder.
-        m_audio.Stop(); if(m_renderer)m_renderer->WaitGPU(); m_haveNext=false;m_next=VideoFrame{};
+        Audio().Stop(); if(m_renderer)m_renderer->WaitGPU(); m_haveNext=false;m_next=VideoFrame{};
         auto readAt=[&](double target,VideoFrame& frame)->bool{
             if(!m_decoder.SeekSeconds(target))return false;
             if(m_decoder.ReadNext(frame))return true;
@@ -891,11 +923,11 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;SetSeeking(false);return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
-        const bool audioOk=m_audio.Start(m_path,m_currentSec);if(audioOk){m_audio.SetVolume(m_muted?0.0f:m_volume);m_audio.Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
+        const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
-    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=Position();m_playing=false;m_audio.Pause(true);}else{if(!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;m_audio.Pause(false);}InvalidateControls();InvalidatePlaybackProgress();}
+    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=Position();m_playing=false;Audio().Pause(true);}else{if(m_sourceKind==MediaSourceKind::LocalFile&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);}InvalidateControls();InvalidatePlaybackProgress();}
     void TogglePause(){SetPaused(m_playing);}
     void StopPlayback(){if(m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return;}RequestSeek(0,false);}
 
@@ -1101,7 +1133,8 @@ private:
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateControls();UpdateCachedStatus();
     }
     void DrainYouTubeCompletions(){
-        if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_YOUTUBE_RESOLVED,WM_YOUTUBE_RESOLVED,PM_REMOVE)){delete reinterpret_cast<YouTubeCompletion*>(message.lParam);}
+        m_youtubeCompletions.Clear();
+        if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_YOUTUBE_RESOLVED,WM_YOUTUBE_RESOLVED,PM_REMOVE)){}
     }
     void CancelYouTubeResolution(bool updateUi=true){
         const bool active=m_youtubeLifecycle.IsResolving()||m_youtubeWorker.joinable();
@@ -1117,6 +1150,30 @@ private:
         if(updateUi)SyncSourceActionAvailability();
         LOG("YouTube resolution cancelled and worker stopped.");
     }
+    static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,uint32_t maxW,uint32_t maxH,bool qualityExplicit,NVSDK_NGX_PerfQuality_Value explicitQuality){
+        if(!completion.result.ok||stop.stop_requested())return;
+        completion.decoder=std::make_unique<VideoDecoder>();
+        if(!completion.decoder->Open(completion.result.mediaUrl,MediaSourceKind::YouTube,stop)){completion.mediaErrorKey=stop.stop_requested()?L"youtube.error.cancelled":L"youtube.error.ffmpeg";return;}
+        double dar=completion.decoder->DisplayAspectRatio();if(!std::isfinite(dar)||dar<0.2)dar=double(completion.decoder->Width())/std::max(1u,completion.decoder->Height());
+        const auto [ow,oh]=OutputForAspect(dar,maxW,maxH);completion.quality=qualityExplicit?explicitQuality:AutoQuality(completion.decoder->NativeWidth(),completion.decoder->NativeHeight(),ow,oh,completion.decoder->FrameRate());
+        const auto [decodeW,decodeH]=RecommendedDecodeSize(completion.decoder->NativeWidth(),completion.decoder->NativeHeight(),ow,oh,completion.quality);
+        if((decodeW!=completion.decoder->Width()||decodeH!=completion.decoder->Height())&&!completion.decoder->SetDecodeSize(decodeW,decodeH))LOG("YouTube realtime decode scaling unavailable; continuing at native decoder resolution.");
+        // Start the final decoder process at the requested network seek after any resize restart.
+        if(completion.seekSeconds>0.0&&!completion.decoder->SeekSeconds(completion.seekSeconds)){completion.mediaErrorKey=L"youtube.error.ffmpeg";return;}
+        const auto firstDeadline=Clock::now()+std::chrono::seconds(20);
+        for(;;){
+            const VideoReadResult read=completion.decoder->ReadNextAvailable(completion.firstFrame,stop);
+            if(read==VideoReadResult::FrameReady)break;
+            if(read==VideoReadResult::Cancelled||stop.stop_requested()){completion.mediaErrorKey=L"youtube.error.cancelled";break;}
+            if(read==VideoReadResult::Stalled){completion.mediaErrorKey=L"youtube.error.media_stalled";break;}
+            if(read==VideoReadResult::Error||read==VideoReadResult::EndOfStream){completion.mediaErrorKey=L"youtube.error.ffmpeg";break;}
+            if(Clock::now()>=firstDeadline){completion.mediaErrorKey=L"youtube.error.media_timeout";completion.decoder->Close();break;}
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if(completion.mediaErrorKey.empty()){
+            completion.audio=std::make_unique<AudioPlayer>();completion.audio->Start(completion.result.mediaUrl,double(completion.firstFrame.timestamp100ns)*1e-7);completion.audio->Pause(true);
+        }
+    }
     void StartYouTubeResolution(const std::wstring& url,const std::wstring& displayTitle=L""){
         if(!IsSupportedYouTubeUrl(url))return;
         CancelYouTubeResolution();
@@ -1127,10 +1184,13 @@ private:
         LOG("YouTube resolution started.");
         try{
             HWND target=m_hwnd;YouTubeResolver* resolver=m_youtubeResolver.get();const std::wstring title=m_pendingYouTubeTitle;
-            m_youtubeWorker=std::jthread([target,resolver,generation,url,title](std::stop_token stop){
-                ResolveResult result=resolver->Resolve(url,stop);
-                auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->result=std::move(result);completion->displayTitle=title;
-                if(PostMessageW(target,WM_YOUTUBE_RESOLVED,0,reinterpret_cast<LPARAM>(completion.get())))completion.release();
+            const uint32_t maxW=m_opt.maxW,maxH=m_opt.maxH;const bool qualityExplicit=m_opt.qualityExplicit;const auto explicitQuality=m_opt.quality;
+            CompletionRegistry<YouTubeCompletion>* completions=&m_youtubeCompletions;
+            m_youtubeWorker=std::jthread([target,resolver,completions,generation,url,title,maxW,maxH,qualityExplicit,explicitQuality](std::stop_token stop){
+                auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->displayTitle=title;
+                completion->result=resolver->Resolve(url,stop);
+                PrepareYouTubeMedia(*completion,stop,maxW,maxH,qualityExplicit,explicitQuality);
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_YOUTUBE_RESOLVED,static_cast<WPARAM>(token),0)!=FALSE;});
             });
         }catch(const std::system_error&){
             m_youtubeLifecycle.Invalidate();m_pendingYouTubeTitle.clear();SyncSourceActionAvailability();
@@ -1138,12 +1198,25 @@ private:
             LOG("YouTube worker could not be started.");
         }
     }
+    void StartYouTubeSeek(double seconds,bool resumeAfter){
+        if(!m_loaded||m_sourceKind!=MediaSourceKind::YouTube||m_path.empty())return;
+        CancelYouTubeResolution();const uint64_t generation=m_youtubeLifecycle.Begin();SyncSourceActionAvailability();
+        const std::wstring source=m_path,title=m_displayTitle;const uint32_t maxW=m_opt.maxW,maxH=m_opt.maxH;const bool qualityExplicit=m_opt.qualityExplicit;const auto explicitQuality=m_opt.quality;
+        try{
+            HWND target=m_hwnd;CompletionRegistry<YouTubeCompletion>* completions=&m_youtubeCompletions;
+            m_youtubeWorker=std::jthread([target,completions,generation,source,title,seconds,resumeAfter,maxW,maxH,qualityExplicit,explicitQuality](std::stop_token stop){
+                auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->displayTitle=title;completion->isSeek=true;completion->resumeAfterSeek=resumeAfter;completion->seekSeconds=seconds;completion->result.ok=true;completion->result.error=ResolveError::None;completion->result.mediaUrl=source;
+                PrepareYouTubeMedia(*completion,stop,maxW,maxH,qualityExplicit,explicitQuality);
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_YOUTUBE_RESOLVED,static_cast<WPARAM>(token),0)!=FALSE;});
+            });
+        }catch(const std::system_error&){m_youtubeLifecycle.Invalidate();SyncSourceActionAvailability();const std::wstring message=T(L"youtube.error.start_failed"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);}
+    }
     void ActivateYouTube(){
         if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
         const auto url=PromptForYouTubeUrl(m_hwnd,m_loc,m_font);if(url)StartYouTubeResolution(*url);
     }
-    void CompleteYouTubeResolution(YouTubeCompletion* raw){
-        std::unique_ptr<YouTubeCompletion> completion(raw);if(!completion)return;
+    void CompleteYouTubeResolution(uint64_t token){
+        std::unique_ptr<YouTubeCompletion> completion=m_youtubeCompletions.Take(token);if(!completion)return;
         if(!m_youtubeLifecycle.Complete(completion->generation))return;
         if(m_youtubeWorker.joinable()){m_youtubeWorker.join();m_youtubeWorker=std::jthread{};}
         m_pendingYouTubeTitle.clear();SyncSourceActionAvailability();
@@ -1152,8 +1225,28 @@ private:
             const std::wstring message=T(YouTubeResolveErrorMessageKey(completion->result.error).data()),caption=T(L"app.title");
             MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);LOG("YouTube resolution failed without exposing source details.");return;
         }
-        LOG("YouTube resolution completed; opening the redacted stream source.");
-        Load(completion->result.mediaUrl,completion->displayTitle,MediaSourceKind::YouTube);
+        if(!completion->mediaErrorKey.empty()){
+            if(completion->mediaErrorKey==L"youtube.error.cancelled")return;
+            const std::wstring message=T(completion->mediaErrorKey.c_str()),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);LOG("YouTube media preparation failed without exposing source details.");return;
+        }
+        if(!completion->decoder||completion->firstFrame.bgra.empty())return;
+        LOG("YouTube resolution and background media preparation completed.");
+        const std::wstring source=std::move(completion->result.mediaUrl);const std::wstring title=std::move(completion->displayTitle);
+        if(completion->isSeek&&m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&m_renderer){
+            Audio().Stop();m_networkAudio.reset();m_decoder.Swap(*completion->decoder);m_networkAudio=std::move(completion->audio);m_activeQuality=completion->quality;
+            m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
+            if(!RenderVideoFrame(completion->firstFrame,true)){const std::wstring message=T(L"error.frame"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);m_playing=false;return;}
+            m_currentSec=double(completion->firstFrame.timestamp100ns)*1e-7;m_haveNext=false;m_waitingForNetworkFrame=true;m_networkFailureShown=false;m_playing=completion->resumeAfterSeek;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_path=source;m_displayTitle=DisplayTitleForSource(MediaSourceKind::YouTube,title);Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!m_playing);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return;
+        }
+        Unload();m_decoder.Swap(*completion->decoder);m_networkAudio=std::move(completion->audio);m_activeQuality=completion->quality;
+        m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
+        const auto [ow,oh]=OutputForAspect(m_dar,m_opt.maxW,m_opt.maxH);const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
+        ShowWindow(m_viewport,SW_SHOW);Layout();m_renderer=std::make_unique<D3D12Renderer>();
+        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)){const std::wstring message=T(L"error.renderer"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);Unload();return;}
+        m_renderer->SetColorSettings(m_colorSettings);m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
+        if(!RenderVideoFrame(completion->firstFrame,true)){const std::wstring message=T(L"error.frame"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);Unload();return;}
+        m_currentSec=double(completion->firstFrame.timestamp100ns)*1e-7;m_haveNext=false;m_waitingForNetworkFrame=true;m_networkFailureShown=false;m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=MediaSourceKind::YouTube;m_displayTitle=DisplayTitleForSource(MediaSourceKind::YouTube,title);m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
+        Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(false);UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
     }
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
@@ -1232,11 +1325,11 @@ private:
         const auto items=ToolbarItems();const ToolbarAction released=ResolveToolbarHover(items,POINT{x,y},ToolbarState());InvalidateControls();if(released==pressed){for(const auto& item:items)if(item.action==pressed){ActivateToolbarAction(pressed,item.bounds);break;}}
     }
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
-    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;m_audio.SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
-    void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
+    void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
+    void ToggleMute(){m_muted=!m_muted;Audio().SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();UpdateCachedStatus();InvalidateControls();}
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
-    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path,title=m_displayTitle;const MediaSourceKind sourceKind=m_sourceKind;double keep=Position();bool wasPlaying=m_playing;if(Load(p,title,sourceKind))RequestSeek(keep,wasPlaying);}}
+    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){double keep=Position();bool wasPlaying=m_playing;if(m_sourceKind==MediaSourceKind::YouTube){StartYouTubeSeek(keep,wasPlaying);return;}std::wstring p=m_path,title=m_displayTitle;if(Load(p,title,MediaSourceKind::LocalFile))RequestSeek(keep,wasPlaying);}}
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
@@ -1245,7 +1338,7 @@ private:
     LRESULT WndProc(HWND h,UINT m,WPARAM w,LPARAM l){
         switch(m){
         case WM_ERASEBKGND:return 1;
-        case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(reinterpret_cast<YouTubeCompletion*>(l));return 0;
+        case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(static_cast<uint64_t>(w));return 0;
         case WM_DESTROY:CancelYouTubeResolution(false);DrainYouTubeCompletions();m_running=false;PostQuitMessage(0);return 0;
         case WM_CLOSE:CancelYouTubeResolution(false);DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
@@ -1270,7 +1363,7 @@ private:
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{HDROP d=reinterpret_cast<HDROP>(w);wchar_t p[32768]{};UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);if(count>0&&DragQueryFileW(d,0,p,static_cast<UINT>(std::size(p))))Load(p);DragFinish(d);return 0;}
-        case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;m_audio.SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
+        case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:
@@ -1290,10 +1383,10 @@ private:
     }
 
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
-    bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false;
+    bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_networkFailureShown=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false;
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;std::jthread m_youtubeWorker;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;
 };
 

@@ -51,6 +51,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/ReShadeConfig.h
     src/YouTubeResolver.cpp
     src/YouTubeResolver.h
+    src/CompletionRegistry.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -108,13 +109,16 @@ if(BUILD_TESTING)
         src/ReShadeConfig.h
         src/YouTubeResolver.cpp
         src/YouTubeResolver.h
+        src/VideoDecoder.cpp
+        src/VideoDecoder.h
+        src/CompletionRegistry.h
     )
     target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING VIDEO_DECODER_TESTING
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32 winhttp)
+    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 

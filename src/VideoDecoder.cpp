@@ -10,6 +10,8 @@
 #include <vector>
 #include <iterator>
 #include <cstring>
+#include <thread>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -39,6 +41,19 @@ static bool ParseRate(const std::string& text, double& out) {
 
 VideoDecoder::~VideoDecoder() { Close(); }
 
+void VideoDecoder::Swap(VideoDecoder& other) noexcept {
+    using std::swap;
+    swap(m_backend,other.m_backend);swap(m_reader,other.m_reader);swap(m_path,other.m_path);
+    swap(m_width,other.m_width);swap(m_height,other.m_height);swap(m_nativeWidth,other.m_nativeWidth);swap(m_nativeHeight,other.m_nativeHeight);swap(m_stride,other.m_stride);
+    swap(m_fps,other.m_fps);swap(m_durationSec,other.m_durationSec);swap(m_displayAspect,other.m_displayAspect);
+    swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
+    swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
+#ifdef VIDEO_DECODER_TESTING
+    swap(m_helperDirectory,other.m_helperDirectory);
+#endif
+}
+
 const wchar_t* VideoDecoder::BackendName() const {
     switch (m_backend) {
     case Backend::FFmpeg: return L"FFmpeg";
@@ -53,7 +68,7 @@ void VideoDecoder::Close() {
     m_backend = Backend::None;
 }
 
-bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind) {
+bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -62,12 +77,13 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind) {
     m_fps = 30.0;
     m_durationSec = 0.0;
     m_displayAspect = 0.0;
+    m_sourceKind = sourceKind;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
 
     // FFmpeg is intentionally preferred. It makes playback independent from
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
-    if (OpenFFmpeg(path)) {
+    if (OpenFFmpeg(path, stop)) {
         m_backend = Backend::FFmpeg;
         LOG("Video decoder selected: FFmpeg");
         return true;
@@ -89,7 +105,14 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind) {
     return false;
 }
 
-std::wstring VideoDecoder::FindTool(const wchar_t* exeName) {
+std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
+#ifdef VIDEO_DECODER_TESTING
+    if(!m_helperDirectory.empty()){
+        const fs::path candidate=fs::path(m_helperDirectory)/exeName;std::error_code ec;
+        if(fs::is_regular_file(candidate,ec))return candidate.wstring();
+        return L"";
+    }
+#endif
     wchar_t modulePath[32768]{};
     if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
         const fs::path base = fs::path(modulePath).parent_path();
@@ -113,7 +136,8 @@ std::wstring VideoDecoder::FindTool(const wchar_t* exeName) {
 }
 
 bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& arguments,
-                              std::string& output, DWORD* exitCode) {
+                              std::string& output, DWORD* exitCode,
+                              std::stop_token stop, std::chrono::milliseconds timeout) {
     output.clear();
     if (exe.empty()) return false;
 
@@ -142,34 +166,65 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
-    const BOOL ok = CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
-                                   TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+            CloseHandle(job); job = nullptr;
+        }
+    }
+    const BOOL ok = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
+                                   TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
 
     if (!ok) {
         CloseHandle(readPipe);
+        if (job) CloseHandle(job);
         return false;
     }
-
+    if (!AssignProcessToJobObject(job, pi.hProcess)) {
+        TerminateProcess(pi.hProcess, 1);WaitForSingleObject(pi.hProcess,500);
+        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
+    }
+    ResumeThread(pi.hThread);
+    const auto deadline=std::chrono::steady_clock::now()+timeout;
+    bool cancelled=false,timedOut=false,pipeError=false;
     char buf[8192];
     for (;;) {
-        DWORD got = 0;
-        if (!ReadFile(readPipe, buf, sizeof(buf), &got, nullptr) || got == 0) break;
-        output.append(buf, buf + got);
+        DWORD available=0;
+        if (!PeekNamedPipe(readPipe,nullptr,0,nullptr,&available,nullptr)) {
+            const DWORD pipeFailure=GetLastError();
+            if(pipeFailure==ERROR_BROKEN_PIPE&&WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0)break;
+            pipeError=true;break;
+        }
+        while(available>0){
+            const DWORD want=std::min<DWORD>(available,sizeof(buf));DWORD got=0;
+            if(!ReadFile(readPipe,buf,want,&got,nullptr)){pipeError=true;break;}
+            if(got==0)break;output.append(buf,buf+got);available-=got;
+        }
+        if(pipeError)break;
+        if(WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0){
+            DWORD remaining=0;if(!PeekNamedPipe(readPipe,nullptr,0,nullptr,&remaining,nullptr)||remaining==0)break;
+        }
+        if(stop.stop_requested()){cancelled=true;break;}
+        if(std::chrono::steady_clock::now()>=deadline){timedOut=true;break;}
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    if(cancelled||timedOut||pipeError){TerminateJobObject(job,1);WaitForSingleObject(pi.hProcess,500);}
     CloseHandle(readPipe);
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     if (exitCode) *exitCode = code;
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    return code == 0;
+    CloseHandle(job);
+    return !cancelled&&!timedOut&&!pipeError&&code == 0;
 }
 
-bool VideoDecoder::ProbeFFmpeg(const std::wstring& path) {
+bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     std::wstring args =
         L"-v error -select_streams v:0 "
         L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate:format=duration "
@@ -177,7 +232,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path) {
 
     std::string text;
     DWORD code = 0;
-    if (!RunCapture(m_ffprobeExe, args, text, &code)) {
+    const auto timeout=m_sourceKind==MediaSourceKind::YouTube?m_probeTimeout:std::chrono::milliseconds(30000);
+    if (!RunCapture(m_ffprobeExe, args, text, &code, stop, timeout)) {
         LOG("ffprobe failed, exitCode=" << code);
         return false;
     }
@@ -274,44 +330,53 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds) {
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
+    HANDLE job=CreateJobObjectW(nullptr,nullptr);
+    if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
-                                   TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    const BOOL ok = job&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
+                                   TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
 
     if (!ok) {
         LOG("CreateProcess(ffmpeg) failed winerr=" << GetLastError());
         CloseHandle(readPipe);
+        if(job)CloseHandle(job);
         return false;
     }
+
+    if(!AssignProcessToJobObject(job,pi.hProcess)){
+        TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
+    }
+    ResumeThread(pi.hThread);
 
     CloseHandle(pi.hThread);
     m_ffmpegProcess = pi.hProcess;
     m_ffmpegStdout = readPipe;
+    m_ffmpegJob = job;
     m_ffmpegFrameIndex = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
+    m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     LOG("FFmpeg raw BGRA decode process started.");
     return true;
 }
 
 void VideoDecoder::StopFFmpeg() {
-    if (m_ffmpegStdout) {
-        CloseHandle(m_ffmpegStdout);
-        m_ffmpegStdout = nullptr;
-    }
     if (m_ffmpegProcess) {
         DWORD code = 0;
         if (GetExitCodeProcess(m_ffmpegProcess, &code) && code == STILL_ACTIVE) {
-            TerminateProcess(m_ffmpegProcess, 0);
-            WaitForSingleObject(m_ffmpegProcess, 1000);
+            if(m_ffmpegJob)TerminateJobObject(m_ffmpegJob,0);else TerminateProcess(m_ffmpegProcess, 0);
+            WaitForSingleObject(m_ffmpegProcess, 500);
         }
         CloseHandle(m_ffmpegProcess);
         m_ffmpegProcess = nullptr;
     }
+    if(m_ffmpegJob){CloseHandle(m_ffmpegJob);m_ffmpegJob=nullptr;}
+    if (m_ffmpegStdout) {CloseHandle(m_ffmpegStdout);m_ffmpegStdout = nullptr;}
+    m_pendingFrame.clear();m_pendingFrameBytes=0;
 }
 
-bool VideoDecoder::OpenFFmpeg(const std::wstring& path) {
+bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_ffmpegExe = FindTool(L"ffmpeg.exe");
     m_ffprobeExe = FindTool(L"ffprobe.exe");
     if (m_ffmpegExe.empty() || m_ffprobeExe.empty()) {
@@ -321,32 +386,58 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path) {
     }
 
     LOG("FFmpeg executable detected.");
-    if (!ProbeFFmpeg(path)) return false;
+    if (!ProbeFFmpeg(path,stop)||stop.stop_requested()) return false;
     return StartFFmpeg(0.0);
 }
 
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
-    if (!m_ffmpegStdout) return false;
-    const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
-    if (!frameBytes) return false;
-
-    out.bgra.resize(frameBytes);
-    size_t total = 0;
-    while (total < frameBytes) {
-        const DWORD want = static_cast<DWORD>(std::min<size_t>(frameBytes - total, 4u << 20));
-        DWORD got = 0;
-        if (!ReadFile(m_ffmpegStdout, out.bgra.data() + total, want, &got, nullptr) || got == 0) {
-            if (total != 0) LOG("FFmpeg ended in the middle of a raw video frame (" << total << "/" << frameBytes << ").");
-            return false;
-        }
-        total += got;
+    for(;;){
+        const VideoReadResult result=ReadNextFFmpegAvailable(out,{});
+        if(result==VideoReadResult::FrameReady)return true;
+        if(result!=VideoReadResult::NotReady)return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+}
+
+VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_token stop) {
+    if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
+    const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
+    if (!frameBytes) return VideoReadResult::Error;
+    if(stop.stop_requested())return VideoReadResult::Cancelled;
+    if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();}
+
+    DWORD available=0;
+    if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
+        if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0)
+            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+        return VideoReadResult::Error;
+    }
+    if(available>0){
+        const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{4u<<20}}));
+        DWORD got=0;
+        if(want&&!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
+        if(got){m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();}
+    }
+
+    if(m_pendingFrameBytes<frameBytes){
+        if(stop.stop_requested())return VideoReadResult::Cancelled;
+        if(m_sourceKind==MediaSourceKind::YouTube&&std::chrono::steady_clock::now()-m_lastFrameByte>=m_networkStallTimeout){
+            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg();return VideoReadResult::Stalled;
+        }
+        if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
+            if(m_pendingFrameBytes)LOG("FFmpeg ended in the middle of a raw video frame.");
+            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+        }
+        return VideoReadResult::NotReady;
+    }
+
+    out.bgra.swap(m_pendingFrame);m_pendingFrame.clear();m_pendingFrameBytes=0;
 
     out.timestamp100ns = m_ffmpegSeekBase100ns +
         static_cast<int64_t>((static_cast<double>(m_ffmpegFrameIndex) / m_fps) * 10000000.0);
     out.discontinuity = (m_ffmpegFrameIndex == 0 && m_ffmpegSeekBase100ns != 0);
     ++m_ffmpegFrameIndex;
-    return true;
+    return VideoReadResult::FrameReady;
 }
 
 bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
@@ -490,6 +581,12 @@ bool VideoDecoder::ReadNext(VideoFrame& out) {
     if (m_backend == Backend::FFmpeg) return ReadNextFFmpeg(out);
     if (m_backend == Backend::MediaFoundation) return ReadNextMediaFoundation(out);
     return false;
+}
+
+VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token stop) {
+    if(m_backend==Backend::FFmpeg)return ReadNextFFmpegAvailable(out,stop);
+    if(m_backend==Backend::MediaFoundation)return ReadNextMediaFoundation(out)?VideoReadResult::FrameReady:VideoReadResult::EndOfStream;
+    return VideoReadResult::Error;
 }
 
 bool VideoDecoder::SeekSeconds(double seconds) {

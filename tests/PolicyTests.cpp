@@ -8,6 +8,11 @@
 #include "UiResources.h"
 #include "RuntimeLifetime.h"
 #include "YouTubeResolver.h"
+#include "CompletionRegistry.h"
+#include "VideoDecoder.h"
+#ifdef small
+#undef small
+#endif
 
 #include <windows.h>
 #include <shellapi.h>
@@ -39,6 +44,18 @@ struct YouTubeResolverTestAccess {
         settings.shutdownWait = std::chrono::milliseconds{500};
         settings.failureStage = failureStage;
         return std::unique_ptr<YouTubeResolver>(new YouTubeResolver(std::move(settings)));
+    }
+};
+
+struct VideoDecoderTestAccess {
+    static std::unique_ptr<VideoDecoder> Create(
+        const std::filesystem::path& helperDirectory,
+        std::chrono::milliseconds probeTimeout = std::chrono::milliseconds{250},
+        std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120})
+    {
+        VideoDecoder::Settings settings;
+        settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;
+        return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
     }
 };
 
@@ -973,6 +990,9 @@ void youtube_resolution_error_mapping_is_actionable_and_distinct_test()
              YouTubeResolveErrorMessageKey(ResolveError::OutputTooLarge));
     CHECK_EQ(std::wstring_view(L"youtube.error.extraction"),
              YouTubeResolveErrorMessageKey(ResolveError::InvalidOutput));
+    Localizer localizer;
+    CHECK_EQ(std::wstring(L"The YouTube stream did not become ready within 20 seconds. Check your connection and try again."),localizer.Get(L"youtube.error.media_timeout"));
+    CHECK_EQ(std::wstring(L"The YouTube stream stopped delivering video for 15 seconds. Check your connection and try again."),localizer.Get(L"youtube.error.media_stalled"));
 }
 
 void youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test()
@@ -1048,6 +1068,78 @@ void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
         }
     }
     if (menu) DestroyMenu(menu);
+}
+
+struct RegistryCompletion {
+    uint64_t generation{};
+    int value{};
+};
+
+void youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test()
+{
+    CompletionRegistry<RegistryCompletion> registry;
+    const uint64_t first = registry.Register(std::make_unique<RegistryCompletion>(RegistryCompletion{7, 41}));
+    const uint64_t second = registry.Register(std::make_unique<RegistryCompletion>(RegistryCompletion{8, 42}));
+    CHECK(first != 0);
+    CHECK(second > first);
+    CHECK(!registry.Take(first + second + 1000));
+    auto owned = registry.Take(first);
+    CHECK(owned != nullptr);
+    if (owned) {
+        CHECK_EQ(uint64_t{7}, owned->generation);
+        CHECK_EQ(41, owned->value);
+    }
+    CHECK(!registry.Take(first));
+    CHECK_EQ(size_t{1}, registry.Size());
+    registry.Clear();
+    CHECK_EQ(size_t{0}, registry.Size());
+    CHECK(!registry.Take(second));
+}
+
+void youtube_completion_registry_post_failure_and_concurrency_are_owned_test()
+{
+    CompletionRegistry<RegistryCompletion> registry;
+    const uint64_t failed = registry.RegisterAndPost(
+        std::make_unique<RegistryCompletion>(RegistryCompletion{1, 9}),
+        [](uint64_t) { return false; });
+    CHECK_EQ(uint64_t{0}, failed);
+    CHECK_EQ(size_t{0}, registry.Size());
+
+    constexpr int count = 200;
+    std::atomic<int> taken{0};
+    std::vector<uint64_t> tokens;
+    tokens.reserve(count);
+    std::mutex tokensMutex;
+    std::jthread producer([&] {
+        for (int index = 0; index < count; ++index) {
+            const uint64_t token = registry.Register(
+                std::make_unique<RegistryCompletion>(RegistryCompletion{2, index}));
+            std::scoped_lock lock(tokensMutex);
+            tokens.push_back(token);
+        }
+    });
+    producer.join();
+    std::jthread firstTaker([&] {
+        for (const uint64_t token : tokens) if (registry.Take(token)) ++taken;
+    });
+    std::jthread secondTaker([&] {
+        for (const uint64_t token : tokens) if (registry.Take(token)) ++taken;
+    });
+    firstTaker.join();
+    secondTaker.join();
+    CHECK_EQ(count, taken.load());
+    CHECK_EQ(size_t{0}, registry.Size());
+
+    const uint64_t stale = registry.Register(
+        std::make_unique<RegistryCompletion>(RegistryCompletion{3, 17}));
+    registry.Clear(); // models destroy/new-source invalidation after worker join.
+    CHECK(!registry.Take(stale));
+
+    std::atomic<bool> registering{true};
+    std::jthread concurrentProducer([&]{for(int index=0;index<500;++index)registry.Register(std::make_unique<RegistryCompletion>(RegistryCompletion{4,index}));registering=false;});
+    std::jthread concurrentClearer([&]{while(registering.load()){registry.Clear();Sleep(0);}registry.Clear();});
+    std::jthread concurrentTaker([&]{uint64_t token=1;while(registering.load()){registry.Take(token++);Sleep(0);}});
+    concurrentProducer.join();concurrentClearer.join();concurrentTaker.join();registry.Clear();CHECK_EQ(size_t{0},registry.Size());
 }
 
 std::filesystem::path executable_directory()
@@ -2139,6 +2231,83 @@ struct ResolverFixture {
     }
 };
 
+size_t count_named_processes(std::wstring_view executableName);
+bool wait_for_named_process_count(std::wstring_view executableName,size_t expected,std::chrono::milliseconds timeout);
+
+struct MediaFixture {
+    std::filesystem::path directory;
+    MediaFixture()
+    {
+        directory=std::filesystem::temp_directory_path()/(L"PolicyTests-NetworkMedia-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));
+        std::error_code error;std::filesystem::create_directories(directory,error);CHECK(!error);
+        CHECK(CopyFileW(current_test_executable().c_str(),(directory/L"ffprobe.exe").c_str(),FALSE)!=FALSE);
+        CHECK(CopyFileW(current_test_executable().c_str(),(directory/L"ffmpeg.exe").c_str(),FALSE)!=FALSE);
+    }
+    ~MediaFixture(){std::error_code error;std::filesystem::remove_all(directory,error);CHECK(!error);}
+};
+
+void youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test()
+{
+    MediaFixture fixture;
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        const auto started=std::chrono::steady_clock::now();
+        CHECK(decoder->Open(L"https://media.invalid/trickle",MediaSourceKind::YouTube));
+        CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+        VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){
+            const auto callStarted=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);
+            CHECK(std::chrono::steady_clock::now()-callStarted<std::chrono::milliseconds{40});Sleep(5);
+        }
+        CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
+        const auto closeStarted=std::chrono::steady_clock::now();decoder->Close();CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
+    }
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{120},std::chrono::milliseconds{80});
+        const auto started=std::chrono::steady_clock::now();CHECK(!decoder->Open(L"https://media.invalid/holdprobe",MediaSourceKind::YouTube));
+        CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+    }
+}
+
+void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
+{
+    MediaFixture fixture;const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
+    DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    for(int cycle=0;cycle<4;++cycle){
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
+        CHECK(decoder->Open(L"https://media.invalid/stallmid",MediaSourceKind::YouTube));VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){const auto call=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);CHECK(std::chrono::steady_clock::now()-call<std::chrono::milliseconds{40});Sleep(5);}
+        CHECK_EQ(VideoReadResult::Stalled,result);decoder->Close();
+    }
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+        const auto closeStarted=std::chrono::steady_clock::now();decoder->Close();CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
+    }
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/exit",MediaSourceKind::YouTube));VideoFrame frame;
+        VideoReadResult result=VideoReadResult::NotReady;for(int i=0;i<50&&result==VideoReadResult::NotReady;++i){result=decoder->ReadNextAvailable(frame);Sleep(5);}CHECK(result==VideoReadResult::EndOfStream||result==VideoReadResult::Error);
+    }
+    Sleep(50);CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,std::chrono::milliseconds{500}));CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,std::chrono::milliseconds{500}));
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
+}
+
+void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
+{
+    MediaFixture fixture;
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/trickle",MediaSourceKind::YouTube));CHECK(decoder->SeekSeconds(12.0));
+        VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){const auto call=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);CHECK(std::chrono::steady_clock::now()-call<std::chrono::milliseconds{40});Sleep(5);}
+        CHECK_EQ(VideoReadResult::FrameReady,result);CHECK(frame.timestamp100ns>=120000000);
+    }
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::seconds{5});CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));CHECK(decoder->SeekSeconds(9.0));
+        const auto started=std::chrono::steady_clock::now();std::jthread worker([&](std::stop_token stop){VideoFrame frame;while(decoder->ReadNextAvailable(frame,stop)==VideoReadResult::NotReady)Sleep(5);});Sleep(30);worker.request_stop();worker.join();decoder->Close();CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+    }
+}
+
 bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds limit)
 {
     const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -2298,6 +2467,21 @@ void youtube_resolver_repeated_runs_leave_process_handle_count_stable_test()
     CHECK(after <= before + 2);
 }
 
+int run_fake_media_child(int argc,wchar_t* argv[])
+{
+    const std::wstring name=current_test_executable().filename().wstring();std::wstring all;
+    for(int index=1;index<argc;++index){all+=L" ";all+=argv[index];}
+    if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
+        if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
+        std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
+    }
+    if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
+    if(all.find(L"exit")!=std::wstring::npos)return 7;
+    if(all.find(L"stallmid")!=std::wstring::npos){std::cout.write("1234",4);std::cout.flush();Sleep(INFINITE);return 0;}
+    if(all.find(L"trickle")!=std::wstring::npos){std::cout.write("12345678",8);std::cout.flush();Sleep(35);std::cout.write("abcdefgh",8);std::cout.flush();return 0;}
+    Sleep(INFINITE);return 0;
+}
+
 int run_fake_resolver_child(int argc, wchar_t* argv[])
 {
     if (argc == 3 && std::wstring_view(argv[1]) == L"--resolver-descendant") {
@@ -2336,6 +2520,11 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
     if (url.find(L"success") != std::wstring_view::npos) {
         std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n" << std::flush;
+        return 0;
+    }
+    if (url.find(L"uismoke") != std::wstring_view::npos) {
+        write_binary_file(current_test_executable().parent_path()/L"ui-helper-launch.marker","launched");
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=uismoke\n" << std::flush;
         return 0;
     }
     if (url.find(L"nonzero") != std::wstring_view::npos) return 7;
@@ -2681,6 +2870,8 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
 
 int wmain(int argc, wchar_t* argv[])
 {
+    const std::wstring executableName=current_test_executable().filename().wstring();
+    if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
     if (argc > 1) return run_fake_resolver_child(argc, argv);
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
@@ -2718,6 +2909,11 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test();
     youtube_display_and_log_labels_never_expose_direct_urls_test();
     youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test();
+    youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test();
+    youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
+    youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
+    youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
+    youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
