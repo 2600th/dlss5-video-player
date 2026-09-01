@@ -16,9 +16,28 @@
 #include <fstream>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <memory>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
+
+struct YouTubeResolverTestAccess {
+    static std::unique_ptr<YouTubeResolver> Create(
+        const std::filesystem::path& helperDirectory,
+        std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
+    {
+        YouTubeResolver::Settings settings;
+        settings.helperDirectory = helperDirectory;
+        settings.deadline = deadline;
+        settings.pollInterval = std::chrono::milliseconds{10};
+        settings.shutdownWait = std::chrono::milliseconds{500};
+        return std::unique_ptr<YouTubeResolver>(new YouTubeResolver(std::move(settings)));
+    }
+};
 
 namespace {
 
@@ -1907,10 +1926,309 @@ void resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test()
     }
 }
 
+void youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test()
+{
+    struct Case {
+        std::wstring_view input;
+        std::wstring_view expected;
+    };
+    const std::array cases{
+        Case{L"", L"\"\""},
+        Case{L"plain", L"plain"},
+        Case{L"two words", L"\"two words\""},
+        Case{L"a\\\\\"b", L"\"a\\\\\\\\\\\"b\""},
+        Case{L"ends with slash \\", L"\"ends with slash \\\\\""},
+        Case{L"https://youtube.com/watch?v=abc&list=PL123", L"https://youtube.com/watch?v=abc&list=PL123"},
+    };
+
+    for (const Case& test : cases) {
+        CHECK_EQ(std::wstring(test.expected), QuoteWindowsArgument(test.input));
+    }
+}
+
+void youtube_resolver_argument_vector_is_exact_and_ordered_test()
+{
+    const std::filesystem::path helperDirectory = LR"(C:\Program Files\DLSS Player)";
+    constexpr std::wstring_view url =
+        L"https://youtube.com/watch?v=abc_DEF-123&list=PL123";
+    const std::vector<std::wstring> expected{
+        L"--no-config",
+        L"--no-playlist",
+        L"--no-warnings",
+        L"--js-runtimes",
+        LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
+        L"-f",
+        L"b[ext=mp4]/b",
+        L"--get-url",
+        std::wstring(url),
+    };
+
+    CHECK_EQ(expected, BuildYouTubeResolverArguments(helperDirectory, url));
+}
+
+std::filesystem::path current_test_executable()
+{
+    std::wstring value(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, value.data(), static_cast<DWORD>(value.size()));
+    CHECK(length > 0);
+    CHECK(length < value.size());
+    value.resize(length);
+    return std::filesystem::path(std::move(value));
+}
+
+struct ResolverFixture {
+    std::filesystem::path directory;
+
+    explicit ResolverFixture(bool validHelper = true)
+    {
+        const auto unique = std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(GetTickCount64());
+        directory = std::filesystem::temp_directory_path() /
+                    (L"PolicyTests-YouTubeResolver-" + unique);
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        CHECK(!error);
+        if (validHelper) {
+            CHECK(CopyFileW(current_test_executable().c_str(),
+                            (directory / L"yt-dlp.exe").c_str(), FALSE) != FALSE);
+        } else {
+            write_binary_file(directory / L"yt-dlp.exe", "not a Windows executable");
+        }
+        write_binary_file(directory / L"deno.exe", "test-only placeholder");
+    }
+
+    ~ResolverFixture()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        CHECK(!error);
+    }
+};
+
+bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds limit)
+{
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    std::error_code error;
+    do {
+        if (std::filesystem::exists(path, error)) return !error;
+        if (error) return false;
+        Sleep(10);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
+void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    const ResolveResult result = resolver->Resolve(
+        L"https://youtube.com/watch?v=success&list=PL123", {});
+
+    CHECK(result.ok);
+    CHECK_EQ(ResolveError::None, result.error);
+    CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=success"),
+             result.mediaUrl);
+    CHECK(result.detail.empty());
+}
+
+void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test()
+{
+    const std::filesystem::path missingDirectory =
+        std::filesystem::temp_directory_path() / L"PolicyTests-resolver-missing";
+    std::error_code error;
+    std::filesystem::remove_all(missingDirectory, error);
+    auto missingResolver = YouTubeResolverTestAccess::Create(missingDirectory);
+    const ResolveResult missing = missingResolver->Resolve(
+        L"https://youtube.com/watch?v=secret_missing", {});
+    CHECK(!missing.ok);
+    CHECK_EQ(ResolveError::HelperMissing, missing.error);
+    CHECK(missing.mediaUrl.empty());
+    CHECK(missing.detail.find(L"secret_missing") == std::wstring::npos);
+
+    ResolverFixture corruptFixture(false);
+    auto corruptResolver = YouTubeResolverTestAccess::Create(corruptFixture.directory);
+    const ResolveResult corrupt = corruptResolver->Resolve(
+        L"https://youtube.com/watch?v=secret_start", {});
+    CHECK(!corrupt.ok);
+    CHECK_EQ(ResolveError::StartFailed, corrupt.error);
+    CHECK(corrupt.mediaUrl.empty());
+    CHECK(corrupt.detail.find(L"secret_start") == std::wstring::npos);
+}
+
+void youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+
+    const ResolveResult nonzero = resolver->Resolve(
+        L"https://youtu.be/nonzero", {});
+    CHECK(!nonzero.ok);
+    CHECK_EQ(ResolveError::ExtractionFailed, nonzero.error);
+    CHECK(nonzero.mediaUrl.empty());
+
+    const ResolveResult exactCaptureLimit = resolver->Resolve(
+        L"https://youtu.be/cap64", {});
+    CHECK(!exactCaptureLimit.ok);
+    CHECK_EQ(ResolveError::InvalidOutput, exactCaptureLimit.error);
+
+    const ResolveResult overflow = resolver->Resolve(
+        L"https://youtu.be/cap64plus", {});
+    CHECK(!overflow.ok);
+    CHECK_EQ(ResolveError::OutputTooLarge, overflow.error);
+    CHECK(overflow.mediaUrl.empty());
+    CHECK(overflow.detail.find(L"https") == std::wstring::npos);
+}
+
+void youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(
+        fixture.directory, std::chrono::seconds{5});
+
+    ResolveResult stopped;
+    const auto stopStarted = std::chrono::steady_clock::now();
+    std::jthread stopWorker([&](std::stop_token token) {
+        stopped = resolver->Resolve(L"https://youtu.be/hang", token);
+    });
+    Sleep(75);
+    stopWorker.request_stop();
+    stopWorker.join();
+    const auto stopElapsed = std::chrono::steady_clock::now() - stopStarted;
+    CHECK_EQ(ResolveError::Cancelled, stopped.error);
+    CHECK(stopElapsed < std::chrono::seconds{2});
+
+    ResolveResult cancelled;
+    const auto cancelStarted = std::chrono::steady_clock::now();
+    std::thread cancelWorker([&] {
+        cancelled = resolver->Resolve(L"https://youtu.be/hang", {});
+    });
+    Sleep(75);
+    resolver->Cancel();
+    cancelWorker.join();
+    const auto cancelElapsed = std::chrono::steady_clock::now() - cancelStarted;
+    CHECK_EQ(ResolveError::Cancelled, cancelled.error);
+    CHECK(cancelElapsed < std::chrono::seconds{2});
+
+    resolver->Cancel();
+    const ResolveResult afterCancel = resolver->Resolve(
+        L"https://youtu.be/success", {});
+    CHECK(afterCancel.ok);
+}
+
+void youtube_resolver_times_out_and_kills_its_descendant_job_tree_test()
+{
+    ResolverFixture fixture;
+    const std::wstring suffix = std::to_wstring(GetCurrentProcessId());
+    const std::filesystem::path marker = std::filesystem::temp_directory_path() /
+        (L"PolicyTests-resolver-descendant-" + suffix + L".pid");
+    remove_file_if_present(marker);
+
+    auto resolver = YouTubeResolverTestAccess::Create(
+        fixture.directory, std::chrono::milliseconds{350});
+    const auto started = std::chrono::steady_clock::now();
+    const ResolveResult result = resolver->Resolve(
+        L"https://youtu.be/descendant_" + suffix, {});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(!result.ok);
+    CHECK_EQ(ResolveError::TimedOut, result.error);
+    CHECK(elapsed < std::chrono::seconds{2});
+    const bool markerExists = wait_for_file(marker, std::chrono::milliseconds{250});
+    CHECK(markerExists);
+    if (!markerExists) return;
+
+    const std::string pidText = read_binary_file(marker);
+    CHECK(!pidText.empty());
+    if (pidText.empty()) return;
+    const DWORD descendantPid = static_cast<DWORD>(std::stoul(pidText));
+    HANDLE descendant = OpenProcess(SYNCHRONIZE, FALSE, descendantPid);
+    if (descendant) {
+        CHECK_EQ(static_cast<DWORD>(WAIT_OBJECT_0), WaitForSingleObject(descendant, 1000));
+        CloseHandle(descendant);
+    }
+    remove_file_if_present(marker);
+}
+
+void youtube_resolver_repeated_runs_leave_process_handle_count_stable_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    DWORD before = 0;
+    DWORD after = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE);
+    for (int run = 0; run < 20; ++run) {
+        const ResolveResult result = resolver->Resolve(
+            L"https://youtu.be/success", {});
+        CHECK(result.ok);
+    }
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE);
+    CHECK(after <= before + 2);
+}
+
+int run_fake_resolver_child(int argc, wchar_t* argv[])
+{
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--resolver-descendant") {
+        write_binary_file(argv[2], std::to_string(GetCurrentProcessId()));
+        Sleep(INFINITE);
+        return 0;
+    }
+    if (argc != 10 || std::wstring_view(argv[1]) != L"--no-config" ||
+        std::wstring_view(argv[2]) != L"--no-playlist" ||
+        std::wstring_view(argv[3]) != L"--no-warnings" ||
+        std::wstring_view(argv[4]) != L"--js-runtimes" ||
+        !std::wstring_view(argv[5]).starts_with(L"deno:") ||
+        std::wstring_view(argv[6]) != L"-f" ||
+        std::wstring_view(argv[7]) != L"b[ext=mp4]/b" ||
+        std::wstring_view(argv[8]) != L"--get-url") {
+        return 91;
+    }
+    const std::filesystem::path expectedDeno =
+        current_test_executable().parent_path() / L"deno.exe";
+    if (std::wstring_view(argv[5]).substr(5) != expectedDeno.wstring()) return 92;
+
+    const std::wstring_view url = argv[9];
+    if (url.find(L"success") != std::wstring_view::npos) {
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n" << std::flush;
+        return 0;
+    }
+    if (url.find(L"nonzero") != std::wstring_view::npos) return 7;
+    if (url.find(L"cap64plus") != std::wstring_view::npos) {
+        std::cout << std::string(64 * 1024 + 1, 'x') << std::flush;
+        Sleep(INFINITE);
+        return 0;
+    }
+    if (url.find(L"cap64") != std::wstring_view::npos) {
+        std::cout << std::string(64 * 1024, 'x') << std::flush;
+        return 0;
+    }
+    const size_t descendant = url.find(L"descendant_");
+    if (descendant != std::wstring_view::npos) {
+        const std::wstring suffix(url.substr(descendant + 11));
+        const std::filesystem::path marker = std::filesystem::temp_directory_path() /
+            (L"PolicyTests-resolver-descendant-" + suffix + L".pid");
+        const std::filesystem::path executable = current_test_executable();
+        std::wstring command = QuoteWindowsArgument(executable.wstring()) +
+            L" --resolver-descendant " + QuoteWindowsArgument(marker.wstring());
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, executable.parent_path().c_str(),
+                            &startup, &process)) {
+            return 93;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        Sleep(INFINITE);
+        return 0;
+    }
+    Sleep(INFINITE);
+    return 0;
+}
+
 } // namespace
 
-int main()
+int wmain(int argc, wchar_t* argv[])
 {
+    if (argc > 1) return run_fake_resolver_child(argc, argv);
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
     runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
@@ -1977,6 +2295,14 @@ int main()
     resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
     resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test();
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
+    youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
+    youtube_resolver_argument_vector_is_exact_and_ordered_test();
+    youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
+    youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
+    youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();
+    youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test();
+    youtube_resolver_times_out_and_kills_its_descendant_job_tree_test();
+    youtube_resolver_repeated_runs_leave_process_handle_count_stable_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

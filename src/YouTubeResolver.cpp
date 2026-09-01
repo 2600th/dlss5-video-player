@@ -3,14 +3,82 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cwctype>
 #include <limits>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
 constexpr size_t kMaximumInputCharacters = 2048;
 constexpr size_t kMaximumOutputBytes = 16 * 1024;
+constexpr size_t kMaximumCapturedBytes = 64 * 1024;
+
+class UniqueHandle {
+public:
+    UniqueHandle() = default;
+    explicit UniqueHandle(HANDLE handle) : handle_(handle) {}
+    ~UniqueHandle() { reset(); }
+
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+
+    UniqueHandle(UniqueHandle&& other) noexcept : handle_(other.release()) {}
+    UniqueHandle& operator=(UniqueHandle&& other) noexcept
+    {
+        if (this != &other) reset(other.release());
+        return *this;
+    }
+
+    HANDLE get() const { return handle_; }
+    HANDLE release()
+    {
+        const HANDLE value = handle_;
+        handle_ = nullptr;
+        return value;
+    }
+    void reset(HANDLE value = nullptr)
+    {
+        if (handle_ && handle_ != INVALID_HANDLE_VALUE) CloseHandle(handle_);
+        handle_ = value;
+    }
+    explicit operator bool() const
+    {
+        return handle_ && handle_ != INVALID_HANDLE_VALUE;
+    }
+
+private:
+    HANDLE handle_{nullptr};
+};
+
+std::filesystem::path module_directory()
+{
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(),
+                                            static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return {};
+    path.resize(length);
+    return std::filesystem::path(std::move(path)).parent_path();
+}
+
+bool is_regular_helper_file(const std::filesystem::path& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+ResolveResult resolver_error(ResolveError error, std::wstring detail)
+{
+    ResolveResult result;
+    result.error = error;
+    result.detail = std::move(detail);
+    return result;
+}
 
 struct CrackedUrl {
     INTERNET_SCHEME scheme{0};
@@ -214,4 +282,330 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     result.ok = true;
     result.mediaUrl = std::move(mediaUrl);
     return result;
+}
+
+std::wstring QuoteWindowsArgument(std::wstring_view argument)
+{
+    if (!argument.empty() &&
+        argument.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(argument);
+    }
+
+    std::wstring quoted(1, L'\"');
+    size_t backslashes = 0;
+    for (const wchar_t character : argument) {
+        if (character == L'\\') {
+            ++backslashes;
+            continue;
+        }
+        if (character == L'\"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+            quoted.push_back(L'\"');
+            backslashes = 0;
+            continue;
+        }
+        quoted.append(backslashes, L'\\');
+        backslashes = 0;
+        quoted.push_back(character);
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'\"');
+    return quoted;
+}
+
+std::vector<std::wstring> BuildYouTubeResolverArguments(
+    const std::filesystem::path& helperDirectory,
+    std::wstring_view youtubeUrl)
+{
+    return {
+        L"--no-config",
+        L"--no-playlist",
+        L"--no-warnings",
+        L"--js-runtimes",
+        L"deno:" + (helperDirectory / L"deno.exe").wstring(),
+        L"-f",
+        L"b[ext=mp4]/b",
+        L"--get-url",
+        std::wstring(youtubeUrl),
+    };
+}
+
+YouTubeResolver::YouTubeResolver()
+    : YouTubeResolver(Settings{module_directory()})
+{
+}
+
+YouTubeResolver::YouTubeResolver(Settings settings)
+    : settings_(std::move(settings))
+{
+    settings_.pollInterval = std::clamp(
+        settings_.pollInterval, std::chrono::milliseconds{1},
+        std::chrono::milliseconds{50});
+    settings_.shutdownWait = std::clamp(
+        settings_.shutdownWait, std::chrono::milliseconds{1},
+        std::chrono::milliseconds{2000});
+}
+
+YouTubeResolver::~YouTubeResolver()
+{
+    Cancel();
+    const std::scoped_lock operationLock(resolveMutex_);
+}
+
+void YouTubeResolver::Cancel()
+{
+    const std::scoped_lock stateLock(stateMutex_);
+    if (!resolving_) return;
+    cancelRequested_ = true;
+    if (activeJob_) TerminateJobObject(activeJob_, ERROR_CANCELLED);
+}
+
+ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_token stop)
+{
+    const std::unique_lock operationLock(resolveMutex_);
+    {
+        const std::scoped_lock stateLock(stateMutex_);
+        resolving_ = true;
+        cancelRequested_ = false;
+    }
+
+    HANDLE job = nullptr;
+    const auto finishState = [this, &job](void*) {
+        const std::scoped_lock stateLock(stateMutex_);
+        if (activeJob_ == job) activeJob_ = nullptr;
+        if (job) CloseHandle(job);
+        resolving_ = false;
+        cancelRequested_ = false;
+    };
+    const std::unique_ptr<void, decltype(finishState)> stateGuard(this, finishState);
+
+    if (!IsSupportedYouTubeUrl(youtubeUrl)) {
+        return resolver_error(ResolveError::InvalidUrl,
+                              L"Enter a supported YouTube video URL.");
+    }
+    if (stop.stop_requested()) {
+        return resolver_error(ResolveError::Cancelled,
+                              L"YouTube resolution was cancelled.");
+    }
+
+    const std::filesystem::path ytDlpPath = settings_.helperDirectory / L"yt-dlp.exe";
+    const std::filesystem::path denoPath = settings_.helperDirectory / L"deno.exe";
+    if (!settings_.helperDirectory.is_absolute() ||
+        !is_regular_helper_file(ytDlpPath) || !is_regular_helper_file(denoPath)) {
+        return resolver_error(ResolveError::HelperMissing,
+                              L"YouTube helper files are missing beside the app.");
+    }
+
+    SECURITY_ATTRIBUTES pipeSecurity{sizeof(pipeSecurity), nullptr, TRUE};
+    HANDLE rawReadPipe = nullptr;
+    HANDLE rawWritePipe = nullptr;
+    if (!CreatePipe(&rawReadPipe, &rawWritePipe, &pipeSecurity, 0)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    UniqueHandle readPipe(rawReadPipe);
+    UniqueHandle writePipe(rawWritePipe);
+    if (!SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+
+    job = CreateJobObjectW(nullptr, nullptr);
+    if (!job) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
+    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                 &jobLimits, sizeof(jobLimits))) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+
+    SIZE_T attributeBytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    if (attributeBytes == 0) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    std::vector<std::byte> attributeStorage(attributeBytes);
+    auto* attributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+        attributeStorage.data());
+    if (!InitializeProcThreadAttributeList(attributeList, 1, 0, &attributeBytes)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    const auto deleteAttributes = [](LPPROC_THREAD_ATTRIBUTE_LIST value) {
+        if (value) DeleteProcThreadAttributeList(value);
+    };
+    const std::unique_ptr<std::remove_pointer_t<LPPROC_THREAD_ATTRIBUTE_LIST>,
+                          decltype(deleteAttributes)>
+        attributes(attributeList, deleteAttributes);
+    HANDLE inheritedOutput = writePipe.get();
+    if (!UpdateProcThreadAttribute(
+            attributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            &inheritedOutput, sizeof(inheritedOutput), nullptr, nullptr)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+
+    const std::vector<std::wstring> arguments =
+        BuildYouTubeResolverArguments(settings_.helperDirectory, youtubeUrl);
+    std::wstring commandLine = QuoteWindowsArgument(ytDlpPath.wstring());
+    for (const std::wstring& argument : arguments) {
+        commandLine.push_back(L' ');
+        commandLine.append(QuoteWindowsArgument(argument));
+    }
+
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = nullptr;
+    startup.StartupInfo.hStdOutput = writePipe.get();
+    startup.StartupInfo.hStdError = writePipe.get();
+    startup.lpAttributeList = attributeList;
+    PROCESS_INFORMATION rawProcess{};
+    const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                                EXTENDED_STARTUPINFO_PRESENT;
+    if (!CreateProcessW(ytDlpPath.c_str(), commandLine.data(), nullptr, nullptr,
+                        TRUE, creationFlags, nullptr,
+                        settings_.helperDirectory.c_str(),
+                        &startup.StartupInfo, &rawProcess)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    UniqueHandle process(rawProcess.hProcess);
+    UniqueHandle processThread(rawProcess.hThread);
+    writePipe.reset();
+
+    if (!AssignProcessToJobObject(job, process.get())) {
+        TerminateProcess(process.get(), ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+
+    bool cancelledBeforeResume = false;
+    {
+        const std::scoped_lock stateLock(stateMutex_);
+        activeJob_ = job;
+        cancelledBeforeResume = cancelRequested_;
+    }
+    if (cancelledBeforeResume || stop.stop_requested()) {
+        TerminateJobObject(job, ERROR_CANCELLED);
+        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        return resolver_error(ResolveError::Cancelled,
+                              L"YouTube resolution was cancelled.");
+    }
+    if (ResumeThread(processThread.get()) == static_cast<DWORD>(-1)) {
+        TerminateJobObject(job, ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    processThread.reset();
+
+    enum class Completion {
+        Running,
+        Exited,
+        Cancelled,
+        TimedOut,
+        Overflow,
+        PipeFailed,
+    };
+    Completion completion = Completion::Running;
+    std::string output;
+    output.reserve(kMaximumOutputBytes);
+    const auto deadline = std::chrono::steady_clock::now() + settings_.deadline;
+
+    const auto cancellationRequested = [this, &stop] {
+        if (stop.stop_requested()) return true;
+        const std::scoped_lock stateLock(stateMutex_);
+        return cancelRequested_;
+    };
+    const auto drainAvailable = [&] {
+        for (;;) {
+            DWORD available = 0;
+            if (!PeekNamedPipe(readPipe.get(), nullptr, 0, nullptr, &available, nullptr)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) return Completion::Running;
+                return Completion::PipeFailed;
+            }
+            if (available == 0) return Completion::Running;
+            char buffer[4096];
+            const DWORD wanted = std::min<DWORD>(available, sizeof(buffer));
+            DWORD received = 0;
+            if (!ReadFile(readPipe.get(), buffer, wanted, &received, nullptr)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) return Completion::Running;
+                return Completion::PipeFailed;
+            }
+            if (received == 0) return Completion::Running;
+            if (output.size() + received > kMaximumCapturedBytes) {
+                return Completion::Overflow;
+            }
+            output.append(buffer, received);
+        }
+    };
+
+    while (completion == Completion::Running) {
+        if (cancellationRequested()) {
+            completion = Completion::Cancelled;
+            break;
+        }
+        const Completion drainResult = drainAvailable();
+        if (drainResult != Completion::Running) {
+            completion = drainResult;
+            break;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            completion = Completion::TimedOut;
+            break;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now);
+        const auto waitDuration = std::min(settings_.pollInterval, remaining);
+        const DWORD wait = WaitForSingleObject(
+            process.get(), static_cast<DWORD>(std::max<int64_t>(1, waitDuration.count())));
+        if (wait == WAIT_OBJECT_0) {
+            if (cancellationRequested()) completion = Completion::Cancelled;
+            else {
+                const Completion finalDrain = drainAvailable();
+                completion = finalDrain == Completion::Running ? Completion::Exited
+                                                                : finalDrain;
+            }
+        } else if (wait == WAIT_FAILED) {
+            completion = Completion::PipeFailed;
+        }
+    }
+
+    if (completion == Completion::Cancelled || completion == Completion::TimedOut ||
+        completion == Completion::Overflow || completion == Completion::PipeFailed) {
+        TerminateJobObject(job, ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+    }
+
+    if (completion == Completion::Cancelled) {
+        return resolver_error(ResolveError::Cancelled,
+                              L"YouTube resolution was cancelled.");
+    }
+    if (completion == Completion::TimedOut) {
+        return resolver_error(ResolveError::TimedOut,
+                              L"YouTube resolution timed out.");
+    }
+    if (completion == Completion::Overflow) {
+        return resolver_error(ResolveError::OutputTooLarge,
+                              L"YouTube resolver output exceeded the safety limit.");
+    }
+    if (completion == Completion::PipeFailed) {
+        return resolver_error(ResolveError::ExtractionFailed,
+                              L"Could not extract a playable YouTube stream.");
+    }
+
+    DWORD exitCode = ERROR_PROCESS_ABORTED;
+    if (!GetExitCodeProcess(process.get(), &exitCode)) {
+        return resolver_error(ResolveError::ExtractionFailed,
+                              L"Could not extract a playable YouTube stream.");
+    }
+    return ParseResolverOutput(output, exitCode);
 }
