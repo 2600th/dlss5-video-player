@@ -150,6 +150,21 @@ function Assert-Stage {
         }
     }
 
+    $inOverlaySection = $false
+    $tutorialProgress = $null
+    foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'ReShade.ini')) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[(.+)\]$') {
+            $inOverlaySection = $Matches[1] -ieq 'OVERLAY'
+        }
+        elseif ($inOverlaySection -and $trimmed -match '^TutorialProgress\s*=\s*(\d+)\s*$') {
+            $tutorialProgress = $Matches[1]
+        }
+    }
+    if ($tutorialProgress -cne '4') {
+        throw 'ReShade.ini must ship with the ReShade tutorial already dismissed (OVERLAY/TutorialProgress=4).'
+    }
+
     Assert-ReleaseExecutableIdentity -Root $resolvedRoot
 
     foreach ($relative in $actual) {
