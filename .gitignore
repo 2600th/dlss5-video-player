@@ -8,7 +8,10 @@
 /*.vcxproj*
 
 # Downloaded dependencies / local runtime packs
-/external/
+/external/*
+!/external/youtube/
+/external/youtube/*
+!/external/youtube/README.md
 /streamline/
 /Streamline/
 

@@ -18,6 +18,14 @@ ReShade is optional for native DLSS SR but required for the experimental RenoDX 
 
 The embedded UI font and application icon are derived from Tabler Icons 3.46.0, copyright (c) 2020-2026 Paweł Kuna, and distributed under the MIT License. The pinned source metadata and complete license text are in `assets/tabler/SOURCE.txt` and `assets/tabler/LICENSE`.
 
+## yt-dlp
+
+The optional YouTube resolver uses the official yt-dlp 2026.08.19 Windows executable, distributed under the Unlicense. That official executable embeds its EJS support. The executable is fetched from its pinned upstream release and is not committed to this repository.
+
+## Deno
+
+Deno 2.9.5 supplies the JavaScript runtime used by yt-dlp's EJS support. Deno is distributed under the MIT License. The Windows executable is extracted from its pinned official archive and is not committed to this repository.
+
 ## RenoDX / experimental DLSS 5 runtime
 
 `renodx-dlss5.addon64`, `nvngx_dlssnr.dll` and related experimental runtime files are not included in this repository. Users obtain and use them separately under the terms applicable to those files.
