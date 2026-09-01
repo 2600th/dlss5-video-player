@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr uint32_t kSchema = 1;
+constexpr uint32_t kSchema = 3;
 constexpr uint32_t kMinDimension = 64;
 constexpr uint32_t kMaxWidth = 7680;
 constexpr uint32_t kMaxHeight = 4320;
@@ -285,6 +285,21 @@ std::filesystem::path CanonicalOrAbsolute(const std::filesystem::path& path,
 
 std::atomic<uint64_t> g_stagingNonce{0};
 
+bool MoveToInvalidDirectory(const std::filesystem::path& root,
+                            const std::filesystem::path& source,
+                            std::wstring_view prefix)
+{
+    for(size_t attempt=0;attempt<128;++attempt){
+        const auto destination=root/L"staging"/
+            (std::wstring(prefix)+L"-"+std::to_wstring(GetCurrentProcessId())+L"-"+
+             std::to_wstring(++g_stagingNonce));
+        if(MoveFileExW(source.c_str(),destination.c_str(),MOVEFILE_WRITE_THROUGH))return true;
+        const DWORD error=GetLastError();
+        if(error!=ERROR_ALREADY_EXISTS&&error!=ERROR_FILE_EXISTS)return false;
+    }
+    return false;
+}
+
 } // namespace
 
 std::optional<std::string> Sha256File(const std::filesystem::path& path, std::stop_token stop)
@@ -375,9 +390,12 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
         ",\"frameCount\":" + std::to_string(manifest.frameCount) +
         ",\"duration100ns\":" + std::to_string(manifest.duration100ns) +
         ",\"nativeEvaluations\":" + std::to_string(manifest.nativeEvaluations) +
+        ",\"verifiedNeuralFrames\":" + std::to_string(manifest.verifiedNeuralFrames) +
         ",\"observedFeature18Evaluations\":" +
             std::to_string(manifest.observedFeature18Evaluations) +
         ",\"feature18Created\":" + (manifest.feature18Created ? "true" : "false") +
+        ",\"feature18ArmedBeforeCapture\":" +
+            (manifest.feature18ArmedBeforeCapture ? "true" : "false") +
         ",\"upscaling\":" + (manifest.upscaling ? "true" : "false") + "}\n";
 }
 
@@ -400,9 +418,12 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
         !ReadIntegerField(cursor, "frameCount", manifest.frameCount) ||
         !ReadIntegerField(cursor, "duration100ns", manifest.duration100ns) ||
         !ReadIntegerField(cursor, "nativeEvaluations", manifest.nativeEvaluations) ||
+        !ReadIntegerField(cursor, "verifiedNeuralFrames", manifest.verifiedNeuralFrames) ||
         !ReadIntegerField(cursor, "observedFeature18Evaluations",
                           manifest.observedFeature18Evaluations) ||
         !ReadBoolField(cursor, "feature18Created", manifest.feature18Created) ||
+        !ReadBoolField(cursor, "feature18ArmedBeforeCapture",
+                       manifest.feature18ArmedBeforeCapture) ||
         !ReadBoolField(cursor, "upscaling", manifest.upscaling, false) ||
         !cursor.Expect('}') || !cursor.Finished()) return std::nullopt;
 
@@ -427,7 +448,9 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
     }
     return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
            IsHexDigest(manifest.runtimeDigest) && manifest.feature18Created &&
-           manifest.nativeEvaluations >= manifest.frameCount &&
+           manifest.feature18ArmedBeforeCapture &&
+           manifest.nativeEvaluations == manifest.frameCount &&
+           manifest.verifiedNeuralFrames == manifest.frameCount &&
            manifest.observedFeature18Evaluations > 0;
 }
 
@@ -556,8 +579,10 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         manifest.neuralDigest.clear();
         manifest.runtimeDigest.clear();
         manifest.nativeEvaluations = 0;
+        manifest.verifiedNeuralFrames = 0;
         manifest.observedFeature18Evaluations = 0;
         manifest.feature18Created = false;
+        manifest.feature18ArmedBeforeCapture = false;
     } else {
         manifest.neuralDigest = *digest;
     }
@@ -590,11 +615,7 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     std::error_code existsError;
     if (std::filesystem::exists(destination, existsError)) {
         if (existsError) return false;
-        const auto quarantine = root_ / L"staging" /
-            (L"invalid-" + std::wstring(key.begin(), key.end()) + L"-" +
-             std::to_wstring(++g_stagingNonce));
-        if (!MoveFileExW(destination.c_str(), quarantine.c_str(), MOVEFILE_WRITE_THROUGH))
-            return false;
+        if(!MoveToInvalidDirectory(root_,destination,L"invalid-existing"))return false;
     }
     if (!MoveFileExW(staging.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
         return false;
@@ -618,9 +639,15 @@ bool NeuralCacheManager::PromoteRender(std::string_view key,
 bool NeuralCacheManager::MarkInvalid(const std::filesystem::path& staging)
 {
     if (!OwnsPath(staging) || staging.parent_path().filename() != L"staging") return false;
-    const auto destination = root_ / L"staging" /
-        (L"invalid-" + std::to_wstring(++g_stagingNonce));
-    return MoveFileExW(staging.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+    return MoveToInvalidDirectory(root_,staging,L"invalid");
+}
+
+bool NeuralCacheManager::Quarantine(const NeuralCacheEntry& entry)
+{
+    if (!valid_ || !OwnsPath(entry.directory)) return false;
+    const auto parent = entry.directory.parent_path().filename();
+    if (parent != L"sources" && parent != L"renders") return false;
+    return MoveToInvalidDirectory(root_,entry.directory,L"invalid-cache");
 }
 
 uintmax_t NeuralCacheManager::SizeBytes() const

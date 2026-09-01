@@ -51,6 +51,9 @@ public:
     bool Open(const std::wstring& path,
               MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
               std::stop_token stop = {});
+    bool OpenSequential(const std::wstring& path,
+                        MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
+                        std::stop_token stop = {});
     void Close();
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
@@ -73,7 +76,11 @@ private:
     enum class Backend { None, FFmpeg, MediaFoundation };
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
 
-    bool OpenFFmpeg(const std::wstring& path, std::stop_token stop);
+    bool OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
+                  std::stop_token stop, bool queueFrames);
+
+    bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
+                    FFmpegAcceleration initialAcceleration);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
     bool StartFFmpeg(double seekSeconds,
                      FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda);

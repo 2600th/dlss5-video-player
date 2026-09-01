@@ -25,6 +25,7 @@ enum class NeuralRenderPhase {
 
 struct NeuralRuntimeEvidence {
     bool upscalingOff{};
+    bool inlineInterceptionContract{};
     bool feature18Created{};
     bool feature18Evaluated{};
     bool laterFailure{};
@@ -32,7 +33,8 @@ struct NeuralRuntimeEvidence {
 
     bool Valid() const noexcept
     {
-        return upscalingOff && feature18Created && feature18Evaluated && !laterFailure;
+        return upscalingOff && inlineInterceptionContract && feature18Created && feature18Evaluated &&
+               highestObservedEvaluation > 0 && !laterFailure;
     }
 };
 
@@ -62,6 +64,8 @@ struct NeuralRenderResult {
     uint64_t frameCount{};
     int64_t duration100ns{};
     uint64_t nativeEvaluations{};
+    uint64_t verifiedNeuralFrames{};
+    bool feature18ArmedBeforeCapture{};
     NeuralRuntimeEvidence evidence{};
     std::wstring detail;
 };

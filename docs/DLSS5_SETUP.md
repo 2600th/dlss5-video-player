@@ -65,13 +65,19 @@ Spatial DLSS upscaling and RenoDX neural upscaling both remain off.
 Neural rendering finishes before playback. The player materializes a private
 local source when needed, evaluates every frame in timestamp order, reads the
 neural output back from D3D12, encodes with NVENC (or restarts from frame zero
-with software H.264), and probes the completed video. Only a complete manifest
-with matching hashes, dimensions, frame count, video duration, final-frame
-decode, runtime digest, and feature-18 evidence is promoted into the cache.
+with software H.264), and probes the completed video. Only a complete schema-3
+manifest with matching hashes, dimensions, frame count, monotonic source
+timing, video duration, final-frame decode, runtime digest, one captured native
+submission per source frame, the NGX-only inline interception contract armed
+before capture, and a stabilized feature-18 receipt that advances after the
+captured sequence is promoted. A feature-18 failure, skip, or pass-through
+marker rejects the complete job. Offline decoding uses the software FFmpeg path
+so CUDA resources remain available to feature 18 and NVENC; normal playback
+continues to prefer hardware decoding.
 
 On the tested RTX 5090, the 30.03-second Resident Evil Requiem example produced
-all 1,800 frames at 1920×1080/59.94 fps with `upscaling=false`. Cached playback
-dropped 5 frames (0.28%), stayed responsive, and reopened the unchanged cache
+all 1,800 frames at 1920×1080/59.94 fps with `upscaling=false`. Isolated cached
+playback dropped 1 frame (0.056%) and reopened the unchanged cache
 entry without neural re-evaluation. RTX 40 policy and runtime loading are
 covered by automated tests, but physical RTX 40 neural output remains
 unverified on this system.

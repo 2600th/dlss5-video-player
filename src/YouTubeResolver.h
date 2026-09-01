@@ -52,6 +52,9 @@ struct YouTubeFormatAvailability {
 inline constexpr size_t kMaximumYouTubeFormatMetadataBytes = 4u * 1024u * 1024u;
 
 bool IsSupportedYouTubeUrl(std::wstring_view value);
+std::string CanonicalYouTubeVideoId(std::wstring_view value);
+std::string StableYouTubeStreamIdentity(std::wstring_view mediaUrl,
+                                        std::wstring_view audioUrl);
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
 std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality);

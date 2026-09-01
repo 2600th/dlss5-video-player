@@ -196,6 +196,17 @@ struct ChildProcess {
     }
 };
 
+class OwnedHandle {
+public:
+    explicit OwnedHandle(HANDLE value=nullptr):value_(value){}
+    ~OwnedHandle(){if(value_)CloseHandle(value_);}
+    OwnedHandle(const OwnedHandle&)=delete;
+    OwnedHandle& operator=(const OwnedHandle&)=delete;
+    HANDLE get()const{return value_;}
+private:
+    HANDLE value_{};
+};
+
 struct CaptureResult {
     bool started{};
     bool cancelled{};
@@ -415,6 +426,14 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
 {
     if (!impl_->active || !impl_->process.stdinWrite) return EncodeError::WriteFailed;
     if (bgra.size() != impl_->frameBytes) return EncodeError::InvalidFrame;
+    HANDLE interruptJob=nullptr;
+    if(!impl_->process.job||!DuplicateHandle(GetCurrentProcess(),impl_->process.job,
+        GetCurrentProcess(),&interruptJob,0,FALSE,DUPLICATE_SAME_ACCESS))
+        return EncodeError::WriteFailed;
+    OwnedHandle interruptHandle(interruptJob);
+    std::stop_callback interrupt(stop,[job=interruptHandle.get()]{
+        TerminateJobObject(job,ERROR_CANCELLED);
+    });
     size_t offset = 0;
     while (offset < bgra.size()) {
         if (stop.stop_requested()) { Cancel(); return EncodeError::Cancelled; }
@@ -423,7 +442,7 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
         if (!WriteFile(impl_->process.stdinWrite, bgra.data() + offset, wanted, &written, nullptr) ||
             written == 0) {
             Cancel();
-            return EncodeError::WriteFailed;
+            return stop.stop_requested() ? EncodeError::Cancelled : EncodeError::WriteFailed;
         }
         offset += written;
     }

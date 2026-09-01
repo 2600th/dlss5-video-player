@@ -31,7 +31,7 @@ struct NeuralCacheIdentity {
 };
 
 struct NeuralCacheManifest {
-    uint32_t schema{1};
+    uint32_t schema{3};
     NeuralCacheEntryKind kind{NeuralCacheEntryKind::Render};
     NeuralCacheState state{NeuralCacheState::Staging};
     std::string sourceDigest;
@@ -43,8 +43,10 @@ struct NeuralCacheManifest {
     uint64_t frameCount{};
     int64_t duration100ns{};
     uint64_t nativeEvaluations{};
+    uint64_t verifiedNeuralFrames{};
     uint64_t observedFeature18Evaluations{};
     bool feature18Created{};
+    bool feature18ArmedBeforeCapture{};
     bool upscaling{};
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;
@@ -83,6 +85,7 @@ public:
     bool PromoteRender(std::string_view key, const std::filesystem::path& staging,
                        NeuralCacheManifest manifest);
     bool MarkInvalid(const std::filesystem::path& staging);
+    bool Quarantine(const NeuralCacheEntry& entry);
     uintmax_t SizeBytes() const;
     bool Clear();
 

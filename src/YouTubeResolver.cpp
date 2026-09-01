@@ -536,6 +536,46 @@ bool query_has_video_id(std::wstring_view query)
     return foundVideoId;
 }
 
+std::wstring_view unique_query_value(std::wstring_view query,std::wstring_view wanted)
+{
+    std::wstring_view found;
+    while(!query.empty()){
+        const size_t separator=query.find(L'&');
+        const std::wstring_view item=query.substr(0,separator);
+        const size_t equals=item.find(L'=');
+        if(equals!=std::wstring_view::npos&&
+           equals_case_insensitive(item.substr(0,equals),wanted)){
+            if(!found.empty())return {};
+            found=item.substr(equals+1);
+        }
+        if(separator==std::wstring_view::npos)break;
+        query.remove_prefix(separator+1);
+    }
+    return found;
+}
+
+std::string ascii_value(std::wstring_view value)
+{
+    std::string result;result.reserve(value.size());
+    for(const wchar_t character:value){
+        if(character<0x20||character>0x7e)return {};
+        result.push_back(static_cast<char>(character));
+    }
+    return result;
+}
+
+std::string stream_itag(std::wstring_view value)
+{
+    CrackedUrl url;
+    if(!crack_url(value,url)||url.scheme!=INTERNET_SCHEME_HTTPS||url.hasUserInfo||
+       !has_dot_bound_suffix(url.host,L"googlevideo.com"))return {};
+    const auto itag=unique_query_value(query_part(url.extra),L"itag");
+    if(itag.empty()||itag.size()>8||!std::all_of(itag.begin(),itag.end(),[](wchar_t c){
+        return c>=L'0'&&c<=L'9';
+    }))return {};
+    return ascii_value(itag);
+}
+
 bool has_forbidden_input_character(std::wstring_view value)
 {
     return std::any_of(value.begin(), value.end(), [](wchar_t character) {
@@ -595,6 +635,28 @@ bool IsSupportedYouTubeUrl(std::wstring_view value)
         return is_video_id(std::wstring_view(url.path).substr(shortsPrefix.size()));
     }
     return false;
+}
+
+std::string CanonicalYouTubeVideoId(std::wstring_view value)
+{
+    if(!IsSupportedYouTubeUrl(value))return {};
+    CrackedUrl url;if(!crack_url(value,url))return {};
+    std::wstring_view id;
+    if(equals_case_insensitive(url.host,L"youtu.be"))id=std::wstring_view(url.path).substr(1);
+    else if(url.path==L"/watch")id=unique_query_value(query_part(url.extra),L"v");
+    else{
+        constexpr std::wstring_view prefix=L"/shorts/";
+        if(url.path.starts_with(prefix))id=std::wstring_view(url.path).substr(prefix.size());
+    }
+    return is_video_id(id)?ascii_value(id):std::string{};
+}
+
+std::string StableYouTubeStreamIdentity(std::wstring_view mediaUrl,
+                                        std::wstring_view audioUrl)
+{
+    std::string video=stream_itag(mediaUrl),audio=stream_itag(audioUrl);
+    if(video.empty()||audio.empty())return {};
+    return "video-itag="+video+"|audio-itag="+audio;
 }
 
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error)

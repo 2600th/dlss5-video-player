@@ -3145,13 +3145,26 @@ void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
 void resolver_output_accepts_separate_https_video_and_audio_urls_test()
 {
     const ResolveResult result = ParseResolverOutput(
-        "https://v1.googlevideo.com/videoplayback?id=video\r\n"
-        "https://a1.googlevideo.com/videoplayback?id=audio\r\n", 0);
+        "https://v1.googlevideo.com/videoplayback?id=video&itag=137&expire=999\r\n"
+        "https://a1.googlevideo.com/videoplayback?id=audio&itag=140&expire=999\r\n", 0);
     CHECK(result.ok);
-    CHECK_EQ(std::wstring(L"https://v1.googlevideo.com/videoplayback?id=video"),
+    CHECK_EQ(std::wstring(L"https://v1.googlevideo.com/videoplayback?id=video&itag=137&expire=999"),
              result.mediaUrl);
-    CHECK_EQ(std::wstring(L"https://a1.googlevideo.com/videoplayback?id=audio"),
+    CHECK_EQ(std::wstring(L"https://a1.googlevideo.com/videoplayback?id=audio&itag=140&expire=999"),
              result.audioUrl);
+    CHECK_EQ(std::string("video-itag=137|audio-itag=140"),
+             StableYouTubeStreamIdentity(result.mediaUrl,result.audioUrl));
+    CHECK_EQ(StableYouTubeStreamIdentity(result.mediaUrl,result.audioUrl),
+             StableYouTubeStreamIdentity(
+                 L"https://v2.googlevideo.com/videoplayback?expire=123&itag=137",
+                 L"https://a2.googlevideo.com/videoplayback?expire=456&itag=140"));
+    CHECK(StableYouTubeStreamIdentity(
+        L"https://v1.googlevideo.com/videoplayback?id=video",
+        L"https://a1.googlevideo.com/videoplayback?id=audio").empty());
+    CHECK_EQ(std::string("9lrThxCoznw"),
+             CanonicalYouTubeVideoId(L"https://www.youtube.com/watch?v=9lrThxCoznw"));
+    CHECK_EQ(std::string("9lrThxCoznw"),
+             CanonicalYouTubeVideoId(L"https://youtu.be/9lrThxCoznw"));
 }
 
 void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
@@ -3469,6 +3482,23 @@ void video_decoder_hardware_failure_falls_back_to_software_test()
     while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
     CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
     CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(marker));
+}
+
+void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
+{
+    MediaFixture fixture;
+    const auto marker=fixture.directory/L"sequential-acceleration.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",marker.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"drainexit",MediaSourceKind::LocalFile));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{2};
+    while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){
+        result=decoder->ReadNextAvailable(frame);Sleep(1);
+    }
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    CHECK_EQ(size_t{1920u*1080u*4u},frame.bgra.size());
+    CHECK_EQ(std::string("software\n"),read_binary_file(marker));
 }
 
 void video_decoder_background_queue_is_bounded_to_four_frames_test()
@@ -4054,6 +4084,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
         if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        if(all.find(L"drainexit")!=std::wstring::npos){std::cout<<"width=1920\nheight=1080\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.034\n"<<std::flush;return 0;}
         if(all.find(L"partialend")!=std::wstring::npos){std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.067\n"<<std::flush;return 0;}
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
@@ -4074,6 +4105,18 @@ int run_fake_media_child(int argc,wchar_t* argv[])
             if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out.put('x');}
         }
         Sleep(INFINITE);return 0;
+    }
+    if(all.find(L"drainexit")!=std::wstring::npos){
+        const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
+        if(!marker.empty()){
+            const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
+            const bool d3d11=all.find(L"-hwaccel d3d11va")!=std::wstring::npos;
+            std::ofstream out(marker,std::ios::binary|std::ios::app);
+            out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");
+        }
+        const std::vector<char> frame(1920u*1080u*4u,'z');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));
+        std::cout.flush();return 0;
     }
     if(all.find(L"exit")!=std::wstring::npos)return 7;
     if(all.find(L"partialend")!=std::wstring::npos){std::cout.write("1234567890abcdef1234567890abcdef12345678",40);std::cout.flush();return 0;}
@@ -4795,6 +4838,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
+    video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();

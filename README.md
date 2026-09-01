@@ -65,8 +65,10 @@ The project is useful for:
   intensity, mask, and guide overrides.
 - **Local media playback** for MP4, MKV, MOV, WebM, AVI, and other formats
   supported by the supplied FFmpeg build.
-- **Verified pre-render before playback**: every neural frame is produced,
-  encoded, probed, and atomically cached before the movie is shown.
+- **Verified pre-render before playback**: every source frame must advance the
+  native submission counter, produce a captured output, and remain inside a
+  feature-18 session with no failure or pass-through marker before the encoded
+  video is independently probed and atomically cached.
 - **Public YouTube playback** with Auto (exact 1080p preferred, otherwise the
   highest available resolution up to 4K) plus manual 2160p, 1440p, and 1080p
   choices. Sub-1080p fallbacks remain automatic and are not exposed as modes.
@@ -146,9 +148,12 @@ project documentation.
 
 The neural default is 1920×1080 native/DLAA. On the tested RTX 5090, the
 30.03-second Resident Evil Requiem example produced and independently decoded
-all 1,800 neural frames at 1920×1080/59.94 fps. Its manifest recorded feature
-18 creation/evaluation evidence and `upscaling=false`. Cached playback dropped
-5 frames (0.28%) and reused the unchanged artifact without re-rendering. RTX 40
+all 1,800 neural frames at 1920×1080/59.94 fps. Its hardened manifest recorded
+`nativeEvaluations=1800`, `verifiedNeuralFrames=1800`, the inline interception
+contract armed before capture, a feature-18 receipt that advanced after the
+captured sequence, and
+`upscaling=false`. Isolated cached playback dropped 1 frame
+(0.056%) and reused the unchanged artifact without re-rendering. RTX 40
 hardware remains unmeasured on this system.
 
 If the optional neural path is unstable, choose **Advanced > Restart in DLSS
@@ -163,6 +168,7 @@ selects a spatial upscaling mode.
 | Open a local video | `Ctrl+O` |
 | Open a YouTube URL | `Ctrl+L` |
 | Play or pause | `Space` or `Ctrl+Alt+Space` |
+| Step one cached frame while paused | `.` |
 | Seek backward / forward 10 seconds | `Left` / `Right` |
 | Mute | `M` |
 | Toggle Original / Neural rendered | `D` |

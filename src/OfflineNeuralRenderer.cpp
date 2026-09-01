@@ -35,6 +35,8 @@ struct AttemptResult {
     uint64_t frames{};
     uint64_t bytes{};
     uint64_t evaluations{};
+    bool hasTimestamp{};
+    int64_t firstTimestamp{};
     int64_t lastTimestamp{};
 };
 
@@ -155,6 +157,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     if (!evaluator.FeatureCreated()) {
         source.Close();result.detail = L"Feature 18 was not created.";return result;
     }
+    const NeuralRuntimeEvidence armedEvidence=
+        ParseNeuralRuntimeEvidence(evidenceProvider());
+    if(!armedEvidence.Valid()){
+        source.Close();
+        result.detail=L"Feature 18 inline interception was not armed before frame capture.";
+        return result;
+    }
+    result.feature18ArmedBeforeCapture=true;
+    uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
 
     auto reopenFromZero = [&] {
         source.Close();
@@ -196,6 +207,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             if (read != JobRead::FrameReady) {
                 attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
             }
+            if (frame.timestamp100ns < 0 ||
+                (attempt.hasTimestamp && frame.timestamp100ns <= attempt.lastTimestamp)) {
+                attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
+            }
             const uint64_t before = evaluator.EvaluationCount();
             std::vector<uint8_t> captured;
             if (!evaluator.Submit(frame, temporalReset || frame.discontinuity, true, captured) ||
@@ -210,6 +225,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 attempt.encoderError=writeError;encoder.Cancel();return attempt;
             }
             ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured.size();
+            if (!attempt.hasTimestamp) {
+                attempt.firstTimestamp=frame.timestamp100ns;
+                attempt.hasTimestamp=true;
+            }
             attempt.lastTimestamp=frame.timestamp100ns;
             emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
         }
@@ -234,6 +253,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
             result.detail=L"The source could not be restarted for software encoding.";return result;
         }
+        const NeuralRuntimeEvidence retryEvidence=
+            ParseNeuralRuntimeEvidence(evidenceProvider());
+        if(!retryEvidence.Valid()){
+            result.detail=L"Feature 18 evidence was not valid before the software retry.";
+            return result;
+        }
+        successfulAttemptBaseline=retryEvidence.highestObservedEvaluation;
         selected=EncoderKind::H264Software;
         attempt=runAttempt(selected);
     }
@@ -252,14 +278,17 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     emit(NeuralRenderPhase::Encoding,attempt.frames,attempt.bytes,false);
     emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
     result.evidence=ParseNeuralRuntimeEvidence(evidenceProvider());
-    if(!result.evidence.Valid()){
-        result.detail=L"Feature 18 runtime evidence was incomplete or contained a later failure.";
+    if(!result.evidence.Valid()||
+       result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
+        result.detail=L"Feature 18 runtime evidence did not advance after captured rendering or contained a later failure.";
         return result;
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
     result.nativeEvaluations=attempt.evaluations;
-    result.duration100ns=static_cast<int64_t>(std::llround(
-        (double(attempt.frames)/request.fps)*10000000.0));
+    result.verifiedNeuralFrames=attempt.frames;
+    const int64_t nominalFrameDuration=static_cast<int64_t>(
+        std::llround(10000000.0/request.fps));
+    result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+nominalFrameDuration;
     emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
     return result;
 }
@@ -302,7 +331,7 @@ struct TestEncoderAdapter {
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
     bool Open(const std::filesystem::path& path,std::stop_token stop){
-        return decoder.Open(path.wstring(),MediaSourceKind::LocalFile,stop);
+        return decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop);
     }
     void Close(){decoder.Close();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
@@ -363,14 +392,19 @@ std::filesystem::path ModuleDirectory()
 std::string ReadLogSegment(const std::filesystem::path& path,uintmax_t offset)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
-    for(int attempt=0;attempt<10;++attempt){
+    uintmax_t lastSegmentSize=std::numeric_limits<uintmax_t>::max();
+    int stableSamples=0;
+    for(int attempt=0;attempt<20;++attempt){
         std::error_code error;const auto size=std::filesystem::file_size(path,error);
         if(!error&&size>=offset&&size-offset<=Limit){
+            const uintmax_t segmentSize=size-offset;
             std::ifstream input(path,std::ios::binary);
             if(input){input.seekg(static_cast<std::streamoff>(offset));
                 latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
                 const auto evidence=ParseNeuralRuntimeEvidence(latest);
-                if(evidence.Valid()||evidence.laterFailure)return latest;
+                stableSamples=segmentSize==lastSegmentSize?stableSamples+1:1;
+                lastSegmentSize=segmentSize;
+                if((evidence.Valid()||evidence.laterFailure)&&stableSamples>=3)return latest;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -385,19 +419,20 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
 {
     NeuralRuntimeEvidence evidence;const std::string lower=LowerAscii(reshadeLogSegment);
     evidence.upscalingOff=lower.find("active settings: upscaling=off")!=std::string::npos;
+    evidence.inlineInterceptionContract=
+        lower.find("enablehooks=2: ngx hooks only")!=std::string::npos&&
+        lower.find("private feature-18 gpu ordering active")!=std::string::npos;
     const size_t created=lower.find("feature 18 created");
     const size_t evaluated=lower.find("inline feature 18 evaluation succeeded");
     evidence.feature18Created=created!=std::string::npos;
     evidence.feature18Evaluated=evaluated!=std::string::npos;
-    size_t firstSuccess=std::string::npos;
-    if(evidence.feature18Created)firstSuccess=created;
-    if(evidence.feature18Evaluated)firstSuccess=std::min(firstSuccess,evaluated);
-    const std::array<std::string_view,3> failures{
-        "feature 18 create failed","feature 18 evaluation failed","inline feature 18 evaluation failed"};
+    const std::array<std::string_view,9> failures{
+        "feature 18 create failed","feature 18 evaluation failed",
+        "inline feature 18 evaluation failed","feature 18 evaluate raised an exception",
+        "nr skipped:","nr declined an evaluate:","nr workset pool exhausted",
+        "the game dlss output was retained","nr is paused for this feature"};
     for(const auto failure:failures){
-        const size_t position=lower.find(failure);
-        if(position!=std::string::npos&&firstSuccess!=std::string::npos&&position>firstSuccess)
-            evidence.laterFailure=true;
+        if(lower.find(failure)!=std::string::npos)evidence.laterFailure=true;
     }
     evidence.highestObservedEvaluation=HighestEvaluationCount(lower);
     return evidence;

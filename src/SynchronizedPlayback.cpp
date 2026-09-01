@@ -213,13 +213,12 @@ SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token s
 bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
 {
     if(!impl_->opened||!std::isfinite(seconds)||seconds<0.0||stop.stop_requested())return false;
-    const auto published=impl_->current;
     if(!impl_->original->SeekSeconds(seconds))return false;
-    if(impl_->neural&&!impl_->neural->SeekSeconds(seconds)){impl_->current=published;return false;}
+    if(impl_->neural&&!impl_->neural->SeekSeconds(seconds)){Close();return false;}
     impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
     SynchronizedFramePair candidate;
     if(impl_->BuildPair(candidate,stop)!=SynchronizedReadResult::PairReady){
-        impl_->current=published;return false;
+        Close();return false;
     }
     impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
 }

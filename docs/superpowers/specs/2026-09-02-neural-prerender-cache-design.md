@@ -1,7 +1,7 @@
 # Neural pre-render cache and synchronized comparison design
 
-**Date:** 2026-09-02  
-**Status:** Approved  
+**Date:** 2026-09-02
+**Status:** Approved
 **Target release:** v0.12.0
 
 ## Objective

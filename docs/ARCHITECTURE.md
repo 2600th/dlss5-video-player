@@ -83,16 +83,27 @@ job's monotonic successful-submission count.
 
 ## Offline neural job and cache
 
-`OfflineNeuralRenderer` decodes from frame zero, primes feature 18, restarts the
-source from zero, evaluates and captures every frame, and finishes the encoder.
+`OfflineNeuralRenderer` decodes sequentially from frame zero, primes feature
+18, restarts the source from zero, rejects non-monotonic timestamps, evaluates
+and captures every frame, and finishes the encoder.
 If NVENC cannot start or write, the entire sequence restarts from zero with
 software H.264 rather than splicing incompatible temporal histories.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
-quality, and upscaling state form the render identity. Staging entries become
-reusable only after independent probing and atomic promotion; cancellation and
-failed validation can never publish a partial render.
+quality, and upscaling state form the render identity. Network source entries
+use the canonical YouTube video ID plus stable selected-format `itag` values,
+not expiring signed stream URLs. Staging entries become reusable only after
+independent probing and atomic promotion. Schema 3 requires
+`nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
+interception contract armed before frame capture, a feature-18 success
+checkpoint that advances after the captured sequence, and no feature-18
+failure, skip, or pass-through marker in the stabilized job log segment.
+Sequential offline decoding uses software FFmpeg to avoid competing with the
+D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache
+hits are re-probed through the final frame and
+quarantined if decoding or metadata validation fails. Cancellation and failed
+validation can never publish a partial render.
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.
