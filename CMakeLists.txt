@@ -49,6 +49,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/RuntimePolicy.h
     src/ReShadeConfig.cpp
     src/ReShadeConfig.h
+    src/YouTubeResolver.cpp
+    src/YouTubeResolver.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -60,7 +62,7 @@ target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
 target_link_libraries(DLSSVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
-    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi
+    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp
     nvsdk_ngx_d
 )
 
@@ -104,13 +106,15 @@ if(BUILD_TESTING)
         src/RuntimePolicy.h
         src/ReShadeConfig.cpp
         src/ReShadeConfig.h
+        src/YouTubeResolver.cpp
+        src/YouTubeResolver.h
     )
     target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32)
+    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32 winhttp)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 endif()

@@ -7,6 +7,7 @@
 #include "UiLayout.h"
 #include "UiResources.h"
 #include "RuntimeLifetime.h"
+#include "YouTubeResolver.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -1702,6 +1703,138 @@ void configure_neural_addon_rejects_non_regular_path_before_replacement_test()
     CHECK(!removeError);
 }
 
+void youtube_url_validation_accepts_only_supported_video_routes_test()
+{
+    const std::array accepted{
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://youtu.be/dQw4w9WgXcQ",
+        L"https://youtu.be/dQw4w9WgXcQ?t=12",
+        L"https://youtube.com/shorts/dQw4w9WgXcQ",
+        L"https://youtube.com/watch?list=PL123&v=dQw4w9WgXcQ&index=2",
+    };
+
+    for (const std::wstring_view value : accepted) {
+        CHECK(IsSupportedYouTubeUrl(value));
+    }
+}
+
+void youtube_url_validation_rejects_unsafe_or_unselected_inputs_test()
+{
+    std::vector<std::wstring> rejected{
+        L"http://youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://user@youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://user:secret@youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ",
+        L"https://notyoutube.com/watch?v=dQw4w9WgXcQ",
+        L"https://example.com/watch?v=dQw4w9WgXcQ",
+        L"file:///C:/video.mp4",
+        L"C:\\video.mp4",
+        L"\\\\server\\share\\video.mp4",
+        L"https://youtube.com/watch?v=bad\nvalue",
+        L"https://youtube.com/watch?v=\"secret\"",
+        L"https://youtube.com/watch?v='secret'",
+        L"",
+        L"   ",
+        L" https://youtube.com/watch?v=dQw4w9WgXcQ",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ ",
+        L"https://youtube.com/playlist?list=PL123",
+        L"https://youtube.com/watch?list=PL123",
+        L"https://youtube.com/watch?v=",
+        L"https://youtube.com/shorts/",
+        L"https://youtu.be/",
+        L"https://youtube.com/embed/dQw4w9WgXcQ",
+    };
+    rejected.push_back(L"https://youtube.com/watch?v=" + std::wstring(2049, L'a'));
+
+    for (const std::wstring& value : rejected) {
+        CHECK(!IsSupportedYouTubeUrl(value));
+    }
+}
+
+void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
+{
+    struct Case {
+        std::string_view output;
+        std::wstring_view expected;
+    };
+    const std::array accepted{
+        Case{"https://googlevideo.com/videoplayback?id=plain",
+             L"https://googlevideo.com/videoplayback?id=plain"},
+        Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc",
+             L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
+        Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\r\n",
+             L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
+        Case{"\r\nhttps://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\r\n",
+             L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
+    };
+
+    for (const Case& test : accepted) {
+        const ResolveResult result = ParseResolverOutput(test.output, 0);
+        CHECK(result.ok);
+        CHECK_EQ(ResolveError::None, result.error);
+        CHECK_EQ(std::wstring(test.expected), result.mediaUrl);
+        CHECK(result.detail.empty());
+        CHECK(result.mediaUrl.find(L'\r') == std::wstring::npos);
+        CHECK(result.mediaUrl.find(L'\n') == std::wstring::npos);
+    }
+}
+
+void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
+{
+    const std::vector<std::string> rejected{
+        "",
+        "\r\n",
+        "https://a.googlevideo.com/one\nhttps://b.googlevideo.com/two",
+        "http://a.googlevideo.com/videoplayback?id=abc",
+        "https://googlevideo.com.evil.example/videoplayback?id=abc",
+        "https://evilgooglevideo.com/videoplayback?id=abc",
+        "https://example.com/videoplayback?id=abc",
+        "https://user@googlevideo.com/videoplayback?id=abc",
+        "not-a-url",
+        std::string("https://a.googlevideo.com/") + std::string(16 * 1024, 'a'),
+    };
+
+    for (const std::string& output : rejected) {
+        const ResolveResult result = ParseResolverOutput(output, 0);
+        CHECK(!result.ok);
+        CHECK_EQ(ResolveError::InvalidOutput, result.error);
+        CHECK(result.mediaUrl.empty());
+        CHECK(result.detail.size() <= 4096);
+        CHECK(result.detail.find(L"http") == std::wstring::npos);
+        CHECK(result.detail.find(L"googlevideo") == std::wstring::npos);
+        CHECK(result.detail.find(L"not-a-url") == std::wstring::npos);
+    }
+}
+
+void resolver_nonzero_exit_returns_bounded_sanitized_non_url_detail_test()
+{
+    const ResolveResult safe = ParseResolverOutput("ERROR: video unavailable\r\n", 7);
+    CHECK(!safe.ok);
+    CHECK_EQ(ResolveError::ExtractionFailed, safe.error);
+    CHECK(safe.mediaUrl.empty());
+    CHECK(safe.detail.find(L"video unavailable") != std::wstring::npos);
+    CHECK(safe.detail.size() <= 4096);
+
+    const ResolveResult sensitive = ParseResolverOutput(
+        "ERROR: rejected https://example.com/watch?v=secret-token bearer-secret\r\n", 9);
+    CHECK(!sensitive.ok);
+    CHECK_EQ(ResolveError::ExtractionFailed, sensitive.error);
+    CHECK(sensitive.mediaUrl.empty());
+    CHECK(sensitive.detail.size() <= 4096);
+    CHECK(sensitive.detail.find(L"https://") == std::wstring::npos);
+    CHECK(sensitive.detail.find(L"example.com") == std::wstring::npos);
+    CHECK(sensitive.detail.find(L"secret-token") == std::wstring::npos);
+    CHECK(sensitive.detail.find(L"bearer-secret") == std::wstring::npos);
+
+    const ResolveResult oversized = ParseResolverOutput(std::string(8 * 1024, 'x'), 1);
+    CHECK(!oversized.ok);
+    CHECK_EQ(ResolveError::ExtractionFailed, oversized.error);
+    CHECK(oversized.detail.size() <= 4096);
+}
+
 } // namespace
 
 int main()
@@ -1764,6 +1897,11 @@ int main()
     evaluated_config_update_observes_actual_final_bytes_test();
     configure_neural_addon_fails_closed_for_malformed_ini_test();
     configure_neural_addon_rejects_non_regular_path_before_replacement_test();
+    youtube_url_validation_accepts_only_supported_video_routes_test();
+    youtube_url_validation_rejects_unsafe_or_unselected_inputs_test();
+    resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test();
+    resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
+    resolver_nonzero_exit_returns_bounded_sanitized_non_url_detail_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";
