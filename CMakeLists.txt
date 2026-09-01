@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.11.0 LANGUAGES CXX RC)
+project(DLSSVideoPlayer VERSION 0.12.0 LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -16,7 +16,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
 set(DLSS_SDK "${CMAKE_SOURCE_DIR}/external/DLSS" CACHE PATH "Path to NVIDIA/DLSS SDK checkout")
 if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
-    message(FATAL_ERROR "NVIDIA DLSS SDK not found at ${DLSS_SDK}. Run build_windows.bat; it clones the official NVIDIA/DLSS repository automatically.")
+    message(FATAL_ERROR "NVIDIA DLSS SDK not found at ${DLSS_SDK}. Provide the pinned official NVIDIA/DLSS checkout documented in docs/BUILDING.md.")
 endif()
 
 set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
@@ -84,7 +84,7 @@ add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
 
 # The one-click BAT stages these binaries automatically. Keep this optional so
 # developers can still configure CMake before downloading FFmpeg.
-set(FFMPEG_STAGED_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg/bin")
+set(FFMPEG_STAGED_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg/bin" CACHE PATH "Path to the verified FFmpeg bin directory")
 if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe" AND EXISTS "${FFMPEG_STAGED_DIR}/ffprobe.exe")
     add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

@@ -17,43 +17,44 @@ jobs:
 
       - name: Clone NVIDIA DLSS SDK
         shell: cmd
-        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git external\DLSS
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
 
-      - name: Download FFmpeg Essentials
+      - name: Require private locked release inputs
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force external\ffmpeg\bin | Out-Null
-          Invoke-WebRequest -UseBasicParsing https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile external\ffmpeg.zip
-          Expand-Archive external\ffmpeg.zip external\ffmpeg_unpack -Force
-          $ffmpeg = Get-ChildItem external\ffmpeg_unpack -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          $ffprobe = Get-ChildItem external\ffmpeg_unpack -Recurse -Filter ffprobe.exe | Select-Object -First 1
-          Copy-Item $ffmpeg.FullName external\ffmpeg\bin\ffmpeg.exe
-          Copy-Item $ffprobe.FullName external\ffmpeg\bin\ffprobe.exe
+          if (-not (Test-Path external\runtime\nvngx_dlssnr.dll)) {
+            throw 'Private experimental runtime inputs are unavailable. Refusing to assemble a public release from unverified substitutes.'
+          }
+          .\tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination external\runtime -ValidateOnly
+
+      - name: Fetch pinned UI assets and YouTube helpers
+        shell: powershell
+        run: |
+          .\tools\fetch_ui_assets.ps1
+          .\tools\fetch_youtube_helpers.ps1
 
       - name: Configure
         shell: cmd
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 
       - name: Build Release
         shell: cmd
         run: cmake --build build --config Release --parallel
 
+      - name: Test Release
+        shell: cmd
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: Assemble release package
-        shell: powershell
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $stage = "dist/DLSSVideoPlayer-$tag-win64"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item build/Release/DLSSVideoPlayer.exe $stage/
-          Copy-Item external/ffmpeg/bin/ffmpeg.exe $stage/
-          Copy-Item external/ffmpeg/bin/ffprobe.exe $stage/
-          Copy-Item external/DLSS/lib/Windows_x86_64/rel/nvngx_dlss.dll $stage/
-          Copy-Item docs $stage/docs -Recurse
-          Copy-Item README.md,LICENSE,THIRD_PARTY.md,CHANGELOG.md,DLSS5_CHECKLIST.txt,prepare_dlss5_test.bat,inspect_dlssnr.ps1,run_dlss5_test.bat,run_4k_auto.bat,run_4k_quality.bat $stage/
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/DLSSVideoPlayer-$tag-win64.zip" -CompressionLevel Optimal
+        shell: cmd
+        run: package_release.bat
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/*.zip
+          files: dist/DLSSVideoPlayer-v0.12.0-win64.zip

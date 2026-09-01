@@ -18,15 +18,29 @@ jobs:
 
       - name: Clone NVIDIA DLSS SDK
         shell: cmd
-        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git external\DLSS
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
+
+      - name: Fetch pinned UI assets and YouTube helpers
+        shell: powershell
+        run: |
+          .\tools\fetch_ui_assets.ps1
+          .\tools\fetch_youtube_helpers.ps1
 
       - name: Configure
         shell: cmd
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 
       - name: Build Release
         shell: cmd
         run: cmake --build build --config Release --parallel
+
+      - name: Test Release
+        shell: cmd
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
@@ -35,6 +49,5 @@ jobs:
           if-no-files-found: error
           path: |
             build/Release/DLSSVideoPlayer.exe
-            build/Release/nvngx_dlss.dll
             LICENSE
             README.md

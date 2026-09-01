@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InputDirectory,
-    [Parameter(Mandatory = $true)][string]$Destination
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,16 +62,26 @@ function Assert-LockedFile {
 
 $verified = foreach ($entry in $lock.entries) {
     $matches = @(Get-ChildItem -LiteralPath $inputRoot -Recurse -File -Filter ([string]$entry.sourceName))
+    if ($matches.Count -eq 0 -and [string]$entry.sourceName -cne [string]$entry.destination) {
+        $matches = @(Get-ChildItem -LiteralPath $inputRoot -Recurse -File -Filter ([string]$entry.destination))
+    }
     if ($matches.Count -ne 1) {
-        throw "Expected exactly one '$($entry.sourceName)' below '$inputRoot'; found $($matches.Count)."
+        throw "Expected exactly one '$($entry.sourceName)' or staged '$($entry.destination)' below '$inputRoot'; found $($matches.Count)."
     }
     Assert-LockedFile -Entry $entry -Path $matches[0].FullName
 }
 
-New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
-foreach ($file in $verified) {
-    Copy-Item -LiteralPath $file.Source -Destination (Join-Path $destinationRoot $file.Destination) -Force
+if (-not $ValidateOnly) {
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
+    foreach ($file in $verified) {
+        Copy-Item -LiteralPath $file.Source -Destination (Join-Path $destinationRoot $file.Destination) -Force
+    }
 }
 
 $verified | Sort-Object Destination | Format-Table Destination, Size, SHA256, Authenticode -AutoSize
-Write-Host "Verified and staged $($verified.Count) locked runtime files into '$destinationRoot'."
+if ($ValidateOnly) {
+    Write-Host "Verified $($verified.Count) locked runtime files in '$inputRoot'."
+}
+else {
+    Write-Host "Verified and staged $($verified.Count) locked runtime files into '$destinationRoot'."
+}

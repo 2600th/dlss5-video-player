@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0 - 2026-09-01
+
+- Added public non-DRM YouTube playback through pinned yt-dlp and Deno helpers.
+- Added six curated game/anime examples with availability-change handling.
+- Added English-only runtime/UI policy and simplified RTX 40/RTX 50 defaults.
+- Added the optional experimental RenoDX neural-rendering path, enabled by
+  default with a safe-mode escape hatch.
+- Added pinned runtime hashes and fail-closed staging for the supplied DLSS
+  310.8, ReShade, RenoDX, and Streamline binary set.
+- Release binaries remain experimental: the modified neural DLL has an invalid
+  Authenticode signature, RTX 50 hardware was not tested, and redistribution
+  permission for the supplied runtime set is unresolved.
+
 ## 0.11.0 - 2026-08-29
 
 - Added live post-DLSS image adjustments: brightness, contrast, saturation, gamma, temperature and tint.
