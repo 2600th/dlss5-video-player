@@ -538,6 +538,7 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
 {
     return {
         L"--no-config",
+        L"--no-cache-dir",
         L"--no-playlist",
         L"--no-warnings",
         L"--js-runtimes",

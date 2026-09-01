@@ -2416,6 +2416,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"https://youtube.com/watch?v=abc_DEF-123&list=PL123";
     const std::vector<std::wstring> expected{
         L"--no-config",
+        L"--no-cache-dir",
         L"--no-playlist",
         L"--no-warnings",
         L"--js-runtimes",
@@ -2808,28 +2809,38 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         Sleep(INFINITE);
         return 0;
     }
-    if (argc != 12 || std::wstring_view(argv[1]) != L"--no-config" ||
-        std::wstring_view(argv[2]) != L"--no-playlist" ||
-        std::wstring_view(argv[3]) != L"--no-warnings" ||
-        std::wstring_view(argv[4]) != L"--js-runtimes" ||
-        !std::wstring_view(argv[5]).starts_with(L"deno:") ||
-        std::wstring_view(argv[6]) != L"--extractor-args" ||
-        std::wstring_view(argv[7]) != L"youtube:player_client=android" ||
-        std::wstring_view(argv[8]) != L"-f" ||
-        std::wstring_view(argv[9]) != L"b[ext=mp4]/b" ||
-        std::wstring_view(argv[10]) != L"--get-url") {
+    const std::wstring_view requestedUrl = argc > 1 ? std::wstring_view(argv[argc - 1]) : L"";
+    const bool noCacheDir = argc > 2 && std::wstring_view(argv[2]) == L"--no-cache-dir";
+    if (requestedUrl.find(L"ytcacheaudit") != std::wstring_view::npos && !noCacheDir) {
+        const std::wstring xdgCache = read_environment_variable(L"XDG_CACHE_HOME");
+        if (!xdgCache.empty()) {
+            write_binary_file(std::filesystem::path(xdgCache) / L"yt-dlp-default.marker",
+                              "default-cache-write");
+        }
+    }
+    if (argc != 13 || std::wstring_view(argv[1]) != L"--no-config" ||
+        std::wstring_view(argv[2]) != L"--no-cache-dir" ||
+        std::wstring_view(argv[3]) != L"--no-playlist" ||
+        std::wstring_view(argv[4]) != L"--no-warnings" ||
+        std::wstring_view(argv[5]) != L"--js-runtimes" ||
+        !std::wstring_view(argv[6]).starts_with(L"deno:") ||
+        std::wstring_view(argv[7]) != L"--extractor-args" ||
+        std::wstring_view(argv[8]) != L"youtube:player_client=android" ||
+        std::wstring_view(argv[9]) != L"-f" ||
+        std::wstring_view(argv[10]) != L"b[ext=mp4]/b" ||
+        std::wstring_view(argv[11]) != L"--get-url") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
         current_test_executable().parent_path() / L"deno.exe";
     std::error_code equivalentError;
     if (!std::filesystem::equivalent(
-            std::filesystem::path(std::wstring(std::wstring_view(argv[5]).substr(5))),
+            std::filesystem::path(std::wstring(std::wstring_view(argv[6]).substr(5))),
             expectedDeno, equivalentError) || equivalentError) {
         return 92;
     }
 
-    const std::wstring_view url = argv[11];
+    const std::wstring_view url = argv[12];
     if (url.find(L"envcapture") != std::wstring_view::npos) {
         const std::filesystem::path expectedCache =
             current_test_executable().parent_path() / L"youtube-helper-cache";
@@ -3048,14 +3059,21 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     std::error_code error;
     std::filesystem::create_directories(callerCache, error);
     CHECK(!error);
+    const std::filesystem::path callerXdgCache = fixture.directory.parent_path() /
+        (L"PolicyTests-caller-xdg-cache-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(GetTickCount64()));
+    std::filesystem::create_directories(callerXdgCache, error);
+    CHECK(!error);
     const ScopedEnvironmentVariable inheritedOverride(L"DENO_DIR", callerCache.wstring());
+    const ScopedEnvironmentVariable inheritedXdgCache(L"XDG_CACHE_HOME", callerXdgCache.wstring());
 
     const std::filesystem::path packageCache = fixture.directory / L"youtube-helper-cache";
     const std::filesystem::path packageMarker = packageCache / L"resolver-envcapture.marker";
     const std::filesystem::path callerMarker = callerCache / L"resolver-envcapture.marker";
+    const std::filesystem::path callerXdgMarker = callerXdgCache / L"yt-dlp-default.marker";
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-    const ResolveResult result = resolver->Resolve(L"https://youtu.be/envcapture", {});
+    const ResolveResult result = resolver->Resolve(L"https://youtu.be/envcapture-ytcacheaudit", {});
 
     CHECK(result.ok);
     CHECK(std::filesystem::is_directory(packageCache, error));
@@ -3063,10 +3081,14 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     CHECK_EQ(std::string("package-local"), read_binary_file(packageMarker));
     CHECK(!std::filesystem::exists(callerMarker, error));
     CHECK(!error);
+    CHECK(!std::filesystem::exists(callerXdgMarker, error));
+    CHECK(!error);
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
                                        std::chrono::milliseconds{500}));
 
     std::filesystem::remove_all(callerCache, error);
+    CHECK(!error);
+    std::filesystem::remove_all(callerXdgCache, error);
     CHECK(!error);
 }
 
