@@ -3,7 +3,6 @@
 #include <winhttp.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cwctype>
 #include <limits>
 #include <string>
@@ -12,7 +11,6 @@ namespace {
 
 constexpr size_t kMaximumInputCharacters = 2048;
 constexpr size_t kMaximumOutputBytes = 16 * 1024;
-constexpr size_t kMaximumDetailCharacters = 4 * 1024;
 
 struct CrackedUrl {
     INTERNET_SCHEME scheme{0};
@@ -100,18 +98,24 @@ std::wstring_view query_part(std::wstring_view extra)
 
 bool query_has_video_id(std::wstring_view query)
 {
+    bool foundVideoId = false;
     while (!query.empty()) {
         const size_t separator = query.find(L'&');
         const std::wstring_view item = query.substr(0, separator);
         const size_t equals = item.find(L'=');
-        if (equals != std::wstring_view::npos && item.substr(0, equals) == L"v" &&
-            is_video_id(item.substr(equals + 1))) {
-            return true;
+        const std::wstring_view name = item.substr(0, equals);
+        if (name.find(L'%') != std::wstring_view::npos) return false;
+        if (equals_case_insensitive(name, L"v")) {
+            if (name != L"v" || equals == std::wstring_view::npos || foundVideoId ||
+                !is_video_id(item.substr(equals + 1))) {
+                return false;
+            }
+            foundVideoId = true;
         }
         if (separator == std::wstring_view::npos) break;
         query.remove_prefix(separator + 1);
     }
-    return false;
+    return foundVideoId;
 }
 
 bool has_forbidden_input_character(std::wstring_view value)
@@ -136,65 +140,6 @@ std::wstring utf8_to_wide(std::string_view value)
         return {};
     }
     return converted;
-}
-
-bool contains_case_insensitive(std::string_view value, std::string_view needle)
-{
-    return std::search(value.begin(), value.end(), needle.begin(), needle.end(),
-                       [](char left, char right) {
-                           return std::tolower(static_cast<unsigned char>(left)) ==
-                                  std::tolower(static_cast<unsigned char>(right));
-                       }) != value.end();
-}
-
-bool diagnostic_token_is_sensitive(std::string_view token)
-{
-    return contains_case_insensitive(token, "://") ||
-           contains_case_insensitive(token, "www.") ||
-           contains_case_insensitive(token, "token") ||
-           contains_case_insensitive(token, "bearer") ||
-           contains_case_insensitive(token, "authorization") ||
-           contains_case_insensitive(token, "signature") ||
-           contains_case_insensitive(token, "sig=");
-}
-
-std::wstring sanitize_detail(std::string_view bytes)
-{
-    std::wstring detail;
-    detail.reserve(std::min(bytes.size(), kMaximumDetailCharacters));
-    size_t offset = 0;
-    while (offset < bytes.size() && detail.size() < kMaximumDetailCharacters) {
-        while (offset < bytes.size() &&
-               std::isspace(static_cast<unsigned char>(bytes[offset])) != 0) {
-            ++offset;
-        }
-        if (offset == bytes.size()) break;
-
-        const size_t start = offset;
-        while (offset < bytes.size() &&
-               std::isspace(static_cast<unsigned char>(bytes[offset])) == 0) {
-            ++offset;
-        }
-        const std::string_view token = bytes.substr(start, offset - start);
-        if (!detail.empty()) detail.push_back(L' ');
-        if (diagnostic_token_is_sensitive(token)) {
-            constexpr std::wstring_view replacement = L"[redacted]";
-            detail.append(replacement.substr(
-                0, std::min(replacement.size(), kMaximumDetailCharacters - detail.size())));
-            continue;
-        }
-
-        for (const unsigned char character : token) {
-            if (detail.size() == kMaximumDetailCharacters) break;
-            detail.push_back(character >= 0x20 && character <= 0x7e &&
-                                     character != '\'' && character != '"'
-                                 ? static_cast<wchar_t>(character)
-                                 : L'?');
-        }
-    }
-
-    if (detail.empty()) detail = L"Resolver helper failed.";
-    return detail;
 }
 
 ResolveResult invalid_output()
@@ -239,19 +184,19 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     if (exitCode != 0) {
         ResolveResult result;
         result.error = ResolveError::ExtractionFailed;
-        result.detail = sanitize_detail(stdoutBytes);
+        result.detail = L"Could not extract a playable YouTube stream.";
         return result;
     }
 
-    while (!stdoutBytes.empty() &&
-           (stdoutBytes.front() == '\r' || stdoutBytes.front() == '\n')) {
-        stdoutBytes.remove_prefix(1);
+    if (stdoutBytes.empty() || stdoutBytes.size() > kMaximumOutputBytes) {
+        return invalid_output();
     }
-    while (!stdoutBytes.empty() &&
-           (stdoutBytes.back() == '\r' || stdoutBytes.back() == '\n')) {
+    if (stdoutBytes.ends_with("\r\n")) {
+        stdoutBytes.remove_suffix(2);
+    } else if (stdoutBytes.ends_with("\n")) {
         stdoutBytes.remove_suffix(1);
     }
-    if (stdoutBytes.empty() || stdoutBytes.size() > kMaximumOutputBytes ||
+    if (stdoutBytes.empty() ||
         stdoutBytes.find_first_of("\r\n") != std::string_view::npos) {
         return invalid_output();
     }

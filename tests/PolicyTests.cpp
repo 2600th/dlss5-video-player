@@ -1714,6 +1714,8 @@ void youtube_url_validation_accepts_only_supported_video_routes_test()
         L"https://youtu.be/dQw4w9WgXcQ?t=12",
         L"https://youtube.com/shorts/dQw4w9WgXcQ",
         L"https://youtube.com/watch?list=PL123&v=dQw4w9WgXcQ&index=2",
+        L"https://youtube.com:443/watch?v=dQw4w9WgXcQ",
+        L"https://youtube.com:8443/watch?v=dQw4w9WgXcQ",
     };
 
     for (const std::wstring_view value : accepted) {
@@ -1746,12 +1748,56 @@ void youtube_url_validation_rejects_unsafe_or_unselected_inputs_test()
         L"https://youtube.com/shorts/",
         L"https://youtu.be/",
         L"https://youtube.com/embed/dQw4w9WgXcQ",
+        L"https://youtube.com./watch?v=dQw4w9WgXcQ",
+        L"https://youtube.com.evil.example./watch?v=dQw4w9WgXcQ",
+        L"https://y\u043eutube.com/watch?v=dQw4w9WgXcQ",
+        L"https://youtube.com\u3002evil.example/watch?v=dQw4w9WgXcQ",
+        L"https://xn--youtube-9d0b.com/watch?v=dQw4w9WgXcQ",
     };
     rejected.push_back(L"https://youtube.com/watch?v=" + std::wstring(2049, L'a'));
+
+    std::wstring embeddedNul = L"https://youtube.com/watch?v=abc";
+    embeddedNul.push_back(L'\0');
+    embeddedNul.append(L"def");
+    rejected.push_back(std::move(embeddedNul));
 
     for (const std::wstring& value : rejected) {
         CHECK(!IsSupportedYouTubeUrl(value));
     }
+}
+
+void youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test()
+{
+    const std::array rejected{
+        L"https://youtube.com/watch?v=abc&v=abc",
+        L"https://youtube.com/watch?v=abc&v=def",
+        L"https://youtube.com/watch?v=&v=abc",
+        L"https://youtube.com/watch?v=abc&v=",
+        L"https://youtube.com/watch?V=abc",
+        L"https://youtube.com/watch?V=abc&v=def",
+        L"https://youtube.com/watch?%76=abc",
+        L"https://youtube.com/watch?%56=abc&v=def",
+        L"https://youtube.com/watch?v%3Dabc",
+        L"https://youtube.com/watch?v=abc%26v%3Ddef",
+        L"https://youtube.com/watch?v=abc%26list%3DPL123",
+    };
+
+    for (const std::wstring_view value : rejected) {
+        CHECK(!IsSupportedYouTubeUrl(value));
+    }
+}
+
+void youtube_url_validation_enforces_exact_2048_character_boundary_test()
+{
+    constexpr std::wstring_view prefix = L"https://youtu.be/";
+    const std::wstring accepted = std::wstring(prefix) +
+                                  std::wstring(2048 - prefix.size(), L'a');
+    const std::wstring rejected = accepted + L'a';
+
+    CHECK_EQ(size_t{2048}, accepted.size());
+    CHECK(IsSupportedYouTubeUrl(accepted));
+    CHECK_EQ(size_t{2049}, rejected.size());
+    CHECK(!IsSupportedYouTubeUrl(rejected));
 }
 
 void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
@@ -1765,9 +1811,9 @@ void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
              L"https://googlevideo.com/videoplayback?id=plain"},
         Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc",
              L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
-        Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\r\n",
+        Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\n",
              L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
-        Case{"\r\nhttps://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\r\n",
+        Case{"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc\r\n",
              L"https://rr1---sn-a5mekn6r.googlevideo.com/videoplayback?id=abc"},
     };
 
@@ -1794,6 +1840,13 @@ void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
         "https://example.com/videoplayback?id=abc",
         "https://user@googlevideo.com/videoplayback?id=abc",
         "not-a-url",
+        "a.googlevideo.com/videoplayback?id=abc",
+        "https: //a.googlevideo.com/videoplayback?id=abc",
+        "\nhttps://a.googlevideo.com/videoplayback?id=abc",
+        "https://a.googlevideo.com/videoplayback?id=abc\n\n",
+        "https://a.googlevideo.com/videoplayback?id=abc\r\n\r\n",
+        "https://a.googlevideo.com/videoplayback?id=abc\r",
+        std::string{"https://a.googlevideo.com/\xc3\x28", 28},
         std::string("https://a.googlevideo.com/") + std::string(16 * 1024, 'a'),
     };
 
@@ -1809,30 +1862,49 @@ void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
     }
 }
 
-void resolver_nonzero_exit_returns_bounded_sanitized_non_url_detail_test()
+void resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test()
 {
-    const ResolveResult safe = ParseResolverOutput("ERROR: video unavailable\r\n", 7);
-    CHECK(!safe.ok);
-    CHECK_EQ(ResolveError::ExtractionFailed, safe.error);
-    CHECK(safe.mediaUrl.empty());
-    CHECK(safe.detail.find(L"video unavailable") != std::wstring::npos);
-    CHECK(safe.detail.size() <= 4096);
+    constexpr std::string_view prefix = "https://a.googlevideo.com/";
+    const std::string exactRaw = std::string(prefix) +
+                                 std::string(16 * 1024 - prefix.size(), 'a');
+    const std::string overRaw = exactRaw + 'a';
+    const std::string exactWithCrLf = std::string(prefix) +
+        std::string(16 * 1024 - prefix.size() - 2, 'a') + "\r\n";
+    const std::string overWithCrLf = std::string(prefix) +
+        std::string(16 * 1024 - prefix.size() - 1, 'a') + "\r\n";
 
-    const ResolveResult sensitive = ParseResolverOutput(
-        "ERROR: rejected https://example.com/watch?v=secret-token bearer-secret\r\n", 9);
-    CHECK(!sensitive.ok);
-    CHECK_EQ(ResolveError::ExtractionFailed, sensitive.error);
-    CHECK(sensitive.mediaUrl.empty());
-    CHECK(sensitive.detail.size() <= 4096);
-    CHECK(sensitive.detail.find(L"https://") == std::wstring::npos);
-    CHECK(sensitive.detail.find(L"example.com") == std::wstring::npos);
-    CHECK(sensitive.detail.find(L"secret-token") == std::wstring::npos);
-    CHECK(sensitive.detail.find(L"bearer-secret") == std::wstring::npos);
+    CHECK_EQ(size_t{16 * 1024}, exactRaw.size());
+    CHECK(ParseResolverOutput(exactRaw, 0).ok);
+    CHECK_EQ(size_t{16 * 1024 + 1}, overRaw.size());
+    CHECK_EQ(ResolveError::InvalidOutput, ParseResolverOutput(overRaw, 0).error);
+    CHECK_EQ(size_t{16 * 1024}, exactWithCrLf.size());
+    CHECK(ParseResolverOutput(exactWithCrLf, 0).ok);
+    CHECK_EQ(size_t{16 * 1024 + 1}, overWithCrLf.size());
+    CHECK_EQ(ResolveError::InvalidOutput, ParseResolverOutput(overWithCrLf, 0).error);
+}
 
-    const ResolveResult oversized = ParseResolverOutput(std::string(8 * 1024, 'x'), 1);
-    CHECK(!oversized.ok);
-    CHECK_EQ(ResolveError::ExtractionFailed, oversized.error);
-    CHECK(oversized.detail.size() <= 4096);
+void resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test()
+{
+    constexpr std::wstring_view expectedDetail =
+        L"Could not extract a playable YouTube stream.";
+    const std::vector<std::string> diagnostics{
+        "ERROR: video unavailable\r\n",
+        "ERROR: rejected https://example.com/watch?v=secret-token\r\n",
+        "ERROR: rejected https: //example.com/watch?v=split-secret\r\n",
+        "Bearer abc123",
+        "Authorization=Basic-secret password=hunter2 token=abc secret=qwerty cookie=session",
+        "(https://example.com/watch?v=adjacent-secret); [Bearer abc123]",
+        std::string(8 * 1024, 'x'),
+    };
+
+    for (const std::string& diagnostic : diagnostics) {
+        const ResolveResult result = ParseResolverOutput(diagnostic, 7);
+        CHECK(!result.ok);
+        CHECK_EQ(ResolveError::ExtractionFailed, result.error);
+        CHECK(result.mediaUrl.empty());
+        CHECK_EQ(std::wstring(expectedDetail), result.detail);
+        CHECK(result.detail.size() <= 4096);
+    }
 }
 
 } // namespace
@@ -1899,9 +1971,12 @@ int main()
     configure_neural_addon_rejects_non_regular_path_before_replacement_test();
     youtube_url_validation_accepts_only_supported_video_routes_test();
     youtube_url_validation_rejects_unsafe_or_unselected_inputs_test();
+    youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test();
+    youtube_url_validation_enforces_exact_2048_character_boundary_test();
     resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test();
     resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
-    resolver_nonzero_exit_returns_bounded_sanitized_non_url_detail_test();
+    resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test();
+    resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";
