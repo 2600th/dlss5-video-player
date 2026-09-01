@@ -111,6 +111,33 @@ struct D3D12RendererTestAccess {
     {
         return renderer.WaitGPUForContinuedUse();
     }
+    static void ConfigureFrameSignal(D3D12Renderer& renderer,HRESULT signalResult,
+                                     HRESULT deviceRemovedReason,int& signalCalls,
+                                     int& reasonChecks)
+    {
+        renderer.m_testFrameSignal=[&signalCalls,signalResult](uint64_t){
+            ++signalCalls;return signalResult;
+        };
+        renderer.m_testDeviceRemovedReason=[&reasonChecks,deviceRemovedReason]{
+            ++reasonChecks;return deviceRemovedReason;
+        };
+    }
+    static void SetFrameTracking(D3D12Renderer& renderer,uint32_t frameSlot,
+                                 uint64_t fenceValue,uint32_t trackedSlot,
+                                 uint64_t trackedFence)
+    {
+        renderer.m_frameSlot=frameSlot;renderer.m_fenceValue=fenceValue;
+        renderer.m_frameFence[trackedSlot]=trackedFence;
+    }
+    static bool SignalFrameSlot(D3D12Renderer& renderer,uint32_t slot)
+    {
+        return renderer.SignalFrameSlot(slot);
+    }
+    static uint32_t FrameSlot(const D3D12Renderer& renderer){return renderer.m_frameSlot;}
+    static uint64_t FenceValue(const D3D12Renderer& renderer){return renderer.m_fenceValue;}
+    static uint64_t FrameFence(const D3D12Renderer& renderer,uint32_t slot){return renderer.m_frameFence[slot];}
+    static bool GPUUnusable(const D3D12Renderer& renderer){return renderer.m_gpuUnusable;}
+    static d3d12_renderer_detail::FenceWaitResult LastFenceResult(const D3D12Renderer& renderer){return renderer.m_lastFenceWaitResult;}
 };
 
 namespace {
@@ -1763,6 +1790,71 @@ void renderer_safe_owner_retains_resources_after_live_device_drain_failure_test(
     }
 }
 
+void renderer_frame_signal_failure_is_cached_without_advancing_tracking_test()
+{
+    int signalCalls=0,reasonChecks=0;
+    auto destroyed=std::make_shared<int>(0);
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureFrameSignal(
+        *renderer,E_FAIL,S_OK,signalCalls,reasonChecks);
+    D3D12RendererTestAccess::SetFrameTracking(*renderer,1,9,1,4);
+    D3D12RendererTestAccess::OwnSentinel(
+        *renderer,std::make_unique<RendererOwnedSentinel>(destroyed));
+
+    CHECK(!D3D12RendererTestAccess::SignalFrameSlot(*renderer,1));
+    CHECK_EQ(1,signalCalls);CHECK_EQ(1,reasonChecks);
+    CHECK_EQ(uint32_t{1},D3D12RendererTestAccess::FrameSlot(*renderer));
+    CHECK_EQ(uint64_t{9},D3D12RendererTestAccess::FenceValue(*renderer));
+    CHECK_EQ(uint64_t{4},D3D12RendererTestAccess::FrameFence(*renderer,1));
+    CHECK(D3D12RendererTestAccess::GPUUnusable(*renderer));
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::SignalFailed,
+             D3D12RendererTestAccess::LastFenceResult(*renderer));
+    CHECK(!D3D12RendererTestAccess::SignalFrameSlot(*renderer,1));
+    CHECK_EQ(1,signalCalls);
+
+    renderer.reset();
+    CHECK_EQ(0,*destroyed);
+}
+
+void renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test()
+{
+    int signalCalls=0,reasonChecks=0;
+    auto destroyed=std::make_shared<int>(0);
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureFrameSignal(
+        *renderer,E_FAIL,DXGI_ERROR_DEVICE_REMOVED,signalCalls,reasonChecks);
+    D3D12RendererTestAccess::SetFrameTracking(*renderer,2,12,2,8);
+    D3D12RendererTestAccess::OwnSentinel(
+        *renderer,std::make_unique<RendererOwnedSentinel>(destroyed));
+
+    CHECK(!D3D12RendererTestAccess::SignalFrameSlot(*renderer,2));
+    CHECK_EQ(1,signalCalls);CHECK_EQ(1,reasonChecks);
+    CHECK_EQ(uint32_t{2},D3D12RendererTestAccess::FrameSlot(*renderer));
+    CHECK_EQ(uint64_t{12},D3D12RendererTestAccess::FenceValue(*renderer));
+    CHECK_EQ(uint64_t{8},D3D12RendererTestAccess::FrameFence(*renderer,2));
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::DeviceRemoved,
+             D3D12RendererTestAccess::LastFenceResult(*renderer));
+
+    renderer.reset();
+    CHECK_EQ(1,*destroyed);
+}
+
+void renderer_frame_signal_success_advances_tracking_once_test()
+{
+    int signalCalls=0,reasonChecks=0;
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureFrameSignal(
+        *renderer,S_OK,S_OK,signalCalls,reasonChecks);
+    D3D12RendererTestAccess::SetFrameTracking(*renderer,0,20,0,14);
+
+    CHECK(D3D12RendererTestAccess::SignalFrameSlot(*renderer,0));
+    CHECK_EQ(1,signalCalls);CHECK_EQ(0,reasonChecks);
+    CHECK_EQ(uint32_t{1},D3D12RendererTestAccess::FrameSlot(*renderer));
+    CHECK_EQ(uint64_t{21},D3D12RendererTestAccess::FenceValue(*renderer));
+    CHECK_EQ(uint64_t{21},D3D12RendererTestAccess::FrameFence(*renderer,0));
+    CHECK(!D3D12RendererTestAccess::GPUUnusable(*renderer));
+}
+
 void gpu_classification_table_test()
 {
     struct Case {
@@ -3192,7 +3284,7 @@ void youtube_destroyed_window_and_visibility_failure_leave_active_state_unchange
         [&](std::unique_ptr<Candidate>){
             return CommitPreparedAudioHandoff(
                 [&]{order.push_back(2);active={11,21,31,false};},
-                [&]{order.push_back(1);return false;},
+                [&]{order.push_back(1);return ShowPreparedRenderWindow(viewport,destroyed);},
                 [&]{order.push_back(3);},
                 [&]{order.push_back(4);preparedAudioPaused=false;});
         });
@@ -4049,6 +4141,9 @@ int wmain(int argc, wchar_t* argv[])
     renderer_non_teardown_wait_failure_is_propagated_test();
     renderer_safe_owner_releases_owned_resources_only_after_completed_or_removed_drain_test();
     renderer_safe_owner_retains_resources_after_live_device_drain_failure_test();
+    renderer_frame_signal_failure_is_cached_without_advancing_tracking_test();
+    renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test();
+    renderer_frame_signal_success_advances_tracking_once_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
     bootstrap_action_matrix_test();

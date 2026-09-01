@@ -94,7 +94,7 @@ private:
     void CopyMappedRows(uint8_t* mapped, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp,
                         const void* src, size_t tightRowBytes, uint32_t rows);
     bool WaitForFrameSlot(uint32_t slot);
-    void SignalFrameSlot(uint32_t slot);
+    bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
@@ -175,6 +175,8 @@ private:
 #ifdef D3D12_RENDERER_TESTING
     friend struct D3D12RendererTestAccess;
     std::function<d3d12_renderer_detail::FenceWaitResult()> m_testWaitGPU;
+    std::function<HRESULT(uint64_t)> m_testFrameSignal;
+    std::function<HRESULT()> m_testDeviceRemovedReason;
     std::unique_ptr<D3D12RendererTestOwnedResource> m_testOwnedResource;
 #endif
 };

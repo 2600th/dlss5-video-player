@@ -367,9 +367,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
-    SignalFrameSlot(slot);
-    m_frameSlot=(slot+1u)%FrameCount;
-    return true;
+    return SignalFrameSlot(slot);
 }
 
 bool D3D12Renderer::PresentCurrent(){
@@ -416,8 +414,7 @@ bool D3D12Renderer::PresentCurrent(){
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
     if(FAILED(phr)){LOG("Static Present failed hr=0x"<<std::hex<<phr);return false;}
-    SignalFrameSlot(slot);m_frameSlot=(slot+1u)%FrameCount;
-    return true;
+    return SignalFrameSlot(slot);
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
@@ -436,10 +433,35 @@ bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
     return result==d3d12_renderer_detail::FenceWaitResult::Completed;
 }
-void D3D12Renderer::SignalFrameSlot(uint32_t slot){
-    if(slot>=FrameCount||!m_queue||!m_fence)return;
-    const uint64_t v=++m_fenceValue;
-    if(SUCCEEDED(m_queue->Signal(m_fence.Get(),v)))m_frameFence[slot]=v;
+bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
+    if(m_gpuUnusable||slot>=FrameCount)return false;
+    const uint64_t v=m_fenceValue+1;
+    HRESULT signalResult=E_FAIL;
+#if defined(D3D12_RENDERER_TESTING)
+    if(m_testFrameSignal)signalResult=m_testFrameSignal(v);
+    else
+#endif
+    {
+        if(!m_queue||!m_fence)return false;
+        signalResult=m_queue->Signal(m_fence.Get(),v);
+    }
+    if(FAILED(signalResult)){
+        HRESULT removedReason=S_OK;
+#if defined(D3D12_RENDERER_TESTING)
+        if(m_testDeviceRemovedReason)removedReason=m_testDeviceRemovedReason();
+        else
+#endif
+        if(m_device)removedReason=m_device->GetDeviceRemovedReason();
+        m_lastFenceWaitResult=d3d12_renderer_detail::ClassifyFenceWaitFailure(
+            d3d12_renderer_detail::FenceWaitResult::SignalFailed,
+            [=]{return removedReason;});
+        m_gpuUnusable=true;
+        return false;
+    }
+    m_fenceValue=v;
+    m_frameFence[slot]=v;
+    m_frameSlot=(slot+1u)%FrameCount;
+    return true;
 }
 d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(){
 #if defined(D3D12_RENDERER_TESTING)
