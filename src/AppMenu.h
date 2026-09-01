@@ -42,8 +42,6 @@ inline constexpr UINT IDM_YOUTUBE_QUALITY_AUTO = 410;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_2160 = 411;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_1440 = 412;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_1080 = 413;
-inline constexpr UINT IDM_YOUTUBE_QUALITY_720 = 414;
-inline constexpr UINT IDM_YOUTUBE_QUALITY_480 = 415;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 
 enum class PlayerCommandRoute {

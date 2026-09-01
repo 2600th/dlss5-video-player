@@ -526,19 +526,15 @@ std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
 {
     switch (quality) {
     case YouTubeSourceQuality::Auto:
-        return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
+        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
     case YouTubeSourceQuality::P2160:
-        return L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b";
+        return L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]";
     case YouTubeSourceQuality::P1440:
-        return L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b";
+        return L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]";
     case YouTubeSourceQuality::P1080:
-        return L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b";
-    case YouTubeSourceQuality::P720:
-        return L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b";
-    case YouTubeSourceQuality::P480:
-        return L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b";
+        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]";
     }
-    return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
+    return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
 }
 
 namespace {

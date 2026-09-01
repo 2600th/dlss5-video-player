@@ -154,12 +154,14 @@ void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
 {
     using release_package_policy::IsAllowedPath;
 
-    const std::array<std::wstring_view, 14> allowed = {
+    const std::array<std::wstring_view, 19> allowed = {
         L"DLSSVideoPlayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe",
         L"deno.exe", L"nvngx_dlss.dll", L"nvngx_dlssnr.dll", L"dxgi.dll",
         L"sl.common.dll", L"ReShade.ini", L"ReShadePreset.ini",
         L"docs/DLSS5_SETUP.md", L"THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt",
-        L"PACKAGE_MANIFEST.txt"
+        L"PACKAGE_MANIFEST.txt", L"SECURITY.md", L"CONTRIBUTING.md",
+        L"CHANGELOG.md", L"docs/RELATED_PROJECTS.md",
+        L"THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt"
     };
     for (const auto path : allowed) CHECK(IsAllowedPath(path));
 
@@ -171,6 +173,32 @@ void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
         L"nvngx_dlssnr.rollback.dll", L"unexpected-helper.exe"
     };
     for (const auto path : forbidden) CHECK(!IsAllowedPath(path));
+}
+
+void public_release_package_policy_excludes_private_and_optional_binaries_test()
+{
+    using release_package_policy::IsAllowedPublicPath;
+
+    const std::array<std::wstring_view, 17> allowed = {
+        L"DLSSVideoPlayer.exe", L"nvngx_dlss.dll", L"README.md", L"LICENSE",
+        L"SECURITY.md", L"CONTRIBUTING.md", L"CHANGELOG.md", L"THIRD_PARTY.md",
+        L"PUBLIC_RELEASE_NOTICE.txt", L"PACKAGE_MANIFEST.txt",
+        L"THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt",
+        L"THIRD_PARTY_LICENSES/tabler-MIT.txt", L"docs/ARCHITECTURE.md",
+        L"docs/BUILDING.md", L"docs/DLSS5_SETUP.md", L"docs/RELATED_PROJECTS.md",
+        L"docs/TROUBLESHOOTING.md"
+    };
+    for (const auto path : allowed) CHECK(IsAllowedPublicPath(path));
+
+    const std::array<std::wstring_view, 20> forbidden = {
+        L"nvngx_dlssnr.dll", L"renodx-dlss5.addon64", L"dxgi.dll",
+        L"ReShade.ini", L"ReShadePreset.ini", L"sl.common.dll", L"sl.dlss.dll",
+        L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll",
+        L"sl.pcl.dll", L"sl.reflex.dll", L"ffmpeg.exe", L"ffprobe.exe",
+        L"yt-dlp.exe", L"deno.exe", L"DLSSVideoPlayer.ini",
+        L"DLSSVideoPlayer.log", L"unexpected.dll"
+    };
+    for (const auto path : forbidden) CHECK(!IsAllowedPublicPath(path));
 }
 
 void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
@@ -1054,8 +1082,6 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
         std::pair{L"2160p", app_menu::IDM_YOUTUBE_QUALITY_2160},
         std::pair{L"1440p", app_menu::IDM_YOUTUBE_QUALITY_1440},
         std::pair{L"1080p", app_menu::IDM_YOUTUBE_QUALITY_1080},
-        std::pair{L"720p", app_menu::IDM_YOUTUBE_QUALITY_720},
-        std::pair{L"480p", app_menu::IDM_YOUTUBE_QUALITY_480},
     };
     std::vector<MenuEntry> entries;
     if (quality) collect_menu_entries(quality, entries);
@@ -1067,8 +1093,8 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
         if (selected) CHECK_EQ(command, app_menu::CommandForYouTubeQuality(*selected));
     }
     for (const auto& entry : entries) {
-        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_1080,
-                 (entry.state & MFS_CHECKED) != 0);
+        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_AUTO,
+                  (entry.state & MFS_CHECKED) != 0);
     }
 
     CHECK(app_menu::UpdateYouTubeQualitySelection(menu, YouTubeSourceQuality::P1080));
@@ -1079,6 +1105,8 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
                  (entry.state & MFS_CHECKED) != 0);
     }
     CHECK(!app_menu::YouTubeQualityForCommand(app_menu::IDM_QUALITY_AUTO).has_value());
+    CHECK(!app_menu::YouTubeQualityForCommand(414).has_value());
+    CHECK(!app_menu::YouTubeQualityForCommand(415).has_value());
     if (menu) DestroyMenu(menu);
 }
 
@@ -1977,6 +2005,44 @@ void neural_addon_policy_test()
     CHECK(!NeuralAddonDesired(GpuGeneration::Unsupported, false));
 }
 
+void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
+{
+    const auto experimental = ResolveNeuralRenderDefaults(true, false, 3840, 2160);
+    CHECK_EQ(uint32_t{1920}, experimental.width);
+    CHECK_EQ(uint32_t{1080}, experimental.height);
+
+    const auto explicitOutput = ResolveNeuralRenderDefaults(true, true, 2560, 1440);
+    CHECK_EQ(uint32_t{2560}, explicitOutput.width);
+    CHECK_EQ(uint32_t{1440}, explicitOutput.height);
+
+    const auto nativeOnly = ResolveNeuralRenderDefaults(false, false, 3840, 2160);
+    CHECK_EQ(uint32_t{3840}, nativeOnly.width);
+    CHECK_EQ(uint32_t{2160}, nativeOnly.height);
+}
+
+void neural_runtime_layout_is_absent_complete_or_fail_closed_test()
+{
+    CHECK_EQ(NeuralRuntimeLayout::Absent,
+             ClassifyNeuralRuntimeLayout(false, false, false, false));
+    CHECK_EQ(NeuralRuntimeLayout::Complete,
+             ClassifyNeuralRuntimeLayout(true, true, true, true));
+
+    for (unsigned presentMask = 1; presentMask < 15; ++presentMask) {
+        CHECK_EQ(NeuralRuntimeLayout::Incomplete,
+                 ClassifyNeuralRuntimeLayout(
+                     (presentMask & 1U) != 0,
+                     (presentMask & 2U) != 0,
+                     (presentMask & 4U) != 0,
+                     (presentMask & 8U) != 0));
+    }
+}
+
+void default_neural_carrier_uses_native_resolution_dlaa_test()
+{
+    CHECK_EQ(NVSDK_NGX_PerfQuality_Value_DLAA,
+             DefaultNeuralCarrierQuality());
+}
+
 void bootstrap_action_matrix_test()
 {
     struct Case {
@@ -2464,6 +2530,88 @@ void disabled_addons_insertion_uses_target_section_line_ending_test()
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
 
+void neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64,legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=0\n"
+        "NeuralUplift=0\n"
+        "NREnableUpscaling=1\n"
+        "NRIntensity=1.25\n";
+    constexpr std::string_view expected =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n"
+        "NRIntensity=1.25\n";
+
+    const std::string updated = UpdateNeuralAddonIni(input, true);
+    CHECK_EQ(std::string(expected), updated);
+    CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true));
+}
+
+void neural_addon_runtime_settings_are_created_without_enabling_upscaling_test()
+{
+    constexpr std::string_view input =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n";
+    constexpr std::string_view expected =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n"
+        "[ADDON]\r\n"
+        "DisabledAddons=\r\n"
+        "[RenoDX.DLSS5]\r\n"
+        "EnableHooks=2\r\n"
+        "NeuralUplift=1\r\n"
+        "NREnableUpscaling=0\r\n";
+
+    CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
+}
+
+void neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=\n"
+        "[RenoDX.DLSS5]\n"
+        "NeuralUplift=1\n"
+        "NeuralUplift=0\n";
+    bool rejected = false;
+    try {
+        (void)UpdateNeuralAddonIni(input, true);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    CHECK(rejected);
+}
+
+void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
+{
+    constexpr std::string_view input =
+        "[ADDON] ; ReShade accepts trailing text\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n"
+        "[RenoDX.DLSS5] ; existing settings\n"
+        "NRIntensity=1.25\n"
+        "[OTHER] ; this must end the RenoDX section\n"
+        "Foo=1\n";
+    constexpr std::string_view expected =
+        "[ADDON] ; ReShade accepts trailing text\n"
+        "DisabledAddons=\n"
+        "[RenoDX.DLSS5] ; existing settings\n"
+        "NRIntensity=1.25\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n"
+        "[OTHER] ; this must end the RenoDX section\n"
+        "Foo=1\n";
+
+    CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
+}
+
 void configure_neural_addon_is_idempotent_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
@@ -2477,7 +2625,11 @@ void configure_neural_addon_is_idempotent_test()
         "[GENERAL]\n"
         "PresetPath=C:\\Games\\Player\n"
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64\n";
+        "DisabledAddons=legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n";
     write_binary_file(path, input);
 
     const ConfigUpdate first = ConfigureNeuralAddon(path, true);
@@ -2540,7 +2692,11 @@ void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
         "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n";
     constexpr std::string_view normalExpected =
         "[ADDON]\r\n"
-        "DisabledAddons=legacy.addon64\r\n";
+        "DisabledAddons=legacy.addon64\r\n"
+        "[RenoDX.DLSS5]\r\n"
+        "EnableHooks=2\r\n"
+        "NeuralUplift=1\r\n"
+        "NREnableUpscaling=0\r\n";
     write_binary_file(path, legacyInput);
 
     const ConfigUpdate safe = ConfigureNeuralAddon(path, false);
@@ -2917,7 +3073,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
         L"-f",
-        L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b",
+        L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]",
         L"--get-url",
         std::wstring(url),
     };
@@ -2926,21 +3082,17 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
                            helperDirectory, url, YouTubeSourceQuality::P1080));
 }
 
-void youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test()
+void youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test()
 {
     const std::array cases{
         std::pair{YouTubeSourceQuality::Auto,
-                  std::wstring_view(L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b")},
+                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]")},
         std::pair{YouTubeSourceQuality::P2160,
-                  std::wstring_view(L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b")},
+                  std::wstring_view(L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]")},
         std::pair{YouTubeSourceQuality::P1440,
-                  std::wstring_view(L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b")},
+                  std::wstring_view(L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]")},
         std::pair{YouTubeSourceQuality::P1080,
-                  std::wstring_view(L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b")},
-        std::pair{YouTubeSourceQuality::P720,
-                  std::wstring_view(L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b")},
-        std::pair{YouTubeSourceQuality::P480,
-                  std::wstring_view(L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b")},
+                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]")},
     };
     for (const auto& [quality, expected] : cases) {
         CHECK_EQ(expected, YouTubeFormatSelector(quality));
@@ -3076,6 +3228,23 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
     }
     Sleep(50);CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,std::chrono::milliseconds{500}));CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,std::chrono::milliseconds{500}));
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
+}
+
+void youtube_decoder_discards_only_expected_trailing_partial_frame_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"https://media.invalid/partialend",MediaSourceKind::YouTube));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;size_t frames=0;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    while(std::chrono::steady_clock::now()<deadline){
+        result=decoder->ReadNextAvailable(frame);
+        if(result==VideoReadResult::FrameReady){++frames;result=VideoReadResult::NotReady;}
+        else if(result!=VideoReadResult::NotReady)break;
+        Sleep(5);
+    }
+    CHECK_EQ(size_t{2},frames);
+    CHECK_EQ(VideoReadResult::EndOfStream,result);
 }
 
 void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
@@ -3690,6 +3859,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
         if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        if(all.find(L"partialend")!=std::wstring::npos){std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.067\n"<<std::flush;return 0;}
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
@@ -3711,6 +3881,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         Sleep(INFINITE);return 0;
     }
     if(all.find(L"exit")!=std::wstring::npos)return 7;
+    if(all.find(L"partialend")!=std::wstring::npos){std::cout.write("1234567890abcdef1234567890abcdef12345678",40);std::cout.flush();return 0;}
     if(all.find(L"stallmid")!=std::wstring::npos){std::cout.write("1234",4);std::cout.flush();Sleep(INFINITE);return 0;}
     if(all.find(L"trickle")!=std::wstring::npos){std::cout.write("12345678",8);std::cout.flush();Sleep(35);std::cout.write("abcdefgh",8);std::cout.flush();return 0;}
     Sleep(INFINITE);return 0;
@@ -3754,7 +3925,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[6]) != L"--js-runtimes" ||
         !std::wstring_view(argv[7]).starts_with(L"deno:") ||
         std::wstring_view(argv[8]) != L"-f" ||
-        std::wstring_view(argv[9]) != L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b" ||
+        std::wstring_view(argv[9]) != YouTubeFormatSelector(YouTubeSourceQuality::Auto) ||
         std::wstring_view(argv[10]) != L"--get-url") {
         return 91;
     }
@@ -4373,6 +4544,7 @@ int wmain(int argc, wchar_t* argv[])
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
     release_package_filename_policy_is_allowlisted_and_fail_closed_test();
+    public_release_package_policy_excludes_private_and_optional_binaries_test();
     runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
     toolbar_layout_selects_stable_action_sets_for_width_modes_test();
     toolbar_layout_preserves_group_separation_test();
@@ -4421,6 +4593,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
+    youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
@@ -4451,6 +4624,9 @@ int wmain(int argc, wchar_t* argv[])
     renderer_frame_signal_success_advances_tracking_once_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
+    neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
+    neural_runtime_layout_is_absent_complete_or_fail_closed_test();
+    default_neural_carrier_uses_native_resolution_dlaa_test();
     bootstrap_action_matrix_test();
     windows_command_line_quoting_round_trip_test();
     runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
@@ -4471,6 +4647,10 @@ int wmain(int argc, wchar_t* argv[])
     reshade_68_section_and_key_lookup_are_case_sensitive_test();
     reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test();
     disabled_addons_insertion_uses_target_section_line_ending_test();
+    neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test();
+    neural_addon_runtime_settings_are_created_without_enabling_upscaling_test();
+    neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test();
+    reshade_trailing_section_text_uses_reshade_section_boundaries_test();
     configure_neural_addon_is_idempotent_test();
     configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
     configure_neural_addon_safe_then_normal_observes_reshade_state_test();
@@ -4488,7 +4668,7 @@ int wmain(int argc, wchar_t* argv[])
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
     youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
-    youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test();
+    youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
     youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
     youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();

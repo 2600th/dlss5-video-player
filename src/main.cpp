@@ -370,7 +370,7 @@ struct YouTubeCompletion {
     NetworkCommitKind commitKind{NetworkCommitKind::InitialOpen};
     YouTubeSourceQuality sourceQuality{YouTubeSourceQuality::Auto};
     bool requestedQualityExplicit{false};
-    NVSDK_NGX_PerfQuality_Value requestedQuality{NVSDK_NGX_PerfQuality_Value_MaxQuality};
+    NVSDK_NGX_PerfQuality_Value requestedQuality{DefaultNeuralCarrierQuality()};
     bool resumeAfterSeek{true};
     double seekSeconds{0.0};
 };
@@ -385,8 +385,9 @@ struct PreparedRendererCandidate {
 
 struct AppOptions {
     uint32_t maxW=3840, maxH=2160;
-    NVSDK_NGX_PerfQuality_Value quality=NVSDK_NGX_PerfQuality_Value_MaxQuality;
-    bool qualityExplicit=false;
+    bool outputExplicit=false;
+    NVSDK_NGX_PerfQuality_Value quality=DefaultNeuralCarrierQuality();
+    bool qualityExplicit=true;
     bool safeMode=false;
     bool addonBootstrapRestarted=false;
     bool neuralAddonRequested=false;
@@ -413,7 +414,7 @@ static AppOptions ParseArgs() {
             continue;
         } else if(a==L"--output" && i+1<o.userArguments.size()) {
             std::wstring v=o.userArguments[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
-            if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); }
+            if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); o.outputExplicit=true; }
         } else if(a==L"--quality" && i+1<o.userArguments.size()) {
             std::wstring q=o.userArguments[++i]; std::transform(q.begin(),q.end(),q.begin(),::towlower);
             if(q==L"auto") { o.qualityExplicit=false; }
@@ -477,6 +478,35 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     if(!CurrentExecutablePath(executable,pathError)) return FailBootstrap(pathError);
 
     options.detectedGpu=DetectHighPerformanceGpu();
+    const std::filesystem::path runtimeDirectory=executable.parent_path();
+    bool layoutInspectionFailed=false;
+    const auto isRegularRuntimeFile=[&](const wchar_t* name) {
+        const std::filesystem::path file=runtimeDirectory/name;
+        const DWORD attributes=GetFileAttributesW(file.c_str());
+        if(attributes!=INVALID_FILE_ATTRIBUTES)
+            return (attributes&FILE_ATTRIBUTE_DIRECTORY)==0;
+        const DWORD error=GetLastError();
+        if(error!=ERROR_FILE_NOT_FOUND&&error!=ERROR_PATH_NOT_FOUND)
+            layoutInspectionFailed=true;
+        return false;
+    };
+    const bool hasConfig=isRegularRuntimeFile(L"ReShade.ini");
+    const bool hasProxy=isRegularRuntimeFile(L"dxgi.dll");
+    const bool hasAddon=isRegularRuntimeFile(L"renodx-dlss5.addon64");
+    const bool hasRuntime=isRegularRuntimeFile(L"nvngx_dlssnr.dll");
+    if(layoutInspectionFailed) return FailBootstrap(L"Unable to inspect the experimental neural runtime layout");
+
+    const NeuralRuntimeLayout layout=ClassifyNeuralRuntimeLayout(
+        hasConfig,hasProxy,hasAddon,hasRuntime);
+    if(layout==NeuralRuntimeLayout::Absent) {
+        options.neuralAddonRequested=false;
+        options.neuralAddonConfigured=false;
+        LOG("Experimental neural runtime absent; continuing in native DLAA developer mode.");
+        return StartupResult::Continue;
+    }
+    if(layout==NeuralRuntimeLayout::Incomplete)
+        return FailBootstrap(L"The experimental neural runtime is incomplete; require ReShade.ini, dxgi.dll, renodx-dlss5.addon64, and nvngx_dlssnr.dll together");
+
     options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
     const ConfigUpdate update=ConfigureNeuralAddon(executable.parent_path()/L"ReShade.ini",options.neuralAddonRequested);
     const BootstrapAction action=DecideBootstrapFromObservedUpdate(
@@ -545,7 +575,7 @@ static std::wstring TimeText(double sec) {
 
 class PlayerApp {
 public:
-    explicit PlayerApp(AppOptions o):m_opt(std::move(o)){}
+    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto){}
     ~PlayerApp(){CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
 
     bool Create(HINSTANCE hi) {
@@ -564,6 +594,7 @@ public:
         const std::wstring appTitle=m_loc.Get(L"app.title");
         m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
         if(!m_hwnd) return false;
+        app_menu::UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);
         RegisterOverlayHotkeys();
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
         m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,nullptr);
@@ -1468,7 +1499,7 @@ private:
         }
     }
 
-    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
+    AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false;
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
@@ -1484,6 +1515,11 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;
     if(startup==StartupResult::ExitFailure)return 1;
+    const NeuralRenderDefaults renderDefaults=ResolveNeuralRenderDefaults(
+        options.neuralAddonConfigured,options.outputExplicit,options.maxW,options.maxH);
+    options.maxW=renderDefaults.width;options.maxH=renderDefaults.height;
+    if(options.neuralAddonConfigured&&!options.outputExplicit)
+        LOG("Neural pre-render defaults active: output=1920x1080, YouTube Auto prefers exact 1080p; --output remains an explicit override.");
     if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;
     if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}
 

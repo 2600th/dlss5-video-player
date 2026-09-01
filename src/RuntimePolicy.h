@@ -18,6 +18,11 @@ struct DetectedGpu {
     std::wstring description;
 };
 
+struct NeuralRenderDefaults {
+    uint32_t width{};
+    uint32_t height{};
+};
+
 struct RuntimeArguments {
     bool ok{false};
     bool safeMode{false};
@@ -32,6 +37,12 @@ enum class BootstrapAction {
     Fail,
 };
 
+enum class NeuralRuntimeLayout {
+    Absent,
+    Complete,
+    Incomplete,
+};
+
 enum class SafeModeRestartOutcome {
     Cancelled,
     LaunchFailed,
@@ -40,6 +51,16 @@ enum class SafeModeRestartOutcome {
 
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
+NeuralRenderDefaults ResolveNeuralRenderDefaults(
+    bool neuralAddonConfigured,
+    bool outputExplicit,
+    uint32_t requestedWidth,
+    uint32_t requestedHeight);
+NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
+    bool hasReShadeConfig,
+    bool hasReShadeProxy,
+    bool hasNeuralAddon,
+    bool hasNeuralRuntime);
 DetectedGpu DetectHighPerformanceGpu();
 BootstrapAction DecideBootstrap(
     bool desiredEnabled,

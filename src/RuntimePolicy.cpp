@@ -104,6 +104,33 @@ bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode)
     return !safeMode && (gpu == GpuGeneration::Rtx40Ada || gpu == GpuGeneration::Rtx50Blackwell);
 }
 
+NeuralRenderDefaults ResolveNeuralRenderDefaults(
+    bool neuralAddonConfigured,
+    bool outputExplicit,
+    uint32_t requestedWidth,
+    uint32_t requestedHeight)
+{
+    if (neuralAddonConfigured && !outputExplicit) {
+        return {1920, 1080};
+    }
+    return {requestedWidth, requestedHeight};
+}
+
+NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
+    bool hasReShadeConfig,
+    bool hasReShadeProxy,
+    bool hasNeuralAddon,
+    bool hasNeuralRuntime)
+{
+    const unsigned presentCount = static_cast<unsigned>(hasReShadeConfig) +
+                                  static_cast<unsigned>(hasReShadeProxy) +
+                                  static_cast<unsigned>(hasNeuralAddon) +
+                                  static_cast<unsigned>(hasNeuralRuntime);
+    if (presentCount == 0) return NeuralRuntimeLayout::Absent;
+    if (presentCount == 4) return NeuralRuntimeLayout::Complete;
+    return NeuralRuntimeLayout::Incomplete;
+}
+
 DetectedGpu DetectHighPerformanceGpu()
 {
     IDXGIFactory6* factory = nullptr;
