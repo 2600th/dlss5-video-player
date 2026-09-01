@@ -361,12 +361,12 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds) {
     return true;
 }
 
-void VideoDecoder::StopFFmpeg() {
+void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
     if (m_ffmpegProcess) {
         DWORD code = 0;
         if (GetExitCodeProcess(m_ffmpegProcess, &code) && code == STILL_ACTIVE) {
             if(m_ffmpegJob)TerminateJobObject(m_ffmpegJob,0);else TerminateProcess(m_ffmpegProcess, 0);
-            WaitForSingleObject(m_ffmpegProcess, 500);
+            WaitForSingleObject(m_ffmpegProcess, waitTimeout);
         }
         CloseHandle(m_ffmpegProcess);
         m_ffmpegProcess = nullptr;
@@ -422,7 +422,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
     if(m_pendingFrameBytes<frameBytes){
         if(stop.stop_requested())return VideoReadResult::Cancelled;
         if(m_sourceKind==MediaSourceKind::YouTube&&std::chrono::steady_clock::now()-m_lastFrameByte>=m_networkStallTimeout){
-            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg();return VideoReadResult::Stalled;
+            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);return VideoReadResult::Stalled;
         }
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
             if(m_pendingFrameBytes)LOG("FFmpeg ended in the middle of a raw video frame.");

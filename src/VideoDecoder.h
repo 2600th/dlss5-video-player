@@ -65,7 +65,7 @@ private:
     bool StartFFmpeg(double seekSeconds);
     bool ReadNextFFmpeg(VideoFrame& out);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
-    void StopFFmpeg();
+    void StopFFmpeg(DWORD waitTimeout = 500);
 
     bool OpenMediaFoundation(const std::wstring& path);
     bool ReadNextMediaFoundation(VideoFrame& out);

@@ -2421,7 +2421,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
         L"--extractor-args",
-        L"youtube:player_client=web_embedded",
+        L"youtube:player_client=android",
         L"-f",
         L"b[ext=mp4]/b",
         L"--get-url",
@@ -2784,7 +2784,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[4]) != L"--js-runtimes" ||
         !std::wstring_view(argv[5]).starts_with(L"deno:") ||
         std::wstring_view(argv[6]) != L"--extractor-args" ||
-        std::wstring_view(argv[7]) != L"youtube:player_client=web_embedded" ||
+        std::wstring_view(argv[7]) != L"youtube:player_client=android" ||
         std::wstring_view(argv[8]) != L"-f" ||
         std::wstring_view(argv[9]) != L"b[ext=mp4]/b" ||
         std::wstring_view(argv[10]) != L"--get-url") {
@@ -2949,13 +2949,15 @@ void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_te
 void youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test()
 {
     ResolverFixture fixture;
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
     auto resolver = YouTubeResolverTestAccess::Create(
         fixture.directory, std::chrono::seconds{5});
     ResolveResult result;
     std::thread worker([&] {
         result = resolver->Resolve(L"https://youtu.be/hang", {});
     });
-    Sleep(75);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses + 1,
+                                       std::chrono::milliseconds{500}));
 
     const std::filesystem::path replacement = fixture.directory / L"replacement-deno.exe";
     write_binary_file(replacement, "replacement");

@@ -438,7 +438,7 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"--js-runtimes",
         L"deno:" + (helperDirectory / L"deno.exe").wstring(),
         L"--extractor-args",
-        L"youtube:player_client=web_embedded",
+        L"youtube:player_client=android",
         L"-f",
         L"b[ext=mp4]/b",
         L"--get-url",
