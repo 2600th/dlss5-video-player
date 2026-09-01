@@ -1,5 +1,6 @@
 #include "NeuralCache.h"
 #include "MediaPipeline.h"
+#include "OfflineNeuralRenderer.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -11,7 +12,9 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -378,6 +381,191 @@ void probe_child_inherits_only_its_output_pipe_test()
     if (unrelated) CloseHandle(unrelated);
 }
 
+std::vector<OfflineDecodedFrame> FiveOfflineFrames()
+{
+    constexpr std::array<int64_t,5> timestamps{0,333333,666666,999999,1333332};
+    std::vector<OfflineDecodedFrame> frames;
+    for(size_t index=0;index<timestamps.size();++index)
+        frames.push_back(OfflineDecodedFrame{{uint8_t(index),0,0,255},timestamps[index],index==0});
+    return frames;
+}
+
+class FakeOfflineSource final : public IFrameSource {
+public:
+    explicit FakeOfflineSource(std::vector<OfflineDecodedFrame> frames=FiveOfflineFrames())
+        : frames_(std::move(frames)) {}
+    bool Open(const std::filesystem::path&,std::stop_token stop) override
+    { ++opens;index_=0;return !stop.stop_requested(); }
+    void Close() override { ++closes; }
+    OfflineFrameRead Read(OfflineDecodedFrame& frame,std::stop_token stop) override
+    {
+        if(stop.stop_requested())return OfflineFrameRead::Cancelled;
+        if(index_>=frames_.size())return OfflineFrameRead::EndOfStream;
+        frame=frames_[index_++];return OfflineFrameRead::FrameReady;
+    }
+    int opens{};int closes{};
+private:
+    std::vector<OfflineDecodedFrame> frames_;size_t index_{};
+};
+
+class FakeNeuralEvaluator final : public INeuralFrameEvaluator {
+public:
+    bool Initialize(HWND,uint32_t,uint32_t,double) override { initialized=true;return true; }
+    bool Submit(const OfflineDecodedFrame& frame,bool temporalReset,bool capture,
+                std::vector<uint8_t>& bgra) override
+    {
+        submitted.push_back(frame.timestamp100ns);resets.push_back(temporalReset);
+        if(!capture){if(++primeSubmissions>=2)featureCreated=true;if(featureCreated)++evaluations;return true;}
+        ++captureSubmissions;
+        if(failCaptureAt&&captureSubmissions==*failCaptureAt)return false;
+        if(!featureCreated)return false;
+        ++evaluations;bgra=frame.bgra;captured.push_back(frame.timestamp100ns);return true;
+    }
+    bool FeatureCreated() const override { return featureCreated; }
+    uint64_t EvaluationCount() const override { return evaluations; }
+    void ResetTemporal() override { ++temporalResets; }
+    bool initialized{};bool featureCreated{};uint64_t evaluations{};int primeSubmissions{};
+    int captureSubmissions{};int temporalResets{};std::optional<int> failCaptureAt;
+    std::vector<int64_t> submitted,captured;std::vector<bool> resets;
+};
+
+class FakeFrameEncoder final : public IFrameEncoder {
+public:
+    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path&) override
+    {
+        starts.push_back(spec.kind);current=spec.kind;attempts.emplace_back();
+        if(spec.kind==EncoderKind::HevcNvenc&&failNvencStart)return EncodeError::StartFailed;
+        active=true;return EncodeError::None;
+    }
+    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop) override
+    {
+        if(stop.stop_requested())return EncodeError::Cancelled;
+        if(!active)return EncodeError::WriteFailed;
+        if(current==EncoderKind::HevcNvenc&&failNvencWriteAt&&
+           attempts.back().size()==*failNvencWriteAt){active=false;return EncodeError::WriteFailed;}
+        attempts.back().emplace_back(frame.begin(),frame.end());return EncodeError::None;
+    }
+    EncodeError Finish(std::stop_token stop) override
+    { ++finishes;active=false;return stop.stop_requested()?EncodeError::Cancelled:EncodeError::None; }
+    void Cancel() override { ++cancels;active=false; }
+    bool failNvencStart{};std::optional<size_t> failNvencWriteAt;bool active{};
+    EncoderKind current{EncoderKind::HevcNvenc};int finishes{};int cancels{};
+    std::vector<EncoderKind> starts;std::vector<std::vector<std::vector<uint8_t>>> attempts;
+};
+
+std::string ValidNeuralEvidence()
+{
+    return "active settings: upscaling=OFF\nfeature 18 created\n"
+           "inline feature 18 evaluation succeeded evaluation count=5\n";
+}
+
+NeuralRenderRequest OfflineRequest(const std::filesystem::path& directory)
+{
+    NeuralRenderRequest request;request.sourcePath=directory/L"source.mkv";
+    request.stagingVideoPath=directory/L"neural.partial.mkv";request.width=1;request.height=1;
+    request.fps=30.0;request.durationSeconds=5.0/30.0;return request;
+}
+
+void offline_job_primes_feature_then_restarts_source_and_captures_every_frame_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    const NeuralRenderResult result=job.Run(OfflineRequest(fixture.Path()),{},{});
+    CHECK(result.ok);CHECK(!result.cancelled);CHECK_EQ(uint64_t{5},result.frameCount);
+    CHECK_EQ(uint64_t{5},result.nativeEvaluations);CHECK_EQ(2,source.opens);
+    CHECK_EQ(2,evaluator.primeSubmissions);CHECK_EQ(size_t{5},evaluator.captured.size());
+    CHECK_EQ(int64_t{0},evaluator.captured.front());CHECK_EQ(int64_t{1333332},evaluator.captured.back());
+    CHECK_EQ(size_t{1},encoder.attempts.size());CHECK_EQ(size_t{5},encoder.attempts.back().size());
+}
+
+void offline_job_rejects_any_frame_without_a_neural_evaluation_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    evaluator.failCaptureAt=3;
+    OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    const auto result=job.Run(OfflineRequest(fixture.Path()),{},{});
+    CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(size_t{1},encoder.starts.size());
+    CHECK_EQ(2,source.opens);CHECK(encoder.cancels>0);
+}
+
+void offline_job_reports_monotonic_progress_and_smoothed_eta_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    auto now=std::chrono::steady_clock::time_point{};
+    OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();},
+        [&]{now+=100ms;return now;});
+    std::vector<NeuralRenderProgress> progress;
+    const auto result=job.Run(OfflineRequest(fixture.Path()),[&](const auto& value){progress.push_back(value);},{});
+    CHECK(result.ok);CHECK(!progress.empty());
+    for(size_t index=1;index<progress.size();++index){
+        CHECK(progress[index].completedFrames>=progress[index-1].completedFrames);
+        CHECK(progress[index].elapsed>=progress[index-1].elapsed);
+    }
+    const auto rendered=std::ranges::find_if(progress,[](const auto& value){
+        return value.phase==NeuralRenderPhase::NeuralRendering&&value.completedFrames==5;});
+    CHECK(rendered!=progress.end());if(rendered!=progress.end())CHECK_EQ(0ms,rendered->estimatedRemaining);
+}
+
+void offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    std::stop_source stop;OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    const auto result=job.Run(OfflineRequest(fixture.Path()),[&](const auto& progress){
+        if(progress.completedFrames==2)stop.request_stop();},stop.get_token());
+    CHECK(!result.ok);CHECK(result.cancelled);CHECK_EQ(0,encoder.finishes);CHECK(encoder.cancels>0);
+}
+
+void offline_job_nvenc_start_failure_restarts_from_frame_zero_with_h264_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    encoder.failNvencStart=true;OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    const auto result=job.Run(OfflineRequest(fixture.Path()),{},{});
+    CHECK(result.ok);CHECK_EQ(EncoderKind::H264Software,result.encoder);
+    CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc,EncoderKind::H264Software}),encoder.starts);
+    CHECK_EQ(3,source.opens);CHECK_EQ(size_t{5},encoder.attempts.back().size());
+    CHECK_EQ(uint8_t{0},encoder.attempts.back().front().front());
+}
+
+void offline_job_nvenc_write_failure_restarts_the_whole_sequence_with_h264_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    encoder.failNvencWriteAt=2;OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    std::vector<NeuralRenderProgress> progress;
+    const auto result=job.Run(OfflineRequest(fixture.Path()),[&](const auto& value){progress.push_back(value);},{});
+    CHECK(result.ok);CHECK_EQ(EncoderKind::H264Software,result.encoder);CHECK_EQ(3,source.opens);
+    CHECK_EQ(size_t{2},encoder.attempts.front().size());CHECK_EQ(size_t{5},encoder.attempts.back().size());
+    CHECK_EQ(uint8_t{0},encoder.attempts.back().front().front());
+    for(size_t index=1;index<progress.size();++index){
+        CHECK(progress[index].completedFrames>=progress[index-1].completedFrames);
+        CHECK(progress[index].bytes>=progress[index-1].bytes);
+    }
+}
+
+void offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    evaluator.failCaptureAt=4;OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
+    const auto result=job.Run(OfflineRequest(fixture.Path()),{},{});
+    CHECK(!result.ok);CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc}),encoder.starts);
+    CHECK_EQ(2,source.opens);
+}
+
+void reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test()
+{
+    const auto valid=ParseNeuralRuntimeEvidence(ValidNeuralEvidence());
+    CHECK(valid.Valid());CHECK(valid.upscalingOff);CHECK(valid.feature18Created);
+    CHECK(valid.feature18Evaluated);CHECK_EQ(uint64_t{5},valid.highestObservedEvaluation);
+    CHECK(!ParseNeuralRuntimeEvidence("feature 18 created\ninline feature 18 evaluation succeeded\n").Valid());
+    CHECK(!ParseNeuralRuntimeEvidence("active settings: upscaling=OFF\nfeature 18 created\n").Valid());
+}
+
+void reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test()
+{
+    const auto evidence=ParseNeuralRuntimeEvidence(
+        ValidNeuralEvidence()+"feature 18 evaluation failed hr=0x80004005\n");
+    CHECK(evidence.laterFailure);CHECK(!evidence.Valid());
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -434,6 +622,15 @@ int wmain(int argc, wchar_t* argv[])
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();
     probe_child_inherits_only_its_output_pipe_test();
+    offline_job_primes_feature_then_restarts_source_and_captures_every_frame_test();
+    offline_job_rejects_any_frame_without_a_neural_evaluation_test();
+    offline_job_reports_monotonic_progress_and_smoothed_eta_test();
+    offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test();
+    offline_job_nvenc_start_failure_restarts_from_frame_zero_with_h264_test();
+    offline_job_nvenc_write_failure_restarts_the_whole_sequence_with_h264_test();
+    offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test();
+    reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test();
+    reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;

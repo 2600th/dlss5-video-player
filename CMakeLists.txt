@@ -59,6 +59,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/NeuralCache.h
     src/MediaPipeline.cpp
     src/MediaPipeline.h
+    src/OfflineNeuralRenderer.cpp
+    src/OfflineNeuralRenderer.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -168,10 +170,13 @@ if(BUILD_TESTING)
         src/NeuralCache.h
         src/MediaPipeline.cpp
         src/MediaPipeline.h
+        src/OfflineNeuralRenderer.cpp
+        src/OfflineNeuralRenderer.h
     )
     target_include_directories(NeuralPrerenderTests PRIVATE src)
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        OFFLINE_NEURAL_RENDERER_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
