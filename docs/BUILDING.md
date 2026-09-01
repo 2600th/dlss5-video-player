@@ -3,6 +3,11 @@
 The project targets Windows x64 with Visual Studio 2022, CMake, the Windows SDK,
 and C++20. Build inputs are deliberately separate from release packaging.
 
+The public source build compiles the native NVIDIA NGX / DLSS Super Resolution
+path. The optional experimental DLSS 5 neural-rendering path is a separate
+runtime interception layer and is not contained in the public NVIDIA SDK
+checkout or produced by this build.
+
 ## Pinned local inputs
 
 - NVIDIA/DLSS checkout at commit
@@ -31,4 +36,12 @@ ctest --test-dir build -C Release --output-on-failure
 
 `build/Release` is developer output, not a distributable folder. Authorized
 release maintainers assemble and verify the explicit allowlist separately with
-`package_release.bat`. End users do not run build or helper scripts.
+`package_public_release.bat`. That command creates the publishable core ZIP
+containing the application, the official NVIDIA-signed SDK runtime, notices,
+and documentation. It excludes the modified neural DLL, RenoDX/ReShade,
+Streamline, FFmpeg, and YouTube helpers.
+
+`package_release.bat` is reserved for a private, complete, hash-locked
+experimental layout. Its output is not publishable unless the maintainer has
+independently established redistribution rights for every bundled component.
+End users do not run build or helper scripts.

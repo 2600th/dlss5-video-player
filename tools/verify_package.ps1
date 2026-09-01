@@ -1,7 +1,8 @@
 [CmdletBinding(DefaultParameterSetName = 'Stage')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Stage')][string]$StageDirectory,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Zip')][string]$Zip
+    [Parameter(Mandatory = $true, ParameterSetName = 'Zip')][string]$Zip,
+    [switch]$PublicCore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,19 +11,35 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-$expected = @(
-    'DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
-    'dxgi.dll', 'ReShade.ini', 'ReShadePreset.ini', 'renodx-dlss5.addon64',
-    'nvngx_dlss.dll', 'nvngx_dlssnr.dll', 'sl.common.dll', 'sl.dlss.dll',
-    'sl.dlss_g.dll', 'sl.dlss_nr.dll', 'sl.interposer.dll', 'sl.nis.dll',
-    'sl.pcl.dll', 'sl.reflex.dll', 'README.md', 'LICENSE', 'THIRD_PARTY.md',
-    'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
-    'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
-    'THIRD_PARTY_LICENSES/experimental-runtime.txt',
-    'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
-    'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/TROUBLESHOOTING.md',
-    'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
-)
+if ($PublicCore) {
+    $expected = @(
+        'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'README.md', 'LICENSE',
+        'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
+        'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
+        'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+        'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
+        'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
+        'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt'
+    )
+}
+else {
+    $expected = @(
+        'DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
+        'dxgi.dll', 'ReShade.ini', 'ReShadePreset.ini', 'renodx-dlss5.addon64',
+        'nvngx_dlss.dll', 'nvngx_dlssnr.dll', 'sl.common.dll', 'sl.dlss.dll',
+        'sl.dlss_g.dll', 'sl.dlss_nr.dll', 'sl.interposer.dll', 'sl.nis.dll',
+        'sl.pcl.dll', 'sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
+        'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
+        'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
+        'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
+        'THIRD_PARTY_LICENSES/experimental-runtime.txt',
+        'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+        'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
+        'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
+        'docs/TROUBLESHOOTING.md',
+        'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
+    )
+}
 $temporaryRoot = $null
 $maxArchiveEntries = 128
 $maxArchiveEntryBytes = 512MB
@@ -112,6 +129,26 @@ function Assert-ReleaseExecutableIdentity {
 
 function Assert-LockedFiles {
     param([string]$Root)
+    if ($PublicCore) {
+        $packagedPath = Join-Path $Root 'nvngx_dlss.dll'
+        $sdkPath = Join-Path $repositoryRoot 'external\DLSS\lib\Windows_x86_64\rel\nvngx_dlss.dll'
+        if (-not (Test-Path -LiteralPath $sdkPath -PathType Leaf)) {
+            throw "Pinned official DLSS runtime is missing: $sdkPath"
+        }
+        $packaged = Get-Item -LiteralPath $packagedPath
+        $sdk = Get-Item -LiteralPath $sdkPath
+        if ($packaged.Length -ne $sdk.Length -or
+            (Get-Sha256 -Path $packagedPath) -cne (Get-Sha256 -Path $sdkPath)) {
+            throw 'Public package DLSS runtime does not match the pinned official SDK.'
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $packagedPath
+        $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+        if ([string]$signature.Status -cne 'Valid' -or $subject -notlike '*NVIDIA*') {
+            throw "Public package DLSS runtime is not validly NVIDIA-signed: status=$($signature.Status) signer=$subject"
+        }
+        return
+    }
+
     $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
     foreach ($entry in $runtimeLock.entries) {
         $path = Join-Path $Root ([string]$entry.destination)
@@ -146,31 +183,33 @@ function Assert-Stage {
         throw "Package allowlist mismatch. Missing=[$([string]::Join(', ', $missing))] Unexpected=[$([string]::Join(', ', $unexpected))]"
     }
 
-    $knownExecutables = @('DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe')
+    $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe') } else { @('DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
     $unexpectedExecutables = @($actual | Where-Object { $_.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) -and $_ -cnotin $knownExecutables })
     if ($unexpectedExecutables.Count -ne 0) {
         throw "Unexpected launchable executable(s): $([string]::Join(', ', $unexpectedExecutables))"
     }
 
-    foreach ($configName in @('ReShade.ini', 'ReShadePreset.ini')) {
-        if ((Get-Item -LiteralPath (Join-Path $resolvedRoot $configName)).Length -eq 0) {
-            throw "$configName must not be empty."
+    if (-not $PublicCore) {
+        foreach ($configName in @('ReShade.ini', 'ReShadePreset.ini')) {
+            if ((Get-Item -LiteralPath (Join-Path $resolvedRoot $configName)).Length -eq 0) {
+                throw "$configName must not be empty."
+            }
         }
-    }
 
-    $inOverlaySection = $false
-    $tutorialProgress = $null
-    foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'ReShade.ini')) {
-        $trimmed = $line.Trim()
-        if ($trimmed -match '^\[(.+)\]$') {
-            $inOverlaySection = $Matches[1] -ieq 'OVERLAY'
+        $inOverlaySection = $false
+        $tutorialProgress = $null
+        foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'ReShade.ini')) {
+            $trimmed = $line.Trim()
+            if ($trimmed -match '^\[(.+)\]$') {
+                $inOverlaySection = $Matches[1] -ieq 'OVERLAY'
+            }
+            elseif ($inOverlaySection -and $trimmed -match '^TutorialProgress\s*=\s*(\d+)\s*$') {
+                $tutorialProgress = $Matches[1]
+            }
         }
-        elseif ($inOverlaySection -and $trimmed -match '^TutorialProgress\s*=\s*(\d+)\s*$') {
-            $tutorialProgress = $Matches[1]
+        if ($tutorialProgress -cne '4') {
+            throw 'ReShade.ini must ship with the ReShade tutorial already dismissed (OVERLAY/TutorialProgress=4).'
         }
-    }
-    if ($tutorialProgress -cne '4') {
-        throw 'ReShade.ini must ship with the ReShade tutorial already dismissed (OVERLAY/TutorialProgress=4).'
     }
 
     Assert-ReleaseExecutableIdentity -Root $resolvedRoot
@@ -264,6 +303,10 @@ try {
         $roots = @(Get-ChildItem -LiteralPath $temporaryRoot -Directory)
         if ($roots.Count -ne 1 -or @(Get-ChildItem -LiteralPath $temporaryRoot -File).Count -ne 0) {
             throw 'ZIP must contain exactly one top-level release directory.'
+        }
+        $expectedRootName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version-win64" }
+        if ($roots[0].Name -cne $expectedRootName) {
+            throw "ZIP release directory mismatch: expected '$expectedRootName', received '$($roots[0].Name)'."
         }
         Assert-Stage -Root $roots[0].FullName
     }

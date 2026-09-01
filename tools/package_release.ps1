@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([switch]$ValidateBuildOnly)
+param(
+    [switch]$ValidateBuildOnly,
+    [switch]$PublicCore
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -10,7 +13,7 @@ $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw)
 if ($version -cne '0.12.0') { throw "This assembler is locked to release 0.12.0; VERSION is '$version'." }
 
 $distRoot = Join-Path $repositoryRoot 'dist'
-$stageName = "DLSSVideoPlayer-v$version-win64"
+$stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version-win64" }
 $stageRoot = Join-Path $distRoot $stageName
 $zipPath = Join-Path $distRoot "$stageName.zip"
 $buildRoot = Join-Path $repositoryRoot 'build\Release'
@@ -153,63 +156,93 @@ function Get-AuthenticodeRecord {
 Invoke-FreshReleaseBuild
 if ($ValidateBuildOnly) { return }
 
-& (Join-Path $PSScriptRoot 'stage_runtime.ps1') -InputDirectory $runtimeRoot -Destination $runtimeRoot -ValidateOnly | Out-Host
-Assert-HashLock -Root $runtimeRoot -LockPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -NameProperty 'destination'
+if (-not $PublicCore) {
+    & (Join-Path $PSScriptRoot 'stage_runtime.ps1') -InputDirectory $runtimeRoot -Destination $runtimeRoot -ValidateOnly | Out-Host
+    Assert-HashLock -Root $runtimeRoot -LockPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -NameProperty 'destination'
 
-$toolLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\tool-lock.json') -Raw | ConvertFrom-Json
-foreach ($entry in $toolLock.entries) {
-    $root = if ([string]$entry.name -in @('ffmpeg.exe', 'ffprobe.exe')) { $ffmpegRoot } else { $youtubeRoot }
-    $path = Join-Path $root ([string]$entry.name)
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Locked helper is missing: $path" }
-    $item = Get-Item -LiteralPath $path
-    $hash = Get-Sha256 -Path $path
-    if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
-        throw "Locked helper drifted: $($entry.name)"
-    }
-    $signature = Get-AuthenticodeSignature -LiteralPath $path
-    if ([string]$signature.Status -cne [string]$entry.signatureStatus) {
-        throw "Authenticode status drifted for '$($entry.name)'."
-    }
-    if ($entry.PSObject.Properties.Name -contains 'signerContains' -and [string]$entry.signerContains) {
-        $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
-        if ($subject -notlike "*$($entry.signerContains)*") { throw "Signer drifted for '$($entry.name)'." }
+    $toolLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\tool-lock.json') -Raw | ConvertFrom-Json
+    foreach ($entry in $toolLock.entries) {
+        $root = if ([string]$entry.name -in @('ffmpeg.exe', 'ffprobe.exe')) { $ffmpegRoot } else { $youtubeRoot }
+        $path = Join-Path $root ([string]$entry.name)
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Locked helper is missing: $path" }
+        $item = Get-Item -LiteralPath $path
+        $hash = Get-Sha256 -Path $path
+        if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
+            throw "Locked helper drifted: $($entry.name)"
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        if ([string]$signature.Status -cne [string]$entry.signatureStatus) {
+            throw "Authenticode status drifted for '$($entry.name)'."
+        }
+        if ($entry.PSObject.Properties.Name -contains 'signerContains' -and [string]$entry.signerContains) {
+            $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+            if ($subject -notlike "*$($entry.signerContains)*") { throw "Signer drifted for '$($entry.name)'." }
+        }
     }
 }
 
-$sources = @(
-    @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
-    @('ffmpeg.exe', (Join-Path $ffmpegRoot 'ffmpeg.exe')),
-    @('ffprobe.exe', (Join-Path $ffmpegRoot 'ffprobe.exe')),
-    @('yt-dlp.exe', (Join-Path $youtubeRoot 'yt-dlp.exe')),
-    @('deno.exe', (Join-Path $youtubeRoot 'deno.exe')),
-    @('dxgi.dll', (Join-Path $runtimeRoot 'dxgi.dll')),
-    @('ReShade.ini', (Join-Path $repositoryRoot 'packaging\ReShade.ini')),
-    @('ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
-    @('renodx-dlss5.addon64', (Join-Path $runtimeRoot 'renodx-dlss5.addon64')),
-    @('nvngx_dlss.dll', (Join-Path $runtimeRoot 'nvngx_dlss.dll')),
-    @('nvngx_dlssnr.dll', (Join-Path $runtimeRoot 'nvngx_dlssnr.dll')),
-    @('sl.common.dll', (Join-Path $runtimeRoot 'sl.common.dll')),
-    @('sl.dlss.dll', (Join-Path $runtimeRoot 'sl.dlss.dll')),
-    @('sl.dlss_g.dll', (Join-Path $runtimeRoot 'sl.dlss_g.dll')),
-    @('sl.dlss_nr.dll', (Join-Path $runtimeRoot 'sl.dlss_nr.dll')),
-    @('sl.interposer.dll', (Join-Path $runtimeRoot 'sl.interposer.dll')),
-    @('sl.nis.dll', (Join-Path $runtimeRoot 'sl.nis.dll')),
-    @('sl.pcl.dll', (Join-Path $runtimeRoot 'sl.pcl.dll')),
-    @('sl.reflex.dll', (Join-Path $runtimeRoot 'sl.reflex.dll')),
-    @('README.md', (Join-Path $repositoryRoot 'README.md')),
-    @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
-    @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
-    @('THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.08.19.txt')),
-    @('THIRD_PARTY_LICENSES/deno-2.9.5.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\deno-2.9.5.txt')),
-    @('THIRD_PARTY_LICENSES/ffmpeg.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg.txt')),
-    @('THIRD_PARTY_LICENSES/experimental-runtime.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\experimental-runtime.txt')),
-    @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
-    @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
-    @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
-    @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
-    @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md')),
-    @('EXPERIMENTAL_RUNTIME_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\EXPERIMENTAL_RUNTIME_NOTICE.txt'))
-)
+if ($PublicCore) {
+    $sources = @(
+        @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
+        @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
+        @('README.md', (Join-Path $repositoryRoot 'README.md')),
+        @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
+        @('SECURITY.md', (Join-Path $repositoryRoot 'SECURITY.md')),
+        @('CONTRIBUTING.md', (Join-Path $repositoryRoot 'CONTRIBUTING.md')),
+        @('CHANGELOG.md', (Join-Path $repositoryRoot 'CHANGELOG.md')),
+        @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
+        @('PUBLIC_RELEASE_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\PUBLIC_RELEASE_NOTICE.txt')),
+        @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt')),
+        @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
+        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
+        @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
+        @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
+        @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
+        @('docs/RELATED_PROJECTS.md', (Join-Path $repositoryRoot 'docs\RELATED_PROJECTS.md')),
+        @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md'))
+    )
+}
+else {
+    $sources = @(
+        @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
+        @('ffmpeg.exe', (Join-Path $ffmpegRoot 'ffmpeg.exe')),
+        @('ffprobe.exe', (Join-Path $ffmpegRoot 'ffprobe.exe')),
+        @('yt-dlp.exe', (Join-Path $youtubeRoot 'yt-dlp.exe')),
+        @('deno.exe', (Join-Path $youtubeRoot 'deno.exe')),
+        @('dxgi.dll', (Join-Path $runtimeRoot 'dxgi.dll')),
+        @('ReShade.ini', (Join-Path $repositoryRoot 'packaging\ReShade.ini')),
+        @('ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
+        @('renodx-dlss5.addon64', (Join-Path $runtimeRoot 'renodx-dlss5.addon64')),
+        @('nvngx_dlss.dll', (Join-Path $runtimeRoot 'nvngx_dlss.dll')),
+        @('nvngx_dlssnr.dll', (Join-Path $runtimeRoot 'nvngx_dlssnr.dll')),
+        @('sl.common.dll', (Join-Path $runtimeRoot 'sl.common.dll')),
+        @('sl.dlss.dll', (Join-Path $runtimeRoot 'sl.dlss.dll')),
+        @('sl.dlss_g.dll', (Join-Path $runtimeRoot 'sl.dlss_g.dll')),
+        @('sl.dlss_nr.dll', (Join-Path $runtimeRoot 'sl.dlss_nr.dll')),
+        @('sl.interposer.dll', (Join-Path $runtimeRoot 'sl.interposer.dll')),
+        @('sl.nis.dll', (Join-Path $runtimeRoot 'sl.nis.dll')),
+        @('sl.pcl.dll', (Join-Path $runtimeRoot 'sl.pcl.dll')),
+        @('sl.reflex.dll', (Join-Path $runtimeRoot 'sl.reflex.dll')),
+        @('README.md', (Join-Path $repositoryRoot 'README.md')),
+        @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
+        @('SECURITY.md', (Join-Path $repositoryRoot 'SECURITY.md')),
+        @('CONTRIBUTING.md', (Join-Path $repositoryRoot 'CONTRIBUTING.md')),
+        @('CHANGELOG.md', (Join-Path $repositoryRoot 'CHANGELOG.md')),
+        @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
+        @('THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\yt-dlp-2026.08.19.txt')),
+        @('THIRD_PARTY_LICENSES/deno-2.9.5.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\deno-2.9.5.txt')),
+        @('THIRD_PARTY_LICENSES/ffmpeg.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\ffmpeg.txt')),
+        @('THIRD_PARTY_LICENSES/experimental-runtime.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\experimental-runtime.txt')),
+        @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
+        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
+        @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
+        @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
+        @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
+        @('docs/RELATED_PROJECTS.md', (Join-Path $repositoryRoot 'docs\RELATED_PROJECTS.md')),
+        @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md')),
+        @('EXPERIMENTAL_RUNTIME_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\EXPERIMENTAL_RUNTIME_NOTICE.txt'))
+    )
+}
 
 foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source[1] -PathType Leaf)) { throw "Required package input is missing: $($source[1])" }
@@ -241,7 +274,7 @@ foreach ($file in $files) {
 $utf8NoBom = New-Object Text.UTF8Encoding $false
 [IO.File]::WriteAllLines((Join-Path $stageFull 'PACKAGE_MANIFEST.txt'), $manifest, $utf8NoBom)
 
-& (Join-Path $PSScriptRoot 'verify_package.ps1') -StageDirectory $stageFull
+& (Join-Path $PSScriptRoot 'verify_package.ps1') -StageDirectory $stageFull -PublicCore:$PublicCore
 
 if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
 Add-Type -AssemblyName System.IO.Compression
@@ -256,6 +289,6 @@ try {
 }
 finally { $archive.Dispose() }
 
-& (Join-Path $PSScriptRoot 'verify_package.ps1') -Zip $zipPath
+& (Join-Path $PSScriptRoot 'verify_package.ps1') -Zip $zipPath -PublicCore:$PublicCore
 $zipHash = Get-Sha256 -Path $zipPath
 Write-Host "Created '$zipPath' ($((Get-Item -LiteralPath $zipPath).Length) bytes, SHA-256 $zipHash)."

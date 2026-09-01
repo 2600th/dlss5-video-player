@@ -6,11 +6,11 @@
       "sourceName": "nvngx_dlssnr_ada_v51_async.dll",
       "destination": "nvngx_dlssnr.dll",
       "size": 165840496,
-      "sha256": "28BDC080D28686DECDB63F6F4246B022274916B80AAFDAB266FE0FB63B2B9265",
+      "sha256": "4B8D19BC3EFF58A084F5ECA7489C921501C203450169FB82FF4F649A4482BA05",
       "fileVersion": "310.8.0.0",
       "signatureStatus": "HashMismatch",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "User-supplied patched Ada asynchronous DLSS neural-rendering runtime.",
+      "provenance": "Community-modified RTX 40-targeted DLSS NR 310.8.0 runtime from RankFTW/rhi-repo release dlssnr-310.8.0-RTX40; the modification invalidates its embedded NVIDIA Authenticode signature, and binary architecture inspection reports RTX 40 and RTX 50 code targets.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
     },
     {
@@ -38,12 +38,12 @@
     {
       "sourceName": "renodx-dlss5.addon64",
       "destination": "renodx-dlss5.addon64",
-      "size": 391168,
-      "sha256": "87AEF9DDD937C7241E6BF8D8EFEA0045D63559135E254C60DAB316DB3D3A4AEE",
-      "fileVersion": "0.2026.0827.2036",
+      "size": 1732608,
+      "sha256": "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952",
+      "fileVersion": "0.2026.0828.0517",
       "signatureStatus": "NotSigned",
       "signerContains": "",
-      "provenance": "User-supplied RenoDX DLSS 5 add-on.",
+      "provenance": "RenoDX DLSS 5 add-on 4.70 from the RankFTW/rhi-repo release renodx-dlss5-4.70; GitHub verified archive digest d6e356d01b429af6288f488a4926c44f1d779a7d4586ee8c79d04d3a09a536e6.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#renodx--experimental-dlss-5-runtime"
     },
     {

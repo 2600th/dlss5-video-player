@@ -1,0 +1,22 @@
+PUBLIC CORE RELEASE
+
+This public package contains the DLSS Video Player application and the official
+NVIDIA-signed DLSS Super Resolution runtime from the pinned NVIDIA DLSS SDK.
+The NVIDIA SDK license is included under THIRD_PARTY_LICENSES.
+
+This package intentionally does not contain nvngx_dlssnr.dll, RenoDX, ReShade,
+Streamline, modified game files, FFmpeg, FFprobe, yt-dlp, or Deno. It therefore
+does not enable the experimental DLSS 5 neural-rendering interception path or
+YouTube playback. Local playback uses Windows Media Foundation and the codecs
+available on the host system.
+
+DLAA is the default native-resolution NGX mode. Spatial DLSS upscaling remains
+off until the user explicitly selects another quality mode.
+
+Do not mix individual files from experimental runtime packs into this folder.
+The experimental neural layout is accepted only when all required activation
+files are supplied together by an authorized user. This project makes no claim
+that community-modified or leaked runtime files are safe or redistributable.
+
+No NVIDIA endorsement is claimed. Review LICENSE, SECURITY.md, THIRD_PARTY.md,
+and the notices under THIRD_PARTY_LICENSES before redistribution.

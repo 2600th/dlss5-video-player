@@ -75,11 +75,51 @@ CPU analysis is performed on a compact grid. D3D12 expands the result to the exa
 
 Normal playback does not flush the GPU every frame. Fence waits happen only when a frame slot is reused before completion or during operations that require a hard synchronization point such as seek/reinitialization.
 
+During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
+dedicated readback resource and emits tightly packed BGRA frames to a bounded
+FFmpeg encoder process. The same persistent NGX/feature-18 session is retained
+across the sequence; an add-on-requested feature recreation does not break the
+job's monotonic successful-submission count.
+
+## Offline neural job and cache
+
+`OfflineNeuralRenderer` decodes from frame zero, primes feature 18, restarts the
+source from zero, evaluates and captures every frame, and finishes the encoder.
+If NVENC cannot start or write, the entire sequence restarts from zero with
+software H.264 rather than splicing incompatible temporal histories.
+
+`NeuralCacheManager` stages source and render artifacts under LocalAppData.
+Source, application version, GPU path, runtime digest, native dimensions,
+quality, and upscaling state form the render identity. Staging entries become
+reusable only after independent probing and atomic promotion; cancellation and
+failed validation can never publish a partial render.
+
+`SynchronizedPlayback` opens the original and neural files together, validates
+their geometry/rate/duration, and publishes timestamp-matched frame pairs.
+Original is the initial view. The DLSS toggle changes the visible member of the
+last-presented pair, so comparison never advances ahead of the audio clock.
+
 ## NGX integration
 
 `DLSSBackend` initializes NGX, queries DLSS settings, creates the Super Sampling feature and evaluates it through the D3D12 `_C` entry point used by NVIDIA's helper path.
 
-The integration intentionally leaves the raw NGX symbols visible to make interception by ReShade/RenoDX possible.
+The default performance/quality value is DLAA. That keeps input and output at
+native 1:1 resolution while preserving a real NGX feature creation/evaluation
+sequence for the optional interception layer. Spatial DLSS Super Resolution is
+enabled only when the user explicitly selects Auto, Quality, Balanced,
+Performance, or Ultra Performance.
+
+The source tree directly implements native DLSS Super Resolution, not an
+official public DLSS 5 API. It intentionally leaves the raw NGX symbols visible
+so the separately supplied experimental RenoDX/ReShade DLSS 5 add-on can
+intercept real feature creation and evaluation calls. Successful native NGX
+evaluation therefore does not prove that the neural add-on loaded or evaluated.
+
+RenoDX 4.70 can create and evaluate feature 18 inline after observing the
+player's DLSS/DLAA contract. Bootstrap explicitly enables its hooks and neural
+uplift while leaving `NREnableUpscaling=0`. The player does not also instantiate
+a direct feature-18 bridge: that would duplicate the neural pass and require an
+additional undocumented NGX/caller-shim lifetime beside the existing add-on.
 
 ## Final image adjustments
 
