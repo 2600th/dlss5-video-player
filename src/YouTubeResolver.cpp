@@ -512,12 +512,6 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
                               L"YouTube helper files are missing beside the app.");
     }
 
-#ifdef YOUTUBE_RESOLVER_TESTING
-    if (failureStage_ == FailureStage::PipeSetup) {
-        return resolver_error(ResolveError::StartFailed,
-                              L"Could not start the YouTube resolver.");
-    }
-#endif
     SECURITY_ATTRIBUTES pipeSecurity{sizeof(pipeSecurity), nullptr, TRUE};
     HANDLE rawReadPipe = nullptr;
     HANDLE rawWritePipe = nullptr;
@@ -527,6 +521,12 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     }
     UniqueHandle readPipe(rawReadPipe);
     UniqueHandle writePipe(rawWritePipe);
+#ifdef YOUTUBE_RESOLVER_TESTING
+    if (failureStage_ == FailureStage::PipeHandlesOwned) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+#endif
     if (!SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0)) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");

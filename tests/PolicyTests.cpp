@@ -2428,7 +2428,7 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
         ResolveError expected;
     };
     const std::array cases{
-        Case{YouTubeResolver::FailureStage::PipeSetup, ResolveError::StartFailed},
+        Case{YouTubeResolver::FailureStage::PipeHandlesOwned, ResolveError::StartFailed},
         Case{YouTubeResolver::FailureStage::JobAssignment, ResolveError::StartFailed},
         Case{YouTubeResolver::FailureStage::Resume, ResolveError::StartFailed},
         Case{YouTubeResolver::FailureStage::PipeRead, ResolveError::ExtractionFailed},

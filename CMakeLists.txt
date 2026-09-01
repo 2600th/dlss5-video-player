@@ -137,12 +137,35 @@ int main() { auto value = YouTubeResolver::FailureStage::None; return static_cas
     if(YOUTUBE_RELEASE_EXPOSES_FAILURE_STAGE)
         message(FATAL_ERROR "Release YouTubeResolver exposes its test-only failure stages.")
     endif()
-    unset(YOUTUBE_RELEASE_EXPOSES_SETTINGS CACHE)
+    unset(YOUTUBE_RELEASE_EXPOSES_FORMER_FRIEND_ROUTE CACHE)
     check_cxx_source_compiles([[#include "YouTubeResolver.h"
-int main() { YouTubeResolver::Settings value; (void)value; return 0; }
-]] YOUTUBE_RELEASE_EXPOSES_SETTINGS)
-    if(YOUTUBE_RELEASE_EXPOSES_SETTINGS)
-        message(FATAL_ERROR "Release YouTubeResolver exposes its test-only settings.")
+#include <utility>
+struct YouTubeResolverTestAccess {
+    static YouTubeResolver Create() {
+        YouTubeResolver::Settings settings;
+        return YouTubeResolver(std::move(settings));
+    }
+};
+int main() { auto resolver = YouTubeResolverTestAccess::Create(); (void)resolver; return 0; }
+]] YOUTUBE_RELEASE_EXPOSES_FORMER_FRIEND_ROUTE)
+    if(YOUTUBE_RELEASE_EXPOSES_FORMER_FRIEND_ROUTE)
+        message(FATAL_ERROR "Release YouTubeResolver exposes its former friend injection route.")
+    endif()
+    set(CMAKE_REQUIRED_DEFINITIONS
+        -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -DYOUTUBE_RESOLVER_TESTING)
+    unset(YOUTUBE_TEST_BUILD_SUPPORTS_FRIEND_ROUTE CACHE)
+    check_cxx_source_compiles([[#include "YouTubeResolver.h"
+#include <utility>
+struct YouTubeResolverTestAccess {
+    static YouTubeResolver Create() {
+        YouTubeResolver::Settings settings;
+        return YouTubeResolver(std::move(settings));
+    }
+};
+int main() { auto resolver = YouTubeResolverTestAccess::Create(); (void)resolver; return 0; }
+]] YOUTUBE_TEST_BUILD_SUPPORTS_FRIEND_ROUTE)
+    if(NOT YOUTUBE_TEST_BUILD_SUPPORTS_FRIEND_ROUTE)
+        message(FATAL_ERROR "PolicyTests compile definition does not enable its friend injection route.")
     endif()
     unset(CMAKE_REQUIRED_INCLUDES)
     unset(CMAKE_REQUIRED_DEFINITIONS)

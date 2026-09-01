@@ -56,7 +56,7 @@ public:
 #ifdef YOUTUBE_RESOLVER_TESTING
     enum class FailureStage {
         None,
-        PipeSetup,
+        PipeHandlesOwned,
         JobAssignment,
         Resume,
         PipeRead,
