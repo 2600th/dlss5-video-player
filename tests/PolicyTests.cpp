@@ -15,6 +15,7 @@
 #include "NetworkMediaTransaction.h"
 #include "D3D12FenceWait.h"
 #include "D3D12Renderer.h"
+#include "ReleasePackagePolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -146,6 +147,29 @@ constexpr std::string_view kNeuralAddon = "DLSS 5 Neural Rendering@renodx-dlss5.
 constexpr std::string_view kNeuralAddonName = "DLSS 5 Neural Rendering";
 constexpr std::string_view kNeuralAddonFilename = "renodx-dlss5.addon64";
 bool resolverSymlinkCoverageExercised = false;
+
+void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
+{
+    using release_package_policy::IsAllowedPath;
+
+    const std::array<std::wstring_view, 14> allowed = {
+        L"DLSSVideoPlayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe",
+        L"deno.exe", L"nvngx_dlss.dll", L"nvngx_dlssnr.dll", L"dxgi.dll",
+        L"sl.common.dll", L"ReShade.ini", L"ReShadePreset.ini",
+        L"docs/DLSS5_SETUP.md", L"THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt",
+        L"PACKAGE_MANIFEST.txt"
+    };
+    for (const auto path : allowed) CHECK(IsAllowedPath(path));
+
+    const std::array<std::wstring_view, 15> forbidden = {
+        L"pt-BR.lang", L"languages/pt-BR.lang", L"downloads/video.mp4",
+        L"ReShade.log", L"DLSSVideoPlayer.log", L"DLSSVideoPlayer.ini",
+        L"developer-settings.ini", L"test.mp4", L"sample.mkv",
+        L"DLSSVideoPlayer.pdb", L"thing.obj", L"source.zip", L"source.7z",
+        L"nvngx_dlssnr.rollback.dll", L"unexpected-helper.exe"
+    };
+    for (const auto path : forbidden) CHECK(!IsAllowedPath(path));
+}
 
 void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
 {
@@ -4073,6 +4097,7 @@ int wmain(int argc, wchar_t* argv[])
     if (argc > 1) return run_fake_resolver_child(argc, argv);
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
+    release_package_filename_policy_is_allowlisted_and_fail_closed_test();
     runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
     toolbar_layout_selects_stable_action_sets_for_width_modes_test();
     toolbar_layout_preserves_group_separation_test();

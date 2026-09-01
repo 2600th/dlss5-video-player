@@ -122,6 +122,7 @@ if(BUILD_TESTING)
         src/D3D12FenceWait.h
         src/D3D12Renderer.cpp
         src/D3D12Renderer.h
+        src/ReleasePackagePolicy.h
         src/DLSSBackend.cpp
         src/DLSSBackend.h
     )

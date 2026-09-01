@@ -12,7 +12,12 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $lockPath = Join-Path $repositoryRoot 'packaging\runtime-lock.json'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
 $inputRoot = (Resolve-Path -LiteralPath $InputDirectory).Path
-$destinationRoot = [IO.Path]::GetFullPath((Join-Path (Get-Location) $Destination))
+$destinationRoot = if ([IO.Path]::IsPathRooted($Destination)) {
+    [IO.Path]::GetFullPath($Destination)
+}
+else {
+    [IO.Path]::GetFullPath((Join-Path (Get-Location) $Destination))
+}
 
 function Get-NormalizedVersion {
     param([Parameter(Mandatory = $true)][string]$Path)
