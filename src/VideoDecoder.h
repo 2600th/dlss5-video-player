@@ -8,8 +8,12 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <stop_token>
 #include <utility>
+#include <thread>
 #include "UiLayout.h"
 
 #ifdef VIDEO_DECODER_TESTING
@@ -67,13 +71,20 @@ public:
 
 private:
     enum class Backend { None, FFmpeg, MediaFoundation };
+    enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
 
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
-    bool StartFFmpeg(double seekSeconds);
+    bool StartFFmpeg(double seekSeconds,
+                     FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda);
     bool ReadNextFFmpeg(VideoFrame& out);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
+    VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop);
+    bool TryNextFFmpegAcceleration(DWORD exitCode);
     void StopFFmpeg(DWORD waitTimeout = 500);
+    void StartFrameQueue();
+    void StopFrameQueue();
+    void FrameQueueLoop(std::stop_token stop);
 
     bool OpenMediaFoundation(const std::wstring& path);
     bool ReadNextMediaFoundation(VideoFrame& out);
@@ -103,12 +114,20 @@ private:
     HANDLE m_ffmpegJob = nullptr;
     uint64_t m_ffmpegFrameIndex = 0;
     int64_t m_ffmpegSeekBase100ns = 0;
+    FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;
     std::vector<uint8_t> m_pendingFrame;
     size_t m_pendingFrameBytes = 0;
     std::chrono::steady_clock::time_point m_lastFrameByte{};
     std::chrono::milliseconds m_networkStallTimeout{15000};
     std::chrono::milliseconds m_probeTimeout{15000};
+    static constexpr size_t FrameQueueCapacity = 4;
+    std::mutex m_frameMutex;
+    std::condition_variable_any m_frameCv;
+    std::deque<VideoFrame> m_frameQueue;
+    VideoReadResult m_frameTerminal = VideoReadResult::NotReady;
+    bool m_frameQueueEnabled = false;
+    std::jthread m_frameThread;
 #ifdef VIDEO_DECODER_TESTING
     struct Settings {
         std::wstring helperDirectory;

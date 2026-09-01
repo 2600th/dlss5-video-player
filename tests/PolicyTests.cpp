@@ -3074,6 +3074,37 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
     }
 }
 
+void video_decoder_hardware_failure_falls_back_to_software_test()
+{
+    MediaFixture fixture;
+    const auto marker=fixture.directory/L"acceleration-order.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",marker.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"https://media.invalid/hardwarefallback",MediaSourceKind::YouTube));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
+    CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
+    CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(marker));
+}
+
+void video_decoder_background_queue_is_bounded_to_four_frames_test()
+{
+    MediaFixture fixture;
+    const auto marker=fixture.directory/L"large-frame-progress.bin";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_FRAME_MARKER",marker.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"https://media.invalid/largeburst",MediaSourceKind::YouTube));
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds{750};
+    uintmax_t produced=0;
+    while(std::chrono::steady_clock::now()<deadline){
+        std::error_code error;produced=std::filesystem::file_size(marker,error);if(!error&&produced>=4)break;Sleep(10);
+    }
+    Sleep(75);
+    std::error_code error;produced=std::filesystem::file_size(marker,error);if(error)produced=0;
+    CHECK(produced>=4);CHECK(produced<=6);
+}
+
 void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test()
 {
     struct Case {
@@ -3639,9 +3670,27 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     for(int index=1;index<argc;++index){all+=L" ";all+=argv[index];}
     if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
+        if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
+    if(all.find(L"hardwarefallback")!=std::wstring::npos){
+        const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
+        const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
+        const bool d3d11=all.find(L"-hwaccel d3d11va")!=std::wstring::npos;
+        if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");}
+        if(cuda||d3d11)return 7;
+        std::cout.write("1234567890abcdef",16);std::cout.flush();return 0;
+    }
+    if(all.find(L"largeburst")!=std::wstring::npos){
+        const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_FRAME_MARKER");
+        const std::vector<char> frame(4u*1024u*1024u,'x');
+        for(int index=0;index<20;++index){
+            std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();
+            if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out.put('x');}
+        }
+        Sleep(INFINITE);return 0;
+    }
     if(all.find(L"exit")!=std::wstring::npos)return 7;
     if(all.find(L"stallmid")!=std::wstring::npos){std::cout.write("1234",4);std::cout.flush();Sleep(INFINITE);return 0;}
     if(all.find(L"trickle")!=std::wstring::npos){std::cout.write("12345678",8);std::cout.flush();Sleep(35);std::cout.write("abcdefgh",8);std::cout.flush();return 0;}
@@ -4352,6 +4401,8 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
+    video_decoder_hardware_failure_falls_back_to_software_test();
+    video_decoder_background_queue_is_bounded_to_four_frames_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
     youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();

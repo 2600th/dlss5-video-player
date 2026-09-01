@@ -12,6 +12,7 @@
 #include <cstring>
 #include <thread>
 #include <utility>
+#include <system_error>
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -42,17 +43,23 @@ static bool ParseRate(const std::string& text, double& out) {
 VideoDecoder::~VideoDecoder() { Close(); }
 
 void VideoDecoder::Swap(VideoDecoder& other) noexcept {
+    const bool restartThis = other.m_frameQueueEnabled;
+    const bool restartOther = m_frameQueueEnabled;
+    StopFrameQueue();
+    other.StopFrameQueue();
     using std::swap;
     swap(m_backend,other.m_backend);swap(m_reader,other.m_reader);swap(m_path,other.m_path);
     swap(m_width,other.m_width);swap(m_height,other.m_height);swap(m_nativeWidth,other.m_nativeWidth);swap(m_nativeHeight,other.m_nativeHeight);swap(m_stride,other.m_stride);
     swap(m_fps,other.m_fps);swap(m_durationSec,other.m_durationSec);swap(m_displayAspect,other.m_displayAspect);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
-    swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
 #ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
     swap(m_failureStage,other.m_failureStage);
 #endif
+    if(restartThis)StartFrameQueue();
+    if(restartOther)other.StartFrameQueue();
 }
 
 const wchar_t* VideoDecoder::BackendName() const {
@@ -64,6 +71,7 @@ const wchar_t* VideoDecoder::BackendName() const {
 }
 
 void VideoDecoder::Close() {
+    StopFrameQueue();
     StopFFmpeg();
     m_reader.Reset();
     m_backend = Backend::None;
@@ -86,6 +94,7 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, st
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
     if (OpenFFmpeg(path, stop)) {
         m_backend = Backend::FFmpeg;
+        StartFrameQueue();
         LOG("Video decoder selected: FFmpeg");
         return true;
     }
@@ -304,7 +313,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     return true;
 }
 
-bool VideoDecoder::StartFFmpeg(double seekSeconds) {
+bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration acceleration) {
     StopFFmpeg();
     seekSeconds = std::max(0.0, seekSeconds);
 
@@ -333,11 +342,21 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds) {
 
     std::wostringstream args;
     args << L"-hide_banner -loglevel error -nostdin -threads 0 ";
+    if (acceleration == FFmpegAcceleration::Cuda)
+        args << L"-hwaccel cuda -hwaccel_output_format cuda ";
+    else if (acceleration == FFmpegAcceleration::D3D11Va)
+        args << L"-hwaccel d3d11va -hwaccel_output_format d3d11 ";
     if (seekSeconds > 0.0)
         args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
     args << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
-    if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
+    if (acceleration == FFmpegAcceleration::Cuda)
+        args << L"-vf scale_cuda=" << m_width << L":" << m_height
+             << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12,format=bgra ";
+    else if (acceleration == FFmpegAcceleration::D3D11Va)
+        args << L"-vf hwdownload,format=nv12,scale=" << m_width << L":" << m_height
+             << L":flags=bicubic,format=bgra ";
+    else if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
         args << L"-vf scale=" << m_width << L":" << m_height << L":flags=bicubic ";
     args << L"-pix_fmt bgra -fps_mode cfr -r "
          << std::fixed << std::setprecision(6) << m_fps
@@ -388,8 +407,11 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds) {
     m_ffmpegJob = job;
     m_ffmpegFrameIndex = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
+    m_ffmpegAcceleration = acceleration;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
-    LOG("FFmpeg raw BGRA decode process started.");
+    const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
+        acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
+    LOG("FFmpeg raw BGRA process started with " << accelerationName << ".");
     return true;
 }
 
@@ -422,6 +444,18 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop) {
     return StartFFmpeg(0.0);
 }
 
+bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
+    if (exitCode == 0 || exitCode == STILL_ACTIVE || m_ffmpegAcceleration == FFmpegAcceleration::Software)
+        return false;
+    const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
+        FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
+    const double resumeSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
+        static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
+    LOG("FFmpeg hardware path exited with code " << exitCode << "; trying " <<
+        (next == FFmpegAcceleration::D3D11Va ? "D3D11VA" : "software") << " fallback.");
+    return StartFFmpeg(resumeSeconds, next);
+}
+
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
     for(;;){
         const VideoReadResult result=ReadNextFFmpegAvailable(out,{});
@@ -431,7 +465,7 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
     }
 }
 
-VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_token stop) {
+VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
     const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
     if (!frameBytes) return VideoReadResult::Error;
@@ -440,8 +474,11 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
 
     DWORD available=0;
     if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
-        if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0)
+        if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
+            DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
+            if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
             return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+        }
         return VideoReadResult::Error;
     }
     if(available>0){
@@ -457,6 +494,8 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
             LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);return VideoReadResult::Stalled;
         }
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
+            DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
+            if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
             if(m_pendingFrameBytes)LOG("FFmpeg ended in the middle of a raw video frame.");
             return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
         }
@@ -472,6 +511,78 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
     return VideoReadResult::FrameReady;
 }
 
+void VideoDecoder::StartFrameQueue() {
+    if (m_backend != Backend::FFmpeg || m_frameThread.joinable()) return;
+    {
+        std::lock_guard lock(m_frameMutex);
+        m_frameQueue.clear();
+        m_frameTerminal = VideoReadResult::NotReady;
+        m_frameQueueEnabled = true;
+    }
+    try {
+        m_frameThread = std::jthread([this](std::stop_token stop) { FrameQueueLoop(stop); });
+    } catch (const std::system_error& error) {
+        std::lock_guard lock(m_frameMutex);
+        m_frameQueueEnabled = false;
+        LOG("Decoded-frame queue could not start; using synchronous reads. error=" << error.code().value());
+    }
+}
+
+void VideoDecoder::StopFrameQueue() {
+    if (m_frameThread.joinable()) {
+        m_frameThread.request_stop();
+        m_frameCv.notify_all();
+        m_frameThread.join();
+    }
+    std::lock_guard lock(m_frameMutex);
+    m_frameQueue.clear();
+    m_frameTerminal = VideoReadResult::NotReady;
+    m_frameQueueEnabled = false;
+}
+
+void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
+    while (!stop.stop_requested()) {
+        {
+            std::unique_lock lock(m_frameMutex);
+            if (!m_frameCv.wait(lock, stop, [this] { return m_frameQueue.size() < FrameQueueCapacity; }))
+                break;
+        }
+
+        VideoFrame frame;
+        const VideoReadResult result = ReadNextFFmpegProcessAvailable(frame, stop);
+        if (result == VideoReadResult::FrameReady) {
+            std::lock_guard lock(m_frameMutex);
+            if (stop.stop_requested()) break;
+            m_frameQueue.push_back(std::move(frame));
+            m_frameCv.notify_all();
+        } else if (result == VideoReadResult::NotReady) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } else if (result != VideoReadResult::Cancelled) {
+            std::lock_guard lock(m_frameMutex);
+            m_frameTerminal = result;
+            m_frameCv.notify_all();
+            break;
+        }
+    }
+}
+
+VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_token stop) {
+    {
+        std::lock_guard lock(m_frameMutex);
+        if (m_frameQueueEnabled) {
+            if (stop.stop_requested()) return VideoReadResult::Cancelled;
+            if (!m_frameQueue.empty()) {
+                out = std::move(m_frameQueue.front());
+                m_frameQueue.pop_front();
+                m_frameCv.notify_all();
+                return VideoReadResult::FrameReady;
+            }
+            return m_frameTerminal;
+        }
+    }
+    return ReadNextFFmpegProcessAvailable(out,stop);
+}
+
 bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
     if (m_backend != Backend::FFmpeg || !m_nativeWidth || !m_nativeHeight) return false;
     width = std::max(2u, width & ~1u);
@@ -481,16 +592,21 @@ bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
     if (!width || !height) return false;
     if (width == m_width && height == m_height) return true;
 
+    const bool restartQueue=m_frameQueueEnabled;
+    if(restartQueue)StopFrameQueue();
     const uint32_t oldW=m_width, oldH=m_height;
     m_width=width; m_height=height; m_stride=static_cast<int32_t>(m_width*4u);
     if (StartFFmpeg(0.0)) {
+        if(restartQueue)StartFrameQueue();
         LOG("FFmpeg realtime decode scale: " << m_nativeWidth << "x" << m_nativeHeight << " -> " << m_width << "x" << m_height);
         return true;
     }
 
     LOG("FFmpeg decode downscale failed; restoring native decode size.");
     m_width=oldW; m_height=oldH; m_stride=static_cast<int32_t>(m_width*4u);
-    return StartFFmpeg(0.0);
+    const bool restored=StartFFmpeg(0.0);
+    if(restartQueue&&restored)StartFrameQueue();
+    return restored;
 }
 
 bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
@@ -623,7 +739,13 @@ VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token 
 
 bool VideoDecoder::SeekSeconds(double seconds) {
     seconds = std::clamp(seconds, 0.0, std::max(0.0, m_durationSec));
-    if (m_backend == Backend::FFmpeg) return StartFFmpeg(seconds);
+    if (m_backend == Backend::FFmpeg) {
+        const bool restartQueue=m_frameQueueEnabled;
+        if(restartQueue)StopFrameQueue();
+        const bool started=StartFFmpeg(seconds);
+        if(restartQueue&&started)StartFrameQueue();
+        return started;
+    }
     if (m_backend != Backend::MediaFoundation || !m_reader) return false;
 
     PROPVARIANT pos{};
