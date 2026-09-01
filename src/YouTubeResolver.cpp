@@ -65,11 +65,105 @@ std::filesystem::path module_directory()
     return std::filesystem::path(std::move(path)).parent_path();
 }
 
-bool is_regular_helper_file(const std::filesystem::path& path)
+std::filesystem::path final_normalized_path(HANDLE handle)
 {
-    const DWORD attributes = GetFileAttributesW(path.c_str());
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    DWORD required = GetFinalPathNameByHandleW(
+        handle, nullptr, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (required == 0) return {};
+    std::wstring value(required, L'\0');
+    const DWORD written = GetFinalPathNameByHandleW(
+        handle, value.data(), required, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (written == 0 || written >= required) return {};
+    value.resize(written);
+    return std::filesystem::path(std::move(value)).lexically_normal();
+}
+
+bool same_path_case_insensitive(const std::filesystem::path& left,
+                                const std::filesystem::path& right)
+{
+    const std::wstring leftValue = left.lexically_normal().wstring();
+    const std::wstring rightValue = right.lexically_normal().wstring();
+    if (leftValue.size() > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        rightValue.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    return CompareStringOrdinal(
+               leftValue.data(), static_cast<int>(leftValue.size()),
+               rightValue.data(), static_cast<int>(rightValue.size()), TRUE) == CSTR_EQUAL;
+}
+
+struct VerifiedHelpers {
+    UniqueHandle directory;
+    UniqueHandle ytDlp;
+    UniqueHandle deno;
+    std::filesystem::path directoryPath;
+    std::filesystem::path ytDlpPath;
+};
+
+bool open_verified_helper(const std::filesystem::path& requestedPath,
+                          const std::filesystem::path& canonicalDirectory,
+                          UniqueHandle& heldHandle,
+                          std::filesystem::path& canonicalPath)
+{
+    UniqueHandle candidate(CreateFileW(
+        requestedPath.c_str(), GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_EXECUTE,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!candidate) return false;
+    if (GetFileType(candidate.get()) != FILE_TYPE_DISK) return false;
+
+    FILE_ATTRIBUTE_TAG_INFO tagInfo{};
+    if (!GetFileInformationByHandleEx(candidate.get(), FileAttributeTagInfo,
+                                      &tagInfo, sizeof(tagInfo)) ||
+        (tagInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+        (tagInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        tagInfo.ReparseTag != 0) {
+        return false;
+    }
+
+    canonicalPath = final_normalized_path(candidate.get());
+    if (canonicalPath.empty() ||
+        !same_path_case_insensitive(canonicalPath.parent_path(), canonicalDirectory)) {
+        return false;
+    }
+    heldHandle = std::move(candidate);
+    return true;
+}
+
+bool verify_beside_app_helpers(const std::filesystem::path& requestedDirectory,
+                               VerifiedHelpers& verified)
+{
+    if (!requestedDirectory.is_absolute()) return false;
+    UniqueHandle directory(CreateFileW(
+        requestedDirectory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!directory || GetFileType(directory.get()) != FILE_TYPE_DISK) return false;
+    FILE_ATTRIBUTE_TAG_INFO directoryInfo{};
+    if (!GetFileInformationByHandleEx(directory.get(), FileAttributeTagInfo,
+                                      &directoryInfo, sizeof(directoryInfo)) ||
+        (directoryInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return false;
+    }
+    const std::filesystem::path canonicalDirectory =
+        final_normalized_path(directory.get());
+    if (canonicalDirectory.empty()) return false;
+
+    UniqueHandle ytDlp;
+    UniqueHandle deno;
+    std::filesystem::path canonicalYtDlp;
+    std::filesystem::path canonicalDeno;
+    if (!open_verified_helper(requestedDirectory / L"yt-dlp.exe", canonicalDirectory,
+                              ytDlp, canonicalYtDlp) ||
+        !open_verified_helper(requestedDirectory / L"deno.exe", canonicalDirectory,
+                              deno, canonicalDeno)) {
+        return false;
+    }
+
+    verified.directory = std::move(directory);
+    verified.ytDlp = std::move(ytDlp);
+    verified.deno = std::move(deno);
+    verified.directoryPath = canonicalDirectory;
+    verified.ytDlpPath = canonicalYtDlp;
+    return true;
 }
 
 ResolveResult resolver_error(ResolveError error, std::wstring detail)
@@ -284,7 +378,9 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     return result;
 }
 
-std::wstring QuoteWindowsArgument(std::wstring_view argument)
+namespace {
+
+std::wstring quote_windows_argument(std::wstring_view argument)
 {
     if (!argument.empty() &&
         argument.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
@@ -313,7 +409,7 @@ std::wstring QuoteWindowsArgument(std::wstring_view argument)
     return quoted;
 }
 
-std::vector<std::wstring> BuildYouTubeResolverArguments(
+std::vector<std::wstring> build_youtube_resolver_arguments(
     const std::filesystem::path& helperDirectory,
     std::wstring_view youtubeUrl)
 {
@@ -330,21 +426,43 @@ std::vector<std::wstring> BuildYouTubeResolverArguments(
     };
 }
 
+} // namespace
+
+#ifdef YOUTUBE_RESOLVER_TESTING
+std::wstring QuoteWindowsArgument(std::wstring_view argument)
+{
+    return quote_windows_argument(argument);
+}
+
+std::vector<std::wstring> BuildYouTubeResolverArguments(
+    const std::filesystem::path& helperDirectory,
+    std::wstring_view youtubeUrl)
+{
+    return build_youtube_resolver_arguments(helperDirectory, youtubeUrl);
+}
+#endif
+
 YouTubeResolver::YouTubeResolver()
-    : YouTubeResolver(Settings{module_directory()})
+    : helperDirectory_(module_directory())
 {
 }
 
+#ifdef YOUTUBE_RESOLVER_TESTING
 YouTubeResolver::YouTubeResolver(Settings settings)
-    : settings_(std::move(settings))
+    : helperDirectory_(std::move(settings.helperDirectory)),
+      deadline_(settings.deadline),
+      pollInterval_(settings.pollInterval),
+      shutdownWait_(settings.shutdownWait),
+      failureStage_(settings.failureStage)
 {
-    settings_.pollInterval = std::clamp(
-        settings_.pollInterval, std::chrono::milliseconds{1},
+    pollInterval_ = std::clamp(
+        pollInterval_, std::chrono::milliseconds{1},
         std::chrono::milliseconds{50});
-    settings_.shutdownWait = std::clamp(
-        settings_.shutdownWait, std::chrono::milliseconds{1},
+    shutdownWait_ = std::clamp(
+        shutdownWait_, std::chrono::milliseconds{1},
         std::chrono::milliseconds{2000});
 }
+#endif
 
 YouTubeResolver::~YouTubeResolver()
 {
@@ -388,14 +506,18 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
                               L"YouTube resolution was cancelled.");
     }
 
-    const std::filesystem::path ytDlpPath = settings_.helperDirectory / L"yt-dlp.exe";
-    const std::filesystem::path denoPath = settings_.helperDirectory / L"deno.exe";
-    if (!settings_.helperDirectory.is_absolute() ||
-        !is_regular_helper_file(ytDlpPath) || !is_regular_helper_file(denoPath)) {
+    VerifiedHelpers verifiedHelpers;
+    if (!verify_beside_app_helpers(helperDirectory_, verifiedHelpers)) {
         return resolver_error(ResolveError::HelperMissing,
                               L"YouTube helper files are missing beside the app.");
     }
 
+#ifdef YOUTUBE_RESOLVER_TESTING
+    if (failureStage_ == FailureStage::PipeSetup) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+#endif
     SECURITY_ATTRIBUTES pipeSecurity{sizeof(pipeSecurity), nullptr, TRUE};
     HANDLE rawReadPipe = nullptr;
     HANDLE rawWritePipe = nullptr;
@@ -451,11 +573,11 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     }
 
     const std::vector<std::wstring> arguments =
-        BuildYouTubeResolverArguments(settings_.helperDirectory, youtubeUrl);
-    std::wstring commandLine = QuoteWindowsArgument(ytDlpPath.wstring());
+        build_youtube_resolver_arguments(verifiedHelpers.directoryPath, youtubeUrl);
+    std::wstring commandLine = quote_windows_argument(verifiedHelpers.ytDlpPath.wstring());
     for (const std::wstring& argument : arguments) {
         commandLine.push_back(L' ');
-        commandLine.append(QuoteWindowsArgument(argument));
+        commandLine.append(quote_windows_argument(argument));
     }
 
     STARTUPINFOEXW startup{};
@@ -468,9 +590,9 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     PROCESS_INFORMATION rawProcess{};
     const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
                                 EXTENDED_STARTUPINFO_PRESENT;
-    if (!CreateProcessW(ytDlpPath.c_str(), commandLine.data(), nullptr, nullptr,
+    if (!CreateProcessW(verifiedHelpers.ytDlpPath.c_str(), commandLine.data(), nullptr, nullptr,
                         TRUE, creationFlags, nullptr,
-                        settings_.helperDirectory.c_str(),
+                        verifiedHelpers.directoryPath.c_str(),
                         &startup.StartupInfo, &rawProcess)) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
@@ -479,9 +601,16 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     UniqueHandle processThread(rawProcess.hThread);
     writePipe.reset();
 
-    if (!AssignProcessToJobObject(job, process.get())) {
+    bool assignedToJob = false;
+#ifdef YOUTUBE_RESOLVER_TESTING
+    if (failureStage_ != FailureStage::JobAssignment)
+#endif
+    {
+        assignedToJob = AssignProcessToJobObject(job, process.get()) != FALSE;
+    }
+    if (!assignedToJob) {
         TerminateProcess(process.get(), ERROR_PROCESS_ABORTED);
-        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        WaitForSingleObject(process.get(), static_cast<DWORD>(shutdownWait_.count()));
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }
@@ -494,13 +623,20 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     }
     if (cancelledBeforeResume || stop.stop_requested()) {
         TerminateJobObject(job, ERROR_CANCELLED);
-        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        WaitForSingleObject(process.get(), static_cast<DWORD>(shutdownWait_.count()));
         return resolver_error(ResolveError::Cancelled,
                               L"YouTube resolution was cancelled.");
     }
-    if (ResumeThread(processThread.get()) == static_cast<DWORD>(-1)) {
+    DWORD resumeResult = static_cast<DWORD>(-1);
+#ifdef YOUTUBE_RESOLVER_TESTING
+    if (failureStage_ != FailureStage::Resume)
+#endif
+    {
+        resumeResult = ResumeThread(processThread.get());
+    }
+    if (resumeResult == static_cast<DWORD>(-1)) {
         TerminateJobObject(job, ERROR_PROCESS_ABORTED);
-        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        WaitForSingleObject(process.get(), static_cast<DWORD>(shutdownWait_.count()));
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }
@@ -517,7 +653,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     Completion completion = Completion::Running;
     std::string output;
     output.reserve(kMaximumOutputBytes);
-    const auto deadline = std::chrono::steady_clock::now() + settings_.deadline;
+    const auto deadline = std::chrono::steady_clock::now() + deadline_;
 
     const auto cancellationRequested = [this, &stop] {
         if (stop.stop_requested()) return true;
@@ -525,6 +661,9 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
         return cancelRequested_;
     };
     const auto drainAvailable = [&] {
+#ifdef YOUTUBE_RESOLVER_TESTING
+        if (failureStage_ == FailureStage::PipeRead) return Completion::PipeFailed;
+#endif
         for (;;) {
             DWORD available = 0;
             if (!PeekNamedPipe(readPipe.get(), nullptr, 0, nullptr, &available, nullptr)) {
@@ -564,7 +703,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - now);
-        const auto waitDuration = std::min(settings_.pollInterval, remaining);
+        const auto waitDuration = std::min(pollInterval_, remaining);
         const DWORD wait = WaitForSingleObject(
             process.get(), static_cast<DWORD>(std::max<int64_t>(1, waitDuration.count())));
         if (wait == WAIT_OBJECT_0) {
@@ -582,7 +721,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     if (completion == Completion::Cancelled || completion == Completion::TimedOut ||
         completion == Completion::Overflow || completion == Completion::PipeFailed) {
         TerminateJobObject(job, ERROR_PROCESS_ABORTED);
-        WaitForSingleObject(process.get(), static_cast<DWORD>(settings_.shutdownWait.count()));
+        WaitForSingleObject(process.get(), static_cast<DWORD>(shutdownWait_.count()));
     }
 
     if (completion == Completion::Cancelled) {

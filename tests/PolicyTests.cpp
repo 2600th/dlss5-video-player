@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <filesystem>
 #include <fstream>
@@ -28,13 +29,15 @@
 struct YouTubeResolverTestAccess {
     static std::unique_ptr<YouTubeResolver> Create(
         const std::filesystem::path& helperDirectory,
-        std::chrono::milliseconds deadline = std::chrono::milliseconds{500})
+        std::chrono::milliseconds deadline = std::chrono::milliseconds{500},
+        YouTubeResolver::FailureStage failureStage = YouTubeResolver::FailureStage::None)
     {
         YouTubeResolver::Settings settings;
         settings.helperDirectory = helperDirectory;
         settings.deadline = deadline;
         settings.pollInterval = std::chrono::milliseconds{10};
         settings.shutdownWait = std::chrono::milliseconds{500};
+        settings.failureStage = failureStage;
         return std::unique_ptr<YouTubeResolver>(new YouTubeResolver(std::move(settings)));
     }
 };
@@ -44,6 +47,7 @@ namespace {
 constexpr std::string_view kNeuralAddon = "DLSS 5 Neural Rendering@renodx-dlss5.addon64";
 constexpr std::string_view kNeuralAddonName = "DLSS 5 Neural Rendering";
 constexpr std::string_view kNeuralAddonFilename = "renodx-dlss5.addon64";
+bool resolverSymlinkCoverageExercised = false;
 
 void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
 {
@@ -2183,9 +2187,23 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
     const std::filesystem::path expectedDeno =
         current_test_executable().parent_path() / L"deno.exe";
-    if (std::wstring_view(argv[5]).substr(5) != expectedDeno.wstring()) return 92;
+    std::error_code equivalentError;
+    if (!std::filesystem::equivalent(
+            std::filesystem::path(std::wstring(std::wstring_view(argv[5]).substr(5))),
+            expectedDeno, equivalentError) || equivalentError) {
+        return 92;
+    }
 
     const std::wstring_view url = argv[9];
+    const size_t symlinkAttack = url.find(L"symlinkattack_");
+    if (symlinkAttack != std::wstring_view::npos) {
+        const std::wstring suffix(url.substr(symlinkAttack + 14));
+        const std::filesystem::path marker = std::filesystem::temp_directory_path() /
+            (L"PolicyTests-resolver-symlink-executed-" + suffix + L".marker");
+        write_binary_file(marker, "executed");
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=symlink\n" << std::flush;
+        return 0;
+    }
     if (url.find(L"success") != std::wstring_view::npos) {
         std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n" << std::flush;
         return 0;
@@ -2222,6 +2240,275 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
     Sleep(INFINITE);
     return 0;
+}
+
+size_t count_named_processes(std::wstring_view executableName)
+{
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    CHECK(snapshot != INVALID_HANDLE_VALUE);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{sizeof(entry)};
+    size_t count = 0;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (CompareStringOrdinal(entry.szExeFile, -1, executableName.data(),
+                                     static_cast<int>(executableName.size()), TRUE) == CSTR_EQUAL) {
+                ++count;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CHECK(CloseHandle(snapshot) != FALSE);
+    return count;
+}
+
+bool wait_for_named_process_count(std::wstring_view executableName, size_t expected,
+                                  std::chrono::milliseconds limit)
+{
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    do {
+        if (count_named_processes(executableName) == expected) return true;
+        Sleep(10);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return count_named_processes(executableName) == expected;
+}
+
+void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test()
+{
+    ResolverFixture fixture;
+    const std::filesystem::path outsideDirectory = fixture.directory.parent_path() /
+        (L"PolicyTests-YouTubeResolver-outside-" + std::to_wstring(GetCurrentProcessId()));
+    const std::filesystem::path outsideHelper = outsideDirectory / L"outside-helper.exe";
+    const std::filesystem::path executionMarker = std::filesystem::temp_directory_path() /
+        (L"PolicyTests-resolver-symlink-executed-" +
+         std::to_wstring(GetCurrentProcessId()) + L".marker");
+    std::error_code error;
+    std::filesystem::remove_all(outsideDirectory, error);
+    error.clear();
+    std::filesystem::create_directories(outsideDirectory, error);
+    CHECK(!error);
+    CHECK(CopyFileW(current_test_executable().c_str(), outsideHelper.c_str(), FALSE) != FALSE);
+    remove_file_if_present(executionMarker);
+
+    std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    const DWORD symlinkFlags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    const bool symlinkCreated = CreateSymbolicLinkW(
+        (fixture.directory / L"yt-dlp.exe").c_str(), outsideHelper.c_str(),
+        symlinkFlags) != FALSE;
+    if (symlinkCreated) {
+        resolverSymlinkCoverageExercised = true;
+        auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+        const ResolveResult result = resolver->Resolve(
+            L"https://youtu.be/symlinkattack_" + std::to_wstring(GetCurrentProcessId()), {});
+        CHECK(!result.ok);
+        CHECK_EQ(ResolveError::HelperMissing, result.error);
+        CHECK(result.detail.find(L"symlinkattack") == std::wstring::npos);
+        CHECK(!std::filesystem::exists(executionMarker));
+    } else {
+        const DWORD errorCode = GetLastError();
+        CHECK(errorCode == ERROR_PRIVILEGE_NOT_HELD || errorCode == ERROR_INVALID_PARAMETER ||
+              errorCode == ERROR_NOT_SUPPORTED);
+    }
+
+    std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
+    error.clear();
+    std::filesystem::create_directory(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    auto directoryResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    CHECK_EQ(ResolveError::HelperMissing,
+             directoryResolver->Resolve(L"https://youtu.be/success", {}).error);
+
+    std::filesystem::remove_all(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    CHECK(CopyFileW(current_test_executable().c_str(),
+                    (fixture.directory / L"yt-dlp.exe").c_str(), FALSE) != FALSE);
+    std::filesystem::remove(fixture.directory / L"deno.exe", error);
+    CHECK(!error);
+    error.clear();
+    std::filesystem::create_directory(fixture.directory / L"deno.exe", error);
+    CHECK(!error);
+    auto denoDirectoryResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    CHECK_EQ(ResolveError::HelperMissing,
+             denoDirectoryResolver->Resolve(L"https://youtu.be/success", {}).error);
+
+    std::filesystem::remove_all(outsideDirectory, error);
+    CHECK(!error);
+    remove_file_if_present(executionMarker);
+}
+
+void youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(
+        fixture.directory, std::chrono::seconds{5});
+    ResolveResult result;
+    std::thread worker([&] {
+        result = resolver->Resolve(L"https://youtu.be/hang", {});
+    });
+    Sleep(75);
+
+    const std::filesystem::path replacement = fixture.directory / L"replacement-deno.exe";
+    write_binary_file(replacement, "replacement");
+    SetLastError(ERROR_SUCCESS);
+    const BOOL replaced = MoveFileExW(replacement.c_str(),
+                                      (fixture.directory / L"deno.exe").c_str(),
+                                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    CHECK(replaced == FALSE);
+    const DWORD replacementError = GetLastError();
+    CHECK(replacementError == ERROR_SHARING_VIOLATION ||
+          replacementError == ERROR_ACCESS_DENIED);
+
+    resolver->Cancel();
+    worker.join();
+    CHECK_EQ(ResolveError::Cancelled, result.error);
+    remove_file_if_present(replacement);
+}
+
+void youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(
+        fixture.directory, std::chrono::seconds{5});
+    ResolveResult active;
+    ResolveResult queued;
+    std::atomic<bool> queuedFinished{false};
+    std::thread activeThread([&] {
+        active = resolver->Resolve(L"https://youtu.be/hang", {});
+    });
+    Sleep(75);
+    std::thread queuedThread([&] {
+        queued = resolver->Resolve(L"https://youtu.be/success", {});
+        queuedFinished = true;
+    });
+    Sleep(75);
+    CHECK(!queuedFinished.load());
+    resolver->Cancel();
+    activeThread.join();
+    queuedThread.join();
+
+    CHECK_EQ(ResolveError::Cancelled, active.error);
+    CHECK(queued.ok);
+    CHECK(queuedFinished.load());
+    CHECK(resolver->Resolve(L"https://youtu.be/success", {}).ok);
+}
+
+void youtube_resolver_queued_stop_token_cancels_before_launch_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(
+        fixture.directory, std::chrono::seconds{5});
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+    ResolveResult active;
+    ResolveResult queued;
+    std::thread activeThread([&] {
+        active = resolver->Resolve(L"https://youtu.be/hang", {});
+    });
+    Sleep(75);
+    std::stop_source queuedStop;
+    std::thread queuedThread([&] {
+        queued = resolver->Resolve(L"https://youtu.be/success", queuedStop.get_token());
+    });
+    Sleep(75);
+    queuedStop.request_stop();
+    resolver->Cancel();
+    activeThread.join();
+    queuedThread.join();
+    CHECK_EQ(ResolveError::Cancelled, active.error);
+    CHECK_EQ(ResolveError::Cancelled, queued.error);
+    Sleep(50);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+}
+
+void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test()
+{
+    ResolverFixture fixture;
+    struct Case {
+        YouTubeResolver::FailureStage stage;
+        ResolveError expected;
+    };
+    const std::array cases{
+        Case{YouTubeResolver::FailureStage::PipeSetup, ResolveError::StartFailed},
+        Case{YouTubeResolver::FailureStage::JobAssignment, ResolveError::StartFailed},
+        Case{YouTubeResolver::FailureStage::Resume, ResolveError::StartFailed},
+        Case{YouTubeResolver::FailureStage::PipeRead, ResolveError::ExtractionFailed},
+    };
+
+    for (const Case& test : cases) {
+        DWORD beforeHandles = 0;
+        DWORD afterHandles = 0;
+        CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeHandles) != FALSE);
+        const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+        auto resolver = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::seconds{5}, test.stage);
+        const auto started = std::chrono::steady_clock::now();
+        const ResolveResult result = resolver->Resolve(L"https://youtu.be/hang", {});
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        CHECK_EQ(test.expected, result.error);
+        CHECK(result.detail.find(L"hang") == std::wstring::npos);
+        CHECK(result.detail.find(L"https") == std::wstring::npos);
+        CHECK(elapsed < std::chrono::seconds{2});
+        resolver.reset();
+        Sleep(25);
+        CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterHandles) != FALSE);
+        CHECK(afterHandles <= beforeHandles + 2);
+        CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                           std::chrono::milliseconds{500}));
+    }
+}
+
+void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test()
+{
+    ResolverFixture fixture;
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+
+    DWORD beforeTimeoutHandles = 0;
+    DWORD afterTimeoutHandles = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeTimeoutHandles) != FALSE);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        auto timeoutResolver = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::milliseconds{80});
+        CHECK_EQ(ResolveError::TimedOut,
+                 timeoutResolver->Resolve(L"https://youtu.be/hang", {}).error);
+    }
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
+    CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+
+    DWORD beforeCancelHandles = 0;
+    DWORD afterCancelHandles = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeCancelHandles) != FALSE);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        auto cancelResolver = YouTubeResolverTestAccess::Create(
+            fixture.directory, std::chrono::seconds{5});
+        ResolveResult cancelled;
+        std::thread worker([&] {
+            cancelled = cancelResolver->Resolve(L"https://youtu.be/hang", {});
+        });
+        Sleep(30);
+        cancelResolver->Cancel();
+        worker.join();
+        CHECK_EQ(ResolveError::Cancelled, cancelled.error);
+    }
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterCancelHandles) != FALSE);
+    CHECK(afterCancelHandles <= beforeCancelHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+
+    DWORD beforeOverflowHandles = 0;
+    DWORD afterOverflowHandles = 0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &beforeOverflowHandles) != FALSE);
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        auto overflowResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+        CHECK_EQ(ResolveError::OutputTooLarge,
+                 overflowResolver->Resolve(L"https://youtu.be/cap64plus", {}).error);
+    }
+    Sleep(50);
+    CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterOverflowHandles) != FALSE);
+    CHECK(afterOverflowHandles <= beforeOverflowHandles + 2);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
 }
 
 } // namespace
@@ -2303,12 +2590,20 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test();
     youtube_resolver_times_out_and_kills_its_descendant_job_tree_test();
     youtube_resolver_repeated_runs_leave_process_handle_count_stable_test();
+    youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test();
+    youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test();
+    youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test();
+    youtube_resolver_queued_stop_token_cancels_before_launch_test();
+    youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();
+    youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";
         return EXIT_FAILURE;
     }
 
+    std::cout << "Resolver symlink coverage: "
+              << (resolverSymlinkCoverageExercised ? "exercised" : "unavailable") << '\n';
     std::cout << "PolicyTests: all assertions passed\n";
     return EXIT_SUCCESS;
 }

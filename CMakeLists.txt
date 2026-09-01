@@ -111,10 +111,40 @@ if(BUILD_TESTING)
     )
     target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32 winhttp)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
+
+    add_executable(ReleaseApiCompileTests tests/ReleaseApiCompileTests.cpp)
+    target_include_directories(ReleaseApiCompileTests PRIVATE src)
+    target_compile_definitions(ReleaseApiCompileTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    )
+    target_compile_options(ReleaseApiCompileTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
+
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES "${CMAKE_SOURCE_DIR}/src")
+    set(CMAKE_REQUIRED_DEFINITIONS -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX)
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    unset(YOUTUBE_RELEASE_EXPOSES_FAILURE_STAGE CACHE)
+    check_cxx_source_compiles([[#include "YouTubeResolver.h"
+int main() { auto value = YouTubeResolver::FailureStage::None; return static_cast<int>(value); }
+]] YOUTUBE_RELEASE_EXPOSES_FAILURE_STAGE)
+    if(YOUTUBE_RELEASE_EXPOSES_FAILURE_STAGE)
+        message(FATAL_ERROR "Release YouTubeResolver exposes its test-only failure stages.")
+    endif()
+    unset(YOUTUBE_RELEASE_EXPOSES_SETTINGS CACHE)
+    check_cxx_source_compiles([[#include "YouTubeResolver.h"
+int main() { YouTubeResolver::Settings value; (void)value; return 0; }
+]] YOUTUBE_RELEASE_EXPOSES_SETTINGS)
+    if(YOUTUBE_RELEASE_EXPOSES_SETTINGS)
+        message(FATAL_ERROR "Release YouTubeResolver exposes its test-only settings.")
+    endif()
+    unset(CMAKE_REQUIRED_INCLUDES)
+    unset(CMAKE_REQUIRED_DEFINITIONS)
+    unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
 endif()

@@ -10,7 +10,9 @@
 #include <string_view>
 #include <vector>
 
+#ifdef YOUTUBE_RESOLVER_TESTING
 struct YouTubeResolverTestAccess;
+#endif
 
 enum class ResolveError {
     None,
@@ -33,10 +35,12 @@ struct ResolveResult {
 
 bool IsSupportedYouTubeUrl(std::wstring_view value);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
+#ifdef YOUTUBE_RESOLVER_TESTING
 std::wstring QuoteWindowsArgument(std::wstring_view argument);
 std::vector<std::wstring> BuildYouTubeResolverArguments(
     const std::filesystem::path& helperDirectory,
     std::wstring_view youtubeUrl);
+#endif
 
 class YouTubeResolver {
 public:
@@ -49,7 +53,18 @@ public:
     ResolveResult Resolve(std::wstring_view youtubeUrl, std::stop_token stop);
     void Cancel();
 
+#ifdef YOUTUBE_RESOLVER_TESTING
+    enum class FailureStage {
+        None,
+        PipeSetup,
+        JobAssignment,
+        Resume,
+        PipeRead,
+    };
+#endif
+
 private:
+#ifdef YOUTUBE_RESOLVER_TESTING
     friend struct YouTubeResolverTestAccess;
 
     struct Settings {
@@ -57,11 +72,19 @@ private:
         std::chrono::milliseconds deadline{std::chrono::seconds{45}};
         std::chrono::milliseconds pollInterval{std::chrono::milliseconds{25}};
         std::chrono::milliseconds shutdownWait{std::chrono::seconds{2}};
+        FailureStage failureStage{FailureStage::None};
     };
 
     explicit YouTubeResolver(Settings settings);
+#endif
 
-    Settings settings_;
+    std::filesystem::path helperDirectory_;
+    std::chrono::milliseconds deadline_{std::chrono::seconds{45}};
+    std::chrono::milliseconds pollInterval_{std::chrono::milliseconds{25}};
+    std::chrono::milliseconds shutdownWait_{std::chrono::seconds{2}};
+#ifdef YOUTUBE_RESOLVER_TESTING
+    FailureStage failureStage_{FailureStage::None};
+#endif
     std::mutex resolveMutex_;
     std::mutex stateMutex_;
     HANDLE activeJob_{nullptr};
