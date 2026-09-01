@@ -55,10 +55,13 @@ add_executable(DLSSVideoPlayer WIN32
     src/ExampleVideos.h
     src/CompletionRegistry.h
     src/NetworkMediaTransaction.h
+    src/NeuralCache.cpp
+    src/NeuralCache.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
 )
 target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
 target_include_directories(DLSSVideoPlayer PRIVATE "${DLSS_SDK}/include")
@@ -66,7 +69,7 @@ target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
 target_link_libraries(DLSSVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
-    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp
+    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt
     nvsdk_ngx_d
 )
 
@@ -155,6 +158,21 @@ if(BUILD_TESTING)
     )
     target_compile_options(ReleaseApiCompileTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     add_test(NAME ReleaseApiCompileTests COMMAND ReleaseApiCompileTests)
+
+    add_executable(NeuralPrerenderTests
+        tests/NeuralPrerenderTests.cpp
+        tests/TestSupport.h
+        src/NeuralCache.cpp
+        src/NeuralCache.h
+    )
+    target_include_directories(NeuralPrerenderTests PRIVATE src)
+    target_compile_definitions(NeuralPrerenderTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
+    )
+    target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32)
+    add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     include(CheckCXXSourceCompiles)
     set(CMAKE_REQUIRED_INCLUDES "${CMAKE_SOURCE_DIR}/src")
