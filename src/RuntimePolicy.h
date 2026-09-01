@@ -49,6 +49,33 @@ enum class SafeModeRestartOutcome {
     CloseCurrent,
 };
 
+enum class NeuralPlaybackState {
+    Idle,
+    Acquiring,
+    Rendering,
+    Validating,
+    Ready,
+    OriginalOnly,
+    Cancelling,
+    Failed,
+};
+
+struct NeuralPlaybackLifecycle {
+    NeuralPlaybackState state{NeuralPlaybackState::Idle};
+    uint64_t generation{};
+    uint64_t Begin();
+    bool Accept(uint64_t candidateGeneration) const;
+    bool Transition(NeuralPlaybackState next);
+    void Invalidate();
+};
+
+enum class NeuralOpenAction { UseCache, StartJob, OriginalOnly };
+NeuralOpenAction DecideNeuralOpen(bool runtimeComplete, bool safeMode, bool cacheValid);
+bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid);
+void ExecuteNeuralReplacementSequence(const std::function<void()>& requestStop,
+                                      const std::function<void()>& joinWorker,
+                                      const std::function<void()>& replace);
+
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
 NeuralRenderDefaults ResolveNeuralRenderDefaults(

@@ -18,6 +18,7 @@
 #include "D3D12Renderer.h"
 #include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
+#include "SynchronizedPlayback.h"
 #ifdef small
 #undef small
 #endif
@@ -2145,6 +2146,73 @@ void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
     const auto nativeOnly = ResolveNeuralRenderDefaults(false, false, 3840, 2160);
     CHECK_EQ(uint32_t{3840}, nativeOnly.width);
     CHECK_EQ(uint32_t{2160}, nativeOnly.height);
+}
+
+void neural_open_uses_valid_cache_without_starting_a_job_test()
+{
+    CHECK_EQ(NeuralOpenAction::UseCache,DecideNeuralOpen(true,false,true));
+    NeuralPlaybackLifecycle lifecycle;const uint64_t generation=lifecycle.Begin();
+    CHECK(lifecycle.Accept(generation));CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
+}
+
+void neural_open_starts_materialize_then_render_on_cache_miss_test()
+{
+    CHECK_EQ(NeuralOpenAction::StartJob,DecideNeuralOpen(true,false,false));
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
+}
+
+void neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test()
+{
+    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(false,false,true));
+    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(true,true,true));
+}
+
+void neural_completion_publishes_only_after_probe_and_manifest_validation_test()
+{
+    CHECK(CanPublishNeuralCompletion(true,true,true));
+    CHECK(!CanPublishNeuralCompletion(false,true,true));
+    CHECK(!CanPublishNeuralCompletion(true,false,true));
+    CHECK(!CanPublishNeuralCompletion(true,true,false));
+}
+
+void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
+{
+    NeuralPlaybackLifecycle lifecycle;const uint64_t generation=lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+    lifecycle.Invalidate();CHECK(!lifecycle.Accept(generation));
+    lifecycle.Begin();CHECK(lifecycle.Transition(NeuralPlaybackState::Failed));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+}
+
+void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test()
+{
+    CHECK_EQ(ComparisonView::Neural,ToggleComparisonView(ComparisonView::Original));
+    CHECK_EQ(ComparisonView::Original,ToggleComparisonView(ComparisonView::Neural));
+}
+
+void source_change_cancels_and_joins_the_owned_job_before_replacement_test()
+{
+    std::vector<int> order;
+    ExecuteNeuralReplacementSequence([&]{order.push_back(1);},[&]{order.push_back(2);},
+                                     [&]{order.push_back(3);});
+    CHECK_EQ(std::vector<int>({1,2,3}),order);
+}
+
+void youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test()
+{
+    const auto formats=ParseYouTubeFormatMetadata(
+        R"([{"format_note":"escaped \"height\":2160","height":1080},{"height":1440},{"height":2160},{"height":1080},{"height":null}])");
+    CHECK(formats.valid);CHECK(formats.autoAvailable);CHECK(formats.p1080);CHECK(formats.p1440);CHECK(formats.p2160);
+    const auto low=ParseYouTubeFormatMetadata(R"([{"height":720},{"height":480}])");
+    CHECK(low.valid);CHECK(low.autoAvailable);CHECK(!low.p1080);CHECK(!low.p1440);CHECK(!low.p2160);
+    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080},])").valid);
+    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080}] trailing)").valid);
+    CHECK(!ParseYouTubeFormatMetadata(std::string(kMaximumYouTubeFormatMetadataBytes+1,' ')).valid);
 }
 
 void neural_runtime_layout_is_absent_complete_or_fail_closed_test()
@@ -4760,6 +4828,14 @@ int wmain(int argc, wchar_t* argv[])
     gpu_classification_table_test();
     neural_addon_policy_test();
     neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
+    neural_open_uses_valid_cache_without_starting_a_job_test();
+    neural_open_starts_materialize_then_render_on_cache_miss_test();
+    neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test();
+    neural_completion_publishes_only_after_probe_and_manifest_validation_test();
+    neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
+    dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
+    source_change_cancels_and_joins_the_owned_job_before_replacement_test();
+    youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();
     neural_runtime_layout_is_absent_complete_or_fail_closed_test();
     default_neural_carrier_uses_native_resolution_dlaa_test();
     bootstrap_action_matrix_test();

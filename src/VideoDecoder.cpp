@@ -253,7 +253,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate:format=duration "
+        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:format=duration "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -286,7 +286,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             }
             else if (key == "avg_frame_rate") ParseRate(value, avgRate);
             else if (key == "r_frame_rate") ParseRate(value, rawRate);
-            else if (key == "duration" && value != "N/A") duration = std::stod(value);
+            else if (key == "duration" && value != "N/A" && duration <= 0.0) duration = std::stod(value);
         } catch (...) {}
     }
 
@@ -465,6 +465,21 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
     }
 }
 
+VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
+    if (!m_pendingFrameBytes) return VideoReadResult::EndOfStream;
+    const double completedSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
+        static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
+    const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_fps));
+    if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_durationSec > 0.0 &&
+        completedSeconds + endTolerance >= m_durationSec) {
+        LOG("Discarding an incomplete trailing raw frame after the expected YouTube duration.");
+        m_pendingFrameBytes = 0;
+        return VideoReadResult::EndOfStream;
+    }
+    LOG("FFmpeg ended in the middle of a raw video frame.");
+    return VideoReadResult::Error;
+}
+
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
     const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
@@ -477,7 +492,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
         if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
             DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
             if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+            return ClassifyFFmpegEnd(exitCode);
         }
         return VideoReadResult::Error;
     }
@@ -496,8 +511,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
             DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
             if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            if(m_pendingFrameBytes)LOG("FFmpeg ended in the middle of a raw video frame.");
-            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+            return ClassifyFFmpegEnd(exitCode);
         }
         return VideoReadResult::NotReady;
     }

@@ -262,7 +262,7 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     const std::vector<std::wstring> expectedMaterialize{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
         L"-i", materialize.videoUrl, L"-i", materialize.audioUrl,
-        L"-map", L"0:v:0", L"-map", L"1:a:0?", L"-c", L"copy",
+        L"-map", L"0:v:0", L"-map", L"1:a:0?", L"-c", L"copy", L"-shortest",
         L"-f", L"matroska", materialize.output.wstring()};
     CHECK_EQ(expectedMaterialize, BuildMaterializeArguments(materialize));
 
@@ -556,6 +556,10 @@ void reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test(
     const auto valid=ParseNeuralRuntimeEvidence(ValidNeuralEvidence());
     CHECK(valid.Valid());CHECK(valid.upscalingOff);CHECK(valid.feature18Created);
     CHECK(valid.feature18Evaluated);CHECK_EQ(uint64_t{5},valid.highestObservedEvaluation);
+    const auto productionLog=ParseNeuralRuntimeEvidence(
+        "DLSS5 active settings: upscaling=OFF\nfeature 18 created via the signed snippet\n"
+        "inline feature 18 evaluation succeeded (count=17, NR input 1920x1080)\n");
+    CHECK(productionLog.Valid());CHECK_EQ(uint64_t{17},productionLog.highestObservedEvaluation);
     CHECK(!ParseNeuralRuntimeEvidence("feature 18 created\ninline feature 18 evaluation succeeded\n").Valid());
     CHECK(!ParseNeuralRuntimeEvidence("active settings: upscaling=OFF\nfeature 18 created\n").Valid());
 }

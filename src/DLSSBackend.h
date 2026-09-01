@@ -5,6 +5,13 @@
 #include <nvsdk_ngx_helpers.h>
 #include "NgxSession.h"
 
+constexpr NVSDK_NGX_PerfQuality_Value DefaultNeuralCarrierQuality() noexcept
+{
+    // DLAA preserves the hook-visible NGX evaluation contract at 1:1 resolution,
+    // so neural rendering can run without enabling spatial DLSS upscaling.
+    return NVSDK_NGX_PerfQuality_Value_DLAA;
+}
+
 // Direct NGX DLSS-SR host.
 // The player deliberately uses the raw NVSDK_NGX_D3D12_CreateFeature / EvaluateFeature_C
 // entry points after explicitly populating the parameter block. This makes the
@@ -63,7 +70,7 @@ private:
     uint32_t m_optimalW = 0, m_optimalH = 0;
     uint32_t m_minW = 0, m_minH = 0, m_maxW = 0, m_maxH = 0;
     uint32_t m_outputW = 0, m_outputH = 0;
-    NVSDK_NGX_PerfQuality_Value m_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    NVSDK_NGX_PerfQuality_Value m_quality = DefaultNeuralCarrierQuality();
     NVSDK_NGX_Result m_lastResult = NVSDK_NGX_Result_Fail;
     bool m_initialized = false;
     bool m_sessionLeaseAcquired = false;

@@ -7,6 +7,10 @@
 #include <stop_token>
 
 enum class ComparisonView { Original, Neural };
+constexpr ComparisonView ToggleComparisonView(ComparisonView view) noexcept
+{
+    return view == ComparisonView::Original ? ComparisonView::Neural : ComparisonView::Original;
+}
 
 struct SynchronizedFramePair {
     VideoFrame original;

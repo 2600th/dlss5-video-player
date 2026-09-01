@@ -80,6 +80,7 @@ private:
     bool ReadNextFFmpeg(VideoFrame& out);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
     VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop);
+    VideoReadResult ClassifyFFmpegEnd(DWORD exitCode);
     bool TryNextFFmpegAcceleration(DWORD exitCode);
     void StopFFmpeg(DWORD waitTimeout = 500);
     void StartFrameQueue();

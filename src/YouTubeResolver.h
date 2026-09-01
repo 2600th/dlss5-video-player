@@ -41,10 +41,21 @@ struct ResolveResult {
     std::wstring detail;
 };
 
+struct YouTubeFormatAvailability {
+    bool valid{};
+    bool autoAvailable{true};
+    bool p2160{};
+    bool p1440{};
+    bool p1080{};
+};
+
+inline constexpr size_t kMaximumYouTubeFormatMetadataBytes = 4u * 1024u * 1024u;
+
 bool IsSupportedYouTubeUrl(std::wstring_view value);
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
 std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality);
+YouTubeFormatAvailability ParseYouTubeFormatMetadata(std::string_view json);
 #ifdef YOUTUBE_RESOLVER_TESTING
 std::wstring QuoteWindowsArgument(std::wstring_view argument);
 std::vector<std::wstring> BuildYouTubeResolverArguments(

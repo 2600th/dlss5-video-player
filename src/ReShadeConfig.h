@@ -20,6 +20,14 @@ std::string UpdateDisabledAddonsIni(
     std::string_view addonName,
     bool disabled);
 
+// Applies the complete RenoDX neural-rendering contract used by this player.
+// Enabling turns hooks and neural uplift on while explicitly keeping RenoDX's
+// own upscaling path off. Disabling only disables the add-on, preserving the
+// user's neural tuning for a later normal launch.
+std::string UpdateNeuralAddonIni(
+    std::string_view ini,
+    bool enable);
+
 ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     std::string_view previousIni,
     std::string_view finalIni,

@@ -314,7 +314,7 @@ std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& re
         arguments.insert(arguments.end(), {L"-map", L"0:a:0?"});
     }
     arguments.insert(arguments.end(), {
-        L"-c", L"copy", L"-f", L"matroska", request.output.wstring()});
+        L"-c", L"copy", L"-shortest", L"-f", L"matroska", request.output.wstring()});
     return arguments;
 }
 

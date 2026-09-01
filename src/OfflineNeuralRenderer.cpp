@@ -50,15 +50,18 @@ std::string LowerAscii(std::string_view value)
 uint64_t HighestEvaluationCount(std::string_view lower)
 {
     uint64_t highest = 0;
-    constexpr std::string_view marker = "evaluation count=";
-    size_t position = 0;
-    while ((position = lower.find(marker, position)) != std::string_view::npos) {
-        position += marker.size();
-        uint64_t value = 0;
-        const char* first = lower.data() + position;
-        const char* last = lower.data() + lower.size();
-        const auto parsed = std::from_chars(first, last, value);
-        if (parsed.ec == std::errc{}) highest = std::max(highest, value);
+    constexpr std::array<std::string_view,2> markers{
+        "evaluation count=", "evaluation succeeded (count="};
+    for(const auto marker:markers){
+        size_t position = 0;
+        while ((position = lower.find(marker, position)) != std::string_view::npos) {
+            position += marker.size();
+            uint64_t value = 0;
+            const char* first = lower.data() + position;
+            const char* last = lower.data() + lower.size();
+            const auto parsed = std::from_chars(first, last, value);
+            if (parsed.ec == std::errc{}) highest = std::max(highest, value);
+        }
     }
     return highest;
 }
@@ -255,7 +258,8 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
     result.nativeEvaluations=attempt.evaluations;
-    result.duration100ns=static_cast<int64_t>(std::llround(request.durationSeconds*10000000.0));
+    result.duration100ns=static_cast<int64_t>(std::llround(
+        (double(attempt.frames)/request.fps)*10000000.0));
     emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
     return result;
 }
@@ -315,7 +319,7 @@ struct ProductionSourceAdapter {
 };
 
 struct ProductionEvaluatorAdapter {
-    D3D12RendererOwner renderer;
+    D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
     uint32_t width{},height{};double fps{};bool forceReset{true};
     bool Initialize(HWND window,uint32_t w,uint32_t h,double rate){
@@ -328,17 +332,17 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const bool temporalReset=forceReset||reset;forceReset=false;
         if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,temporalReset,guide))return false;
         const float frameMs=static_cast<float>(1000.0/fps);
-        if(!capture)return renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
+        if(!capture){const bool ok=renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
             guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-            guide.gridW,guide.gridH,temporalReset,frameMs);
+            guide.gridW,guide.gridH,temporalReset,frameMs);if(ok)++successfulEvaluations;return ok;}
         CapturedVideoFrame captured;
         if(!renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),
             guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
             guide.gridW,guide.gridH,temporalReset,frameMs,captured))return false;
-        output=std::move(captured.bgra);return true;
+        output=std::move(captured.bgra);++successfulEvaluations;return true;
     }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
-    uint64_t EvaluationCount()const{return renderer?renderer->DLSSEvaluations():0;}
+    uint64_t EvaluationCount()const{return successfulEvaluations;}
     void ResetTemporal(){guides.Reset();forceReset=true;}
 };
 

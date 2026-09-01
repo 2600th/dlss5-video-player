@@ -18,6 +18,7 @@ constexpr std::string_view kNeuralAddonCanonical =
 constexpr std::string_view kNeuralAddonRegisteredName = "DLSS 5 Neural Rendering";
 constexpr std::string_view kNeuralAddonAtFilename = "@renodx-dlss5.addon64";
 constexpr std::string_view kNeuralAddonLegacyFilename = "renodx-dlss5.addon64";
+constexpr std::string_view kNeuralSettingsSection = "RenoDX.DLSS5";
 constexpr std::string_view kUtf8Bom = "\xEF\xBB\xBF";
 
 struct Line {
@@ -100,11 +101,26 @@ std::string_view StripUtf8Bom(std::string_view value, bool firstLine)
     return value;
 }
 
-bool IsSection(std::string_view line, std::string_view sectionName, bool firstLine)
+std::string_view ReShadeSectionName(std::string_view line, bool firstLine)
 {
     line = Trim(StripUtf8Bom(line, firstLine));
-    return line.size() >= 2 && line.front() == '[' && line.back() == ']'
-        && Trim(line.substr(1, line.size() - 2)) == sectionName;
+    if (line.empty() || line.front() != '[') return {};
+    line = line.substr(0, line.find(']'));
+    const size_t first = line.find_first_not_of(" \t[]");
+    if (first == std::string_view::npos) return {};
+    const size_t last = line.find_last_not_of(" \t[]");
+    return line.substr(first, last - first + 1);
+}
+
+bool IsSection(std::string_view line, std::string_view sectionName, bool firstLine)
+{
+    return ReShadeSectionName(line, firstLine) == sectionName;
+}
+
+bool IsAnySection(std::string_view line, bool firstLine)
+{
+    line = Trim(StripUtf8Bom(line, firstLine));
+    return !line.empty() && line.front() == '[';
 }
 
 bool IsKey(std::string_view line, std::string_view keyName, size_t& valueStart)
@@ -261,9 +277,8 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
     for (size_t index = 0; index < lines.size(); ++index) {
         const Line& line = lines[index];
         const std::string_view content = ini.substr(line.begin, line.contentEnd - line.begin);
-        const std::string_view trimmed = Trim(StripUtf8Bom(content, index == 0));
         const bool isAddonSection = IsSection(content, "ADDON", index == 0);
-        const bool isAnySection = !trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']';
+        const bool isAnySection = IsAnySection(content, index == 0);
         if (isAnySection) {
             if (inAddonSection && addonSectionEnd == ini.size()) {
                 addonSectionEnd = line.begin;
@@ -331,6 +346,127 @@ ParsedUpdate ParseAndUpdate(std::string_view ini, std::string_view addonName, bo
     std::string content(ini);
     content.replace(disabledLine.begin + valueStart, disabledLine.contentEnd - (disabledLine.begin + valueStart), updatedList);
     return {false, {}, std::move(content), addonEnabled};
+}
+
+ParsedUpdate UpdateExactIniKey(
+    std::string_view ini,
+    std::string_view sectionName,
+    std::string_view keyName,
+    std::string_view desiredValue)
+{
+    if (ini.find('\0') != std::string_view::npos) {
+        return {true, "INI contains an embedded NUL"};
+    }
+
+    const std::vector<Line> lines = SplitLines(ini);
+    size_t sectionHeader = std::string_view::npos;
+    size_t sectionEnd = ini.size();
+    size_t sectionCount = 0;
+    std::vector<size_t> matchingKeys;
+    bool inTargetSection = false;
+
+    for (size_t index = 0; index < lines.size(); ++index) {
+        const Line& line = lines[index];
+        const std::string_view content = ini.substr(line.begin, line.contentEnd - line.begin);
+        const bool isTargetSection = IsSection(content, sectionName, index == 0);
+        const bool isAnySection = IsAnySection(content, index == 0);
+        if (isAnySection) {
+            if (inTargetSection && sectionEnd == ini.size()) {
+                sectionEnd = line.begin;
+            }
+            inTargetSection = isTargetSection;
+            if (isTargetSection) {
+                ++sectionCount;
+                if (sectionHeader == std::string_view::npos) sectionHeader = index;
+            }
+            continue;
+        }
+        if (inTargetSection) {
+            size_t valueStart = 0;
+            if (IsKey(content, keyName, valueStart)) matchingKeys.push_back(index);
+        }
+    }
+
+    if (sectionCount > 1) {
+        return {true, "INI contains duplicate [" + std::string(sectionName) + "] sections"};
+    }
+    if (matchingKeys.size() > 1) {
+        return {true, "[" + std::string(sectionName) + "] contains duplicate "
+            + std::string(keyName) + " keys"};
+    }
+
+    const std::string lineEnding = DetectTargetSectionLineEnding(
+        ini, lines, sectionHeader, sectionEnd);
+    if (sectionHeader == std::string_view::npos) {
+        std::string content(ini);
+        if (!content.empty() && content.back() != '\r' && content.back() != '\n') {
+            content.append(lineEnding);
+        }
+        content.push_back('[');
+        content.append(sectionName);
+        content.push_back(']');
+        content.append(lineEnding);
+        content.append(keyName);
+        content.push_back('=');
+        content.append(desiredValue);
+        content.append(lineEnding);
+        return {false, {}, std::move(content)};
+    }
+
+    if (matchingKeys.empty()) {
+        std::string content(ini);
+        if (sectionEnd > 0 && content[sectionEnd - 1] != '\r' && content[sectionEnd - 1] != '\n') {
+            content.insert(sectionEnd, lineEnding);
+            sectionEnd += lineEnding.size();
+        }
+        std::string key;
+        key.append(keyName);
+        key.push_back('=');
+        key.append(desiredValue);
+        key.append(lineEnding);
+        content.insert(sectionEnd, key);
+        return {false, {}, std::move(content)};
+    }
+
+    const Line& matchingLine = lines[matchingKeys.front()];
+    const std::string_view line = ini.substr(
+        matchingLine.begin, matchingLine.contentEnd - matchingLine.begin);
+    size_t valueStart = 0;
+    IsKey(line, keyName, valueStart);
+    if (Trim(line.substr(valueStart)) == desiredValue) {
+        return {false, {}, std::string(ini)};
+    }
+    std::string content(ini);
+    content.replace(
+        matchingLine.begin + valueStart,
+        matchingLine.contentEnd - (matchingLine.begin + valueStart),
+        desiredValue);
+    return {false, {}, std::move(content)};
+}
+
+ParsedUpdate ParseAndUpdateNeural(std::string_view ini, bool enable)
+{
+    ParsedUpdate updated = ParseAndUpdate(ini, kNeuralAddonCanonical, !enable);
+    if (updated.malformed || !enable) return updated;
+
+    const bool addonEnabled = updated.addonEnabled;
+    // RenoDX's persisted controls are documented and exercised by the
+    // MIT-licensed DLSS5-Feeder project. Keep this list deliberately narrow:
+    // use the raw-NGX-only hook mode, turn the neural pass on, keep neural
+    // upscaling off, and preserve every user-owned style/intensity/guide
+    // setting. This player does not use Streamline, so mode 2 avoids an
+    // unnecessary Streamline hook.
+    constexpr std::pair<std::string_view, std::string_view> settings[]{
+        {"EnableHooks", "2"},
+        {"NeuralUplift", "1"},
+        {"NREnableUpscaling", "0"},
+    };
+    for (const auto& [key, value] : settings) {
+        updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection, key, value);
+        if (updated.malformed) return updated;
+    }
+    updated.addonEnabled = addonEnabled;
+    return updated;
 }
 
 std::wstring Win32Error(std::wstring_view operation)
@@ -424,17 +560,26 @@ std::string UpdateDisabledAddonsIni(std::string_view ini, std::string_view addon
     return updated.content;
 }
 
+std::string UpdateNeuralAddonIni(std::string_view ini, bool enable)
+{
+    const ParsedUpdate updated = ParseAndUpdateNeural(ini, enable);
+    if (updated.malformed) {
+        throw std::invalid_argument(updated.error);
+    }
+    return updated.content;
+}
+
 ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     std::string_view previousIni,
     std::string_view finalIni,
     bool changed,
     bool desiredEnabled)
 {
-    const ParsedUpdate previous = ParseAndUpdate(previousIni, kNeuralAddonCanonical, !desiredEnabled);
+    const ParsedUpdate previous = ParseAndUpdateNeural(previousIni, desiredEnabled);
     if (previous.malformed) {
         return {false, changed, false, false, std::wstring(previous.error.begin(), previous.error.end())};
     }
-    const ParsedUpdate final = ParseAndUpdate(finalIni, kNeuralAddonCanonical, !desiredEnabled);
+    const ParsedUpdate final = ParseAndUpdateNeural(finalIni, desiredEnabled);
     if (final.malformed) {
         return {false, changed, previous.addonEnabled, false, std::wstring(final.error.begin(), final.error.end())};
     }
@@ -452,7 +597,7 @@ ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool ena
         return {false, false, false, false, originalRead.error};
     }
 
-    const ParsedUpdate updated = ParseAndUpdate(originalRead.content, kNeuralAddonCanonical, !enable);
+    const ParsedUpdate updated = ParseAndUpdateNeural(originalRead.content, enable);
     if (updated.malformed) {
         return {false, false, false, false, std::wstring(updated.error.begin(), updated.error.end())};
     }
@@ -468,6 +613,14 @@ ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool ena
     if (!finalRead.ok) {
         return {false, true, updated.addonEnabled, false,
             L"Unable to verify updated ReShade.ini: " + finalRead.error};
+    }
+    const ParsedUpdate observed = ParseAndUpdateNeural(finalRead.content, enable);
+    if (observed.malformed || observed.content != finalRead.content) {
+        const std::string detail = observed.malformed
+            ? observed.error
+            : "Observed RenoDX neural settings do not match the requested state";
+        return {false, true, updated.addonEnabled, observed.addonEnabled,
+            std::wstring(detail.begin(), detail.end())};
     }
     return EvaluateNeuralAddonConfigUpdate(originalRead.content, finalRead.content, true, enable);
 }
