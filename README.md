@@ -72,11 +72,11 @@ When the packaged YouTube helpers are available, **File > Examples** offers this
 
 | Category | Video | Official channel | URL |
 | --- | --- | --- | --- |
-| Games | Grand Theft Auto V: Official Gameplay Video | Rockstar Games | https://www.youtube.com/watch?v=N-xHcvug3WI |
+| Games | GTA VI Trailer 2 | Rockstar Games | https://www.youtube.com/watch?v=VQRLujxTm3c |
 | Games | Resident Evil Requiem - Launch Trailer | Resident Evil | https://www.youtube.com/watch?v=9lrThxCoznw |
-| Games | Battlefield 6 Official Multiplayer Gameplay Trailer | Battlefield | https://www.youtube.com/watch?v=wFGEMfyAQtI |
-| Anime | The Apothecary Diaries \| OFFICIAL TRAILER | Crunchyroll | https://www.youtube.com/watch?v=XYNGkSvFT8c |
-| Anime | Tomb Raider King \| Official Trailer | Crunchyroll | https://www.youtube.com/watch?v=vwQY5heVraU |
+| Games | Battlefield 6 Season 3 Official Gameplay Trailer | Battlefield | https://www.youtube.com/watch?v=XCMr55EjFew |
+| Anime | 2026 Summer Anime Season Trailer | Crunchyroll | https://www.youtube.com/watch?v=DWM2IfkzLHo |
+| Anime | Spring 2026 Season Official Trailer | Crunchyroll | https://www.youtube.com/watch?v=7Wc6ugY3meg |
 | Anime | My Hero Academia FINAL SEASON "More" Official Trailer | Crunchyroll | https://www.youtube.com/watch?v=pxbEWUjh6E4 |
 
 Availability and region access can change. These entries play through the same public, non-DRM YouTube resolver flow as a pasted URL.

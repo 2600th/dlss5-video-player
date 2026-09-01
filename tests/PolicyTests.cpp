@@ -2420,6 +2420,8 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--no-warnings",
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
+        L"--extractor-args",
+        L"youtube:player_client=web_embedded",
         L"-f",
         L"b[ext=mp4]/b",
         L"--get-url",
@@ -2776,14 +2778,16 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         Sleep(INFINITE);
         return 0;
     }
-    if (argc != 10 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 12 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-playlist" ||
         std::wstring_view(argv[3]) != L"--no-warnings" ||
         std::wstring_view(argv[4]) != L"--js-runtimes" ||
         !std::wstring_view(argv[5]).starts_with(L"deno:") ||
-        std::wstring_view(argv[6]) != L"-f" ||
-        std::wstring_view(argv[7]) != L"b[ext=mp4]/b" ||
-        std::wstring_view(argv[8]) != L"--get-url") {
+        std::wstring_view(argv[6]) != L"--extractor-args" ||
+        std::wstring_view(argv[7]) != L"youtube:player_client=web_embedded" ||
+        std::wstring_view(argv[8]) != L"-f" ||
+        std::wstring_view(argv[9]) != L"b[ext=mp4]/b" ||
+        std::wstring_view(argv[10]) != L"--get-url") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -2795,7 +2799,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[9];
+    const std::wstring_view url = argv[11];
     const size_t symlinkAttack = url.find(L"symlinkattack_");
     if (symlinkAttack != std::wstring_view::npos) {
         const std::wstring suffix(url.substr(symlinkAttack + 14));
