@@ -33,6 +33,14 @@ enum class VideoReadResult {
 
 class VideoDecoder {
 public:
+#ifdef VIDEO_DECODER_TESTING
+    enum class FailureStage {
+        None,
+        ProbeResume,
+        DecodeResume,
+    };
+#endif
+
     VideoDecoder() = default;
     ~VideoDecoder();
 
@@ -71,9 +79,9 @@ private:
     bool ReadNextMediaFoundation(VideoFrame& out);
 
     std::wstring FindTool(const wchar_t* exeName) const;
-    static bool RunCapture(const std::wstring& exe, const std::wstring& arguments,
-                           std::string& output, DWORD* exitCode,
-                           std::stop_token stop, std::chrono::milliseconds timeout);
+    bool RunCapture(const std::wstring& exe, const std::wstring& arguments,
+                    std::string& output, DWORD* exitCode,
+                    std::stop_token stop, std::chrono::milliseconds timeout);
 
     Backend m_backend = Backend::None;
     Microsoft::WRL::ComPtr<IMFSourceReader> m_reader;
@@ -106,10 +114,13 @@ private:
         std::wstring helperDirectory;
         std::chrono::milliseconds probeTimeout{15000};
         std::chrono::milliseconds stallTimeout{15000};
+        FailureStage failureStage{FailureStage::None};
     };
     explicit VideoDecoder(Settings settings) : m_helperDirectory(std::move(settings.helperDirectory)),
-        m_networkStallTimeout(settings.stallTimeout),m_probeTimeout(settings.probeTimeout) {}
+        m_networkStallTimeout(settings.stallTimeout),m_probeTimeout(settings.probeTimeout),
+        m_failureStage(settings.failureStage) {}
     friend struct VideoDecoderTestAccess;
     std::wstring m_helperDirectory;
+    FailureStage m_failureStage{FailureStage::None};
 #endif
 };

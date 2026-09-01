@@ -57,14 +57,15 @@ Additional `sl.*.dll` files may also be present when using a Streamline-based ex
 
 1. Launch `DLSSVideoPlayer.exe`.
 2. Drop a video onto the idle window or click **Open**.
-3. Leave **DLSS Auto** enabled for the realtime-oriented default.
-4. Open ReShade with **Home** when testing the RenoDX DLSS 5 add-on.
-5. Use **Ctrl+Alt+Space** to pause/resume even while ReShade is capturing normal keyboard/mouse input.
-6. Use **Ctrl+Alt+C** to open Image Adjustments even while the ReShade overlay is open.
+3. To stream a public, non-DRM YouTube video, press **Ctrl+L** (or choose **File > Open YouTube URL...**), paste its public URL, and select **Play**. Private, login-required, paid, and DRM-protected videos are not supported; public-video availability and region access can change.
+4. Leave **DLSS Auto** enabled for the realtime-oriented default.
+5. Open ReShade with **Home** when testing the RenoDX DLSS 5 add-on.
+6. Use **Ctrl+Alt+Space** to pause/resume even while ReShade is capturing normal keyboard/mouse input.
+7. Use **Ctrl+Alt+C** to open Image Adjustments even while the ReShade overlay is open.
 
 If the experimental neural path is unstable, choose **Advanced > Restart in DLSS SR safe mode** or launch with `--safe-mode`. Safe mode disables only `renodx-dlss5.addon64` for that launch and keeps native DLSS Super Resolution available. A later normal launch on an RTX 40/50 GPU restores the default add-on setting, with at most one bootstrap relaunch for either correction.
 
-The player does not force a file picker at startup. It opens in an idle state and waits for drag-and-drop, **Open**, `Ctrl+O`, or a file path passed on the command line.
+The player does not force a file picker at startup. It opens in an idle state and waits for drag-and-drop, **Open**, `Ctrl+O`, **Open YouTube URL**, `Ctrl+L`, or a file path passed on the command line.
 
 ## Fixed YouTube examples
 
@@ -86,6 +87,7 @@ Availability and region access can change. These entries play through the same p
 | Action | Shortcut |
 | --- | --- |
 | Open video | `Ctrl+O` |
+| Open public non-DRM YouTube URL | `Ctrl+L` |
 | Play / Pause | `Space` |
 | ReShade-safe Play / Pause | `Ctrl+Alt+Space` |
 | Back 10 seconds | `Left` / `Ctrl+Alt+Left` |

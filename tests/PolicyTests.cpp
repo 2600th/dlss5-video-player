@@ -54,10 +54,11 @@ struct VideoDecoderTestAccess {
     static std::unique_ptr<VideoDecoder> Create(
         const std::filesystem::path& helperDirectory,
         std::chrono::milliseconds probeTimeout = std::chrono::milliseconds{250},
-        std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120})
+        std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120},
+        VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None)
     {
         VideoDecoder::Settings settings;
-        settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;
+        settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
         return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
     }
 };
@@ -1223,19 +1224,19 @@ NetworkRenderConfiguration render_configuration(int quality,uint32_t decodeWidth
     NetworkRenderConfiguration config{};config.sourceWidth=1920;config.sourceHeight=1080;config.decodeWidth=decodeWidth;config.decodeHeight=decodeHeight;config.inputWidth=inputWidth;config.inputHeight=inputHeight;config.outputWidth=1920;config.outputHeight=1080;config.guideWidth=320;config.guideHeight=180;config.quality=quality;return config;
 }
 
-void youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test()
+void youtube_renderer_transaction_validates_every_open_seek_and_quality_candidate_geometry_test()
 {
     const auto active=render_configuration(1);
-    CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::InitialOpen,nullptr,active));
-    CHECK_EQ(NetworkRendererPlan::ReuseActive,SelectNetworkRendererPlan(NetworkCommitKind::Seek,&active,active));
+    CHECK(NetworkPreparedGeometryIsValid(active,1280,720,
+          static_cast<size_t>(1280)*720*4));
     auto geometry=active;geometry.decodeWidth=960;geometry.inputWidth=960;
-    CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::Seek,&active,geometry));
+    CHECK(NetworkPreparedGeometryIsValid(geometry,960,720,
+          static_cast<size_t>(960)*720*4));
     // MaxPerf, Balanced, MaxQuality, UltraPerformance, and DLAA are every
     // explicit quality route exposed by the native menu.
     uint32_t decodeWidth=832;
     for(const int quality:{0,1,2,3,5}){
         const auto prepared=render_configuration(quality,decodeWidth,468,decodeWidth,468);
-        CHECK_EQ(NetworkRendererPlan::CreateCandidate,SelectNetworkRendererPlan(NetworkCommitKind::QualityReload,&active,prepared));
         CHECK(prepared.decodeWidth==decodeWidth&&prepared.decodeHeight==468);
         CHECK(prepared.inputWidth==decodeWidth&&prepared.inputHeight==468);
         CHECK(prepared.outputWidth==1920&&prepared.outputHeight==1080);
@@ -1266,41 +1267,75 @@ void youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back
     CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3,4,5}),order);CHECK_EQ(12,activeRenderer);CHECK_EQ(22,activeMedia);CHECK_EQ(32,activeAudio);
 }
 
-void youtube_compatible_seek_never_touches_active_renderer_before_commit_test()
+void youtube_candidate_seek_render_failure_preserves_all_active_state_before_commit_test()
 {
-    const auto configuration=render_configuration(2);
-    const NetworkPreparedFrameDescriptor readyFrame{
-        1280,720,1280u*4u,static_cast<size_t>(1280)*720*4,true};
-    const NetworkPreparedFrameDescriptor badRowBytes{
-        1280,720,1280u*4u-4u,static_cast<size_t>(1280)*720*4,true};
-    CHECK(NetworkPreparedFrameIsCompatible(configuration,configuration,readyFrame));
-    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,badRowBytes));
-    auto notReady=readyFrame;notReady.decoderReady=false;
-    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,notReady));
-    auto wrongDimensions=readyFrame;wrongDimensions.width=1278;
-    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,wrongDimensions));
-    auto wrongBytes=readyFrame;--wrongBytes.frameBytes;
-    CHECK(!NetworkPreparedFrameIsCompatible(configuration,configuration,wrongBytes));
-    auto differentConfiguration=configuration;++differentConfiguration.outputWidth;
-    CHECK(!NetworkPreparedFrameIsCompatible(configuration,differentConfiguration,readyFrame));
+    struct PlaybackState {
+        int decoder{};
+        int audio{};
+        int renderer{};
+        int renderWindow{};
+        int quality{};
+        bool qualityExplicit{};
+        bool playing{};
+        double position{};
+        int64_t lastRenderedTimestamp{};
+        int guideHistory{};
+        int dlssHistory{};
+        bool operator==(const PlaybackState&) const = default;
+    };
+    struct Candidate {
+        bool renderFirst{};
+        int decoder{};
+        int audio{};
+        int renderer{};
+        int renderWindow{};
+        int quality{};
+    };
 
+    PlaybackState active{10,20,30,40,2,true,true,17.5,175000000,51,61};
+    const PlaybackState before=active;
     std::vector<int> order;
-    int activeRendererMutations=0;
-    bool ownershipCommitted=false;
-    const bool rejected=ExecuteCompatibleNetworkSeek(
-        [&]{order.push_back(1);return false;},
-        [&]{order.push_back(2);ownershipCommitted=true;},
-        [&]{order.push_back(3);++activeRendererMutations;return true;});
-    CHECK(!rejected);CHECK_EQ(std::vector<int>({1}),order);
-    CHECK(!ownershipCommitted);CHECK_EQ(0,activeRendererMutations);
+    bool commitCalled=false;
+    const bool renderFirst=false;
+    const bool rejected=ExecuteNetworkCandidateTransaction<Candidate>(
+        [&]{order.push_back(1);return std::make_unique<Candidate>(
+            Candidate{renderFirst,11,21,31,41,3});},
+        [&](Candidate& candidate){order.push_back(2);return candidate.renderFirst;},
+        [&](std::unique_ptr<Candidate> candidate){
+            order.push_back(3);commitCalled=true;
+            active={candidate->decoder,candidate->audio,candidate->renderer,
+                    candidate->renderWindow,candidate->quality,false,false,
+                    42.0,420000000,0,0};
+        });
+    CHECK(!rejected);
+    CHECK_EQ(std::vector<int>({1,2}),order);
+    CHECK(!commitCalled);
+    CHECK_EQ(before,active);
 
     order.clear();
-    const bool committed=ExecuteCompatibleNetworkSeek(
-        [&]{order.push_back(1);return true;},
-        [&]{order.push_back(2);ownershipCommitted=true;},
-        [&]{CHECK(ownershipCommitted);order.push_back(3);++activeRendererMutations;return true;});
-    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3}),order);
-    CHECK(ownershipCommitted);CHECK_EQ(1,activeRendererMutations);
+    int oldStopCount=0,oldRendererDestroyCount=0;
+    const bool committed=ExecuteNetworkCandidateTransaction<Candidate>(
+        [&]{order.push_back(1);return std::make_unique<Candidate>(
+            Candidate{true,12,22,32,42,4});},
+        [&](Candidate& candidate){order.push_back(2);return candidate.renderFirst;},
+        [&](std::unique_ptr<Candidate> candidate){
+            CommitPreparedAudioHandoff(
+                [&]{order.push_back(3);++oldStopCount;},
+                [&]{order.push_back(4);active={candidate->decoder,candidate->audio,
+                    candidate->renderer,candidate->renderWindow,candidate->quality,
+                    false,false,24.0,240000000,0,0};},
+                [&]{order.push_back(5);active.playing=true;});
+            order.push_back(6);++oldRendererDestroyCount;
+        });
+    CHECK(committed);
+    CHECK_EQ(std::vector<int>({1,2,4,3,5,6}),order);
+    CHECK_EQ(1,oldStopCount);
+    CHECK_EQ(1,oldRendererDestroyCount);
+    CHECK_EQ(12,active.decoder);CHECK_EQ(22,active.audio);
+    CHECK_EQ(32,active.renderer);CHECK_EQ(42,active.renderWindow);
+    CHECK_EQ(4,active.quality);CHECK(!active.qualityExplicit);CHECK(active.playing);
+    CHECK_EQ(24.0,active.position);CHECK_EQ(int64_t{240000000},active.lastRenderedTimestamp);
+    CHECK_EQ(0,active.guideHistory);CHECK_EQ(0,active.dlssHistory);
 }
 
 void youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test()
@@ -1346,9 +1381,6 @@ void youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_
     auto first=registry.Take(firstToken);CHECK(first!=nullptr);CHECK(!lifecycle.Complete(first->generation));
     auto second=registry.Take(secondToken);CHECK(second!=nullptr);CHECK(!lifecycle.Complete(second->generation));
     auto third=registry.Take(thirdToken);CHECK(third!=nullptr);CHECK(lifecycle.Complete(third->generation));
-    CHECK_EQ(NetworkRendererPlan::CreateCandidate,
-             SelectNetworkRendererPlan(NetworkCommitKind::QualityReload,&activeConfiguration,
-                                       third->configuration));
     if(!third->preparationOk){
         CHECK_EQ(10,activeDecoder);CHECK_EQ(20,activeRenderer);CHECK_EQ(30,activeAudio);
     }
@@ -1357,18 +1389,19 @@ void youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_
     const uint64_t fourthToken=registry.Register(std::make_unique<Prepared>(Prepared{
         fourthGeneration,qualityConfiguration,true,14,34}));
     auto fourth=registry.Take(fourthToken);CHECK(fourth!=nullptr);CHECK(lifecycle.Complete(fourth->generation));
-    std::vector<int> handoff;
+    std::vector<int> handoff;int retiringAudio=activeAudio;
     const bool committed=ExecuteNetworkCandidateTransaction<int>(
         [&]{return std::make_unique<int>(24);},
         [&](int& renderer){return renderer==24&&NetworkPreparedGeometryIsValid(
             fourth->configuration,960,540,static_cast<size_t>(960)*540*4);},
         [&](std::unique_ptr<int> renderer){
             CommitPreparedAudioHandoff(
-                [&]{handoff.push_back(1);activeAudio=0;},
+                [&]{handoff.push_back(1);retiringAudio=0;},
                 [&]{handoff.push_back(2);activeDecoder=fourth->decoder;activeRenderer=*renderer;activeAudio=fourth->audio;},
                 [&]{handoff.push_back(3);});
         });
-    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3}),handoff);
+    CHECK(committed);CHECK_EQ(std::vector<int>({2,1,3}),handoff);
+    CHECK_EQ(0,retiringAudio);
     CHECK_EQ(14,activeDecoder);CHECK_EQ(24,activeRenderer);CHECK_EQ(34,activeAudio);
     CHECK(!registry.Take(fourthToken));
 
@@ -1377,6 +1410,48 @@ void youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_
         cancelledGeneration,activeConfiguration,true,15,35}));
     lifecycle.Invalidate();registry.Clear();
     CHECK(!registry.Take(cancelledToken));CHECK(!lifecycle.Complete(cancelledGeneration));
+}
+
+void youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test()
+{
+    struct Prepared {
+        Prepared(uint64_t generation,int* destroyed)
+            : generation(generation),destroyed(destroyed) {}
+        ~Prepared(){if(destroyed)++*destroyed;}
+        uint64_t generation{};
+        int* destroyed{};
+    };
+
+    YouTubeResolutionLifecycle lifecycle;
+    CompletionRegistry<Prepared> registry;
+    int destroyed=0;
+    const uint64_t staleGeneration=lifecycle.Begin();
+    const uint64_t staleToken=registry.Register(
+        std::make_unique<Prepared>(staleGeneration,&destroyed));
+    const uint64_t currentGeneration=lifecycle.Begin();
+    const uint64_t currentToken=registry.Register(
+        std::make_unique<Prepared>(currentGeneration,&destroyed));
+
+    auto stale=registry.Take(staleToken);
+    CHECK(stale!=nullptr);
+    CHECK(!lifecycle.Complete(stale->generation));
+    stale.reset();
+    CHECK_EQ(1,destroyed);
+
+    auto current=registry.Take(currentToken);
+    CHECK(current!=nullptr);
+    CHECK(lifecycle.Complete(current->generation));
+    current.reset();
+    CHECK_EQ(2,destroyed);
+
+    const uint64_t cancelledGeneration=lifecycle.Begin();
+    const uint64_t cancelledToken=registry.Register(
+        std::make_unique<Prepared>(cancelledGeneration,&destroyed));
+    lifecycle.Invalidate();
+    registry.Clear();
+    CHECK_EQ(3,destroyed);
+    CHECK(!registry.Take(cancelledToken));
+    CHECK(!lifecycle.Complete(cancelledGeneration));
 }
 
 std::filesystem::path executable_directory()
@@ -2417,6 +2492,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
     const std::vector<std::wstring> expected{
         L"--no-config",
         L"--no-cache-dir",
+        L"--no-plugin-dirs",
         L"--no-playlist",
         L"--no-warnings",
         L"--js-runtimes",
@@ -2578,6 +2654,63 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
     }
 }
 
+void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test()
+{
+    struct Case {
+        VideoDecoder::FailureStage stage;
+        MediaSourceKind sourceKind;
+        std::wstring_view path;
+    };
+    const std::array cases{
+        Case{VideoDecoder::FailureStage::ProbeResume,MediaSourceKind::LocalFile,
+             LR"(C:\missing\local-probe-resume.mp4)"},
+        Case{VideoDecoder::FailureStage::ProbeResume,MediaSourceKind::YouTube,
+             L"https://media.invalid/network-probe-resume"},
+        Case{VideoDecoder::FailureStage::DecodeResume,MediaSourceKind::LocalFile,
+             LR"(C:\missing\local-decode-resume.mp4)"},
+        Case{VideoDecoder::FailureStage::DecodeResume,MediaSourceKind::YouTube,
+             L"https://media.invalid/network-decode-resume"},
+    };
+    MediaFixture fixture;
+    const size_t beforeProbe=count_named_processes(L"ffprobe.exe");
+    const size_t beforeFfmpeg=count_named_processes(L"ffmpeg.exe");
+    // The first failed local open initializes process-wide Media Foundation
+    // state before its fallback rejects the missing file. Warm that one-time
+    // state before measuring per-attempt handle ownership.
+    {
+        auto warmup=VideoDecoderTestAccess::Create(
+            fixture.directory,std::chrono::milliseconds{250},
+            std::chrono::milliseconds{120},VideoDecoder::FailureStage::ProbeResume);
+        const auto started=std::chrono::steady_clock::now();
+        CHECK(!warmup->Open(LR"(C:\missing\resume-warmup.mp4)",MediaSourceKind::LocalFile));
+        CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+    }
+    CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,
+                                       std::chrono::milliseconds{500}));
+    CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,
+                                       std::chrono::milliseconds{500}));
+    DWORD beforeHandles=0,afterHandles=0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+
+    for(int repetition=0;repetition<4;++repetition){
+        for(const Case& test:cases){
+            auto decoder=VideoDecoderTestAccess::Create(
+                fixture.directory,std::chrono::milliseconds{250},
+                std::chrono::milliseconds{120},test.stage);
+            const auto started=std::chrono::steady_clock::now();
+            CHECK(!decoder->Open(std::wstring(test.path),test.sourceKind));
+            CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
+            decoder.reset();
+            CHECK(wait_for_named_process_count(L"ffprobe.exe",beforeProbe,
+                                               std::chrono::milliseconds{500}));
+            CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeFfmpeg,
+                                               std::chrono::milliseconds{500}));
+        }
+    }
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
+    CHECK(afterHandles<=beforeHandles+2);
+}
+
 void youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test()
 {
     MediaFixture fixture;const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");DWORD beforeHandles=0,afterHandles=0;CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
@@ -2621,11 +2754,87 @@ void youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test()
     MediaFixture fixture;auto prepared=AudioPlayerTestAccess::Create(fixture.directory);
     CHECK(prepared->Start(L"https://media.invalid/audiotrickle",12.25,AudioStartState::Paused));CHECK(prepared->Paused());CHECK_EQ(12.25,AudioPlayerTestAccess::SeekBase(*prepared));Sleep(60);CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*prepared));
     bool oldAudible=true,newAudible=false;std::vector<int> order;
-    CommitPreparedAudioHandoff([&]{CHECK(oldAudible);CHECK(!newAudible);oldAudible=false;order.push_back(1);},[&]{CHECK(!oldAudible);CHECK(!newAudible);order.push_back(2);},[&]{prepared->Pause(false);newAudible=true;order.push_back(3);});
-    CHECK_EQ(std::vector<int>({1,2,3}),order);CHECK(!prepared->Paused());
+    CommitPreparedAudioHandoff([&]{CHECK(oldAudible);CHECK(!newAudible);oldAudible=false;order.push_back(1);},[&]{CHECK(oldAudible);CHECK(!newAudible);order.push_back(2);},[&]{CHECK(!oldAudible);prepared->Pause(false);newAudible=true;order.push_back(3);});
+    CHECK_EQ(std::vector<int>({2,1,3}),order);CHECK(!prepared->Paused());
     prepared->Stop();
 
     auto cancelled=AudioPlayerTestAccess::Create(fixture.directory);CHECK(cancelled->Start(L"https://media.invalid/audiohold",4.0,AudioStartState::Paused));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*cancelled));cancelled.reset();
+}
+
+void youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test()
+{
+    struct ActivePlayback {
+        int decoder{10};
+        int audio{20};
+        int renderer{30};
+        int quality{2};
+        bool playing{true};
+        int64_t history{170000000};
+        bool operator==(const ActivePlayback&) const=default;
+    };
+    struct Candidate {
+        Candidate(HWND window,HANDLE handle,bool renderFirst,bool* destroyed)
+            : window(window),handle(handle),renderFirst(renderFirst),destroyed(destroyed) {}
+        Candidate(const Candidate&)=delete;
+        Candidate& operator=(const Candidate&)=delete;
+        HWND window{};
+        HANDLE handle{};
+        bool renderFirst{};
+        bool* destroyed{};
+        ~Candidate(){
+            if(handle)CloseHandle(handle);
+            if(window)DestroyWindow(window);
+            if(destroyed)*destroyed=true;
+        }
+    };
+
+    MediaFixture fixture;
+    const size_t beforeProcesses=count_named_processes(L"ffmpeg.exe");
+    DWORD beforeHandles=0,afterHandles=0;
+    CHECK(GetProcessHandleCount(GetCurrentProcess(),&beforeHandles)!=FALSE);
+    auto preparedDecoder=VideoDecoderTestAccess::Create(fixture.directory);
+    auto preparedAudio=AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(preparedDecoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+    CHECK(preparedAudio->Start(L"https://media.invalid/audiohold",9.0,AudioStartState::Paused));
+    CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses+2,
+                                       std::chrono::milliseconds{500}));
+
+    ActivePlayback active;
+    const ActivePlayback before=active;
+    HWND candidateWindow=nullptr;
+    bool candidateDestroyed=false;
+    bool commitCalled=false;
+    const bool committed=ExecuteNetworkCandidateTransaction<Candidate>(
+        [&]{
+            candidateWindow=CreateWindowExW(0,L"STATIC",L"candidate",0,0,0,1,1,
+                                             HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
+            HANDLE event=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+            CHECK(candidateWindow!=nullptr);CHECK(event!=nullptr);
+            return std::make_unique<Candidate>(candidateWindow,event,false,&candidateDestroyed);
+        },
+        [&](Candidate& candidate){return candidate.renderFirst;},
+        [&](std::unique_ptr<Candidate>){
+            commitCalled=true;active={11,21,31,3,false,90000000};
+            preparedAudio.reset();preparedDecoder.reset();
+        });
+    CHECK(!committed);
+    CHECK(!commitCalled);
+    CHECK_EQ(before,active);
+    CHECK(candidateDestroyed);
+    CHECK(candidateWindow!=nullptr);
+    CHECK(!IsWindow(candidateWindow));
+
+    preparedAudio.reset();
+    preparedDecoder.reset();
+    CHECK(wait_for_named_process_count(L"ffmpeg.exe",beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+    const auto handlesDeadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    do{
+        CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);
+        if(afterHandles<=beforeHandles+2)break;
+        Sleep(5);
+    }while(std::chrono::steady_clock::now()<handlesDeadline);
+    CHECK(afterHandles<=beforeHandles+2);
 }
 
 bool wait_for_file(const std::filesystem::path& path, std::chrono::milliseconds limit)
@@ -2811,6 +3020,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
     const std::wstring_view requestedUrl = argc > 1 ? std::wstring_view(argv[argc - 1]) : L"";
     const bool noCacheDir = argc > 2 && std::wstring_view(argv[2]) == L"--no-cache-dir";
+    const bool noPluginDirs = argc > 3 && std::wstring_view(argv[3]) == L"--no-plugin-dirs";
     if (requestedUrl.find(L"ytcacheaudit") != std::wstring_view::npos && !noCacheDir) {
         const std::wstring xdgCache = read_environment_variable(L"XDG_CACHE_HOME");
         if (!xdgCache.empty()) {
@@ -2818,29 +3028,43 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
                               "default-cache-write");
         }
     }
-    if (argc != 13 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (requestedUrl.find(L"pluginaudit") != std::wstring_view::npos && !noPluginDirs) {
+        const std::wstring xdgConfig = read_environment_variable(L"XDG_CONFIG_HOME");
+        if (!xdgConfig.empty()) {
+            const std::filesystem::path pluginDirectory =
+                std::filesystem::path(xdgConfig) / L"yt-dlp" / L"plugins";
+            const std::filesystem::path pluginSource = pluginDirectory / L"exec-on-import.plugin";
+            std::error_code pluginError;
+            if (std::filesystem::is_regular_file(pluginSource, pluginError) && !pluginError) {
+                write_binary_file(pluginDirectory / L"default-plugin-executed.marker",
+                                  "default-plugin-executed");
+            }
+        }
+    }
+    if (argc != 14 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
-        std::wstring_view(argv[3]) != L"--no-playlist" ||
-        std::wstring_view(argv[4]) != L"--no-warnings" ||
-        std::wstring_view(argv[5]) != L"--js-runtimes" ||
-        !std::wstring_view(argv[6]).starts_with(L"deno:") ||
-        std::wstring_view(argv[7]) != L"--extractor-args" ||
-        std::wstring_view(argv[8]) != L"youtube:player_client=android" ||
-        std::wstring_view(argv[9]) != L"-f" ||
-        std::wstring_view(argv[10]) != L"b[ext=mp4]/b" ||
-        std::wstring_view(argv[11]) != L"--get-url") {
+        std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
+        std::wstring_view(argv[4]) != L"--no-playlist" ||
+        std::wstring_view(argv[5]) != L"--no-warnings" ||
+        std::wstring_view(argv[6]) != L"--js-runtimes" ||
+        !std::wstring_view(argv[7]).starts_with(L"deno:") ||
+        std::wstring_view(argv[8]) != L"--extractor-args" ||
+        std::wstring_view(argv[9]) != L"youtube:player_client=android" ||
+        std::wstring_view(argv[10]) != L"-f" ||
+        std::wstring_view(argv[11]) != L"b[ext=mp4]/b" ||
+        std::wstring_view(argv[12]) != L"--get-url") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
         current_test_executable().parent_path() / L"deno.exe";
     std::error_code equivalentError;
     if (!std::filesystem::equivalent(
-            std::filesystem::path(std::wstring(std::wstring_view(argv[6]).substr(5))),
+            std::filesystem::path(std::wstring(std::wstring_view(argv[7]).substr(5))),
             expectedDeno, equivalentError) || equivalentError) {
         return 92;
     }
 
-    const std::wstring_view url = argv[12];
+    const std::wstring_view url = argv[13];
     if (url.find(L"envcapture") != std::wstring_view::npos) {
         const std::filesystem::path expectedCache =
             current_test_executable().parent_path() / L"youtube-helper-cache";
@@ -3092,6 +3316,38 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     CHECK(!error);
 }
 
+void youtube_resolver_disables_default_plugin_execution_from_inherited_config_test()
+{
+    ResolverFixture fixture;
+    const std::filesystem::path callerConfig = fixture.directory.parent_path() /
+        (L"PolicyTests-caller-xdg-config-" + std::to_wstring(GetCurrentProcessId()) +
+         L"-" + std::to_wstring(GetTickCount64()));
+    const std::filesystem::path pluginDirectory = callerConfig / L"yt-dlp" / L"plugins";
+    const std::filesystem::path pluginSource = pluginDirectory / L"exec-on-import.plugin";
+    const std::filesystem::path executionMarker =
+        pluginDirectory / L"default-plugin-executed.marker";
+    std::error_code error;
+    std::filesystem::create_directories(pluginDirectory, error);
+    CHECK(!error);
+    write_binary_file(pluginSource, "executable-default-plugin");
+    const ScopedEnvironmentVariable inheritedXdgConfig(L"XDG_CONFIG_HOME",
+                                                        callerConfig.wstring());
+    const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+
+    const ResolveResult result = resolver->Resolve(L"https://youtu.be/success-pluginaudit", {});
+
+    CHECK(result.ok);
+    CHECK(std::filesystem::is_regular_file(pluginSource, error));
+    CHECK(!error);
+    CHECK(!std::filesystem::exists(executionMarker, error));
+    CHECK(!error);
+    CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses,
+                                       std::chrono::milliseconds{500}));
+    std::filesystem::remove_all(callerConfig, error);
+    CHECK(!error);
+}
+
 void youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test()
 {
     ResolverFixture fixture;
@@ -3321,17 +3577,20 @@ int wmain(int argc, wchar_t* argv[])
     fixed_youtube_examples_are_complete_safe_and_menu_routable_test();
     youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test();
     youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
-    youtube_renderer_transaction_selects_reuse_only_for_identical_plain_seek_test();
+    youtube_renderer_transaction_validates_every_open_seek_and_quality_candidate_geometry_test();
     youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test();
-    youtube_compatible_seek_never_touches_active_renderer_before_commit_test();
+    youtube_candidate_seek_render_failure_preserves_all_active_state_before_commit_test();
     youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test();
     youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test();
+    youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
+    video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
     youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();
     youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test();
+    youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
@@ -3380,6 +3639,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test();
     youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test();
     youtube_resolver_forces_package_local_deno_cache_over_parent_override_test();
+    youtube_resolver_disables_default_plugin_execution_from_inherited_config_test();
     youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test();
     youtube_resolver_queued_stop_token_cancels_before_launch_test();
     youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();

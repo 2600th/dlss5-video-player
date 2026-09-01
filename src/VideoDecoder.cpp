@@ -51,6 +51,7 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
 #ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
+    swap(m_failureStage,other.m_failureStage);
 #endif
 }
 
@@ -188,7 +189,23 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         TerminateProcess(pi.hProcess, 1);WaitForSingleObject(pi.hProcess,500);
         CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
     }
-    ResumeThread(pi.hThread);
+    DWORD resumeResult=static_cast<DWORD>(-1);
+#ifdef VIDEO_DECODER_TESTING
+    if(m_failureStage!=FailureStage::ProbeResume)
+#endif
+    {
+        resumeResult=ResumeThread(pi.hThread);
+    }
+    if(resumeResult==static_cast<DWORD>(-1)){
+        const DWORD resumeError=GetLastError();
+        LOG("ResumeThread(ffprobe) failed winerr="<<resumeError);
+        if(!TerminateJobObject(job,ERROR_PROCESS_ABORTED))
+            TerminateProcess(pi.hProcess,ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(pi.hProcess,500);
+        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);
+        if(exitCode)*exitCode=ERROR_PROCESS_ABORTED;
+        return false;
+    }
     const auto deadline=std::chrono::steady_clock::now()+timeout;
     bool cancelled=false,timedOut=false,pipeError=false;
     char buf[8192];
@@ -348,7 +365,22 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds) {
     if(!AssignProcessToJobObject(job,pi.hProcess)){
         TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
     }
-    ResumeThread(pi.hThread);
+    DWORD resumeResult=static_cast<DWORD>(-1);
+#ifdef VIDEO_DECODER_TESTING
+    if(m_failureStage!=FailureStage::DecodeResume)
+#endif
+    {
+        resumeResult=ResumeThread(pi.hThread);
+    }
+    if(resumeResult==static_cast<DWORD>(-1)){
+        const DWORD resumeError=GetLastError();
+        LOG("ResumeThread(ffmpeg) failed winerr="<<resumeError);
+        if(!TerminateJobObject(job,ERROR_PROCESS_ABORTED))
+            TerminateProcess(pi.hProcess,ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(pi.hProcess,500);
+        CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);
+        return false;
+    }
 
     CloseHandle(pi.hThread);
     m_ffmpegProcess = pi.hProcess;

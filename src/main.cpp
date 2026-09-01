@@ -1266,21 +1266,21 @@ private:
         const float frameMs=float(1000.0/std::max(1.0,completion.decoder->FrameRate()));
         return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,true,frameMs);
     }
-    void InstallPreparedYouTube(YouTubeCompletion& completion,std::unique_ptr<PreparedRendererCandidate> candidate,bool reusedRenderer){
-        const std::wstring source=std::move(completion.result.mediaUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;std::unique_ptr<D3D12Renderer> oldRenderer;
+    void InstallPreparedYouTube(YouTubeCompletion& completion,std::unique_ptr<PreparedRendererCandidate> candidate){
+        const std::wstring source=std::move(completion.result.mediaUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;std::unique_ptr<D3D12Renderer> oldRenderer;std::unique_ptr<AudioPlayer> oldNetworkAudio;
         CommitPreparedAudioHandoff(
-            [&]{Audio().Stop();m_networkAudio.reset();},
+            [&]{if(oldNetworkAudio)oldNetworkAudio.reset();else m_audio.Stop();},
             [&]{
-                m_decoder.Swap(*completion.decoder);m_networkAudio=std::move(completion.audio);
-                if(candidate){oldRenderWindow=m_renderWnd;oldRenderer=std::move(m_renderer);m_renderWnd=candidate->window;candidate->window=nullptr;m_renderer=std::move(candidate->renderer);completion.configuration=candidate->configuration;}
+                m_decoder.Swap(*completion.decoder);oldNetworkAudio=std::move(m_networkAudio);m_networkAudio=std::move(completion.audio);
+                oldRenderWindow=m_renderWnd;oldRenderer=std::move(m_renderer);m_renderWnd=candidate->window;candidate->window=nullptr;m_renderer=std::move(candidate->renderer);completion.configuration=candidate->configuration;
             },
             [&]{Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!shouldPlay);});
-        if(oldRenderer)oldRenderer.reset();if(oldRenderWindow&&oldRenderWindow!=m_renderWnd)DestroyWindow(oldRenderWindow);
+        completion.decoder.reset();oldRenderer.reset();if(oldRenderWindow&&oldRenderWindow!=m_renderWnd)DestroyWindow(oldRenderWindow);
         m_activeQuality=static_cast<NVSDK_NGX_PerfQuality_Value>(completion.configuration.quality);m_opt.qualityExplicit=completion.requestedQualityExplicit;m_opt.quality=completion.requestedQuality;
         m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=completion.firstFrame.timestamp100ns;m_lastGlobalX=0;m_lastGlobalY=0;
         m_currentSec=double(completion.firstFrame.timestamp100ns)*1e-7;m_haveNext=false;m_waitingForNetworkFrame=true;m_networkReadState.Reset();m_playing=shouldPlay;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=MediaSourceKind::YouTube;m_displayTitle=DisplayTitleForSource(MediaSourceKind::YouTube,title);m_droppedFrames=completion.commitKind==NetworkCommitKind::InitialOpen?0:m_droppedFrames;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
-        ShowWindow(m_viewport,SW_SHOW);if(!reusedRenderer&&m_renderWnd)ShowWindow(m_renderWnd,SW_SHOW);UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
+        ShowWindow(m_viewport,SW_SHOW);if(m_renderWnd)ShowWindow(m_renderWnd,SW_SHOW);UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
     }
     void CompleteYouTubeResolution(uint64_t token){
         std::unique_ptr<YouTubeCompletion> completion=m_youtubeCompletions.Take(token);if(!completion)return;
@@ -1298,25 +1298,11 @@ private:
         }
         if(!completion->decoder||completion->firstFrame.bgra.empty())return;
         LOG("YouTube resolution and background media preparation completed.");
-        const NetworkRenderConfiguration activeConfiguration=ActiveNetworkConfiguration();const NetworkRenderConfiguration* active=m_loaded&&m_renderer?&activeConfiguration:nullptr;
-        const NetworkRendererPlan plan=SelectNetworkRendererPlan(completion->commitKind,active,completion->configuration);
-        if(plan==NetworkRendererPlan::ReuseActive){
-            const NetworkPreparedFrameDescriptor frame{
-                completion->decoder->Width(),completion->decoder->Height(),
-                static_cast<size_t>(completion->decoder->Width())*4,
-                completion->firstFrame.bgra.size(),completion->decoder->Ready()};
-            const bool rendered=ExecuteCompatibleNetworkSeek(
-                [&]{return m_renderer&&NetworkPreparedFrameIsCompatible(activeConfiguration,completion->configuration,frame);},
-                [&]{InstallPreparedYouTube(*completion,{},true);},
-                [&]{return RenderVideoFrame(completion->firstFrame,true);});
-            if(!rendered){const std::wstring message=T(L"error.frame"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);LOG("Prepared YouTube seek failed before or immediately after commit without exposing source details.");}
-            return;
-        }
         bool candidateCreated=false;
         const bool committed=ExecuteNetworkCandidateTransaction<PreparedRendererCandidate>(
             [&]{auto candidate=CreateRendererCandidate(*completion);candidateCreated=candidate!=nullptr;return candidate;},
             [&](PreparedRendererCandidate& candidate){return ValidatePreparedFrame(*completion,*candidate.renderer,candidate.guides);},
-            [&](std::unique_ptr<PreparedRendererCandidate> candidate){InstallPreparedYouTube(*completion,std::move(candidate),false);});
+            [&](std::unique_ptr<PreparedRendererCandidate> candidate){InstallPreparedYouTube(*completion,std::move(candidate));});
         if(!committed){const std::wstring message=T(candidateCreated?L"error.frame":L"error.renderer"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);LOG("Prepared YouTube renderer transaction rolled back; active state preserved.");}
     }
     PlayerRuntimeStatus RuntimeStatus()const{

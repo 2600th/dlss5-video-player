@@ -36,48 +36,6 @@ inline bool NetworkConfigurationMatchesExceptInput(const NetworkRenderConfigurat
     auto a=left,b=right;a.inputWidth=b.inputWidth=0;a.inputHeight=b.inputHeight=0;return a==b;
 }
 
-enum class NetworkRendererPlan {
-    ReuseActive,
-    CreateCandidate,
-};
-
-inline NetworkRendererPlan SelectNetworkRendererPlan(
-    NetworkCommitKind kind,
-    const NetworkRenderConfiguration* active,
-    const NetworkRenderConfiguration& prepared)
-{
-    if (kind == NetworkCommitKind::Seek && active && *active == prepared)
-        return NetworkRendererPlan::ReuseActive;
-    return NetworkRendererPlan::CreateCandidate;
-}
-
-struct NetworkPreparedFrameDescriptor {
-    uint32_t width{};
-    uint32_t height{};
-    size_t rowBytes{};
-    size_t frameBytes{};
-    bool decoderReady{false};
-};
-
-inline bool NetworkPreparedFrameIsCompatible(
-    const NetworkRenderConfiguration& active,
-    const NetworkRenderConfiguration& prepared,
-    const NetworkPreparedFrameDescriptor& frame)
-{
-    if (active != prepared || !frame.decoderReady ||
-        frame.width != prepared.decodeWidth || frame.height != prepared.decodeHeight ||
-        !prepared.sourceWidth || !prepared.sourceHeight || !prepared.inputWidth ||
-        !prepared.inputHeight || !prepared.outputWidth || !prepared.outputHeight ||
-        !prepared.guideWidth || !prepared.guideHeight) {
-        return false;
-    }
-    constexpr size_t bytesPerPixel=4;
-    if(frame.width>std::numeric_limits<size_t>::max()/bytesPerPixel)return false;
-    const size_t expectedRow=static_cast<size_t>(frame.width)*bytesPerPixel;
-    if(frame.rowBytes!=expectedRow||frame.height>std::numeric_limits<size_t>::max()/expectedRow)return false;
-    return frame.frameBytes==expectedRow*frame.height;
-}
-
 inline bool NetworkPreparedGeometryIsValid(const NetworkRenderConfiguration& configuration,
                                            uint32_t frameWidth,
                                            uint32_t frameHeight,
@@ -112,23 +70,13 @@ bool ExecuteNetworkCandidateTransaction(Factory&& factory,
     return true;
 }
 
-template<class Validator, class Committer, class FirstRenderer>
-bool ExecuteCompatibleNetworkSeek(Validator&& validate,
-                                  Committer&& commit,
-                                  FirstRenderer&& renderFirst)
-{
-    if(!std::forward<Validator>(validate)())return false;
-    std::forward<Committer>(commit)();
-    return std::forward<FirstRenderer>(renderFirst)();
-}
-
 template<class StopOld, class InstallPrepared, class ActivatePrepared>
 void CommitPreparedAudioHandoff(StopOld&& stopOld,
                                 InstallPrepared&& installPrepared,
                                 ActivatePrepared&& activatePrepared)
 {
-    std::forward<StopOld>(stopOld)();
     std::forward<InstallPrepared>(installPrepared)();
+    std::forward<StopOld>(stopOld)();
     std::forward<ActivatePrepared>(activatePrepared)();
 }
 
