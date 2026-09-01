@@ -18,12 +18,17 @@ The included `nvngx_dlssnr.dll` is modified and its Authenticode status is
 
 - Local MP4, MKV, MOV, WebM, AVI, and other FFmpeg-supported media.
 - Public, non-DRM YouTube videos that do not require login, payment, or cookies.
+- **Video > YouTube source quality** selects Auto, 2160p, 1440p, 1080p,
+  720p, or 480p. A fixed choice uses the best available stream at or below
+  that height; changing it preserves the current playback position.
 - Drag/drop, play/pause, ±10-second seek, timeline seek, volume/mute, aspect,
   fullscreen, debug views, and post-DLSS image adjustments.
 - `D` toggles native DLSS; `F6` recreates the NGX feature.
 
 YouTube availability, regional access, and upstream formats can change. Private,
 login-required, paid, age-gated, and DRM-protected videos are not supported.
+Source quality is separate from **DLSS > Mode / quality**, which controls the
+renderer rather than the YouTube stream.
 
 ## Neural mode and safe mode
 

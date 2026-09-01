@@ -20,6 +20,12 @@ age-gated, cookie-dependent, or DRM-protected videos are outside the resolver
 contract. Availability and region access can change. Local playback remains
 available when YouTube resolution is unavailable.
 
+## YouTube video quality is too low
+
+Choose **Video > YouTube source quality**. Auto requests the best available
+stream; a fixed height falls back to the best stream below it. This setting is
+separate from **DLSS > Mode / quality**.
+
 ## Playback drops frames
 
 Use Auto, Balanced, or Performance quality at a lower output resolution. The

@@ -2,9 +2,12 @@
 
 #include <windows.h>
 
+#include <optional>
+
 #include "ExampleVideos.h"
 
 class Localizer;
+enum class YouTubeSourceQuality;
 
 namespace app_menu {
 
@@ -35,6 +38,12 @@ inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_FULLSCREEN = 402;
 inline constexpr UINT IDM_VIDEO_ADJUSTMENTS = 403;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_AUTO = 410;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_2160 = 411;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_1440 = 412;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_1080 = 413;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_720 = 414;
+inline constexpr UINT IDM_YOUTUBE_QUALITY_480 = 415;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 
 enum class PlayerCommandRoute {
@@ -49,5 +58,8 @@ bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown)
 const ExampleVideo* ExampleVideoForCommand(UINT command);
 bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
                                     bool youtubeEnabled);
+std::optional<YouTubeSourceQuality> YouTubeQualityForCommand(UINT command);
+UINT CommandForYouTubeQuality(YouTubeSourceQuality quality);
+bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality);
 
 } // namespace app_menu

@@ -1020,6 +1020,49 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     if (menu) DestroyMenu(menu);
 }
 
+void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    HMENU video = find_top_level_submenu(menu, L"Video");
+    HMENU quality = find_top_level_submenu(video, L"YouTube source quality");
+    CHECK(video != nullptr);
+    CHECK(quality != nullptr);
+
+    const std::array expected{
+        std::pair{L"Auto (best available)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
+        std::pair{L"2160p", app_menu::IDM_YOUTUBE_QUALITY_2160},
+        std::pair{L"1440p", app_menu::IDM_YOUTUBE_QUALITY_1440},
+        std::pair{L"1080p", app_menu::IDM_YOUTUBE_QUALITY_1080},
+        std::pair{L"720p", app_menu::IDM_YOUTUBE_QUALITY_720},
+        std::pair{L"480p", app_menu::IDM_YOUTUBE_QUALITY_480},
+    };
+    std::vector<MenuEntry> entries;
+    if (quality) collect_menu_entries(quality, entries);
+    CHECK_EQ(expected.size(), entries.size());
+    for (const auto& [label, command] : expected) {
+        CHECK(has_menu_entry(entries, label, command));
+        const auto selected = app_menu::YouTubeQualityForCommand(command);
+        CHECK(selected.has_value());
+        if (selected) CHECK_EQ(command, app_menu::CommandForYouTubeQuality(*selected));
+    }
+    for (const auto& entry : entries) {
+        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_AUTO,
+                 (entry.state & MFS_CHECKED) != 0);
+    }
+
+    CHECK(app_menu::UpdateYouTubeQualitySelection(menu, YouTubeSourceQuality::P1080));
+    entries.clear();
+    if (quality) collect_menu_entries(quality, entries);
+    for (const auto& entry : entries) {
+        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_1080,
+                 (entry.state & MFS_CHECKED) != 0);
+    }
+    CHECK(!app_menu::YouTubeQualityForCommand(app_menu::IDM_QUALITY_AUTO).has_value());
+    if (menu) DestroyMenu(menu);
+}
+
 void youtube_availability_drives_real_menu_and_idle_action_consistently_test()
 {
     Localizer localizer;
@@ -2722,10 +2765,23 @@ void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
         CHECK(result.ok);
         CHECK_EQ(ResolveError::None, result.error);
         CHECK_EQ(std::wstring(test.expected), result.mediaUrl);
+        CHECK_EQ(std::wstring(test.expected), result.audioUrl);
         CHECK(result.detail.empty());
         CHECK(result.mediaUrl.find(L'\r') == std::wstring::npos);
         CHECK(result.mediaUrl.find(L'\n') == std::wstring::npos);
     }
+}
+
+void resolver_output_accepts_separate_https_video_and_audio_urls_test()
+{
+    const ResolveResult result = ParseResolverOutput(
+        "https://v1.googlevideo.com/videoplayback?id=video\r\n"
+        "https://a1.googlevideo.com/videoplayback?id=audio\r\n", 0);
+    CHECK(result.ok);
+    CHECK_EQ(std::wstring(L"https://v1.googlevideo.com/videoplayback?id=video"),
+             result.mediaUrl);
+    CHECK_EQ(std::wstring(L"https://a1.googlevideo.com/videoplayback?id=audio"),
+             result.audioUrl);
 }
 
 void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
@@ -2733,7 +2789,7 @@ void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
     const std::vector<std::string> rejected{
         "",
         "\r\n",
-        "https://a.googlevideo.com/one\nhttps://b.googlevideo.com/two",
+        "https://a.googlevideo.com/one\nhttps://b.googlevideo.com/two\nhttps://c.googlevideo.com/three",
         "http://a.googlevideo.com/videoplayback?id=abc",
         "https://googlevideo.com.evil.example/videoplayback?id=abc",
         "https://evilgooglevideo.com/videoplayback?id=abc",
@@ -2755,6 +2811,7 @@ void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
         CHECK(!result.ok);
         CHECK_EQ(ResolveError::InvalidOutput, result.error);
         CHECK(result.mediaUrl.empty());
+        CHECK(result.audioUrl.empty());
         CHECK(result.detail.size() <= 4096);
         CHECK(result.detail.find(L"http") == std::wstring::npos);
         CHECK(result.detail.find(L"googlevideo") == std::wstring::npos);
@@ -2840,15 +2897,35 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--no-warnings",
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
-        L"--extractor-args",
-        L"youtube:player_client=android",
         L"-f",
-        L"b[ext=mp4]/b",
+        L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b",
         L"--get-url",
         std::wstring(url),
     };
 
-    CHECK_EQ(expected, BuildYouTubeResolverArguments(helperDirectory, url));
+    CHECK_EQ(expected, BuildYouTubeResolverArguments(
+                           helperDirectory, url, YouTubeSourceQuality::P1080));
+}
+
+void youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test()
+{
+    const std::array cases{
+        std::pair{YouTubeSourceQuality::Auto,
+                  std::wstring_view(L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b")},
+        std::pair{YouTubeSourceQuality::P2160,
+                  std::wstring_view(L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b")},
+        std::pair{YouTubeSourceQuality::P1440,
+                  std::wstring_view(L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b")},
+        std::pair{YouTubeSourceQuality::P1080,
+                  std::wstring_view(L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b")},
+        std::pair{YouTubeSourceQuality::P720,
+                  std::wstring_view(L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b")},
+        std::pair{YouTubeSourceQuality::P480,
+                  std::wstring_view(L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b")},
+    };
+    for (const auto& [quality, expected] : cases) {
+        CHECK_EQ(expected, YouTubeFormatSelector(quality));
+    }
 }
 
 std::filesystem::path current_test_executable()
@@ -3418,6 +3495,8 @@ void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_
     CHECK_EQ(ResolveError::None, result.error);
     CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=success"),
              result.mediaUrl);
+    CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=success-audio"),
+             result.audioUrl);
     CHECK(result.detail.empty());
 }
 
@@ -3599,18 +3678,16 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 14 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 12 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
         std::wstring_view(argv[5]) != L"--no-warnings" ||
         std::wstring_view(argv[6]) != L"--js-runtimes" ||
         !std::wstring_view(argv[7]).starts_with(L"deno:") ||
-        std::wstring_view(argv[8]) != L"--extractor-args" ||
-        std::wstring_view(argv[9]) != L"youtube:player_client=android" ||
-        std::wstring_view(argv[10]) != L"-f" ||
-        std::wstring_view(argv[11]) != L"b[ext=mp4]/b" ||
-        std::wstring_view(argv[12]) != L"--get-url") {
+        std::wstring_view(argv[8]) != L"-f" ||
+        std::wstring_view(argv[9]) != L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b" ||
+        std::wstring_view(argv[10]) != L"--get-url") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -3622,7 +3699,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[13];
+    const std::wstring_view url = argv[11];
     if (url.find(L"envcapture") != std::wstring_view::npos) {
         const std::filesystem::path expectedCache =
             current_test_executable().parent_path() / L"youtube-helper-cache";
@@ -3647,7 +3724,8 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 0;
     }
     if (url.find(L"success") != std::wstring_view::npos) {
-        std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n" << std::flush;
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n"
+                     "https://r1.googlevideo.com/videoplayback?id=success-audio\n" << std::flush;
         return 0;
     }
     if (url.find(L"uismoke") != std::wstring_view::npos) {
@@ -4253,6 +4331,7 @@ int wmain(int argc, wchar_t* argv[])
     failed_icon_font_uses_label_only_presentation_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
+    youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();
     youtube_availability_drives_real_menu_and_idle_action_consistently_test();
     youtube_resolution_generation_accepts_only_the_current_completion_test();
     youtube_resolution_disables_only_conflicting_source_actions_test();
@@ -4331,11 +4410,13 @@ int wmain(int argc, wchar_t* argv[])
     youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test();
     youtube_url_validation_enforces_exact_2048_character_boundary_test();
     resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test();
+    resolver_output_accepts_separate_https_video_and_audio_urls_test();
     resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
     resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test();
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
     youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
+    youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
     youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
     youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();

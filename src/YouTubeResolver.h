@@ -26,9 +26,19 @@ enum class ResolveError {
     InvalidOutput,
 };
 
+enum class YouTubeSourceQuality {
+    Auto,
+    P2160,
+    P1440,
+    P1080,
+    P720,
+    P480,
+};
+
 struct ResolveResult {
     bool ok{false};
     std::wstring mediaUrl;
+    std::wstring audioUrl;
     ResolveError error{ResolveError::None};
     std::wstring detail;
 };
@@ -36,11 +46,13 @@ struct ResolveResult {
 bool IsSupportedYouTubeUrl(std::wstring_view value);
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
+std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality);
 #ifdef YOUTUBE_RESOLVER_TESTING
 std::wstring QuoteWindowsArgument(std::wstring_view argument);
 std::vector<std::wstring> BuildYouTubeResolverArguments(
     const std::filesystem::path& helperDirectory,
-    std::wstring_view youtubeUrl);
+    std::wstring_view youtubeUrl,
+    YouTubeSourceQuality quality);
 #endif
 
 class YouTubeResolver {
@@ -52,6 +64,8 @@ public:
     YouTubeResolver& operator=(const YouTubeResolver&) = delete;
 
     ResolveResult Resolve(std::wstring_view youtubeUrl, std::stop_token stop);
+    ResolveResult Resolve(std::wstring_view youtubeUrl, YouTubeSourceQuality quality,
+                          std::stop_token stop);
     void Cancel();
 
 #ifdef YOUTUBE_RESOLVER_TESTING

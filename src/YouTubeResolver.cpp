@@ -481,24 +481,64 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     } else if (stdoutBytes.ends_with("\n")) {
         stdoutBytes.remove_suffix(1);
     }
-    if (stdoutBytes.empty() ||
-        stdoutBytes.find_first_of("\r\n") != std::string_view::npos) {
+    if (stdoutBytes.empty()) return invalid_output();
+
+    const size_t separator = stdoutBytes.find('\n');
+    if (separator != std::string_view::npos &&
+        stdoutBytes.find('\n', separator + 1) != std::string_view::npos) {
+        return invalid_output();
+    }
+    std::string_view videoBytes = separator == std::string_view::npos
+                                      ? stdoutBytes
+                                      : stdoutBytes.substr(0, separator);
+    std::string_view audioBytes = separator == std::string_view::npos
+                                      ? videoBytes
+                                      : stdoutBytes.substr(separator + 1);
+    if (separator != std::string_view::npos && videoBytes.ends_with('\r')) {
+        videoBytes.remove_suffix(1);
+    }
+    if (videoBytes.empty() || audioBytes.empty() ||
+        videoBytes.find_first_of("\r\n") != std::string_view::npos ||
+        audioBytes.find_first_of("\r\n") != std::string_view::npos) {
         return invalid_output();
     }
 
-    std::wstring mediaUrl = utf8_to_wide(stdoutBytes);
-    if (mediaUrl.empty() || has_forbidden_input_character(mediaUrl)) return invalid_output();
-
-    CrackedUrl url;
-    if (!crack_url(mediaUrl, url) || url.scheme != INTERNET_SCHEME_HTTPS ||
-        url.hasUserInfo || !has_dot_bound_suffix(url.host, L"googlevideo.com")) {
+    std::wstring mediaUrl = utf8_to_wide(videoBytes);
+    std::wstring audioUrl = utf8_to_wide(audioBytes);
+    const auto trustedStreamUrl = [](const std::wstring& value) {
+        if (value.empty() || has_forbidden_input_character(value)) return false;
+        CrackedUrl url;
+        return crack_url(value, url) && url.scheme == INTERNET_SCHEME_HTTPS &&
+               !url.hasUserInfo && has_dot_bound_suffix(url.host, L"googlevideo.com");
+    };
+    if (!trustedStreamUrl(mediaUrl) || !trustedStreamUrl(audioUrl)) {
         return invalid_output();
     }
 
     ResolveResult result;
     result.ok = true;
     result.mediaUrl = std::move(mediaUrl);
+    result.audioUrl = std::move(audioUrl);
     return result;
+}
+
+std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
+{
+    switch (quality) {
+    case YouTubeSourceQuality::Auto:
+        return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
+    case YouTubeSourceQuality::P2160:
+        return L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b";
+    case YouTubeSourceQuality::P1440:
+        return L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b";
+    case YouTubeSourceQuality::P1080:
+        return L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b";
+    case YouTubeSourceQuality::P720:
+        return L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b";
+    case YouTubeSourceQuality::P480:
+        return L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b";
+    }
+    return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
 }
 
 namespace {
@@ -534,7 +574,8 @@ std::wstring quote_windows_argument(std::wstring_view argument)
 
 std::vector<std::wstring> build_youtube_resolver_arguments(
     const std::filesystem::path& helperDirectory,
-    std::wstring_view youtubeUrl)
+    std::wstring_view youtubeUrl,
+    YouTubeSourceQuality quality)
 {
     return {
         L"--no-config",
@@ -544,10 +585,8 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"--no-warnings",
         L"--js-runtimes",
         L"deno:" + (helperDirectory / L"deno.exe").wstring(),
-        L"--extractor-args",
-        L"youtube:player_client=android",
         L"-f",
-        L"b[ext=mp4]/b",
+        std::wstring(YouTubeFormatSelector(quality)),
         L"--get-url",
         std::wstring(youtubeUrl),
     };
@@ -563,9 +602,10 @@ std::wstring QuoteWindowsArgument(std::wstring_view argument)
 
 std::vector<std::wstring> BuildYouTubeResolverArguments(
     const std::filesystem::path& helperDirectory,
-    std::wstring_view youtubeUrl)
+    std::wstring_view youtubeUrl,
+    YouTubeSourceQuality quality)
 {
-    return build_youtube_resolver_arguments(helperDirectory, youtubeUrl);
+    return build_youtube_resolver_arguments(helperDirectory, youtubeUrl, quality);
 }
 #endif
 
@@ -606,6 +646,13 @@ void YouTubeResolver::Cancel()
 }
 
 ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_token stop)
+{
+    return Resolve(youtubeUrl, YouTubeSourceQuality::Auto, stop);
+}
+
+ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
+                                       YouTubeSourceQuality quality,
+                                       std::stop_token stop)
 {
     const std::unique_lock operationLock(resolveMutex_);
     {
@@ -700,7 +747,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl, std::stop_t
     }
 
     const std::vector<std::wstring> arguments =
-        build_youtube_resolver_arguments(verifiedHelpers.directoryPath, youtubeUrl);
+        build_youtube_resolver_arguments(verifiedHelpers.directoryPath, youtubeUrl, quality);
     auto childEnvironment =
         child_environment_with_package_cache(verifiedHelpers.cacheDirectoryPath);
     if (!childEnvironment) {
