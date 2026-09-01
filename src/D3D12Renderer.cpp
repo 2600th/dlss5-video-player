@@ -1,4 +1,5 @@
 #include "D3D12Renderer.h"
+#include "D3D12FenceWait.h"
 #include "Log.h"
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -416,8 +417,15 @@ void D3D12Renderer::SignalFrameSlot(uint32_t slot){
 }
 void D3D12Renderer::WaitGPU(){
     if(!m_queue||!m_fence||!m_fenceEvent)return;
-    uint64_t v=++m_fenceValue;m_queue->Signal(m_fence.Get(),v);
-    if(m_fence->GetCompletedValue()<v){m_fence->SetEventOnCompletion(v,m_fenceEvent);WaitForSingleObject(m_fenceEvent,INFINITE);}
+    const uint64_t v=++m_fenceValue;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+        v,
+        [&](uint64_t value){return m_queue->Signal(m_fence.Get(),value);},
+        [&]{return m_fence->GetCompletedValue();},
+        [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
+        [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
+    if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)
+        LOG("GPU teardown wait failed.");
 }
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::RTV(uint32_t i)const{auto h=m_rtvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*m_rtvInc;return h;}
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::DSV()const{return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();}

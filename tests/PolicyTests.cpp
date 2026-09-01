@@ -13,6 +13,7 @@
 #include "VideoDecoder.h"
 #include "AudioPlayer.h"
 #include "NetworkMediaTransaction.h"
+#include "D3D12FenceWait.h"
 #ifdef small
 #undef small
 #endif
@@ -1320,15 +1321,15 @@ void youtube_candidate_seek_render_failure_preserves_all_active_state_before_com
         [&](Candidate& candidate){order.push_back(2);return candidate.renderFirst;},
         [&](std::unique_ptr<Candidate> candidate){
             CommitPreparedAudioHandoff(
-                [&]{order.push_back(3);++oldStopCount;},
-                [&]{order.push_back(4);active={candidate->decoder,candidate->audio,
+                [&]{order.push_back(3);active={candidate->decoder,candidate->audio,
                     candidate->renderer,candidate->renderWindow,candidate->quality,
                     false,false,24.0,240000000,0,0};},
-                [&]{order.push_back(5);active.playing=true;});
-            order.push_back(6);++oldRendererDestroyCount;
+                [&]{order.push_back(4);},
+                [&]{order.push_back(5);++oldStopCount;++oldRendererDestroyCount;},
+                [&]{order.push_back(6);active.playing=true;});
         });
     CHECK(committed);
-    CHECK_EQ(std::vector<int>({1,2,4,3,5,6}),order);
+    CHECK_EQ(std::vector<int>({1,2,3,4,5,6}),order);
     CHECK_EQ(1,oldStopCount);
     CHECK_EQ(1,oldRendererDestroyCount);
     CHECK_EQ(12,active.decoder);CHECK_EQ(22,active.audio);
@@ -1396,11 +1397,12 @@ void youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_
             fourth->configuration,960,540,static_cast<size_t>(960)*540*4);},
         [&](std::unique_ptr<int> renderer){
             CommitPreparedAudioHandoff(
-                [&]{handoff.push_back(1);retiringAudio=0;},
-                [&]{handoff.push_back(2);activeDecoder=fourth->decoder;activeRenderer=*renderer;activeAudio=fourth->audio;},
-                [&]{handoff.push_back(3);});
+                [&]{handoff.push_back(1);activeDecoder=fourth->decoder;activeRenderer=*renderer;activeAudio=fourth->audio;},
+                [&]{handoff.push_back(2);},
+                [&]{handoff.push_back(3);retiringAudio=0;},
+                [&]{handoff.push_back(4);});
         });
-    CHECK(committed);CHECK_EQ(std::vector<int>({2,1,3}),handoff);
+    CHECK(committed);CHECK_EQ(std::vector<int>({1,2,3,4}),handoff);
     CHECK_EQ(0,retiringAudio);
     CHECK_EQ(14,activeDecoder);CHECK_EQ(24,activeRenderer);CHECK_EQ(34,activeAudio);
     CHECK(!registry.Take(fourthToken));
@@ -1535,6 +1537,62 @@ void harness_sanity_test()
 {
     CHECK(true);
     CHECK_EQ(2 + 2, 4);
+}
+
+void gpu_teardown_fence_signal_failure_stops_before_event_registration_test()
+{
+    int completionQueries=0,eventRegistrations=0,waits=0;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+        uint64_t{41},
+        [&](uint64_t value){CHECK_EQ(uint64_t{41},value);return E_FAIL;},
+        [&]{++completionQueries;return uint64_t{0};},
+        [&](uint64_t){++eventRegistrations;return S_OK;},
+        [&](DWORD){++waits;return DWORD{WAIT_OBJECT_0};});
+
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::SignalFailed,result);
+    CHECK_EQ(0,completionQueries);CHECK_EQ(0,eventRegistrations);CHECK_EQ(0,waits);
+}
+
+void gpu_teardown_fence_event_registration_failure_stops_before_wait_test()
+{
+    int eventRegistrations=0,waits=0;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+        uint64_t{42},
+        [](uint64_t){return S_OK;},
+        []{return uint64_t{0};},
+        [&](uint64_t value){CHECK_EQ(uint64_t{42},value);++eventRegistrations;return E_FAIL;},
+        [&](DWORD){++waits;return DWORD{WAIT_OBJECT_0};});
+
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::EventRegistrationFailed,result);
+    CHECK_EQ(1,eventRegistrations);CHECK_EQ(0,waits);
+}
+
+void gpu_teardown_fence_wait_failure_is_bounded_and_reported_test()
+{
+    DWORD observedTimeout=INFINITE;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+        uint64_t{43},
+        [](uint64_t){return S_OK;},
+        []{return uint64_t{0};},
+        [](uint64_t){return S_OK;},
+        [&](DWORD timeout){observedTimeout=timeout;return DWORD{WAIT_FAILED};});
+
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::WaitFailed,result);
+    CHECK(observedTimeout!=INFINITE);CHECK(observedTimeout<=DWORD{2000});
+}
+
+void gpu_teardown_fence_timeout_is_bounded_and_reported_test()
+{
+    DWORD observedTimeout=INFINITE;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+        uint64_t{44},
+        [](uint64_t){return S_OK;},
+        []{return uint64_t{0};},
+        [](uint64_t){return S_OK;},
+        [&](DWORD timeout){observedTimeout=timeout;return DWORD{WAIT_TIMEOUT};});
+
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::TimedOut,result);
+    CHECK(observedTimeout!=INFINITE);CHECK(observedTimeout<=DWORD{2000});
 }
 
 void gpu_classification_table_test()
@@ -2754,11 +2812,67 @@ void youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test()
     MediaFixture fixture;auto prepared=AudioPlayerTestAccess::Create(fixture.directory);
     CHECK(prepared->Start(L"https://media.invalid/audiotrickle",12.25,AudioStartState::Paused));CHECK(prepared->Paused());CHECK_EQ(12.25,AudioPlayerTestAccess::SeekBase(*prepared));Sleep(60);CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*prepared));
     bool oldAudible=true,newAudible=false;std::vector<int> order;
-    CommitPreparedAudioHandoff([&]{CHECK(oldAudible);CHECK(!newAudible);oldAudible=false;order.push_back(1);},[&]{CHECK(oldAudible);CHECK(!newAudible);order.push_back(2);},[&]{CHECK(!oldAudible);prepared->Pause(false);newAudible=true;order.push_back(3);});
-    CHECK_EQ(std::vector<int>({2,1,3}),order);CHECK(!prepared->Paused());
+    CommitPreparedAudioHandoff(
+        [&]{CHECK(oldAudible);CHECK(!newAudible);CHECK(prepared->Paused());order.push_back(1);},
+        [&]{CHECK(oldAudible);CHECK(!newAudible);CHECK(prepared->Paused());order.push_back(2);},
+        [&]{CHECK(oldAudible);CHECK(!newAudible);CHECK(prepared->Paused());oldAudible=false;order.push_back(3);},
+        [&]{CHECK(!oldAudible);prepared->Pause(false);newAudible=true;order.push_back(4);});
+    CHECK_EQ(std::vector<int>({1,2,3,4}),order);CHECK(!prepared->Paused());
     prepared->Stop();
 
     auto cancelled=AudioPlayerTestAccess::Create(fixture.directory);CHECK(cancelled->Start(L"https://media.invalid/audiohold",4.0,AudioStartState::Paused));CHECK_EQ(uint64_t{0},AudioPlayerTestAccess::SubmittedBuffers(*cancelled));cancelled.reset();
+}
+
+void youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test()
+{
+    enum Event {
+        InstallCandidate=1,
+        ShowCandidate,
+        RetireOldAudio,
+        RetireOldDecoder,
+        RetireOldRenderer,
+        RetireOldWindow,
+        EstablishClocks,
+        ActivatePreparedAudio,
+    };
+    std::vector<int> order;
+    std::array<int,4> retireCounts{};
+    const std::array<int,4> expectedRetireCounts{1,1,1,1};
+    bool candidateInstalled=false,candidateVisible=false,preparedAudioPaused=true;
+
+    CommitPreparedAudioHandoff(
+        [&]{
+            CHECK(preparedAudioPaused);
+            candidateInstalled=true;
+            order.push_back(InstallCandidate);
+        },
+        [&]{
+            CHECK(candidateInstalled);
+            CHECK(preparedAudioPaused);
+            candidateVisible=true;
+            order.push_back(ShowCandidate);
+        },
+        [&]{
+            CHECK(candidateVisible);
+            CHECK(preparedAudioPaused);
+            ++retireCounts[0];order.push_back(RetireOldAudio);
+            ++retireCounts[1];order.push_back(RetireOldDecoder);
+            ++retireCounts[2];order.push_back(RetireOldRenderer);
+            ++retireCounts[3];order.push_back(RetireOldWindow);
+        },
+        [&]{
+            CHECK(candidateVisible);
+            CHECK_EQ(expectedRetireCounts,retireCounts);
+            order.push_back(EstablishClocks);
+            preparedAudioPaused=false;
+            order.push_back(ActivatePreparedAudio);
+        });
+
+    CHECK_EQ(std::vector<int>({InstallCandidate,ShowCandidate,RetireOldAudio,
+              RetireOldDecoder,RetireOldRenderer,RetireOldWindow,
+              EstablishClocks,ActivatePreparedAudio}),order);
+    CHECK(!preparedAudioPaused);
+    CHECK_EQ(expectedRetireCounts,retireCounts);
 }
 
 void youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test()
@@ -3590,8 +3704,13 @@ int wmain(int argc, wchar_t* argv[])
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
     youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();
     youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test();
+    youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test();
     youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
+    gpu_teardown_fence_signal_failure_stops_before_event_registration_test();
+    gpu_teardown_fence_event_registration_failure_stops_before_wait_test();
+    gpu_teardown_fence_wait_failure_is_bounded_and_reported_test();
+    gpu_teardown_fence_timeout_is_bounded_and_reported_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
     bootstrap_action_matrix_test();

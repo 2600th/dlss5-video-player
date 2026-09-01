@@ -70,13 +70,15 @@ bool ExecuteNetworkCandidateTransaction(Factory&& factory,
     return true;
 }
 
-template<class StopOld, class InstallPrepared, class ActivatePrepared>
-void CommitPreparedAudioHandoff(StopOld&& stopOld,
-                                InstallPrepared&& installPrepared,
+template<class InstallPrepared, class MakeVisible, class RetireOld, class ActivatePrepared>
+void CommitPreparedAudioHandoff(InstallPrepared&& installPrepared,
+                                MakeVisible&& makeVisible,
+                                RetireOld&& retireOld,
                                 ActivatePrepared&& activatePrepared)
 {
     std::forward<InstallPrepared>(installPrepared)();
-    std::forward<StopOld>(stopOld)();
+    std::forward<MakeVisible>(makeVisible)();
+    std::forward<RetireOld>(retireOld)();
     std::forward<ActivatePrepared>(activatePrepared)();
 }
 

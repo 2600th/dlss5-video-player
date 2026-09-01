@@ -39,6 +39,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/DLSSBackend.h
     src/D3D12Renderer.cpp
     src/D3D12Renderer.h
+    src/D3D12FenceWait.h
     src/TemporalGuides.cpp
     src/TemporalGuides.h
     src/AudioPlayer.cpp
@@ -118,6 +119,7 @@ if(BUILD_TESTING)
         src/AudioPlayer.cpp
         src/AudioPlayer.h
         src/NetworkMediaTransaction.h
+        src/D3D12FenceWait.h
     )
     target_include_directories(PolicyTests PRIVATE src)
     target_compile_definitions(PolicyTests PRIVATE
