@@ -1,7 +1,15 @@
 # Security
 
-This project launches local `ffmpeg.exe` and `ffprobe.exe` helper processes and can load third-party graphics add-ons/DLLs placed beside the executable.
+The player launches only its package-local `ffmpeg.exe`, `ffprobe.exe`,
+`yt-dlp.exe`, and `deno.exe` helpers without a command shell. YouTube support is
+limited to validated public HTTPS video URLs.
 
-Only use runtime files from sources you trust. Experimental DLSS 5, ReShade, RenoDX and Streamline files are outside this repository's trust boundary.
+The experimental package intentionally contains a modified neural DLL with
+Authenticode `HashMismatch`, plus unsigned ReShade/RenoDX files. Those signature
+states are disclosed separately from malware-scan results. The exact release
+inputs are pinned by size and SHA-256 and the package verifier rejects drift or
+unexpected files.
 
-For security-sensitive reports that should not be public, contact the repository maintainer privately rather than posting exploit details in a public issue.
+Redistribution permission for the supplied combined experimental runtime set is
+unresolved. Do not publish a package until the applicable upstream terms have
+been reviewed. Report security-sensitive issues privately to the maintainer.

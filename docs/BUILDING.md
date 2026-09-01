@@ -1,71 +1,34 @@
-# Building
+# Building 0.12.0
 
-## Supported build environment
+The project targets Windows x64 with Visual Studio 2022, CMake, the Windows SDK,
+and C++20. Build inputs are deliberately separate from release packaging.
 
-The project currently targets Windows x64 and Direct3D 12.
+## Pinned local inputs
 
-Required tools:
+- NVIDIA/DLSS checkout at commit
+  `a291cc7d2cc642a51566f3dfd5376f635cd1b284`.
+- A verified FFmpeg/FFprobe pair in `external/ffmpeg/bin`.
+- Pinned Tabler assets and YouTube helpers fetched by the scripts in `tools/`.
+- For release assembly only, the hash-locked files in `external/runtime`.
 
-- Visual Studio 2022 with the **Desktop development with C++** workload
-- Windows 10/11 SDK
-- Git for Windows
-- CMake (the copy bundled with Visual Studio is supported)
+Set `DLSS_SDK_DIR` or `FFMPEG_BIN_DIR` before running `build_windows.bat` when
+those verified inputs live elsewhere. The build script does not search nearby
+folders for alternate DLLs and does not silently replace `nvngx_dlss.dll`.
 
-An internet connection is required for the first one-click build because the script clones the official NVIDIA DLSS SDK and obtains FFmpeg when no local FFmpeg installation is available.
-
-## One-click build
-
-From a normal Command Prompt:
+## Build and test
 
 ```bat
 build_windows.bat
 ```
 
-The script searches for Git, Visual Studio 2022 and CMake, then prepares:
-
-```text
-external/DLSS/
-external/ffmpeg/bin/
-build/
-```
-
-The Release executable is written to:
-
-```text
-build\Release\DLSSVideoPlayer.exe
-```
-
-## Manual CMake build
-
-First make sure the NVIDIA DLSS repository is available at `external/DLSS`:
+For a manual build:
 
 ```bat
-git clone --depth 1 https://github.com/NVIDIA/DLSS.git external\DLSS
-```
-
-Then configure/build:
-
-```bat
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DDLSS_SDK=external/DLSS -DFFMPEG_STAGED_DIR=external/ffmpeg/bin
 cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-FFmpeg is not linked into the executable. `ffmpeg.exe` and `ffprobe.exe` are runtime helpers and should be placed beside the player executable. The one-click build does this automatically.
-
-## Experimental DLSS 5 files
-
-The source project compiles without the experimental DLSS 5 Neural Rendering package. Those files are runtime-only and should not be committed to the repository.
-
-If you place the experimental files beside `build_windows.bat` or in a local `streamline` folder, the build script can stage recognized runtime files into `build\Release` for local testing.
-
-## Compiler settings
-
-The project uses:
-
-- C++20
-- `/W4`
-- `/permissive-`
-- `/EHsc`
-- `/Zc:__cplusplus`
-
-Warnings should be treated as bugs during development even though the project does not globally enable `/WX`.
+`build/Release` is developer output, not a distributable folder. Authorized
+release maintainers assemble and verify the explicit allowlist separately with
+`package_release.bat`. End users do not run build or helper scripts.
