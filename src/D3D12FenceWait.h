@@ -11,11 +11,36 @@ inline constexpr DWORD TeardownFenceWaitMilliseconds=2000;
 
 enum class FenceWaitResult {
     Completed,
+    DeviceRemoved,
     SignalFailed,
     EventRegistrationFailed,
     WaitFailed,
     TimedOut,
 };
+
+template<class CompletedValue, class RegisterEvent, class Wait>
+FenceWaitResult WaitForGPUFenceCompletion(uint64_t value,
+                                          ULONGLONG started,
+                                          CompletedValue&& completedValue,
+                                          RegisterEvent&& registerEvent,
+                                          Wait&& wait)
+{
+    const uint64_t beforeRegistration=completedValue();
+    if(beforeRegistration==UINT64_MAX)return FenceWaitResult::DeviceRemoved;
+    if(beforeRegistration>=value)return FenceWaitResult::Completed;
+    if(FAILED(registerEvent(value)))return FenceWaitResult::EventRegistrationFailed;
+    for(;;){
+        const ULONGLONG elapsed=GetTickCount64()-started;
+        if(elapsed>=TeardownFenceWaitMilliseconds)return FenceWaitResult::TimedOut;
+        const DWORD remaining=static_cast<DWORD>(TeardownFenceWaitMilliseconds-elapsed);
+        const DWORD waitResult=wait(remaining);
+        if(waitResult!=WAIT_OBJECT_0&&waitResult!=WAIT_TIMEOUT)return FenceWaitResult::WaitFailed;
+        const uint64_t completed=completedValue();
+        if(completed==UINT64_MAX)return FenceWaitResult::DeviceRemoved;
+        if(completed>=value)return FenceWaitResult::Completed;
+        if(waitResult==WAIT_TIMEOUT)return FenceWaitResult::TimedOut;
+    }
+}
 
 template<class Signal, class CompletedValue, class RegisterEvent, class Wait>
 FenceWaitResult WaitForGPUFenceTeardown(uint64_t value,
@@ -24,13 +49,11 @@ FenceWaitResult WaitForGPUFenceTeardown(uint64_t value,
                                         RegisterEvent&& registerEvent,
                                         Wait&& wait)
 {
-    if(FAILED(std::forward<Signal>(signal)(value)))return FenceWaitResult::SignalFailed;
-    if(std::forward<CompletedValue>(completedValue)()>=value)return FenceWaitResult::Completed;
-    if(FAILED(std::forward<RegisterEvent>(registerEvent)(value)))return FenceWaitResult::EventRegistrationFailed;
-    const DWORD waitResult=std::forward<Wait>(wait)(TeardownFenceWaitMilliseconds);
-    if(waitResult==WAIT_OBJECT_0)return FenceWaitResult::Completed;
-    if(waitResult==WAIT_TIMEOUT)return FenceWaitResult::TimedOut;
-    return FenceWaitResult::WaitFailed;
+    const ULONGLONG started=GetTickCount64();
+    if(FAILED(signal(value)))return FenceWaitResult::SignalFailed;
+    return WaitForGPUFenceCompletion(value,started,
+        std::forward<CompletedValue>(completedValue),
+        std::forward<RegisterEvent>(registerEvent),std::forward<Wait>(wait));
 }
 
 } // namespace d3d12_renderer_detail

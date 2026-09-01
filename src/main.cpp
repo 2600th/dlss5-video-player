@@ -848,7 +848,7 @@ private:
     }
 
     void Unload() {
-        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
+        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -925,7 +925,13 @@ private:
         if(!m_loaded||m_seeking)return false;SetSeeking(true);sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
         // Seek is deliberately transactional and performed from Tick(), never from a mouse message.
         // Shut down the audio producer first, wait for GPU work, then restart the video decoder.
-        Audio().Stop(); if(m_renderer)m_renderer->WaitGPU(); m_haveNext=false;m_next=VideoFrame{};
+        Audio().Stop();
+        if(m_renderer&&m_renderer->WaitGPU()!=d3d12_renderer_detail::FenceWaitResult::Completed){
+            LOG("Seek aborted after GPU synchronization failure.");
+            Unload();
+            return false;
+        }
+        m_haveNext=false;m_next=VideoFrame{};
         auto readAt=[&](double target,VideoFrame& frame)->bool{
             if(!m_decoder.SeekSeconds(target))return false;
             if(m_decoder.ReadNext(frame))return true;
@@ -1273,7 +1279,7 @@ private:
                 m_decoder.Swap(*completion.decoder);oldNetworkAudio=std::move(m_networkAudio);m_networkAudio=std::move(completion.audio);
                 oldRenderWindow=m_renderWnd;oldRenderer=std::move(m_renderer);m_renderWnd=candidate->window;candidate->window=nullptr;m_renderer=std::move(candidate->renderer);completion.configuration=candidate->configuration;
             },
-            [&]{ShowWindow(m_viewport,SW_SHOW);if(m_renderWnd)ShowWindow(m_renderWnd,SW_SHOW);},
+            [&]{ShowWindow(m_viewport,SW_SHOW);ShowPreparedRenderWindow(m_viewport,m_renderWnd);},
             [&]{
                 if(oldNetworkAudio)oldNetworkAudio.reset();else m_audio.Stop();
                 completion.decoder.reset();oldRenderer.reset();

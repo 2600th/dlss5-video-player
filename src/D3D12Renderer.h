@@ -4,7 +4,17 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
+
+#ifdef D3D12_RENDERER_TESTING
+#include <functional>
+#include <memory>
+struct D3D12RendererTestAccess;
+struct D3D12RendererTestOwnedResource {
+    virtual ~D3D12RendererTestOwnedResource()=default;
+};
+#endif
 
 class D3D12Renderer {
 public:
@@ -45,7 +55,7 @@ public:
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
     bool DLSSLastEvaluationUsedC() const { return m_dlss.LastEvaluationUsedC(); }
     NVSDK_NGX_Result DLSSLastResult() const { return m_dlss.LastResult(); }
-    void WaitGPU();
+    d3d12_renderer_detail::FenceWaitResult WaitGPU();
     bool PresentCurrent();
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; }
     const ColorSettings& GetColorSettings() const { return m_colorSettings; }
@@ -63,7 +73,7 @@ private:
     bool CreateHeapsAndBackbuffers();
     bool CreatePipelines();
     bool CreateVideoResources();
-    bool InitializeDLSS();
+    bool InitializeDLSS(bool& gpuSynchronized);
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
                                 Microsoft::WRL::ComPtr<ID3D12Resource>& upload,
                                 uint8_t*& mapped,
@@ -76,6 +86,8 @@ private:
                         const void* src, size_t tightRowBytes, uint32_t rows);
     bool WaitForFrameSlot(uint32_t slot);
     void SignalFrameSlot(uint32_t slot);
+    bool WaitGPUForContinuedUse();
+    void ForceDeviceRemovalForTeardown();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
     D3D12_CPU_DESCRIPTOR_HANDLE RTV(uint32_t index) const;
@@ -91,6 +103,7 @@ private:
     Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
+    Microsoft::WRL::ComPtr<ID3D12Device5> m_device5;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapchain;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_allocators[FrameCount];
@@ -146,5 +159,13 @@ private:
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;
+    bool m_gpuUnusable = false;
     DLSSBackend m_dlss;
+
+#ifdef D3D12_RENDERER_TESTING
+    friend struct D3D12RendererTestAccess;
+    std::function<d3d12_renderer_detail::FenceWaitResult()> m_testWaitGPU;
+    std::function<void()> m_testRemoveDevice;
+    std::unique_ptr<D3D12RendererTestOwnedResource> m_testOwnedResource;
+#endif
 };

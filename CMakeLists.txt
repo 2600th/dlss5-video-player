@@ -120,13 +120,18 @@ if(BUILD_TESTING)
         src/AudioPlayer.h
         src/NetworkMediaTransaction.h
         src/D3D12FenceWait.h
+        src/D3D12Renderer.cpp
+        src/D3D12Renderer.h
+        src/DLSSBackend.cpp
+        src/DLSSBackend.h
     )
-    target_include_directories(PolicyTests PRIVATE src)
+    target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include")
     target_compile_definitions(PolicyTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING VIDEO_DECODER_TESTING AUDIO_PLAYER_TESTING
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING VIDEO_DECODER_TESTING AUDIO_PLAYER_TESTING D3D12_RENDERER_TESTING
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(PolicyTests PRIVATE dxgi shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32 winmm)
+    target_link_directories(PolicyTests PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(PolicyTests PRIVATE d3d12 dxgi dxguid d3dcompiler shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32 winmm nvsdk_ngx_d)
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 

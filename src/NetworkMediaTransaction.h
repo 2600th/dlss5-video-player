@@ -2,6 +2,7 @@
 
 #include "VideoDecoder.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -80,6 +81,16 @@ void CommitPreparedAudioHandoff(InstallPrepared&& installPrepared,
     std::forward<MakeVisible>(makeVisible)();
     std::forward<RetireOld>(retireOld)();
     std::forward<ActivatePrepared>(activatePrepared)();
+}
+
+inline void ShowPreparedRenderWindow(HWND viewport,HWND renderWindow)
+{
+    if(!viewport||!renderWindow)return;
+    RECT bounds{};
+    if(!GetClientRect(viewport,&bounds))return;
+    const int width=std::max<LONG>(1,bounds.right-bounds.left);
+    const int height=std::max<LONG>(1,bounds.bottom-bounds.top);
+    SetWindowPos(renderWindow,HWND_TOP,0,0,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);
 }
 
 enum class NetworkReadPosition {

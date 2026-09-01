@@ -25,7 +25,15 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r,D3D12_RESOURCE_STATES
 }
 
 D3D12Renderer::~D3D12Renderer() {
-    WaitGPU();
+    const auto drainResult=WaitGPU();
+    if(drainResult!=d3d12_renderer_detail::FenceWaitResult::Completed &&
+       drainResult!=d3d12_renderer_detail::FenceWaitResult::DeviceRemoved) {
+        LOG("GPU teardown drain failed; forcing device removal before releasing renderer resources.");
+        ForceDeviceRemovalForTeardown();
+    }
+#if defined(D3D12_RENDERER_TESTING)
+    m_testOwnedResource.reset();
+#endif
     for (uint32_t i=0;i<FrameCount;++i) {
         if (m_upload[i] && m_uploadMapped[i]) m_upload[i]->Unmap(0,nullptr);
         if (m_guideUpload[i] && m_guideMapped[i]) m_guideUpload[i]->Unmap(0,nullptr);
@@ -40,7 +48,9 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
-    if(!InitializeDLSS()) {
+    bool gpuSynchronized=false;
+    if(!InitializeDLSS(gpuSynchronized)) {
+        if(!gpuSynchronized)return false;
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
         m_renderW=std::max(1u,outputW*2u/3u); m_renderH=std::max(1u,outputH*2u/3u);
     }
@@ -65,6 +75,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     if(!m_adapter)m_adapter=fallback; if(!m_adapter){LOG("No D3D12 hardware adapter.");return false;}
     DXGI_ADAPTER_DESC1 ad{};m_adapter->GetDesc1(&ad);LOG("D3D12 adapter vendor=0x"<<std::hex<<ad.VendorId<<" device=0x"<<ad.DeviceId);
     if(!HR(D3D12CreateDevice(m_adapter.Get(),D3D_FEATURE_LEVEL_12_0,IID_PPV_ARGS(&m_device)),"D3D12CreateDevice"))return false;
+    if(!HR(m_device.As(&m_device5),"Query ID3D12Device5"))return false;
     D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     if(!HR(m_device->CreateCommandQueue(&q,IID_PPV_ARGS(&m_queue)),"CreateCommandQueue"))return false;
     for(uint32_t i=0;i<FrameCount;++i) {
@@ -169,11 +180,13 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     return true;
 }
 
-bool D3D12Renderer::InitializeDLSS(){
+bool D3D12Renderer::InitializeDLSS(bool& gpuSynchronized){
     auto* cmd=m_cmds[0].Get();
     m_allocators[0]->Reset();cmd->Reset(m_allocators[0].Get(),nullptr);bool ok=m_dlss.Initialize(m_device.Get(),cmd,m_sourceW,m_sourceH,m_outputW,m_outputH,m_quality);
     if(ok){m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();}
-    cmd->Close();ID3D12CommandList*l[]={cmd};m_queue->ExecuteCommandLists(1,l);WaitGPU();return ok;
+    cmd->Close();ID3D12CommandList*l[]={cmd};m_queue->ExecuteCommandLists(1,l);
+    gpuSynchronized=WaitGPUForContinuedUse();
+    return ok&&gpuSynchronized;
 }
 
 bool D3D12Renderer::CreateUploadForTexture(const D3D12_RESOURCE_DESC&desc,ComPtr<ID3D12Resource>&upload,uint8_t*&mapped,D3D12_PLACED_SUBRESOURCE_FOOTPRINT&fp,uint32_t&rows,uint64_t&rowBytes,uint64_t&total,const char*name){
@@ -237,6 +250,7 @@ void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE
 float D3D12Renderer::Halton(uint32_t index,uint32_t base){float f=1.0f,r=0.0f;while(index){f/=float(base);r+=f*float(index%base);index/=base;}return r;}
 
 bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs){
+    if(m_gpuUnusable)return false;
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
     if(!bgra||bytes<videoRow*m_sourceH||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
@@ -308,7 +322,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
         if (!HR(cmd->Close(), "Close command list after NGX CreateFeature")) return false;
         ID3D12CommandList* initLists[] = { cmd };
         m_queue->ExecuteCommandLists(1, initLists);
-        WaitGPU();
+        if(!WaitGPUForContinuedUse())return false;
         if (!HR(m_allocators[slot]->Reset(), "Reset allocator after NGX CreateFeature")) return false;
         if (!HR(cmd->Reset(m_allocators[slot].Get(), nullptr), "Reset command list after NGX CreateFeature")) return false;
         ID3D12DescriptorHeap* postCreateHeaps[] = { m_srvHeap.Get() };
@@ -353,7 +367,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
 }
 
 bool D3D12Renderer::PresentCurrent(){
-    if(!m_swapchain||!m_queue||!m_rootSig)return false;
+    if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
@@ -404,19 +418,26 @@ void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D
 bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
     if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
     const uint64_t v=m_frameFence[slot];
-    if(v && m_fence->GetCompletedValue()<v){
-        if(FAILED(m_fence->SetEventOnCompletion(v,m_fenceEvent)))return false;
-        WaitForSingleObject(m_fenceEvent,INFINITE);
-    }
-    return true;
+    if(!v)return true;
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceCompletion(
+        v,
+        GetTickCount64(),
+        [&]{return m_fence->GetCompletedValue();},
+        [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
+        [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
+    if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)m_gpuUnusable=true;
+    return result==d3d12_renderer_detail::FenceWaitResult::Completed;
 }
 void D3D12Renderer::SignalFrameSlot(uint32_t slot){
     if(slot>=FrameCount||!m_queue||!m_fence)return;
     const uint64_t v=++m_fenceValue;
     if(SUCCEEDED(m_queue->Signal(m_fence.Get(),v)))m_frameFence[slot]=v;
 }
-void D3D12Renderer::WaitGPU(){
-    if(!m_queue||!m_fence||!m_fenceEvent)return;
+d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(){
+#if defined(D3D12_RENDERER_TESTING)
+    if(m_testWaitGPU)return m_testWaitGPU();
+#endif
+    if(!m_queue||!m_fence||!m_fenceEvent)return d3d12_renderer_detail::FenceWaitResult::Completed;
     const uint64_t v=++m_fenceValue;
     const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
         v,
@@ -425,7 +446,19 @@ void D3D12Renderer::WaitGPU(){
         [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)
-        LOG("GPU teardown wait failed.");
+        LOG("GPU fence wait failed.");
+    return result;
+}
+bool D3D12Renderer::WaitGPUForContinuedUse(){
+    const bool completed=WaitGPU()==d3d12_renderer_detail::FenceWaitResult::Completed;
+    if(!completed)m_gpuUnusable=true;
+    return completed;
+}
+void D3D12Renderer::ForceDeviceRemovalForTeardown(){
+#if defined(D3D12_RENDERER_TESTING)
+    if(m_testRemoveDevice){m_testRemoveDevice();return;}
+#endif
+    if(m_device5)m_device5->RemoveDevice();
 }
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::RTV(uint32_t i)const{auto h=m_rtvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*m_rtvInc;return h;}
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::DSV()const{return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();}
