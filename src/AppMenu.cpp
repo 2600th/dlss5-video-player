@@ -47,4 +47,26 @@ bool RoutesToRehook(PlayerCommandRoute route, UINT value)
     return route == PlayerCommandRoute::KeyDown ? value == VK_F6 : value == IDM_REHOOK;
 }
 
+bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown)
+{
+    if (route == PlayerCommandRoute::NativeMenu) return value == IDM_OPEN_YOUTUBE;
+    return controlDown && value == 'L';
+}
+
+bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
+                                    bool youtubeEnabled)
+{
+    if (!menuBar) return false;
+    HMENU fileMenu = GetSubMenu(menuBar, 0);
+    if (!fileMenu) return false;
+    const UINT openState = EnableMenuItem(
+        fileMenu, IDM_OPEN,
+        MF_BYCOMMAND | (openEnabled ? MF_ENABLED : MF_GRAYED));
+    const UINT youtubeState = EnableMenuItem(
+        fileMenu, IDM_OPEN_YOUTUBE,
+        MF_BYCOMMAND | (youtubeEnabled ? MF_ENABLED : MF_GRAYED));
+    return openState != static_cast<UINT>(-1) &&
+           youtubeState != static_cast<UINT>(-1);
+}
+
 } // namespace app_menu

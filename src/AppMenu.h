@@ -42,5 +42,8 @@ enum class PlayerCommandRoute {
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
+bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown);
+bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
+                                    bool youtubeEnabled);
 
 } // namespace app_menu

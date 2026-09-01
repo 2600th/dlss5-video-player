@@ -341,6 +341,24 @@ bool IsSupportedYouTubeUrl(std::wstring_view value)
     return false;
 }
 
+std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error)
+{
+    switch (error) {
+    case ResolveError::InvalidUrl: return L"youtube.error.invalid";
+    case ResolveError::HelperMissing: return L"youtube.error.helper_missing";
+    case ResolveError::StartFailed: return L"youtube.error.start_failed";
+    case ResolveError::TimedOut: return L"youtube.error.timeout";
+    case ResolveError::Cancelled: return L"youtube.error.cancelled";
+    case ResolveError::OutputTooLarge:
+    case ResolveError::ExtractionFailed:
+    case ResolveError::InvalidOutput:
+        return L"youtube.error.extraction";
+    case ResolveError::None:
+        return L"youtube.error.extraction";
+    }
+    return L"youtube.error.extraction";
+}
+
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
 {
     if (exitCode != 0) {

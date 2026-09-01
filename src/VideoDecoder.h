@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "UiLayout.h"
 
 struct VideoFrame {
     std::vector<uint8_t> bgra;
@@ -19,7 +20,8 @@ public:
     VideoDecoder() = default;
     ~VideoDecoder();
 
-    bool Open(const std::wstring& path);
+    bool Open(const std::wstring& path,
+              MediaSourceKind sourceKind = MediaSourceKind::LocalFile);
     void Close();
     bool ReadNext(VideoFrame& out);
     bool SeekSeconds(double seconds);

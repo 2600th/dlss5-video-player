@@ -53,7 +53,7 @@ void VideoDecoder::Close() {
     m_backend = Backend::None;
 }
 
-bool VideoDecoder::Open(const std::wstring& path) {
+bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -71,6 +71,11 @@ bool VideoDecoder::Open(const std::wstring& path) {
         m_backend = Backend::FFmpeg;
         LOG("Video decoder selected: FFmpeg");
         return true;
+    }
+
+    if (DecoderPolicyForSource(sourceKind) == DecoderOpenPolicy::FfmpegOnly) {
+        LOG("FFmpeg could not open the YouTube stream; Media Foundation fallback is disabled.");
+        return false;
     }
 
     LOG("FFmpeg backend unavailable or rejected the file; trying Media Foundation.");

@@ -518,8 +518,8 @@ void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
     }
 
     const bool youtubeAvailable = YouTubePlaybackAvailable();
-    CHECK(!youtubeAvailable);
-    const ToolbarAvailability intermediate{false, false, false, youtubeAvailable};
+    CHECK(youtubeAvailable);
+    const ToolbarAvailability intermediate{false, false, false, false};
     CHECK(IsToolbarActionEnabled(ToolbarAction::Open, intermediate));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::OpenYouTube, intermediate));
     CHECK_EQ(ToolbarAction::Open,
@@ -887,7 +887,7 @@ void player_menu_is_english_only_and_retains_advanced_commands_test()
     }
     for (const auto& entry : entries) {
         if (entry.command == app_menu::IDM_OPEN_YOUTUBE) {
-            CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) != 0);
+            CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) == 0);
         }
     }
     for (const auto& entry : entries) {
@@ -918,6 +918,136 @@ void youtube_availability_drives_real_menu_and_idle_action_consistently_test()
         CHECK_EQ(available, IsToolbarActionEnabled(ToolbarAction::OpenYouTube, state));
         if (menu) DestroyMenu(menu);
     }
+}
+
+void youtube_resolution_generation_accepts_only_the_current_completion_test()
+{
+    YouTubeResolutionLifecycle lifecycle;
+    const uint64_t first = lifecycle.Begin();
+    CHECK(lifecycle.IsResolving());
+    const uint64_t second = lifecycle.Begin();
+    CHECK(second > first);
+    CHECK(!lifecycle.Complete(first));
+    CHECK(lifecycle.IsResolving());
+    CHECK(lifecycle.Complete(second));
+    CHECK(!lifecycle.IsResolving());
+    CHECK(!lifecycle.Complete(second));
+
+    const uint64_t cancelled = lifecycle.Begin();
+    lifecycle.Invalidate();
+    CHECK(!lifecycle.IsResolving());
+    CHECK(!lifecycle.Complete(cancelled));
+}
+
+void youtube_resolution_disables_only_conflicting_source_actions_test()
+{
+    ToolbarAvailability state{};
+    state.mediaLoaded = true;
+    state.rendererReady = true;
+    state.youtubeAvailable = true;
+    CHECK(IsToolbarActionEnabled(ToolbarAction::Open, state));
+    CHECK(IsToolbarActionEnabled(ToolbarAction::OpenYouTube, state));
+    CHECK(IsToolbarActionEnabled(ToolbarAction::PlayPause, state));
+
+    state.resolvingYouTube = true;
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::Open, state));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::OpenYouTube, state));
+    CHECK(IsToolbarActionEnabled(ToolbarAction::PlayPause, state));
+}
+
+void youtube_resolution_error_mapping_is_actionable_and_distinct_test()
+{
+    CHECK_EQ(std::wstring_view(L"youtube.error.invalid"),
+             YouTubeResolveErrorMessageKey(ResolveError::InvalidUrl));
+    CHECK_EQ(std::wstring_view(L"youtube.error.helper_missing"),
+             YouTubeResolveErrorMessageKey(ResolveError::HelperMissing));
+    CHECK_EQ(std::wstring_view(L"youtube.error.start_failed"),
+             YouTubeResolveErrorMessageKey(ResolveError::StartFailed));
+    CHECK_EQ(std::wstring_view(L"youtube.error.timeout"),
+             YouTubeResolveErrorMessageKey(ResolveError::TimedOut));
+    CHECK_EQ(std::wstring_view(L"youtube.error.cancelled"),
+             YouTubeResolveErrorMessageKey(ResolveError::Cancelled));
+    CHECK_EQ(std::wstring_view(L"youtube.error.extraction"),
+             YouTubeResolveErrorMessageKey(ResolveError::ExtractionFailed));
+    CHECK_EQ(std::wstring_view(L"youtube.error.extraction"),
+             YouTubeResolveErrorMessageKey(ResolveError::OutputTooLarge));
+    CHECK_EQ(std::wstring_view(L"youtube.error.extraction"),
+             YouTubeResolveErrorMessageKey(ResolveError::InvalidOutput));
+}
+
+void youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test()
+{
+    CHECK_EQ(DecoderOpenPolicy::FfmpegThenMediaFoundation,
+             DecoderPolicyForSource(MediaSourceKind::LocalFile));
+    CHECK_EQ(DecoderOpenPolicy::FfmpegOnly,
+             DecoderPolicyForSource(MediaSourceKind::YouTube));
+}
+
+void youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test()
+{
+    std::vector<int> order;
+    ExecuteYouTubeCancellationSequence(
+        [&] { order.push_back(1); },
+        [&] { order.push_back(2); },
+        [&] { order.push_back(3); });
+    CHECK_EQ(std::vector<int>({1, 2, 3}), order);
+}
+
+void youtube_display_and_log_labels_never_expose_direct_urls_test()
+{
+    const std::wstring direct =
+        L"https://r1---sn.example.googlevideo.com/videoplayback?expire=1&token=secret";
+    CHECK_EQ(std::wstring(L"YouTube video"),
+             DisplayTitleForSource(MediaSourceKind::YouTube, L""));
+    CHECK_EQ(std::wstring(L"Official game trailer"),
+             DisplayTitleForSource(MediaSourceKind::YouTube, L"Official game trailer"));
+    CHECK_EQ(std::string_view("YouTube stream"),
+             SafeSourceLogLabel(MediaSourceKind::YouTube));
+    const std::wstring title = DisplayTitleForSource(MediaSourceKind::YouTube, direct);
+    CHECK(title.find(L"https://") == std::wstring::npos);
+    CHECK(title.find(L"secret") == std::wstring::npos);
+}
+
+void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    bool enabled = false;
+    for (const auto& entry : entries) {
+        if (entry.command != app_menu::IDM_OPEN_YOUTUBE) continue;
+        enabled = (entry.state & (MFS_DISABLED | MFS_GRAYED)) == 0;
+    }
+    CHECK(enabled);
+    CHECK(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,
+                                        app_menu::IDM_OPEN_YOUTUBE, false));
+    CHECK(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,
+                                        'L', true));
+    CHECK(!app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,
+                                         'L', false));
+    CHECK(!app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,
+                                         'O', true));
+    CHECK(app_menu::UpdateSourceActionAvailability(menu, false, false));
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    for (const auto& entry : entries) {
+        if (entry.command == app_menu::IDM_OPEN ||
+            entry.command == app_menu::IDM_OPEN_YOUTUBE) {
+            CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) != 0);
+        }
+    }
+    CHECK(app_menu::UpdateSourceActionAvailability(menu, true, true));
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    for (const auto& entry : entries) {
+        if (entry.command == app_menu::IDM_OPEN ||
+            entry.command == app_menu::IDM_OPEN_YOUTUBE) {
+            CHECK((entry.state & (MFS_DISABLED | MFS_GRAYED)) == 0);
+        }
+    }
+    if (menu) DestroyMenu(menu);
 }
 
 std::filesystem::path executable_directory()
@@ -2581,6 +2711,13 @@ int wmain(int argc, wchar_t* argv[])
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_availability_drives_real_menu_and_idle_action_consistently_test();
+    youtube_resolution_generation_accepts_only_the_current_completion_test();
+    youtube_resolution_disables_only_conflicting_source_actions_test();
+    youtube_resolution_error_mapping_is_actionable_and_distinct_test();
+    youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test();
+    youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test();
+    youtube_display_and_log_labels_never_expose_direct_urls_test();
+    youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test();
     legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
     gpu_classification_table_test();
     neural_addon_policy_test();

@@ -250,10 +250,11 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
 {
     switch (action) {
     case ToolbarAction::Open:
+        return !availability.resolvingYouTube;
     case ToolbarAction::Fullscreen:
         return true;
     case ToolbarAction::OpenYouTube:
-        return availability.youtubeAvailable;
+        return availability.youtubeAvailable && !availability.resolvingYouTube;
     case ToolbarAction::Back10:
     case ToolbarAction::PlayPause:
     case ToolbarAction::Stop:
@@ -438,7 +439,59 @@ bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& request
     return true;
 }
 
+uint64_t YouTubeResolutionLifecycle::Begin()
+{
+    ++generation_;
+    resolving_ = true;
+    return generation_;
+}
+
+bool YouTubeResolutionLifecycle::Complete(uint64_t generation)
+{
+    if (!resolving_ || generation != generation_) return false;
+    resolving_ = false;
+    return true;
+}
+
+void YouTubeResolutionLifecycle::Invalidate()
+{
+    ++generation_;
+    resolving_ = false;
+}
+
+DecoderOpenPolicy DecoderPolicyForSource(MediaSourceKind sourceKind)
+{
+    return sourceKind == MediaSourceKind::YouTube
+        ? DecoderOpenPolicy::FfmpegOnly
+        : DecoderOpenPolicy::FfmpegThenMediaFoundation;
+}
+
+std::wstring DisplayTitleForSource(MediaSourceKind sourceKind,
+                                   std::wstring_view suppliedTitle)
+{
+    if (sourceKind != MediaSourceKind::YouTube) return std::wstring(suppliedTitle);
+    if (suppliedTitle.empty() || suppliedTitle.find(L"://") != std::wstring_view::npos ||
+        suppliedTitle.find(L"googlevideo") != std::wstring_view::npos) {
+        return L"YouTube video";
+    }
+    return std::wstring(suppliedTitle);
+}
+
+std::string_view SafeSourceLogLabel(MediaSourceKind sourceKind)
+{
+    return sourceKind == MediaSourceKind::YouTube ? "YouTube stream" : "local file";
+}
+
+void ExecuteYouTubeCancellationSequence(const std::function<void()>& requestStop,
+                                        const std::function<void()>& cancelResolver,
+                                        const std::function<void()>& joinWorker)
+{
+    if (requestStop) requestStop();
+    if (cancelResolver) cancelResolver();
+    if (joinWorker) joinWorker();
+}
+
 bool YouTubePlaybackAvailable()
 {
-    return false;
+    return true;
 }

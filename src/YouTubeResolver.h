@@ -34,6 +34,7 @@ struct ResolveResult {
 };
 
 bool IsSupportedYouTubeUrl(std::wstring_view value);
+std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
 #ifdef YOUTUBE_RESOLVER_TESTING
 std::wstring QuoteWindowsArgument(std::wstring_view argument);

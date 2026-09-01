@@ -27,6 +27,30 @@ struct ToolbarAvailability {
     bool seeking{false};
     bool rendererReady{false};
     bool youtubeAvailable{false};
+    bool resolvingYouTube{false};
+};
+
+enum class MediaSourceKind {
+    LocalFile,
+    YouTube,
+};
+
+enum class DecoderOpenPolicy {
+    FfmpegThenMediaFoundation,
+    FfmpegOnly,
+};
+
+class YouTubeResolutionLifecycle {
+public:
+    uint64_t Begin();
+    bool Complete(uint64_t generation);
+    void Invalidate();
+    bool IsResolving() const { return resolving_; }
+    uint64_t Generation() const { return generation_; }
+
+private:
+    uint64_t generation_{0};
+    bool resolving_{false};
 };
 
 struct IdleSurfaceLayout {
@@ -123,4 +147,11 @@ PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
                                                bool dlssEnabled,
                                                bool dlssFeatureCreated);
 bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& requestRecreate);
+DecoderOpenPolicy DecoderPolicyForSource(MediaSourceKind sourceKind);
+std::wstring DisplayTitleForSource(MediaSourceKind sourceKind,
+                                   std::wstring_view suppliedTitle);
+std::string_view SafeSourceLogLabel(MediaSourceKind sourceKind);
+void ExecuteYouTubeCancellationSequence(const std::function<void()>& requestStop,
+                                        const std::function<void()>& cancelResolver,
+                                        const std::function<void()>& joinWorker);
 bool YouTubePlaybackAvailable();

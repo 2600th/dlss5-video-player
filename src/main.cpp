@@ -20,6 +20,9 @@
 #include <vector>
 #include <cwctype>
 #include <cstdlib>
+#include <optional>
+#include <thread>
+#include <system_error>
 #include "VideoDecoder.h"
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
@@ -32,6 +35,7 @@
 #include "ReShadeConfig.h"
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
+#include "YouTubeResolver.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -124,6 +128,223 @@ static constexpr int IDC_ADJ_TEMPERATURE = 7105;
 static constexpr int IDC_ADJ_TINT = 7106;
 static constexpr int IDC_ADJ_RESET = 7110;
 static constexpr int IDC_ADJ_CLOSE = 7111;
+
+static constexpr int IDC_YOUTUBE_URL = 7201;
+static constexpr int IDC_YOUTUBE_PASTE = 7202;
+static constexpr int IDC_YOUTUBE_NOTE = 7203;
+static constexpr int IDC_YOUTUBE_ERROR = 7204;
+static constexpr UINT WM_YOUTUBE_RESOLVED = WM_APP + 41;
+
+struct YouTubeUrlDialogState {
+    const Localizer* localizer{};
+    HFONT font{};
+    HWND edit{};
+    HWND error{};
+    bool accepted{false};
+    bool done{false};
+    std::wstring url;
+};
+
+static int DialogDip(HWND window, int value)
+{
+    return MulDiv(value, static_cast<int>(ActiveWindowDpi(window)), USER_DEFAULT_SCREEN_DPI);
+}
+
+static std::wstring ReadWindowText(HWND window)
+{
+    const int length = GetWindowTextLengthW(window);
+    if (length <= 0) return {};
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    GetWindowTextW(window, text.data(), length + 1);
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+static void SetControlFont(HWND control, HFONT font)
+{
+    if (control && font) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+static void PasteClipboardText(HWND edit)
+{
+    if (!edit || !OpenClipboard(edit)) return;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data) {
+        const auto* text = static_cast<const wchar_t*>(GlobalLock(data));
+        if (text) {
+            SetWindowTextW(edit, text);
+            SendMessageW(edit, EM_SETSEL, static_cast<WPARAM>(-1), static_cast<LPARAM>(-1));
+            GlobalUnlock(data);
+        }
+    }
+    CloseClipboard();
+}
+
+static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    auto* state = reinterpret_cast<YouTubeUrlDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<YouTubeUrlDialogState*>(create->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (!state) return DefWindowProcW(window, message, wParam, lParam);
+
+    switch (message) {
+    case WM_CREATE: {
+        const int pad = DialogDip(window, 20);
+        const int labelHeight = DialogDip(window, 22);
+        const int editHeight = DialogDip(window, 30);
+        const int buttonWidth = DialogDip(window, 82);
+        const int buttonHeight = DialogDip(window, 32);
+        RECT client{};
+        GetClientRect(window, &client);
+        HWND label = CreateWindowExW(0, L"STATIC", state->localizer->Get(L"youtube.dialog.url").c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT, pad, pad, client.right - 2 * pad, labelHeight,
+            window, nullptr, nullptr, nullptr);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            pad, pad + labelHeight, client.right - 3 * pad - buttonWidth, editHeight,
+            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_URL)), nullptr, nullptr);
+        SendMessageW(state->edit, EM_SETLIMITTEXT, 2048, 0);
+        HWND paste = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.paste").c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            client.right - pad - buttonWidth, pad + labelHeight, buttonWidth, editHeight,
+            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_PASTE)), nullptr, nullptr);
+        HWND note = CreateWindowExW(0, L"STATIC", state->localizer->Get(L"youtube.dialog.note").c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT, pad, pad + labelHeight + editHeight + DialogDip(window, 10),
+            client.right - 2 * pad, labelHeight, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_NOTE)), nullptr, nullptr);
+        state->error = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
+            pad, pad + labelHeight + editHeight + DialogDip(window, 38), client.right - 2 * pad,
+            DialogDip(window, 38), window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_ERROR)), nullptr, nullptr);
+        HWND play = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.play").c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            client.right - pad - buttonWidth * 2 - DialogDip(window, 10), client.bottom - pad - buttonHeight,
+            buttonWidth, buttonHeight, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), nullptr, nullptr);
+        HWND cancel = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.cancel").c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            client.right - pad - buttonWidth, client.bottom - pad - buttonHeight,
+            buttonWidth, buttonHeight, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), nullptr, nullptr);
+        for (HWND control : {label, state->edit, paste, note, state->error, play, cancel}) {
+            SetControlFont(control, state->font);
+        }
+        SetFocus(state->edit);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_YOUTUBE_PASTE) {
+            PasteClipboardText(state->edit);
+            SetWindowTextW(state->error, L"");
+            SetFocus(state->edit);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDOK) {
+            HWND edit = GetDlgItem(window, IDC_YOUTUBE_URL);
+            const std::wstring candidate = ReadWindowText(edit);
+            const bool supported = IsSupportedYouTubeUrl(candidate);
+            LOG("YouTube URL validation " << (supported ? "accepted." : "rejected."));
+            if (!supported) {
+                SetWindowTextW(state->error, state->localizer->Get(L"youtube.dialog.invalid").c_str());
+                SetFocus(edit);
+                SendMessageW(edit, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+                return 0;
+            }
+            state->url = candidate;
+            state->accepted = true;
+            DestroyWindow(window);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL) {
+            DestroyWindow(window);
+            return 0;
+        }
+        break;
+    case WM_CTLCOLORSTATIC:
+        if (reinterpret_cast<HWND>(lParam) == state->error) {
+            SetTextColor(reinterpret_cast<HDC>(wParam), RGB(180, 36, 36));
+            SetBkColor(reinterpret_cast<HDC>(wParam), GetSysColor(COLOR_WINDOW));
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    case WM_DESTROY:
+        state->done = true;
+        return 0;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+static std::optional<std::wstring> PromptForYouTubeUrl(HWND owner, const Localizer& localizer,
+                                                       HFONT font)
+{
+    static constexpr const wchar_t* kClassName = L"DLSSVideoYouTubeUrlDialogV1";
+    const HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSW dialogClass{};
+    dialogClass.lpfnWndProc = YouTubeUrlDialogProc;
+    dialogClass.hInstance = instance;
+    dialogClass.lpszClassName = kClassName;
+    dialogClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    if (!RegisterClassW(&dialogClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return std::nullopt;
+
+    const int clientWidth = DialogDip(owner, 520);
+    const int clientHeight = DialogDip(owner, 220);
+    RECT bounds{0, 0, clientWidth, clientHeight};
+    AdjustWindowRectEx(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
+                       WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT);
+    RECT ownerBounds{};
+    GetWindowRect(owner, &ownerBounds);
+    const int width = bounds.right - bounds.left;
+    const int height = bounds.bottom - bounds.top;
+    const int ownerWidth = static_cast<int>(ownerBounds.right - ownerBounds.left);
+    const int ownerHeight = static_cast<int>(ownerBounds.bottom - ownerBounds.top);
+    const int x = static_cast<int>(ownerBounds.left) + std::max(0, (ownerWidth - width) / 2);
+    const int y = static_cast<int>(ownerBounds.top) + std::max(0, (ownerHeight - height) / 2);
+    YouTubeUrlDialogState state{&localizer, font};
+    const std::wstring title = localizer.Get(L"youtube.dialog.title");
+    HWND dialog = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, kClassName,
+        title.c_str(), WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height,
+        owner, nullptr, instance, &state);
+    if (!dialog) return std::nullopt;
+
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetForegroundWindow(dialog);
+    SetFocus(state.edit);
+    MSG message{};
+    bool repostQuit = false;
+    int quitCode = 0;
+    while (!state.done) {
+        const BOOL result = GetMessageW(&message, nullptr, 0, 0);
+        if (result <= 0) {
+            if (result == 0) {
+                repostQuit = true;
+                quitCode = static_cast<int>(message.wParam);
+            }
+            if (IsWindow(dialog)) DestroyWindow(dialog);
+            break;
+        }
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    if (repostQuit) PostQuitMessage(quitCode);
+    if (!state.accepted) return std::nullopt;
+    return state.url;
+}
+
+struct YouTubeCompletion {
+    uint64_t generation{};
+    ResolveResult result;
+    std::wstring displayTitle;
+};
 
 struct AppOptions {
     uint32_t maxW=3840, maxH=2160;
@@ -288,7 +509,7 @@ static std::wstring TimeText(double sec) {
 class PlayerApp {
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)){}
-    ~PlayerApp(){SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
+    ~PlayerApp(){CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
 
     bool Create(HINSTANCE hi) {
         m_loc.Initialize();
@@ -549,10 +770,12 @@ private:
         return DefWindowProcW(h,m,w,l);
     }
 
-    bool Load(const std::wstring& path) {
-        if(path.empty())return false;
+    bool Load(const std::wstring& source,const std::wstring& displayTitle=L"",MediaSourceKind sourceKind=MediaSourceKind::LocalFile) {
+        if(source.empty())return false;
+        CancelYouTubeResolution();
         Unload();
-        if(!m_decoder.Open(path)){std::wstring e=T(L"error.decode"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);return false;}
+        LOG("Opening " << SafeSourceLogLabel(sourceKind) << ".");
+        if(!m_decoder.Open(source,sourceKind)){std::wstring e=T(sourceKind==MediaSourceKind::YouTube?L"youtube.error.ffmpeg":L"error.decode"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);return false;}
         m_dar=m_decoder.DisplayAspectRatio(); if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         auto [ow,oh]=OutputForAspect(m_dar,m_opt.maxW,m_opt.maxH);
         m_activeQuality = m_opt.qualityExplicit ? m_opt.quality : AutoQuality(m_decoder.NativeWidth(),m_decoder.NativeHeight(),ow,oh,m_decoder.FrameRate());
@@ -567,12 +790,12 @@ private:
         m_renderer->SetColorSettings(m_colorSettings);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
-        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
+        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(source,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
         UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
-        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_cachedStatus.clear();
+        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -660,7 +883,7 @@ private:
         VideoFrame f; bool got=readAt(sec,f);
         if(!got){
             LOG("Seek decoder restart failed; reopening the same file for recovery.");
-            m_decoder.Close(); if(m_decoder.Open(m_path))got=readAt(sec,f);
+            m_decoder.Close(); if(m_decoder.Open(m_path,m_sourceKind))got=readAt(sec,f);
         }
         if(!got){
             LOG("Seek failed without crashing; playback remains paused.");m_playing=false;SetSeeking(false);m_currentSec=sec;UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return false;
@@ -674,17 +897,12 @@ private:
 
     void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=Position();m_playing=false;m_audio.Pause(true);}else{if(!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;m_audio.Pause(false);}InvalidateControls();InvalidatePlaybackProgress();}
     void TogglePause(){SetPaused(m_playing);}
-    void StopPlayback(){RequestSeek(0,false);}
+    void StopPlayback(){if(m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return;}RequestSeek(0,false);}
 
     void UpdateTitle(){
         if(!m_hwnd)return;
         const std::wstring appTitle=T(L"app.title");
-        std::wstring mediaTitle;
-        if(m_loaded&&!m_path.empty()){
-            mediaTitle=std::filesystem::path(m_path).stem().wstring();
-            if(mediaTitle.empty())mediaTitle=std::filesystem::path(m_path).filename().wstring();
-        }
-        const std::wstring title=BuildPlayerWindowTitle(appTitle,mediaTitle,120);
+        const std::wstring title=BuildPlayerWindowTitle(appTitle,m_loaded?m_displayTitle:L"",120);
         if(title==m_cachedWindowTitle)return;
         m_cachedWindowTitle=title;SetWindowTextW(m_hwnd,title.c_str());
     }
@@ -702,7 +920,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking,m_renderer!=nullptr,YouTubePlaybackAvailable()};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()};}
     std::optional<RECT> VolumeRect()const{RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -723,7 +941,7 @@ private:
     }
     void UpdateCachedStatus(){
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
-        m_cachedStatus=status;if(m_hwnd&&m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}
+        m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
     ToolbarAction ToolbarActionAt(int x,int y)const{
         const auto items=FocusableItems();return ResolveToolbarHover(items,POINT{x,y},ToolbarState());
@@ -820,7 +1038,7 @@ private:
             const IdleSurfaceLayout idle=IdleLayout();
             SetBkMode(dc,TRANSPARENT);
             SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
-            SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=T(L"idle.subtitle");RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
+            SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:T(L"idle.subtitle");RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
             for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
             if(!YouTubePlaybackAvailable()){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);const bool compactReason=idle.subtitle.top==idle.subtitle.bottom;std::wstring reason=T(compactReason?L"idle.youtube_unavailable_compact":L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);}return;
         }
@@ -876,14 +1094,73 @@ private:
         switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleDLSS();break;case HK_ADJUSTMENTS:ShowAdjustments();break;}
     }
 
-    void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
-    void ActivateYouTube(){if(!YouTubePlaybackAvailable())return;LOG("YouTube activation is available but no resolver is connected");}
+    void OpenFromDialog(){if(!ToolbarActionEnabled(ToolbarAction::Open))return;auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
+    void SyncSourceActionAvailability(){
+        if(!m_hwnd)return;const ToolbarAvailability state=ToolbarState();HMENU menu=GetMenu(m_hwnd);
+        if(menu){app_menu::UpdateSourceActionAvailability(menu,IsToolbarActionEnabled(ToolbarAction::Open,state),IsToolbarActionEnabled(ToolbarAction::OpenYouTube,state));DrawMenuBar(m_hwnd);}
+        ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateControls();UpdateCachedStatus();
+    }
+    void DrainYouTubeCompletions(){
+        if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_YOUTUBE_RESOLVED,WM_YOUTUBE_RESOLVED,PM_REMOVE)){delete reinterpret_cast<YouTubeCompletion*>(message.lParam);}
+    }
+    void CancelYouTubeResolution(bool updateUi=true){
+        const bool active=m_youtubeLifecycle.IsResolving()||m_youtubeWorker.joinable();
+        if(!active)return;m_youtubeLifecycle.Invalidate();
+        if(m_youtubeWorker.joinable()){
+            ExecuteYouTubeCancellationSequence(
+                [&]{m_youtubeWorker.request_stop();},
+                [&]{if(m_youtubeResolver)m_youtubeResolver->Cancel();},
+                [&]{m_youtubeWorker.join();});
+            m_youtubeWorker=std::jthread{};
+        }
+        DrainYouTubeCompletions();m_pendingYouTubeTitle.clear();
+        if(updateUi)SyncSourceActionAvailability();
+        LOG("YouTube resolution cancelled and worker stopped.");
+    }
+    void StartYouTubeResolution(const std::wstring& url,const std::wstring& displayTitle=L""){
+        if(!IsSupportedYouTubeUrl(url))return;
+        CancelYouTubeResolution();
+        if(!m_youtubeResolver)m_youtubeResolver=std::make_unique<YouTubeResolver>();
+        const uint64_t generation=m_youtubeLifecycle.Begin();
+        m_pendingYouTubeTitle=DisplayTitleForSource(MediaSourceKind::YouTube,displayTitle);
+        SyncSourceActionAvailability();
+        LOG("YouTube resolution started.");
+        try{
+            HWND target=m_hwnd;YouTubeResolver* resolver=m_youtubeResolver.get();const std::wstring title=m_pendingYouTubeTitle;
+            m_youtubeWorker=std::jthread([target,resolver,generation,url,title](std::stop_token stop){
+                ResolveResult result=resolver->Resolve(url,stop);
+                auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->result=std::move(result);completion->displayTitle=title;
+                if(PostMessageW(target,WM_YOUTUBE_RESOLVED,0,reinterpret_cast<LPARAM>(completion.get())))completion.release();
+            });
+        }catch(const std::system_error&){
+            m_youtubeLifecycle.Invalidate();m_pendingYouTubeTitle.clear();SyncSourceActionAvailability();
+            const std::wstring message=T(L"youtube.error.start_failed"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);
+            LOG("YouTube worker could not be started.");
+        }
+    }
+    void ActivateYouTube(){
+        if(!ToolbarActionEnabled(ToolbarAction::OpenYouTube))return;
+        const auto url=PromptForYouTubeUrl(m_hwnd,m_loc,m_font);if(url)StartYouTubeResolution(*url);
+    }
+    void CompleteYouTubeResolution(YouTubeCompletion* raw){
+        std::unique_ptr<YouTubeCompletion> completion(raw);if(!completion)return;
+        if(!m_youtubeLifecycle.Complete(completion->generation))return;
+        if(m_youtubeWorker.joinable()){m_youtubeWorker.join();m_youtubeWorker=std::jthread{};}
+        m_pendingYouTubeTitle.clear();SyncSourceActionAvailability();
+        if(!completion->result.ok){
+            if(completion->result.error==ResolveError::Cancelled)return;
+            const std::wstring message=T(YouTubeResolveErrorMessageKey(completion->result.error).data()),caption=T(L"app.title");
+            MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);LOG("YouTube resolution failed without exposing source details.");return;
+        }
+        LOG("YouTube resolution completed; opening the redacted stream source.");
+        Load(completion->result.mediaUrl,completion->displayTitle,MediaSourceKind::YouTube);
+    }
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
     }
     std::wstring BuildStatusText()const{
-        if(!m_loaded||!m_renderer)return{};
-        const PlayerRuntimeStatus runtime=RuntimeStatus();PlayerStatusSnapshot status{};status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
+        PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
+        const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
         std::wstring text=BuildPlayerStatusText(status);if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;return text;
     }
     void RestartInSafeMode(){
@@ -959,7 +1236,7 @@ private:
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();UpdateCachedStatus();InvalidateControls();}
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
-    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;if(Load(p))RequestSeek(keep,wasPlaying);}}
+    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path,title=m_displayTitle;const MediaSourceKind sourceKind=m_sourceKind;double keep=Position();bool wasPlaying=m_playing;if(Load(p,title,sourceKind))RequestSeek(keep,wasPlaying);}}
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
@@ -968,8 +1245,9 @@ private:
     LRESULT WndProc(HWND h,UINT m,WPARAM w,LPARAM l){
         switch(m){
         case WM_ERASEBKGND:return 1;
-        case WM_DESTROY:m_running=false;PostQuitMessage(0);return 0;
-        case WM_CLOSE:DestroyWindow(h);return 0;
+        case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(reinterpret_cast<YouTubeCompletion*>(l));return 0;
+        case WM_DESTROY:CancelYouTubeResolution(false);DrainYouTubeCompletions();m_running=false;PostQuitMessage(0);return 0;
+        case WM_CLOSE:CancelYouTubeResolution(false);DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
             if(info){const UINT dpi=ActiveWindowDpi(h);const POINT minimum=MinimumPlayerWindowTrackSize(h,dpi);info->ptMinTrackSize.x=std::max<LONG>(info->ptMinTrackSize.x,minimum.x);info->ptMinTrackSize.y=std::max<LONG>(info->ptMinTrackSize.y,minimum.y);}
@@ -996,15 +1274,16 @@ private:
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleDLSS();return 0;}if(w=='G'){ToggleDepthMode();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleDLSS();return 0;}if(w=='G'){ToggleDepthMode();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
     }
 
     void HandleCommand(UINT id){
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
+        if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         switch(id){
-        case IDM_OPEN:OpenFromDialog();break;case IDM_OPEN_YOUTUBE:ActivateYouTube();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;
+        case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;
         case IDM_QUALITY_AUTO:SetQualityMode(true,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_QUALITY:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_BALANCED:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_Balanced);break;case IDM_QUALITY_PERFORMANCE:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxPerf);break;case IDM_QUALITY_ULTRAPERF:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_UltraPerformance);break;case IDM_QUALITY_DLAA:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_DLAA);break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_MASK:SetDebug(D3D12Renderer::DebugView::BiasMask);break;case IDM_DEPTH_MODE:ToggleDepthMode();break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;
         }
@@ -1014,7 +1293,7 @@ private:
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false;
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_cachedStatus,m_cachedWindowTitle;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;std::jthread m_youtubeWorker;
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;
 };
 
