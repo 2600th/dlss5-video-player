@@ -31,12 +31,12 @@ inline bool IsAllowedPath(std::wstring_view path)
     const std::wstring normalized = NormalizePath(path);
     if (!IsSafeRelativePath(normalized)) return false;
 
-    static constexpr std::array<std::wstring_view, 38> allowed = {
-        L"dlssvideoplayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe", L"deno.exe",
-        L"dxgi.dll", L"reshade.ini", L"reshadepreset.ini", L"renodx-dlss5.addon64",
-        L"nvngx_dlss.dll", L"nvngx_dlssnr.dll", L"sl.common.dll", L"sl.dlss.dll",
-        L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll",
-        L"sl.pcl.dll", L"sl.reflex.dll", L"readme.md", L"license", L"security.md",
+    static constexpr std::array<std::wstring_view, 40> allowed = {
+        L"dlssvideoplayer.exe", L"nvngx_dlss.dll", L"neural-runtime/neuralworker.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe", L"deno.exe",
+        L"neural-runtime/dxgi.dll", L"neural-runtime/reshade.ini", L"neural-runtime/reshadepreset.ini", L"neural-runtime/renodx-dlss5.addon64",
+        L"neural-runtime/nvngx_dlss.dll", L"neural-runtime/nvngx_dlssnr.dll", L"neural-runtime/sl.common.dll", L"neural-runtime/sl.dlss.dll",
+        L"neural-runtime/sl.dlss_g.dll", L"neural-runtime/sl.dlss_nr.dll", L"neural-runtime/sl.interposer.dll", L"neural-runtime/sl.nis.dll",
+        L"neural-runtime/sl.pcl.dll", L"neural-runtime/sl.reflex.dll", L"readme.md", L"license", L"security.md",
         L"contributing.md", L"changelog.md", L"third_party.md",
         L"docs/architecture.md", L"docs/building.md", L"docs/dlss5_setup.md",
         L"docs/troubleshooting.md", L"experimental_runtime_notice.txt", L"package_manifest.txt",

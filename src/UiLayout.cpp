@@ -26,7 +26,9 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Stop, 48, 0, false},
     ToolbarDefinition{ToolbarAction::Forward10, 44, 0, false},
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
-    ToolbarDefinition{ToolbarAction::ToggleDlss, 82, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 230, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 320, 1, true},
     ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
     ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
     ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
@@ -136,6 +138,29 @@ ButtonContentLayout LayoutButtonContent(RECT outer,SIZE icon,SIZE text,bool stac
     return layout;
 }
 
+ActivityVisual ResolveActivityVisual(RECT track, uint64_t elapsedMs,
+                                     uint64_t completed, uint64_t total,
+                                     bool measurable, bool motionEnabled)
+{
+    ActivityVisual visual{};
+    visual.fill = track;
+    const LONG width = std::max(0L, track.right-track.left);
+    visual.spinnerStep = motionEnabled ? unsigned((elapsedMs/80)%12) : 0;
+    visual.indeterminate = !measurable || !total;
+    if (!visual.indeterminate) {
+        const double fraction = double(std::min(completed,total))/double(total);
+        visual.percent = static_cast<unsigned>(fraction*100.0);
+        visual.fill.right = track.left+static_cast<LONG>(width*fraction);
+    } else {
+        const LONG segment = std::min(width,std::max(1L,width/4));
+        const double cycle = double(elapsedMs%1600)/800.0;
+        const double position = motionEnabled ? (cycle<=1.0?cycle:2.0-cycle) : 0.5;
+        visual.fill.left += static_cast<LONG>((width-segment)*position);
+        visual.fill.right = visual.fill.left+segment;
+    }
+    return visual;
+}
+
 PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth,int clientHeight,UINT dpi)
 {
     const int width=std::max(1,clientWidth),height=std::max(1,clientHeight);
@@ -158,6 +183,9 @@ PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth,int clientHeight,U
     };
     PreRenderSurfaceLayout layout{};
     layout.title=row(0);layout.phase=row(1);layout.resolution=row(2);
+    const int spinnerSide=std::min(DipToPixels(40,dpi),std::max(0,textTop-gutter-gap));
+    const int spinnerTop=std::max(0,textTop-gap-spinnerSide);
+    layout.spinner=RECT{(width-spinnerSide)/2,spinnerTop,(width+spinnerSide)/2,spinnerTop+spinnerSide};
     layout.frameCount=row(3);layout.elapsedEta=row(4);layout.size=row(5);
     layout.progressTrack=RECT{left,progressTop,right,progressBottom};
     layout.progressFill=layout.progressTrack;layout.progressFill.right=layout.progressFill.left;
@@ -250,10 +278,10 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
     int itemWidthDip = 0;
 
     if (LayoutWidth(selected, 0, dpi) > availableWidth) {
-        compact = true;
-        itemWidthDip = kToolbarCompactWidthDip;
-        if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
-            selected = std::span<const ToolbarDefinition* const>{required};
+        selected = std::span<const ToolbarDefinition* const>{required};
+        if (LayoutWidth(selected, 0, dpi) > availableWidth) {
+            compact = true;
+            itemWidthDip = kToolbarCompactWidthDip;
             if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
                 itemWidthDip = kToolbarSmallestWidthDip;
             }
@@ -284,7 +312,7 @@ int MinimumToolbarClientWidth(UINT dpi)
     const auto required = RequiredToolbarDefinitions();
     const std::span<const ToolbarDefinition* const> selected{required};
     return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
-           LayoutWidth(selected, kToolbarSmallestWidthDip, dpi);
+           LayoutWidth(selected, 0, dpi);
 }
 
 int MinimumIdleClientHeight(UINT dpi)
@@ -351,8 +379,15 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
     case ToolbarAction::Mute:
     case ToolbarAction::Aspect:
         return availability.mediaLoaded && !availability.seeking;
-    case ToolbarAction::ToggleDlss:
-        return availability.mediaLoaded && !availability.seeking && availability.rendererReady;
+    case ToolbarAction::ToggleNeuralRendering:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.neuralRenderingAvailable;
+    case ToolbarAction::ToggleUpscaling:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.upscalingAvailable;
+    case ToolbarAction::ToggleFrameGeneration:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.frameGenerationAvailable;
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;
@@ -473,11 +508,8 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
     } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::DlssSrSafeMode) {
         configuration = L"DLSS SR safe mode";
     }
-    const wchar_t* dlssState = status.dlssState == PlayerDlssState::Active
-        ? L"DLSS SR active" : L"Scaler fallback";
-
     std::wstringstream text;
-    text << configuration << L" \u00b7 " << dlssState
+    text << configuration << L" \u00b7 " << (status.upscalingStatus.empty()?L"DLSS SR unavailable":status.upscalingStatus) << L" \u00b7 FG unavailable"
          << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
          << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
          << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight

@@ -1,5 +1,6 @@
 #include "DLSSBackend.h"
 #include "Log.h"
+#include "UpscalingPolicy.h"
 #include <windows.h>
 #include <filesystem>
 #include <algorithm>
@@ -11,7 +12,7 @@ DLSSBackend::~DLSSBackend() { Shutdown(); }
 bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
                              uint32_t sourceW, uint32_t sourceH,
                              uint32_t outputW, uint32_t outputH,
-                             NVSDK_NGX_PerfQuality_Value quality) {
+                             NVSDK_NGX_PerfQuality_Value quality, bool preserveSource) {
     m_device = device;
     m_outputW = outputW;
     m_outputH = outputH;
@@ -73,6 +74,29 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     }
 
     float sharpness=0.0f;
+    if (preserveSource) {
+        // Select a runtime-supported dynamic range; never resize the decoded input
+        // to force a nominal Quality/Performance ratio.
+        bool supported=false;
+        for (auto candidate : {NVSDK_NGX_PerfQuality_Value_MaxQuality,
+                               NVSDK_NGX_PerfQuality_Value_Balanced,
+                               NVSDK_NGX_PerfQuality_Value_MaxPerf,
+                               NVSDK_NGX_PerfQuality_Value_UltraPerformance}) {
+            m_lastResult=NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params,outputW,outputH,candidate,
+                &m_optimalW,&m_optimalH,&m_maxW,&m_maxH,&m_minW,&m_minH,&sharpness);
+            LOG("SR range query quality="<<candidate<<" result="<<std::hex<<m_lastResult<<std::dec
+                <<" optimal="<<m_optimalW<<"x"<<m_optimalH<<" min="<<m_minW<<"x"<<m_minH<<" max="<<m_maxW<<"x"<<m_maxH);
+            if (!NVSDK_NGX_FAILED(m_lastResult) && SourceFitsDLSSRange(sourceW,sourceH,
+                outputW,outputH,m_minW,m_minH,m_maxW,m_maxH)) {
+                m_quality=candidate; supported=true; break;
+            }
+        }
+        if (!supported) {
+            LOG("DLSS SR source dimensions are outside the runtime-supported input range.");
+            return false;
+        }
+    }
+    else {
     m_lastResult = NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params, outputW, outputH, quality,
         &m_optimalW, &m_optimalH, &m_maxW, &m_maxH, &m_minW, &m_minH, &sharpness);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_optimalW || !m_optimalH) {
@@ -83,13 +107,16 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
         m_minW = m_maxW = m_optimalW;
         m_minH = m_maxH = m_optimalH;
     }
+    }
 
     // Do not pre-upscale a low-resolution movie to the nominal DLSS quality input
     // before invoking DLSS.  Pick the source-equivalent size when the runtime's
     // dynamic-resolution range permits it, otherwise clamp to the advertised range.
     // This preserves the actual reconstruction job for DLSS instead of hiding it
     // behind a bilinear resize first.
-    if (quality == NVSDK_NGX_PerfQuality_Value_DLAA) {
+    if (preserveSource) {
+        m_renderW=sourceW; m_renderH=sourceH;
+    } else if (quality == NVSDK_NGX_PerfQuality_Value_DLAA) {
         m_renderW = outputW; m_renderH = outputH;
     } else {
         const double outAR = outputH ? double(outputW) / double(outputH) : 1.0;

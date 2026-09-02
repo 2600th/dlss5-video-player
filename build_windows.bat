@@ -54,14 +54,20 @@ if errorlevel 1 (
 )
 
 echo [4/5] Configuring Visual Studio 2022 x64...
-"%CMAKE_EXE%" -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
+"%CMAKE_EXE%" -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
 if errorlevel 1 exit /b 1
 
 echo [5/5] Building and testing Release...
-"%CMAKE_EXE%" --build build --config Release --parallel
+"%CMAKE_EXE%" --build build-upscaling --config Release --parallel
 if errorlevel 1 exit /b 1
-"%CMAKE_EXE%" --build build --config Release --target RUN_TESTS
+"%CMAKE_EXE%" --build build-upscaling --config Release --target RUN_TESTS
 if errorlevel 1 exit /b 1
 
-echo [OK] build\Release\DLSSVideoPlayer.exe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination build-upscaling\Release\neural-runtime
+if errorlevel 1 exit /b 1
+copy /y packaging\ReShade.ini build-upscaling\Release\neural-runtime\ReShade.ini >nul
+if errorlevel 1 exit /b 1
+copy /y packaging\ReShadePreset.ini build-upscaling\Release\neural-runtime\ReShadePreset.ini >nul
+if errorlevel 1 exit /b 1
+echo [OK] build-upscaling\Release\DLSSVideoPlayer.exe
 echo Release packaging is a separate, allowlisted step: package_release.bat

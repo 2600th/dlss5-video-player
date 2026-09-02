@@ -22,6 +22,21 @@ folders for alternate DLLs and does not silently replace `nvngx_dlss.dll`.
 
 ## Build and test
 
+For the new independent-upscaling layout, use a fresh `build-upscaling` directory.
+CMake builds the hidden
+`Release/neural-runtime/NeuralWorker.exe` alongside the hook-free player.
+For a private NR test, stage the existing locked runtime into that subdirectory:
+
+```powershell
+./tools/stage_runtime.ps1 -InputDirectory external/runtime -Destination build-upscaling/Release/neural-runtime
+Copy-Item packaging/ReShade.ini,packaging/ReShadePreset.ini build-upscaling/Release/neural-runtime
+./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix '-upscaling'
+```
+
+The package assembler refuses to replace an existing package; choose a new suffix
+for another candidate. Never copy the neural `dxgi.dll` into the player root.
+Private runtime notices and redistribution restrictions are unchanged.
+
 ```bat
 build_windows.bat
 ```
@@ -29,12 +44,12 @@ build_windows.bat
 For a manual build:
 
 ```bat
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DDLSS_SDK=external/DLSS -DFFMPEG_STAGED_DIR=external/ffmpeg/bin
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
+cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON -DDLSS_SDK=external/DLSS -DFFMPEG_STAGED_DIR=external/ffmpeg/bin
+cmake --build build-upscaling --config Release --parallel
+ctest --test-dir build-upscaling -C Release --output-on-failure
 ```
 
-`build/Release` is developer output, not a distributable folder. Authorized
+`build-upscaling/Release` is developer output, not a distributable folder. Authorized
 release maintainers assemble and verify the explicit allowlist separately with
 `package_public_release.bat`. That command creates the publishable core ZIP
 containing the application, the official NVIDIA-signed SDK runtime, notices,

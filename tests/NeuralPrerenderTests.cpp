@@ -414,6 +414,22 @@ void encoder_child_inherits_only_its_stdin_pipe_test()
     if (unrelated) CloseHandle(unrelated);
 }
 
+void cached_media_probe_reads_headers_without_redecoding_validated_video_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(),fixture.Path()/L"ffprobe.exe");
+    // No FFmpeg installed: opening an already hash-validated cache entry must
+    // only inspect headers, not count/decode all frames or start an encoder.
+    const auto probe=ProbeMedia(fixture.Path(),fixture.Path()/L"already-validated.mkv",{},
+                                MediaProbeMode::CachedMetadata);
+    CHECK(probe.ok);CHECK_EQ(uint32_t{2},probe.width);CHECK_EQ(uint32_t{2},probe.height);
+    CHECK_EQ(int64_t{333333},probe.duration100ns);
+    CHECK_EQ(uint64_t{0},probe.frameCount);CHECK(!probe.decodedFinalFrame);
+    std::stop_source stop;stop.request_stop();
+    CHECK(!ProbeMedia(fixture.Path(),fixture.Path()/L"already-validated.mkv",stop.get_token(),
+                      MediaProbeMode::CachedMetadata).ok);
+}
+
 void probe_child_inherits_only_its_output_pipe_test()
 {
     TempDirectory fixture;
@@ -737,6 +753,7 @@ public:
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
     {
         if(stop.stop_requested())return VideoReadResult::Cancelled;
+        if(notReadyReads>0){--notReadyReads;return VideoReadResult::NotReady;}
         if(index>=frames.size())return VideoReadResult::EndOfStream;
         frame=frames[index++];return VideoReadResult::FrameReady;
     }
@@ -751,8 +768,63 @@ public:
     double FrameRate() const override { return fps; }
     double DurationSeconds() const override { return duration; }
     std::vector<VideoFrame> frames;size_t index{};uint32_t width{1},height{1};
-    double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},closes{},seeks{};
+    double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},closes{},seeks{},notReadyReads{};
 };
+
+void synchronized_seek_waits_for_decoder_startup_and_preserves_comparison_test()
+{
+    FakeSynchronizedSource original({0,333333,666666,999999});
+    FakeSynchronizedSource neural({0,333333,666666,999999});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK(playback.SetView(ComparisonView::Neural));playback.SetPaused(true);
+    original.notReadyReads=2;neural.notReadyReads=4;
+    CHECK(playback.SeekSeconds(0.066,{}));
+    CHECK(playback.NeuralAvailable());CHECK(playback.Paused());
+    CHECK_EQ(ComparisonView::Neural,playback.View());
+    CHECK(playback.CurrentPair()!=nullptr);
+    if(const auto* pair=playback.CurrentPair()){
+        CHECK_EQ(int64_t{666666},pair->original.timestamp100ns);
+        CHECK_EQ(int64_t{666666},pair->neural.timestamp100ns);
+    }
+    playback.SetPaused(false);
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+}
+
+void synchronized_seek_at_end_selects_last_frame_test()
+{
+    FakeSynchronizedSource original({0,333333,666666,999999});
+    FakeSynchronizedSource neural({0,333333,666666,999999});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    CHECK(playback.SeekSeconds(original.duration,{}));
+    CHECK(playback.VisibleFrame()!=nullptr);
+    if(playback.VisibleFrame())CHECK_EQ(int64_t{999999},playback.VisibleFrame()->timestamp100ns);
+}
+
+void synchronized_seek_handles_container_duration_padding_at_end_test()
+{
+    for(const double neuralDuration:{0.1333332,0.16}){
+        FakeSynchronizedSource original({0,333333,666666,999999});
+        FakeSynchronizedSource neural({0,333333,666666,999999});
+        original.duration=0.16;neural.duration=neuralDuration;
+        SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+        CHECK(playback.SeekSeconds(0.16,{}));
+        CHECK(playback.VisibleFrame()!=nullptr);
+        if(playback.VisibleFrame())CHECK_EQ(int64_t{999999},playback.VisibleFrame()->timestamp100ns);
+    }
+}
+
+void synchronized_seek_wait_can_be_cancelled_test()
+{
+    FakeSynchronizedSource original({0,333333});FakeSynchronizedSource neural({0,333333});
+    SynchronizedPlayback playback(original,neural);CHECK(playback.Open(L"o",L"n",{}));
+    original.notReadyReads=100000;
+    std::stop_source stop;
+    auto seek=std::async(std::launch::async,[&]{return playback.SeekSeconds(0,stop.get_token());});
+    std::this_thread::sleep_for(25ms);stop.request_stop();
+    CHECK_EQ(std::future_status::ready,seek.wait_for(1s));CHECK(!seek.get());
+    CHECK(playback.VisibleFrame()==nullptr);
+}
 
 void synchronized_playback_starts_original_and_switches_same_timestamp_test()
 {
@@ -841,6 +913,11 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
         SetEvent(reinterpret_cast<HANDLE>(raw));
     }
     if (_wcsicmp(name.c_str(), L"ffprobe.exe") == 0) {
+        const bool cached=std::ranges::any_of(arguments,[](std::wstring_view value){return value.ends_with(L"already-validated.mkv");});
+        if(cached){
+            if(std::find(arguments.begin(),arguments.end(),L"-count_frames")!=arguments.end())return 92;
+            std::cout << "width=2\nheight=2\nduration=0.0333333\n";return 0;
+        }
         std::cout << "width=2\nheight=2\nnb_read_frames=1\nduration=0.0333333\n";
         return 0;
     }
@@ -885,6 +962,7 @@ int wmain(int argc, wchar_t* argv[])
     encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();
+    cached_media_probe_reads_headers_without_redecoding_validated_video_test();
     probe_child_inherits_only_its_output_pipe_test();
     encoder_blocked_write_is_interrupted_by_stop_test();
     offline_job_primes_feature_then_restarts_source_and_captures_every_frame_test();
@@ -904,6 +982,10 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_starts_original_and_switches_same_timestamp_test();
     synchronized_playback_advances_both_streams_under_one_clock_test();
     synchronized_playback_seek_commits_only_after_both_streams_reach_target_test();
+    synchronized_seek_waits_for_decoder_startup_and_preserves_comparison_test();
+    synchronized_seek_at_end_selects_last_frame_test();
+    synchronized_seek_handles_container_duration_padding_at_end_test();
+    synchronized_seek_wait_can_be_cancelled_test();
     synchronized_playback_refuses_a_mismatched_neural_frame_beyond_one_frame_test();
     synchronized_playback_rejects_incompatible_cached_stream_metadata_test();
     synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();

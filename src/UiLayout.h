@@ -13,7 +13,8 @@
 
 enum class ToolbarAction {
     Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
-    ToggleDlss, Aspect, Adjustments, DebugView, Fullscreen, None
+    ToggleNeuralRendering, ToggleUpscaling, ToggleFrameGeneration,
+    Aspect, Adjustments, DebugView, Fullscreen, None
 };
 
 struct ToolbarItem {
@@ -28,6 +29,9 @@ struct ToolbarAvailability {
     bool rendererReady{false};
     bool youtubeAvailable{false};
     bool resolvingYouTube{false};
+    bool neuralRenderingAvailable{false};
+    bool upscalingAvailable{false};
+    bool frameGenerationAvailable{false};
 };
 
 enum class MediaSourceKind {
@@ -94,6 +98,7 @@ struct PlayerStatusSnapshot {
     uint32_t outputWidth{};
     uint32_t outputHeight{};
     std::wstring quality;
+    std::wstring upscalingStatus;
     double renderedFps{};
     double sourceFps{};
     uint64_t droppedFrames{};
@@ -118,6 +123,7 @@ struct ButtonContentLayout {
 };
 
 struct PreRenderSurfaceLayout {
+    RECT spinner{};
     RECT title{};
     RECT phase{};
     RECT resolution{};
@@ -128,6 +134,17 @@ struct PreRenderSurfaceLayout {
     RECT progressFill{};
     RECT cancelButton{};
 };
+
+struct ActivityVisual {
+    RECT fill{};
+    unsigned spinnerStep{};
+    unsigned percent{};
+    bool indeterminate{};
+};
+
+ActivityVisual ResolveActivityVisual(RECT track, uint64_t elapsedMs,
+                                     uint64_t completed, uint64_t total,
+                                     bool measurable, bool motionEnabled);
 
 inline constexpr int kToolbarSpacingDip = 4;
 inline constexpr int kToolbarMinHitHeightDip = 36;

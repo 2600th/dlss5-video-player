@@ -14,7 +14,9 @@ reconstructs approximate guides from decoded frame history. Treat the result as
 experimental and verify actual module loading, add-on status, and visual output
 separately.
 
-The player now treats the experimental runtime as an atomic layout. If all four
+The private build isolates the experimental runtime in `neural-runtime/`,
+alongside `NeuralWorker.exe`. The player root must not contain `dxgi.dll`.
+The player treats the experimental runtime as an atomic layout. If all four
 of `ReShade.ini`, `dxgi.dll`, `renodx-dlss5.addon64`, and
 `nvngx_dlssnr.dll` are absent, a normal source build starts in native DLAA
 developer mode. If only part of that layout is present, startup fails closed
@@ -27,7 +29,8 @@ generation. RTX 40 support in this project relies on a community-modified
 310.8.0 runtime and must not be described as official NVIDIA support.
 
 The runtime lock currently selects RenoDX DLSS 5 add-on 4.70. Normal-mode
-bootstrap atomically enforces only these managed values in `ReShade.ini`:
+helper bootstrap atomically enforces only these managed values in
+`neural-runtime/ReShade.ini`:
 
 ```ini
 [RenoDX.DLSS5]
@@ -41,8 +44,8 @@ directly and does not use Streamline, so this avoids installing an unnecessary
 Streamline hook.
 
 Other RenoDX controls—including preset, style, intensity, automatic mask, and
-guide overrides—are preserved. Safe mode disables the add-on through ReShade's
-canonical `DisabledAddons` token and does not destroy those user settings.
+guide overrides—are preserved. Safe mode skips the neural helper entirely and
+does not change those user settings.
 
 The selected neural runtime is modified and reports Authenticode `HashMismatch`.
 Its embedded NVIDIA signature no longer validates. The ReShade proxy and RenoDX
@@ -50,9 +53,10 @@ add-on are unsigned. These signature states do not establish malware or safety,
 and matching a SHA-256 lock proves only that a file is the expected byte stream.
 See `EXPERIMENTAL_RUNTIME_NOTICE.txt`.
 
-DLAA is the default NGX carrier at native 1:1 resolution, so spatial DLSS
-upscaling is off by default. Quality, Balanced, Performance, Ultra Performance,
-and Auto remain explicit user selections.
+The offline neural helper uses a native 1:1 DLAA carrier, with upscaling off.
+The player's independent runtime SR toggle also starts off. Its output target
+defaults to 1440p, with 2160p selectable; the backend selects a supported NGX
+quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
@@ -100,15 +104,15 @@ and introduce a second undocumented NGX session. See
 
 ## Checking observed status
 
-The player status reports the selected configuration, not proof that a neural
-workload evaluated successfully. Press **Home**, open ReShade's **Add-ons** page,
-and inspect the RenoDX add-on's observed status. Native NGX status and evaluation
-counters are shown in the player.
+The player status reports the selected configuration. The hidden helper has no
+interactive overlay: inspect `neural-runtime/ReShade.log` for feature-18 creation,
+inline evaluation and no later failure. Successful cache promotion additionally
+requires captured-frame counts, hashes and independent media validation. Native
+runtime SR evaluations appear in the player's separate `DLSSVideoPlayer.log`.
 
 ## Safe mode
 
 If the experimental path is unstable, choose **Advanced > Restart in DLSS SR
-safe mode**. Safe mode disables only the RenoDX neural add-on for that launch and
-keeps the official NGX path available. A later normal launch on an RTX 40/50
-policy target restores the add-on setting with at most one bootstrap relaunch;
-it does not opt into spatial upscaling.
+safe mode**. Safe mode skips the neural helper for that launch and keeps the
+official NGX path available. A later normal launch on an RTX 40/50 policy target
+enables neural pre-rendering again. SR remains off by default on each launch.

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <optional>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -213,14 +215,40 @@ SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token s
 bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
 {
     if(!impl_->opened||!std::isfinite(seconds)||seconds<0.0||stop.stop_requested())return false;
-    if(!impl_->original->SeekSeconds(seconds))return false;
-    if(impl_->neural&&!impl_->neural->SeekSeconds(seconds)){Close();return false;}
-    impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
-    SynchronizedFramePair candidate;
-    if(impl_->BuildPair(candidate,stop)!=SynchronizedReadResult::PairReady){
-        Close();return false;
+    // The timeline endpoint is after the last frame, not a decodable timestamp.
+    const double duration=impl_->neural?
+        std::min(impl_->original->DurationSeconds(),impl_->neural->DurationSeconds()):
+        impl_->original->DurationSeconds();
+    const double frameDuration=1.0/impl_->original->FrameRate();
+    if(std::isfinite(duration)&&duration>0.0)
+        seconds=std::min(seconds,std::max(0.0,duration-frameDuration));
+    // Restarting FFmpeg is asynchronous. Retain either ready half of the pair
+    // while the other decoder warms up; NotReady is not a failed seek.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    for(int attempt=0;attempt<2;++attempt){
+        if(stop.stop_requested()||!impl_->original->SeekSeconds(seconds)||
+           (impl_->neural&&!impl_->neural->SeekSeconds(seconds))){Close();return false;}
+        impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
+        SynchronizedFramePair candidate;
+        SynchronizedReadResult result;
+        for(;;){
+            result=impl_->BuildPair(candidate,stop);
+            if(stop.stop_requested()||std::chrono::steady_clock::now()>=deadline){Close();return false;}
+            if(result!=SynchronizedReadResult::NotReady)break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if(result==SynchronizedReadResult::PairReady){
+            impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
+        }
+        // Container/audio duration may round past the last video PTS. At the
+        // tail only, retry one frame earlier instead of unloading a valid pair.
+        if(attempt==0&&seconds>0.0&&seconds>=duration-2.0*frameDuration&&
+           (result==SynchronizedReadResult::EndOfStream||result==SynchronizedReadResult::OutOfSync)){
+            seconds=std::max(0.0,seconds-frameDuration);continue;
+        }
+        break;
     }
-    impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
+    Close();return false;
 }
 
 bool SynchronizedPlayback::SetView(ComparisonView view)

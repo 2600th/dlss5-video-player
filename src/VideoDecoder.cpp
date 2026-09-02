@@ -137,6 +137,13 @@ std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
     wchar_t modulePath[32768]{};
     if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
         const fs::path base = fs::path(modulePath).parent_path();
+        // neural-runtime is a contained helper package: use only the explicit
+        // parent copy shared with the player, never an unrelated PATH tool.
+        if (base.filename() == L"neural-runtime") {
+            const fs::path shared = base.parent_path() / exeName;
+            std::error_code ec;
+            return fs::is_regular_file(shared, ec) ? shared.wstring() : L"";
+        }
         const fs::path candidates[] = {
             base / exeName,
             base / L"ffmpeg" / exeName,
@@ -502,12 +509,11 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
 
     DWORD available=0;
     if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
-        if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
-            DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
-            if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            return ClassifyFFmpegEnd(exitCode);
-        }
-        return VideoReadResult::Error;
+        if(GetLastError()!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+        // A child can close stdout just before its process handle becomes signaled.
+        // Treat that short interval as an empty pipe so the existing nonblocking
+        // exit/fallback path below observes the eventual exit code.
+        available=0;
     }
     DWORD got=0;
     if(available>0){

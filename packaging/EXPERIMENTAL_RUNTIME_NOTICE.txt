@@ -1,5 +1,13 @@
 EXPERIMENTAL DLSS NEURAL-RENDERING RUNTIME
 
+PRIVATE LOCAL TEST BUILD - NOT A PUBLIC RELEASE
+
+This assembled bundle is intended for private testing and experimentation.
+Third-party components remain the property of their respective owners and are
+governed by their own licenses; the project's MIT license does not relicense
+them. This notice does not grant additional rights or override upstream terms.
+Keep this bundle private while redistribution permission remains unresolved.
+
 This package includes a community-modified RTX 40-targeted NVIDIA
 neural-rendering DLL. The modification invalidates its embedded Authenticode
 signature (HashMismatch). The ReShade proxy and RenoDX add-on are unsigned.

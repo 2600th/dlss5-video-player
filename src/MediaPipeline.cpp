@@ -36,7 +36,17 @@ std::filesystem::path ModuleDirectory()
 std::filesystem::path FindHelper(const std::filesystem::path& directory,
                                  std::wstring_view name)
 {
-    const auto candidate = (directory.empty() ? ModuleDirectory() : directory) / name;
+    const std::filesystem::path base = directory.empty() ? ModuleDirectory() : directory;
+    // The neural helper is deliberately packaged below the hook-free player.
+    // Its FFmpeg tools remain the single shared copies beside that parent,
+    // never an arbitrary executable found through PATH.
+    if (base.filename() == L"neural-runtime") {
+        const auto shared = base.parent_path() / name;
+        std::error_code error;
+        if (std::filesystem::is_regular_file(shared, error) && !error) return shared;
+        return {};
+    }
+    const auto candidate = base / name;
     std::error_code error;
     if (!std::filesystem::is_regular_file(candidate, error) || error) return {};
     return candidate;
@@ -475,16 +485,18 @@ void RawVideoEncoder::Cancel()
 
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
                        const std::filesystem::path& media,
-                       std::stop_token stop)
+                       std::stop_token stop, MediaProbeMode mode)
 {
     ProbeResult result;
+    const bool fullValidation=mode==MediaProbeMode::FullValidation;
     const auto ffprobe = FindHelper(helperDirectory, L"ffprobe.exe");
     const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
-    if (ffprobe.empty() || ffmpeg.empty()) { result.detail = L"FFmpeg tools are unavailable."; return result; }
-    const std::vector<std::wstring> probeArguments{
-        L"-v", L"error", L"-count_frames", L"-select_streams", L"v:0",
-        L"-show_entries", L"stream=width,height,nb_read_frames:format=duration",
+    if (ffprobe.empty() || (fullValidation&&ffmpeg.empty())) { result.detail = L"FFmpeg tools are unavailable."; return result; }
+    std::vector<std::wstring> probeArguments{
+        L"-v", L"error", L"-select_streams", L"v:0",
+        L"-show_entries", fullValidation?L"stream=width,height,nb_read_frames:format=duration":L"stream=width,height:format=duration",
         L"-of", L"default=noprint_wrappers=1:nokey=0", media.wstring()};
+    if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_frames");
     const CaptureResult capture = RunCapture(ffprobe, probeArguments, stop);
     if (!capture.started || capture.cancelled || capture.exitCode != 0) {
         result.detail = capture.cancelled ? L"Media validation was cancelled." : L"FFprobe validation failed.";
@@ -512,11 +524,15 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
         if (end == std::string::npos) break;
         position = end + 1;
     }
-    result.duration100ns = std::llround(durationSeconds * 10000000.0);
-    if (!result.width || !result.height || !result.frameCount || result.duration100ns <= 0) {
+    if(std::isfinite(durationSeconds)&&durationSeconds>0.0&&durationSeconds<double(INT64_MAX)/10000000.0)
+        result.duration100ns = std::llround(durationSeconds * 10000000.0);
+    if (!result.width || !result.height || (fullValidation&&!result.frameCount) || result.duration100ns <= 0) {
         result.detail = L"FFprobe returned incomplete media metadata.";
         return result;
     }
+    // Only for entries already checked against their persisted content hash and
+    // complete manifest. Full frame/end-of-stream validation stays on promotion.
+    if(!fullValidation){result.ok=true;return result;}
     ChildProcess finalFrame;
     const std::vector<std::wstring> decodeArguments{
         L"-v", L"error", L"-sseof", L"-1", L"-i", media.wstring(),

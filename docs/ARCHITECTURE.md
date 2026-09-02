@@ -36,14 +36,15 @@ FP16 reconstructed output
   +-> final image adjustments
   |
   v
-D3D12 swapchain -> ReShade -> display
+D3D12 swapchain -> display (player has no ReShade proxy)
 ```
 
 ## Decoder
 
 `VideoDecoder` uses FFmpeg as the primary decoder by launching `ffmpeg.exe`/`ffprobe.exe` as helper processes. Media Foundation is kept as a fallback path.
 
-The decoder can request a lower decode size for high-resolution material so the CPU does not always move native 4K BGRA frames when DLSS is rendering from a smaller input resolution.
+Playback preserves the decoded source dimensions. Selecting an SR output never
+downsamples a source to fit a nominal DLSS quality ratio.
 
 ## Timing
 
@@ -101,14 +102,20 @@ checkpoint that advances after the captured sequence, and no feature-18
 failure, skip, or pass-through marker in the stabilized job log segment.
 Sequential offline decoding uses software FFmpeg to avoid competing with the
 D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache
-hits are re-probed through the final frame and
-quarantined if decoding or metadata validation fails. Cancellation and failed
+hits retain full content-hash verification and use header-only metadata probes;
+frame counting and final-frame decoding run once before promotion, not on every
+replay. Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.
-Original is the initial view. The DLSS toggle changes the visible member of the
+Neural Rendering is requested on for a new session, so a valid cached replay
+selects the neural member after the first pair is ready and before it is
+presented. Toggling Neural Rendering changes the visible member of the
 last-presented pair, so comparison never advances ahead of the audio clock.
+Seeking waits for both restarted decoders to produce a pair; temporary
+`NotReady` results do not unload playback. Tail seeks account for container
+duration padding with a bounded earlier-frame retry.
 
 ## NGX integration
 
@@ -116,9 +123,20 @@ last-presented pair, so comparison never advances ahead of the audio clock.
 
 The default performance/quality value is DLAA. That keeps input and output at
 native 1:1 resolution while preserving a real NGX feature creation/evaluation
-sequence for the optional interception layer. Spatial DLSS Super Resolution is
-enabled only when the user explicitly selects Auto, Quality, Balanced,
-Performance, or Ultra Performance.
+sequence for the optional interception layer in `neural-runtime/NeuralWorker.exe`.
+The main player does not load that proxy. Its independent runtime SR toggle
+defaults off, selects a supported NGX input range without resizing the source,
+and targets a 2560x1440 or 3840x2160 bounding box. It validates a candidate
+renderer on a separate child window before swapping; failure preserves playback.
+Ordinary playback disables sampling jitter. Frame Generation is unavailable.
+These controls do not alter the offline DLAA carrier or cache identity.
+
+Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.
+Only paths and progress/results cross processes; encoded videos remain in the
+existing cache. The helper enters DXGI on its main thread before Media Foundation
+and decoder startup, then maintains a hidden window/message pump during rendering.
+The cache manager still checks hashes, geometry, timeline and feature-18 evidence
+before promotion. Closing/cancelling the job terminates the helper process tree.
 
 The source tree directly implements native DLSS Super Resolution, not an
 official public DLSS 5 API. It intentionally leaves the raw NGX symbols visible

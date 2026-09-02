@@ -52,7 +52,9 @@ D3D12Renderer::~D3D12Renderer() {
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
 
-bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality) {
+bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource) {
+    m_preserveSource=preserveSource;
+    m_delayedRecreateDone=preserveSource;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
@@ -60,7 +62,7 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     if(!InitializeDLSS(gpuSynchronized)) {
         if(!gpuSynchronized)return false;
         LOG("DLSS unavailable; using D3D12 scaler fallback.");
-        m_renderW=std::max(1u,outputW*2u/3u); m_renderH=std::max(1u,outputH*2u/3u);
+        m_renderW=sourceW; m_renderH=sourceH;
     }
     if(!CreateVideoResources()) return false;
     LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs + R8 bias; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
@@ -189,7 +191,7 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
 
 bool D3D12Renderer::InitializeDLSS(bool& gpuSynchronized){
     auto* cmd=m_cmds[0].Get();
-    m_allocators[0]->Reset();cmd->Reset(m_allocators[0].Get(),nullptr);bool ok=m_dlss.Initialize(m_device.Get(),cmd,m_sourceW,m_sourceH,m_outputW,m_outputH,m_quality);
+    m_allocators[0]->Reset();cmd->Reset(m_allocators[0].Get(),nullptr);bool ok=m_dlss.Initialize(m_device.Get(),cmd,m_sourceW,m_sourceH,m_outputW,m_outputH,m_quality,m_preserveSource);
     if(ok){m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();}
     cmd->Close();ID3D12CommandList*l[]={cmd};m_queue->ExecuteCommandLists(1,l);
     gpuSynchronized=WaitGPUForContinuedUse();
@@ -299,8 +301,8 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     // One temporal jitter sample drives BOTH the color reconstruction input and the
     // spatial lookup of all guide buffers.  The motion-vector VALUES themselves remain
     // unjittered (hence no MVJittered create flag), matching the standard DLSS contract.
-    const float jitterX=Halton(uint32_t(m_framesPresented%1024)+1,2)-0.5f;
-    const float jitterY=Halton(uint32_t(m_framesPresented%1024)+1,3)-0.5f;
+    const float jitterX=DLSSEnabled()?Halton(uint32_t(m_framesPresented%1024)+1,2)-0.5f:0.0f;
+    const float jitterY=DLSSEnabled()?Halton(uint32_t(m_framesPresented%1024)+1,3)-0.5f:0.0f;
     const float jitterUVX=jitterX/float(m_renderW), jitterUVY=jitterY/float(m_renderH);
 
     // GPU-expand the compact CPU optical-flow/mask analysis to exact DLSS input
@@ -338,7 +340,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
         DLSSEnabled(), m_dlss.FeatureCreated(), m_framesPresented,
         m_delayedRecreateDone, m_recreateRequested,
         [&] { return m_dlss.EnsureFeature(cmd); },
-        [&] { return m_dlss.RecreateFeature(cmd); });
+        [&] { return m_dlss.RecreateFeature(cmd); },m_preserveSource);
     const bool needFeatureFlush = featureSetup.needsFlush;
     if (featureSetup.selected) temporalReset = true;
     if (needFeatureFlush) {

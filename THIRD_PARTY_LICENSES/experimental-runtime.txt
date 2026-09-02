@@ -1,5 +1,10 @@
 Experimental runtime source and terms notice
 
+This assembled runtime bundle is intended for private testing and
+experimentation, not public release. All third-party components remain the
+property of their respective owners under their applicable licenses. This
+statement does not change those licenses or grant additional permissions.
+
 NVIDIA DLSS / NGX: https://github.com/NVIDIA/DLSS
 NVIDIA Streamline: https://github.com/NVIDIA-RTX/Streamline
 ReShade: https://github.com/crosire/reshade

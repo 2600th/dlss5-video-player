@@ -24,7 +24,7 @@ public:
     bool Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
                     uint32_t sourceW, uint32_t sourceH,
                     uint32_t outputW, uint32_t outputH,
-                    NVSDK_NGX_PerfQuality_Value quality);
+                    NVSDK_NGX_PerfQuality_Value quality, bool preserveSource = false);
     bool EnsureFeature(ID3D12GraphicsCommandList* cmd);
     bool RecreateFeature(ID3D12GraphicsCommandList* cmd);
     bool FeatureCreated() const { return m_handle != nullptr; }

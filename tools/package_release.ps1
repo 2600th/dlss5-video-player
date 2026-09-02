@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$ValidateBuildOnly,
-    [switch]$PublicCore
+    [switch]$PublicCore,
+    [string]$BuildDirectory = 'build-upscaling',
+    [string]$PackageSuffix = '-upscaling'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,10 +15,10 @@ $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw)
 if ($version -cne '0.12.0') { throw "This assembler is locked to release 0.12.0; VERSION is '$version'." }
 
 $distRoot = Join-Path $repositoryRoot 'dist'
-$stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version-win64" }
+$stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
 $stageRoot = Join-Path $distRoot $stageName
 $zipPath = Join-Path $distRoot "$stageName.zip"
-$buildRoot = Join-Path $repositoryRoot 'build\Release'
+$buildRoot = Join-Path (Join-Path $repositoryRoot $BuildDirectory) 'Release'
 $runtimeRoot = Join-Path $repositoryRoot 'external\runtime'
 $youtubeRoot = Join-Path $repositoryRoot 'external\youtube'
 $ffmpegRoot = Join-Path $repositoryRoot 'external\ffmpeg\bin'
@@ -55,8 +57,8 @@ function Get-OrdinalPackageFiles {
 }
 
 function Invoke-FreshReleaseBuild {
-    $buildDirectory = Join-Path $repositoryRoot 'build'
-    $cachePath = Join-Path $buildDirectory 'CMakeCache.txt'
+    $configuredBuildDirectory = Join-Path $repositoryRoot $BuildDirectory
+    $cachePath = Join-Path $configuredBuildDirectory 'CMakeCache.txt'
     if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
         throw "Configured build directory is missing: $cachePath"
     }
@@ -73,12 +75,12 @@ function Invoke-FreshReleaseBuild {
     if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "Configured CMake executable is missing: $cmake" }
 
     $executable = Join-Path $buildRoot 'DLSSVideoPlayer.exe'
-    & $cmake --build $buildDirectory --config Release --target clean
+    & $cmake --build $configuredBuildDirectory --config Release --target clean
     if ($LASTEXITCODE -ne 0) { throw "Clean build step failed with exit code $LASTEXITCODE." }
     if (Test-Path -LiteralPath $executable) { throw 'Clean left a stale DLSSVideoPlayer.exe; refusing to package it.' }
 
     $buildStartedUtc = [DateTime]::UtcNow
-    & $cmake --build $buildDirectory --config Release --target DLSSVideoPlayer --parallel
+    & $cmake --build $configuredBuildDirectory --config Release --target DLSSVideoPlayer --parallel
     if ($LASTEXITCODE -ne 0) { throw "Release build failed with exit code $LASTEXITCODE." }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Fresh build did not produce DLSSVideoPlayer.exe.' }
     if ((Get-Item -LiteralPath $executable).LastWriteTimeUtc -lt $buildStartedUtc.AddSeconds(-2)) {
@@ -209,20 +211,22 @@ else {
         @('ffprobe.exe', (Join-Path $ffmpegRoot 'ffprobe.exe')),
         @('yt-dlp.exe', (Join-Path $youtubeRoot 'yt-dlp.exe')),
         @('deno.exe', (Join-Path $youtubeRoot 'deno.exe')),
-        @('dxgi.dll', (Join-Path $runtimeRoot 'dxgi.dll')),
-        @('ReShade.ini', (Join-Path $repositoryRoot 'packaging\ReShade.ini')),
-        @('ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
-        @('renodx-dlss5.addon64', (Join-Path $runtimeRoot 'renodx-dlss5.addon64')),
-        @('nvngx_dlss.dll', (Join-Path $runtimeRoot 'nvngx_dlss.dll')),
-        @('nvngx_dlssnr.dll', (Join-Path $runtimeRoot 'nvngx_dlssnr.dll')),
-        @('sl.common.dll', (Join-Path $runtimeRoot 'sl.common.dll')),
-        @('sl.dlss.dll', (Join-Path $runtimeRoot 'sl.dlss.dll')),
-        @('sl.dlss_g.dll', (Join-Path $runtimeRoot 'sl.dlss_g.dll')),
-        @('sl.dlss_nr.dll', (Join-Path $runtimeRoot 'sl.dlss_nr.dll')),
-        @('sl.interposer.dll', (Join-Path $runtimeRoot 'sl.interposer.dll')),
-        @('sl.nis.dll', (Join-Path $runtimeRoot 'sl.nis.dll')),
-        @('sl.pcl.dll', (Join-Path $runtimeRoot 'sl.pcl.dll')),
-        @('sl.reflex.dll', (Join-Path $runtimeRoot 'sl.reflex.dll')),
+        @('neural-runtime/dxgi.dll', (Join-Path $runtimeRoot 'dxgi.dll')),
+        @('neural-runtime/ReShade.ini', (Join-Path $repositoryRoot 'packaging\ReShade.ini')),
+        @('neural-runtime/ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
+        @('neural-runtime/renodx-dlss5.addon64', (Join-Path $runtimeRoot 'renodx-dlss5.addon64')),
+        @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
+        @('neural-runtime/nvngx_dlss.dll', (Join-Path $runtimeRoot 'nvngx_dlss.dll')),
+        @('neural-runtime/NeuralWorker.exe', (Join-Path $buildRoot 'neural-runtime/NeuralWorker.exe')),
+        @('neural-runtime/nvngx_dlssnr.dll', (Join-Path $runtimeRoot 'nvngx_dlssnr.dll')),
+        @('neural-runtime/sl.common.dll', (Join-Path $runtimeRoot 'sl.common.dll')),
+        @('neural-runtime/sl.dlss.dll', (Join-Path $runtimeRoot 'sl.dlss.dll')),
+        @('neural-runtime/sl.dlss_g.dll', (Join-Path $runtimeRoot 'sl.dlss_g.dll')),
+        @('neural-runtime/sl.dlss_nr.dll', (Join-Path $runtimeRoot 'sl.dlss_nr.dll')),
+        @('neural-runtime/sl.interposer.dll', (Join-Path $runtimeRoot 'sl.interposer.dll')),
+        @('neural-runtime/sl.nis.dll', (Join-Path $runtimeRoot 'sl.nis.dll')),
+        @('neural-runtime/sl.pcl.dll', (Join-Path $runtimeRoot 'sl.pcl.dll')),
+        @('neural-runtime/sl.reflex.dll', (Join-Path $runtimeRoot 'sl.reflex.dll')),
         @('README.md', (Join-Path $repositoryRoot 'README.md')),
         @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
         @('SECURITY.md', (Join-Path $repositoryRoot 'SECURITY.md')),
@@ -252,7 +256,7 @@ New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 $distFull = [IO.Path]::GetFullPath($distRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $stageFull = [IO.Path]::GetFullPath($stageRoot)
 if (-not $stageFull.StartsWith($distFull, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe stage path.' }
-if (Test-Path -LiteralPath $stageFull) { [IO.Directory]::Delete($stageFull, $true) }
+if (Test-Path -LiteralPath $stageFull) { throw 'Package output already exists. Select a new PackageSuffix.' }
 New-Item -ItemType Directory -Path $stageFull | Out-Null
 
 foreach ($source in $sources) {
@@ -274,9 +278,9 @@ foreach ($file in $files) {
 $utf8NoBom = New-Object Text.UTF8Encoding $false
 [IO.File]::WriteAllLines((Join-Path $stageFull 'PACKAGE_MANIFEST.txt'), $manifest, $utf8NoBom)
 
-& (Join-Path $PSScriptRoot 'verify_package.ps1') -StageDirectory $stageFull -PublicCore:$PublicCore
+& (Join-Path $PSScriptRoot 'verify_package.ps1') -StageDirectory $stageFull -PublicCore:$PublicCore -PackageSuffix $PackageSuffix
 
-if (Test-Path -LiteralPath $zipPath) { [IO.File]::Delete($zipPath) }
+if (Test-Path -LiteralPath $zipPath) { throw 'Archive already exists. Select a new PackageSuffix.' }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
@@ -289,6 +293,6 @@ try {
 }
 finally { $archive.Dispose() }
 
-& (Join-Path $PSScriptRoot 'verify_package.ps1') -Zip $zipPath -PublicCore:$PublicCore
+& (Join-Path $PSScriptRoot 'verify_package.ps1') -Zip $zipPath -PublicCore:$PublicCore -PackageSuffix $PackageSuffix
 $zipHash = Get-Sha256 -Path $zipPath
 Write-Host "Created '$zipPath' ($((Get-Item -LiteralPath $zipPath).Length) bytes, SHA-256 $zipHash)."

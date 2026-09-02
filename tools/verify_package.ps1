@@ -2,7 +2,8 @@
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Stage')][string]$StageDirectory,
     [Parameter(Mandatory = $true, ParameterSetName = 'Zip')][string]$Zip,
-    [switch]$PublicCore
+    [switch]$PublicCore,
+    [string]$PackageSuffix = '-upscaling'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,11 +25,11 @@ if ($PublicCore) {
 }
 else {
     $expected = @(
-        'DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
-        'dxgi.dll', 'ReShade.ini', 'ReShadePreset.ini', 'renodx-dlss5.addon64',
-        'nvngx_dlss.dll', 'nvngx_dlssnr.dll', 'sl.common.dll', 'sl.dlss.dll',
-        'sl.dlss_g.dll', 'sl.dlss_nr.dll', 'sl.interposer.dll', 'sl.nis.dll',
-        'sl.pcl.dll', 'sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
+        'DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
+        'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
+        'nvngx_dlss.dll', 'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
+        'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
+        'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
         'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
         'THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt',
         'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
@@ -149,9 +150,14 @@ function Assert-LockedFiles {
         return
     }
 
+    $rootSr=Join-Path $Root 'nvngx_dlss.dll'
+    $officialSr=Join-Path $repositoryRoot 'external/DLSS/lib/Windows_x86_64/rel/nvngx_dlss.dll'
+    if((Get-Sha256 -Path $rootSr) -cne (Get-Sha256 -Path $officialSr)) {
+        throw 'Playback SR runtime does not match the pinned official SDK.'
+    }
     $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
     foreach ($entry in $runtimeLock.entries) {
-        $path = Join-Path $Root ([string]$entry.destination)
+        $path = Join-Path (Join-Path $Root 'neural-runtime') ([string]$entry.destination)
         $item = Get-Item -LiteralPath $path
         $hash = Get-Sha256 -Path $path
         if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
@@ -183,14 +189,14 @@ function Assert-Stage {
         throw "Package allowlist mismatch. Missing=[$([string]::Join(', ', $missing))] Unexpected=[$([string]::Join(', ', $unexpected))]"
     }
 
-    $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe') } else { @('DLSSVideoPlayer.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
+    $knownExecutables = if ($PublicCore) { @('DLSSVideoPlayer.exe') } else { @('DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe') }
     $unexpectedExecutables = @($actual | Where-Object { $_.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase) -and $_ -cnotin $knownExecutables })
     if ($unexpectedExecutables.Count -ne 0) {
         throw "Unexpected launchable executable(s): $([string]::Join(', ', $unexpectedExecutables))"
     }
 
     if (-not $PublicCore) {
-        foreach ($configName in @('ReShade.ini', 'ReShadePreset.ini')) {
+        foreach ($configName in @('neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini')) {
             if ((Get-Item -LiteralPath (Join-Path $resolvedRoot $configName)).Length -eq 0) {
                 throw "$configName must not be empty."
             }
@@ -198,7 +204,7 @@ function Assert-Stage {
 
         $inOverlaySection = $false
         $tutorialProgress = $null
-        foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'ReShade.ini')) {
+        foreach ($line in Get-Content -LiteralPath (Join-Path $resolvedRoot 'neural-runtime/ReShade.ini')) {
             $trimmed = $line.Trim()
             if ($trimmed -match '^\[(.+)\]$') {
                 $inOverlaySection = $Matches[1] -ieq 'OVERLAY'
@@ -304,7 +310,7 @@ try {
         if ($roots.Count -ne 1 -or @(Get-ChildItem -LiteralPath $temporaryRoot -File).Count -ne 0) {
             throw 'ZIP must contain exactly one top-level release directory.'
         }
-        $expectedRootName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version-win64" }
+        $expectedRootName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
         if ($roots[0].Name -cne $expectedRootName) {
             throw "ZIP release directory mismatch: expected '$expectedRootName', received '$($roots[0].Name)'."
         }

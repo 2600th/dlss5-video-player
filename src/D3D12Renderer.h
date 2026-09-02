@@ -47,7 +47,7 @@ public:
     bool Initialize(HWND hwnd, uint32_t sourceW, uint32_t sourceH,
                     uint32_t outputW, uint32_t outputH,
                     uint32_t gridW, uint32_t gridH,
-                    NVSDK_NGX_PerfQuality_Value quality);
+                    NVSDK_NGX_PerfQuality_Value quality, bool preserveSource = false);
     bool RenderFrame(const uint8_t* bgra, size_t bytes,
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
@@ -62,6 +62,7 @@ public:
     bool DLSSAvailable() const { return m_dlss.Available(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
     bool DLSSRequested() const { return m_dlssEnabled; }
+    bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
@@ -181,6 +182,7 @@ private:
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
     bool m_delayedRecreateDone = false;
+    bool m_preserveSource = false;
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};

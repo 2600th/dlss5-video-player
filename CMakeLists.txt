@@ -14,6 +14,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
+# Source files are UTF-8 without a BOM. Do not let the Windows ANSI code page
+# reinterpret UI punctuation when compiling wide string literals.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+
 set(DLSS_SDK "${CMAKE_SOURCE_DIR}/external/DLSS" CACHE PATH "Path to NVIDIA/DLSS SDK checkout")
 if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
     message(FATAL_ERROR "NVIDIA DLSS SDK not found at ${DLSS_SDK}. Provide the pinned official NVIDIA/DLSS checkout documented in docs/BUILDING.md.")
@@ -61,6 +65,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/MediaPipeline.h
     src/OfflineNeuralRenderer.cpp
     src/OfflineNeuralRenderer.h
+    src/NeuralWorker.cpp
+    src/NeuralWorker.h
     src/SynchronizedPlayback.cpp
     src/SynchronizedPlayback.h
 )
@@ -78,6 +84,21 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt
     nvsdk_ngx_d
 )
+
+# Only the offline helper loads the experimental proxy/add-on. The player root
+# stays hook-free for its independent runtime Super Resolution feature.
+add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
+    src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
+    src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
+    src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
+target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include")
+target_compile_options(NeuralWorker PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
+get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
+target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
+set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
+add_dependencies(DLSSVideoPlayer NeuralWorker)
 
 add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -118,6 +139,22 @@ if(EXISTS "${YOUTUBE_STAGED_DIR}/yt-dlp.exe" AND EXISTS "${YOUTUBE_STAGED_DIR}/d
 endif()
 
 if(BUILD_TESTING)
+    add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
+        src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
+        src/VideoDecoder.cpp src/RuntimePolicy.cpp src/UiLayout.cpp)
+    target_include_directories(UpscalingGpuSmoke PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(UpscalingGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
+    add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
+    target_include_directories(NeuralWorkerTests PRIVATE src)
+    target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(NeuralWorkerTests PRIVATE shell32)
+    add_test(NAME NeuralWorkerTests COMMAND NeuralWorkerTests)
+    add_executable(UpscalingTests tests/UpscalingTests.cpp)
+    target_include_directories(UpscalingTests PRIVATE src)
+    target_compile_definitions(UpscalingTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_test(NAME UpscalingTests COMMAND UpscalingTests)
     add_executable(PolicyTests
         tests/PolicyTests.cpp
         tests/TestSupport.h
@@ -187,6 +224,24 @@ if(BUILD_TESTING)
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32)
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
+
+    # Exercise the real player completion handlers and text submitted to Win32.
+    get_target_property(player_ui_sources DLSSVideoPlayer SOURCES)
+    list(REMOVE_ITEM player_ui_sources src/main.cpp)
+    add_executable(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
+    target_include_directories(PlayerUiRegressionTests PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(PlayerUiRegressionTests PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX PLAYER_APP_TESTING
+        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+    get_target_property(player_ui_options DLSSVideoPlayer COMPILE_OPTIONS)
+    target_compile_options(PlayerUiRegressionTests PRIVATE ${player_ui_options})
+    get_target_property(player_ui_libraries DLSSVideoPlayer LINK_LIBRARIES)
+    target_link_directories(PlayerUiRegressionTests PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(PlayerUiRegressionTests PRIVATE ${player_ui_libraries})
+    # The player persists settings beside its executable; isolate test settings.
+    set_target_properties(PlayerUiRegressionTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ui-regressions/$<CONFIG>")
+    add_test(NAME PlayerUiRegressionTests COMMAND PlayerUiRegressionTests)
 
     include(CheckCXXSourceCompiles)
     set(CMAKE_REQUIRED_INCLUDES "${CMAKE_SOURCE_DIR}/src")

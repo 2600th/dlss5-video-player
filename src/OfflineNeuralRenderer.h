@@ -15,6 +15,7 @@
 #include <vector>
 
 enum class NeuralRenderPhase {
+    CheckingCache,
     Acquiring,
     Decoding,
     NeuralRendering,

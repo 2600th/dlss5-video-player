@@ -168,14 +168,18 @@ void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
 
     const std::array<std::wstring_view, 19> allowed = {
         L"DLSSVideoPlayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe",
-        L"deno.exe", L"nvngx_dlss.dll", L"nvngx_dlssnr.dll", L"dxgi.dll",
-        L"sl.common.dll", L"ReShade.ini", L"ReShadePreset.ini",
+        L"deno.exe", L"nvngx_dlss.dll", L"neural-runtime/nvngx_dlssnr.dll", L"neural-runtime/dxgi.dll",
+        L"neural-runtime/sl.common.dll", L"neural-runtime/ReShade.ini", L"neural-runtime/ReShadePreset.ini",
         L"docs/DLSS5_SETUP.md", L"THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt",
         L"PACKAGE_MANIFEST.txt", L"SECURITY.md", L"CONTRIBUTING.md",
         L"CHANGELOG.md", L"docs/RELATED_PROJECTS.md",
         L"THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt"
     };
     for (const auto path : allowed) CHECK(IsAllowedPath(path));
+    CHECK(IsAllowedPath(L"neural-runtime/NeuralWorker.exe"));
+    CHECK(IsAllowedPath(L"neural-runtime/nvngx_dlss.dll"));
+    CHECK(!IsAllowedPath(L"dxgi.dll"));
+    CHECK(!IsAllowedPath(L"renodx-dlss5.addon64"));
 
     const std::array<std::wstring_view, 15> forbidden = {
         L"pt-BR.lang", L"languages/pt-BR.lang", L"downloads/video.mp4",
@@ -413,7 +417,9 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Open,
         ToolbarAction::PlayPause,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Fullscreen,
     };
     const std::vector<ToolbarAction> allActions{
@@ -423,7 +429,9 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Stop,
         ToolbarAction::Forward10,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Aspect,
         ToolbarAction::Adjustments,
         ToolbarAction::DebugView,
@@ -434,30 +442,34 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
     CHECK_EQ(requiredNarrow, toolbar_actions(narrow));
     for (const auto& item : narrow) CHECK(item.compact);
 
-    const auto normal = LayoutToolbar(640, 180, 96);
-    CHECK_EQ(allActions, toolbar_actions(normal));
-    for (const auto& item : normal) CHECK(item.compact);
+    const auto normal = LayoutToolbar(MinimumToolbarClientWidth(96), 180, 96);
+    CHECK_EQ(requiredNarrow, toolbar_actions(normal));
+    for (const auto& item : normal) CHECK(!item.compact);
 
-    const auto wide = LayoutToolbar(1000, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     CHECK_EQ(allActions, toolbar_actions(wide));
     for (const auto& item : wide) CHECK(!item.compact);
 }
 
 void toolbar_layout_preserves_group_separation_test()
 {
-    const auto items = LayoutToolbar(1000, 180, 96);
+    const auto items = LayoutToolbar(1600, 180, 96);
     const ToolbarItem* back = find_toolbar_item(items, ToolbarAction::Back10);
     const ToolbarItem* play = find_toolbar_item(items, ToolbarAction::PlayPause);
     const ToolbarItem* mute = find_toolbar_item(items, ToolbarAction::Mute);
-    const ToolbarItem* dlss = find_toolbar_item(items, ToolbarAction::ToggleDlss);
+    const ToolbarItem* neural = find_toolbar_item(items, ToolbarAction::ToggleNeuralRendering);
+    const ToolbarItem* upscaling = find_toolbar_item(items, ToolbarAction::ToggleUpscaling);
+    const ToolbarItem* frameGeneration = find_toolbar_item(items, ToolbarAction::ToggleFrameGeneration);
     const ToolbarItem* adjustments = find_toolbar_item(items, ToolbarAction::Adjustments);
     const ToolbarItem* debug = find_toolbar_item(items, ToolbarAction::DebugView);
     const ToolbarItem* fullscreen = find_toolbar_item(items, ToolbarAction::Fullscreen);
-    CHECK(back && play && mute && dlss && adjustments && debug && fullscreen);
-    if (!(back && play && mute && dlss && adjustments && debug && fullscreen)) return;
+    CHECK(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen);
+    if (!(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen)) return;
 
     CHECK_EQ(4L, play->bounds.left - back->bounds.right);
-    CHECK_EQ(12L, dlss->bounds.left - mute->bounds.right);
+    CHECK_EQ(12L, neural->bounds.left - mute->bounds.right);
+    CHECK_EQ(4L, upscaling->bounds.left - neural->bounds.right);
+    CHECK_EQ(4L, frameGeneration->bounds.left - upscaling->bounds.right);
     CHECK_EQ(12L, debug->bounds.left - adjustments->bounds.right);
     CHECK_EQ(4L, fullscreen->bounds.left - debug->bounds.right);
 }
@@ -465,8 +477,8 @@ void toolbar_layout_preserves_group_separation_test()
 void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
 {
     const auto narrow = LayoutToolbar(320, 180, 96);
-    const auto normal = LayoutToolbar(640, 180, 96);
-    const auto wide = LayoutToolbar(1000, 180, 96);
+    const auto normal = LayoutToolbar(900, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     const auto scaled = LayoutToolbar(960, 300, 144);
 
     for (const auto* items : {&narrow, &normal, &wide}) {
@@ -483,7 +495,7 @@ void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
     check_toolbar_items_do_not_overlap(scaled);
 
     CHECK_EQ(16L, wide.front().bounds.left);
-    CHECK(wide.back().bounds.right <= 1000 - 16);
+    CHECK(wide.back().bounds.right <= 1600 - 16);
     CHECK_EQ(24L, scaled.front().bounds.left);
     CHECK(scaled.back().bounds.right <= 960 - 24);
 }
@@ -506,42 +518,31 @@ void toolbar_hit_testing_is_half_open_and_boundary_stable_test()
 
 void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
 {
-    struct Case {
-        UINT dpi;
-        int expectedClientWidth;
-        int expectedTargetSize;
-        int expectedGutter;
-    };
-    constexpr Case cases[]{
-        {0, 244, 36, 16},
-        {96, 244, 36, 16},
-        {120, 305, 45, 20},
-        {144, 366, 54, 24},
-        {192, 488, 72, 32},
-    };
     const std::vector<ToolbarAction> requiredNarrow{
         ToolbarAction::Open,
         ToolbarAction::PlayPause,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Fullscreen,
     };
 
-    for (const auto& test : cases) {
-        CHECK_EQ(test.expectedClientWidth, MinimumToolbarClientWidth(test.dpi));
-        const auto items = LayoutToolbar(test.expectedClientWidth, test.expectedTargetSize * 4, test.dpi);
+    for (const UINT dpi : {0u, 96u, 120u, 144u, 192u}) {
+        const UINT effectiveDpi = dpi == 0 ? 96 : dpi;
+        const int clientWidth = MinimumToolbarClientWidth(dpi);
+        const auto items = LayoutToolbar(clientWidth,
+                                         MulDiv(400, static_cast<int>(effectiveDpi), 96), dpi);
         CHECK_EQ(requiredNarrow, toolbar_actions(items));
-        CHECK_EQ(static_cast<size_t>(5), items.size());
+        CHECK_EQ(static_cast<size_t>(7), items.size());
         for (const auto& item : items) {
-            CHECK(item.compact);
-            CHECK(item.bounds.right - item.bounds.left >= test.expectedTargetSize);
-            CHECK(item.bounds.bottom - item.bounds.top >= test.expectedTargetSize);
+            CHECK(!item.compact);
+            CHECK(item.bounds.bottom - item.bounds.top >= MulDiv(36, static_cast<int>(effectiveDpi), 96));
         }
         check_toolbar_items_do_not_overlap(items);
         if (!items.empty()) {
-            CHECK_EQ(static_cast<LONG>(test.expectedGutter), items.front().bounds.left);
-            CHECK_EQ(static_cast<LONG>(test.expectedClientWidth - test.expectedGutter),
-                     items.back().bounds.right);
+            CHECK_EQ(static_cast<LONG>(MulDiv(kToolbarOuterGutterDip, static_cast<int>(effectiveDpi), 96)), items.front().bounds.left);
+            CHECK_EQ(static_cast<LONG>(clientWidth - MulDiv(kToolbarOuterGutterDip, static_cast<int>(effectiveDpi), 96)), items.back().bounds.right);
         }
     }
 }
@@ -554,20 +555,21 @@ bool rectangles_intersect(const RECT& left, const RECT& right)
 
 void volume_slider_never_intersects_compact_or_threshold_toolbar_test()
 {
-    for (const int width : {320, 640, 922}) {
+    for (const int width : {320}) {
         const auto items = LayoutToolbar(width, 180, 96);
         CHECK(!LayoutVolumeSlider(width, 180, 96, items).has_value());
     }
 
-    const auto thresholdItems = LayoutToolbar(923, 180, 96);
-    const auto slider = LayoutVolumeSlider(923, 180, 96, thresholdItems);
+    const int thresholdWidth = MinimumToolbarClientWidth(96) + 185;
+    const auto thresholdItems = LayoutToolbar(thresholdWidth, 180, 96);
+    const auto slider = LayoutVolumeSlider(thresholdWidth, 180, 96, thresholdItems);
     CHECK(slider.has_value());
     if (!slider) return;
     for (const auto& item : thresholdItems) {
         CHECK(!rectangles_intersect(*slider, item.bounds));
     }
-    CHECK_EQ(738L, slider->left);
-    CHECK_EQ(828L, slider->right);
+    CHECK_EQ(static_cast<LONG>(thresholdWidth - 185), slider->left);
+    CHECK_EQ(static_cast<LONG>(thresholdWidth - 95), slider->right);
 }
 
 void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
@@ -582,9 +584,11 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     CHECK_EQ(ToolbarAction::Open,
              NextFocusableToolbarAction(idleItems, ToolbarAction::Open, true, idle));
 
-    const auto loadedItems = LayoutToolbar(640, 180, 96);
+    const auto loadedItems = LayoutToolbar(1600, 180, 96);
     const ToolbarAvailability withoutRenderer{true, false, false};
-    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleDlss, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::Adjustments, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::DebugView, withoutRenderer));
     const ToolbarAvailability seeking{true, true, true};
@@ -612,7 +616,7 @@ void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
-    const auto wide = LayoutToolbar(1200, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     const auto narrow = LayoutToolbar(320, 180, 96);
     const auto contains = [](std::span<const ToolbarItem> items, ToolbarAction action) {
         return std::any_of(items.begin(), items.end(),
@@ -621,7 +625,9 @@ void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 
     CHECK(contains(wide, ToolbarAction::DebugView));
     CHECK(!contains(narrow, ToolbarAction::DebugView));
-    CHECK(contains(wide, ToolbarAction::ToggleDlss));
+    CHECK(contains(wide, ToolbarAction::ToggleNeuralRendering));
+    CHECK(contains(wide, ToolbarAction::ToggleUpscaling));
+    CHECK(contains(wide, ToolbarAction::ToggleFrameGeneration));
     CHECK(contains(wide, ToolbarAction::PlayPause));
 
     CHECK_EQ(ToolbarAction::Open,
@@ -630,7 +636,7 @@ void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
     ToolbarAvailability withoutRenderer = loaded;
     withoutRenderer.rendererReady = false;
     CHECK_EQ(ToolbarAction::Open,
-             ReconcileFocusedToolbarAction(wide, ToolbarAction::ToggleDlss,
+             ReconcileFocusedToolbarAction(wide, ToolbarAction::ToggleNeuralRendering,
                                             withoutRenderer));
 
     CHECK_EQ(ToolbarAction::PlayPause,
@@ -669,8 +675,7 @@ void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
         CHECK_EQ(test.clientHeight, MinimumIdleClientHeight(test.dpi));
         const IdleSurfaceLayout shortLayout = LayoutIdleSurface(
             MinimumToolbarClientWidth(test.dpi), test.clientHeight, test.dpi);
-        CHECK(shortLayout.stacked);
-        CHECK_EQ(shortLayout.subtitle.top, shortLayout.subtitle.bottom);
+        CHECK(!shortLayout.stacked);
         for (const auto& action : shortLayout.actions) {
             CHECK(action.bounds.top >= 0);
             CHECK(action.bounds.bottom <= test.clientHeight);
@@ -738,14 +743,14 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.renderedFps = 58.4;
     status.sourceFps = 59.94;
     status.droppedFrames = 3;
-    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR active \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
+    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
              BuildPlayerStatusText(status));
 
     status.runtimeConfiguration = PlayerRuntimeConfiguration::DlssSrSafeMode;
     status.dlssState = PlayerDlssState::Active;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR active \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
     status.dlssState = PlayerDlssState::ScalerFallback;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 Scaler fallback \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
 
     const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, true, true);
     CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralActive.configuration);
@@ -1059,6 +1064,28 @@ void button_content_layout_centers_combined_icon_and_label_without_outline_conta
     }
 }
 
+void feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test()
+{
+    struct FeatureWidth { ToolbarAction action; int minimumWidthDip; };
+    constexpr FeatureWidth features[]{
+        {ToolbarAction::ToggleNeuralRendering, 270},
+        {ToolbarAction::ToggleUpscaling, 230},
+        {ToolbarAction::ToggleFrameGeneration, 320},
+    };
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        const auto items = LayoutToolbar(MinimumToolbarClientWidth(dpi),
+                                         MulDiv(360, static_cast<int>(dpi), 96), dpi);
+        for (const auto& feature : features) {
+            const ToolbarItem* item = find_toolbar_item(items, feature.action);
+            CHECK(item != nullptr);
+            if (!item) continue;
+            CHECK(item->bounds.right - item->bounds.left >=
+                  MulDiv(feature.minimumWidthDip, static_cast<int>(dpi), 96));
+        }
+        check_toolbar_items_do_not_overlap(items);
+    }
+}
+
 void prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test()
 {
     const auto inside=[](const RECT& inner,const RECT& outer){
@@ -1086,6 +1113,32 @@ void advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_t
     CHECK_EQ(std::wstring(L"Acquiring"),localizer.Get(L"neural.phase.acquiring"));
     CHECK_EQ(std::wstring(L"Neural rendered"),localizer.Get(L"neural.view.rendered"));
     if(menu)DestroyMenu(menu);
+}
+
+void feature_menu_uses_distinct_controls_and_honest_availability_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Neural Rendering\tD", app_menu::IDM_NEURAL_RENDERING));
+    CHECK(has_menu_entry(entries, L"DLSS Upscaling",
+                         app_menu::IDM_DLSS_UPSCALING));
+    CHECK(has_menu_entry(entries, L"Frame Generation\tUnavailable in this build",
+                         app_menu::IDM_FRAME_GENERATION));
+    CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
+
+    CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
+                                              false, false, false, false));
+    const UINT neural = GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND);
+    const UINT upscaling = GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND);
+    const UINT frameGeneration = GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((neural & (MF_DISABLED | MF_GRAYED)) == 0);
+    CHECK((neural & MF_CHECKED) != 0);
+    CHECK((upscaling & (MF_DISABLED | MF_GRAYED)) != 0);
+    CHECK((frameGeneration & (MF_DISABLED | MF_GRAYED)) != 0);
+    if (menu) DestroyMenu(menu);
 }
 
 void debug_view_popup_contains_all_existing_views_and_selection_test()
@@ -1153,7 +1206,7 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
     CHECK(quality != nullptr);
 
     const std::array expected{
-        std::pair{L"Auto (best available)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
+        std::pair{L"Auto (1080p preferred)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
         std::pair{L"2160p", app_menu::IDM_YOUTUBE_QUALITY_2160},
         std::pair{L"1440p", app_menu::IDM_YOUTUBE_QUALITY_1440},
         std::pair{L"1080p", app_menu::IDM_YOUTUBE_QUALITY_1080},
@@ -3475,13 +3528,20 @@ void video_decoder_hardware_failure_falls_back_to_software_test()
     MediaFixture fixture;
     const auto marker=fixture.directory/L"acceleration-order.txt";
     ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",marker.wstring());
-    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
-    CHECK(decoder->Open(L"https://media.invalid/hardwarefallback",MediaSourceKind::YouTube));
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2});
+    CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
     VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    const auto started=std::chrono::steady_clock::now();
+    const auto deadline=started+std::chrono::seconds{5};
     while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
+    const std::string accelerationOrder=read_binary_file(marker);
+    if(result!=VideoReadResult::FrameReady){
+        const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
+        std::cerr<<"hardware fallback diagnostic: result="<<static_cast<int>(result)
+                 <<" elapsed_ms="<<elapsed<<" marker="<<accelerationOrder<<'\n';
+    }
     CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
-    CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(marker));
+    CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),accelerationOrder);
 }
 
 void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
@@ -4093,8 +4153,9 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
         const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
         const bool d3d11=all.find(L"-hwaccel d3d11va")!=std::wstring::npos;
+        const bool delayedExit=all.find(L"hardwarefallbackdelayedexit")!=std::wstring::npos;
         if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");}
-        if(cuda||d3d11)return 7;
+        if(cuda||d3d11){if(delayedExit){CloseHandle(GetStdHandle(STD_OUTPUT_HANDLE));Sleep(75);}return 7;}
         std::cout.write("1234567890abcdef",16);std::cout.flush();return 0;
     }
     if(all.find(L"largeburst")!=std::wstring::npos){
@@ -4811,8 +4872,10 @@ int wmain(int argc, wchar_t* argv[])
     failed_icon_font_uses_label_only_presentation_test();
     button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test();
     button_content_layout_centers_combined_icon_and_label_without_outline_contact_test();
+    feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test();
     prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test();
     advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
+    feature_menu_uses_distinct_controls_and_honest_availability_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();

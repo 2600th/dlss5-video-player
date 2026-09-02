@@ -1,5 +1,17 @@
 # Troubleshooting
 
+## Independent upscaling build
+
+- Extract the whole package into a new folder. A root-level `dxgi.dll` is an old
+  layout; the new neural DLLs belong only in `neural-runtime/`.
+- DLSS Upscaling starts off. Open a video, then enable it from the DLSS menu or
+  bottom bar. Choose 1440p/default or 2160p output. If the source meets/exceeds
+  the output target, it stays native; no source detail is discarded.
+- SR startup/evaluation failure keeps ordinary playback available. Check
+  `DLSSVideoPlayer.log` beside the player for the NGX result.
+- Neural-job diagnostics are beside `neural-runtime/NeuralWorker.exe`. Switching
+  SR or the comparison view does not invalidate or re-encode a verified cache.
+
 ## Experimental neural mode is unstable
 
 Use **Advanced > Restart in DLSS SR safe mode**. This disables the RenoDX add-on

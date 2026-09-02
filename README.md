@@ -44,7 +44,7 @@ evaluated successfully, or produced visually correct results.
 
 The project is useful for:
 
-- testing native-resolution DLAA and opt-in DLSS video upscaling on NVIDIA RTX
+- comparing synchronized original and pre-rendered neural video on NVIDIA RTX
   hardware;
 - watching local FFmpeg-supported media through a native D3D12 pipeline;
 - comparing the source, motion, depth, mask, and reconstructed output views;
@@ -57,9 +57,10 @@ The project is useful for:
 
 - **Experimental DLSS 5 neural rendering path** through a RenoDX/ReShade add-on
   that can observe the player's real D3D12 NGX feature creation and evaluation.
-- **Native-resolution DLAA carrier by default**, keeping spatial DLSS
-  upscaling off while preserving the NGX evaluation contract the add-on
-  observes. Super Resolution modes remain explicit opt-ins.
+- **Independent feature controls**: Neural Rendering is requested on by
+  default and compares synchronized cached frames; DLSS Upscaling is off by
+  default and runs at playback time on either view, with 1440p or 2160p output;
+  Frame Generation is unavailable because this build has no FG backend.
 - **RenoDX 4.70 runtime contract** that explicitly sets neural uplift on and
   both RenoDX and NGX spatial upscaling off, while preserving user-owned style,
   intensity, mask, and guide overrides.
@@ -141,10 +142,21 @@ project documentation.
 5. In an authorized neural layout, wait for source acquisition, neural
    rendering, encoding, and validation to finish. Playback begins only after a
    complete cache entry is reopened successfully.
-6. Use **DLSS off · Original** / **DLSS on · Neural rendered** to compare the
-   same timestamp. Spatial upscaling remains off during neural pre-rendering.
-7. Press `Home` and check ReShade's
-   **Add-ons** page to verify the observed `DLSS 5 Neural Rendering` state.
+6. Use **Neural Rendering · Off** / **Neural Rendering · On** to compare the
+   same timestamp. The requested default opens a valid cached video on its
+   neural frame without showing an original frame first.
+7. Optionally enable **DLSS Upscaling** from the bottom bar or DLSS menu.
+   **DLSS > Upscaling output** defaults to 1440p; 2160p is selectable. This
+   preserves source resolution and aspect ratio, and never re-encodes the cache.
+   A source already at or above the target remains native. Frame Generation is
+   unavailable.
+
+The private build keeps `NeuralWorker.exe`, ReShade, RenoDX and the locked neural
+DLLs in `neural-runtime/`. Keep this subfolder intact. Do not place `dxgi.dll`
+beside the player or extract this build over an older package. The player uses
+only ordinary NGX SR; the hidden helper performs verified offline neural jobs.
+Helper diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and `ReShade.log`;
+playback diagnostics are beside `DLSSVideoPlayer.exe`.
 
 The neural default is 1920×1080 native/DLAA. On the tested RTX 5090, the
 30.03-second Resident Evil Requiem example produced and independently decoded
@@ -157,9 +169,8 @@ captured sequence, and
 hardware remains unmeasured on this system.
 
 If the optional neural path is unstable, choose **Advanced > Restart in DLSS
-SR safe mode**. Safe mode disables the RenoDX add-on for that launch while
-retaining the official NGX path. DLAA remains the default unless the user
-selects a spatial upscaling mode.
+SR safe mode**. Safe mode skips the neural helper for that launch while
+retaining the optional runtime upscaler. Frame Generation remains unavailable.
 
 ## Common controls
 
@@ -178,9 +189,15 @@ selects a spatial upscaling mode.
 
 Source quality under **Video > YouTube source quality** controls the locally
 materialized YouTube source. Neural rendering uses native 1:1 DLAA and keeps
-both NGX and RenoDX upscaling off. In cached playback, the DLSS toggle switches
-between synchronized original and neural-rendered frames rather than running a
-second real-time upscale.
+both NGX and RenoDX upscaling off. In cached playback, Neural Rendering
+switches between synchronized original and neural-rendered frames rather than
+running a second real-time upscale.
+
+Loading and cache checks show an animated spinner and progress indicator. Neural
+rendering shows the actual completed-frame percentage, elapsed time and estimated
+time remaining when available. The indicator stops when playback starts; Windows'
+reduced-animation preference is respected. Press Escape or click Cancel to stop
+loading or neural preparation.
 
 ## Supported YouTube playback
 
@@ -255,13 +272,13 @@ Fetch the pinned UI and YouTube helper assets, configure, build, and test:
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\fetch_ui_assets.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\fetch_youtube_helpers.ps1
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
+cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+cmake --build build-upscaling --config Release --parallel
+ctest --test-dir build-upscaling -C Release --output-on-failure
 ```
 
 The developer executable is written to
-`build\Release\DLSSVideoPlayer.exe`. It can test the native NGX/DLSS SR path,
+`build-upscaling\Release\DLSSVideoPlayer.exe`. It can test the native NGX/DLSS SR path,
 but a source build alone does not contain the experimental DLSS 5 neural
 runtime. A developer build is not a distributable release folder. Authorized
 release maintainers must assemble and verify the explicit package allowlist
@@ -289,9 +306,9 @@ For environment overrides, FFmpeg staging, and the one-click Windows build, see
 - **The experimental neural path is unstable:** restart in **DLSS SR safe mode**.
 - **YouTube playback fails:** try another public, non-DRM video and confirm that
   the package-local yt-dlp and Deno helpers are present.
-- **The overlay or add-on state is unclear:** press `Home`, open ReShade's
-  **Add-ons** page, and inspect the observed RenoDX status. A configured mode is
-  not proof that a neural workload evaluated successfully.
+- **The add-on state is unclear:** inspect `neural-runtime/ReShade.log` for
+  feature-18 creation and evaluation. The hidden helper has no interactive
+  overlay; a configured mode alone is not proof of a neural evaluation.
 
 See the full [Troubleshooting guide](docs/TROUBLESHOOTING.md) and
 [experimental neural-mode setup](docs/DLSS5_SETUP.md).

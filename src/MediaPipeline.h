@@ -94,6 +94,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+enum class MediaProbeMode { FullValidation, CachedMetadata };
+
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
                        const std::filesystem::path& media,
-                       std::stop_token stop);
+                       std::stop_token stop,
+                       MediaProbeMode mode = MediaProbeMode::FullValidation);

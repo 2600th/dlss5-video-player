@@ -5,6 +5,7 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <filesystem>
 
 class Log {
 public:
@@ -22,7 +23,14 @@ public:
         m_file.flush();
     }
 private:
-    Log() : m_file("DLSSVideoPlayer.log", std::ios::out | std::ios::trunc) {}
+    static std::filesystem::path LogPath() {
+        std::wstring path(32768,L'\0');
+        const DWORD length=GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));
+        if(!length||length>=path.size())return L"DLSSVideoPlayer.log";
+        path.resize(length);
+        return std::filesystem::path(path).parent_path()/L"DLSSVideoPlayer.log";
+    }
+    Log() : m_file(LogPath(), std::ios::out | std::ios::trunc) {}
     std::ofstream m_file;
     std::mutex m_mutex;
 };
