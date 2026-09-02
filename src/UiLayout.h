@@ -13,7 +13,8 @@
 
 enum class ToolbarAction {
     Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
-    ToggleDlss, Aspect, Adjustments, DebugView, Fullscreen, None
+    ToggleNeuralRendering, ToggleUpscaling, ToggleFrameGeneration,
+    Aspect, Adjustments, DebugView, Fullscreen, None
 };
 
 struct ToolbarItem {
@@ -28,6 +29,9 @@ struct ToolbarAvailability {
     bool rendererReady{false};
     bool youtubeAvailable{false};
     bool resolvingYouTube{false};
+    bool neuralRenderingAvailable{false};
+    bool upscalingAvailable{false};
+    bool frameGenerationAvailable{false};
 };
 
 enum class MediaSourceKind {
@@ -94,6 +98,7 @@ struct PlayerStatusSnapshot {
     uint32_t outputWidth{};
     uint32_t outputHeight{};
     std::wstring quality;
+    std::wstring upscalingStatus;
     double renderedFps{};
     double sourceFps{};
     uint64_t droppedFrames{};
@@ -105,6 +110,41 @@ struct PaintBufferLayout {
     int height{};
     POINT viewportOrigin{};
 };
+
+inline constexpr int kButtonHorizontalInsetDip = 10;
+inline constexpr int kButtonVerticalInsetDip = 6;
+inline constexpr int kButtonIconLabelGapDip = 7;
+
+struct ButtonContentLayout {
+    RECT content{};
+    RECT icon{};
+    RECT text{};
+    bool stacked{};
+};
+
+struct PreRenderSurfaceLayout {
+    RECT spinner{};
+    RECT title{};
+    RECT phase{};
+    RECT resolution{};
+    RECT frameCount{};
+    RECT elapsedEta{};
+    RECT size{};
+    RECT progressTrack{};
+    RECT progressFill{};
+    RECT cancelButton{};
+};
+
+struct ActivityVisual {
+    RECT fill{};
+    unsigned spinnerStep{};
+    unsigned percent{};
+    bool indeterminate{};
+};
+
+ActivityVisual ResolveActivityVisual(RECT track, uint64_t elapsedMs,
+                                     uint64_t completed, uint64_t total,
+                                     bool measurable, bool motionEnabled);
 
 inline constexpr int kToolbarSpacingDip = 4;
 inline constexpr int kToolbarMinHitHeightDip = 36;
@@ -138,6 +178,9 @@ ToolbarAction ResolveToolbarHoverForCursor(std::span<const ToolbarItem> items,
                                            std::optional<POINT> clientPoint,
                                            ToolbarAvailability availability);
 std::optional<PaintBufferLayout> LayoutPaintBuffer(RECT clientBounds, RECT paintBounds);
+ButtonContentLayout LayoutButtonContent(RECT outer, SIZE icon, SIZE text,
+                                        bool stacked, UINT dpi);
+PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth, int clientHeight, UINT dpi);
 std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status);
 std::wstring BuildPlayerWindowTitle(std::wstring_view appTitle,
                                     std::wstring_view mediaTitle,

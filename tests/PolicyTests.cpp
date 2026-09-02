@@ -18,6 +18,7 @@
 #include "D3D12Renderer.h"
 #include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
+#include "SynchronizedPlayback.h"
 #ifdef small
 #undef small
 #endif
@@ -141,6 +142,17 @@ struct D3D12RendererTestAccess {
     static uint64_t FrameFence(const D3D12Renderer& renderer,uint32_t slot){return renderer.m_frameFence[slot];}
     static bool GPUUnusable(const D3D12Renderer& renderer){return renderer.m_gpuUnusable;}
     static d3d12_renderer_detail::FenceWaitResult LastFenceResult(const D3D12Renderer& renderer){return renderer.m_lastFenceWaitResult;}
+    static void ConfigureCacheCapture(D3D12Renderer& renderer,uint32_t width,uint32_t height,
+                                      bool neuralUsed,
+                                      std::function<bool(std::vector<uint8_t>&)> capture)
+    {
+        renderer.m_outputW=width;renderer.m_outputH=height;
+        renderer.m_lastDLSSUsed=neuralUsed;renderer.m_testCacheCapture=std::move(capture);
+    }
+    static bool CaptureEvaluatedFrame(D3D12Renderer& renderer,CapturedVideoFrame& frame)
+    {
+        return renderer.CaptureEvaluatedFrame(frame);
+    }
 };
 
 namespace {
@@ -154,14 +166,20 @@ void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
 {
     using release_package_policy::IsAllowedPath;
 
-    const std::array<std::wstring_view, 14> allowed = {
+    const std::array<std::wstring_view, 19> allowed = {
         L"DLSSVideoPlayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe",
-        L"deno.exe", L"nvngx_dlss.dll", L"nvngx_dlssnr.dll", L"dxgi.dll",
-        L"sl.common.dll", L"ReShade.ini", L"ReShadePreset.ini",
+        L"deno.exe", L"nvngx_dlss.dll", L"neural-runtime/nvngx_dlssnr.dll", L"neural-runtime/dxgi.dll",
+        L"neural-runtime/sl.common.dll", L"neural-runtime/ReShade.ini", L"neural-runtime/ReShadePreset.ini",
         L"docs/DLSS5_SETUP.md", L"THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt",
-        L"PACKAGE_MANIFEST.txt"
+        L"PACKAGE_MANIFEST.txt", L"SECURITY.md", L"CONTRIBUTING.md",
+        L"CHANGELOG.md", L"docs/RELATED_PROJECTS.md",
+        L"THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt"
     };
     for (const auto path : allowed) CHECK(IsAllowedPath(path));
+    CHECK(IsAllowedPath(L"neural-runtime/NeuralWorker.exe"));
+    CHECK(IsAllowedPath(L"neural-runtime/nvngx_dlss.dll"));
+    CHECK(!IsAllowedPath(L"dxgi.dll"));
+    CHECK(!IsAllowedPath(L"renodx-dlss5.addon64"));
 
     const std::array<std::wstring_view, 15> forbidden = {
         L"pt-BR.lang", L"languages/pt-BR.lang", L"downloads/video.mp4",
@@ -171,6 +189,32 @@ void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
         L"nvngx_dlssnr.rollback.dll", L"unexpected-helper.exe"
     };
     for (const auto path : forbidden) CHECK(!IsAllowedPath(path));
+}
+
+void public_release_package_policy_excludes_private_and_optional_binaries_test()
+{
+    using release_package_policy::IsAllowedPublicPath;
+
+    const std::array<std::wstring_view, 17> allowed = {
+        L"DLSSVideoPlayer.exe", L"nvngx_dlss.dll", L"README.md", L"LICENSE",
+        L"SECURITY.md", L"CONTRIBUTING.md", L"CHANGELOG.md", L"THIRD_PARTY.md",
+        L"PUBLIC_RELEASE_NOTICE.txt", L"PACKAGE_MANIFEST.txt",
+        L"THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt",
+        L"THIRD_PARTY_LICENSES/tabler-MIT.txt", L"docs/ARCHITECTURE.md",
+        L"docs/BUILDING.md", L"docs/DLSS5_SETUP.md", L"docs/RELATED_PROJECTS.md",
+        L"docs/TROUBLESHOOTING.md"
+    };
+    for (const auto path : allowed) CHECK(IsAllowedPublicPath(path));
+
+    const std::array<std::wstring_view, 20> forbidden = {
+        L"nvngx_dlssnr.dll", L"renodx-dlss5.addon64", L"dxgi.dll",
+        L"ReShade.ini", L"ReShadePreset.ini", L"sl.common.dll", L"sl.dlss.dll",
+        L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll",
+        L"sl.pcl.dll", L"sl.reflex.dll", L"ffmpeg.exe", L"ffprobe.exe",
+        L"yt-dlp.exe", L"deno.exe", L"DLSSVideoPlayer.ini",
+        L"DLSSVideoPlayer.log", L"unexpected.dll"
+    };
+    for (const auto path : forbidden) CHECK(!IsAllowedPublicPath(path));
 }
 
 void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
@@ -373,7 +417,9 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Open,
         ToolbarAction::PlayPause,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Fullscreen,
     };
     const std::vector<ToolbarAction> allActions{
@@ -383,7 +429,9 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Stop,
         ToolbarAction::Forward10,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Aspect,
         ToolbarAction::Adjustments,
         ToolbarAction::DebugView,
@@ -394,30 +442,34 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
     CHECK_EQ(requiredNarrow, toolbar_actions(narrow));
     for (const auto& item : narrow) CHECK(item.compact);
 
-    const auto normal = LayoutToolbar(640, 180, 96);
-    CHECK_EQ(allActions, toolbar_actions(normal));
-    for (const auto& item : normal) CHECK(item.compact);
+    const auto normal = LayoutToolbar(MinimumToolbarClientWidth(96), 180, 96);
+    CHECK_EQ(requiredNarrow, toolbar_actions(normal));
+    for (const auto& item : normal) CHECK(!item.compact);
 
-    const auto wide = LayoutToolbar(1000, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     CHECK_EQ(allActions, toolbar_actions(wide));
     for (const auto& item : wide) CHECK(!item.compact);
 }
 
 void toolbar_layout_preserves_group_separation_test()
 {
-    const auto items = LayoutToolbar(1000, 180, 96);
+    const auto items = LayoutToolbar(1600, 180, 96);
     const ToolbarItem* back = find_toolbar_item(items, ToolbarAction::Back10);
     const ToolbarItem* play = find_toolbar_item(items, ToolbarAction::PlayPause);
     const ToolbarItem* mute = find_toolbar_item(items, ToolbarAction::Mute);
-    const ToolbarItem* dlss = find_toolbar_item(items, ToolbarAction::ToggleDlss);
+    const ToolbarItem* neural = find_toolbar_item(items, ToolbarAction::ToggleNeuralRendering);
+    const ToolbarItem* upscaling = find_toolbar_item(items, ToolbarAction::ToggleUpscaling);
+    const ToolbarItem* frameGeneration = find_toolbar_item(items, ToolbarAction::ToggleFrameGeneration);
     const ToolbarItem* adjustments = find_toolbar_item(items, ToolbarAction::Adjustments);
     const ToolbarItem* debug = find_toolbar_item(items, ToolbarAction::DebugView);
     const ToolbarItem* fullscreen = find_toolbar_item(items, ToolbarAction::Fullscreen);
-    CHECK(back && play && mute && dlss && adjustments && debug && fullscreen);
-    if (!(back && play && mute && dlss && adjustments && debug && fullscreen)) return;
+    CHECK(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen);
+    if (!(back && play && mute && neural && upscaling && frameGeneration && adjustments && debug && fullscreen)) return;
 
     CHECK_EQ(4L, play->bounds.left - back->bounds.right);
-    CHECK_EQ(12L, dlss->bounds.left - mute->bounds.right);
+    CHECK_EQ(12L, neural->bounds.left - mute->bounds.right);
+    CHECK_EQ(4L, upscaling->bounds.left - neural->bounds.right);
+    CHECK_EQ(4L, frameGeneration->bounds.left - upscaling->bounds.right);
     CHECK_EQ(12L, debug->bounds.left - adjustments->bounds.right);
     CHECK_EQ(4L, fullscreen->bounds.left - debug->bounds.right);
 }
@@ -425,8 +477,8 @@ void toolbar_layout_preserves_group_separation_test()
 void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
 {
     const auto narrow = LayoutToolbar(320, 180, 96);
-    const auto normal = LayoutToolbar(640, 180, 96);
-    const auto wide = LayoutToolbar(1000, 180, 96);
+    const auto normal = LayoutToolbar(900, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     const auto scaled = LayoutToolbar(960, 300, 144);
 
     for (const auto* items : {&narrow, &normal, &wide}) {
@@ -443,7 +495,7 @@ void toolbar_layout_scales_hit_height_and_avoids_overlap_test()
     check_toolbar_items_do_not_overlap(scaled);
 
     CHECK_EQ(16L, wide.front().bounds.left);
-    CHECK(wide.back().bounds.right <= 1000 - 16);
+    CHECK(wide.back().bounds.right <= 1600 - 16);
     CHECK_EQ(24L, scaled.front().bounds.left);
     CHECK(scaled.back().bounds.right <= 960 - 24);
 }
@@ -466,42 +518,31 @@ void toolbar_hit_testing_is_half_open_and_boundary_stable_test()
 
 void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
 {
-    struct Case {
-        UINT dpi;
-        int expectedClientWidth;
-        int expectedTargetSize;
-        int expectedGutter;
-    };
-    constexpr Case cases[]{
-        {0, 244, 36, 16},
-        {96, 244, 36, 16},
-        {120, 305, 45, 20},
-        {144, 366, 54, 24},
-        {192, 488, 72, 32},
-    };
     const std::vector<ToolbarAction> requiredNarrow{
         ToolbarAction::Open,
         ToolbarAction::PlayPause,
         ToolbarAction::Mute,
-        ToolbarAction::ToggleDlss,
+        ToolbarAction::ToggleNeuralRendering,
+        ToolbarAction::ToggleUpscaling,
+        ToolbarAction::ToggleFrameGeneration,
         ToolbarAction::Fullscreen,
     };
 
-    for (const auto& test : cases) {
-        CHECK_EQ(test.expectedClientWidth, MinimumToolbarClientWidth(test.dpi));
-        const auto items = LayoutToolbar(test.expectedClientWidth, test.expectedTargetSize * 4, test.dpi);
+    for (const UINT dpi : {0u, 96u, 120u, 144u, 192u}) {
+        const UINT effectiveDpi = dpi == 0 ? 96 : dpi;
+        const int clientWidth = MinimumToolbarClientWidth(dpi);
+        const auto items = LayoutToolbar(clientWidth,
+                                         MulDiv(400, static_cast<int>(effectiveDpi), 96), dpi);
         CHECK_EQ(requiredNarrow, toolbar_actions(items));
-        CHECK_EQ(static_cast<size_t>(5), items.size());
+        CHECK_EQ(static_cast<size_t>(7), items.size());
         for (const auto& item : items) {
-            CHECK(item.compact);
-            CHECK(item.bounds.right - item.bounds.left >= test.expectedTargetSize);
-            CHECK(item.bounds.bottom - item.bounds.top >= test.expectedTargetSize);
+            CHECK(!item.compact);
+            CHECK(item.bounds.bottom - item.bounds.top >= MulDiv(36, static_cast<int>(effectiveDpi), 96));
         }
         check_toolbar_items_do_not_overlap(items);
         if (!items.empty()) {
-            CHECK_EQ(static_cast<LONG>(test.expectedGutter), items.front().bounds.left);
-            CHECK_EQ(static_cast<LONG>(test.expectedClientWidth - test.expectedGutter),
-                     items.back().bounds.right);
+            CHECK_EQ(static_cast<LONG>(MulDiv(kToolbarOuterGutterDip, static_cast<int>(effectiveDpi), 96)), items.front().bounds.left);
+            CHECK_EQ(static_cast<LONG>(clientWidth - MulDiv(kToolbarOuterGutterDip, static_cast<int>(effectiveDpi), 96)), items.back().bounds.right);
         }
     }
 }
@@ -514,20 +555,21 @@ bool rectangles_intersect(const RECT& left, const RECT& right)
 
 void volume_slider_never_intersects_compact_or_threshold_toolbar_test()
 {
-    for (const int width : {320, 640, 922}) {
+    for (const int width : {320}) {
         const auto items = LayoutToolbar(width, 180, 96);
         CHECK(!LayoutVolumeSlider(width, 180, 96, items).has_value());
     }
 
-    const auto thresholdItems = LayoutToolbar(923, 180, 96);
-    const auto slider = LayoutVolumeSlider(923, 180, 96, thresholdItems);
+    const int thresholdWidth = MinimumToolbarClientWidth(96) + 185;
+    const auto thresholdItems = LayoutToolbar(thresholdWidth, 180, 96);
+    const auto slider = LayoutVolumeSlider(thresholdWidth, 180, 96, thresholdItems);
     CHECK(slider.has_value());
     if (!slider) return;
     for (const auto& item : thresholdItems) {
         CHECK(!rectangles_intersect(*slider, item.bounds));
     }
-    CHECK_EQ(738L, slider->left);
-    CHECK_EQ(828L, slider->right);
+    CHECK_EQ(static_cast<LONG>(thresholdWidth - 185), slider->left);
+    CHECK_EQ(static_cast<LONG>(thresholdWidth - 95), slider->right);
 }
 
 void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
@@ -542,9 +584,11 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     CHECK_EQ(ToolbarAction::Open,
              NextFocusableToolbarAction(idleItems, ToolbarAction::Open, true, idle));
 
-    const auto loadedItems = LayoutToolbar(640, 180, 96);
+    const auto loadedItems = LayoutToolbar(1600, 180, 96);
     const ToolbarAvailability withoutRenderer{true, false, false};
-    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleDlss, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, withoutRenderer));
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::Adjustments, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::DebugView, withoutRenderer));
     const ToolbarAvailability seeking{true, true, true};
@@ -572,7 +616,7 @@ void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
 void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 {
     const ToolbarAvailability loaded{true, false, true, false};
-    const auto wide = LayoutToolbar(1200, 180, 96);
+    const auto wide = LayoutToolbar(1600, 180, 96);
     const auto narrow = LayoutToolbar(320, 180, 96);
     const auto contains = [](std::span<const ToolbarItem> items, ToolbarAction action) {
         return std::any_of(items.begin(), items.end(),
@@ -581,7 +625,9 @@ void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
 
     CHECK(contains(wide, ToolbarAction::DebugView));
     CHECK(!contains(narrow, ToolbarAction::DebugView));
-    CHECK(contains(wide, ToolbarAction::ToggleDlss));
+    CHECK(contains(wide, ToolbarAction::ToggleNeuralRendering));
+    CHECK(contains(wide, ToolbarAction::ToggleUpscaling));
+    CHECK(contains(wide, ToolbarAction::ToggleFrameGeneration));
     CHECK(contains(wide, ToolbarAction::PlayPause));
 
     CHECK_EQ(ToolbarAction::Open,
@@ -590,7 +636,7 @@ void focused_toolbar_action_reconciles_layout_and_availability_changes_test()
     ToolbarAvailability withoutRenderer = loaded;
     withoutRenderer.rendererReady = false;
     CHECK_EQ(ToolbarAction::Open,
-             ReconcileFocusedToolbarAction(wide, ToolbarAction::ToggleDlss,
+             ReconcileFocusedToolbarAction(wide, ToolbarAction::ToggleNeuralRendering,
                                             withoutRenderer));
 
     CHECK_EQ(ToolbarAction::PlayPause,
@@ -629,8 +675,7 @@ void idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test()
         CHECK_EQ(test.clientHeight, MinimumIdleClientHeight(test.dpi));
         const IdleSurfaceLayout shortLayout = LayoutIdleSurface(
             MinimumToolbarClientWidth(test.dpi), test.clientHeight, test.dpi);
-        CHECK(shortLayout.stacked);
-        CHECK_EQ(shortLayout.subtitle.top, shortLayout.subtitle.bottom);
+        CHECK(!shortLayout.stacked);
         for (const auto& action : shortLayout.actions) {
             CHECK(action.bounds.top >= 0);
             CHECK(action.bounds.bottom <= test.clientHeight);
@@ -698,14 +743,14 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.renderedFps = 58.4;
     status.sourceFps = 59.94;
     status.droppedFrames = 3;
-    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR active \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
+    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
              BuildPlayerStatusText(status));
 
     status.runtimeConfiguration = PlayerRuntimeConfiguration::DlssSrSafeMode;
     status.dlssState = PlayerDlssState::Active;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR active \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
     status.dlssState = PlayerDlssState::ScalerFallback;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 Scaler fallback \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
 
     const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, true, true);
     CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralActive.configuration);
@@ -985,6 +1030,117 @@ void failed_icon_font_uses_label_only_presentation_test()
     CHECK(ResolveButtonPresentation(true) == ButtonPresentation::IconAndLabel);
 }
 
+void button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test()
+{
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const int width=MulDiv(180,int(dpi),96),height=MulDiv(40,int(dpi),96);
+        const SIZE icon{MulDiv(17,int(dpi),96),MulDiv(17,int(dpi),96)};
+        const SIZE text{MulDiv(64,int(dpi),96),MulDiv(15,int(dpi),96)};
+        const RECT outer{0,0,width,height};
+        const auto layout=LayoutButtonContent(outer,icon,text,false,dpi);
+        CHECK(outer.bottom-outer.top>=MulDiv(36,int(dpi),96));
+        CHECK(layout.icon.left-outer.left>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(outer.right-layout.text.right>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(layout.icon.top-outer.top>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(outer.bottom-layout.icon.bottom>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(layout.text.top-outer.top>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(outer.bottom-layout.text.bottom>=MulDiv(kButtonVerticalInsetDip,int(dpi),96));
+        CHECK(layout.text.left-layout.icon.right>=MulDiv(kButtonIconLabelGapDip,int(dpi),96));
+    }
+}
+
+void button_content_layout_centers_combined_icon_and_label_without_outline_contact_test()
+{
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const RECT outer{0,0,MulDiv(220,int(dpi),96),MulDiv(44,int(dpi),96)};
+        const auto layout=LayoutButtonContent(
+            outer,SIZE{MulDiv(18,int(dpi),96),MulDiv(18,int(dpi),96)},
+            SIZE{MulDiv(72,int(dpi),96),MulDiv(16,int(dpi),96)},false,dpi);
+        const int leftSpace=layout.content.left-outer.left;
+        const int rightSpace=outer.right-layout.content.right;
+        CHECK(std::abs(leftSpace-rightSpace)<=1);
+        CHECK(leftSpace>=MulDiv(kButtonHorizontalInsetDip,int(dpi),96));
+        CHECK(layout.icon.right<=layout.text.left);
+    }
+}
+
+void feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test()
+{
+    struct FeatureWidth { ToolbarAction action; int minimumWidthDip; };
+    constexpr FeatureWidth features[]{
+        {ToolbarAction::ToggleNeuralRendering, 270},
+        {ToolbarAction::ToggleUpscaling, 230},
+        {ToolbarAction::ToggleFrameGeneration, 320},
+    };
+    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+        const auto items = LayoutToolbar(MinimumToolbarClientWidth(dpi),
+                                         MulDiv(360, static_cast<int>(dpi), 96), dpi);
+        for (const auto& feature : features) {
+            const ToolbarItem* item = find_toolbar_item(items, feature.action);
+            CHECK(item != nullptr);
+            if (!item) continue;
+            CHECK(item->bounds.right - item->bounds.left >=
+                  MulDiv(feature.minimumWidthDip, static_cast<int>(dpi), 96));
+        }
+        check_toolbar_items_do_not_overlap(items);
+    }
+}
+
+void prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test()
+{
+    const auto inside=[](const RECT& inner,const RECT& outer){
+        return inner.left>=outer.left&&inner.top>=outer.top&&inner.right<=outer.right&&
+               inner.bottom<=outer.bottom&&inner.right>=inner.left&&inner.bottom>=inner.top;
+    };
+    for(const UINT dpi:{96u,120u,144u,192u}){
+        const int width=MulDiv(640,int(dpi),96),height=MulDiv(420,int(dpi),96);
+        const RECT client{0,0,width,height};const auto layout=LayoutPreRenderSurface(width,height,dpi);
+        for(const RECT rect:{layout.title,layout.phase,layout.resolution,layout.frameCount,
+                             layout.elapsedEta,layout.size,layout.progressTrack,
+                             layout.progressFill,layout.cancelButton})CHECK(inside(rect,client));
+        CHECK(layout.cancelButton.right-layout.cancelButton.left<=MulDiv(120,int(dpi),96));
+        CHECK(layout.cancelButton.bottom-layout.cancelButton.top<=MulDiv(40,int(dpi),96));
+        CHECK(layout.progressFill.left==layout.progressTrack.left);
+    }
+}
+
+void advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test()
+{
+    Localizer localizer;const HMENU menu=app_menu::CreateMenuBar(localizer,true);CHECK(menu!=nullptr);
+    std::vector<MenuEntry> entries;if(menu)collect_menu_entries(menu,entries);
+    CHECK(has_menu_entry(entries,L"Clear Neural Cache",app_menu::IDM_CLEAR_NEURAL_CACHE));
+    CHECK(!has_menu_text(entries,L"720p"));CHECK(!has_menu_text(entries,L"480p"));
+    CHECK_EQ(std::wstring(L"Acquiring"),localizer.Get(L"neural.phase.acquiring"));
+    CHECK_EQ(std::wstring(L"Neural rendered"),localizer.Get(L"neural.view.rendered"));
+    if(menu)DestroyMenu(menu);
+}
+
+void feature_menu_uses_distinct_controls_and_honest_availability_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Neural Rendering\tD", app_menu::IDM_NEURAL_RENDERING));
+    CHECK(has_menu_entry(entries, L"DLSS Upscaling",
+                         app_menu::IDM_DLSS_UPSCALING));
+    CHECK(has_menu_entry(entries, L"Frame Generation\tUnavailable in this build",
+                         app_menu::IDM_FRAME_GENERATION));
+    CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
+
+    CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
+                                              false, false, false, false));
+    const UINT neural = GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND);
+    const UINT upscaling = GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND);
+    const UINT frameGeneration = GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((neural & (MF_DISABLED | MF_GRAYED)) == 0);
+    CHECK((neural & MF_CHECKED) != 0);
+    CHECK((upscaling & (MF_DISABLED | MF_GRAYED)) != 0);
+    CHECK((frameGeneration & (MF_DISABLED | MF_GRAYED)) != 0);
+    if (menu) DestroyMenu(menu);
+}
+
 void debug_view_popup_contains_all_existing_views_and_selection_test()
 {
     const HMENU menu = app_menu::CreateDebugViewMenu(app_menu::IDM_VIEW_DEPTH);
@@ -1050,12 +1206,10 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
     CHECK(quality != nullptr);
 
     const std::array expected{
-        std::pair{L"Auto (best available)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
+        std::pair{L"Auto (1080p preferred)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
         std::pair{L"2160p", app_menu::IDM_YOUTUBE_QUALITY_2160},
         std::pair{L"1440p", app_menu::IDM_YOUTUBE_QUALITY_1440},
         std::pair{L"1080p", app_menu::IDM_YOUTUBE_QUALITY_1080},
-        std::pair{L"720p", app_menu::IDM_YOUTUBE_QUALITY_720},
-        std::pair{L"480p", app_menu::IDM_YOUTUBE_QUALITY_480},
     };
     std::vector<MenuEntry> entries;
     if (quality) collect_menu_entries(quality, entries);
@@ -1067,8 +1221,8 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
         if (selected) CHECK_EQ(command, app_menu::CommandForYouTubeQuality(*selected));
     }
     for (const auto& entry : entries) {
-        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_1080,
-                 (entry.state & MFS_CHECKED) != 0);
+        CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_AUTO,
+                  (entry.state & MFS_CHECKED) != 0);
     }
 
     CHECK(app_menu::UpdateYouTubeQualitySelection(menu, YouTubeSourceQuality::P1080));
@@ -1079,6 +1233,8 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
                  (entry.state & MFS_CHECKED) != 0);
     }
     CHECK(!app_menu::YouTubeQualityForCommand(app_menu::IDM_QUALITY_AUTO).has_value());
+    CHECK(!app_menu::YouTubeQualityForCommand(414).has_value());
+    CHECK(!app_menu::YouTubeQualityForCommand(415).has_value());
     if (menu) DestroyMenu(menu);
 }
 
@@ -1942,6 +2098,59 @@ void renderer_frame_signal_success_advances_tracking_once_test()
     CHECK(!D3D12RendererTestAccess::GPUUnusable(*renderer));
 }
 
+void renderer_cache_capture_requires_a_successful_neural_evaluation_test()
+{
+    auto renderer=MakeD3D12Renderer();int captures=0;
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,false,[&](std::vector<uint8_t>&){++captures;return true;});
+    CapturedVideoFrame frame;frame.bgra.assign(7,0x55);frame.width=9;frame.height=9;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(0,captures);CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);
+    CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_returns_exact_tight_bgra_geometry_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){
+            bytes={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};return true;
+        });
+    CapturedVideoFrame frame;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(uint32_t{2},frame.width);CHECK_EQ(uint32_t{2},frame.height);
+    CHECK_EQ(size_t{16},frame.bgra.size());CHECK_EQ(uint8_t{15},frame.bgra.back());
+
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(17,0);return true;});
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(8,0x44);return false;});
+    CapturedVideoFrame frame;frame.bgra.assign(16,0x22);frame.width=2;frame.height=2;
+    CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+}
+
+void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
+{
+    auto renderer=MakeD3D12Renderer();
+    D3D12Renderer::ColorSettings adjusted{};adjusted.brightness=2.0f;adjusted.contrast=3.0f;
+    adjusted.saturation=0.0f;adjusted.gamma=0.25f;adjusted.temperature=1.0f;adjusted.tint=-1.0f;
+    renderer->SetColorSettings(adjusted);
+    const std::vector<uint8_t> neuralBytes{10,20,30,255};
+    D3D12RendererTestAccess::ConfigureCacheCapture(
+        *renderer,1,1,true,[&](std::vector<uint8_t>& bytes){bytes=neuralBytes;return true;});
+    CapturedVideoFrame frame;
+    CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
+    CHECK_EQ(neuralBytes,frame.bgra);
+}
+
 void gpu_classification_table_test()
 {
     struct Case {
@@ -1975,6 +2184,111 @@ void neural_addon_policy_test()
     CHECK(!NeuralAddonDesired(GpuGeneration::Rtx50Blackwell, true));
     CHECK(!NeuralAddonDesired(GpuGeneration::OtherNvidia, false));
     CHECK(!NeuralAddonDesired(GpuGeneration::Unsupported, false));
+}
+
+void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
+{
+    const auto experimental = ResolveNeuralRenderDefaults(true, false, 3840, 2160);
+    CHECK_EQ(uint32_t{1920}, experimental.width);
+    CHECK_EQ(uint32_t{1080}, experimental.height);
+
+    const auto explicitOutput = ResolveNeuralRenderDefaults(true, true, 2560, 1440);
+    CHECK_EQ(uint32_t{2560}, explicitOutput.width);
+    CHECK_EQ(uint32_t{1440}, explicitOutput.height);
+
+    const auto nativeOnly = ResolveNeuralRenderDefaults(false, false, 3840, 2160);
+    CHECK_EQ(uint32_t{3840}, nativeOnly.width);
+    CHECK_EQ(uint32_t{2160}, nativeOnly.height);
+}
+
+void neural_open_uses_valid_cache_without_starting_a_job_test()
+{
+    CHECK_EQ(NeuralOpenAction::UseCache,DecideNeuralOpen(true,false,true));
+    NeuralPlaybackLifecycle lifecycle;const uint64_t generation=lifecycle.Begin();
+    CHECK(lifecycle.Accept(generation));CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
+}
+
+void neural_open_starts_materialize_then_render_on_cache_miss_test()
+{
+    CHECK_EQ(NeuralOpenAction::StartJob,DecideNeuralOpen(true,false,false));
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
+}
+
+void neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test()
+{
+    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(false,false,true));
+    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(true,true,true));
+}
+
+void neural_completion_publishes_only_after_probe_and_manifest_validation_test()
+{
+    CHECK(CanPublishNeuralCompletion(true,true,true));
+    CHECK(!CanPublishNeuralCompletion(false,true,true));
+    CHECK(!CanPublishNeuralCompletion(true,false,true));
+    CHECK(!CanPublishNeuralCompletion(true,true,false));
+}
+
+void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
+{
+    NeuralPlaybackLifecycle lifecycle;const uint64_t generation=lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+    lifecycle.Invalidate();CHECK(!lifecycle.Accept(generation));
+    lifecycle.Begin();CHECK(lifecycle.Transition(NeuralPlaybackState::Failed));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+}
+
+void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test()
+{
+    CHECK_EQ(ComparisonView::Neural,ToggleComparisonView(ComparisonView::Original));
+    CHECK_EQ(ComparisonView::Original,ToggleComparisonView(ComparisonView::Neural));
+}
+
+void source_change_cancels_and_joins_the_owned_job_before_replacement_test()
+{
+    std::vector<int> order;
+    ExecuteNeuralReplacementSequence([&]{order.push_back(1);},[&]{order.push_back(2);},
+                                     [&]{order.push_back(3);});
+    CHECK_EQ(std::vector<int>({1,2,3}),order);
+}
+
+void youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test()
+{
+    const auto formats=ParseYouTubeFormatMetadata(
+        R"([{"format_note":"escaped \"height\":2160","height":1080},{"height":1440},{"height":2160},{"height":1080},{"height":null}])");
+    CHECK(formats.valid);CHECK(formats.autoAvailable);CHECK(formats.p1080);CHECK(formats.p1440);CHECK(formats.p2160);
+    const auto low=ParseYouTubeFormatMetadata(R"([{"height":720},{"height":480}])");
+    CHECK(low.valid);CHECK(low.autoAvailable);CHECK(!low.p1080);CHECK(!low.p1440);CHECK(!low.p2160);
+    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080},])").valid);
+    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080}] trailing)").valid);
+    CHECK(!ParseYouTubeFormatMetadata(std::string(kMaximumYouTubeFormatMetadataBytes+1,' ')).valid);
+}
+
+void neural_runtime_layout_is_absent_complete_or_fail_closed_test()
+{
+    CHECK_EQ(NeuralRuntimeLayout::Absent,
+             ClassifyNeuralRuntimeLayout(false, false, false, false));
+    CHECK_EQ(NeuralRuntimeLayout::Complete,
+             ClassifyNeuralRuntimeLayout(true, true, true, true));
+
+    for (unsigned presentMask = 1; presentMask < 15; ++presentMask) {
+        CHECK_EQ(NeuralRuntimeLayout::Incomplete,
+                 ClassifyNeuralRuntimeLayout(
+                     (presentMask & 1U) != 0,
+                     (presentMask & 2U) != 0,
+                     (presentMask & 4U) != 0,
+                     (presentMask & 8U) != 0));
+    }
+}
+
+void default_neural_carrier_uses_native_resolution_dlaa_test()
+{
+    CHECK_EQ(NVSDK_NGX_PerfQuality_Value_DLAA,
+             DefaultNeuralCarrierQuality());
 }
 
 void bootstrap_action_matrix_test()
@@ -2464,6 +2778,88 @@ void disabled_addons_insertion_uses_target_section_line_ending_test()
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
 
+void neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64,legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=0\n"
+        "NeuralUplift=0\n"
+        "NREnableUpscaling=1\n"
+        "NRIntensity=1.25\n";
+    constexpr std::string_view expected =
+        "[ADDON]\n"
+        "DisabledAddons=legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n"
+        "NRIntensity=1.25\n";
+
+    const std::string updated = UpdateNeuralAddonIni(input, true);
+    CHECK_EQ(std::string(expected), updated);
+    CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true));
+}
+
+void neural_addon_runtime_settings_are_created_without_enabling_upscaling_test()
+{
+    constexpr std::string_view input =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n";
+    constexpr std::string_view expected =
+        "[GENERAL]\r\n"
+        "PresetPath=.\\ReShadePreset.ini\r\n"
+        "[ADDON]\r\n"
+        "DisabledAddons=\r\n"
+        "[RenoDX.DLSS5]\r\n"
+        "EnableHooks=2\r\n"
+        "NeuralUplift=1\r\n"
+        "NREnableUpscaling=0\r\n";
+
+    CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
+}
+
+void neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test()
+{
+    constexpr std::string_view input =
+        "[ADDON]\n"
+        "DisabledAddons=\n"
+        "[RenoDX.DLSS5]\n"
+        "NeuralUplift=1\n"
+        "NeuralUplift=0\n";
+    bool rejected = false;
+    try {
+        (void)UpdateNeuralAddonIni(input, true);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    CHECK(rejected);
+}
+
+void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
+{
+    constexpr std::string_view input =
+        "[ADDON] ; ReShade accepts trailing text\n"
+        "DisabledAddons=DLSS 5 Neural Rendering@renodx-dlss5.addon64\n"
+        "[RenoDX.DLSS5] ; existing settings\n"
+        "NRIntensity=1.25\n"
+        "[OTHER] ; this must end the RenoDX section\n"
+        "Foo=1\n";
+    constexpr std::string_view expected =
+        "[ADDON] ; ReShade accepts trailing text\n"
+        "DisabledAddons=\n"
+        "[RenoDX.DLSS5] ; existing settings\n"
+        "NRIntensity=1.25\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n"
+        "[OTHER] ; this must end the RenoDX section\n"
+        "Foo=1\n";
+
+    CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
+}
+
 void configure_neural_addon_is_idempotent_test()
 {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "PolicyTests-ReShade.ini";
@@ -2477,7 +2873,11 @@ void configure_neural_addon_is_idempotent_test()
         "[GENERAL]\n"
         "PresetPath=C:\\Games\\Player\n"
         "[ADDON]\n"
-        "DisabledAddons=legacy.addon64\n";
+        "DisabledAddons=legacy.addon64\n"
+        "[RenoDX.DLSS5]\n"
+        "EnableHooks=2\n"
+        "NeuralUplift=1\n"
+        "NREnableUpscaling=0\n";
     write_binary_file(path, input);
 
     const ConfigUpdate first = ConfigureNeuralAddon(path, true);
@@ -2540,7 +2940,11 @@ void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
         "DisabledAddons=legacy.addon64,DLSS 5 Neural Rendering@renodx-dlss5.addon64\r\n";
     constexpr std::string_view normalExpected =
         "[ADDON]\r\n"
-        "DisabledAddons=legacy.addon64\r\n";
+        "DisabledAddons=legacy.addon64\r\n"
+        "[RenoDX.DLSS5]\r\n"
+        "EnableHooks=2\r\n"
+        "NeuralUplift=1\r\n"
+        "NREnableUpscaling=0\r\n";
     write_binary_file(path, legacyInput);
 
     const ConfigUpdate safe = ConfigureNeuralAddon(path, false);
@@ -2794,13 +3198,26 @@ void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
 void resolver_output_accepts_separate_https_video_and_audio_urls_test()
 {
     const ResolveResult result = ParseResolverOutput(
-        "https://v1.googlevideo.com/videoplayback?id=video\r\n"
-        "https://a1.googlevideo.com/videoplayback?id=audio\r\n", 0);
+        "https://v1.googlevideo.com/videoplayback?id=video&itag=137&expire=999\r\n"
+        "https://a1.googlevideo.com/videoplayback?id=audio&itag=140&expire=999\r\n", 0);
     CHECK(result.ok);
-    CHECK_EQ(std::wstring(L"https://v1.googlevideo.com/videoplayback?id=video"),
+    CHECK_EQ(std::wstring(L"https://v1.googlevideo.com/videoplayback?id=video&itag=137&expire=999"),
              result.mediaUrl);
-    CHECK_EQ(std::wstring(L"https://a1.googlevideo.com/videoplayback?id=audio"),
+    CHECK_EQ(std::wstring(L"https://a1.googlevideo.com/videoplayback?id=audio&itag=140&expire=999"),
              result.audioUrl);
+    CHECK_EQ(std::string("video-itag=137|audio-itag=140"),
+             StableYouTubeStreamIdentity(result.mediaUrl,result.audioUrl));
+    CHECK_EQ(StableYouTubeStreamIdentity(result.mediaUrl,result.audioUrl),
+             StableYouTubeStreamIdentity(
+                 L"https://v2.googlevideo.com/videoplayback?expire=123&itag=137",
+                 L"https://a2.googlevideo.com/videoplayback?expire=456&itag=140"));
+    CHECK(StableYouTubeStreamIdentity(
+        L"https://v1.googlevideo.com/videoplayback?id=video",
+        L"https://a1.googlevideo.com/videoplayback?id=audio").empty());
+    CHECK_EQ(std::string("9lrThxCoznw"),
+             CanonicalYouTubeVideoId(L"https://www.youtube.com/watch?v=9lrThxCoznw"));
+    CHECK_EQ(std::string("9lrThxCoznw"),
+             CanonicalYouTubeVideoId(L"https://youtu.be/9lrThxCoznw"));
 }
 
 void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
@@ -2917,7 +3334,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
         L"-f",
-        L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b",
+        L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]",
         L"--get-url",
         std::wstring(url),
     };
@@ -2926,21 +3343,17 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
                            helperDirectory, url, YouTubeSourceQuality::P1080));
 }
 
-void youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test()
+void youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test()
 {
     const std::array cases{
         std::pair{YouTubeSourceQuality::Auto,
-                  std::wstring_view(L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b")},
+                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]")},
         std::pair{YouTubeSourceQuality::P2160,
-                  std::wstring_view(L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b")},
+                  std::wstring_view(L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]")},
         std::pair{YouTubeSourceQuality::P1440,
-                  std::wstring_view(L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b")},
+                  std::wstring_view(L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]")},
         std::pair{YouTubeSourceQuality::P1080,
-                  std::wstring_view(L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b")},
-        std::pair{YouTubeSourceQuality::P720,
-                  std::wstring_view(L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b")},
-        std::pair{YouTubeSourceQuality::P480,
-                  std::wstring_view(L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b")},
+                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]")},
     };
     for (const auto& [quality, expected] : cases) {
         CHECK_EQ(expected, YouTubeFormatSelector(quality));
@@ -3078,6 +3491,23 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
     CHECK(GetProcessHandleCount(GetCurrentProcess(),&afterHandles)!=FALSE);CHECK(afterHandles<=beforeHandles+2);
 }
 
+void youtube_decoder_discards_only_expected_trailing_partial_frame_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"https://media.invalid/partialend",MediaSourceKind::YouTube));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;size_t frames=0;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    while(std::chrono::steady_clock::now()<deadline){
+        result=decoder->ReadNextAvailable(frame);
+        if(result==VideoReadResult::FrameReady){++frames;result=VideoReadResult::NotReady;}
+        else if(result!=VideoReadResult::NotReady)break;
+        Sleep(5);
+    }
+    CHECK_EQ(size_t{2},frames);
+    CHECK_EQ(VideoReadResult::EndOfStream,result);
+}
+
 void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
 {
     MediaFixture fixture;
@@ -3098,13 +3528,37 @@ void video_decoder_hardware_failure_falls_back_to_software_test()
     MediaFixture fixture;
     const auto marker=fixture.directory/L"acceleration-order.txt";
     ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",marker.wstring());
-    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
-    CHECK(decoder->Open(L"https://media.invalid/hardwarefallback",MediaSourceKind::YouTube));
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2});
+    CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
     VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
+    const auto started=std::chrono::steady_clock::now();
+    const auto deadline=started+std::chrono::seconds{5};
     while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
+    const std::string accelerationOrder=read_binary_file(marker);
+    if(result!=VideoReadResult::FrameReady){
+        const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count();
+        std::cerr<<"hardware fallback diagnostic: result="<<static_cast<int>(result)
+                 <<" elapsed_ms="<<elapsed<<" marker="<<accelerationOrder<<'\n';
+    }
     CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
-    CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(marker));
+    CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),accelerationOrder);
+}
+
+void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
+{
+    MediaFixture fixture;
+    const auto marker=fixture.directory/L"sequential-acceleration.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",marker.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"drainexit",MediaSourceKind::LocalFile));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{2};
+    while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){
+        result=decoder->ReadNextAvailable(frame);Sleep(1);
+    }
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    CHECK_EQ(size_t{1920u*1080u*4u},frame.bgra.size());
+    CHECK_EQ(std::string("software\n"),read_binary_file(marker));
 }
 
 void video_decoder_background_queue_is_bounded_to_four_frames_test()
@@ -3690,6 +4144,8 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
         if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        if(all.find(L"drainexit")!=std::wstring::npos){std::cout<<"width=1920\nheight=1080\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.034\n"<<std::flush;return 0;}
+        if(all.find(L"partialend")!=std::wstring::npos){std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.067\n"<<std::flush;return 0;}
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
@@ -3697,8 +4153,9 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
         const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
         const bool d3d11=all.find(L"-hwaccel d3d11va")!=std::wstring::npos;
+        const bool delayedExit=all.find(L"hardwarefallbackdelayedexit")!=std::wstring::npos;
         if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");}
-        if(cuda||d3d11)return 7;
+        if(cuda||d3d11){if(delayedExit){CloseHandle(GetStdHandle(STD_OUTPUT_HANDLE));Sleep(75);}return 7;}
         std::cout.write("1234567890abcdef",16);std::cout.flush();return 0;
     }
     if(all.find(L"largeburst")!=std::wstring::npos){
@@ -3710,7 +4167,20 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         }
         Sleep(INFINITE);return 0;
     }
+    if(all.find(L"drainexit")!=std::wstring::npos){
+        const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
+        if(!marker.empty()){
+            const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
+            const bool d3d11=all.find(L"-hwaccel d3d11va")!=std::wstring::npos;
+            std::ofstream out(marker,std::ios::binary|std::ios::app);
+            out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");
+        }
+        const std::vector<char> frame(1920u*1080u*4u,'z');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));
+        std::cout.flush();return 0;
+    }
     if(all.find(L"exit")!=std::wstring::npos)return 7;
+    if(all.find(L"partialend")!=std::wstring::npos){std::cout.write("1234567890abcdef1234567890abcdef12345678",40);std::cout.flush();return 0;}
     if(all.find(L"stallmid")!=std::wstring::npos){std::cout.write("1234",4);std::cout.flush();Sleep(INFINITE);return 0;}
     if(all.find(L"trickle")!=std::wstring::npos){std::cout.write("12345678",8);std::cout.flush();Sleep(35);std::cout.write("abcdefgh",8);std::cout.flush();return 0;}
     Sleep(INFINITE);return 0;
@@ -3754,7 +4224,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[6]) != L"--js-runtimes" ||
         !std::wstring_view(argv[7]).starts_with(L"deno:") ||
         std::wstring_view(argv[8]) != L"-f" ||
-        std::wstring_view(argv[9]) != L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b" ||
+        std::wstring_view(argv[9]) != YouTubeFormatSelector(YouTubeSourceQuality::Auto) ||
         std::wstring_view(argv[10]) != L"--get-url") {
         return 91;
     }
@@ -4373,6 +4843,7 @@ int wmain(int argc, wchar_t* argv[])
     harness_sanity_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
     release_package_filename_policy_is_allowlisted_and_fail_closed_test();
+    public_release_package_policy_excludes_private_and_optional_binaries_test();
     runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
     toolbar_layout_selects_stable_action_sets_for_width_modes_test();
     toolbar_layout_preserves_group_separation_test();
@@ -4399,6 +4870,12 @@ int wmain(int argc, wchar_t* argv[])
     native_button_palette_has_distinct_interaction_states_test();
     active_button_small_text_meets_wcag_contrast_test();
     failed_icon_font_uses_label_only_presentation_test();
+    button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test();
+    button_content_layout_centers_combined_icon_and_label_without_outline_contact_test();
+    feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test();
+    prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test();
+    advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
+    feature_menu_uses_distinct_controls_and_honest_availability_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();
@@ -4421,8 +4898,10 @@ int wmain(int argc, wchar_t* argv[])
     youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
+    youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
+    video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
@@ -4449,8 +4928,23 @@ int wmain(int argc, wchar_t* argv[])
     renderer_frame_signal_failure_is_cached_without_advancing_tracking_test();
     renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test();
     renderer_frame_signal_success_advances_tracking_once_test();
+    renderer_cache_capture_requires_a_successful_neural_evaluation_test();
+    renderer_cache_capture_returns_exact_tight_bgra_geometry_test();
+    renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test();
+    renderer_cache_capture_does_not_apply_playback_color_adjustments_test();
     gpu_classification_table_test();
     neural_addon_policy_test();
+    neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
+    neural_open_uses_valid_cache_without_starting_a_job_test();
+    neural_open_starts_materialize_then_render_on_cache_miss_test();
+    neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test();
+    neural_completion_publishes_only_after_probe_and_manifest_validation_test();
+    neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
+    dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
+    source_change_cancels_and_joins_the_owned_job_before_replacement_test();
+    youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();
+    neural_runtime_layout_is_absent_complete_or_fail_closed_test();
+    default_neural_carrier_uses_native_resolution_dlaa_test();
     bootstrap_action_matrix_test();
     windows_command_line_quoting_round_trip_test();
     runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
@@ -4471,6 +4965,10 @@ int wmain(int argc, wchar_t* argv[])
     reshade_68_section_and_key_lookup_are_case_sensitive_test();
     reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test();
     disabled_addons_insertion_uses_target_section_line_ending_test();
+    neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test();
+    neural_addon_runtime_settings_are_created_without_enabling_upscaling_test();
+    neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test();
+    reshade_trailing_section_text_uses_reshade_section_boundaries_test();
     configure_neural_addon_is_idempotent_test();
     configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
     configure_neural_addon_safe_then_normal_observes_reshade_state_test();
@@ -4488,7 +4986,7 @@ int wmain(int argc, wchar_t* argv[])
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
     youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
-    youtube_source_quality_selectors_are_bounded_with_best_below_fallback_test();
+    youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
     youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
     youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();

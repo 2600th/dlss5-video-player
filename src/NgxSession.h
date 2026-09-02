@@ -79,7 +79,8 @@ FeatureSetupResult PrepareFeatureForFrame(
     bool& delayedRecreateDone,
     bool& recreateRequested,
     EnsureFeature&& ensureFeature,
-    RecreateFeature&& recreateFeature)
+    RecreateFeature&& recreateFeature,
+    bool immediateCreate = false)
 {
     if (!enabled) return {};
 
@@ -91,7 +92,7 @@ FeatureSetupResult PrepareFeatureForFrame(
         recreateRequested = false;
         return {true, needsFlush};
     }
-    if (!featureCreated && framesPresented >= 2) {
+    if (!featureCreated && (immediateCreate || framesPresented >= 2)) {
         return {true, ensureFeature()};
     }
     if (!delayedRecreateDone && framesPresented >= 60) {

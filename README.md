@@ -7,7 +7,7 @@ same timestamp.
 
 [Download the personal Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/personal-v0.12.0.1)
  · [Release source](https://github.com/2600th/dlss5-video-player/tree/personal-v0.12.0.1)
- · [Technical README](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/README.md)
+ · [Technical README](TECHNICAL_OVERVIEW.md)
  · [Screenshots](#screenshots)
 
 > [!IMPORTANT]
@@ -19,9 +19,9 @@ same timestamp.
 
 ![DLSS Video Player showing paused Resident Evil neural-rendered playback, with separate Neural Rendering, DLSS Upscaling and Frame Generation controls](docs/screenshots/neural-playback.jpg)
 
-The screenshots and features below describe **personal-v0.12.0.1**. The released
-application source is on the linked tag and `codex/neural-prerender-cache`
-branch; this homepage update does not merge that application code into `main`.
+The screenshots and downloadable build describe **personal-v0.12.0.1**.
+The application source, tests and documentation are now consolidated on `main`.
+The release tag remains an immutable snapshot of the tested personal build.
 
 ## What it does
 

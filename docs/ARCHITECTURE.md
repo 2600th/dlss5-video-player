@@ -36,14 +36,15 @@ FP16 reconstructed output
   +-> final image adjustments
   |
   v
-D3D12 swapchain -> ReShade -> display
+D3D12 swapchain -> display (player has no ReShade proxy)
 ```
 
 ## Decoder
 
 `VideoDecoder` uses FFmpeg as the primary decoder by launching `ffmpeg.exe`/`ffprobe.exe` as helper processes. Media Foundation is kept as a fallback path.
 
-The decoder can request a lower decode size for high-resolution material so the CPU does not always move native 4K BGRA frames when DLSS is rendering from a smaller input resolution.
+Playback preserves the decoded source dimensions. Selecting an SR output never
+downsamples a source to fit a nominal DLSS quality ratio.
 
 ## Timing
 
@@ -75,11 +76,79 @@ CPU analysis is performed on a compact grid. D3D12 expands the result to the exa
 
 Normal playback does not flush the GPU every frame. Fence waits happen only when a frame slot is reused before completion or during operations that require a hard synchronization point such as seek/reinitialization.
 
+During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
+dedicated readback resource and emits tightly packed BGRA frames to a bounded
+FFmpeg encoder process. The same persistent NGX/feature-18 session is retained
+across the sequence; an add-on-requested feature recreation does not break the
+job's monotonic successful-submission count.
+
+## Offline neural job and cache
+
+`OfflineNeuralRenderer` decodes sequentially from frame zero, primes feature
+18, restarts the source from zero, rejects non-monotonic timestamps, evaluates
+and captures every frame, and finishes the encoder.
+If NVENC cannot start or write, the entire sequence restarts from zero with
+software H.264 rather than splicing incompatible temporal histories.
+
+`NeuralCacheManager` stages source and render artifacts under LocalAppData.
+Source, application version, GPU path, runtime digest, native dimensions,
+quality, and upscaling state form the render identity. Network source entries
+use the canonical YouTube video ID plus stable selected-format `itag` values,
+not expiring signed stream URLs. Staging entries become reusable only after
+independent probing and atomic promotion. Schema 3 requires
+`nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
+interception contract armed before frame capture, a feature-18 success
+checkpoint that advances after the captured sequence, and no feature-18
+failure, skip, or pass-through marker in the stabilized job log segment.
+Sequential offline decoding uses software FFmpeg to avoid competing with the
+D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache
+hits retain full content-hash verification and use header-only metadata probes;
+frame counting and final-frame decoding run once before promotion, not on every
+replay. Invalid metadata is quarantined. Cancellation and failed
+validation can never publish a partial render.
+
+`SynchronizedPlayback` opens the original and neural files together, validates
+their geometry/rate/duration, and publishes timestamp-matched frame pairs.
+Neural Rendering is requested on for a new session, so a valid cached replay
+selects the neural member after the first pair is ready and before it is
+presented. Toggling Neural Rendering changes the visible member of the
+last-presented pair, so comparison never advances ahead of the audio clock.
+Seeking waits for both restarted decoders to produce a pair; temporary
+`NotReady` results do not unload playback. Tail seeks account for container
+duration padding with a bounded earlier-frame retry.
+
 ## NGX integration
 
 `DLSSBackend` initializes NGX, queries DLSS settings, creates the Super Sampling feature and evaluates it through the D3D12 `_C` entry point used by NVIDIA's helper path.
 
-The integration intentionally leaves the raw NGX symbols visible to make interception by ReShade/RenoDX possible.
+The default performance/quality value is DLAA. That keeps input and output at
+native 1:1 resolution while preserving a real NGX feature creation/evaluation
+sequence for the optional interception layer in `neural-runtime/NeuralWorker.exe`.
+The main player does not load that proxy. Its independent runtime SR toggle
+defaults off, selects a supported NGX input range without resizing the source,
+and targets a 2560x1440 or 3840x2160 bounding box. It validates a candidate
+renderer on a separate child window before swapping; failure preserves playback.
+Ordinary playback disables sampling jitter. Frame Generation is unavailable.
+These controls do not alter the offline DLAA carrier or cache identity.
+
+Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.
+Only paths and progress/results cross processes; encoded videos remain in the
+existing cache. The helper enters DXGI on its main thread before Media Foundation
+and decoder startup, then maintains a hidden window/message pump during rendering.
+The cache manager still checks hashes, geometry, timeline and feature-18 evidence
+before promotion. Closing/cancelling the job terminates the helper process tree.
+
+The source tree directly implements native DLSS Super Resolution, not an
+official public DLSS 5 API. It intentionally leaves the raw NGX symbols visible
+so the separately supplied experimental RenoDX/ReShade DLSS 5 add-on can
+intercept real feature creation and evaluation calls. Successful native NGX
+evaluation therefore does not prove that the neural add-on loaded or evaluated.
+
+RenoDX 4.70 can create and evaluate feature 18 inline after observing the
+player's DLSS/DLAA contract. Bootstrap explicitly enables its hooks and neural
+uplift while leaving `NREnableUpscaling=0`. The player does not also instantiate
+a direct feature-18 bridge: that would duplicate the neural pass and require an
+additional undocumented NGX/caller-shim lifetime beside the existing add-on.
 
 ## Final image adjustments
 

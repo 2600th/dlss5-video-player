@@ -104,6 +104,33 @@ bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode)
     return !safeMode && (gpu == GpuGeneration::Rtx40Ada || gpu == GpuGeneration::Rtx50Blackwell);
 }
 
+NeuralRenderDefaults ResolveNeuralRenderDefaults(
+    bool neuralAddonConfigured,
+    bool outputExplicit,
+    uint32_t requestedWidth,
+    uint32_t requestedHeight)
+{
+    if (neuralAddonConfigured && !outputExplicit) {
+        return {1920, 1080};
+    }
+    return {requestedWidth, requestedHeight};
+}
+
+NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
+    bool hasReShadeConfig,
+    bool hasReShadeProxy,
+    bool hasNeuralAddon,
+    bool hasNeuralRuntime)
+{
+    const unsigned presentCount = static_cast<unsigned>(hasReShadeConfig) +
+                                  static_cast<unsigned>(hasReShadeProxy) +
+                                  static_cast<unsigned>(hasNeuralAddon) +
+                                  static_cast<unsigned>(hasNeuralRuntime);
+    if (presentCount == 0) return NeuralRuntimeLayout::Absent;
+    if (presentCount == 4) return NeuralRuntimeLayout::Complete;
+    return NeuralRuntimeLayout::Incomplete;
+}
+
 DetectedGpu DetectHighPerformanceGpu()
 {
     IDXGIFactory6* factory = nullptr;
@@ -236,4 +263,84 @@ std::wstring BuildWindowsCommandLine(
         AppendQuotedArgument(commandLine, argument);
     }
     return commandLine;
+}
+
+uint64_t NeuralPlaybackLifecycle::Begin()
+{
+    ++generation;
+    state = NeuralPlaybackState::Acquiring;
+    return generation;
+}
+
+bool NeuralPlaybackLifecycle::Accept(uint64_t candidateGeneration) const
+{
+    return candidateGeneration != 0 && candidateGeneration == generation &&
+           state != NeuralPlaybackState::Idle;
+}
+
+bool NeuralPlaybackLifecycle::Transition(NeuralPlaybackState next)
+{
+    bool allowed = false;
+    switch (state) {
+    case NeuralPlaybackState::Idle:
+        allowed = next == NeuralPlaybackState::Acquiring ||
+                  next == NeuralPlaybackState::OriginalOnly;
+        break;
+    case NeuralPlaybackState::Acquiring:
+        allowed = next == NeuralPlaybackState::Rendering || next == NeuralPlaybackState::Ready ||
+                  next == NeuralPlaybackState::OriginalOnly || next == NeuralPlaybackState::Cancelling ||
+                  next == NeuralPlaybackState::Failed;
+        break;
+    case NeuralPlaybackState::Rendering:
+        allowed = next == NeuralPlaybackState::Validating || next == NeuralPlaybackState::Cancelling ||
+                  next == NeuralPlaybackState::Failed;
+        break;
+    case NeuralPlaybackState::Validating:
+        allowed = next == NeuralPlaybackState::Ready || next == NeuralPlaybackState::OriginalOnly ||
+                  next == NeuralPlaybackState::Cancelling || next == NeuralPlaybackState::Failed;
+        break;
+    case NeuralPlaybackState::Ready:
+        allowed = next == NeuralPlaybackState::Acquiring || next == NeuralPlaybackState::OriginalOnly ||
+                  next == NeuralPlaybackState::Idle;
+        break;
+    case NeuralPlaybackState::OriginalOnly:
+        allowed = next == NeuralPlaybackState::Acquiring || next == NeuralPlaybackState::Idle;
+        break;
+    case NeuralPlaybackState::Cancelling:
+        allowed = next == NeuralPlaybackState::OriginalOnly || next == NeuralPlaybackState::Idle ||
+                  next == NeuralPlaybackState::Failed;
+        break;
+    case NeuralPlaybackState::Failed:
+        allowed = next == NeuralPlaybackState::OriginalOnly || next == NeuralPlaybackState::Acquiring ||
+                  next == NeuralPlaybackState::Idle;
+        break;
+    }
+    if (allowed) state = next;
+    return allowed;
+}
+
+void NeuralPlaybackLifecycle::Invalidate()
+{
+    ++generation;
+    state = NeuralPlaybackState::Idle;
+}
+
+NeuralOpenAction DecideNeuralOpen(bool runtimeComplete, bool safeMode, bool cacheValid)
+{
+    if (!runtimeComplete || safeMode) return NeuralOpenAction::OriginalOnly;
+    return cacheValid ? NeuralOpenAction::UseCache : NeuralOpenAction::StartJob;
+}
+
+bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid)
+{
+    return renderOk && probeOk && manifestValid;
+}
+
+void ExecuteNeuralReplacementSequence(const std::function<void()>& requestStop,
+                                      const std::function<void()>& joinWorker,
+                                      const std::function<void()>& replace)
+{
+    if (requestStop) requestStop();
+    if (joinWorker) joinWorker();
+    if (replace) replace();
 }

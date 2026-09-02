@@ -26,7 +26,9 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Stop, 48, 0, false},
     ToolbarDefinition{ToolbarAction::Forward10, 44, 0, false},
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
-    ToolbarDefinition{ToolbarAction::ToggleDlss, 82, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 230, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 320, 1, true},
     ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
     ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
     ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
@@ -77,6 +79,121 @@ std::array<const ToolbarDefinition*, kRequiredToolbarItemCount> RequiredToolbarD
 }
 
 } // namespace
+
+ButtonContentLayout LayoutButtonContent(RECT outer,SIZE icon,SIZE text,bool stacked,UINT dpi)
+{
+    const int horizontal=std::max(0,DipToPixels(kButtonHorizontalInsetDip,dpi));
+    const int vertical=std::max(0,DipToPixels(kButtonVerticalInsetDip,dpi));
+    const int gap=std::max(0,DipToPixels(kButtonIconLabelGapDip,dpi));
+    RECT inner{std::min<LONG>(outer.right,outer.left+horizontal),
+               std::min<LONG>(outer.bottom,outer.top+vertical),
+               std::max<LONG>(outer.left,outer.right-horizontal),
+               std::max<LONG>(outer.top,outer.bottom-vertical)};
+    const int availableWidth=std::max<LONG>(0,inner.right-inner.left);
+    const int availableHeight=std::max<LONG>(0,inner.bottom-inner.top);
+    const bool hasIcon=icon.cx>0&&icon.cy>0;
+    const bool hasText=text.cx>0&&text.cy>0;
+    ButtonContentLayout layout{};layout.stacked=stacked&&hasIcon&&hasText;
+    const auto centeredRect=[](RECT bounds,int width,int height){
+        width=std::clamp(width,0,int(bounds.right-bounds.left));
+        height=std::clamp(height,0,int(bounds.bottom-bounds.top));
+        const int left=bounds.left+(int(bounds.right-bounds.left)-width)/2;
+        const int top=bounds.top+(int(bounds.bottom-bounds.top)-height)/2;
+        return RECT{left,top,left+width,top+height};
+    };
+    if(layout.stacked){
+        const int iconHeight=std::min<int>(icon.cy,availableHeight);
+        const int textHeight=std::min<int>(text.cy,std::max(0,availableHeight-iconHeight-gap));
+        const int totalHeight=iconHeight+(iconHeight&&textHeight?gap:0)+textHeight;
+        const int top=inner.top+(availableHeight-totalHeight)/2;
+        const int iconWidth=std::min<int>(icon.cx,availableWidth);
+        const int textWidth=std::min<int>(text.cx,availableWidth);
+        layout.icon=RECT{inner.left+(availableWidth-iconWidth)/2,top,
+                         inner.left+(availableWidth+iconWidth)/2,top+iconHeight};
+        const int textTop=layout.icon.bottom+(iconHeight&&textHeight?gap:0);
+        layout.text=RECT{inner.left+(availableWidth-textWidth)/2,textTop,
+                         inner.left+(availableWidth+textWidth)/2,textTop+textHeight};
+    }else if(hasIcon&&hasText){
+        const int iconWidth=std::min<int>(icon.cx,availableWidth);
+        const int actualGap=std::min(gap,std::max(0,availableWidth-iconWidth));
+        const int textWidth=std::min<int>(text.cx,std::max(0,availableWidth-iconWidth-actualGap));
+        const int totalWidth=iconWidth+actualGap+textWidth;
+        const int left=inner.left+(availableWidth-totalWidth)/2;
+        layout.icon=RECT{left,inner.top+(availableHeight-std::min<int>(icon.cy,availableHeight))/2,
+                         left+iconWidth,inner.top+(availableHeight+std::min<int>(icon.cy,availableHeight))/2};
+        layout.text=RECT{layout.icon.right+actualGap,
+                         inner.top+(availableHeight-std::min<int>(text.cy,availableHeight))/2,
+                         layout.icon.right+actualGap+textWidth,
+                         inner.top+(availableHeight+std::min<int>(text.cy,availableHeight))/2};
+    }else if(hasIcon){
+        layout.icon=centeredRect(inner,icon.cx,icon.cy);layout.text=layout.icon;
+    }else{
+        layout.text=centeredRect(inner,std::min<int>(text.cx,availableWidth),text.cy);
+        layout.icon=layout.text;
+    }
+    layout.content=RECT{std::min(layout.icon.left,layout.text.left),
+                        std::min(layout.icon.top,layout.text.top),
+                        std::max(layout.icon.right,layout.text.right),
+                        std::max(layout.icon.bottom,layout.text.bottom)};
+    return layout;
+}
+
+ActivityVisual ResolveActivityVisual(RECT track, uint64_t elapsedMs,
+                                     uint64_t completed, uint64_t total,
+                                     bool measurable, bool motionEnabled)
+{
+    ActivityVisual visual{};
+    visual.fill = track;
+    const LONG width = std::max(0L, track.right-track.left);
+    visual.spinnerStep = motionEnabled ? unsigned((elapsedMs/80)%12) : 0;
+    visual.indeterminate = !measurable || !total;
+    if (!visual.indeterminate) {
+        const double fraction = double(std::min(completed,total))/double(total);
+        visual.percent = static_cast<unsigned>(fraction*100.0);
+        visual.fill.right = track.left+static_cast<LONG>(width*fraction);
+    } else {
+        const LONG segment = std::min(width,std::max(1L,width/4));
+        const double cycle = double(elapsedMs%1600)/800.0;
+        const double position = motionEnabled ? (cycle<=1.0?cycle:2.0-cycle) : 0.5;
+        visual.fill.left += static_cast<LONG>((width-segment)*position);
+        visual.fill.right = visual.fill.left+segment;
+    }
+    return visual;
+}
+
+PreRenderSurfaceLayout LayoutPreRenderSurface(int clientWidth,int clientHeight,UINT dpi)
+{
+    const int width=std::max(1,clientWidth),height=std::max(1,clientHeight);
+    const int gutter=std::min({DipToPixels(24,dpi),width/8,height/10});
+    const int left=std::clamp(gutter,0,width),right=std::clamp(width-gutter,left,width);
+    const int line=std::max(1,std::min(DipToPixels(24,dpi),height/10));
+    const int gap=std::max(1,std::min(DipToPixels(8,dpi),height/30));
+    const int buttonWidth=std::min(DipToPixels(120,dpi),std::max(0,right-left));
+    const int buttonHeight=std::min(DipToPixels(40,dpi),std::max(1,height-2*gutter));
+    const int buttonTop=std::max(gutter,height-gutter-buttonHeight);
+    const int progressHeight=std::max(1,std::min(DipToPixels(10,dpi),height/24));
+    const int progressBottom=std::max(gutter,buttonTop-gap);
+    const int progressTop=std::max(gutter,progressBottom-progressHeight);
+    const int textBottom=std::max(gutter,progressTop-gap);
+    const int textBlockHeight=std::min(textBottom-gutter,line*6+gap*5);
+    const int textTop=std::max(gutter,textBottom-textBlockHeight);
+    auto row=[&](int index){
+        const int top=std::min(textBottom,textTop+index*(line+gap));
+        return RECT{left,top,right,std::min(textBottom,top+line)};
+    };
+    PreRenderSurfaceLayout layout{};
+    layout.title=row(0);layout.phase=row(1);layout.resolution=row(2);
+    const int spinnerSide=std::min(DipToPixels(40,dpi),std::max(0,textTop-gutter-gap));
+    const int spinnerTop=std::max(0,textTop-gap-spinnerSide);
+    layout.spinner=RECT{(width-spinnerSide)/2,spinnerTop,(width+spinnerSide)/2,spinnerTop+spinnerSide};
+    layout.frameCount=row(3);layout.elapsedEta=row(4);layout.size=row(5);
+    layout.progressTrack=RECT{left,progressTop,right,progressBottom};
+    layout.progressFill=layout.progressTrack;layout.progressFill.right=layout.progressFill.left;
+    const int buttonLeft=left+(right-left-buttonWidth)/2;
+    layout.cancelButton=RECT{buttonLeft,buttonTop,buttonLeft+buttonWidth,
+                             std::min(height-gutter,buttonTop+buttonHeight)};
+    return layout;
+}
 
 IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi)
 {
@@ -161,10 +278,10 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
     int itemWidthDip = 0;
 
     if (LayoutWidth(selected, 0, dpi) > availableWidth) {
-        compact = true;
-        itemWidthDip = kToolbarCompactWidthDip;
-        if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
-            selected = std::span<const ToolbarDefinition* const>{required};
+        selected = std::span<const ToolbarDefinition* const>{required};
+        if (LayoutWidth(selected, 0, dpi) > availableWidth) {
+            compact = true;
+            itemWidthDip = kToolbarCompactWidthDip;
             if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
                 itemWidthDip = kToolbarSmallestWidthDip;
             }
@@ -195,7 +312,7 @@ int MinimumToolbarClientWidth(UINT dpi)
     const auto required = RequiredToolbarDefinitions();
     const std::span<const ToolbarDefinition* const> selected{required};
     return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
-           LayoutWidth(selected, kToolbarSmallestWidthDip, dpi);
+           LayoutWidth(selected, 0, dpi);
 }
 
 int MinimumIdleClientHeight(UINT dpi)
@@ -262,8 +379,15 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
     case ToolbarAction::Mute:
     case ToolbarAction::Aspect:
         return availability.mediaLoaded && !availability.seeking;
-    case ToolbarAction::ToggleDlss:
-        return availability.mediaLoaded && !availability.seeking && availability.rendererReady;
+    case ToolbarAction::ToggleNeuralRendering:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.neuralRenderingAvailable;
+    case ToolbarAction::ToggleUpscaling:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.upscalingAvailable;
+    case ToolbarAction::ToggleFrameGeneration:
+        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
+               availability.frameGenerationAvailable;
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;
@@ -384,11 +508,8 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
     } else if (status.runtimeConfiguration == PlayerRuntimeConfiguration::DlssSrSafeMode) {
         configuration = L"DLSS SR safe mode";
     }
-    const wchar_t* dlssState = status.dlssState == PlayerDlssState::Active
-        ? L"DLSS SR active" : L"Scaler fallback";
-
     std::wstringstream text;
-    text << configuration << L" \u00b7 " << dlssState
+    text << configuration << L" \u00b7 " << (status.upscalingStatus.empty()?L"DLSS SR unavailable":status.upscalingStatus) << L" \u00b7 FG unavailable"
          << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
          << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
          << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight

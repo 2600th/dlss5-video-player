@@ -43,7 +43,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), games = CreatePopupMenu(), anime = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), dlss = CreatePopupMenu(), quality = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), games = CreatePopupMenu(), anime = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), dlss = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -65,15 +65,24 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), examplesName.c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
-    add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_720, L"menu.youtube_quality_720"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_480, L"menu.youtube_quality_480"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_480, IDM_YOUTUBE_QUALITY_1080, MF_BYCOMMAND);
+    add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
     const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); add(video, IDM_VIEW_MASK, L"menu.mask"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
-    add(quality, IDM_QUALITY_AUTO, L"menu.quality_auto"); AppendMenuW(quality, MF_STRING, IDM_QUALITY_QUALITY, L"Quality"); AppendMenuW(quality, MF_STRING, IDM_QUALITY_BALANCED, L"Balanced"); AppendMenuW(quality, MF_STRING, IDM_QUALITY_PERFORMANCE, L"Performance"); AppendMenuW(quality, MF_STRING, IDM_QUALITY_ULTRAPERF, L"Ultra Performance"); AppendMenuW(quality, MF_STRING, IDM_QUALITY_DLAA, L"DLAA");
-    add(dlss, IDM_DLSS, L"menu.dlss_toggle"); add(dlss, IDM_DEPTH_MODE, L"menu.depthmode"); const std::wstring qualityName = localizer.Get(L"menu.quality"); AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(quality), qualityName.c_str());
+    add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
+    add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+    HMENU upscaleOutput=CreatePopupMenu();
+    AppendMenuW(upscaleOutput,MF_STRING|MF_CHECKED,IDM_UPSCALE_1440,L"1440p (default)");
+    AppendMenuW(upscaleOutput,MF_STRING,IDM_UPSCALE_2160,L"2160p (4K)");
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),L"Upscaling output");
+    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable");
+    add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
+    AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
+    add(advanced, IDM_DEPTH_MODE, L"menu.depthmode");
     add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode"); AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_REHOOK, L"menu.rehook");
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
+    UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
     return bar;
 }
 
@@ -126,8 +135,6 @@ std::optional<YouTubeSourceQuality> YouTubeQualityForCommand(UINT command)
     case IDM_YOUTUBE_QUALITY_2160: return YouTubeSourceQuality::P2160;
     case IDM_YOUTUBE_QUALITY_1440: return YouTubeSourceQuality::P1440;
     case IDM_YOUTUBE_QUALITY_1080: return YouTubeSourceQuality::P1080;
-    case IDM_YOUTUBE_QUALITY_720: return YouTubeSourceQuality::P720;
-    case IDM_YOUTUBE_QUALITY_480: return YouTubeSourceQuality::P480;
     default: return std::nullopt;
     }
 }
@@ -139,8 +146,6 @@ UINT CommandForYouTubeQuality(YouTubeSourceQuality quality)
     case YouTubeSourceQuality::P2160: return IDM_YOUTUBE_QUALITY_2160;
     case YouTubeSourceQuality::P1440: return IDM_YOUTUBE_QUALITY_1440;
     case YouTubeSourceQuality::P1080: return IDM_YOUTUBE_QUALITY_1080;
-    case YouTubeSourceQuality::P720: return IDM_YOUTUBE_QUALITY_720;
-    case YouTubeSourceQuality::P480: return IDM_YOUTUBE_QUALITY_480;
     }
     return IDM_YOUTUBE_QUALITY_AUTO;
 }
@@ -150,9 +155,29 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality)
     HMENU qualityMenu = find_menu_containing_command(menuBar, IDM_YOUTUBE_QUALITY_AUTO);
     if (!qualityMenu) return false;
     return CheckMenuRadioItem(qualityMenu, IDM_YOUTUBE_QUALITY_AUTO,
-                              IDM_YOUTUBE_QUALITY_480,
+                              IDM_YOUTUBE_QUALITY_1080,
                               CommandForYouTubeQuality(quality),
                               MF_BYCOMMAND) != FALSE;
+}
+
+bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
+                               bool neuralAvailable, bool neuralActive,
+                               bool upscalingAvailable, bool upscalingActive,
+                               bool frameGenerationAvailable, bool frameGenerationActive)
+{
+    const auto update = [&](UINT command, bool available, bool checked) {
+        const HMENU menu = find_menu_containing_command(menuBar, command);
+        if (!menu) return false;
+        const UINT enabled = EnableMenuItem(menu, command,
+            MF_BYCOMMAND | (available ? MF_ENABLED : MF_GRAYED));
+        const DWORD marked = CheckMenuItem(menu, command,
+            MF_BYCOMMAND | ((available ? checked : command == IDM_NEURAL_RENDERING && neuralRequested)
+                ? MF_CHECKED : MF_UNCHECKED));
+        return enabled != static_cast<UINT>(-1) && marked != static_cast<DWORD>(-1);
+    };
+    return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
+           update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
+           update(IDM_FRAME_GENERATION, frameGenerationAvailable, frameGenerationActive);
 }
 
 } // namespace app_menu

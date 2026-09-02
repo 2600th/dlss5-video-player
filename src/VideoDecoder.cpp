@@ -78,6 +78,16 @@ void VideoDecoder::Close() {
 }
 
 bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
+    return OpenImpl(path,sourceKind,stop,true);
+}
+
+bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
+                                  std::stop_token stop) {
+    return OpenImpl(path,sourceKind,stop,false);
+}
+
+bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
+                            std::stop_token stop, bool queueFrames) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -92,9 +102,10 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, st
 
     // FFmpeg is intentionally preferred. It makes playback independent from
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
-    if (OpenFFmpeg(path, stop)) {
+    if (OpenFFmpeg(path, stop,queueFrames?FFmpegAcceleration::Cuda:
+                                      FFmpegAcceleration::Software)) {
         m_backend = Backend::FFmpeg;
-        StartFrameQueue();
+        if(queueFrames)StartFrameQueue();
         LOG("Video decoder selected: FFmpeg");
         return true;
     }
@@ -126,6 +137,13 @@ std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
     wchar_t modulePath[32768]{};
     if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
         const fs::path base = fs::path(modulePath).parent_path();
+        // neural-runtime is a contained helper package: use only the explicit
+        // parent copy shared with the player, never an unrelated PATH tool.
+        if (base.filename() == L"neural-runtime") {
+            const fs::path shared = base.parent_path() / exeName;
+            std::error_code ec;
+            return fs::is_regular_file(shared, ec) ? shared.wstring() : L"";
+        }
         const fs::path candidates[] = {
             base / exeName,
             base / L"ffmpeg" / exeName,
@@ -253,7 +271,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate:format=duration "
+        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:format=duration "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -286,7 +304,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             }
             else if (key == "avg_frame_rate") ParseRate(value, avgRate);
             else if (key == "r_frame_rate") ParseRate(value, rawRate);
-            else if (key == "duration" && value != "N/A") duration = std::stod(value);
+            else if (key == "duration" && value != "N/A" && duration <= 0.0) duration = std::stod(value);
         } catch (...) {}
     }
 
@@ -430,7 +448,8 @@ void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
     m_pendingFrame.clear();m_pendingFrameBytes=0;
 }
 
-bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop) {
+bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
+                              FFmpegAcceleration initialAcceleration) {
     m_ffmpegExe = FindTool(L"ffmpeg.exe");
     m_ffprobeExe = FindTool(L"ffprobe.exe");
     if (m_ffmpegExe.empty() || m_ffprobeExe.empty()) {
@@ -441,7 +460,7 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop) {
 
     LOG("FFmpeg executable detected.");
     if (!ProbeFFmpeg(path,stop)||stop.stop_requested()) return false;
-    return StartFFmpeg(0.0);
+    return StartFFmpeg(0.0,initialAcceleration);
 }
 
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
@@ -465,6 +484,22 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
     }
 }
 
+VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
+    if (!m_pendingFrameBytes) return VideoReadResult::EndOfStream;
+    const double completedSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
+        static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
+    const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_fps));
+    if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_durationSec > 0.0 &&
+        completedSeconds + endTolerance >= m_durationSec) {
+        LOG("Discarding an incomplete trailing raw frame after the expected YouTube duration.");
+        m_pendingFrameBytes = 0;
+        return VideoReadResult::EndOfStream;
+    }
+    LOG("FFmpeg ended in the middle of a raw video frame. exitCode="<<exitCode
+        <<" frameIndex="<<m_ffmpegFrameIndex<<" pendingBytes="<<m_pendingFrameBytes);
+    return VideoReadResult::Error;
+}
+
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
     const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
@@ -474,16 +509,15 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
 
     DWORD available=0;
     if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
-        if(GetLastError()==ERROR_BROKEN_PIPE&&m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
-            DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
-            if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
-        }
-        return VideoReadResult::Error;
+        if(GetLastError()!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+        // A child can close stdout just before its process handle becomes signaled.
+        // Treat that short interval as an empty pipe so the existing nonblocking
+        // exit/fallback path below observes the eventual exit code.
+        available=0;
     }
+    DWORD got=0;
     if(available>0){
         const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{4u<<20}}));
-        DWORD got=0;
         if(want&&!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
         if(got){m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();}
     }
@@ -494,10 +528,12 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
             LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);return VideoReadResult::Stalled;
         }
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
+            DWORD remaining=0;
+            if(PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&remaining,nullptr)&&remaining>0)
+                return VideoReadResult::NotReady;
             DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
             if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            if(m_pendingFrameBytes)LOG("FFmpeg ended in the middle of a raw video frame.");
-            return m_pendingFrameBytes?VideoReadResult::Error:VideoReadResult::EndOfStream;
+            return ClassifyFFmpegEnd(exitCode);
         }
         return VideoReadResult::NotReady;
     }

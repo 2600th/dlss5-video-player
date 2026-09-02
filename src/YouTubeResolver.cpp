@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <charconv>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +19,156 @@ namespace {
 constexpr size_t kMaximumInputCharacters = 2048;
 constexpr size_t kMaximumOutputBytes = 16 * 1024;
 constexpr size_t kMaximumCapturedBytes = 64 * 1024;
+
+class FormatJsonParser {
+public:
+    explicit FormatJsonParser(std::string_view input) : input_(input) {}
+
+    YouTubeFormatAvailability Parse()
+    {
+        YouTubeFormatAvailability result;
+        if (input_.size() > kMaximumYouTubeFormatMetadataBytes) return result;
+        SkipWhitespace();
+        if (!ParseArray(result)) return result;
+        SkipWhitespace();
+        if (position_ != input_.size()) return result;
+        result.valid = true;
+        return result;
+    }
+
+private:
+    void SkipWhitespace()
+    {
+        while (position_ < input_.size() &&
+               (input_[position_] == ' ' || input_[position_] == '\t' ||
+                input_[position_] == '\r' || input_[position_] == '\n')) ++position_;
+    }
+
+    bool Consume(char expected)
+    {
+        SkipWhitespace();
+        if (position_ >= input_.size() || input_[position_] != expected) return false;
+        ++position_;
+        return true;
+    }
+
+    bool ParseString(std::string* decoded = nullptr)
+    {
+        SkipWhitespace();
+        if (position_ >= input_.size() || input_[position_++] != '"') return false;
+        if (decoded) decoded->clear();
+        while (position_ < input_.size()) {
+            const unsigned char character = static_cast<unsigned char>(input_[position_++]);
+            if (character == '"') return true;
+            if (character < 0x20) return false;
+            if (character != '\\') {
+                if (decoded) decoded->push_back(static_cast<char>(character));
+                continue;
+            }
+            if (position_ >= input_.size()) return false;
+            const char escape = input_[position_++];
+            if (escape == '"' || escape == '\\' || escape == '/') {
+                if (decoded) decoded->push_back(escape);
+            } else if (escape == 'b' || escape == 'f' || escape == 'n' ||
+                       escape == 'r' || escape == 't') {
+                if (decoded) decoded->push_back('?');
+            } else if (escape == 'u') {
+                if (position_ + 4 > input_.size()) return false;
+                for (size_t index = 0; index < 4; ++index) {
+                    const char hex = input_[position_++];
+                    if (!((hex >= '0' && hex <= '9') || (hex >= 'a' && hex <= 'f') ||
+                          (hex >= 'A' && hex <= 'F'))) return false;
+                }
+                if (decoded) decoded->push_back('?');
+            } else return false;
+        }
+        return false;
+    }
+
+    bool ParseNumber(std::string_view* token = nullptr)
+    {
+        SkipWhitespace();
+        const size_t begin = position_;
+        if (position_ < input_.size() && input_[position_] == '-') ++position_;
+        if (position_ >= input_.size()) return false;
+        if (input_[position_] == '0') ++position_;
+        else {
+            if (input_[position_] < '1' || input_[position_] > '9') return false;
+            while (position_ < input_.size() && input_[position_] >= '0' && input_[position_] <= '9') ++position_;
+        }
+        if (position_ < input_.size() && input_[position_] == '.') {
+            ++position_;const size_t digits = position_;
+            while (position_ < input_.size() && input_[position_] >= '0' && input_[position_] <= '9') ++position_;
+            if (digits == position_) return false;
+        }
+        if (position_ < input_.size() && (input_[position_] == 'e' || input_[position_] == 'E')) {
+            ++position_;if (position_ < input_.size() && (input_[position_] == '+' || input_[position_] == '-')) ++position_;
+            const size_t digits = position_;
+            while (position_ < input_.size() && input_[position_] >= '0' && input_[position_] <= '9') ++position_;
+            if (digits == position_) return false;
+        }
+        if (token) *token = input_.substr(begin, position_ - begin);
+        return true;
+    }
+
+    bool ParseLiteral(std::string_view literal)
+    {
+        SkipWhitespace();
+        if (input_.substr(position_, literal.size()) != literal) return false;
+        position_ += literal.size();return true;
+    }
+
+    bool ParseValue(YouTubeFormatAvailability& result, bool heightValue = false)
+    {
+        SkipWhitespace();if (position_ >= input_.size()) return false;
+        if (input_[position_] == '{') return ParseObject(result);
+        if (input_[position_] == '[') return ParseArray(result);
+        if (input_[position_] == '"') return ParseString();
+        if (input_[position_] == 't') return ParseLiteral("true");
+        if (input_[position_] == 'f') return ParseLiteral("false");
+        if (input_[position_] == 'n') return ParseLiteral("null");
+        std::string_view number;
+        if (!ParseNumber(&number)) return false;
+        if (heightValue && number.find_first_of(".-+eE") == std::string_view::npos) {
+            uint32_t height = 0;
+            const auto parsed = std::from_chars(number.data(), number.data() + number.size(), height);
+            if (parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size() && height > 0) {
+                result.p1080 = result.p1080 || height == 1080;
+                result.p1440 = result.p1440 || height == 1440;
+                result.p2160 = result.p2160 || height == 2160;
+            }
+        }
+        return true;
+    }
+
+    bool ParseObject(YouTubeFormatAvailability& result)
+    {
+        if (!Consume('{')) return false;
+        SkipWhitespace();if (position_ < input_.size() && input_[position_] == '}') { ++position_;return true; }
+        for (;;) {
+            std::string key;if (!ParseString(&key) || !Consume(':')) return false;
+            if (!ParseValue(result, key == "height")) return false;
+            SkipWhitespace();if (position_ >= input_.size()) return false;
+            if (input_[position_] == '}') { ++position_;return true; }
+            if (input_[position_++] != ',') return false;
+        }
+    }
+
+    bool ParseArray(YouTubeFormatAvailability& result)
+    {
+        if (!Consume('[')) return false;
+        SkipWhitespace();if (position_ < input_.size() && input_[position_] == ']') { ++position_;return true; }
+        for (;;) {
+            if (!ParseValue(result)) return false;
+            SkipWhitespace();if (position_ >= input_.size()) return false;
+            if (input_[position_] == ']') { ++position_;return true; }
+            if (input_[position_++] != ',') return false;
+        }
+    }
+
+    std::string_view input_;
+    size_t position_{};
+};
 
 class UniqueHandle {
 public:
@@ -385,6 +536,46 @@ bool query_has_video_id(std::wstring_view query)
     return foundVideoId;
 }
 
+std::wstring_view unique_query_value(std::wstring_view query,std::wstring_view wanted)
+{
+    std::wstring_view found;
+    while(!query.empty()){
+        const size_t separator=query.find(L'&');
+        const std::wstring_view item=query.substr(0,separator);
+        const size_t equals=item.find(L'=');
+        if(equals!=std::wstring_view::npos&&
+           equals_case_insensitive(item.substr(0,equals),wanted)){
+            if(!found.empty())return {};
+            found=item.substr(equals+1);
+        }
+        if(separator==std::wstring_view::npos)break;
+        query.remove_prefix(separator+1);
+    }
+    return found;
+}
+
+std::string ascii_value(std::wstring_view value)
+{
+    std::string result;result.reserve(value.size());
+    for(const wchar_t character:value){
+        if(character<0x20||character>0x7e)return {};
+        result.push_back(static_cast<char>(character));
+    }
+    return result;
+}
+
+std::string stream_itag(std::wstring_view value)
+{
+    CrackedUrl url;
+    if(!crack_url(value,url)||url.scheme!=INTERNET_SCHEME_HTTPS||url.hasUserInfo||
+       !has_dot_bound_suffix(url.host,L"googlevideo.com"))return {};
+    const auto itag=unique_query_value(query_part(url.extra),L"itag");
+    if(itag.empty()||itag.size()>8||!std::all_of(itag.begin(),itag.end(),[](wchar_t c){
+        return c>=L'0'&&c<=L'9';
+    }))return {};
+    return ascii_value(itag);
+}
+
 bool has_forbidden_input_character(std::wstring_view value)
 {
     return std::any_of(value.begin(), value.end(), [](wchar_t character) {
@@ -444,6 +635,28 @@ bool IsSupportedYouTubeUrl(std::wstring_view value)
         return is_video_id(std::wstring_view(url.path).substr(shortsPrefix.size()));
     }
     return false;
+}
+
+std::string CanonicalYouTubeVideoId(std::wstring_view value)
+{
+    if(!IsSupportedYouTubeUrl(value))return {};
+    CrackedUrl url;if(!crack_url(value,url))return {};
+    std::wstring_view id;
+    if(equals_case_insensitive(url.host,L"youtu.be"))id=std::wstring_view(url.path).substr(1);
+    else if(url.path==L"/watch")id=unique_query_value(query_part(url.extra),L"v");
+    else{
+        constexpr std::wstring_view prefix=L"/shorts/";
+        if(url.path.starts_with(prefix))id=std::wstring_view(url.path).substr(prefix.size());
+    }
+    return is_video_id(id)?ascii_value(id):std::string{};
+}
+
+std::string StableYouTubeStreamIdentity(std::wstring_view mediaUrl,
+                                        std::wstring_view audioUrl)
+{
+    std::string video=stream_itag(mediaUrl),audio=stream_itag(audioUrl);
+    if(video.empty()||audio.empty())return {};
+    return "video-itag="+video+"|audio-itag="+audio;
 }
 
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error)
@@ -526,19 +739,20 @@ std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
 {
     switch (quality) {
     case YouTubeSourceQuality::Auto:
-        return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
+        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
     case YouTubeSourceQuality::P2160:
-        return L"bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]/b";
+        return L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]";
     case YouTubeSourceQuality::P1440:
-        return L"bv[height<=1440][ext=mp4]+ba[ext=m4a]/bv[height<=1440]+ba/b[height<=1440]/b";
+        return L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]";
     case YouTubeSourceQuality::P1080:
-        return L"bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]/b";
-    case YouTubeSourceQuality::P720:
-        return L"bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]/b";
-    case YouTubeSourceQuality::P480:
-        return L"bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]/b";
+        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]";
     }
-    return L"bv[ext=mp4]+ba[ext=m4a]/bv+ba/b";
+    return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
+}
+
+YouTubeFormatAvailability ParseYouTubeFormatMetadata(std::string_view json)
+{
+    return FormatJsonParser(json).Parse();
 }
 
 namespace {

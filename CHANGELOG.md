@@ -1,7 +1,32 @@
 # Changelog
 
+## Unreleased - runtime upscaling private build
+
+- Added animated loading/cache-check indicators, indeterminate progress during
+  setup, and real frame percentages during neural rendering. Animation stops
+  during ordinary playback and respects Windows' client-area animation setting.
+- Isolated the offline neural renderer in `neural-runtime/NeuralWorker.exe` so
+  playback can use independent NVIDIA NGX Super Resolution.
+- Added runtime DLSS Upscaling, off by default, with 1440p/default and 2160p
+  outputs. Preserve source dimensions, cached media, comparison and playback state.
+- Keep Neural Rendering on by default and Frame Generation unavailable.
+- Reject old root-level proxy layouts; extract the whole build into a new folder.
+- Added process-protocol, first-frame SR, output-size and opt-in GPU smoke tests.
+
 ## 0.12.0 - 2026-09-01
 
+- Replaced the ambiguous DLSS toggle with synchronized Neural Rendering,
+  DLSS Upscaling, and Frame Generation controls. Neural Rendering starts
+  requested on for cached comparison; Upscaling is disabled for the neural-hook
+  conflict and Frame Generation is unavailable without an FG backend.
+- Reuse validated cached videos with content-hash and header checks, avoiding
+  repeat full-video decoding; show a distinct cache-checking status.
+- Fixed cached-video seeks treating decoder startup as failure; wait for both
+  frames and clamp end-of-timeline clicks to the last playable frame.
+- Fixed garbled Unicode punctuation in neural-render progress and playback text
+  by compiling C++ sources explicitly as UTF-8.
+- Restored Open/YouTube/Examples menu availability after neural rendering
+  succeeds, fails, is cancelled, or cannot start.
 - Added public non-DRM YouTube playback through pinned yt-dlp and Deno helpers.
 - Added six curated game/anime examples with availability-change handling.
 - Added English-only runtime/UI policy and simplified RTX 40/RTX 50 defaults.
