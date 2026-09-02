@@ -5,23 +5,22 @@ Windows and NVIDIA RTX GPUs. Open a local video or a public YouTube example,
 render it once, then play the cached result and switch to the original at the
 same timestamp.
 
-[Download the personal Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/personal-v0.12.0.1)
- · [Release source](https://github.com/2600th/dlss5-video-player/tree/personal-v0.12.0.1)
+[Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.12.0.1)
+ · [Release source](https://github.com/2600th/dlss5-video-player/tree/dlss5-video-player-v0.12.0.1)
  · [Technical README](TECHNICAL_OVERVIEW.md)
  · [Screenshots](#screenshots)
 
 > [!IMPORTANT]
-> This is a **private, personal-use experiment**, not an official NVIDIA DLSS 5
+> This is an **experimental project**, not an official NVIDIA DLSS 5
 > integration. The bundled neural runtime includes modified/unsigned third-party
-> components. Their redistribution permissions remain unresolved; keep the
-> package private. Attribution and a testing disclaimer do not replace the
-> owners' license terms.
+> components. Rights to NVIDIA components belong to NVIDIA. Other third-party
+> components belong to their respective owners.
 
 ![DLSS Video Player showing paused Resident Evil neural-rendered playback, with separate Neural Rendering, DLSS Upscaling and Frame Generation controls](docs/screenshots/neural-playback.jpg)
 
-The screenshots and downloadable build describe **personal-v0.12.0.1**.
+The screenshots and downloadable build describe **dlss5-video-player-v0.12.0.1**.
 The application source, tests and documentation are now consolidated on `main`.
-The release tag remains an immutable snapshot of the tested personal build.
+The release tag remains an immutable snapshot of the tested build.
 
 ## What it does
 
@@ -38,7 +37,7 @@ The release tag remains an immutable snapshot of the tested personal build.
 - **Native Windows controls.** Drag and drop, timeline seeking, audio/volume,
   fullscreen, aspect controls and post-DLSS image adjustments.
 
-| Feature | Default in the personal build |
+| Feature | Default in this build |
 | --- | --- |
 | Neural Rendering | On; playback uses a validated cached result when available |
 | DLSS Upscaling | Off; runs at playback time when enabled |
@@ -52,7 +51,7 @@ exposed as manual modes. Source quality and upscaling output are separate.
 
 ## Screenshots
 
-Actual Windows captures from the personal build on an RTX 5090. These show the
+Actual Windows captures from this build on an RTX 5090. These show the
 interface and feature states, not a visual-quality benchmark or a promise of
 the same performance on other hardware. Click an image to inspect it.
 
@@ -95,9 +94,9 @@ this player; no endorsement or additional media rights are claimed.
 
 ## Get started
 
-1. Open the [personal release](https://github.com/2600th/dlss5-video-player/releases/tag/personal-v0.12.0.1)
+1. Open the [release](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.12.0.1)
    while signed into a GitHub account with access to this private repository.
-2. Download `DLSSVideoPlayer-v0.12.0-upscaling-loading-win64.zip` and, optionally,
+2. Download `dlss5-video-player-v0.12.0.1-win64.zip` and, optionally,
    its `.sha256` checksum file. GitHub's source-code archives are not runnable
    application packages.
 3. Extract the **whole ZIP into a new folder**. Keep `neural-runtime/` and all
@@ -110,7 +109,7 @@ this player; no endorsement or additional media rights are claimed.
 ## Requirements and limitations
 
 - Windows x64, a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA driver.
-- The current personal build was hardware-tested on an **RTX 5090**. RTX 40
+- The current build was hardware-tested on an **RTX 5090**. RTX 40
   neural compatibility relies on a community modification and was not tested
   for this build; policy recognition alone is not compatibility proof.
 - Neural rendering is an offline preparation step, not a claim of real-time
@@ -128,13 +127,13 @@ this player; no endorsement or additional media rights are claimed.
 
 ## Developer documentation
 
-- [Build the released source](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/BUILDING.md)
-- [Architecture](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/ARCHITECTURE.md)
-- [Experimental neural-runtime setup](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/DLSS5_SETUP.md)
-- [Troubleshooting](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/TROUBLESHOOTING.md)
-- [Runtime upscaling verification](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/superpowers/plans/2026-09-02-upscaling-verification.md)
-- [Loading-feedback verification](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/docs/superpowers/plans/2026-09-02-loading-feedback-verification.md)
-- [Third-party notices](https://github.com/2600th/dlss5-video-player/blob/personal-v0.12.0.1/THIRD_PARTY.md)
+- [Build the released source](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/BUILDING.md)
+- [Architecture](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/ARCHITECTURE.md)
+- [Experimental neural-runtime setup](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/DLSS5_SETUP.md)
+- [Troubleshooting](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/TROUBLESHOOTING.md)
+- [Runtime upscaling verification](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/superpowers/plans/2026-09-02-upscaling-verification.md)
+- [Loading-feedback verification](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/superpowers/plans/2026-09-02-loading-feedback-verification.md)
+- [Third-party notices](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/THIRD_PARTY.md)
 
 The core stack is C++20, Win32, Direct3D 12, FFmpeg and NVIDIA NGX. An isolated
 helper hosts the experimental RenoDX/ReShade neural runtime, keeping playback's

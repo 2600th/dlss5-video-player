@@ -1,6 +1,6 @@
 # Screenshot provenance
 
-Captured on 2026-09-02 from the locally built personal-v0.12.0.1 player, running
+Captured on 2026-09-02 from the locally built dlss5-video-player-v0.12.0.1 player, running
 on Windows with an NVIDIA RTX 5090. Files are unedited JPEG window captures;
 no mockups, AI-generated frames or external desktop overlays are included.
 
