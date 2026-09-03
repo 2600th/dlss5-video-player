@@ -24,11 +24,12 @@ jobs:
           git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
           git -C external\DLSS checkout --detach FETCH_HEAD
 
-      - name: Fetch pinned UI assets and YouTube helpers
+      - name: Fetch pinned UI assets and media helpers
         shell: powershell
         run: |
           .\tools\fetch_ui_assets.ps1
           .\tools\fetch_youtube_helpers.ps1
+          .\tools\fetch_ffmpeg_helpers.ps1
 
       - name: Configure
         shell: cmd
