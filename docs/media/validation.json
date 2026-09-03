@@ -1,0 +1,122 @@
+{
+  "date": "2026-09-03",
+  "video": "neural-comparison-demo.mp4",
+  "sha256": "7d7604a26b9f06a12297cca2194c8c80b80daaf0d21ed12df04eb4d9dd045ed1",
+  "probe": {
+    "programs": [],
+    "stream_groups": [],
+    "streams": [
+      {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "r_frame_rate": "30/1",
+        "duration": "30.000000",
+        "nb_read_frames": "900"
+      }
+    ],
+    "format": {
+      "duration": "30.000000",
+      "size": "7936201"
+    }
+  },
+  "source": {
+    "title": "The Witcher IV - Cinematic Reveal Trailer",
+    "url": "https://www.youtube.com/watch?v=54dabgZJ5YA",
+    "sha256": "ef4926c0da4451ff879b7b0e5e32d3f3b35fb06a542b179b0689735094fbefdf",
+    "width": 1920,
+    "height": 1080,
+    "fps": "30000/1001",
+    "frames": 10868,
+    "paused_seconds": 112.611,
+    "moving_seconds_approximate": [
+      113,
+      128
+    ]
+  },
+  "content_review": "Every included shot inspected: fully clothed village characters and forest imagery; no nudity, sexual activity or sexualized imagery.",
+  "capture": {
+    "application_version": "0.13.0",
+    "source_mode": "local file",
+    "gpu": "RTX 5090",
+    "upscaling": false,
+    "playback_adjustments": "neutral",
+    "neural_mode": "prepared cache",
+    "verified_neural_frames": 10868
+  },
+  "local_document_links_checked": 40,
+  "full_decode": "passed; all 900 frames decoded with FFmpeg -xerror",
+  "browser_playback": "revised export ended at 30.00 seconds; 1920 x 1080; no media error",
+  "cuts_inspected_frames": [
+    89,
+    90,
+    359,
+    360,
+    809,
+    810
+  ],
+  "screenshots": "all five refreshed files visually inspected",
+  "reconstruction": {
+    "delivery_recovery": "revised export recovery passed; 270 and 450 frames at 1442 x 932, 9 and 15 seconds",
+    "original_capture_preparation": "passed; timestamp-preserving takes restored after recovery check",
+    "original_takes": {
+      "face-take.mp4": {
+        "frames": 252,
+        "duration": 9.0
+      },
+      "playback-take.mp4": {
+        "frames": 448,
+        "duration": 15.0
+      }
+    },
+    "timing": "Desktop capture has timestamp gaps; Remotion samples the recordings at 30 fps without changing playback speed."
+  },
+  "typescript": "tsc --noEmit passed",
+  "application_source_changes": true,
+  "source_loading_fix": {
+    "behavior": "Honor selected video/audio stream availability, including fractional timestamps; preserve cancellation and overall 45-second deadline.",
+    "release_build": "passed",
+    "ctest": {
+      "passed": 9,
+      "failed": 0,
+      "seconds": 36.33
+    },
+    "independent_review": "no remaining important or critical findings",
+    "live_resolve": "production-object harness returned at advertised availability",
+    "live_acquisition": {
+      "width": 1920,
+      "height": 1080,
+      "frames": 10868,
+      "video_seconds": 362.629,
+      "container_seconds": 362.681,
+      "bytes": 102939223
+    },
+    "capture_limitation": "Demo uses the existing v0.13.0 build and a local source; it does not demonstrate the network-loading fix."
+  },
+  "neural_toggle_check": {
+    "method": "Inspect the native On button blue fill at an observed fixed position in every decoded delivery frame; cross-check readable labels visually.",
+    "state_changes": [
+      {
+        "frame": 0,
+        "seconds": 0.0,
+        "neural_on": true
+      },
+      {
+        "frame": 90,
+        "seconds": 3.0,
+        "neural_on": false
+      },
+      {
+        "frame": 212,
+        "seconds": 7.067,
+        "neural_on": true
+      }
+    ],
+    "remains_on_through_end": true,
+    "frames_checked_after_switch": 688,
+    "no_off_frames_in_15_to_30_seconds": true
+  },
+  "revision": "Keep Neural Rendering On from the paused comparison switch through the end; replace the moving take with continuous On playback."
+}

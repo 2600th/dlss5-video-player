@@ -708,6 +708,7 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     if (stdoutBytes.empty()) return invalid_output();
 
     double durationSeconds = 0.0;
+    int64_t availableAtUnixSeconds = 0;
     if (stdoutBytes.starts_with("duration=")) {
         // yt-dlp --print emits metadata before the --get-url stream lines.
         // Legacy URL-only parsing stays available, but Resolve requires metadata.
@@ -719,7 +720,29 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
         const size_t statusStart = metadata.find(statusMarker);
         if (statusStart == std::string_view::npos) return invalid_output();
         const std::string_view duration = metadata.substr(9, statusStart - 9);
-        const std::string_view status = metadata.substr(statusStart + statusMarker.size());
+        std::string_view status = metadata.substr(statusStart + statusMarker.size());
+        constexpr std::string_view videoAvailabilityMarker = ";video_available_at=";
+        constexpr std::string_view audioAvailabilityMarker = ";audio_available_at=";
+        const size_t availabilityStart = status.find(videoAvailabilityMarker);
+        if (availabilityStart != std::string_view::npos) {
+            const auto availability = status.substr(availabilityStart + videoAvailabilityMarker.size());
+            status = status.substr(0, availabilityStart);
+            const auto audioStart = availability.find(audioAvailabilityMarker);
+            if (audioStart == std::string_view::npos) return invalid_output();
+            for (const auto value : {availability.substr(0, audioStart),
+                                     availability.substr(audioStart + audioAvailabilityMarker.size())}) {
+                double timestamp = 0.0;
+                const auto parsedTimestamp = std::from_chars(value.data(), value.data() + value.size(), timestamp);
+                // Bound the epoch before any clock arithmetic (through year 9999).
+                if (parsedTimestamp.ec != std::errc{} || parsedTimestamp.ptr != value.data() + value.size() ||
+                    !std::isfinite(timestamp) || timestamp < 0.0 || timestamp > 253402300799.0)
+                    return invalid_output();
+                // A millisecond ad skip offset can produce a fractional epoch.
+                // Round upward so the integer-second wait never opens it early.
+                availableAtUnixSeconds = std::max(availableAtUnixSeconds,
+                    static_cast<int64_t>(std::ceil(timestamp)));
+            }
+        }
         const auto parsed = std::from_chars(duration.data(), duration.data() + duration.size(),
                                             durationSeconds);
         if (parsed.ec != std::errc{} || parsed.ptr != duration.data() + duration.size() ||
@@ -769,6 +792,7 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     result.mediaUrl = std::move(mediaUrl);
     result.audioUrl = std::move(audioUrl);
     result.durationSeconds = durationSeconds;
+    result.availableAtUnixSeconds = availableAtUnixSeconds;
     return result;
 }
 
@@ -845,7 +869,7 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"height,vbr,abr",
         L"--get-url",
         L"--print",
-        L"duration=%(duration)s;live_status=%(live_status)s",
+        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s",
         std::wstring(youtubeUrl),
     };
 }
@@ -1188,6 +1212,21 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     if (result.ok && result.durationSeconds <= 0.0) {
         return resolver_error(ResolveError::InvalidOutput,
                               L"Only fixed-duration YouTube videos are supported.");
+    }
+    // yt-dlp's native downloader honors the selected formats' available_at;
+    // --get-url does not. Opening these URLs early can return HTTP 403 even
+    // though the same public streams work as soon as their waiting period ends.
+    while (result.ok) {
+        if (cancellationRequested())
+            return resolver_error(ResolveError::Cancelled, L"YouTube resolution was cancelled.");
+        const auto steadyNow = std::chrono::steady_clock::now();
+        if (steadyNow >= deadline)
+            return resolver_error(ResolveError::TimedOut, L"YouTube resolution timed out.");
+        const auto unixNow = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (result.availableAtUnixSeconds <= unixNow) break;
+        std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(
+            pollInterval_, deadline - steadyNow));
     }
     return result;
 }

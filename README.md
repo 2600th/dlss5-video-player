@@ -6,7 +6,13 @@ public YouTube videos, with optional DLSS Super Resolution during playback.
 
 [Get started](#get-started) · [Usage guide](docs/USAGE.md) · [Build from source](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-![Paused neural playback with separate neural rendering and upscaling controls](docs/screenshots/current/neural-playback.jpg)
+[![Watch the 30-second DLSS 5 Video Player demonstration](docs/media/neural-comparison-poster.jpg)](docs/media/neural-comparison-demo.mp4)
+
+**[Watch the 30-second demo](docs/media/neural-comparison-demo.mp4)** — actual player
+footage from The Witcher IV. Compare the same paused frame with Neural Rendering
+Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
+intentionally silent.
+[Capture details and edit source](docs/media/README.md).
 
 **v0.13.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
 with recent-video caching, settings snapshots, MKV export and highest-bitrate
@@ -93,15 +99,19 @@ inspect it at full size.
 
 ### Recent videos and export
 
-![Recent videos menu alongside the cached-video export command](docs/screenshots/current/recent-videos.jpg)
+![File menu with Recent videos and the cached-video export command](docs/screenshots/current/recent-videos.jpg)
 
 <details>
-<summary>Original view at the same paused timestamp</summary>
+<summary>Matched original and neural face views</summary>
 
-![Original video at the same paused timestamp as the neural playback image above](docs/screenshots/current/original-comparison.jpg)
+![Cached neural view of Ciri in The Witcher IV daylight village sequence](docs/screenshots/current/neural-playback.jpg)
+
+![Original video at the same paused timestamp as the neural view](docs/screenshots/current/original-comparison.jpg)
 
 Runtime upscaling is off in both comparison captures. These document a synchronized
 toggle, not a claim that every source gains visible detail.
+
+[Inspect the unscaled same-frame face crops](docs/screenshots/current/face-comparison.png).
 
 </details>
 

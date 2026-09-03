@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <stop_token>
@@ -40,6 +41,8 @@ struct ResolveResult {
     ResolveError error{ResolveError::None};
     std::wstring detail;
     double durationSeconds{};
+    // Latest selected stream availability, rounded up to avoid premature access.
+    int64_t availableAtUnixSeconds{};
 };
 
 struct YouTubeFormatAvailability {

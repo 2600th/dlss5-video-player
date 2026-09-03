@@ -1,47 +1,61 @@
 # Screenshot provenance
 
-## v0.13.0 feature captures
+## September 3, 2026 refresh
 
-The `current/` gallery was captured on 2026-09-03 from the feature implementation
-released in v0.13.0, before the release version bump, on Windows with an NVIDIA RTX 5090.
-The five JPEG window captures retain the actual
-window, menus, video and status text; there is no retouching, synthetic UI or
-image enhancement. Source screenshots are saved directly without recompression.
+The four media-bearing JPEGs in `current/` are authentic Windows captures of
+DLSS 5 Video Player v0.13.0 on an NVIDIA RTX 5090. Each captures the complete
+1442 × 932 player window, including the title, menus, controls and status.
+FFmpeg captured the visible desktop region established by computer-use window
+inspection. The files use one high-quality JPEG encoding; no UI replacement,
+face retouching, sharpening or color adjustment was applied. The captured
+computer-use pointer indicator is retained.
 
-The gallery uses the configured [GTA VI - Trailer 2 example](https://www.youtube.com/watch?v=VQRLujxTm3c)
-from Rockstar Games. Neural playback was validated at 1920 x 1080 / 30 fps.
-Original and neural comparison images use the same paused timestamp at
-approximately 01:05 on the complete 2:47 trailer, with
-runtime upscaling and playback image adjustments off/default.
-The neural/original JPEG pair was refreshed after the highest-bitrate download
-change using the complete H.264 source (2.434 Mbps measured average video bitrate).
+The footage is [The Witcher IV — Cinematic Reveal Trailer](https://www.youtube.com/watch?v=54dabgZJ5YA),
+published by The Witcher / CD PROJEKT RED. The daylight village close-up of Ciri
+is at **01:52.611** (the player's counter rounds this to 01:53). Contact sheets and consecutive frames were inspected for
+gaze, expression, open eyes, blur and occlusion. The selected scene contains
+fully clothed characters and no sexual content. The original/neural pair was
+captured while paused, switching only Neural Rendering. DLSS Upscaling was off,
+fit mode was active, audio was muted, and playback image adjustments were neutral.
 
-The separate `current/face-comparison.png` is a diagnostic figure extracted from
-frame 1950 (zero-based, 01:05 at 30 fps) in the original and saved neural videos.
-This figure retains the earlier AV1-source verification; it is not a bitrate comparison.
-It uses identical 400 x 460 crops at x=560, y=100, with labels above them.
-There is no scaling, retouching or color adjustment. The render log reports
-intensity 1.00, global tone 1.00, preset/style 0, and neural upscaling off.
+The complete official H.264 video-only format 137 was downloaded with the
+bundled yt-dlp, then opened as a local file through the player's normal render
+and cache-validation path. The source is **1920 × 1080, 30000/1001 fps,
+10,868 frames**. No source rescaling, retiming or image adjustment was applied.
+The completed render manifest reports 10,868 native evaluations and 10,868
+verified neural frames, with neural upscaling disabled.
+
+| Provenance field | Value |
+| --- | --- |
+| Source SHA-256 | `ef4926c0da4451ff879b7b0e5e32d3f3b35fb06a542b179b0689735094fbefdf` |
+| Render cache key | `f7ae512a647acee09aba1a38da5e269ce1cf6ae13c239ef95fa853ea9491f609` |
+| Neural SHA-256 | `7a21fc81cc95c2aded299c960f19531ae8974c810347069b8c1a43fdfdea502a` |
+| Neural settings | `EnableHooks=2`, `NREnableUpscaling=0`, `NeuralUplift=1` |
+
+`current/face-comparison.png` uses zero-based frame **3375 (112.6125 seconds)**
+from this source and its synchronized neural cache. Both 700 × 880 source-pixel
+crops use x=670, y=0, with labels outside the image. There is no scaling,
+retouching or color correction. [Reproduction script](../../tools/demo-video/make-face-comparison.py).
 
 | File | State |
 | --- | --- |
-| `current/neural-playback.jpg` | Paused cached neural view; README lead image |
-| `current/original-comparison.jpg` | Original view at the same timestamp |
-| `current/upcoming-games.jpg` | Five official examples in the File menu |
-| `current/recent-videos.jpg` | Persistent recent history and export command |
-| `current/player-start.jpg` | Local file and YouTube entry points |
-| `current/face-comparison.png` | Same-frame face diagnostic from the earlier AV1-source run |
+| `current/neural-playback.jpg` | Paused cached neural view; also used in the demo poster |
+| `current/original-comparison.jpg` | Original at the identical paused moment |
+| `current/upcoming-games.jpg` | Five official examples in the expanded File submenu |
+| `current/recent-videos.jpg` | File menu with Recent videos and Export cached video; history submenu closed to keep local paths out of the capture |
+| `current/player-start.jpg` | Retained September 3 start-screen capture from the v0.13.0 feature implementation before its version bump |
+| `current/face-comparison.png` | Unscaled matched crops from the source and render |
 
-Images are documentation of feature states, not a benchmark or evidence of
-NVIDIA-equivalent quality. A fixed five-game editorial selection is not a
-popularity ranking. See [example provenance](../EXAMPLE_VIDEOS.md) and
+The [30-second demonstration](../media/README.md) uses the same Witcher IV
+source and actual application recordings. The toggle compares original and
+prepared cached neural video; it does not execute live neural rendering.
+
+These images document feature states, not an image-quality benchmark or an
+official NVIDIA integration. A fixed five-game selection is not a popularity
+ranking. See [example provenance](../EXAMPLE_VIDEOS.md) and
 [functional verification](../VERIFICATION-2026-09-02.md).
 
-For future updates, capture the actual current build at one consistent window
-size, use a clear paused frame, keep compared timestamps/settings identical,
-and include complete relevant controls. Check for clipped menus, tooltips,
-personal paths and desktop overlays before saving. Remove superseded captures
-when no maintained document uses them; historical versions remain in Git.
-
-Game footage and trademarks belong to their respective owners. The source-code
-license does not relicense this third-party media or imply endorsement.
+Rights to NVIDIA components belong to NVIDIA. Other third-party components,
+game footage and trademarks belong to their respective owners. The Witcher IV
+trailer footage is credited to CD PROJEKT RED. The source-code license does not
+relicense this media or imply endorsement.

@@ -3393,7 +3393,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"height,vbr,abr",
         L"--get-url",
         L"--print",
-        L"duration=%(duration)s;live_status=%(live_status)s",
+        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s",
         std::wstring(url),
     };
 
@@ -4158,6 +4158,91 @@ void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_
     CHECK(result.detail.empty());
 }
 
+void youtube_resolver_waits_until_both_selected_streams_are_available_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::seconds{5});
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto ready = now + 2;
+    const auto url = L"https://youtu.be/availability_" + std::to_wstring(now + 1) +
+        L"_" + std::to_wstring(ready);
+    const auto result = resolver->Resolve(url, {});
+    CHECK(result.ok);
+    CHECK(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() >= ready);
+}
+
+void youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test()
+{
+    ResolverFixture fixture;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto url = L"https://youtu.be/availability_" + std::to_wstring(now + 10) + L"_0";
+    auto bounded = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::milliseconds{150});
+    CHECK_EQ(ResolveError::TimedOut, bounded->Resolve(url, {}).error);
+    const auto marker = fixture.directory / L"availability-ready.marker";
+    std::filesystem::remove(marker);
+    for (const bool explicitCancel : {false, true}) {
+        auto resolver = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::seconds{5});
+        const auto beforeHelpers = count_named_processes(L"yt-dlp.exe");
+        ResolveResult result;
+        std::jthread worker([&](std::stop_token stop) { result = resolver->Resolve(url, stop); });
+        CHECK(wait_for_file(marker, std::chrono::seconds{2}));
+        // The extractor has exited: cancellation must still interrupt the
+        // resolver's availability wait, independently of its child-process loop.
+        const auto childDeadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+        while (count_named_processes(L"yt-dlp.exe") != beforeHelpers &&
+               std::chrono::steady_clock::now() < childDeadline) Sleep(10);
+        CHECK_EQ(beforeHelpers, count_named_processes(L"yt-dlp.exe"));
+        if (explicitCancel) resolver->Cancel(); else worker.request_stop();
+        worker.join();
+        CHECK_EQ(ResolveError::Cancelled, result.error);
+        CHECK(result.mediaUrl.empty());
+        CHECK(result.audioUrl.empty());
+        std::filesystem::remove(marker);
+    }
+}
+
+void youtube_resolver_waits_for_fractional_stream_availability_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::seconds{5});
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto ready = now + 1;
+    const auto result = resolver->Resolve(
+        L"https://youtu.be/availability_0_" + std::to_wstring(ready) + L"_fraction", {});
+    CHECK(result.ok);
+    CHECK(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
+          >= static_cast<double>(ready) + 0.5);
+}
+
+void resolver_output_validates_stream_availability_metadata_test()
+{
+    for (const auto suffix : {";video_available_at=1788425759;audio_available_at=1788425760",
+                               ";video_available_at=1788425759.5;audio_available_at=1788425760.25",
+                               ";video_available_at=0;audio_available_at=0"}) {
+        CHECK(ParseResolverOutput(std::string("duration=167;live_status=not_live") + suffix +
+            "\nhttps://v.googlevideo.com/video\n", 0).ok);
+    }
+    for (const auto suffix : {";video_available_at=-1;audio_available_at=0",
+                               ";video_available_at=nan;audio_available_at=0",
+                               ";video_available_at=inf;audio_available_at=0",
+                               ";video_available_at=253402300800;audio_available_at=0",
+                               ";video_available_at=18446744073709551616;audio_available_at=0",
+                               ";video_available_at=1;audio_available_at=",
+                               ";video_available_at=1;audio_available_at=0;extra=1",
+                               ";video_available_at=1", ";audio_available_at=1"}) {
+        CHECK_EQ(ResolveError::InvalidOutput, ParseResolverOutput(
+            std::string("duration=167;live_status=not_live") + suffix +
+            "\nhttps://v.googlevideo.com/video\n", 0).error);
+    }
+    CHECK_EQ(int64_t{1788425761}, ParseResolverOutput(
+        "duration=167;live_status=not_live;video_available_at=1788425759.5;audio_available_at=1788425760.25"
+        "\nhttps://v.googlevideo.com/video\n", 0).availableAtUnixSeconds);
+}
+
 void youtube_resolver_requires_duration_metadata_before_acquisition_test()
 {
     ResolverFixture fixture;
@@ -4420,7 +4505,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
         std::wstring_view(argv[13]) != L"--get-url" ||
         std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s") {
+        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -4433,6 +4518,20 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
 
     const std::wstring_view url = argv[16];
+    if (url.find(L"availability_") != std::wstring_view::npos) {
+        const auto times = url.substr(url.find(L"availability_") + 13);
+        const auto separator = times.find(L'_');
+        const std::wstring video(times.substr(0, separator));
+        std::wstring audio(times.substr(separator + 1));
+        if (audio.ends_with(L"_fraction")) audio.replace(audio.size() - 9, 9, L".5");
+        std::cout << "duration=167;live_status=not_live;video_available_at=";
+        for (const wchar_t character : video) std::cout.put(static_cast<char>(character));
+        std::cout << ";audio_available_at=";
+        for (const wchar_t character : audio) std::cout.put(static_cast<char>(character));
+        std::cout << "\nhttps://r1.googlevideo.com/videoplayback?id=availability\n" << std::flush;
+        write_binary_file(current_test_executable().parent_path() / L"availability-ready.marker", "ready");
+        return 0;
+    }
     if (url.find(L"missingduration") != std::wstring_view::npos) {
         std::cout << "https://r1.googlevideo.com/videoplayback?id=duration-missing\n" << std::flush;
         return 0;
@@ -5052,6 +5151,13 @@ int wmain(int argc, wchar_t* argv[])
 {
     const std::wstring executableName=current_test_executable().filename().wstring();
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--resolver-availability-tests") {
+        youtube_resolver_waits_until_both_selected_streams_are_available_test();
+        youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test();
+        youtube_resolver_waits_for_fractional_stream_availability_test();
+        resolver_output_validates_stream_availability_metadata_test();
+        return test_support::failure_count == 0 ? 0 : 1;
+    }
     if (argc > 1) return run_fake_resolver_child(argc, argv);
     harness_sanity_test();
     youtube_bitrate_selection_uses_real_helper_without_network_test();
@@ -5205,6 +5311,10 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
     youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
+    youtube_resolver_waits_until_both_selected_streams_are_available_test();
+    youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test();
+    youtube_resolver_waits_for_fractional_stream_availability_test();
+    resolver_output_validates_stream_availability_metadata_test();
     youtube_resolver_requires_duration_metadata_before_acquisition_test();
     youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
     youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();

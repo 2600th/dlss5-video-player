@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Honor YouTube's advertised stream-availability time before opening resolved
+  media URLs, preventing premature HTTP 403 failures. Preserve cancellation and
+  the resolver timeout, including fractional availability timestamps.
+- Replace the demonstration and comparison screenshots with The Witcher IV's
+  village sequence, with no sexual content in the 30-second clip; include the
+  reproducible Remotion edit and capture provenance.
+
 ## 0.13.0 - 2026-09-03
 
 - Replaced the example categories with five official upcoming-game videos.

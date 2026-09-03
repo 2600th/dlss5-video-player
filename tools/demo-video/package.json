@@ -1,0 +1,21 @@
+{
+  "name": "dlss5-player-demo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "preview": "remotion studio --no-open",
+    "render": "remotion render src/index.tsx Demo ../../docs/media/neural-comparison-demo.mp4",
+    "poster": "remotion still src/index.tsx Demo ../../docs/media/neural-comparison-poster.jpg --frame=35"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.520",
+    "@remotion/media": "4.0.520",
+    "remotion": "4.0.520",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "typescript": "5.9.3"
+  }
+}
