@@ -3,6 +3,9 @@
 This guide covers v0.13.0, including recent history, settings-aware cache identity,
 cached-video export and highest-bitrate YouTube selection.
 
+The interface is English-only. It does not load external language packs;
+legacy language settings in the INI are ignored.
+
 ## Open, render and compare
 
 Open a local video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
@@ -86,9 +89,8 @@ The snapshot includes add-on enable state and the neural add-on's settings;
 overlay appearance is excluded. Playback adjustments and runtime upscaling do
 not affect the offline render. This adds no unverified sliders or presets.
 
-The legacy `--quality` argument is no longer supported. Existing
-`run_4k_auto.bat` and `run_4k_quality.bat` names are compatibility launchers;
-select optional 2160p playback upscaling in the player.
+Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
+in the player; the old quality arguments and 4K launch scripts are retired.
 
 ## Export a cached video
 
@@ -112,4 +114,5 @@ Failure or cancellation removes the exporter-owned temporary output and leaves
 the inputs and any existing destination intact.
 
 See [troubleshooting](TROUBLESHOOTING.md) for diagnostics and
-[verification](VERIFICATION-2026-09-02.md) for tested boundaries.
+[verification](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md)
+for tested boundaries.

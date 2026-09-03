@@ -5,6 +5,7 @@ Describe the change and why it is needed.
 ## Validation
 
 - [ ] Release x64 builds successfully
+- [ ] CTest suites pass with the required media helpers staged
 - [ ] MP4/MKV playback tested as applicable
 - [ ] Seek/play/pause tested as applicable
 - [ ] No per-frame GPU flush added to normal playback

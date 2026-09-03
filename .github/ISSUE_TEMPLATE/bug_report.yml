@@ -35,7 +35,7 @@ body:
     id: logs
     attributes:
       label: Relevant logs
-      description: Attach DLSSVideoPlayer.log and ReShade.log when relevant. Remove private paths/data if needed.
+      description: Include the player DLSSVideoPlayer.log and, for neural failures, neural-runtime/DLSSVideoPlayer.log and neural-runtime/ReShade.log. Remove private paths and signed media URLs.
   - type: checkboxes
     id: extras
     attributes:

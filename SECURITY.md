@@ -4,6 +4,10 @@ The player launches only its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. YouTube support is
 limited to validated public HTTPS video URLs.
 
+Offline neural jobs run in the package-local
+`neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in
+that subdirectory; the player rejects the old root-level proxy layout.
+
 The experimental package intentionally contains a modified neural DLL with
 Authenticode `HashMismatch`, plus unsigned ReShade/RenoDX files. Those signature
 states are disclosed separately from malware-scan results. The exact release

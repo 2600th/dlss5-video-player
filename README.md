@@ -15,7 +15,7 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for this development build used an RTX 5090.
+> components. Hardware verification for v0.13.0 used an RTX 5090.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -83,9 +83,9 @@ See [cache, settings and export details](docs/USAGE.md).
 
 ## Screenshots
 
-Actual Windows captures from the development player on an RTX 5090. Images show
-interface states, not image-quality benchmarks. Open an image to inspect it at
-full size.
+Actual Windows captures of the v0.13.0 feature implementation on an RTX 5090.
+Images show interface states, not image-quality benchmarks. Open an image to
+inspect it at full size.
 
 ### Upcoming games
 

@@ -1,6 +1,7 @@
 # Contributing
 
-Contributions are welcome.
+Start with [Building and testing](docs/BUILDING.md) for the pinned dependencies
+and the canonical `build-upscaling` commands.
 
 ## Development guidelines
 
@@ -14,12 +15,19 @@ Contributions are welcome.
 
 ## Before opening a pull request
 
-1. Build Release x64.
-2. Open at least MP4 and MKV samples.
-3. Test play/pause and repeated seeks.
-4. Test Fit and Crop aspect modes.
-5. Test Image Adjustments while playing and paused.
-6. Test debug views `1` through `5`.
-7. If you have an RTX GPU, verify native NGX evaluation succeeds.
+For code changes, build Release x64 and run the nine CTest suites. FFmpeg and
+FFprobe must be staged so the real-media export suite runs. Keep automated
+results separate from GPU and visual-quality claims.
+
+Check the behavior affected by the change: MP4/MKV playback, play/pause and
+seeks, fit/fill, adjustments, debug views, original/neural comparison, cache
+reuse or export. Renderer and timing changes also need applicable GPU/media
+smoke checks. Verify native evaluations and feature-18 evidence separately;
+neither alone establishes visual quality.
+
+For documentation cleanup, check local links, retained screenshot attribution,
+and package inputs. Avoid adding another copy of an existing guide or keeping
+completed task plans in the maintained documentation; Git history retains
+superseded material.
 
 Do not include copyrighted/proprietary runtime packages in pull requests.

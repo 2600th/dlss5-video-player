@@ -3,41 +3,28 @@
 ## High-level pipeline
 
 ```text
-Video file
+Local file / validated YouTube download
+  |                                  |
+  |                                  +-> source audio -> playback clock
+  v
+Source + runtime + settings cache lookup
+  |
+  +-> miss: NeuralWorker.exe
+  |           sequential decode -> temporal guides -> GPU guide expansion
+  |           -> native DLAA carrier + RenoDX feature 18
+  |           -> capture -> encode -> independent validation -> neural cache
   |
   v
-FFmpeg / Media Foundation fallback
+Original + validated neural cache -> synchronized decoded frame pairs
   |
-  +---------------------> audio -> waveOut -> playback clock
+  +-> chosen view -> optional playback SR -> image adjustments -> D3D12 display
   |
-  v
-BGRA decoded video frame
-  |
-  +-> temporal analysis (current + previous frame)
-  |      |
-  |      +-> compact motion/depth/uncertainty guide grid
-  |              |
-  |              v
-  |          GPU expansion
-  |              |
-  |              +-> RG16F motion vectors
-  |              +-> D32/R32 depth
-  |              +-> R8 temporal mask
-  |
-  v
-sRGB -> linear FP16 color
-  |
-  v
-NVIDIA NGX DLSS Super Resolution
-  |
-  v
-FP16 reconstructed output
-  |
-  +-> final image adjustments
-  |
-  v
-D3D12 swapchain -> display (player has no ReShade proxy)
+  +-> cached neural video + compatible source streams -> MKV export
 ```
+
+The main player has no ReShade proxy. The worker hosts the experimental runtime
+in `neural-runtime/`. Source/core builds without that runtime use the native
+playback path.
 
 ## Decoder
 
@@ -124,9 +111,9 @@ pass. Preferences use the existing executable-adjacent INI.
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.
-Neural Rendering is requested on for a new session, so a valid cached replay
-selects the neural member after the first pair is ready and before it is
-presented. Toggling Neural Rendering changes the visible member of the
+Neural Rendering defaults on for a fresh install and then follows the saved
+view preference. The selected member is chosen after the first pair is ready
+and before it is presented. Toggling Neural Rendering changes the visible member of the
 last-presented pair, so comparison never advances ahead of the audio clock.
 Seeking waits for both restarted decoders to produce a pair; temporary
 `NotReady` results do not unload playback. Tail seeks account for container
@@ -176,4 +163,27 @@ When video is paused, adjustment changes re-present the existing DLSS output ins
 
 ## Paused-frame presentation
 
-A frozen video frame is re-presented at a lightweight cadence while paused. This is intentionally separate from video decoding and NGX evaluation. It keeps ReShade's overlay/render loop responsive without advancing the movie or DLSS temporal history.
+A frozen video frame can be re-presented while paused without advancing decoding
+or neural temporal history. Cached comparison and image-adjustment changes can
+therefore update the displayed frame without starting a new neural render.
+
+## Remaining work
+
+The shipped cache/settings/history/export work is described in [Usage](USAGE.md).
+The remaining priorities are:
+
+1. Verified neural controls and presets, with paused wipe, linked zoom and loop
+   comparison to judge their effect.
+2. Watch-original-first playback, bounded previews, and selective cache cleanup
+   with a storage quota.
+3. A sequential job queue, stronger source-timestamp/VFR coverage, subtitle and
+   audio-track selection, and measured frame pacing.
+4. Measured research into NVOFA guidance, official-runtime compatibility and
+   RTX Video SR. Adopt a backend only after capability, quality and performance
+   evidence; keep a working fallback.
+
+Complete HDR processing, GPU-resident transfers, interpolation and durable
+render resume require separate pipeline work. Resume must account for temporal
+neural state; frame indices and encoded segments alone are insufficient.
+Compose subtitles after enhancement, with burn-in only as an explicit export
+choice. These are pending ideas, not current features or release commitments.

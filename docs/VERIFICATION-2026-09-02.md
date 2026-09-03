@@ -2,13 +2,28 @@
 
 Verification began 2 September 2026 and continued on 3 September (Asia/Kolkata).
 
+## Released v0.13.0 baseline
+
+The [v0.13.0 release](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
+was built from `7db4364`. Its clean Windows Release build passed all nine CTest
+suites in 35.63 seconds. The player and neural-worker binaries in the ZIP match
+that tested build. Package verification accepted all 42 allowlisted files;
+the published ZIP SHA-256 is
+`6e793e0daa323e950eb3f9e6f9386a7671247abac629bd86a42d8d7c209f2760`.
+
+[Windows CI passed on `81abb1c`](https://github.com/2600th/dlss5-video-player/actions/runs/33730634801)
+after a CI-only follow-up staged pinned FFmpeg/FFprobe for the real-media export
+tests. Application and test sources were unchanged. The real-media observations
+below used the final feature implementation before the release version bump.
+Earlier intermediate checks are retained here as dated debugging evidence.
+
 Scope: five upcoming-game examples, persistent last-five history and cache retention, neural-settings cache identity, saved playback preferences, and stream-copy MKV export. Renderer, temporal guides, source-resolution contract and feature-18 validation remain unchanged.
 
 ## Automated checks
 
 Visual Studio 2022 Release build; nine CTest suites, including new RecentMediaTests, RenderSettingsTests and CachedExportTests. Tests cover persistence, deduplication, sixth-item eviction reporting, owned removal, changed settings, tampered snapshots, export stream maps/content, cancellation, existing-file protection and relative input paths. Native UI regression includes saved preferences and cross-quality cache preservation.
 
-Final code build passed all 9/9 suites in 18.45 seconds after the Windows
+An intermediate build passed all 9/9 suites in 18.45 seconds after the Windows
 physical-root fix. The default-root regression failed before that fix and passed
 after it; strict ownership checks were retained.
 

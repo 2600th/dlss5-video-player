@@ -1,7 +1,7 @@
 # Troubleshooting
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe the development build.
+These instructions describe v0.13.0.
 
 ## The player cannot find the neural runtime
 
@@ -28,7 +28,7 @@ Successful NGX initialization alone does not prove neural output was captured.
 
 Use a writable player/data location and check free space. Cache data normally
 lives under `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`; Windows may redirect
-it into the launching package's private LocalCache. The development player
+it into the launching package's private LocalCache. The player
 resolves that physical location before creating source/render buckets and saves
 it as `[Storage] CacheDirectory` in the INI beside the EXE. Check that value or
 the startup log's `Neural cache directory:` line for the exact location.
@@ -49,9 +49,10 @@ older untracked cache is not automatically imported into recent history.
 
 Selecting the same upcoming-game example or pasting the same URL checks recent
 history too. Keep the same source-quality setting to reuse its tracked download.
-The completeness fix intentionally replaces older source caches once: earlier
-builds could accept a prematurely ended download. Current acquisition validates
-decoded video duration against YouTube metadata before starting neural rendering;
+The completeness and highest-bitrate selection policies replace older source
+caches once: earlier builds could accept a prematurely ended download or a
+lower-bitrate format. Current acquisition validates decoded video duration
+against YouTube metadata before starting neural rendering;
 a short audio stream no longer cuts off the video. Interrupted HTTP reads use
 bounded retries, and an incomplete result fails instead of becoming a cache hit.
 For acquired YouTube sources, neural timing is checked against the video track;
@@ -81,6 +82,9 @@ Availability and regional access can change; local playback remains available.
 Choose **Video > YouTube source quality**. Auto prefers exact 1080p, otherwise
 selecting the highest available resolution up to 4K. Manual choices are 1080p,
 1440p and 2160p. Source quality is separate from **DLSS > Upscaling output**.
+At the chosen resolution, the resolver prefers the highest advertised video
+bitrate across codecs. That estimate can differ from the downloaded file's
+average bitrate; bitrate alone is not a cross-codec quality score.
 
 ## Upscaling is off or playback drops frames
 

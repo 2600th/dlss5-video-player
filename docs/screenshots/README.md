@@ -1,10 +1,10 @@
 # Screenshot provenance
 
-## Current development captures
+## v0.13.0 feature captures
 
-The `current/` gallery is captured on 2026-09-03 from the local
-`codex/value-improvements` development build on Windows with an NVIDIA RTX 5090.
-It is separate from the earlier release images below. The five JPEG window captures retain the actual
+The `current/` gallery was captured on 2026-09-03 from the feature implementation
+released in v0.13.0, before the release version bump, on Windows with an NVIDIA RTX 5090.
+The five JPEG window captures retain the actual
 window, menus, video and status text; there is no retouching, synthetic UI or
 image enhancement. Source screenshots are saved directly without recompression.
 
@@ -30,6 +30,7 @@ intensity 1.00, global tone 1.00, preset/style 0, and neural upscaling off.
 | `current/upcoming-games.jpg` | Five official examples in the File menu |
 | `current/recent-videos.jpg` | Persistent recent history and export command |
 | `current/player-start.jpg` | Local file and YouTube entry points |
+| `current/face-comparison.png` | Same-frame face diagnostic from the earlier AV1-source run |
 
 Images are documentation of feature states, not a benchmark or evidence of
 NVIDIA-equivalent quality. A fixed five-game editorial selection is not a
@@ -39,26 +40,8 @@ popularity ranking. See [example provenance](../EXAMPLE_VIDEOS.md) and
 For future updates, capture the actual current build at one consistent window
 size, use a clear paused frame, keep compared timestamps/settings identical,
 and include complete relevant controls. Check for clipped menus, tooltips,
-personal paths and desktop overlays before saving. Preserve older release images
-when release documentation references them.
-
-## Earlier v0.12.0.1 captures
-
-Captured on 2026-09-02 from the locally built dlss5-video-player-v0.12.0.1 player, running
-on Windows with an NVIDIA RTX 5090. Files are unedited JPEG window captures;
-no mockups, AI-generated frames or external desktop overlays are included.
-
-- `player-start.jpg`: idle player and source-opening actions.
-- `cache-loading.jpg`: saved 1920x1080 video verification; no new render.
-- `neural-playback.jpg`: paused cached neural view at approximately 00:06.
-- `original-comparison.jpg`: original view at the same paused timestamp.
-- `dlss-controls.jpg`: independent feature menu and upscaling output choices.
-
-Playback and comparison captures use the built-in
-[Resident Evil Requiem - Launch Trailer example](https://www.youtube.com/watch?v=9lrThxCoznw).
-Runtime upscaling is off in all captures. The screenshots demonstrate interface
-states, not an image-quality or cross-GPU performance benchmark.
+personal paths and desktop overlays before saving. Remove superseded captures
+when no maintained document uses them; historical versions remain in Git.
 
 Game footage and trademarks belong to their respective owners. The source-code
-license does not relicense this third-party media or imply endorsement. Keep
-the repository and experimental package private as requested.
+license does not relicense this third-party media or imply endorsement.
