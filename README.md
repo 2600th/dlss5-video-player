@@ -159,5 +159,11 @@ and signed media URLs before sharing logs. Changes should preserve the source
 resolution and neural-validation contracts; run CTest and relevant hardware
 smoke checks before proposing a renderer change.
 
+## Acknowledgments
+
+Built upon [DLSS 5 Video Player by Jessica Natalia Mods](https://gitlab.com/JessicaNataliaMods/dlss-5-video-player/).
+Credit to the original project and its contributors for the foundation this
+project builds on.
+
 Project source is [MIT-licensed](LICENSE). Third-party binaries, game footage and
 trademarks retain their own terms; see [third-party notices](THIRD_PARTY.md).
