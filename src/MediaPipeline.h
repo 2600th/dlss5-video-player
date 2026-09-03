@@ -37,6 +37,13 @@ struct MaterializeRequest {
     std::wstring videoUrl;
     std::wstring audioUrl;
     std::filesystem::path output;
+    double expectedDurationSeconds{};
+};
+
+struct CachedExportRequest {
+    std::filesystem::path neuralVideo;
+    std::filesystem::path sourceMedia;
+    std::filesystem::path output;
 };
 
 struct EncoderSpec {
@@ -60,6 +67,9 @@ struct ProbeResult {
     int64_t duration100ns{};
     bool decodedFinalFrame{};
     std::wstring detail;
+    // Decoded video frame extent; independent of container/audio duration.
+    // Zero for CachedMetadata, which does not inspect frames.
+    int64_t videoDuration100ns{};
 };
 
 std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& request);
@@ -72,6 +82,15 @@ class MediaMaterializer {
 public:
     explicit MediaMaterializer(std::filesystem::path helperDirectory = {});
     MaterializeResult Run(const MaterializeRequest& request, std::stop_token stop);
+
+private:
+    std::filesystem::path helperDirectory_;
+};
+
+class CachedVideoExporter {
+public:
+    explicit CachedVideoExporter(std::filesystem::path helperDirectory = {});
+    MaterializeResult Run(const CachedExportRequest& request, std::stop_token stop);
 
 private:
     std::filesystem::path helperDirectory_;

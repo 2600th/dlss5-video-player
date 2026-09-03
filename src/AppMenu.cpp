@@ -43,7 +43,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), games = CreatePopupMenu(), anime = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), dlss = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), dlss = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -53,16 +53,15 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED), IDM_OPEN_YOUTUBE, youtubeName.c_str());
     for (size_t index = 0; index < kExampleVideos.size(); ++index) {
         const ExampleVideo& example = kExampleVideos[index];
-        HMENU category = example.category == ExampleVideoCategory::Games ? games : anime;
-        AppendMenuW(category, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED),
+        AppendMenuW(examples, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED),
                     IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index), example.title.data());
     }
-    const std::wstring gamesName = localizer.Get(L"menu.examples_games");
-    const std::wstring animeName = localizer.Get(L"menu.examples_anime");
-    const std::wstring examplesName = localizer.Get(L"menu.examples");
-    AppendMenuW(examples, MF_POPUP, reinterpret_cast<UINT_PTR>(games), gamesName.c_str());
-    AppendMenuW(examples, MF_POPUP, reinterpret_cast<UINT_PTR>(anime), animeName.c_str());
-    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), examplesName.c_str());
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Upcoming games");
+    AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, L"Export cached video...");
+    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, L"Cancel export");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
     add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
@@ -84,6 +83,22 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
     return bar;
+}
+
+void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled)
+{
+    HMENU recent=find_menu_containing_command(menuBar,IDM_RECENT_VIDEO_FIRST);
+    if(!recent)return;
+    while(GetMenuItemCount(recent)>0)DeleteMenu(recent,0,MF_BYPOSITION);
+    if(titles.empty())AppendMenuW(recent,MF_STRING|MF_GRAYED,IDM_RECENT_VIDEO_FIRST,L"No recent videos");
+    for(size_t index=0;index<titles.size()&&index<5;++index){
+        std::wstring label=std::to_wstring(index+1)+L". ";
+        for(wchar_t c:titles[index].substr(0,120)){
+            if(c==L'&')label+=L'&';
+            label+=(c<L' '?L' ':c);
+        }
+        AppendMenuW(recent,MF_STRING|(enabled?MF_ENABLED:MF_GRAYED),IDM_RECENT_VIDEO_FIRST+static_cast<UINT>(index),label.c_str());
+    }
 }
 
 bool RoutesToRehook(PlayerCommandRoute route, UINT value)

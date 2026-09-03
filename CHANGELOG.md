@@ -1,7 +1,27 @@
 # Changelog
 
-## Unreleased - runtime upscaling private build
+## 0.13.0 - 2026-09-03
 
+- Replaced the example categories with five official upcoming-game videos.
+- Added persistent recent-five history with validated source/render cache reuse
+  and removal of displaced, unreferenced tracked cache entries.
+- Included canonical neural settings snapshots in render cache identity and
+  rejected publication when settings change during rendering.
+- Persisted playback, comparison, upscaling and YouTube-quality preferences.
+- Select the highest advertised video bitrate at each chosen YouTube resolution,
+  across codecs and containers; Auto retains its 1080p-first behavior. Refresh
+  older source caches once so they cannot bypass the new selection policy.
+- Added cancellable stream-copy MKV export with source audio, compatible
+  subtitles, attachments, metadata and chapters; existing outputs are protected.
+- Resolved the physical writable cache root under Windows package redirection
+  while retaining strict cache ownership checks.
+- Remembered the resolved cache location across launches; example and pasted-URL
+  opens now reuse matching recent sources before resolving YouTube again.
+- Fixed truncated YouTube acquisition: preserve video beyond a shorter audio
+  stream, retry interrupted HTTP reads, and verify decoded video duration against
+  YouTube metadata before rendering. Compare neural timing against the source
+  video track instead of a longer audio tail. Older source caches are replaced once.
+- Removed legacy quality options and refreshed usage documentation and screenshots.
 - Added animated loading/cache-check indicators, indeterminate progress during
   setup, and real frame percentages during neural rendering. Animation stops
   during ordinary playback and respects Windows' client-area animation setting.

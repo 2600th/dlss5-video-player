@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cwctype>
 #include <limits>
@@ -19,6 +20,7 @@ namespace {
 constexpr size_t kMaximumInputCharacters = 2048;
 constexpr size_t kMaximumOutputBytes = 16 * 1024;
 constexpr size_t kMaximumCapturedBytes = 64 * 1024;
+constexpr double kMaximumDurationSeconds = 30.0 * 24.0 * 60.0 * 60.0;
 
 class FormatJsonParser {
 public:
@@ -569,7 +571,16 @@ std::string stream_itag(std::wstring_view value)
     CrackedUrl url;
     if(!crack_url(value,url)||url.scheme!=INTERNET_SCHEME_HTTPS||url.hasUserInfo||
        !has_dot_bound_suffix(url.host,L"googlevideo.com"))return {};
-    const auto itag=unique_query_value(query_part(url.extra),L"itag");
+    auto itag=unique_query_value(query_part(url.extra),L"itag");
+    if(url.path.starts_with(L"/api/manifest/hls_playlist/")){
+        // YouTube HLS puts its stable format ID in the path, alongside expiring
+        // signature fields that must never enter the cache identity.
+        constexpr std::wstring_view marker=L"/itag/";
+        const size_t start=url.path.find(marker);
+        if(start==std::wstring::npos||url.path.find(marker,start+1)!=std::wstring::npos)return {};
+        itag=std::wstring_view(url.path).substr(start+marker.size());
+        itag=itag.substr(0,itag.find(L'/'));
+    }
     if(itag.empty()||itag.size()>8||!std::all_of(itag.begin(),itag.end(),[](wchar_t c){
         return c>=L'0'&&c<=L'9';
     }))return {};
@@ -696,6 +707,31 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     }
     if (stdoutBytes.empty()) return invalid_output();
 
+    double durationSeconds = 0.0;
+    if (stdoutBytes.starts_with("duration=")) {
+        // yt-dlp --print emits metadata before the --get-url stream lines.
+        // Legacy URL-only parsing stays available, but Resolve requires metadata.
+        const size_t metadataEnd = stdoutBytes.find('\n');
+        if (metadataEnd == std::string_view::npos) return invalid_output();
+        std::string_view metadata = stdoutBytes.substr(0, metadataEnd);
+        if (metadata.ends_with('\r')) metadata.remove_suffix(1);
+        constexpr std::string_view statusMarker = ";live_status=";
+        const size_t statusStart = metadata.find(statusMarker);
+        if (statusStart == std::string_view::npos) return invalid_output();
+        const std::string_view duration = metadata.substr(9, statusStart - 9);
+        const std::string_view status = metadata.substr(statusStart + statusMarker.size());
+        const auto parsed = std::from_chars(duration.data(), duration.data() + duration.size(),
+                                            durationSeconds);
+        if (parsed.ec != std::errc{} || parsed.ptr != duration.data() + duration.size() ||
+            !std::isfinite(durationSeconds) || durationSeconds <= 0.0 ||
+            durationSeconds > kMaximumDurationSeconds ||
+            (status != "not_live" && status != "was_live")) {
+            return invalid_output();
+        }
+        stdoutBytes.remove_prefix(metadataEnd + 1);
+        if (stdoutBytes.empty()) return invalid_output();
+    }
+
     const size_t separator = stdoutBytes.find('\n');
     if (separator != std::string_view::npos &&
         stdoutBytes.find('\n', separator + 1) != std::string_view::npos) {
@@ -732,6 +768,7 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     result.ok = true;
     result.mediaUrl = std::move(mediaUrl);
     result.audioUrl = std::move(audioUrl);
+    result.durationSeconds = durationSeconds;
     return result;
 }
 
@@ -739,15 +776,15 @@ std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
 {
     switch (quality) {
     case YouTubeSourceQuality::Auto:
-        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
+        return L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]";
     case YouTubeSourceQuality::P2160:
-        return L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]";
+        return L"bv*[height=2160]+ba/b[height=2160]";
     case YouTubeSourceQuality::P1440:
-        return L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]";
+        return L"bv*[height=1440]+ba/b[height=1440]";
     case YouTubeSourceQuality::P1080:
-        return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]";
+        return L"bv*[height=1080]+ba/b[height=1080]";
     }
-    return L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]";
+    return L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]";
 }
 
 YouTubeFormatAvailability ParseYouTubeFormatMetadata(std::string_view json)
@@ -801,7 +838,14 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"deno:" + (helperDirectory / L"deno.exe").wstring(),
         L"-f",
         std::wstring(YouTubeFormatSelector(quality)),
+        // Keep Auto's resolution fallback, then maximize advertised video bitrate
+        // ahead of codec, container, frame rate and extractor preferences.
+        L"--format-sort-force",
+        L"-S",
+        L"height,vbr,abr",
         L"--get-url",
+        L"--print",
+        L"duration=%(duration)s;live_status=%(live_status)s",
         std::wstring(youtubeUrl),
     };
 }
@@ -1140,5 +1184,10 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
         return resolver_error(ResolveError::ExtractionFailed,
                               L"Could not extract a playable YouTube stream.");
     }
-    return ParseResolverOutput(output, exitCode);
+    ResolveResult result = ParseResolverOutput(output, exitCode);
+    if (result.ok && result.durationSeconds <= 0.0) {
+        return resolver_error(ResolveError::InvalidOutput,
+                              L"Only fixed-duration YouTube videos are supported.");
+    }
+    return result;
 }

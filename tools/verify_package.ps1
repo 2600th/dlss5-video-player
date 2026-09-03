@@ -41,6 +41,7 @@ else {
         'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
     )
 }
+$expected += @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md')
 $temporaryRoot = $null
 $maxArchiveEntries = 128
 $maxArchiveEntryBytes = 512MB

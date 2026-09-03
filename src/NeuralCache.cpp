@@ -76,7 +76,7 @@ private:
     bool finished_{false};
 };
 
-std::optional<std::string> Sha256Bytes(std::string_view bytes)
+std::optional<std::string> HashBytes(std::string_view bytes)
 {
     Sha256Hasher hasher;
     if (!hasher.Update(std::span{
@@ -285,6 +285,29 @@ std::filesystem::path CanonicalOrAbsolute(const std::filesystem::path& path,
 
 std::atomic<uint64_t> g_stagingNonce{0};
 
+std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::path& root)
+{
+    // Windows can merge an existing LocalAppData directory with package-private
+    // writes. A directory handle may report the read-side path; a newly created
+    // file identifies the actual writable parent without weakening ownership.
+    const auto probe = root / (L".cache-path-" + std::to_wstring(GetCurrentProcessId()) +
+                               L"-" + std::to_wstring(++g_stagingNonce));
+    HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return std::nullopt;
+    std::wstring physical(32768, L'\0');
+    const DWORD length = GetFinalPathNameByHandleW(file, physical.data(),
+        static_cast<DWORD>(physical.size()), FILE_NAME_NORMALIZED);
+    CloseHandle(file); // Deletes only this unique probe, including on failure.
+    if (!length || length >= physical.size()) return std::nullopt;
+    physical.resize(length);
+    std::error_code error;
+    auto resolved = std::filesystem::canonical(std::filesystem::path(physical).parent_path(), error);
+    if (error || resolved == resolved.root_path()) return std::nullopt;
+    return resolved;
+}
+
 bool MoveToInvalidDirectory(const std::filesystem::path& root,
                             const std::filesystem::path& source,
                             std::wstring_view prefix)
@@ -301,6 +324,11 @@ bool MoveToInvalidDirectory(const std::filesystem::path& root,
 }
 
 } // namespace
+
+std::optional<std::string> Sha256Bytes(std::string_view bytes)
+{
+    return HashBytes(bytes);
+}
 
 std::optional<std::string> Sha256File(const std::filesystem::path& path, std::stop_token stop)
 {
@@ -334,6 +362,9 @@ std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
     AppendField(canonical, "runtime", identity.runtimeDigest);
     AppendField(canonical, "quality", identity.quality);
     AppendField(canonical, "upscaling", identity.upscaling ? "1" : "0");
+    // Source identities and legacy callers retain their existing keys.
+    if (!identity.settingsDigest.empty())
+        AppendField(canonical, "settings", identity.settingsDigest);
     return Sha256Bytes(canonical).value_or(std::string{});
 }
 
@@ -396,7 +427,9 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
         ",\"feature18Created\":" + (manifest.feature18Created ? "true" : "false") +
         ",\"feature18ArmedBeforeCapture\":" +
             (manifest.feature18ArmedBeforeCapture ? "true" : "false") +
-        ",\"upscaling\":" + (manifest.upscaling ? "true" : "false") + "}\n";
+        ",\"upscaling\":" + (manifest.upscaling ? "true" : "false") +
+        (manifest.settingsDigest.empty() ? std::string{} :
+            ",\"settingsDigest\":\"" + JsonEscape(manifest.settingsDigest) + "\"") + "}\n";
 }
 
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes)
@@ -424,8 +457,14 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
         !ReadBoolField(cursor, "feature18Created", manifest.feature18Created) ||
         !ReadBoolField(cursor, "feature18ArmedBeforeCapture",
                        manifest.feature18ArmedBeforeCapture) ||
-        !ReadBoolField(cursor, "upscaling", manifest.upscaling, false) ||
-        !cursor.Expect('}') || !cursor.Finished()) return std::nullopt;
+        !ReadBoolField(cursor, "upscaling", manifest.upscaling, false)) return std::nullopt;
+    // Schema 3's only optional extension. Reject duplicate/unknown fields.
+    if (cursor.Expect(',') &&
+        !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest, false))
+        return std::nullopt;
+    if (!cursor.Expect('}') || !cursor.Finished() ||
+        (!manifest.settingsDigest.empty() && !IsHexDigest(manifest.settingsDigest)))
+        return std::nullopt;
 
     if (kind == "source") manifest.kind = NeuralCacheEntryKind::Source;
     else if (kind == "render") manifest.kind = NeuralCacheEntryKind::Render;
@@ -442,6 +481,7 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
 {
     if (manifest.state != NeuralCacheState::Complete || !CommonManifestFieldsValid(manifest))
         return false;
+    if (!manifest.settingsDigest.empty() && !IsHexDigest(manifest.settingsDigest)) return false;
     if (manifest.kind == NeuralCacheEntryKind::Source) {
         return IsHexDigest(manifest.sourceDigest) && manifest.neuralDigest.empty() &&
                !manifest.feature18Created;
@@ -476,6 +516,11 @@ NeuralCacheManager::NeuralCacheManager(std::filesystem::path root)
     root_ = CanonicalOrAbsolute(root, error);
     if (error || root_.empty() || root_ == root_.root_path() ||
         root_.parent_path().empty()) return;
+    std::filesystem::create_directories(root_, error);
+    if (error) return;
+    const auto writableRoot = ResolveWritableRoot(root_);
+    if (!writableRoot) return;
+    root_ = *writableRoot;
     std::filesystem::create_directories(root_ / L"sources", error);
     if (error) return;
     std::filesystem::create_directories(root_ / L"renders", error);
@@ -541,6 +586,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     const auto manifest = ParseNeuralCacheManifest(bytes);
     if (!manifest || manifest->kind != kind || !IsReusableNeuralCacheManifest(*manifest))
         return std::nullopt;
+    if (!manifest->settingsDigest.empty() &&
+        Sha256File(directory / L"neural-settings.ini") != manifest->settingsDigest)
+        return std::nullopt;
     const auto payload = directory /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
     const auto digest = Sha256File(payload);
@@ -578,6 +626,7 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         manifest.sourceDigest = *digest;
         manifest.neuralDigest.clear();
         manifest.runtimeDigest.clear();
+        manifest.settingsDigest.clear();
         manifest.nativeEvaluations = 0;
         manifest.verifiedNeuralFrames = 0;
         manifest.observedFeature18Evaluations = 0;
@@ -587,6 +636,8 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         manifest.neuralDigest = *digest;
     }
     if (!IsReusableNeuralCacheManifest(manifest)) return false;
+    if (!manifest.settingsDigest.empty() &&
+        Sha256File(staging / L"neural-settings.ini") != manifest.settingsDigest) return false;
     const auto manifestPath = staging / L"manifest.json";
     {
         std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);
@@ -648,6 +699,34 @@ bool NeuralCacheManager::Quarantine(const NeuralCacheEntry& entry)
     const auto parent = entry.directory.parent_path().filename();
     if (parent != L"sources" && parent != L"renders") return false;
     return MoveToInvalidDirectory(root_,entry.directory,L"invalid-cache");
+}
+
+bool NeuralCacheManager::Remove(NeuralCacheEntryKind kind, std::string_view key)
+{
+    if (!valid_ || !ValidKey(key)) return false;
+    const auto directory = root_ /
+        (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
+        std::wstring(key.begin(), key.end());
+    if (!OwnsPath(directory)) return false;
+    const DWORD attributes = GetFileAttributesW(directory.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return false;
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    return !error;
+}
+
+bool NeuralCacheManager::RemoveSource(std::string_view key)
+{
+    return Remove(NeuralCacheEntryKind::Source, key);
+}
+
+bool NeuralCacheManager::RemoveRender(std::string_view key)
+{
+    return Remove(NeuralCacheEntryKind::Render, key);
 }
 
 uintmax_t NeuralCacheManager::SizeBytes() const

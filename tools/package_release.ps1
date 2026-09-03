@@ -12,7 +12,7 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-if ($version -cne '0.12.0') { throw "This assembler is locked to release 0.12.0; VERSION is '$version'." }
+if ($version -cne '0.13.0') { throw "This assembler is locked to release 0.13.0; VERSION is '$version'." }
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -90,8 +90,8 @@ function Invoke-FreshReleaseBuild {
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
         ProductName = 'DLSS Video Player'
-        FileVersion = '0.12.0.0'
-        ProductVersion = '0.12.0.0'
+        FileVersion = '0.13.0.0'
+        ProductVersion = '0.13.0.0'
         OriginalFilename = 'DLSSVideoPlayer.exe'
     }
     foreach ($name in $expectedIdentity.Keys) {
@@ -111,7 +111,7 @@ function Invoke-FreshReleaseBuild {
         }
     }
 
-    Write-Host 'Fresh clean DLSSVideoPlayer 0.12.0.0 build verified.'
+    Write-Host 'Fresh clean DLSSVideoPlayer 0.13.0.0 build verified.'
 }
 
 function Assert-HashLock {
@@ -247,6 +247,11 @@ else {
         @('EXPERIMENTAL_RUNTIME_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\EXPERIMENTAL_RUNTIME_NOTICE.txt'))
     )
 }
+
+$sources += @(
+    @('docs/USAGE.md', (Join-Path $repositoryRoot 'docs\USAGE.md')),
+    @('docs/EXAMPLE_VIDEOS.md', (Join-Path $repositoryRoot 'docs\EXAMPLE_VIDEOS.md'))
+)
 
 foreach ($source in $sources) {
     if (-not (Test-Path -LiteralPath $source[1] -PathType Leaf)) { throw "Required package input is missing: $($source[1])" }

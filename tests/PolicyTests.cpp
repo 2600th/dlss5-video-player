@@ -1232,7 +1232,7 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
         CHECK_EQ(entry.command == app_menu::IDM_YOUTUBE_QUALITY_1080,
                  (entry.state & MFS_CHECKED) != 0);
     }
-    CHECK(!app_menu::YouTubeQualityForCommand(app_menu::IDM_QUALITY_AUTO).has_value());
+    CHECK(!app_menu::YouTubeQualityForCommand(330u /* removed legacy quality command */).has_value());
     CHECK(!app_menu::YouTubeQualityForCommand(414).has_value());
     CHECK(!app_menu::YouTubeQualityForCommand(415).has_value());
     if (menu) DestroyMenu(menu);
@@ -1396,10 +1396,8 @@ void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
 
 void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
 {
-    CHECK_EQ(size_t{6}, kExampleVideos.size());
+    CHECK_EQ(size_t{5}, kExampleVideos.size());
 
-    size_t games = 0;
-    size_t anime = 0;
     std::vector<std::wstring_view> urls;
     for (const ExampleVideo& example : kExampleVideos) {
         CHECK(!example.title.empty());
@@ -1408,23 +1406,17 @@ void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
         CHECK(IsSupportedYouTubeUrl(example.url));
         CHECK(std::find(urls.begin(), urls.end(), example.url) == urls.end());
         urls.push_back(example.url);
-        if (example.category == ExampleVideoCategory::Games) ++games;
-        if (example.category == ExampleVideoCategory::Anime) ++anime;
     }
-    CHECK_EQ(size_t{3}, games);
-    CHECK_EQ(size_t{3}, anime);
 
     Localizer localizer;
     const HMENU menu = app_menu::CreateMenuBar(localizer, true);
     CHECK(menu != nullptr);
     HMENU file = find_top_level_submenu(menu, L"File");
-    HMENU examples = find_top_level_submenu(file, L"Examples");
-    HMENU gamesMenu = find_top_level_submenu(examples, L"Games");
+    HMENU examples = find_top_level_submenu(file, L"Upcoming games");
     HMENU animeMenu = find_top_level_submenu(examples, L"Anime");
     CHECK(file != nullptr);
     CHECK(examples != nullptr);
-    CHECK(gamesMenu != nullptr);
-    CHECK(animeMenu != nullptr);
+    CHECK(animeMenu == nullptr);
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
     for (size_t index = 0; index < kExampleVideos.size(); ++index) {
@@ -1433,12 +1425,6 @@ void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
         CHECK(has_menu_entry(entries, kExampleVideos[index].title,
                              command));
     }
-    std::vector<MenuEntry> gameEntries;
-    std::vector<MenuEntry> animeEntries;
-    if (gamesMenu) collect_menu_entries(gamesMenu, gameEntries);
-    if (animeMenu) collect_menu_entries(animeMenu, animeEntries);
-    CHECK_EQ(size_t{3}, gameEntries.size());
-    CHECK_EQ(size_t{3}, animeEntries.size());
     CHECK(app_menu::ExampleVideoForCommand(app_menu::IDM_OPEN_YOUTUBE) == nullptr);
     if (menu) DestroyMenu(menu);
 }
@@ -3189,6 +3175,7 @@ void resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test()
         CHECK_EQ(ResolveError::None, result.error);
         CHECK_EQ(std::wstring(test.expected), result.mediaUrl);
         CHECK_EQ(std::wstring(test.expected), result.audioUrl);
+        CHECK_EQ(0.0, result.durationSeconds);
         CHECK(result.detail.empty());
         CHECK(result.mediaUrl.find(L'\r') == std::wstring::npos);
         CHECK(result.mediaUrl.find(L'\n') == std::wstring::npos);
@@ -3214,10 +3201,76 @@ void resolver_output_accepts_separate_https_video_and_audio_urls_test()
     CHECK(StableYouTubeStreamIdentity(
         L"https://v1.googlevideo.com/videoplayback?id=video",
         L"https://a1.googlevideo.com/videoplayback?id=audio").empty());
+    constexpr auto audio = L"https://a.googlevideo.com/videoplayback?itag=140";
+    for(const auto* hls : {
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/123/itag/270/signature/one/file/index.m3u8",
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/456/itag/270/signature/two/file/index.m3u8"}) {
+        CHECK_EQ(std::string("video-itag=270|audio-itag=140"),StableYouTubeStreamIdentity(hls,audio));
+    }
+    for(const auto* invalid : {
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/itag/not-a-number/file/index.m3u8",
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/itag/270/itag/271/file/index.m3u8",
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/itag//file/index.m3u8",
+        L"https://manifest.googlevideo.com/api/manifest/hls_playlist/itag/123456789/file/index.m3u8",
+        L"https://manifest.googlevideo.com/unrelated/itag/270/file/index.m3u8",
+        L"https://googlevideo.com.example.invalid/api/manifest/hls_playlist/itag/270/file/index.m3u8"}) {
+        CHECK(StableYouTubeStreamIdentity(invalid,audio).empty());
+    }
     CHECK_EQ(std::string("9lrThxCoznw"),
              CanonicalYouTubeVideoId(L"https://www.youtube.com/watch?v=9lrThxCoznw"));
     CHECK_EQ(std::string("9lrThxCoznw"),
              CanonicalYouTubeVideoId(L"https://youtu.be/9lrThxCoznw"));
+}
+
+void resolver_output_accepts_authoritative_duration_before_stream_urls_test()
+{
+    const std::array accepted{
+        std::pair{"duration=167;live_status=not_live\nhttps://v.googlevideo.com/video\n", 167.0},
+        std::pair{"duration=167.25;live_status=not_live\r\nhttps://v.googlevideo.com/video\r\nhttps://a.googlevideo.com/audio\r\n", 167.25},
+        std::pair{"duration=2592000;live_status=was_live\nhttps://v.googlevideo.com/video", 2592000.0},
+    };
+    for (const auto& [output, expectedDuration] : accepted) {
+        const auto result = ParseResolverOutput(output, 0);
+        CHECK(result.ok);
+        CHECK_EQ(ResolveError::None, result.error);
+        CHECK_EQ(std::wstring(L"https://v.googlevideo.com/video"), result.mediaUrl);
+        CHECK_EQ(expectedDuration, result.durationSeconds);
+    }
+}
+
+void resolver_output_rejects_invalid_duration_live_status_and_metadata_framing_test()
+{
+    const std::array rejectedMetadata{
+        "duration=;live_status=not_live", "duration=NA;live_status=not_live",
+        "duration=0;live_status=not_live", "duration=-1;live_status=not_live",
+        "duration=nan;live_status=not_live", "duration=inf;live_status=not_live",
+        "duration=1e309;live_status=not_live", "duration=2592001;live_status=not_live",
+        "duration=167seconds;live_status=not_live", "duration=167 ;live_status=not_live",
+        "duration= 167;live_status=not_live", "duration=+167;live_status=not_live",
+        "duration=167;live_status=is_live", "duration=167;live_status=is_upcoming",
+        "duration=167;live_status=post_live", "duration=167;live_status=NA",
+        "duration=167;live_status=not_live;extra=1", "duration=167",
+        "duration=167;live_status=not_live\nduration=167;live_status=not_live",
+        "duration=167;live_status=not_live\n", "duration=167;live_status=not_live\r\r",
+    };
+    for (const auto metadata : rejectedMetadata) {
+        const auto result = ParseResolverOutput(
+            std::string(metadata) + "\nhttps://v.googlevideo.com/video\n", 0);
+        CHECK(!result.ok);
+        CHECK_EQ(ResolveError::InvalidOutput, result.error);
+        CHECK(result.mediaUrl.empty());
+        CHECK(result.audioUrl.empty());
+        CHECK_EQ(0.0, result.durationSeconds);
+        CHECK(result.detail.find(L"http") == std::wstring::npos);
+        CHECK(result.detail.find(L"live_status") == std::wstring::npos);
+    }
+    CHECK(!ParseResolverOutput("duration=167;live_status=not_live\n", 0).ok);
+    CHECK(!ParseResolverOutput(
+        "duration=167;live_status=not_live\nhttps://untrusted.example/video\n", 0).ok);
+    CHECK(!ParseResolverOutput(
+        "https://v.googlevideo.com/video\nduration=167;live_status=not_live\n", 0).ok);
+    CHECK(!ParseResolverOutput(
+        "duration=167;live_status=not_live\nhttps://v.googlevideo.com/video\n\n", 0).ok);
 }
 
 void resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test()
@@ -3334,8 +3387,13 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"--js-runtimes",
         LR"(deno:C:\Program Files\DLSS Player\deno.exe)",
         L"-f",
-        L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]",
+        L"bv*[height=1080]+ba/b[height=1080]",
+        L"--format-sort-force",
+        L"-S",
+        L"height,vbr,abr",
         L"--get-url",
+        L"--print",
+        L"duration=%(duration)s;live_status=%(live_status)s",
         std::wstring(url),
     };
 
@@ -3347,13 +3405,13 @@ void youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fa
 {
     const std::array cases{
         std::pair{YouTubeSourceQuality::Auto,
-                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]/bv[height<=2160][ext=mp4]+ba[ext=m4a]/bv[height<=2160]+ba/b[height<=2160]")},
+                  std::wstring_view(L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]")},
         std::pair{YouTubeSourceQuality::P2160,
-                  std::wstring_view(L"bv[height=2160][ext=mp4]+ba[ext=m4a]/bv[height=2160]+ba/b[height=2160]")},
+                  std::wstring_view(L"bv*[height=2160]+ba/b[height=2160]")},
         std::pair{YouTubeSourceQuality::P1440,
-                  std::wstring_view(L"bv[height=1440][ext=mp4]+ba[ext=m4a]/bv[height=1440]+ba/b[height=1440]")},
+                  std::wstring_view(L"bv*[height=1440]+ba/b[height=1440]")},
         std::pair{YouTubeSourceQuality::P1080,
-                  std::wstring_view(L"bv[height=1080][ext=mp4]+ba[ext=m4a]/bv[height=1080]+ba/b[height=1080]")},
+                  std::wstring_view(L"bv*[height=1080]+ba/b[height=1080]")},
     };
     for (const auto& [quality, expected] : cases) {
         CHECK_EQ(expected, YouTubeFormatSelector(quality));
@@ -3399,6 +3457,76 @@ struct ResolverFixture {
     }
 };
 
+void youtube_bitrate_selection_uses_real_helper_without_network_test()
+{
+    const auto helpers = current_test_executable().parent_path();
+    const auto executable = helpers / L"yt-dlp.exe";
+    if (!std::filesystem::is_regular_file(executable)) {
+        std::cout << "SKIP: bitrate selection requires the staged yt-dlp helper.\n";
+        return;
+    }
+    ResolverFixture fixture;
+    const auto metadata = fixture.directory / L"formats.info.json";
+    const auto selected = fixture.directory / L"selected.txt";
+    const std::string audio = R"({"format_id":"140","url":"https://example.invalid/aac","ext":"m4a","vcodec":"none","acodec":"mp4a.40.2","abr":128},
+        {"format_id":"251","url":"https://example.invalid/opus","ext":"webm","vcodec":"none","acodec":"opus","abr":160})";
+    const std::string p1080 = R"({"format_id":"av1","url":"https://example.invalid/av1","ext":"mp4","height":1080,"width":1920,"fps":60,"vcodec":"av01","acodec":"none","vbr":1555,"quality":10,"preference":10},
+        {"format_id":"avc","url":"https://example.invalid/avc","ext":"mp4","height":1080,"width":1920,"fps":30,"vcodec":"avc1","acodec":"none","vbr":4000},
+        {"format_id":"vp9","url":"https://example.invalid/vp9","ext":"webm","height":1080,"width":1920,"fps":30,"vcodec":"vp9","acodec":"none","vbr":6000},
+        {"format_id":"unknown","url":"https://example.invalid/unknown","ext":"mp4","height":1080,"width":1920,"fps":60,"vcodec":"av01","acodec":"none","quality":99,"preference":99})";
+    const std::string others = R"({"format_id":"720","url":"https://example.invalid/720","ext":"mp4","height":720,"width":1280,"vcodec":"avc1","acodec":"none","vbr":20000},
+        {"format_id":"1440av1","url":"https://example.invalid/1440av1","ext":"mp4","height":1440,"width":2560,"vcodec":"av01","acodec":"none","vbr":5000},
+        {"format_id":"1440avc","url":"https://example.invalid/1440avc","ext":"mp4","height":1440,"width":2560,"vcodec":"avc1","acodec":"none","vbr":8000},
+        {"format_id":"2160av1","url":"https://example.invalid/2160av1","ext":"mp4","height":2160,"width":3840,"vcodec":"av01","acodec":"none","vbr":7000},
+        {"format_id":"2160vp9","url":"https://example.invalid/2160vp9","ext":"webm","height":2160,"width":3840,"vcodec":"vp9","acodec":"none","vbr":12000})";
+    auto checkSelection = [&](YouTubeSourceQuality quality, const std::string& video,
+                              std::string_view expected) {
+        write_binary_file(metadata, "{\"id\":\"fixture\",\"title\":\"Offline formats\",\"duration\":10,\"extractor\":\"youtube\",\"formats\":[" + audio + "," + video + "]}");
+        std::filesystem::remove(selected);
+        auto args = BuildYouTubeResolverArguments(helpers, L"https://youtu.be/fixture", quality);
+        // Keep production selection arguments; substitute an offline catalog for
+        // the network URL and print only the selected format IDs.
+        args.erase(std::find(args.begin(), args.end(), L"--get-url"), args.end());
+        args.insert(args.end(), {L"--simulate", L"--no-check-formats", L"--quiet",
+            L"--load-info-json", metadata.wstring(), L"--print-to-file",
+            L"%(format_id)s", selected.wstring()});
+        std::wstring command = QuoteWindowsArgument(executable.wstring());
+        for (const auto& arg : args) command += L" " + QuoteWindowsArgument(arg);
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION process{};
+        const bool started = CreateProcessW(executable.c_str(), command.data(), nullptr,
+            nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process) != FALSE;
+        CHECK(started);
+        if (!started) return;
+        CloseHandle(process.hThread);
+        const DWORD wait = WaitForSingleObject(process.hProcess, 30000);
+        CHECK_EQ(DWORD{WAIT_OBJECT_0}, wait);
+        if (wait != WAIT_OBJECT_0) {
+            TerminateProcess(process.hProcess, 1);
+            WaitForSingleObject(process.hProcess, 2000);
+        }
+        DWORD code = 1;
+        GetExitCodeProcess(process.hProcess, &code);
+        CloseHandle(process.hProcess);
+        if (expected.empty()) { CHECK(code != 0); return; }
+        CHECK_EQ(DWORD{0}, code);
+        std::ifstream input(selected, std::ios::binary);
+        std::string actual;
+        std::getline(input, actual);
+        if (!actual.empty() && actual.back() == '\r') actual.pop_back();
+        if (actual != expected) std::cerr << "Selected " << actual << "; expected " << expected << '\n';
+        CHECK_EQ(expected, actual);
+    };
+    checkSelection(YouTubeSourceQuality::P1080, p1080 + "," + others, "vp9+251");
+    checkSelection(YouTubeSourceQuality::P1440, p1080 + "," + others, "1440avc+251");
+    checkSelection(YouTubeSourceQuality::P2160, p1080 + "," + others, "2160vp9+251");
+    checkSelection(YouTubeSourceQuality::Auto, p1080 + "," + others, "vp9+251");
+    checkSelection(YouTubeSourceQuality::Auto, others, "2160vp9+251");
+    checkSelection(YouTubeSourceQuality::P1080, others, "");
+    checkSelection(YouTubeSourceQuality::P1080, p1080 + R"(,
+        {"format_id":"combined","url":"https://example.invalid/combined","ext":"mp4","height":1080,"width":1920,"vcodec":"avc1","acodec":"mp4a.40.2","vbr":7000,"abr":128})", "combined");
+}
+
 std::wstring read_environment_variable(std::wstring_view name)
 {
     const DWORD needed = GetEnvironmentVariableW(name.data(), nullptr, 0);
@@ -3443,6 +3571,31 @@ struct MediaFixture {
     }
     ~MediaFixture(){std::error_code error;std::filesystem::remove_all(directory,error);CHECK(!error);}
 };
+
+void video_decoder_prefers_video_duration_tag_over_longer_container_test()
+{
+    MediaFixture fixture;
+    const std::array cases{
+        std::pair{L"durationtag_valid", 1.0},
+        std::pair{L"durationtag_fractional", 3723.25},
+        std::pair{L"durationtag_missing", 3.0},
+        std::pair{L"durationtag_badminute", 3.0},
+        std::pair{L"durationtag_badsecond", 3.0},
+        std::pair{L"durationtag_negative", 3.0},
+        std::pair{L"durationtag_nonfinite", 3.0},
+        std::pair{L"durationtag_trailing", 3.0},
+        std::pair{L"durationtag_overflow", 3.0},
+        std::pair{L"durationtag_zero", 3.0},
+        std::pair{L"durationtag_mp4", 1.25},
+    };
+    for (const auto& [scenario, expectedDuration] : cases) {
+        auto decoder = VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(std::wstring(L"https://media.invalid/") + scenario,
+                                      MediaSourceKind::YouTube));
+        CHECK_EQ(expectedDuration, decoder->DurationSeconds());
+        decoder->Close();
+    }
+}
 
 void youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test()
 {
@@ -4001,7 +4154,25 @@ void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_
              result.mediaUrl);
     CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=success-audio"),
              result.audioUrl);
+    CHECK_EQ(167.0, result.durationSeconds);
     CHECK(result.detail.empty());
+}
+
+void youtube_resolver_requires_duration_metadata_before_acquisition_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    for (const auto url : {L"https://youtu.be/missingduration",
+                           L"https://youtu.be/unknownduration",
+                           L"https://youtu.be/liveduration"}) {
+        const auto result = resolver->Resolve(url, {});
+        CHECK(!result.ok);
+        CHECK_EQ(ResolveError::InvalidOutput, result.error);
+        CHECK(result.mediaUrl.empty());
+        CHECK(result.audioUrl.empty());
+        CHECK_EQ(0.0, result.durationSeconds);
+        CHECK(result.detail.find(L"http") == std::wstring::npos);
+    }
 }
 
 void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test()
@@ -4142,6 +4313,25 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     const std::wstring name=current_test_executable().filename().wstring();std::wstring all;
     for(int index=1;index<argc;++index){all+=L" ";all+=argv[index];}
     if(_wcsicmp(name.c_str(),L"ffprobe.exe")==0){
+        if(all.find(L"durationtag_")!=std::wstring::npos){
+            std::cout << "width=2\nheight=2\navg_frame_rate=30/1\nr_frame_rate=30/1\n";
+            std::cout << (all.find(L"durationtag_mp4")!=std::wstring::npos ? "duration=1.25\n" : "duration=N/A\n");
+            if(all.find(L"stream_tags=DURATION")!=std::wstring::npos){
+                std::string_view tag = "N/A";
+                if(all.find(L"durationtag_valid")!=std::wstring::npos)tag="00:00:01.000000000";
+                else if(all.find(L"durationtag_fractional")!=std::wstring::npos)tag="01:02:03.250000000";
+                else if(all.find(L"durationtag_badminute")!=std::wstring::npos)tag="00:60:01.0";
+                else if(all.find(L"durationtag_badsecond")!=std::wstring::npos)tag="00:00:60.0";
+                else if(all.find(L"durationtag_negative")!=std::wstring::npos)tag="00:00:-1.0";
+                else if(all.find(L"durationtag_nonfinite")!=std::wstring::npos)tag="00:00:nan";
+                else if(all.find(L"durationtag_trailing")!=std::wstring::npos)tag="00:00:01.0junk";
+                else if(all.find(L"durationtag_overflow")!=std::wstring::npos)tag="999999999999999999999999999999:00:01.0";
+                else if(all.find(L"durationtag_zero")!=std::wstring::npos)tag="00:00:00.000000000";
+                std::cout << "TAG:DURATION=" << tag << '\n';
+            }
+            std::cout << "duration=3.000\n" << std::flush;
+            return 0;
+        }
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
         if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
         if(all.find(L"drainexit")!=std::wstring::npos){std::cout<<"width=1920\nheight=1080\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.034\n"<<std::flush;return 0;}
@@ -4216,7 +4406,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             }
         }
     }
-    if (argc != 12 || std::wstring_view(argv[1]) != L"--no-config" ||
+    if (argc != 17 || std::wstring_view(argv[1]) != L"--no-config" ||
         std::wstring_view(argv[2]) != L"--no-cache-dir" ||
         std::wstring_view(argv[3]) != L"--no-plugin-dirs" ||
         std::wstring_view(argv[4]) != L"--no-playlist" ||
@@ -4225,7 +4415,12 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         !std::wstring_view(argv[7]).starts_with(L"deno:") ||
         std::wstring_view(argv[8]) != L"-f" ||
         std::wstring_view(argv[9]) != YouTubeFormatSelector(YouTubeSourceQuality::Auto) ||
-        std::wstring_view(argv[10]) != L"--get-url") {
+        std::wstring_view(argv[10]) != L"--format-sort-force" ||
+        std::wstring_view(argv[11]) != L"-S" ||
+        std::wstring_view(argv[12]) != L"height,vbr,abr" ||
+        std::wstring_view(argv[13]) != L"--get-url" ||
+        std::wstring_view(argv[14]) != L"--print" ||
+        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -4237,7 +4432,21 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         return 92;
     }
 
-    const std::wstring_view url = argv[11];
+    const std::wstring_view url = argv[16];
+    if (url.find(L"missingduration") != std::wstring_view::npos) {
+        std::cout << "https://r1.googlevideo.com/videoplayback?id=duration-missing\n" << std::flush;
+        return 0;
+    }
+    if (url.find(L"unknownduration") != std::wstring_view::npos) {
+        std::cout << "duration=NA;live_status=not_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=duration-unknown\n" << std::flush;
+        return 0;
+    }
+    if (url.find(L"liveduration") != std::wstring_view::npos) {
+        std::cout << "duration=167;live_status=is_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=duration-live\n" << std::flush;
+        return 0;
+    }
     if (url.find(L"envcapture") != std::wstring_view::npos) {
         const std::filesystem::path expectedCache =
             current_test_executable().parent_path() / L"youtube-helper-cache";
@@ -4249,7 +4458,8 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
             return 95;
         }
         write_binary_file(expectedCache / L"resolver-envcapture.marker", "package-local");
-        std::cout << "https://r1.googlevideo.com/videoplayback?id=envcapture\n" << std::flush;
+        std::cout << "duration=167;live_status=not_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=envcapture\n" << std::flush;
         return 0;
     }
     const size_t symlinkAttack = url.find(L"symlinkattack_");
@@ -4258,17 +4468,20 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         const std::filesystem::path marker = std::filesystem::temp_directory_path() /
             (L"PolicyTests-resolver-symlink-executed-" + suffix + L".marker");
         write_binary_file(marker, "executed");
-        std::cout << "https://r1.googlevideo.com/videoplayback?id=symlink\n" << std::flush;
+        std::cout << "duration=167;live_status=not_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=symlink\n" << std::flush;
         return 0;
     }
     if (url.find(L"success") != std::wstring_view::npos) {
-        std::cout << "https://r1.googlevideo.com/videoplayback?id=success\n"
+        std::cout << "duration=167;live_status=not_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=success\n"
                      "https://r1.googlevideo.com/videoplayback?id=success-audio\n" << std::flush;
         return 0;
     }
     if (url.find(L"uismoke") != std::wstring_view::npos) {
         write_binary_file(current_test_executable().parent_path()/L"ui-helper-launch.marker","launched");
-        std::cout << "https://r1.googlevideo.com/videoplayback?id=uismoke\n" << std::flush;
+        std::cout << "duration=167;live_status=not_live\n"
+                     "https://r1.googlevideo.com/videoplayback?id=uismoke\n" << std::flush;
         return 0;
     }
     if (url.find(L"nonzero") != std::wstring_view::npos) return 7;
@@ -4841,6 +5054,7 @@ int wmain(int argc, wchar_t* argv[])
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
     if (argc > 1) return run_fake_resolver_child(argc, argv);
     harness_sanity_test();
+    youtube_bitrate_selection_uses_real_helper_without_network_test();
     runtime_shutdown_releases_player_before_media_foundation_and_com_test();
     release_package_filename_policy_is_allowlisted_and_fail_closed_test();
     public_release_package_policy_excludes_private_and_optional_binaries_test();
@@ -4897,6 +5111,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test();
     youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test();
     youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
+    video_decoder_prefers_video_duration_tag_over_longer_container_test();
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
@@ -4981,6 +5196,8 @@ int wmain(int argc, wchar_t* argv[])
     youtube_url_validation_enforces_exact_2048_character_boundary_test();
     resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test();
     resolver_output_accepts_separate_https_video_and_audio_urls_test();
+    resolver_output_accepts_authoritative_duration_before_stream_urls_test();
+    resolver_output_rejects_invalid_duration_live_status_and_metadata_framing_test();
     resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
     resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test();
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
@@ -4988,6 +5205,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
     youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
+    youtube_resolver_requires_duration_metadata_before_acquisition_test();
     youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
     youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();
     youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test();

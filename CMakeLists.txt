@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.12.0 LANGUAGES CXX RC)
+project(DLSSVideoPlayer VERSION 0.13.0 LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -57,6 +57,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/YouTubeResolver.cpp
     src/YouTubeResolver.h
     src/ExampleVideos.h
+    src/RecentMedia.cpp
+    src/RecentMedia.h
     src/CompletionRegistry.h
     src/NetworkMediaTransaction.h
     src/NeuralCache.cpp
@@ -139,6 +141,20 @@ if(EXISTS "${YOUTUBE_STAGED_DIR}/yt-dlp.exe" AND EXISTS "${YOUTUBE_STAGED_DIR}/d
 endif()
 
 if(BUILD_TESTING)
+    add_executable(RecentMediaTests tests/RecentMediaTests.cpp src/RecentMedia.cpp)
+    add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp)
+    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp)
+    foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests)
+        target_include_directories(${test_target} PRIVATE src)
+        target_compile_definitions(${test_target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+        target_compile_options(${test_target} PRIVATE /W4 /permissive- /EHsc)
+    endforeach()
+    target_link_libraries(RecentMediaTests PRIVATE user32)
+    target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
+    target_link_libraries(CachedExportTests PRIVATE shell32)
+    add_test(NAME RecentMediaTests COMMAND RecentMediaTests)
+    add_test(NAME RenderSettingsTests COMMAND RenderSettingsTests)
+    add_test(NAME CachedExportTests COMMAND CachedExportTests "${FFMPEG_STAGED_DIR}")
     add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
         src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
         src/VideoDecoder.cpp src/RuntimePolicy.cpp src/UiLayout.cpp)

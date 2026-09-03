@@ -13,4 +13,4 @@ if exist "DLSSVideoPlayer.exe" (
   set "EXE=build\Release\DLSSVideoPlayer.exe"
 )
 if not exist "%EXE%" exit /b 1
-start "" "%EXE%" --quality auto %*
+start "" "%EXE%" %*

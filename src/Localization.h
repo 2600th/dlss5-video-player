@@ -21,7 +21,6 @@ private:
         static const Map strings = {
             {L"app.title", L"DLSS Video Player"},
             {L"menu.file", L"File"}, {L"menu.open", L"Open file\tCtrl+O"}, {L"menu.open_youtube", L"Open YouTube URL\u2026\tCtrl+L"}, {L"menu.exit", L"Exit"},
-            {L"menu.examples", L"Examples"}, {L"menu.examples_games", L"Games"}, {L"menu.examples_anime", L"Anime"},
             {L"menu.playback", L"Playback"}, {L"menu.playpause", L"Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)"}, {L"menu.stop", L"Stop\tS"},
             {L"menu.back10", L"Back 10 s\tLeft"}, {L"menu.forward10", L"Forward 10 s\tRight"}, {L"menu.mute", L"Mute\tM"},
             {L"menu.video", L"Video"}, {L"menu.aspectfit", L"Original aspect ratio (Fit)\tA"}, {L"menu.aspectfill", L"Fill without stretching (Crop)"},
@@ -34,7 +33,7 @@ private:
         {L"menu.dlss_upscaling", L"DLSS Upscaling"},
             {L"menu.frame_generation_unavailable", L"Frame Generation\tUnavailable in this build"},
             {L"menu.rehook", L"Recreate NGX / re-hook DLSS 5\tF6"},
-            {L"menu.depthmode", L"Estimated / flat depth proxy\tG"}, {L"menu.quality", L"Mode / quality"}, {L"menu.quality_auto", L"Auto (realtime recommended)"},
+            {L"menu.depthmode", L"Estimated / flat depth proxy\tG"},
             {L"menu.advanced", L"Advanced"}, {L"menu.safe_mode", L"Restart in DLSS SR safe mode"},
             {L"menu.clear_neural_cache", L"Clear Neural Cache"},
             {L"neural.phase.cache", L"Checking saved video"},
