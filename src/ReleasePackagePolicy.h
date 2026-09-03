@@ -31,7 +31,7 @@ inline bool IsAllowedPath(std::wstring_view path)
     const std::wstring normalized = NormalizePath(path);
     if (!IsSafeRelativePath(normalized)) return false;
 
-    static constexpr std::array<std::wstring_view, 40> allowed = {
+    static constexpr std::array<std::wstring_view, 42> allowed = {
         L"dlssvideoplayer.exe", L"nvngx_dlss.dll", L"neural-runtime/neuralworker.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe", L"deno.exe",
         L"neural-runtime/dxgi.dll", L"neural-runtime/reshade.ini", L"neural-runtime/reshadepreset.ini", L"neural-runtime/renodx-dlss5.addon64",
         L"neural-runtime/nvngx_dlss.dll", L"neural-runtime/nvngx_dlssnr.dll", L"neural-runtime/sl.common.dll", L"neural-runtime/sl.dlss.dll",
@@ -43,7 +43,7 @@ inline bool IsAllowedPath(std::wstring_view path)
         L"third_party_licenses/yt-dlp-2026.08.19.txt", L"third_party_licenses/deno-2.9.5.txt",
         L"third_party_licenses/ffmpeg.txt", L"third_party_licenses/experimental-runtime.txt",
         L"third_party_licenses/dlss5-feeder-mit.txt", L"third_party_licenses/tabler-mit.txt",
-        L"docs/related_projects.md"
+        L"docs/related_projects.md", L"docs/usage.md", L"docs/example_videos.md"
     };
     return std::find(allowed.begin(), allowed.end(), normalized) != allowed.end();
 }
@@ -53,14 +53,15 @@ inline bool IsAllowedPublicPath(std::wstring_view path)
     const std::wstring normalized = NormalizePath(path);
     if (!IsSafeRelativePath(normalized)) return false;
 
-    static constexpr std::array<std::wstring_view, 17> allowed = {
+    static constexpr std::array<std::wstring_view, 20> allowed = {
         L"dlssvideoplayer.exe", L"nvngx_dlss.dll", L"readme.md", L"license",
         L"security.md", L"contributing.md", L"changelog.md", L"third_party.md",
         L"public_release_notice.txt", L"package_manifest.txt",
         L"third_party_licenses/nvidia-dlss-sdk.txt",
         L"third_party_licenses/tabler-mit.txt", L"docs/architecture.md",
         L"docs/building.md", L"docs/dlss5_setup.md", L"docs/related_projects.md",
-        L"docs/troubleshooting.md"
+        L"docs/troubleshooting.md", L"docs/usage.md", L"docs/example_videos.md",
+        L"third_party_licenses/dlss5-feeder-mit.txt"
     };
     return std::find(allowed.begin(), allowed.end(), normalized) != allowed.end();
 }

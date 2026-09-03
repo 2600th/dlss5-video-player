@@ -31,6 +31,31 @@ struct PlayerAppTestAccess {
     static void Run()
     {
         PlayerApp app(AppOptions{});
+        // Saved playback choices must survive a reload, with invalid volume clamped.
+        app.m_volume = 0.35f; app.m_muted = true; app.m_fill = true;
+        app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
+        app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
+        const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
+        app.m_cacheRoot=savedCacheRoot;
+        app.SaveVideoSettings();
+        app.m_cacheRoot.clear();
+        app.m_volume = 1.0f; app.m_muted = false; app.m_fill = false;
+        app.m_neuralRequested = true; app.m_upscaleTargetHeight = 1440;
+        app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_cacheRoot,savedCacheRoot);
+        CHECK(std::abs(app.m_volume - 0.35f) < 0.001f);
+        CHECK(app.m_muted && app.m_fill && !app.m_neuralRequested);
+        CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
+        CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
+        app.WriteIniFloat(L"Playback", L"Volume", 2.0f);
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_volume, 1.0f);
+        app.m_muted = false; app.m_fill = false; app.m_neuralRequested = true;
+        app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
+        app.m_cacheRoot.clear();
+        WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,app.SettingsPath().c_str());
+        app.SaveVideoSettings();
         WNDCLASSW windowClass{};
         windowClass.lpfnWndProc = DefWindowProcW;
         windowClass.hInstance = GetModuleHandleW(nullptr);
@@ -43,6 +68,75 @@ struct PlayerAppTestAccess {
         CHECK(app.m_hwnd != nullptr);
         CHECK(app.m_uiResources.Load(GetModuleHandleW(nullptr)));
         app.UpdateFontsForDpi(96);
+
+        // Old source policies must request a fresh resolution; current sources
+        // must reach decoding instead of being rejected by the policy gate.
+        const auto policyRoot=app.SettingsPath().parent_path()/L"bitrate-policy-cache";
+        app.m_cacheRoot=policyRoot;
+        {
+            NeuralCacheManager cache(policyRoot);
+            const std::string key(64,'c');
+            for(const auto& policy : {"source-complete-v4", "source-complete-v5-highest-bitrate"}) {
+                cache.RemoveSource(key);
+                const auto staging=cache.BeginSourceStaging(key);
+                CHECK(staging.has_value());
+                if(!staging)continue;
+                {std::ofstream payload(*staging/L"source.mkv",std::ios::binary);payload<<"policy fixture";}
+                NeuralCacheManifest manifest{};manifest.encoder=policy;
+                manifest.width=1920;manifest.height=1080;manifest.frameCount=1;manifest.duration100ns=333333;
+                CHECK(cache.PromoteSource(key,*staging,manifest));
+                app.StartNeuralJob(L"https://youtu.be/VQRLujxTm3c",{},L"Policy fixture",
+                    L"https://youtu.be/VQRLujxTm3c",MediaSourceKind::YouTube,YouTubeSourceQuality::P1080,key);
+                if(app.m_neuralWorker.joinable())app.m_neuralWorker.join();
+                MSG message{};
+                const bool posted=PeekMessageW(&message,app.m_hwnd,WM_NEURAL_COMPLETE,WM_NEURAL_COMPLETE,PM_REMOVE)!=FALSE;
+                CHECK(posted);
+                if(posted){
+                    auto completion=app.m_neuralCompletions.Take(static_cast<uint64_t>(message.wParam));
+                    CHECK(completion!=nullptr);
+                    if(completion)CHECK_EQ(std::string_view(policy)=="source-complete-v4",completion->cachedSourceUnavailable);
+                }
+                app.CancelNeuralJob(false);
+                CHECK(cache.RemoveSource(key));
+            }
+        }
+        app.m_cacheRoot.clear();
+        std::filesystem::remove_all(policyRoot);
+
+        const auto recentFile=app.SettingsPath().parent_path()/L"recent-regression.dat";
+        app.m_recent=std::make_unique<RecentMediaHistory>(recentFile);
+        NeuralJobCompletion remembered{};remembered.sourceKind=MediaSourceKind::YouTube;
+        remembered.pageUrl=L"https://www.youtube.com/watch?v=VQRLujxTm3c";
+        remembered.displayTitle=L"Trailer & comparison";remembered.sourceQuality=YouTubeSourceQuality::P1080;
+        remembered.sourceKey=std::string(64,'a');remembered.renderKey=std::string(64,'b');
+        app.RecordRecent(remembered);
+        CHECK_EQ(app.m_recent->Entries().size(),size_t{1});
+        remembered.sourceKey.clear();remembered.renderKey.clear();
+        app.RecordRecent(remembered,true);
+        CHECK_EQ(app.m_recent->Entries().front().renderKey,std::string(64,'b'));
+        remembered.sourceQuality=YouTubeSourceQuality::P2160;
+        app.RecordRecent(remembered,true);
+        CHECK(app.m_recent->Entries().front().sourceKey.empty());
+        CHECK(app.m_recent->Entries().front().renderKey.empty());
+        CHECK((GetMenuState(GetMenu(app.m_hwnd),IDM_RECENT_VIDEO_FIRST,MF_BYCOMMAND)&MF_GRAYED)==0);
+        app.m_neuralLifecycle.Begin();app.UpdateRecentMenu();
+        CHECK((GetMenuState(GetMenu(app.m_hwnd),IDM_RECENT_VIDEO_FIRST,MF_BYCOMMAND)&MF_GRAYED)!=0);
+        app.m_neuralLifecycle.Invalidate();
+        // Opening the same example must take the owned source-cache path before
+        // starting the network resolver. A missing cache falls back later.
+        remembered.sourceQuality=YouTubeSourceQuality::P1080;
+        remembered.sourceKey=std::string(64,'a');remembered.renderKey=std::string(64,'b');
+        app.RecordRecent(remembered);
+        app.m_youtubeSourceQuality=YouTubeSourceQuality::P1080;
+        app.m_opt.neuralAddonConfigured=true;
+        app.ActivateExampleVideo(kExampleVideos[0]);
+        CHECK(app.NeuralJobActive());
+        CHECK(!app.m_youtubeLifecycle.IsResolving());
+        app.CancelNeuralJob(false);app.CancelYouTubeResolution(false);
+        app.m_neuralProgress={};app.m_pendingNeuralTitle.clear();
+        app.m_opt.neuralAddonConfigured=false;app.m_youtubeSourceQuality=YouTubeSourceQuality::Auto;
+        app.m_recent.reset();app.m_pendingCacheEvictions.clear();
+        std::filesystem::remove(recentFile);
 
         // This must remain a synchronized neural/original comparison, never an
         // ambiguous label for runtime Super Resolution.
@@ -70,7 +164,7 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_NEURAL_RENDERING);
         app.HandleCommand(IDM_DLSS_UPSCALING);
         app.HandleCommand(IDM_FRAME_GENERATION);
-        app.HandleCommand(IDM_QUALITY_PERFORMANCE);
+        app.HandleCommand(333); // Removed legacy quality command remains inert.
         CHECK(app.m_neuralRequested);
         CHECK_EQ(initialQualityExplicit, app.m_opt.qualityExplicit);
         CHECK_EQ(initialQuality, app.m_opt.quality);

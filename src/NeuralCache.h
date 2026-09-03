@@ -28,6 +28,7 @@ struct NeuralCacheIdentity {
     std::string runtimeDigest;
     std::string quality;
     bool upscaling{};
+    std::string settingsDigest;
 };
 
 struct NeuralCacheManifest {
@@ -48,6 +49,9 @@ struct NeuralCacheManifest {
     bool feature18Created{};
     bool feature18ArmedBeforeCapture{};
     bool upscaling{};
+    // Empty for legacy schema-3 entries; present renders also authenticate
+    // neural-settings.ini alongside the encoded payload.
+    std::string settingsDigest;
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;
 };
@@ -60,6 +64,7 @@ struct NeuralCacheEntry {
 
 std::optional<std::string> Sha256File(const std::filesystem::path& path,
                                       std::stop_token stop = {});
+std::optional<std::string> Sha256Bytes(std::string_view bytes);
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity);
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
@@ -86,6 +91,10 @@ public:
                        NeuralCacheManifest manifest);
     bool MarkInvalid(const std::filesystem::path& staging);
     bool Quarantine(const NeuralCacheEntry& entry);
+    // Removes only this exact owned cache entry. Missing entries succeed.
+    // Callers must first release playback/jobs referencing the entry.
+    bool RemoveSource(std::string_view key);
+    bool RemoveRender(std::string_view key);
     uintmax_t SizeBytes() const;
     bool Clear();
 
@@ -99,6 +108,7 @@ private:
                                            std::string_view key) const;
     bool Promote(NeuralCacheEntryKind kind, std::string_view key,
                  const std::filesystem::path& staging, NeuralCacheManifest manifest);
+    bool Remove(NeuralCacheEntryKind kind, std::string_view key);
 
     std::filesystem::path root_;
     bool valid_{false};

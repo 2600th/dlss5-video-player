@@ -7,6 +7,7 @@
 #include <cwchar>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
@@ -550,6 +551,65 @@ WriteResult WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_vi
 }
 
 } // namespace
+
+std::string SnapshotNeuralAddonSettings(std::string_view ini)
+{
+    const auto addon = ParseAndUpdate(ini, kNeuralAddonCanonical, false);
+    if (addon.malformed) throw std::invalid_argument(addon.error);
+    std::map<std::string, std::string> settings;
+    bool inNeuralSection = false;
+    bool foundSection = false;
+    const auto lines = SplitLines(ini);
+    for (size_t index = 0; index < lines.size(); ++index) {
+        const auto& line = lines[index];
+        const auto content = Trim(StripUtf8Bom(
+            ini.substr(line.begin, line.contentEnd - line.begin), index == 0));
+        // Same comment and exact-case key rules as ReShade 6.8 ini_file::load.
+        if (content.empty() || content.front() == ';' || content.front() == '/' ||
+            content.front() == '#') continue;
+        if (IsAnySection(content, false)) {
+            inNeuralSection = IsSection(content, kNeuralSettingsSection, false);
+            if (inNeuralSection && foundSection)
+                throw std::invalid_argument("INI contains duplicate [RenoDX.DLSS5] sections");
+            foundSection = foundSection || inNeuralSection;
+            continue;
+        }
+        if (!inNeuralSection) continue;
+        const auto equals = content.find('=');
+        const auto key = Trim(content.substr(0, equals));
+        const auto value = equals == std::string_view::npos
+            ? std::string_view{} : Trim(content.substr(equals + 1));
+        if (!settings.emplace(std::string(key), std::string(value)).second)
+            throw std::invalid_argument("[RenoDX.DLSS5] contains duplicate " +
+                                        std::string(key) + " keys");
+    }
+    // Values remain exact: do not guess numeric/default equivalence or discard
+    // unrecognized tuning keys. RenoDX's defaults are covered by runtimeDigest.
+    std::string result = "[ADDON]\nDisabledAddons=";
+    if (!addon.addonEnabled) result.append(kNeuralAddonCanonical);
+    result.append("\n[RenoDX.DLSS5]\n");
+    for (const auto& [key, value] : settings)
+        result.append(key).append("=").append(value).append("\n");
+    return result;
+}
+
+std::optional<std::string> ReadNeuralAddonSettingsSnapshot(
+    const std::filesystem::path& iniPath, std::wstring* error)
+{
+    if (error) error->clear();
+    const auto read = ReadIniFile(iniPath);
+    if (!read.ok) {
+        if (error) *error = read.error;
+        return std::nullopt;
+    }
+    try {
+        return SnapshotNeuralAddonSettings(read.content);
+    } catch (const std::invalid_argument& exception) {
+        const std::string detail = exception.what();
+        if (error) error->assign(detail.begin(), detail.end());
+        return std::nullopt;
+    }
+}
 
 std::string UpdateDisabledAddonsIni(std::string_view ini, std::string_view addonName, bool disabled)
 {

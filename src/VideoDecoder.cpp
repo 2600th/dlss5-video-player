@@ -7,12 +7,14 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <charconv>
 #include <vector>
 #include <iterator>
 #include <cstring>
 #include <thread>
 #include <utility>
 #include <system_error>
+#include <string_view>
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -38,6 +40,29 @@ static bool ParseRate(const std::string& text, double& out) {
         if (std::isfinite(v) && v > 0.0) { out = v; return true; }
     } catch (...) {}
     return false;
+}
+
+static bool ParseDurationTag(std::string_view text, double& out) {
+    const size_t first = text.find(':');
+    const size_t second = first == std::string_view::npos ? first : text.find(':', first + 1);
+    if (first == std::string_view::npos || second == std::string_view::npos) return false;
+    const auto parseUnsigned = [](std::string_view value, uint64_t& number) {
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
+        return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
+    };
+    uint64_t hours = 0, minutes = 0;
+    if (!parseUnsigned(text.substr(0, first), hours) ||
+        !parseUnsigned(text.substr(first + 1, second - first - 1), minutes) || minutes >= 60)
+        return false;
+    const auto secondsText = text.substr(second + 1);
+    double seconds = 0.0;
+    const auto parsed = std::from_chars(secondsText.data(), secondsText.data() + secondsText.size(), seconds);
+    const double total = double(hours) * 3600.0 + double(minutes) * 60.0 + seconds;
+    if (parsed.ec != std::errc{} || parsed.ptr != secondsText.data() + secondsText.size() ||
+        !std::isfinite(seconds) || seconds < 0.0 || seconds >= 60.0 ||
+        !(total > 0.0 && total < double(INT64_MAX) / 10000000.0)) return false;
+    out = total;
+    return true;
 }
 
 VideoDecoder::~VideoDecoder() { Close(); }
@@ -271,7 +296,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:format=duration "
+        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -284,6 +309,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
 
     uint32_t width = 0, height = 0;
     double avgRate = 0.0, rawRate = 0.0, duration = 0.0;
+    double videoDuration = 0.0;
     double displayAspect = 0.0, sampleAspect = 1.0;
     std::istringstream in(text);
     std::string line;
@@ -304,6 +330,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             }
             else if (key == "avg_frame_rate") ParseRate(value, avgRate);
             else if (key == "r_frame_rate") ParseRate(value, rawRate);
+            else if (key == "TAG:DURATION") ParseDurationTag(value, videoDuration);
             else if (key == "duration" && value != "N/A" && duration <= 0.0) duration = std::stod(value);
         } catch (...) {}
     }
@@ -319,7 +346,9 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_height = height;
     m_stride = static_cast<int32_t>(m_width * 4u);
     m_fps = avgRate > 0.0 ? avgRate : (rawRate > 0.0 ? rawRate : 30.0);
-    m_durationSec = (std::isfinite(duration) && duration > 0.0) ? duration : 0.0;
+    // Matroska stores per-track duration here; its container may include longer audio.
+    m_durationSec = videoDuration > 0.0 ? videoDuration :
+        ((std::isfinite(duration) && duration > 0.0) ? duration : 0.0);
     if (std::isfinite(displayAspect) && displayAspect > 0.1) m_displayAspect = displayAspect;
     else m_displayAspect = (double(m_width) * sampleAspect) / double(m_height);
 

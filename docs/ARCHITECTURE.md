@@ -92,7 +92,9 @@ software H.264 rather than splicing incompatible temporal histories.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
-quality, and upscaling state form the render identity. Network source entries
+quality, upscaling state, and a canonical neural-settings digest form the render identity.
+The settings snapshot is saved beside the video and its hash is checked on reuse.
+Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,
 not expiring signed stream URLs. Staging entries become reusable only after
 independent probing and atomic promotion. Schema 3 requires
@@ -106,6 +108,19 @@ hits retain full content-hash verification and use header-only metadata probes;
 frame counting and final-frame decoding run once before promotion, not on every
 replay. Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
+
+`RecentMediaHistory` atomically persists five distinct sources and their current
+cache keys. Displaced keys are removed only when unreferenced by that history and
+no active job/export can own them. Local originals are never removal targets.
+The cache root is resolved through a temporary delete-on-close file before bucket
+creation, so inherited Windows package redirection cannot split the ownership root
+from newly written children. Descendant and reparse-point checks remain in force.
+
+`CachedVideoExporter` stream-copies the validated neural video and source audio,
+compatible subtitles, attachments, metadata and chapters into a new MKV. An owned,
+cancellable FFmpeg process writes a unique sibling stage, published without
+overwriting an existing destination. Export has no render or subtitle-composition
+pass. Preferences use the existing executable-adjacent INI.
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.

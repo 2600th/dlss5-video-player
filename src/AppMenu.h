@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include <optional>
+#include <span>
+#include <string>
 
 #include "ExampleVideos.h"
 #include "UiLayout.h"
@@ -16,6 +18,9 @@ inline constexpr UINT IDM_OPEN = 100;
 inline constexpr UINT IDM_EXIT = 101;
 inline constexpr UINT IDM_OPEN_YOUTUBE = 102;
 inline constexpr UINT IDM_EXAMPLE_VIDEO_FIRST = 110;
+inline constexpr UINT IDM_RECENT_VIDEO_FIRST = 130;
+inline constexpr UINT IDM_EXPORT_CACHED_VIDEO = 140;
+inline constexpr UINT IDM_CANCEL_EXPORT = 141;
 inline constexpr UINT IDM_PLAY = 200;
 inline constexpr UINT IDM_STOP = 201;
 inline constexpr UINT IDM_BACK10 = 202;
@@ -31,12 +36,6 @@ inline constexpr UINT IDM_VIEW_MASK = 306;
 inline constexpr UINT IDM_DEPTH_MODE = 307;
 inline constexpr UINT IDM_DLSS_UPSCALING = 308;
 inline constexpr UINT IDM_FRAME_GENERATION = 309;
-inline constexpr UINT IDM_QUALITY_AUTO = 330;
-inline constexpr UINT IDM_QUALITY_QUALITY = 331;
-inline constexpr UINT IDM_QUALITY_BALANCED = 332;
-inline constexpr UINT IDM_QUALITY_PERFORMANCE = 333;
-inline constexpr UINT IDM_QUALITY_ULTRAPERF = 334;
-inline constexpr UINT IDM_QUALITY_DLAA = 335;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
@@ -56,6 +55,7 @@ enum class PlayerCommandRoute {
 };
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
+void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown);

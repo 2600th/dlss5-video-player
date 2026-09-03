@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -37,3 +38,12 @@ ConfigUpdate EvaluateNeuralAddonConfigUpdate(
 ConfigUpdate ConfigureNeuralAddon(
     const std::filesystem::path& iniPath,
     bool enable);
+
+// Canonical capture settings: neural add-on enable state and all exact-case
+// [RenoDX.DLSS5] entries. Call after ConfigureNeuralAddon(..., true), then again
+// after rendering without reconfiguring. Does not change the supplied settings.
+// ReShade overlay/preset effects are not sampled by CaptureEvaluatedFrame.
+// Throws std::invalid_argument for ambiguous neural entries or embedded NUL.
+std::string SnapshotNeuralAddonSettings(std::string_view ini);
+std::optional<std::string> ReadNeuralAddonSettingsSnapshot(
+    const std::filesystem::path& iniPath, std::wstring* error = nullptr);

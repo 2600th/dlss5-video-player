@@ -311,9 +311,16 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         .audioUrl=L"https://r1.googlevideo.com/audio?id=abc&token=three",
         .output=LR"(C:\Cache Root\source.partial.mkv)"};
     const std::vector<std::wstring> expectedMaterialize{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
-        L"-i", materialize.videoUrl, L"-i", materialize.audioUrl,
-        L"-map", L"0:v:0", L"-map", L"1:a:0?", L"-c", L"copy", L"-shortest",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-xerror",
+        L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
+        L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
+        L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
+        L"-i", materialize.videoUrl,
+        L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
+        L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
+        L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
+        L"-i", materialize.audioUrl,
+        L"-map", L"0:v:0", L"-map", L"1:a:0?", L"-c", L"copy",
         L"-f", L"matroska", materialize.output.wstring()};
     CHECK_EQ(expectedMaterialize, BuildMaterializeArguments(materialize));
 
@@ -337,6 +344,32 @@ void encoder_frame_contract_and_fallback_policy_are_fail_closed_test()
     CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::FinishFailed));
     CHECK(!ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::Cancelled));
     CHECK(!ShouldRetryWithSoftware(EncoderKind::H264Software, EncodeError::StartFailed));
+}
+
+void materialization_failure_reports_diagnostics_without_signed_urls_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    const auto result = MediaMaterializer(fixture.Path()).Run({
+        L"https://media.invalid/diagnostic-error?token=secret-value", {}, fixture.Path() / L"output.mkv"}, {});
+    CHECK(!result.ok);
+    CHECK_EQ(MaterializeError::ProcessFailed, result.error);
+    CHECK(result.detail.find(L"Connection reset") != std::wstring::npos);
+    CHECK(result.detail.find(L"https://") == std::wstring::npos);
+    CHECK(result.detail.find(L"secret-value") == std::wstring::npos);
+    CHECK(result.detail.size() < 2200);
+}
+
+void materialization_discards_oversized_diagnostic_url_fragments_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    const auto result = MediaMaterializer(fixture.Path()).Run({
+        L"https://media.invalid/diagnostic-overflow", {}, fixture.Path() / L"output.mkv"}, {});
+    CHECK(!result.ok);
+    CHECK_EQ(MaterializeError::ProcessFailed, result.error);
+    CHECK(result.detail.find(L"signed-secret") == std::wstring::npos);
+    CHECK(result.detail.find(L"https://") == std::wstring::npos);
 }
 
 void owned_media_pipeline_materializes_encodes_probes_and_cancels_test()
@@ -922,6 +955,22 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
         return 0;
     }
     if (_wcsicmp(name.c_str(), L"ffmpeg.exe") != 0) return 90;
+    if (std::ranges::any_of(arguments, [](std::wstring_view value) {
+            return value.find(L"/diagnostic-overflow") != std::wstring_view::npos;
+        })) {
+        std::string diagnostic = "https://redirect.invalid/video?token=";
+        for (size_t index = 0; index < 32768; ++index) diagnostic += "signed-secret";
+        DWORD written = 0;
+        WriteFile(GetStdHandle(STD_ERROR_HANDLE), diagnostic.data(),
+                  static_cast<DWORD>(diagnostic.size()), &written, nullptr);
+        return 7;
+    }
+    if (std::ranges::any_of(arguments, [](std::wstring_view value) {
+            return value.find(L"/diagnostic-error") != std::wstring_view::npos;
+        })) {
+        std::cerr << "Connection reset while reading https://media.invalid/diagnostic-error?token=secret-value\n";
+        return 7;
+    }
     const bool raw = std::find(arguments.begin(), arguments.end(), L"rawvideo") != arguments.end();
     const bool finalProbe = std::find(arguments.begin(), arguments.end(), L"-sseof") != arguments.end();
     const bool hang = std::ranges::any_of(arguments, [](std::wstring_view value) {
@@ -959,6 +1008,8 @@ int wmain(int argc, wchar_t* argv[])
     source_and_render_promotion_are_hash_validated_and_immutable_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
+    materialization_failure_reports_diagnostics_without_signed_urls_test();
+    materialization_discards_oversized_diagnostic_url_fragments_test();
     encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();

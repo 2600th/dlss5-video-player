@@ -1,7 +1,12 @@
 # DLSS 5 Video Player — Experimental Neural Rendering for Windows
 
+For the v0.13.0 workflow, recent-five retention, settings snapshots and MKV export,
+start with the [usage guide](docs/USAGE.md).
+The measurements below describe their stated historical test runs; current
+verification is recorded [in the repository](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).
+
 [![Windows build](https://github.com/2600th/dlss5-video-player/actions/workflows/build.yml/badge.svg)](https://github.com/2600th/dlss5-video-player/actions/workflows/build.yml)
-[![Version](https://img.shields.io/badge/version-0.12.0-76b900)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.0-76b900)](CHANGELOG.md)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078d4)](docs/BUILDING.md)
 [![C++](https://img.shields.io/badge/C%2B%2B-20-00599c)](CMakeLists.txt)
 [![License](https://img.shields.io/badge/source%20license-MIT-blue)](LICENSE)
@@ -14,7 +19,7 @@ exposes the real D3D12 feature calls to an optional RenoDX/ReShade DLSS 5 neural
 rendering add-on.
 
 > [!IMPORTANT]
-> Version 0.12.0 is a community experiment, **not NVIDIA's official production
+> Version 0.13.0 is a community experiment, **not NVIDIA's official production
 > DLSS 5 integration or SDK release**. Its optional neural runtime contains a
 > modified `nvngx_dlssnr.dll` with Authenticode `HashMismatch`, while the
 > ReShade/RenoDX components are unsigned. Read [What “DLSS 5” means
@@ -158,7 +163,8 @@ only ordinary NGX SR; the hidden helper performs verified offline neural jobs.
 Helper diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and `ReShade.log`;
 playback diagnostics are beside `DLSSVideoPlayer.exe`.
 
-The neural default is 1920×1080 native/DLAA. On the tested RTX 5090, the
+Neural rendering preserves source resolution; YouTube Auto prefers 1080p.
+In the earlier RTX 5090 verification run, the
 30.03-second Resident Evil Requiem example produced and independently decoded
 all 1,800 neural frames at 1920×1080/59.94 fps. Its hardened manifest recorded
 `nativeEvaluations=1800`, `verifiedNeuralFrames=1800`, the inline interception
@@ -213,8 +219,10 @@ behavior can change independently of this project.
 
 Neural source and render files are private cache data under
 `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`. Use **Advanced > Clear Neural
-Cache** when no neural job or cached playback is active to review the cache size
-and remove it. Cancelled or failed jobs are never promoted as reusable entries.
+Cache** to review the size and remove it after confirmation. Clearing closes
+playback and is blocked during acquisition, neural jobs or export. Windows
+package virtualization may redirect the physical path. Cancelled or failed jobs
+are never promoted as reusable entries. See [retention and export](docs/USAGE.md).
 
 ## How it works
 

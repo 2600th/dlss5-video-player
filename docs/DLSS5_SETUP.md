@@ -95,7 +95,10 @@ or redistribute runtime binaries from those repositories.
 The cache is stored under
 `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`. **Advanced > Clear Neural
 Cache** reports its current size and requires confirmation. Clearing is blocked
-while a neural job or cached playback owns an entry.
+while acquisition, a neural job or export is active. Confirmed clearing closes
+playback first. Windows package virtualization may redirect the physical cache
+under the launching app's LocalCache. Recent-five retention and settings-aware
+cache identity are described in the [usage guide](USAGE.md).
 
 The player intentionally retains the add-on interception backend instead of
 also loading feature 18 directly. Running both would duplicate neural passes

@@ -39,6 +39,7 @@ struct ResolveResult {
     std::wstring audioUrl;
     ResolveError error{ResolveError::None};
     std::wstring detail;
+    double durationSeconds{};
 };
 
 struct YouTubeFormatAvailability {

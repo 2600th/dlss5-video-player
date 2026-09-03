@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -226,7 +228,8 @@ struct CaptureResult {
 
 CaptureResult RunCapture(const std::filesystem::path& executable,
                          const std::vector<std::wstring>& arguments,
-                         std::stop_token stop, size_t limit = 1024 * 1024)
+                         std::stop_token stop, size_t limit = 1024 * 1024,
+                         const std::function<void(std::string_view)>& consume = {})
 {
     CaptureResult result;
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
@@ -276,18 +279,21 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
     CloseHandle(info.hThread);
     std::array<char, 4096> buffer{};
     bool done = false;
+    bool captureOverflowed = false;
     while (!done) {
         DWORD available = 0;
         if (PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr) && available) {
             DWORD read = 0;
             const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(buffer.size()));
             if (ReadFile(readPipe, buffer.data(), wanted, &read, nullptr) && read) {
-                if (result.output.size() + read > limit) {
+                if (consume) consume(std::string_view(buffer.data(), read));
+                else if (result.output.size() + read > limit) {
+                    captureOverflowed = true;
                     TerminateJobObject(job, 1);
                     result.output.clear();
                     break;
                 }
-                result.output.append(buffer.data(), read);
+                else result.output.append(buffer.data(), read);
             }
         }
         const DWORD wait = WaitForSingleObject(info.hProcess, 10);
@@ -304,7 +310,14 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
         DWORD read = 0;
         if (!ReadFile(readPipe, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr) || !read)
             break;
-        if (result.output.size() + read <= limit) result.output.append(buffer.data(), read);
+        if (consume) consume(std::string_view(buffer.data(), read));
+        else if (!captureOverflowed) {
+            if (result.output.size() + read <= limit) result.output.append(buffer.data(), read);
+            else {
+                captureOverflowed = true;
+                result.output.clear();
+            }
+        }
     }
     GetExitCodeProcess(info.hProcess, &result.exitCode);
     CloseHandle(readPipe); CloseHandle(info.hProcess); CloseHandle(job);
@@ -317,16 +330,58 @@ bool ParseUnsigned(std::string_view value, uint64_t& output)
     return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
 }
 
+std::wstring MaterializeDiagnostic(std::string_view output, const MaterializeRequest& request)
+{
+    if (output.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, output.data(),
+                                       static_cast<int>(output.size()), nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring text(static_cast<size_t>(size), L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, output.data(),
+                        static_cast<int>(output.size()), text.data(), size);
+    // Remove exact inputs first (including any whitespace), then URLs emitted
+    // after redirects. Redact before shortening so signed query strings cannot
+    // survive a truncated URL match.
+    for (const auto& url : {request.videoUrl, request.audioUrl}) {
+        if (url.empty()) continue;
+        size_t position = 0;
+        while ((position = text.find(url, position)) != std::wstring::npos) {
+            text.replace(position, url.size(), L"[input]");
+            position += 7;
+        }
+    }
+    for (size_t position = 0; position < text.size();) {
+        if (_wcsnicmp(text.c_str() + position, L"https://", 8) == 0 ||
+            _wcsnicmp(text.c_str() + position, L"http://", 7) == 0) {
+            const size_t end = text.find_first_of(L" \t\r\n\"'", position);
+            text.replace(position, (end == std::wstring::npos ? text.size() : end) - position, L"[url]");
+            position += 5;
+        } else ++position;
+    }
+    if (text.size() > 2048) text.resize(2048);
+    return text;
+}
+
 } // namespace
 
 std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& request)
 {
     std::vector<std::wstring> arguments{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
-        L"-i", request.videoUrl,
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-xerror",
     };
+    const auto appendInput = [&](const std::wstring& input) {
+        if (_wcsnicmp(input.c_str(), L"http://", 7) == 0 ||
+            _wcsnicmp(input.c_str(), L"https://", 8) == 0) {
+            arguments.insert(arguments.end(), {
+                L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
+                L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
+                L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0"});
+        }
+        arguments.insert(arguments.end(), {L"-i", input});
+    };
+    appendInput(request.videoUrl);
     if (!request.audioUrl.empty()) {
-        arguments.insert(arguments.end(), {L"-i", request.audioUrl});
+        appendInput(request.audioUrl);
     }
     arguments.insert(arguments.end(), {L"-map", L"0:v:0"});
     if (!request.audioUrl.empty()) {
@@ -335,7 +390,7 @@ std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& re
         arguments.insert(arguments.end(), {L"-map", L"0:a:0?"});
     }
     arguments.insert(arguments.end(), {
-        L"-c", L"copy", L"-shortest", L"-f", L"matroska", request.output.wstring()});
+        L"-c", L"copy", L"-f", L"matroska", request.output.wstring()});
     return arguments;
 }
 
@@ -384,19 +439,125 @@ MediaMaterializer::MediaMaterializer(std::filesystem::path helperDirectory)
 
 MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std::stop_token stop)
 {
-    if (request.videoUrl.empty() || request.output.empty())
+    if (stop.stop_requested())
+        return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
+    if (request.videoUrl.empty() || request.output.empty() ||
+        !std::isfinite(request.expectedDurationSeconds) || request.expectedDurationSeconds < 0.0)
         return {false, MaterializeError::InvalidRequest, L"Invalid media materialization request."};
     const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
     if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
-    ChildProcess process;
-    if (!process.Start(ffmpeg, BuildMaterializeArguments(request), false))
+    const CaptureResult capture = RunCapture(ffmpeg, BuildMaterializeArguments(request), stop, 64 * 1024);
+    if (!capture.started)
         return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
-    bool cancelled = false;
-    const DWORD exitCode = process.Wait(stop, cancelled);
-    if (cancelled) return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
+    if (capture.cancelled) return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
     std::error_code error;
-    if (exitCode != 0 || !std::filesystem::is_regular_file(request.output, error) || error)
-        return {false, MaterializeError::ProcessFailed, L"FFmpeg could not prepare the source."};
+    if (capture.exitCode != 0 || !std::filesystem::is_regular_file(request.output, error) || error) {
+        std::wstring detail = L"FFmpeg could not prepare the source (exit " + std::to_wstring(capture.exitCode) + L").";
+        const auto diagnostic = MaterializeDiagnostic(capture.output, request);
+        if (!diagnostic.empty()) detail += L"\n" + diagnostic;
+        return {false, MaterializeError::ProcessFailed, std::move(detail)};
+    }
+    if (request.expectedDurationSeconds > 0.0) {
+        const ProbeResult probe = ProbeMedia(helperDirectory_, request.output, stop);
+        if (stop.stop_requested())
+            return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
+        // yt-dlp may round duration to a whole second. Keep the allowance fixed:
+        // a percentage would conceal increasingly large gaps on longer videos.
+        if (!probe.ok || probe.videoDuration100ns <= 0 ||
+            double(probe.videoDuration100ns) / 10000000.0 + 1.0 < request.expectedDurationSeconds)
+            return {false, MaterializeError::ProcessFailed,
+                L"The prepared source video is incomplete (expected " +
+                FrameRateText(request.expectedDurationSeconds) + L" seconds, measured " +
+                FrameRateText(double(probe.videoDuration100ns) / 10000000.0) + L" seconds)."};
+    }
+    return {true, MaterializeError::None, {}};
+}
+
+CachedVideoExporter::CachedVideoExporter(std::filesystem::path helperDirectory)
+    : helperDirectory_(std::move(helperDirectory)) {}
+
+MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, std::stop_token stop)
+{
+    const auto cancelled = [] {
+        return MaterializeResult{false, MaterializeError::Cancelled, L"Cached video export was cancelled."};
+    };
+    if (stop.stop_requested()) return cancelled();
+    if (request.neuralVideo.empty() || request.sourceMedia.empty() || request.output.empty() ||
+        _wcsicmp(request.output.extension().c_str(), L".mkv") != 0)
+        return {false, MaterializeError::InvalidRequest, L"Choose a new .mkv file for the cached video export."};
+    std::error_code error;
+    const auto neuralVideo = std::filesystem::absolute(request.neuralVideo, error);
+    if (error)
+        return {false, MaterializeError::InvalidRequest, L"The cached video path is unavailable."};
+    const auto sourceMedia = std::filesystem::absolute(request.sourceMedia, error);
+    if (error)
+        return {false, MaterializeError::InvalidRequest, L"The original source path is unavailable."};
+    for (const auto& input : {neuralVideo, sourceMedia}) {
+        if (!std::filesystem::is_regular_file(input, error) || error)
+            return {false, MaterializeError::InvalidRequest, L"The cached video or original source is unavailable."};
+    }
+    const auto output = std::filesystem::absolute(request.output, error);
+    if (error || !std::filesystem::is_directory(output.parent_path(), error) || error)
+        return {false, MaterializeError::InvalidRequest, L"The export folder is unavailable."};
+    // This also rejects input aliases, directories and reparse points. The final
+    // no-replace rename below closes the race with a file created during export.
+    if (GetFileAttributesW(output.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return {false, MaterializeError::InvalidRequest, L"The export file already exists. Choose a new filename."};
+    const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
+
+    struct StagingFile {
+        std::filesystem::path path;
+        ~StagingFile() { if (!path.empty()) { std::error_code ignored; std::filesystem::remove(path, ignored); } }
+    } staging;
+    static std::atomic_uint64_t sequence{};
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = output.parent_path() / (L".dlss-export-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
+            L"-" + std::to_wstring(sequence.fetch_add(1)) + L".tmp");
+        HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            staging.path = candidate;
+            break;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) break;
+    }
+    if (staging.path.empty())
+        return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
+    if (stop.stop_requested()) return cancelled();
+    const std::vector<std::wstring> arguments{
+        // -y applies only to the exclusively reserved staging file we own.
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
+        L"-i", neuralVideo.wstring(), L"-i", sourceMedia.wstring(),
+        L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?", L"-map", L"1:t?",
+        L"-map_metadata", L"1", L"-map_chapters", L"1", L"-c", L"copy",
+        L"-f", L"matroska", staging.path.wstring()};
+    // Attachments (such as subtitle fonts) travel with the source subtitles.
+    // Unsupported codecs fail the entire export; no subtitle is burned in.
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
+    if (capture.cancelled || stop.stop_requested()) return cancelled();
+    if (!capture.started)
+        return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
+    const auto bytes = std::filesystem::file_size(staging.path, error);
+    if (capture.exitCode != 0 || error || bytes == 0) {
+        std::wstring detail = L"FFmpeg could not export these streams to MKV without conversion.";
+        const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, capture.output.data(),
+                                               static_cast<int>(capture.output.size()), nullptr, 0);
+        if (length > 0) {
+            std::wstring diagnostic(static_cast<size_t>(length), L'\0');
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, capture.output.data(),
+                               static_cast<int>(capture.output.size()), diagnostic.data(), length);
+            detail += L"\n" + diagnostic;
+        }
+        return {false, MaterializeError::ProcessFailed, std::move(detail)};
+    }
+    if (stop.stop_requested()) return cancelled();
+    if (!MoveFileExW(staging.path.c_str(), output.c_str(), MOVEFILE_WRITE_THROUGH))
+        return {false, MaterializeError::ProcessFailed,
+            L"The completed export could not be saved. Check folder access and choose a filename that does not already exist."};
+    staging.path.clear();
     return {true, MaterializeError::None, {}};
 }
 
@@ -494,20 +655,14 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     if (ffprobe.empty() || (fullValidation&&ffmpeg.empty())) { result.detail = L"FFmpeg tools are unavailable."; return result; }
     std::vector<std::wstring> probeArguments{
         L"-v", L"error", L"-select_streams", L"v:0",
-        L"-show_entries", fullValidation?L"stream=width,height,nb_read_frames:format=duration":L"stream=width,height:format=duration",
+        L"-show_entries", fullValidation?L"frame=best_effort_timestamp_time,duration_time,pkt_duration_time:stream=width,height,nb_read_frames:format=duration":L"stream=width,height:format=duration",
         L"-of", L"default=noprint_wrappers=1:nokey=0", media.wstring()};
     if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_frames");
-    const CaptureResult capture = RunCapture(ffprobe, probeArguments, stop);
-    if (!capture.started || capture.cancelled || capture.exitCode != 0) {
-        result.detail = capture.cancelled ? L"Media validation was cancelled." : L"FFprobe validation failed.";
-        return result;
-    }
     double durationSeconds = 0.0;
-    size_t position = 0;
-    while (position < capture.output.size()) {
-        const size_t end = capture.output.find('\n', position);
-        std::string_view line(capture.output.data() + position,
-            (end == std::string::npos ? capture.output.size() : end) - position);
+    double firstVideoTimestamp = std::numeric_limits<double>::infinity();
+    double videoEnd = -std::numeric_limits<double>::infinity();
+    double frameTimestamp = std::numeric_limits<double>::quiet_NaN();
+    const auto parseLine = [&](std::string_view line) {
         if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         const size_t equals = line.find('=');
         if (equals != std::string_view::npos) {
@@ -520,10 +675,44 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
             else if (key == "duration") {
                 try { durationSeconds = std::stod(std::string(value)); } catch (...) { durationSeconds = 0.0; }
             }
+            else if (key == "best_effort_timestamp_time") {
+                try { frameTimestamp = std::stod(std::string(value)); }
+                catch (...) { frameTimestamp = std::numeric_limits<double>::quiet_NaN(); }
+                if (std::isfinite(frameTimestamp)) {
+                    firstVideoTimestamp = std::min(firstVideoTimestamp, frameTimestamp);
+                    videoEnd = std::max(videoEnd, frameTimestamp);
+                }
+            }
+            else if ((key == "duration_time" || key == "pkt_duration_time") && std::isfinite(frameTimestamp)) {
+                double frameDuration = 0.0;
+                try { frameDuration = std::stod(std::string(value)); } catch (...) {}
+                if (std::isfinite(frameDuration) && frameDuration > 0.0)
+                    videoEnd = std::max(videoEnd, frameTimestamp + frameDuration);
+            }
         }
-        if (end == std::string::npos) break;
-        position = end + 1;
+    };
+    // Stream frame metadata so a full-length video does not need a proportional
+    // memory buffer or hit the bounded diagnostic capture limit.
+    std::string pending;
+    bool oversizedLine = false;
+    const CaptureResult capture = RunCapture(ffprobe, probeArguments, stop, 64 * 1024,
+        [&](std::string_view chunk) {
+            for (const char character : chunk) {
+                if (character == '\n') {
+                    if (!oversizedLine) parseLine(pending);
+                    pending.clear(); oversizedLine = false;
+                } else if (pending.size() < 64 * 1024) pending.push_back(character);
+                else oversizedLine = true;
+            }
+        });
+    if (!pending.empty() && !oversizedLine) parseLine(pending);
+    if (!capture.started || capture.cancelled || capture.exitCode != 0) {
+        result.detail = capture.cancelled ? L"Media validation was cancelled." : L"FFprobe validation failed.";
+        return result;
     }
+    const double videoSeconds = videoEnd - firstVideoTimestamp;
+    if (std::isfinite(videoSeconds) && videoSeconds > 0.0 && videoSeconds < double(INT64_MAX) / 10000000.0)
+        result.videoDuration100ns = std::llround(videoSeconds * 10000000.0);
     if(std::isfinite(durationSeconds)&&durationSeconds>0.0&&durationSeconds<double(INT64_MAX)/10000000.0)
         result.duration100ns = std::llround(durationSeconds * 10000000.0);
     if (!result.width || !result.height || (fullValidation&&!result.frameCount) || result.duration100ns <= 0) {

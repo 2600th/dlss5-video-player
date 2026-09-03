@@ -1,140 +1,151 @@
 # DLSS 5 Video Player
 
-Experimental neural video rendering and optional runtime DLSS upscaling for
-Windows and NVIDIA RTX GPUs. Open a local video or a public YouTube example,
-render it once, then play the cached result and switch to the original at the
-same timestamp.
+Render a video once, replay its cached neural result, and compare it with the
+original at the same timestamp. A native Windows player for local media and
+public YouTube videos, with optional DLSS Super Resolution during playback.
 
-[Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.12.0.1)
- · [Release source](https://github.com/2600th/dlss5-video-player/tree/dlss5-video-player-v0.12.0.1)
- · [Technical README](TECHNICAL_OVERVIEW.md)
- · [Screenshots](#screenshots)
+[Get started](#get-started) · [Usage guide](docs/USAGE.md) · [Build from source](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+![Paused neural playback with separate neural rendering and upscaling controls](docs/screenshots/current/neural-playback.jpg)
+
+**v0.13.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
+with recent-video caching, settings snapshots, MKV export and highest-bitrate
+YouTube selection. See the [changelog](CHANGELOG.md).
 
 > [!IMPORTANT]
-> This is an **experimental project**, not an official NVIDIA DLSS 5
-> integration. The bundled neural runtime includes modified/unsigned third-party
-> components. Rights to NVIDIA components belong to NVIDIA. Other third-party
-> components belong to their respective owners.
+> This is an experimental community project, not an official NVIDIA DLSS 5
+> integration. The optional neural runtime uses modified/unsigned third-party
+> components. Hardware verification for this development build used an RTX 5090.
+> See [runtime details and notices](THIRD_PARTY.md).
 
-![DLSS Video Player showing paused Resident Evil neural-rendered playback, with separate Neural Rendering, DLSS Upscaling and Frame Generation controls](docs/screenshots/neural-playback.jpg)
+## Why use it?
 
-The screenshots and downloadable build describe **dlss5-video-player-v0.12.0.1**.
-The application source, tests and documentation are now consolidated on `main`.
-The release tag remains an immutable snapshot of the tested build.
-
-## What it does
-
-- **Neural rendering before playback.** Prepare and validate a complete video,
-  then reuse its cached result on subsequent plays.
-- **Original/neural comparison.** Toggle Neural Rendering without changing the
-  playback timestamp; pause and seek either view.
-- **Independent runtime upscaling.** Optionally apply DLSS Super Resolution to
-  the original or neural-rendered view, with 1440p or 2160p output.
-- **Local files and YouTube examples.** Open FFmpeg-supported video files or
-  public, non-DRM YouTube videos without a login.
-- **Visible loading and processing.** Animated source/cache checks, actual
-  completed-frame progress, elapsed time and ETA when available.
-- **Native Windows controls.** Drag and drop, timeline seeking, audio/volume,
-  fullscreen, aspect controls and post-DLSS image adjustments.
-
-| Feature | Default in this build |
-| --- | --- |
-| Neural Rendering | On; playback uses a validated cached result when available |
-| DLSS Upscaling | Off; runs at playback time when enabled |
-| Upscaling output | 1440p, with 2160p selectable |
-| Frame Generation | Unavailable; no FG backend is implemented |
-| YouTube source quality | Prefer 1080p; otherwise use the highest available resolution up to 4K |
-
-Manual YouTube quality choices are 1080p, 1440p and 2160p. Lower-resolution
-videos can still play through the automatic fallback; 480p and 720p are not
-exposed as manual modes. Source quality and upscaling output are separate.
-
-## Screenshots
-
-Actual Windows captures from this build on an RTX 5090. These show the
-interface and feature states, not a visual-quality benchmark or a promise of
-the same performance on other hardware. Click an image to inspect it.
-
-### Original and neural-rendered comparison
-
-Both captures are paused at the same approximately six-second timestamp, with
-runtime DLSS Upscaling off.
-
-| Original — Neural Rendering off | Cached neural-rendered view — Neural Rendering on |
-| --- | --- |
-| ![Original Resident Evil video frame at the paused comparison timestamp](docs/screenshots/original-comparison.jpg) | ![Cached neural-rendered Resident Evil frame at the same paused timestamp](docs/screenshots/neural-playback.jpg) |
-
-### Independent feature controls
-
-Neural Rendering, DLSS Upscaling and Frame Generation have separate controls.
-The menu exposes 1440p/default and 2160p output while clearly marking Frame
-Generation unavailable.
-
-![DLSS menu showing separate features and the 1440p and 2160p upscaling outputs](docs/screenshots/dlss-controls.jpg)
-
-### Loading and cache reuse
-
-The spinner and progress bar animate while the player checks saved video. A
-valid cache is reused without re-encoding. This still image captures that
-loading state; frame-processing percentages appear during a new neural job.
-
-![Animated cache-check UI captured while verifying a saved 1080p video without re-encoding](docs/screenshots/cache-loading.jpg)
-
-<details>
-<summary>Start screen: local files and YouTube URLs</summary>
-
-![Player start screen with Open file and Open YouTube URL buttons](docs/screenshots/player-start.jpg)
-
-</details>
-
-Example footage: [Resident Evil Requiem - Launch Trailer](https://www.youtube.com/watch?v=9lrThxCoznw),
-from the Resident Evil channel. Game footage, trademarks and third-party
-components remain the property of their respective owners. Screenshots document
-this player; no endorsement or additional media rights are claimed.
+- **Compare the same moment.** Switch between original and cached neural video
+  without changing the playback timestamp.
+- **Replay recent videos.** The last five distinct videos persist across
+  launches. Acquired YouTube sources and neural renders are reused after validation.
+- **Keep experiments consistent.** Neural settings are saved with each render
+  and included in its cache identity. A settings change triggers a new render.
+- **Take the result with you.** Export a new MKV with the cached video, available
+  source audio, compatible subtitles and chapters, without re-encoding.
+- **Choose playback upscaling separately.** Apply optional DLSS Super Resolution
+  to either view at 1440p or 2160p. The neural cache retains source resolution.
+- **Start with a game trailer.** Five official upcoming-game examples are
+  available under **File > Upcoming games**.
 
 ## Get started
 
-1. Open the [release](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.12.0.1)
-   while signed into a GitHub account with access to this private repository.
-2. Download `dlss5-video-player-v0.12.0.1-win64.zip` and, optionally,
-   its `.sha256` checksum file. GitHub's source-code archives are not runnable
-   application packages.
-3. Extract the **whole ZIP into a new folder**. Keep `neural-runtime/` and all
-   helper files intact; do not extract over an older build.
-4. Launch `DLSSVideoPlayer.exe` from File Explorer. Choose a local file, paste a
-   public YouTube URL, or select **File > Examples**.
-5. Let preparation finish, then use **Neural Rendering** or `D` to compare.
-   Enable **DLSS Upscaling** separately if desired.
+1. Use Windows x64 with a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA
+   driver. The experimental neural layout requires the separately supplied
+   runtime described in [setup](docs/DLSS5_SETUP.md).
+2. [Build the current source](docs/BUILDING.md), or download the
+   [v0.13.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
+   if you have repository access. GitHub's source ZIP is not a runnable package.
+3. Extract a packaged build into a **new folder** and keep all helpers and
+   `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.
+4. Open a local file (`Ctrl+O`), paste a public YouTube URL (`Ctrl+L`), or choose
+   **File > Upcoming games**.
+5. Let preparation finish. Press `D` to compare neural and original views;
+   enable **DLSS Upscaling** separately if desired.
+6. Reopen through **File > Recent videos**, or choose **File > Export cached
+   video** to save the prepared result.
 
-## Requirements and limitations
+The publishable core package has fewer capabilities than the complete experimental
+layout. Build inputs and package contents are explained in [Building](docs/BUILDING.md).
 
-- Windows x64, a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA driver.
-- The current build was hardware-tested on an **RTX 5090**. RTX 40
-  neural compatibility relies on a community modification and was not tested
-  for this build; policy recognition alone is not compatibility proof.
-- Neural rendering is an offline preparation step, not a claim of real-time
-  neural processing. Processing time, memory use and quality vary by source
-  and hardware. Runtime upscaling is a separate optional operation.
-- The player estimates motion/depth guides from video rather than receiving
-  authoritative game-engine data. Results can contain artifacts.
-- Private, login-required, paid, age-gated and DRM-protected YouTube content is
-  not supported. Public examples may become unavailable.
-- The modified neural DLL has an invalid Authenticode signature; some bundled
-  components are unsigned. Hash verification checks identity, not safety.
-- Project source is MIT-licensed. Third-party binaries and media retain their
-  own terms. This is not affiliated with or endorsed by NVIDIA or the other
-  upstream projects.
+## Everyday controls
 
-## Developer documentation
+| Action | Control |
+| --- | --- |
+| Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
+| Play or pause | `Space` |
+| Compare original and neural views | `D` |
+| Seek / step a paused cached frame | Timeline or `Left` / `Right`; `.` to step |
+| Volume / mute | Volume control or mouse wheel; `M` to mute |
+| Fit or fill / fullscreen | `A` / `F11` |
+| Image adjustments | `Ctrl+E` |
+| Replay / export | **File > Recent videos / Export cached video** |
 
-- [Build the released source](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/BUILDING.md)
-- [Architecture](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/ARCHITECTURE.md)
-- [Experimental neural-runtime setup](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/DLSS5_SETUP.md)
-- [Troubleshooting](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/TROUBLESHOOTING.md)
-- [Runtime upscaling verification](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/superpowers/plans/2026-09-02-upscaling-verification.md)
-- [Loading-feedback verification](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/docs/superpowers/plans/2026-09-02-loading-feedback-verification.md)
-- [Third-party notices](https://github.com/2600th/dlss5-video-player/blob/dlss5-video-player-v0.12.0.1/THIRD_PARTY.md)
+Volume, mute, fit/fill, comparison view, upscaling preference/output, YouTube
+quality and image adjustments are saved across launches.
 
-The core stack is C++20, Win32, Direct3D 12, FFmpeg and NVIDIA NGX. An isolated
-helper hosts the experimental RenoDX/ReShade neural runtime, keeping playback's
-optional DLSS Super Resolution path separate.
+| Setting | Fresh-install default |
+| --- | --- |
+| Neural Rendering | On; prepare or reuse a validated cache |
+| DLSS Upscaling | Off; 1440p output selected, with 2160p available |
+| YouTube source quality | Auto: prefer exact 1080p, otherwise highest available up to 4K |
+| Frame Generation | Unavailable; no backend is implemented |
+
+Manual YouTube choices are 1080p, 1440p and 2160p. Each selects the highest
+advertised video bitrate at that resolution, across available codecs and containers.
+Source quality and playback upscaling are separate.
+See [cache, settings and export details](docs/USAGE.md).
+
+## Screenshots
+
+Actual Windows captures from the development player on an RTX 5090. Images show
+interface states, not image-quality benchmarks. Open an image to inspect it at
+full size.
+
+### Upcoming games
+
+![File menu with five official upcoming-game video examples](docs/screenshots/current/upcoming-games.jpg)
+
+### Recent videos and export
+
+![Recent videos menu alongside the cached-video export command](docs/screenshots/current/recent-videos.jpg)
+
+<details>
+<summary>Original view at the same paused timestamp</summary>
+
+![Original video at the same paused timestamp as the neural playback image above](docs/screenshots/current/original-comparison.jpg)
+
+Runtime upscaling is off in both comparison captures. These document a synchronized
+toggle, not a claim that every source gains visible detail.
+
+</details>
+
+<details>
+<summary>Start screen</summary>
+
+![Start screen with local file and YouTube URL actions](docs/screenshots/current/player-start.jpg)
+
+</details>
+
+[Capture details and footage attribution](docs/screenshots/README.md).
+
+## Limits to know
+
+- Neural rendering prepares the complete video before playback. Processing time
+  and results vary by source and hardware; this is not real-time neural rendering.
+- Motion and depth guides are estimated from video. Artifacts are possible;
+  RTX 40 neural compatibility has not been hardware-verified for this build.
+- Export copies the cached 8-bit video. Playback adjustments and runtime upscaling
+  are not baked in; export does not restore HDR or lost source precision.
+- Compatible source subtitles remain separate in export. In-player subtitle
+  display, burn-in, queues, HDR processing and durable render resume are not included.
+- YouTube supports public, non-DRM videos without login. Availability and regional
+  access can change. Local playback remains available.
+- Recent history is limited to five videos, not a disk-size quota. Large videos
+  can consume substantial space; use **Advanced > Clear Neural Cache** when needed.
+
+## Development and help
+
+The stack is C++20, Win32, Direct3D 12, FFmpeg and NVIDIA NGX. An isolated helper
+hosts the experimental neural runtime; playback upscaling runs in the player.
+
+- [Build and test](docs/BUILDING.md)
+- [Architecture](docs/ARCHITECTURE.md) and [technical overview](TECHNICAL_OVERVIEW.md)
+- [Runtime setup](docs/DLSS5_SETUP.md)
+- [Verification results](docs/VERIFICATION-2026-09-02.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md) and [report an issue](https://github.com/2600th/dlss5-video-player/issues)
+- [Example video sources](docs/EXAMPLE_VIDEOS.md)
+
+For a bug report, include the build/revision, GPU, driver, source dimensions and
+frame rate, reproduction steps and relevant log excerpts. Remove private paths
+and signed media URLs before sharing logs. Changes should preserve the source
+resolution and neural-validation contracts; run CTest and relevant hardware
+smoke checks before proposing a renderer change.
+
+Project source is [MIT-licensed](LICENSE). Third-party binaries, game footage and
+trademarks retain their own terms; see [third-party notices](THIRD_PARTY.md).

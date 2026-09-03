@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <sstream>
 #include <algorithm>
@@ -41,6 +42,7 @@
 #include "NetworkMediaTransaction.h"
 #include "PlaybackTiming.h"
 #include "NeuralCache.h"
+#include "RecentMedia.h"
 #include "MediaPipeline.h"
 #include "OfflineNeuralRenderer.h"
 #include "NeuralWorker.h"
@@ -52,6 +54,8 @@ using Clock = std::chrono::steady_clock;
 using Microsoft::WRL::ComPtr;
 using namespace app_menu;
 static constexpr int CONTROL_H_DIP = 112;
+// Older source entries could be truncated despite a successful FFmpeg exit.
+static constexpr const char* kCompleteSourcePolicy = "source-complete-v5-highest-bitrate";
 
 static UINT ActiveWindowDpi(HWND window)
 {
@@ -146,6 +150,7 @@ static constexpr int IDC_YOUTUBE_ERROR = 7204;
 static constexpr UINT WM_YOUTUBE_RESOLVED = WM_APP + 41;
 static constexpr UINT WM_NEURAL_PROGRESS = WM_APP + 42;
 static constexpr UINT WM_NEURAL_COMPLETE = WM_APP + 43;
+static constexpr UINT WM_EXPORT_COMPLETE = WM_APP + 44;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -400,6 +405,13 @@ struct NeuralJobCompletion {
     YouTubeSourceQuality sourceQuality{YouTubeSourceQuality::Auto};
     MediaSourceKind sourceKind{MediaSourceKind::LocalFile};
     bool cacheHit{};
+    bool cachedSourceUnavailable{};
+    std::string sourceKey, renderKey;
+};
+
+struct ExportCompletion {
+    MaterializeResult result;
+    std::filesystem::path output;
 };
 
 struct PreparedRendererCandidate {
@@ -442,17 +454,8 @@ static AppOptions ParseArgs() {
         } else if(a==L"--output" && i+1<o.userArguments.size()) {
             std::wstring v=o.userArguments[++i]; auto x=v.find(L'x'); if(x==std::wstring::npos) x=v.find(L'X');
             if(x!=std::wstring::npos) { o.maxW=std::max(64,_wtoi(v.substr(0,x).c_str())); o.maxH=std::max(64,_wtoi(v.substr(x+1).c_str())); o.outputExplicit=true; }
-        } else if(a==L"--quality" && i+1<o.userArguments.size()) {
-            std::wstring q=o.userArguments[++i]; std::transform(q.begin(),q.end(),q.begin(),::towlower);
-            if(q==L"auto") { o.qualityExplicit=false; }
-            else {
-                o.qualityExplicit=true;
-                if(q==L"performance"||q==L"perf") o.quality=NVSDK_NGX_PerfQuality_Value_MaxPerf;
-                else if(q==L"balanced") o.quality=NVSDK_NGX_PerfQuality_Value_Balanced;
-                else if(q==L"ultra-performance"||q==L"ultraperf") o.quality=NVSDK_NGX_PerfQuality_Value_UltraPerformance;
-                else if(q==L"dlaa") o.quality=NVSDK_NGX_PerfQuality_Value_DLAA;
-                else o.quality=NVSDK_NGX_PerfQuality_Value_MaxQuality;
-            }
+        } else if(a==L"--quality") {
+            o.argumentsOk=false;o.argumentError=L"The legacy --quality option was removed. Neural rendering preserves source resolution; choose Super Resolution output in the DLSS menu.";return o;
         } else if(!a.empty() && a[0]!=L'-') o.file=a;
     }
     return o;
@@ -558,6 +561,16 @@ static std::wstring PickVideoFileFallback(HWND owner, const Localizer& loc) {
     return GetOpenFileNameW(&o)?path:L"";
 }
 
+static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title) {
+    wchar_t path[32768]{};
+    std::wstring suggested(title.empty()?L"neural-video":std::wstring(title));
+    for(wchar_t& c:suggested)if(c==L'<'||c==L'>'||c==L':'||c==L'"'||c==L'/'||c==L'\\'||c==L'|'||c==L'?'||c==L'*')c=L'_';
+    suggested+=L"-neural.mkv";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
+    const wchar_t filter[]=L"Matroska video (*.mkv)\0*.mkv\0\0";
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.lpstrDefExt=L"mkv";dialog.lpstrTitle=L"Export cached video to a new MKV file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+    return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
+}
+
 static std::wstring PickVideoFile(HWND owner, const Localizer& loc) {
     ComPtr<IFileOpenDialog> dlg;
     HRESULT hr=CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dlg));
@@ -590,12 +603,20 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
 
     bool Create(HINSTANCE hi) {
         m_loc.Initialize();
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
         LoadVideoSettings();
+        NeuralCacheManager historyCache(m_cacheRoot);
+        if(historyCache.Valid()){
+            m_cacheRoot=historyCache.Root();
+            WritePrivateProfileStringW(L"Storage",L"CacheDirectory",m_cacheRoot.c_str(),SettingsPath().c_str());
+            LOG("Neural cache directory: "<<WideToUtf8(m_cacheRoot.wstring()));
+            m_recent=std::make_unique<RecentMediaHistory>(historyCache.Root()/L"recent-videos.dat");
+            if(!m_recent->Load())LOG("Recent videos could not be loaded; existing file preserved until next successful playback.");
+        }
         INITCOMMONCONTROLSEX icc{sizeof(icc),ICC_BAR_CLASSES};InitCommonControlsEx(&icc);
         WNDCLASSW r{}; r.style=CS_DBLCLKS|CS_OWNDC; r.lpfnWndProc=RenderWndProcStatic; r.hInstance=hi; r.lpszClassName=L"DLSSVideoRenderClassV11"; r.hCursor=LoadCursor(nullptr,IDC_ARROW); r.hbrBackground=nullptr; RegisterClassW(&r);
         WNDCLASSW v{}; v.lpfnWndProc=ViewportWndProcStatic; v.hInstance=hi; v.lpszClassName=L"DLSSVideoViewportClassV11"; v.hCursor=LoadCursor(nullptr,IDC_ARROW); v.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); RegisterClassW(&v);
@@ -610,6 +631,7 @@ public:
         if(!m_hwnd) return false;
         ReadAnimationPreference();
         app_menu::UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);
+        UpdateRecentMenu();
         RegisterOverlayHotkeys();
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
         m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,nullptr);
@@ -621,6 +643,7 @@ public:
     }
 
     void Tick() {
+        PruneRecentCache();
         if(m_seekPending) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
@@ -677,6 +700,62 @@ public:
 private:
     static constexpr UINT_PTR kActivityTimerId=0xD155;
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
+
+    void UpdateRecentMenu(){
+        if(!m_hwnd||!m_recent)return;
+        std::vector<std::wstring> titles;for(const auto& entry:m_recent->Entries())titles.push_back(entry.title.empty()?entry.source:entry.title);
+        app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy());
+        DrawMenuBar(m_hwnd);
+    }
+    void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
+        if(!m_recent)return;
+        RecentMediaEntry entry{};entry.youtube=completion.sourceKind==MediaSourceKind::YouTube;
+        entry.id=entry.youtube?CanonicalYouTubeVideoId(completion.pageUrl):WideToUtf8(std::filesystem::absolute(completion.sourcePath).lexically_normal().wstring());
+        entry.title=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);entry.source=entry.youtube?completion.pageUrl:std::filesystem::absolute(completion.sourcePath).lexically_normal().wstring();entry.sourceKey=completion.sourceKey;entry.renderKey=completion.renderKey;entry.sourceQuality=static_cast<int>(completion.sourceQuality);
+        if(preserveCache)for(const auto& previous:m_recent->Entries()){
+            const bool sameVideo=previous.youtube==entry.youtube&&((entry.youtube&&previous.id==entry.id&&previous.sourceQuality==entry.sourceQuality)||(!entry.youtube&&_wcsicmp(previous.source.c_str(),entry.source.c_str())==0));
+            if(sameVideo&&(entry.sourceKey.empty()||entry.sourceKey==previous.sourceKey)){entry.sourceKey=previous.sourceKey;entry.renderKey=previous.renderKey;break;}
+        }
+        auto evicted=m_recent->Remember(std::move(entry));
+        if(m_recent->Save())m_pendingCacheEvictions.insert(m_pendingCacheEvictions.end(),evicted.begin(),evicted.end());
+        else LOG("Recent video history could not be saved; cached media was preserved.");
+        UpdateRecentMenu();
+    }
+    void RecordOriginalRecent(){
+        if(!m_recent||m_path.empty()||(m_sourceKind==MediaSourceKind::YouTube&&m_youtubePageUrl.empty()))return;
+        NeuralJobCompletion completion{};completion.sourcePath=m_path;completion.displayTitle=m_displayTitle;completion.sourceKind=m_sourceKind;completion.pageUrl=m_youtubePageUrl;completion.sourceQuality=m_youtubeSourceQuality;RecordRecent(completion,true);
+    }
+    bool LoadOriginalFallback(const NeuralJobCompletion& completion){
+        if(!LoadOriginal(completion.sourcePath.wstring(),completion.displayTitle,completion.sourceKind))return false;
+        m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;
+        auto original=completion;original.renderKey.clear();RecordRecent(original,true);
+        UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);return true;
+    }
+    void PruneRecentCache(){
+        if(m_pendingCacheEvictions.empty()||ActivityBusy()||m_exportWorker.joinable())return;
+        NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){m_pendingCacheEvictions.clear();return;}
+        const auto& keep=m_recent->Entries();
+        const auto referenced=[&](const std::string& key,bool render){return key.empty()||std::any_of(keep.begin(),keep.end(),[&](const auto& item){return (render?item.renderKey:item.sourceKey)==key;});};
+        for(const auto& item:m_pendingCacheEvictions){if(!referenced(item.sourceKey,false))cache.RemoveSource(item.sourceKey);if(!referenced(item.renderKey,true))cache.RemoveRender(item.renderKey);}
+        m_pendingCacheEvictions.clear();
+    }
+    void OpenRecent(size_t index){
+        if(!m_recent||index>=m_recent->Entries().size()||ActivityBusy())return;
+        const auto entry=m_recent->Entries()[index];
+        if(entry.youtube){if(NeuralPreRenderEnabled()&&!entry.sourceKey.empty())StartNeuralJob(entry.source,{},entry.title,entry.source,MediaSourceKind::YouTube,static_cast<YouTubeSourceQuality>(entry.sourceQuality),entry.sourceKey);else StartYouTubeResolution(entry.source,entry.title,static_cast<YouTubeSourceQuality>(entry.sourceQuality));return;}
+        if(!std::filesystem::is_regular_file(entry.source)){MessageBoxW(m_hwnd,L"This local video has moved or is no longer available.",T(L"app.title").c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        Load(entry.source,entry.title,MediaSourceKind::LocalFile);
+    }
+    void ExportCachedVideo(){
+        if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
+        const auto output=PickExportFile(m_hwnd,m_displayTitle);if(output.empty())return;
+        const auto neural=m_neuralPath,source=std::filesystem::path(m_path),helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
+        try{m_exportWorker=std::jthread([target,output,neural,source,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=output;completion->result=CachedVideoExporter(helpers).Run({neural,source,output},stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
+        catch(const std::system_error&){MessageBoxW(m_hwnd,L"The export worker could not start. Try again.",L"Export failed",MB_OK|MB_ICONERROR);return;}
+        SyncFeatureMenuState();UpdateCachedStatus();
+    }
+    void CancelExport(){if(m_exportWorker.joinable()){m_exportWorker.request_stop();m_exportWorker.join();m_exportWorker=std::jthread{};}m_exportCompletions.Clear();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
+    void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),L"Export complete",MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),L"Export failed",MB_OK|MB_ICONERROR);}
     uint64_t ActivityElapsedMs()const{
         return m_activityBusy?static_cast<uint64_t>(std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-m_activityStarted).count())):0;
     }
@@ -776,6 +855,20 @@ private:
     }
 
     void LoadVideoSettings(){
+        std::wstring cacheDirectory(32768,L'\0');
+        const DWORD cacheLength=GetPrivateProfileStringW(L"Storage",L"CacheDirectory",L"",cacheDirectory.data(),static_cast<DWORD>(cacheDirectory.size()),SettingsPath().c_str());
+        cacheDirectory.resize(cacheLength);m_cacheRoot=std::filesystem::path(cacheDirectory);
+        if(!m_cacheRoot.is_absolute()||cacheLength>=32767)m_cacheRoot.clear();
+        m_volume=std::clamp(ReadIniFloat(L"Playback",L"Volume",1.0f),0.0f,1.0f);
+        m_muted=ReadIniFloat(L"Playback",L"Muted",0.0f)==1.0f;
+        m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
+        m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
+        m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
+        m_upscaleTargetHeight=ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f)==2160.0f?2160:1440;
+        const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
+        m_youtubeSourceQuality=YouTubeSourceQuality::Auto;
+        for(const auto value:{YouTubeSourceQuality::Auto,YouTubeSourceQuality::P1080,YouTubeSourceQuality::P1440,YouTubeSourceQuality::P2160})
+            if(quality==static_cast<float>(value))m_youtubeSourceQuality=value;
         m_colorSettings.brightness=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Brightness",0.0f),-2.0f,2.0f);
         m_colorSettings.contrast=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Contrast",1.0f),0.0f,3.0f);
         m_colorSettings.saturation=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Saturation",1.0f),0.0f,3.0f);
@@ -785,6 +878,14 @@ private:
     }
 
     void SaveVideoSettings()const{
+        if(!m_cacheRoot.empty())WritePrivateProfileStringW(L"Storage",L"CacheDirectory",m_cacheRoot.c_str(),SettingsPath().c_str());
+        WriteIniFloat(L"Playback",L"Volume",m_volume);
+        WriteIniFloat(L"Playback",L"Muted",m_muted?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
+        WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
         WriteIniFloat(L"VideoAdjustments",L"Contrast",m_colorSettings.contrast);
         WriteIniFloat(L"VideoAdjustments",L"Saturation",m_colorSettings.saturation);
@@ -812,6 +913,9 @@ private:
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
             EnableMenuItem(menu,IDM_UPSCALE_1440,MF_BYCOMMAND|outputState);
             EnableMenuItem(menu,IDM_UPSCALE_2160,MF_BYCOMMAND|outputState);
+            EnableMenuItem(menu,IDM_EXPORT_CACHED_VIDEO,MF_BYCOMMAND|((m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!ActivityBusy())?MF_ENABLED:MF_GRAYED));
+            EnableMenuItem(menu,IDM_CANCEL_EXPORT,MF_BYCOMMAND|(m_exportWorker.joinable()?MF_ENABLED:MF_GRAYED));
+            CheckMenuRadioItem(menu,IDM_ASPECT_FIT,IDM_ASPECT_FILL,m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT,MF_BYCOMMAND);
             DrawMenuBar(m_hwnd);
         }
     }
@@ -976,11 +1080,11 @@ private:
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
-        RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
+        RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();RecordOriginalRecent();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
-        m_lastPlaybackFrame={};m_upscalingError.clear();
+        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -1429,7 +1533,7 @@ private:
     void OpenFromDialog(){if(!ToolbarActionEnabled(ToolbarAction::Open))return;auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
     void SyncSourceActionAvailability(){
         if(!m_hwnd)return;const ToolbarAvailability state=ToolbarState();HMENU menu=GetMenu(m_hwnd);
-        SyncActivityFeedback();
+        SyncActivityFeedback();UpdateRecentMenu();
         if(menu){app_menu::UpdateSourceActionAvailability(menu,IsToolbarActionEnabled(ToolbarAction::Open,state),IsToolbarActionEnabled(ToolbarAction::OpenYouTube,state));DrawMenuBar(m_hwnd);}
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateControls();UpdateCachedStatus();
     }
@@ -1471,38 +1575,44 @@ private:
         if(updateUi){m_neuralProgress={};m_neuralCancelBounds={};InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();
             if(cancelledCompletion&&!cancelledCompletion->sourcePath.empty()&&std::filesystem::is_regular_file(cancelledCompletion->sourcePath)){
                 m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);
-                LoadOriginal(cancelledCompletion->sourcePath.wstring(),cancelledCompletion->displayTitle,cancelledCompletion->sourceKind);
+                LoadOriginalFallback(*cancelledCompletion);
             }
         }
         LOG("Neural pre-render cancelled and worker stopped.");
     }
-    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality){
+    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0){
         if(mediaUrl.empty())return;
         CancelNeuralJob(false);Unload();
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
-                NeuralCacheManager cache;if(!cache.Valid()){completion->result.detail=L"The neural cache directory is unavailable.";goto finish;}
+                NeuralCacheManager cache(cacheRoot);if(!cache.Valid()){completion->result.detail=L"The neural cache directory is unavailable.";goto finish;}
                 {
                     std::filesystem::path sourcePath;
                     if(sourceKind==MediaSourceKind::YouTube){
+                        if(!reuseSourceKey.empty()){
+                            const auto cached=cache.LookupSource(reuseSourceKey);
+                            if(!cached||cached->manifest.encoder!=kCompleteSourcePolicy){completion->cachedSourceUnavailable=true;goto finish;}
+                            sourcePath=cached->payloadPath;completion->sourceKey=reuseSourceKey;
+                            LOG("Recent source cache verified; network resolution skipped.");
+                        }else{
                         const std::string videoId=CanonicalYouTubeVideoId(pageUrl);
                         const std::string streamIdentity=StableYouTubeStreamIdentity(mediaUrl,audioUrl);
-                        if(videoId.empty()||streamIdentity.empty()){completion->result.detail=L"The YouTube source format identity is unavailable.";goto finish;}
-                        NeuralCacheIdentity sourceIdentity{};sourceIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+streamIdentity;sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality="source-shortest-stable-format-v3";
-                        const std::string sourceKey=BuildNeuralCacheKey(sourceIdentity);
+                        if(videoId.empty()||streamIdentity.empty()||!std::isfinite(expectedDurationSeconds)||expectedDurationSeconds<=0.0){completion->result.detail=L"The YouTube source format or duration is unavailable.";goto finish;}
+                        NeuralCacheIdentity sourceIdentity{};sourceIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+streamIdentity;sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality=kCompleteSourcePolicy;
+                        const std::string sourceKey=BuildNeuralCacheKey(sourceIdentity);completion->sourceKey=sourceKey;
                         LOG("Checking source cache key="<<sourceKey);
                         if(const auto cached=cache.LookupSource(sourceKey)){
                             const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
                             if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                             const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                            const bool valid=cachedProbe.ok&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance;
+                            const bool valid=cachedProbe.ok&&cached->manifest.encoder==kCompleteSourcePolicy&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::abs(cachedProbe.duration100ns/10000000.0-expectedDurationSeconds)<=1.0;
                             if(valid){sourcePath=cached->payloadPath;LOG("Source cache hit: content hash and metadata verified; download skipped.");}
                             else if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid source cache entry could not be quarantined.";goto finish;}
                         }
@@ -1510,14 +1620,15 @@ private:
                             LOG("Source cache miss or invalid entry; acquiring source.");
                             NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
                             const auto staging=cache.BeginSourceStaging(sourceKey);if(!staging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
-                            MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv"};MediaMaterializer materializer(moduleDirectory);const auto materialized=materializer.Run(request,stop);
+                            MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv",expectedDurationSeconds};MediaMaterializer materializer(moduleDirectory);const auto materialized=materializer.Run(request,stop);
                             if(!materialized.ok){cache.MarkInvalid(*staging);completion->result.cancelled=materialized.error==MaterializeError::Cancelled;completion->result.detail=materialized.detail;goto finish;}
                             const ProbeResult sourceProbe=ProbeMedia(moduleDirectory,*staging/L"source.mkv",stop);
-                            NeuralCacheManifest sourceManifest{};sourceManifest.encoder="source";sourceManifest.width=sourceProbe.width;sourceManifest.height=sourceProbe.height;sourceManifest.frameCount=sourceProbe.frameCount;sourceManifest.duration100ns=sourceProbe.duration100ns;
+                            NeuralCacheManifest sourceManifest{};sourceManifest.encoder=kCompleteSourcePolicy;sourceManifest.width=sourceProbe.width;sourceManifest.height=sourceProbe.height;sourceManifest.frameCount=sourceProbe.frameCount;sourceManifest.duration100ns=sourceProbe.duration100ns;
                             if(!sourceProbe.ok||!cache.PromoteSource(sourceKey,*staging,sourceManifest)){cache.MarkInvalid(*staging);completion->result.detail=L"The acquired source failed validation.";goto finish;}
                             const auto promoted=cache.LookupSource(sourceKey);if(!promoted){completion->result.detail=L"The acquired source was not reusable.";goto finish;}sourcePath=promoted->payloadPath;
                         }
-                    }else sourcePath=std::filesystem::path(mediaUrl);
+                        }
+                    }else sourcePath=std::filesystem::absolute(std::filesystem::path(mediaUrl));
                     completion->sourcePath=sourcePath;
                     const auto sourceDigest=Sha256File(sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
                     VideoDecoder metadata;if(!metadata.Open(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
@@ -1528,7 +1639,12 @@ private:
                     const int64_t frameDurationTolerance=static_cast<int64_t>(std::ceil(10000000.0/fps));
                     constexpr std::array<std::wstring_view,12> runtimeFiles{L"nvngx_dlssnr.dll",L"nvngx_dlss.dll",L"dxgi.dll",L"renodx-dlss5.addon64",L"sl.common.dll",L"sl.dlss.dll",L"sl.dlss_g.dll",L"sl.dlss_nr.dll",L"sl.interposer.dll",L"sl.nis.dll",L"sl.pcl.dll",L"sl.reflex.dll"};
                     const auto runtimeDigest=BuildRuntimeDigest(moduleDirectory/L"neural-runtime",runtimeFiles,stop);if(!runtimeDigest){completion->result.detail=L"The configured neural runtime is incomplete.";goto finish;}
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,"DLAA|strict-timeline-v3|armed-inline-interception-v3",false};const std::string renderKey=BuildNeuralCacheKey(identity);
+                    const auto configured=ConfigureNeuralAddon(moduleDirectory/L"neural-runtime"/L"ReShade.ini",true);
+                    if(!configured.ok){completion->result.detail=L"The neural settings could not be prepared.";goto finish;}
+                    std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(moduleDirectory/L"neural-runtime"/L"ReShade.ini",&settingsError);
+                    if(!settingsSnapshot){completion->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;goto finish;}
+                    const auto settingsDigest=Sha256Bytes(*settingsSnapshot);if(!settingsDigest){completion->result.detail=L"The neural settings digest could not be computed.";goto finish;}
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,"DLAA|strict-timeline-v3|armed-inline-interception-v3",false,*settingsDigest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;
                     LOG("Checking neural cache key="<<renderKey);
                     if(const auto cached=cache.LookupRender(renderKey)){
                         // LookupRender already verifies the full payload hash and
@@ -1536,17 +1652,20 @@ private:
                         const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
                         if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                        const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-sourceDuration100ns)<=frameDurationTolerance;
+                        const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-sourceDuration100ns)<=frameDurationTolerance;
                         if(valid){completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;goto finish;}
                         if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
                     }
                     LOG("Neural cache miss or invalid entry; starting a new render.");
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
+                    {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
                     NeuralRenderRequest request{nullptr,sourcePath,*staging/L"neural.mkv",width,height,fps,duration};completion->result=RunNeuralWorker(moduleDirectory/L"neural-runtime"/L"NeuralWorker.exe",request,postProgress,stop);
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
+                    const auto finalSettings=ReadNeuralAddonSettingsSnapshot(moduleDirectory/L"neural-runtime"/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
                     const ProbeResult probe=ProbeMedia(moduleDirectory,*staging/L"neural.mkv",stop);
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
+                    manifest.settingsDigest=*settingsDigest;
                     const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&std::llabs(probe.duration100ns-completion->result.duration100ns)<=frameDurationTolerance&&std::llabs(probe.duration100ns-sourceDuration100ns)<=frameDurationTolerance&&std::llabs(completion->result.duration100ns-sourceDuration100ns)<=frameDurationTolerance;
                     NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
                     if(!CanPublishNeuralCompletion(completion->result.ok,probeMatches,IsReusableNeuralCacheManifest(publishCandidate))||!cache.PromoteRender(renderKey,*staging,manifest)){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;}
@@ -1569,7 +1688,7 @@ private:
         if(m_synchronizedPlayback.ReadNextAvailable()!=SynchronizedReadResult::PairReady||!m_synchronizedPlayback.SetView(desiredView)||!m_synchronizedPlayback.VisibleFrame()){Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         const VideoFrame first=*m_synchronizedPlayback.VisibleFrame();if(!RenderVideoFrame(first,true)){Unload();return false;}
-        m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
+        m_neuralPath=completion.neuralPath;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
         m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
         m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
@@ -1583,11 +1702,12 @@ private:
     void CompleteNeuralJob(uint64_t token){
         auto completion=m_neuralCompletions.Take(token);if(!completion||!m_neuralLifecycle.Accept(completion->generation))return;
         if(m_neuralWorker.joinable()){m_neuralWorker.join();m_neuralWorker=std::jthread{};}m_neuralProgressMessages.Clear();m_pendingNeuralTitle.clear();m_neuralCancelBounds={};
-        if(completion->result.cancelled){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath))LoadOriginal(completion->sourcePath.wstring(),completion->displayTitle,completion->sourceKind);else InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();return;}
-        if(completion->result.ok&&!completion->neuralPath.empty()&&LoadCachedPlayback(*completion)){m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);SyncSourceActionAvailability();if(completion->cacheHit)LOG("Verified neural cache hit opened without re-rendering.");else LOG("Verified neural cache playback opened.");return;}
+        if(completion->cachedSourceUnavailable){m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);StartYouTubeResolution(completion->pageUrl,completion->displayTitle,completion->sourceQuality,0.0,true,NetworkCommitKind::InitialOpen,false);return;}
+        if(completion->result.cancelled){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath))LoadOriginalFallback(*completion);else InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();return;}
+        if(completion->result.ok&&!completion->neuralPath.empty()&&LoadCachedPlayback(*completion)){m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(*completion);SyncSourceActionAvailability();if(completion->cacheHit)LOG("Verified neural cache hit opened without re-rendering.");else LOG("Verified neural cache playback opened.");return;}
         m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);LOG("Neural pre-render failed: "<<WideToUtf8(completion->result.detail));
         SyncSourceActionAvailability();
-        if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath)){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);LoadOriginal(completion->sourcePath.wstring(),completion->displayTitle,completion->sourceKind);}
+        if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath)){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);LoadOriginalFallback(*completion);}
         else{const std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
     static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,[[maybe_unused]] uint32_t maxW,[[maybe_unused]] uint32_t maxH,[[maybe_unused]] bool qualityExplicit,[[maybe_unused]] NVSDK_NGX_PerfQuality_Value explicitQuality){
@@ -1619,9 +1739,16 @@ private:
         if(!m_loaded||!m_renderer)return{};const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         return{m_decoder.NativeWidth(),m_decoder.NativeHeight(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_renderer->OutputW(),m_renderer->OutputH(),guideW,guideH,static_cast<int>(m_activeQuality)};
     }
-    void StartYouTubeResolution(const std::wstring& url,const std::wstring& displayTitle=L"",YouTubeSourceQuality sourceQuality=YouTubeSourceQuality::Auto,double seekSeconds=0.0,bool resumeAfter=true,NetworkCommitKind commitKind=NetworkCommitKind::InitialOpen){
+    void StartYouTubeResolution(const std::wstring& url,const std::wstring& displayTitle=L"",YouTubeSourceQuality sourceQuality=YouTubeSourceQuality::Auto,double seekSeconds=0.0,bool resumeAfter=true,NetworkCommitKind commitKind=NetworkCommitKind::InitialOpen,bool allowCachedSource=true){
         if(!IsSupportedYouTubeUrl(url))return;
         CancelYouTubeResolution();
+        if(allowCachedSource&&commitKind==NetworkCommitKind::InitialOpen&&NeuralPreRenderEnabled()&&m_recent){
+            const auto id=CanonicalYouTubeVideoId(url);
+            for(const auto& entry:m_recent->Entries())if(entry.youtube&&entry.id==id&&entry.sourceQuality==static_cast<int>(sourceQuality)&&!entry.sourceKey.empty()){
+                const auto sourceKey=entry.sourceKey;const auto title=displayTitle.empty()?entry.title:displayTitle;
+                StartNeuralJob(url,{},title,url,MediaSourceKind::YouTube,sourceQuality,sourceKey);return;
+            }
+        }
         if(!m_youtubeResolver)m_youtubeResolver=std::make_unique<YouTubeResolver>();
         const uint64_t generation=m_youtubeLifecycle.Begin();
         m_pendingYouTubeTitle=DisplayTitleForSource(MediaSourceKind::YouTube,displayTitle);
@@ -1713,6 +1840,7 @@ private:
                 Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!shouldPlay);
             });
         if(!committed)return false;
+        RecordOriginalRecent();
         RestoreUpscaling();
         UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);DrawMenuBar(m_hwnd);
         UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -1730,7 +1858,7 @@ private:
         }
         if(NeuralPreRenderEnabled()&&!completion->result.mediaUrl.empty()){
             LOG("YouTube resolution completed; acquiring a local source for neural pre-render.");
-            StartNeuralJob(completion->result.mediaUrl,completion->result.audioUrl,completion->displayTitle,completion->pageUrl,MediaSourceKind::YouTube,completion->sourceQuality);return;
+            StartNeuralJob(completion->result.mediaUrl,completion->result.audioUrl,completion->displayTitle,completion->pageUrl,MediaSourceKind::YouTube,completion->sourceQuality,{},completion->result.durationSeconds);return;
         }
         if(!completion->mediaErrorKey.empty()){
             if(completion->mediaErrorKey==L"youtube.error.cancelled")return;
@@ -1749,6 +1877,7 @@ private:
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
     }
     std::wstring BuildStatusText()const{
+        if(m_exportWorker.joinable())return L"Exporting cached video - File > Cancel export to stop";
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
         if(m_cachedPlayback){std::wstring text=L"Neural cached playback · "+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
@@ -1771,11 +1900,14 @@ private:
         if(outcome==SafeModeRestartOutcome::CloseCurrent)DestroyWindow(m_hwnd);
     }
     void ClearNeuralCache(){
-        if(NeuralJobActive()||m_cachedPlayback){MessageBoxW(m_hwnd,L"Stop neural rendering or cached playback before clearing the cache.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONINFORMATION);return;}
-        NeuralCacheManager cache;if(!cache.Valid()){MessageBoxW(m_hwnd,L"The neural cache directory is unavailable.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
-        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Delete "+std::to_wstring(bytes/(1024*1024))+L" MiB of verified neural cache data?";
+        if(ActivityBusy()||m_exportWorker.joinable()){MessageBoxW(m_hwnd,L"Finish or cancel rendering and export before clearing the cache.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){MessageBoxW(m_hwnd,L"The neural cache directory is unavailable.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
+        const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete "+std::to_wstring(bytes/(1024*1024))+L" MiB of neural cache data? Local original files will be kept.";
         if(MessageBoxW(m_hwnd,prompt.c_str(),T(L"menu.clear_neural_cache").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
-        if(!cache.Clear())MessageBoxW(m_hwnd,L"The neural cache could not be cleared.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);
+        Unload();
+        if(!cache.Clear())MessageBoxW(m_hwnd,L"The neural cache could not be fully cleared.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);
+        if(m_recent){auto entries=m_recent->Entries();for(auto it=entries.rbegin();it!=entries.rend();++it){it->sourceKey.clear();it->renderKey.clear();m_recent->Remember(*it);}m_recent->Save();}
+        m_pendingCacheEvictions.clear();SyncSourceActionAvailability();
     }
     void ShowDebugMenu(const RECT& anchor){
         UINT selected=IDM_VIEW_FINAL;
@@ -1837,7 +1969,6 @@ private:
     void ToggleMute(){m_muted=!m_muted;Audio().SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleNeuralRendering(){if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering))return;m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();}
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
-    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){if(m_loaded&&!m_path.empty()&&m_sourceKind==MediaSourceKind::YouTube){StartYouTubeSeek(Position(),m_playing,NetworkCommitKind::QualityReload,std::pair{!automatic,q});return;}m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){double keep=Position();bool wasPlaying=m_playing;std::wstring p=m_path,title=m_displayTitle;if(Load(p,title,MediaSourceKind::LocalFile))RequestSeek(keep,wasPlaying);}}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
@@ -1850,11 +1981,12 @@ private:
         case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
+        case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
-        case WM_DESTROY:if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();m_running=false;PostQuitMessage(0);return 0;
-        case WM_CLOSE:CancelNeuralJob(false);CancelYouTubeResolution(false);DestroyWindow(h);return 0;
+        case WM_DESTROY:CancelExport();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();m_running=false;PostQuitMessage(0);return 0;
+        case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
             if(info){const UINT dpi=ActiveWindowDpi(h);const POINT minimum=MinimumPlayerWindowTrackSize(h,dpi);info->ptMinTrackSize.x=std::max<LONG>(info->ptMinTrackSize.x,minimum.x);info->ptMinTrackSize.y=std::max<LONG>(info->ptMinTrackSize.y,minimum.y);}
@@ -1887,6 +2019,7 @@ private:
     }
 
     void HandleCommand(UINT id){
+        if(id>=IDM_RECENT_VIDEO_FIRST&&id<IDM_RECENT_VIDEO_FIRST+5){OpenRecent(id-IDM_RECENT_VIDEO_FIRST);return;}
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
@@ -1897,11 +2030,18 @@ private:
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
         case IDM_FRAME_GENERATION:break;
-        case IDM_QUALITY_AUTO:case IDM_QUALITY_QUALITY:case IDM_QUALITY_BALANCED:case IDM_QUALITY_PERFORMANCE:case IDM_QUALITY_ULTRAPERF:case IDM_QUALITY_DLAA:break;
+        case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
+        case IDM_CANCEL_EXPORT:CancelExport();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_MASK:SetDebug(D3D12Renderer::DebugView::BiasMask);break;case IDM_DEPTH_MODE:ToggleDepthMode();break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         }
     }
 
+    std::unique_ptr<RecentMediaHistory> m_recent;
+    std::filesystem::path m_cacheRoot;
+    std::vector<RecentMediaEntry> m_pendingCacheEvictions;
+    std::filesystem::path m_neuralPath;
+    CompletionRegistry<ExportCompletion> m_exportCompletions;
+    std::jthread m_exportWorker;
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
@@ -1922,7 +2062,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
 {
     EnablePerMonitorDpiAwareness();
     AppOptions options=ParseArgs();
-    if(!options.argumentsOk){FailBootstrap(options.argumentError);return 1;}
+    if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS Video Player",MB_OK|MB_ICONERROR);return 1;}
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;
     if(startup==StartupResult::ExitFailure)return 1;
