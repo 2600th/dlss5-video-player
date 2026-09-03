@@ -76,6 +76,7 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_backend,other.m_backend);swap(m_reader,other.m_reader);swap(m_path,other.m_path);
     swap(m_width,other.m_width);swap(m_height,other.m_height);swap(m_nativeWidth,other.m_nativeWidth);swap(m_nativeHeight,other.m_nativeHeight);swap(m_stride,other.m_stride);
     swap(m_fps,other.m_fps);swap(m_durationSec,other.m_durationSec);swap(m_displayAspect,other.m_displayAspect);
+    swap(m_stillImage,other.m_stillImage);swap(m_gif,other.m_gif);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
     swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
@@ -120,6 +121,8 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     m_stride = 0;
     m_fps = 30.0;
     m_durationSec = 0.0;
+    m_stillImage = false;
+    m_gif = false;
     m_displayAspect = 0.0;
     m_sourceKind = sourceKind;
 
@@ -265,8 +268,12 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         DWORD available=0;
         if (!PeekNamedPipe(readPipe,nullptr,0,nullptr,&available,nullptr)) {
             const DWORD pipeFailure=GetLastError();
-            if(pipeFailure==ERROR_BROKEN_PIPE&&WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0)break;
-            pipeError=true;break;
+            if(pipeFailure!=ERROR_BROKEN_PIPE){pipeError=true;break;}
+            // A successful, empty orientation probe can close stdout just
+            // before its process exits. Await that exit within the same
+            // cancellable deadline instead of treating EOF as a pipe error.
+            if(WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0)break;
+            available=0;
         }
         while(available>0){
             const DWORD want=std::min<DWORD>(available,sizeof(buf));DWORD got=0;
@@ -296,7 +303,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration "
+        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -310,6 +317,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     uint32_t width = 0, height = 0;
     double avgRate = 0.0, rawRate = 0.0, duration = 0.0;
     double videoDuration = 0.0;
+    std::string format;
     double displayAspect = 0.0, sampleAspect = 1.0;
     std::istringstream in(text);
     std::string line;
@@ -321,6 +329,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         const std::string value = line.substr(eq + 1);
         try {
             if (key == "width") width = static_cast<uint32_t>(std::stoul(value));
+            else if (key == "format_name") format = value;
             else if (key == "height") height = static_cast<uint32_t>(std::stoul(value));
             else if (key == "display_aspect_ratio" && value != "N/A") {
                 const size_t c=value.find(':'); if(c!=std::string::npos){ double a=std::stod(value.substr(0,c)), b=std::stod(value.substr(c+1)); if(b>0) displayAspect=a/b; }
@@ -349,6 +358,36 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     // Matroska stores per-track duration here; its container may include longer audio.
     m_durationSec = videoDuration > 0.0 ? videoDuration :
         ((std::isfinite(duration) && duration > 0.0) ? duration : 0.0);
+    m_gif = format == "gif";
+    m_stillImage = format == "image2" || format == "png_pipe" || format == "jpeg_pipe" ||
+        format == "bmp_pipe" || format == "tiff_pipe" || format == "webp_pipe";
+    // A photo has one frame, with a finite carrier duration for the existing
+    // neural cache. GIF delays are centiseconds: a 100 Hz carrier preserves
+    // every delay instead of retiming variable-delay animation to its average.
+    if (m_stillImage) {
+        m_fps = 1.0; m_durationSec = 1.0;
+        // JPEG EXIF orientation is frame side data, absent from stream metadata.
+        // FFmpeg autorotates its output; expose matching row geometry to the GPU.
+        std::string orientation;
+        if (!RunCapture(m_ffprobeExe, L"-v error -select_streams v:0 -read_intervals \"%+#1\" "
+            L"-show_entries frame_side_data=rotation -of default=noprint_wrappers=1 " + Quote(path),
+            orientation, &code, stop, timeout)) return false;
+        std::istringstream rotations(orientation);
+        while (std::getline(rotations, line)) {
+            if (line.rfind("rotation=", 0) != 0) continue;
+            try {
+                const double angle = std::stod(line.substr(9));
+                if (std::isfinite(angle) && std::abs(std::fmod(std::abs(angle), 180.0) - 90.0) < 0.5) {
+                    std::swap(m_width, m_height);std::swap(m_nativeWidth, m_nativeHeight);
+                    m_stride = static_cast<int32_t>(m_width * 4u);
+                    if (displayAspect > 0.1) displayAspect = 1.0 / displayAspect;
+                    if (sampleAspect > 0.0) sampleAspect = 1.0 / sampleAspect;
+                }
+            } catch (...) { return false; }
+            break;
+        }
+    }
+    else if (m_gif) m_fps = 100.0;
     if (std::isfinite(displayAspect) && displayAspect > 0.1) m_displayAspect = displayAspect;
     else m_displayAspect = (double(m_width) * sampleAspect) / double(m_height);
 
@@ -363,6 +402,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
 bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration acceleration) {
     StopFFmpeg();
     seekSeconds = std::max(0.0, seekSeconds);
+    if (m_stillImage || m_gif) acceleration = FFmpegAcceleration::Software;
+    if (m_stillImage) seekSeconds = 0.0;
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -395,6 +436,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
         args << L"-hwaccel d3d11va -hwaccel_output_format d3d11 ";
     if (seekSeconds > 0.0)
         args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
+    if (m_gif) args << L"-ignore_loop 1 ";
     args << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
     if (acceleration == FFmpegAcceleration::Cuda)
@@ -405,6 +447,9 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
              << L":flags=bicubic,format=bgra ";
     else if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
         args << L"-vf scale=" << m_width << L":" << m_height << L":flags=bicubic ";
+    if (m_stillImage) args << L"-frames:v 1 ";
+    if (m_gif && m_durationSec > seekSeconds)
+        args << L"-t " << std::fixed << std::setprecision(6) << (m_durationSec - seekSeconds) << L" ";
     args << L"-pix_fmt bgra -fps_mode cfr -r "
          << std::fixed << std::setprecision(6) << m_fps
          << L" -f rawvideo pipe:1";

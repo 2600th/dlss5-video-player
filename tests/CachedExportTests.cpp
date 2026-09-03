@@ -1,4 +1,5 @@
 #include "MediaPipeline.h"
+#include "VideoDecoder.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -200,6 +201,23 @@ void ExportTests(const std::filesystem::path& helpers)
         }
     }
 
+    // MP4 uses compatible encodings while preserving selected tracks and chapters.
+    const auto mp4Output = fixture.path / L"with-streams.mp4";
+    CHECK(exporter.Run({cached, source, mp4Output}, {}).ok);
+    if (std::filesystem::exists(mp4Output)) {
+        const auto info = Probe(helpers, mp4Output, log, {L"-show_streams", L"-show_chapters"});
+        CHECK_EQ(size_t{1}, Count(info, "codec_name=h264"));
+        CHECK_EQ(size_t{2}, Count(info, "codec_name=aac"));
+        CHECK_EQ(size_t{2}, Count(info, "codec_name=mov_text"));
+        CHECK_EQ(size_t{1}, Count(info, "[CHAPTER]"));
+        // MP4 can also carry a language tag on its chapter data track.
+        for (const auto* selector : {L"a", L"s"}) {
+            const auto languages = Probe(helpers, mp4Output, log, {L"-select_streams", selector, L"-show_streams"});
+            CHECK_EQ(size_t{1}, Count(languages, "TAG:language=eng"));
+            CHECK_EQ(size_t{1}, Count(languages, "TAG:language=fra"));
+        }
+    }
+
     // A source without audio/subtitles/chapters must still export successfully.
     const auto silentOutput = fixture.path / L"silent.MKV";
     CHECK(exporter.Run({cached, cached, silentOutput}, {}).ok);
@@ -224,7 +242,7 @@ void ExportTests(const std::filesystem::path& helpers)
     const auto alias = fixture.path / L"source-alias.mkv";
     std::filesystem::create_hard_link(source, alias);
     const auto filesBefore = Files(fixture.path);
-    for (const auto& destination : {existing, cached, source, alias, fixture.path / L"wrong.mp4"}) {
+    for (const auto& destination : {existing, cached, source, alias, fixture.path / L"wrong.txt"}) {
         const auto rejected = exporter.Run({cached, source, destination}, {});
         CHECK(!rejected.ok);
         CHECK_EQ(MaterializeError::InvalidRequest, rejected.error);
@@ -310,6 +328,135 @@ void ExportTests(const std::filesystem::path& helpers)
     CHECK_EQ(cachedBefore, Read(cached));
 }
 
+void PhotoAndAnimationTests(const std::filesystem::path& helpers)
+{
+    // Catch image metadata rejecting neural jobs, accidental image looping,
+    // flattened GIFs, and exports that silently use original instead of processed pixels.
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"media.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    CachedVideoExporter exporter(helpers);
+    for (const auto* extension : {L".png", L".jpg", L".bmp", L".tiff", L".webp"}) {
+        const auto photo = fixture.path / (std::wstring(L"photo") + extension);
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-f", L"lavfi", L"-i",
+            L"color=blue:s=96x64", L"-frames:v", L"1", photo.wstring()}, log));
+        VideoDecoder decoder;
+        CHECK(decoder.OpenSequential(photo.wstring()));
+        CHECK_EQ(decoder.Width(), 96u);
+        CHECK_EQ(decoder.Height(), 64u);
+        CHECK_EQ(decoder.FrameRate(), 1.0);
+        CHECK_EQ(decoder.DurationSeconds(), 1.0);
+        VideoFrame frame;
+        CHECK(decoder.ReadNext(frame));
+        CHECK_EQ(frame.bgra.size(), size_t{96 * 64 * 4});
+        CHECK(!decoder.ReadNext(frame));
+        CHECK(decoder.SeekSeconds(0));
+        CHECK(decoder.ReadNext(frame));
+    }
+    // Smartphone JPEG orientation lives on decoded-frame EXIF side data.
+    // Encoded96x64 + orientation6 must be exposed as upright64x96 BGRA rows.
+    const auto rotatedPhoto = fixture.path / L"rotated.jpg";
+    auto jpegBytes = Read(fixture.path / L"photo.jpg");
+    const unsigned char orientation[]{0xff,0xe1,0,34,'E','x','i','f',0,0,
+        'I','I',42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0};
+    jpegBytes.insert(2, reinterpret_cast<const char*>(orientation), sizeof(orientation));
+    Write(rotatedPhoto, jpegBytes);
+    VideoDecoder rotatedDecoder;
+    CHECK(rotatedDecoder.OpenSequential(rotatedPhoto.wstring()));
+    CHECK_EQ(rotatedDecoder.Width(), 64u);
+    CHECK_EQ(rotatedDecoder.Height(), 96u);
+    CHECK_EQ(rotatedDecoder.NativeWidth(), 64u);
+    CHECK(std::abs(rotatedDecoder.DisplayAspectRatio() - 2.0 / 3.0) < 0.001);
+    VideoFrame rotatedFrame;
+    CHECK(rotatedDecoder.ReadNext(rotatedFrame));
+    CHECK_EQ(rotatedFrame.bgra.size(), size_t{96 * 64 * 4});
+
+    // Photos may have odd dimensions; software fallback must preserve them.
+    const auto oddPhoto = fixture.path / L"odd.png";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-f", L"lavfi", L"-i",
+        L"testsrc=s=95x65", L"-frames:v", L"1", oddPhoto.wstring()}, log));
+    VideoDecoder photoDecoder;
+    CHECK(photoDecoder.OpenSequential(oddPhoto.wstring()));
+    VideoFrame photoFrame;
+    CHECK(photoDecoder.ReadNext(photoFrame));
+    const auto photoCache = fixture.path / L"photo-cache.mkv";
+    RawVideoEncoder photoEncoder(helpers);
+    CHECK_EQ(photoEncoder.Start({95, 65, 1.0, EncoderKind::H264Software}, photoCache), EncodeError::None);
+    CHECK_EQ(photoEncoder.WriteFrame(photoFrame.bgra), EncodeError::None);
+    CHECK_EQ(photoEncoder.Finish(), EncodeError::None);
+    const auto photoOutput = fixture.path / L"photo-export.png";
+    CHECK(exporter.Run({photoCache, oddPhoto, photoOutput}, {}).ok);
+    if (std::filesystem::exists(photoOutput)) {
+        const auto info = Probe(helpers, photoOutput, log, {L"-count_frames", L"-show_streams"});
+        CHECK(info.find("width=95") != std::string::npos);
+        CHECK(info.find("height=65") != std::string::npos);
+        CHECK(info.find("nb_read_frames=1") != std::string::npos);
+    }
+    const auto photoMp4 = fixture.path / L"photo-export.mp4";
+    CHECK(exporter.Run({photoCache, oddPhoto, photoMp4}, {}).ok);
+    if (std::filesystem::exists(photoMp4)) {
+        const auto info = Probe(helpers, photoMp4, log, {L"-count_frames", L"-show_streams"});
+        CHECK(info.find("width=95") != std::string::npos);
+        CHECK(info.find("height=65") != std::string::npos);
+        CHECK(info.find("nb_read_frames=1") != std::string::npos);
+    }
+    const auto animation = fixture.path / L"animation.gif";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-f", L"lavfi", L"-i",
+        L"testsrc2=s=96x64:r=10:d=1", L"-vf", L"select='eq(n,0)+eq(n,1)+eq(n,4)'",
+        L"-fps_mode", L"vfr", L"-final_delay", L"60", animation.wstring()}, log));
+    VideoDecoder decoder;
+    CHECK(decoder.OpenSequential(animation.wstring()));
+    CHECK(std::abs(decoder.DurationSeconds() - 1.0) < 0.011);
+    const auto processed = fixture.path / L"processed.mkv";
+    RawVideoEncoder encoder(helpers);
+    CHECK_EQ(encoder.Start({96, 64, decoder.FrameRate(), EncoderKind::H264Software}, processed), EncodeError::None);
+    size_t frames = 0;
+    VideoFrame frame;
+    while (decoder.ReadNext(frame) && frames < 200) {
+        // A visibly different processed result, encoded through the real cache encoder.
+        for (size_t i = 0; i < frame.bgra.size(); i += 4) {
+            frame.bgra[i] = 255; frame.bgra[i + 1] = 0; frame.bgra[i + 2] = 0;
+        }
+        CHECK_EQ(encoder.WriteFrame(frame.bgra), EncodeError::None);
+        ++frames;
+    }
+    CHECK_EQ(frames, size_t{100});
+    CHECK_EQ(encoder.Finish(), EncodeError::None);
+    for (const auto* extension : {L".png", L".jpg", L".gif", L".mp4", L".mkv"}) {
+        const auto output = fixture.path / (std::wstring(L"export") + extension);
+        const auto result = exporter.Run({processed, animation, output}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        const auto info = Probe(helpers, output, log, {L"-show_streams", L"-show_format"});
+        CHECK(info.find("width=96") != std::string::npos);
+        CHECK(info.find("height=64") != std::string::npos);
+        const auto pixels = fixture.path / L"pixels.bgra";
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", output.wstring(),
+            L"-frames:v", L"1", L"-pix_fmt", L"bgra", L"-f", L"rawvideo", pixels.wstring()}, log));
+        const auto bytes = Read(pixels);
+        CHECK_EQ(bytes.size(), size_t{96 * 64 * 4});
+        if (bytes.size() >= 4) { CHECK(static_cast<unsigned char>(bytes[0]) > 220); CHECK(static_cast<unsigned char>(bytes[2]) < 30); }
+        if (std::wstring_view(extension) == L".gif" || std::wstring_view(extension) == L".mp4")
+            CHECK(info.find("duration=1.000000") != std::string::npos);
+    }
+    // A GIF exported directly from an animation must retain distinct visual frames.
+    const auto animatedOutput = fixture.path / L"animated-export.gif";
+    CHECK(exporter.Run({animation, animation, animatedOutput}, {}).ok);
+    if (std::filesystem::exists(animatedOutput)) {
+        const auto info = Probe(helpers, animatedOutput, log, {L"-count_frames", L"-show_streams", L"-show_format"});
+        CHECK(info.find("nb_read_frames=50") != std::string::npos);
+        CHECK(info.find("duration=1.000000") != std::string::npos);
+        VideoDecoder exportedAnimation;
+        CHECK(exportedAnimation.OpenSequential(animatedOutput.wstring()));
+        std::set<std::vector<uint8_t>> distinctFrames;
+        VideoFrame animatedFrame;
+        while (exportedAnimation.ReadNext(animatedFrame) && distinctFrames.size() < 3)
+            distinctFrames.insert(animatedFrame.bgra);
+        CHECK_EQ(distinctFrames.size(), size_t{3});
+    }
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -323,6 +470,7 @@ int wmain(int argc, wchar_t** argv)
     MaterializationPreservesFullVideoTest(helpers);
     MaterializationRejectsShortVideoWithLongAudioTest(helpers);
     ExportTests(helpers);
+    PhotoAndAnimationTests(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

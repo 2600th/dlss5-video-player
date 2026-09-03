@@ -19,7 +19,7 @@ Original + validated neural cache -> synchronized decoded frame pairs
   |
   +-> chosen view -> optional playback SR -> image adjustments -> D3D12 display
   |
-  +-> cached neural video + compatible source streams -> MKV export
+  +-> cached neural frames -> PNG/JPEG/GIF or MP4/MKV export
 ```
 
 The main player has no ReShade proxy. The worker hosts the experimental runtime
@@ -104,10 +104,23 @@ creation, so inherited Windows package redirection cannot split the ownership ro
 from newly written children. Descendant and reparse-point checks remain in force.
 
 `CachedVideoExporter` stream-copies the validated neural video and source audio,
-compatible subtitles, attachments, metadata and chapters into a new MKV. An owned,
+compatible subtitles, attachments, metadata and chapters into a new MKV. It also
+encodes PNG/JPEG single frames, palette GIFs at 50 fps, and H.264/AAC MP4 with
+compatible text subtitles. An owned,
 cancellable FFmpeg process writes a unique sibling stage, published without
 overwriting an existing destination. Export has no render or subtitle-composition
 pass. Preferences use the existing executable-adjacent INI.
+
+Still-image demuxers produce one frame at 1 fps with a one-second cache carrier.
+Neural feature warm-up can reuse that frame up to 120 times; capture reopens the
+source and encodes exactly one frame. GIF decoding uses a 100 fps carrier so
+variable centisecond delays survive synchronized processing. Photos bypass
+hardware video decoding; odd dimensions use 4:4:4 software cache encoding.
+Each encoder attempt captures its first source frame until a fresh runtime
+receipt arrives, retaining only the latest pixels. This is bounded to 120 captures
+and does not extend the exported timeline; unchanged or failed runtime evidence
+still rejects the render. JPEG EXIF rotation is included in decoded dimensions.
+Automatic cache selection probes `<exe>/cache/v1` before the LocalAppData fallback.
 
 `SynchronizedPlayback` opens the original and neural files together, validates
 their geometry/rate/duration, and publishes timestamp-matched frame pairs.

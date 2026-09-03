@@ -411,7 +411,7 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     } else {
         arguments.insert(arguments.end(), {
             L"-c:v", L"libx264", L"-preset", L"slow", L"-crf", L"16",
-            L"-pix_fmt", L"yuv420p"});
+            L"-pix_fmt", (spec.width % 2 || spec.height % 2) ? L"yuv444p" : L"yuv420p"});
     }
     arguments.insert(arguments.end(), {L"-f", L"matroska", output.wstring()});
     return arguments;
@@ -482,9 +482,15 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return MaterializeResult{false, MaterializeError::Cancelled, L"Cached video export was cancelled."};
     };
     if (stop.stop_requested()) return cancelled();
+    const auto extension = request.output.extension().wstring();
+    const bool mkv = _wcsicmp(extension.c_str(), L".mkv") == 0;
+    const bool mp4 = _wcsicmp(extension.c_str(), L".mp4") == 0;
+    const bool gif = _wcsicmp(extension.c_str(), L".gif") == 0;
+    const bool png = _wcsicmp(extension.c_str(), L".png") == 0;
+    const bool jpeg = _wcsicmp(extension.c_str(), L".jpg") == 0 || _wcsicmp(extension.c_str(), L".jpeg") == 0;
     if (request.neuralVideo.empty() || request.sourceMedia.empty() || request.output.empty() ||
-        _wcsicmp(request.output.extension().c_str(), L".mkv") != 0)
-        return {false, MaterializeError::InvalidRequest, L"Choose a new .mkv file for the cached video export."};
+        !(mkv || mp4 || gif || png || jpeg))
+        return {false, MaterializeError::InvalidRequest, L"Choose a new MKV, MP4, GIF, PNG or JPEG file."};
     std::error_code error;
     const auto neuralVideo = std::filesystem::absolute(request.neuralVideo, error);
     if (error)
@@ -505,6 +511,14 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::InvalidRequest, L"The export file already exists. Choose a new filename."};
     const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
     if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
+    bool oddDimensions = false;
+    if (mp4) {
+        const ProbeResult neuralMetadata = ProbeMedia(helperDirectory_, neuralVideo, stop,
+                                                       MediaProbeMode::CachedMetadata);
+        if (!neuralMetadata.ok)
+            return {false, MaterializeError::ProcessFailed, L"The cached neural media could not be inspected."};
+        oddDimensions = neuralMetadata.width % 2 || neuralMetadata.height % 2;
+    }
 
     struct StagingFile {
         std::filesystem::path path;
@@ -527,13 +541,34 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     if (staging.path.empty())
         return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
     if (stop.stop_requested()) return cancelled();
-    const std::vector<std::wstring> arguments{
+    std::vector<std::wstring> arguments{
         // -y applies only to the exclusively reserved staging file we own.
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
-        L"-i", neuralVideo.wstring(), L"-i", sourceMedia.wstring(),
-        L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?", L"-map", L"1:t?",
-        L"-map_metadata", L"1", L"-map_chapters", L"1", L"-c", L"copy",
-        L"-f", L"matroska", staging.path.wstring()};
+        L"-i", neuralVideo.wstring()};
+    if (mkv || mp4) {
+        arguments.insert(arguments.end(), {L"-i", sourceMedia.wstring(),
+            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
+            L"-map_metadata", L"1", L"-map_chapters", L"1"});
+        if (mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
+        else {
+            arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-crf", L"18"});
+            if (oddDimensions) arguments.insert(arguments.end(), {L"-pix_fmt", L"yuv444p"});
+            else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
+            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
+        }
+    } else if (gif) {
+        arguments.insert(arguments.end(), {L"-filter_complex",
+            // Two-centisecond frames avoid the short-delay clamping performed
+            // by common GIF viewers. fps retains holds through the final delay.
+            L"[0:v:0]fps=50,split[a][b];[a]palettegen[p];[b][p]paletteuse=dither=sierra2_4a[v]",
+            L"-map", L"[v]", L"-an", L"-loop", L"0", L"-fps_mode", L"passthrough", L"-f", L"gif"});
+    } else {
+        arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-frames:v", L"1", L"-an",
+            L"-c:v", png ? L"png" : L"mjpeg", L"-pix_fmt", png ? L"rgb24" : L"yuvj444p"});
+        if (jpeg) arguments.insert(arguments.end(), {L"-q:v", L"2"});
+        arguments.insert(arguments.end(), {L"-f", L"image2", L"-update", L"1"});
+    }
+    arguments.push_back(staging.path.wstring());
     // Attachments (such as subtitle fonts) travel with the source subtitles.
     // Unsupported codecs fail the entire export; no subtitle is burned in.
     const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
@@ -542,7 +577,7 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
     const auto bytes = std::filesystem::file_size(staging.path, error);
     if (capture.exitCode != 0 || error || bytes == 0) {
-        std::wstring detail = L"FFmpeg could not export these streams to MKV without conversion.";
+        std::wstring detail = L"FFmpeg could not export this media in the selected format.";
         const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, capture.output.data(),
                                                static_cast<int>(capture.output.size()), nullptr, 0);
         if (length > 0) {

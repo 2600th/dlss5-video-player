@@ -31,6 +31,7 @@ DLSSVideoPlayer.ini
 DLSSVideoPlayer.log
 ReShade.log
 /dist/
+/cache/
 
 # Local archives / generated checksums
 *.zip

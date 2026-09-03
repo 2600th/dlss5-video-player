@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-Version 0.13.0 prepares a complete neural video, reuses the validated result,
+Version 0.14.0 prepares a complete neural video, reuses the validated result,
 and compares it with the original at the same timestamp. Start with the
 [usage guide](docs/USAGE.md) for controls, cache locations, preferences and export.
 
@@ -17,11 +17,13 @@ Extract the entire Windows package into a new writable folder, keep
 a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA driver. Hardware verification
 used an RTX 5090; other neural configurations require their own validation.
 
-Open a local video, paste a public YouTube URL, or choose **File > Upcoming
+Open a local photo, GIF or video, paste a public YouTube URL, or choose **File > Upcoming
 games**. Preparation finishes before synchronized playback begins. Press `D`
 to compare original and neural views. Recent history reuses valid downloads and
-renders. **File > Export cached video** saves a new MKV with the cached video
-and compatible source streams.
+renders. **File > Export processed media** saves PNG/JPEG photos, animated GIFs,
+or MP4/MKV videos. MKV preserves compatible source streams. The cache prefers
+`cache/v1` beside the EXE and falls back to LocalAppData when unwritable.
+Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
 Fresh-install defaults are Neural Rendering on, playback DLSS Upscaling off,
 1440p upscaling output selected, and YouTube Auto preferring exact 1080p.

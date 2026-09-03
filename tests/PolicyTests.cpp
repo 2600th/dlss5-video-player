@@ -1396,7 +1396,7 @@ void youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test()
 
 void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
 {
-    CHECK_EQ(size_t{5}, kExampleVideos.size());
+    CHECK_EQ(size_t{6}, kExampleVideos.size());
 
     std::vector<std::wstring_view> urls;
     for (const ExampleVideo& example : kExampleVideos) {
@@ -1412,7 +1412,7 @@ void fixed_youtube_examples_are_complete_safe_and_menu_routable_test()
     const HMENU menu = app_menu::CreateMenuBar(localizer, true);
     CHECK(menu != nullptr);
     HMENU file = find_top_level_submenu(menu, L"File");
-    HMENU examples = find_top_level_submenu(file, L"Upcoming games");
+    HMENU examples = find_top_level_submenu(file, L"Game trailers");
     HMENU animeMenu = find_top_level_submenu(examples, L"Anime");
     CHECK(file != nullptr);
     CHECK(examples != nullptr);

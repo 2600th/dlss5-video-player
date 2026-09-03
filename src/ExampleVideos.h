@@ -10,10 +10,11 @@ struct ExampleVideo {
 };
 
 inline constexpr std::array kExampleVideos{
-    // Editorial showcase, checked 2026-09-02; see docs/EXAMPLE_VIDEOS.md.
+    // Human-focused trailers under three minutes, checked 2026-09-03; see docs/EXAMPLE_VIDEOS.md.
+    ExampleVideo{L"Hellblade II - Launch Trailer", L"XBOX", L"https://www.youtube.com/watch?v=PRbOmIcVXak"},
+    ExampleVideo{L"The Last of Us Part II Remastered - PC Launch Trailer", L"PlayStation", L"https://www.youtube.com/watch?v=Tg1oRHd5zlw"},
+    ExampleVideo{L"Mafia: The Old Country - Family Takes Sacrifice", L"Mafia Game", L"https://www.youtube.com/watch?v=EAEYZDgHNv8"},
+    ExampleVideo{L"Cyberpunk 2077: Phantom Liberty - Launch Trailer", L"Cyberpunk 2077", L"https://www.youtube.com/watch?v=kfX9n_G0N2Y"},
     ExampleVideo{L"GTA VI - Trailer 2", L"Rockstar Games", L"https://www.youtube.com/watch?v=VQRLujxTm3c"},
-    ExampleVideo{L"Marvel's Wolverine - Extended Gameplay", L"Marvel Entertainment", L"https://www.youtube.com/watch?v=_U56cQFx_Vw"},
-    ExampleVideo{L"Gears of War: E-Day - Gameplay Reveal", L"XBOX", L"https://www.youtube.com/watch?v=dFk4bL3a8I8"},
-    ExampleVideo{L"Fable - Showcase 2026", L"XBOX", L"https://www.youtube.com/watch?v=3iW1i78zFvk"},
-    ExampleVideo{L"The Witcher 4 - Cinematic Reveal", L"The Witcher", L"https://www.youtube.com/watch?v=54dabgZJ5YA"},
+    ExampleVideo{L"Death Stranding 2 - Accolades Trailer", L"PlayStation", L"https://www.youtube.com/watch?v=od0ULrKzylQ"},
 };

@@ -1,7 +1,7 @@
 # Troubleshooting
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe v0.13.0.
+These instructions describe v0.14.0.
 
 ## The player cannot find the neural runtime
 
@@ -26,9 +26,9 @@ Successful NGX initialization alone does not prove neural output was captured.
 
 ## The cache directory is unavailable
 
-Use a writable player/data location and check free space. Cache data normally
-lives under `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`; Windows may redirect
-it into the launching package's private LocalCache. The player
+Use a writable player/data location and check free space. Cache data prefers
+`cache\v1` beside the EXE, falling back to `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`;
+Windows may redirect the fallback into the launching package's private LocalCache. The player
 resolves that physical location before creating source/render buckets and saves
 it as `[Storage] CacheDirectory` in the INI beside the EXE. Check that value or
 the startup log's `Neural cache directory:` line for the exact location.
@@ -60,7 +60,7 @@ a slightly longer audio tail does not count as missing neural video.
 
 ## Export is unavailable or fails
 
-**File > Export cached video** becomes available after validated neural playback
+**File > Export processed media** becomes available after validated neural playback
 opens. Select a new `.mkv` filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
@@ -70,7 +70,7 @@ FFmpeg diagnostic and use compatible source tracks. **File > Cancel export**
 stops the job and removes its temporary output.
 
 The export contains cached neural video, even if the original view is selected.
-Playback adjustments and runtime SR are not baked in. See [export details](USAGE.md#export-a-cached-video).
+Playback adjustments and runtime SR are not baked in. See [export details](USAGE.md#export-processed-media).
 
 ## YouTube playback fails or looks too low resolution
 

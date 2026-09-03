@@ -138,21 +138,27 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         source.Close();result.detail = L"The neural renderer could not be initialized.";return result;
     }
 
-    const uint64_t primeLimit = std::max<uint64_t>(2, std::min<uint64_t>(totalFrames, 120));
+    const bool singleFrameSource = totalFrames == 1;
+    const uint64_t primeLimit = singleFrameSource
+        ? 120 : std::max<uint64_t>(2, std::min<uint64_t>(totalFrames, 120));
     uint64_t primed = 0;
-    while (!evaluator.FeatureCreated() && primed < primeLimit) {
+    for (JobFrame primingFrame; !evaluator.FeatureCreated() && primed < primeLimit; ++primed) {
         if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        JobFrame frame;
-        const JobRead read = source.Read(frame, stop);
-        if (read == JobRead::Cancelled) return cancelled(L"Neural render was cancelled.");
-        if (read != JobRead::FrameReady) {
-            source.Close();result.detail = L"Feature 18 could not be primed from the source.";return result;
+        if (!singleFrameSource || primed == 0) {
+            const JobRead read = source.Read(primingFrame, stop);
+            if (read == JobRead::Cancelled) return cancelled(L"Neural render was cancelled.");
+            if (read != JobRead::FrameReady) {
+                source.Close();result.detail = L"Feature 18 could not be primed from the source.";return result;
+            }
+        } else {
+            // A photo may need several presents to create feature 18. Reuse it
+            // only for warm-up; capture below still reopens and reads it once.
+            primingFrame.discontinuity = false;
         }
         std::vector<uint8_t> ignored;
-        if (!evaluator.Submit(frame, primed == 0 || frame.discontinuity, false, ignored)) {
+        if (!evaluator.Submit(primingFrame, primed == 0 || primingFrame.discontinuity, false, ignored)) {
             source.Close();result.detail = L"Feature 18 priming failed.";return result;
         }
-        ++primed;
     }
     if (!evaluator.FeatureCreated()) {
         source.Close();result.detail = L"Feature 18 was not created.";return result;
@@ -211,13 +217,35 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 (attempt.hasTimestamp && frame.timestamp100ns <= attempt.lastTimestamp)) {
                 attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
             }
-            const uint64_t before = evaluator.EvaluationCount();
             std::vector<uint8_t> captured;
-            if (!evaluator.Submit(frame, temporalReset || frame.discontinuity, true, captured) ||
-                evaluator.EvaluationCount() <= before || captured.size() != expectedBytes) {
-                attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+            for (uint64_t capture = 1; ; ++capture) {
+                if (stop.stop_requested()) {
+                    attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
+                    encoder.Cancel();return attempt;
+                }
+                const uint64_t before = evaluator.EvaluationCount();
+                captured.clear();
+                if (!evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured) ||
+                    evaluator.EvaluationCount() <= before || captured.size() != expectedBytes) {
+                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                }
+                temporalReset = false;
+                if (attempt.frames > 0) break;
+                // The runtime logs successful evaluations sparsely. Capture the
+                // first source frame until a fresh receipt exists, retaining
+                // only its latest pixels for encoding. Each retry has its own
+                // baseline, and these extra captures never extend the timeline.
+                if (capture == 1 || capture % 10 == 0) {
+                    const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
+                    if (!receipt.Valid()) {
+                        attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                    }
+                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
+                }
+                if (capture >= 120) {
+                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                }
             }
-            temporalReset = false;
             const EncodeError writeError = encoder.WriteFrame(captured, stop);
             if (writeError != EncodeError::None) {
                 attempt.failure = writeError == EncodeError::Cancelled
@@ -241,7 +269,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return attempt;
     };
 
-    EncoderKind selected = EncoderKind::HevcNvenc;
+    // NVENC accepts odd dimensions but silently pads them to an even size,
+    // which breaks exact source/neural pairing and cache validation. libx264's
+    // yuv444p path preserves odd image dimensions.
+    EncoderKind selected = (request.width % 2 || request.height % 2)
+        ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
     AttemptResult attempt = runAttempt(selected);
     if (attempt.failure == AttemptFailure::Cancelled)
         return cancelled(L"Neural render was cancelled.");

@@ -67,12 +67,16 @@ public:
     uint32_t NativeHeight() const { return m_nativeHeight ? m_nativeHeight : m_height; }
     double FrameRate() const { return m_fps; }
     double DurationSeconds() const { return m_durationSec; }
+    bool IsStillImage() const { return m_stillImage; }
+    bool IsAnimation() const { return m_gif; }
     double DisplayAspectRatio() const { return m_displayAspect > 0.0 ? m_displayAspect : (m_height ? double(m_width)/double(m_height) : 16.0/9.0); }
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
     const wchar_t* BackendName() const;
 
 private:
+    bool m_stillImage{false};
+    bool m_gif{false};
     enum class Backend { None, FFmpeg, MediaFoundation };
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
 

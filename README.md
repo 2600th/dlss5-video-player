@@ -1,6 +1,6 @@
 # DLSS 5 Video Player
 
-Render a video once, replay its cached neural result, and compare it with the
+Process a photo, GIF or video, replay its cached neural result, and compare it with the
 original at the same timestamp. A native Windows player for local media and
 public YouTube videos, with optional DLSS Super Resolution during playback.
 
@@ -14,14 +14,14 @@ Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
 intentionally silent.
 [Capture details and edit source](docs/media/README.md).
 
-**v0.13.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
+**v0.14.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.14.0)
 with recent-video caching, settings snapshots, MKV export and highest-bitrate
 YouTube selection. See the [changelog](CHANGELOG.md).
 
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.13.0 used an RTX 5090.
+> components. Hardware verification for v0.14.0 used an RTX 5090.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -32,12 +32,15 @@ YouTube selection. See the [changelog](CHANGELOG.md).
   launches. Acquired YouTube sources and neural renders are reused after validation.
 - **Keep experiments consistent.** Neural settings are saved with each render
   and included in its cache identity. A settings change triggers a new render.
-- **Take the result with you.** Export a new MKV with the cached video, available
-  source audio, compatible subtitles and chapters, without re-encoding.
+- **Take the result with you.** Export processed photos as PNG/JPEG, animations
+  as GIF, or videos as MP4/MKV. MKV preserves available source audio, compatible
+  subtitles and chapters without re-encoding.
+- **Keep playback clear.** Fullscreen hides the menu and controls until the
+  mouse moves. Writable portable installs keep their cache beside the EXE.
 - **Choose playback upscaling separately.** Apply optional DLSS Super Resolution
   to either view at 1440p or 2160p. The neural cache retains source resolution.
-- **Start with a game trailer.** Five official upcoming-game examples are
-  available under **File > Upcoming games**.
+- **Start with a game trailer.** Six official trailers featuring human characters,
+  each under three minutes, are available under **File > Game trailers**.
 
 ## Get started
 
@@ -45,16 +48,16 @@ YouTube selection. See the [changelog](CHANGELOG.md).
    driver. The experimental neural layout requires the separately supplied
    runtime described in [setup](docs/DLSS5_SETUP.md).
 2. [Build the current source](docs/BUILDING.md), or download the
-   [v0.13.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.13.0)
+   [v0.14.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.14.0)
    if you have repository access. GitHub's source ZIP is not a runnable package.
 3. Extract a packaged build into a **new folder** and keep all helpers and
    `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.
 4. Open a local file (`Ctrl+O`), paste a public YouTube URL (`Ctrl+L`), or choose
-   **File > Upcoming games**.
+   **File > Game trailers**.
 5. Let preparation finish. Press `D` to compare neural and original views;
    enable **DLSS Upscaling** separately if desired.
-6. Reopen through **File > Recent videos**, or choose **File > Export cached
-   video** to save the prepared result.
+6. Reopen through **File > Recent videos**, or choose **File > Export processed
+   media** to save the prepared result.
 
 The publishable core package has fewer capabilities than the complete experimental
 layout. Build inputs and package contents are explained in [Building](docs/BUILDING.md).
@@ -87,15 +90,14 @@ advertised video bitrate at that resolution, across available codecs and contain
 Source quality and playback upscaling are separate.
 See [cache, settings and export details](docs/USAGE.md).
 
+See the [trailer list and runtimes](docs/EXAMPLE_VIDEOS.md) for the released and
+upcoming AAA games in **File > Game trailers**.
+
 ## Screenshots
 
 Actual Windows captures of the v0.13.0 feature implementation on an RTX 5090.
 Images show interface states, not image-quality benchmarks. Open an image to
 inspect it at full size.
-
-### Upcoming games
-
-![File menu with five official upcoming-game video examples](docs/screenshots/current/upcoming-games.jpg)
 
 ### Recent videos and export
 

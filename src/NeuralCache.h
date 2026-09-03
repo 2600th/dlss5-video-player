@@ -76,7 +76,15 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest);
 
 class NeuralCacheManager {
 public:
+    // An empty root prefers <executable directory>/cache/v1, with LocalAppData
+    // as the fallback. Explicit roots are used without silently falling back.
     explicit NeuralCacheManager(std::filesystem::path root = {});
+
+    // Identifies the previously persisted automatic root without creating it.
+    static std::optional<std::filesystem::path> LegacyDefaultRoot();
+    // Resolves package-virtualized writes using a delete-on-close probe in an
+    // existing legacy directory. Never creates a legacy cache during migration.
+    static std::optional<std::filesystem::path> ResolvedLegacyDefaultRoot();
 
     bool Valid() const { return valid_; }
     const std::filesystem::path& Root() const { return root_; }

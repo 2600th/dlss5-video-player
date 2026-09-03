@@ -124,7 +124,8 @@ static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
 static const wchar_t* kVideoPatterns =
     L"*.mp4;*.m4v;*.mov;*.mkv;*.webm;*.avi;*.wmv;*.asf;*.flv;*.f4v;"
     L"*.ts;*.m2ts;*.mts;*.mpg;*.mpeg;*.mpe;*.vob;*.ogv;*.ogg;*.3gp;*.3g2;"
-    L"*.mxf;*.nut;*.rm;*.rmvb;*.divx;*.dv;*.y4m;*.ivf;*.hevc;*.h265;*.h264;*.264;*.av1;*.vp9";
+    L"*.mxf;*.nut;*.rm;*.rmvb;*.divx;*.dv;*.y4m;*.ivf;*.hevc;*.h265;*.h264;*.264;*.av1;*.vp9;"
+    L"*.gif;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.webp";
 
 static constexpr int HK_PLAY_PAUSE = 9001;
 static constexpr int HK_BACK_10 = 9002;
@@ -561,13 +562,13 @@ static std::wstring PickVideoFileFallback(HWND owner, const Localizer& loc) {
     return GetOpenFileNameW(&o)?path:L"";
 }
 
-static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title) {
+static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title, bool photo, bool animation) {
     wchar_t path[32768]{};
     std::wstring suggested(title.empty()?L"neural-video":std::wstring(title));
     for(wchar_t& c:suggested)if(c==L'<'||c==L'>'||c==L':'||c==L'"'||c==L'/'||c==L'\\'||c==L'|'||c==L'?'||c==L'*')c=L'_';
-    suggested+=L"-neural.mkv";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
-    const wchar_t filter[]=L"Matroska video (*.mkv)\0*.mkv\0\0";
-    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.lpstrDefExt=L"mkv";dialog.lpstrTitle=L"Export cached video to a new MKV file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+    suggested+=L"-neural";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
+    const wchar_t filter[]=L"Matroska video (*.mkv)\0*.mkv\0MP4 video (*.mp4)\0*.mp4\0Animated GIF (*.gif)\0*.gif\0PNG photo (*.png)\0*.png\0JPEG photo (*.jpg)\0*.jpg;*.jpeg\0\0";
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.nFilterIndex=photo?4:animation?3:1;dialog.lpstrDefExt=photo?L"png":animation?L"gif":L"mkv";dialog.lpstrTitle=L"Export processed media to a new file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
     return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
 }
 
@@ -612,7 +613,7 @@ public:
         NeuralCacheManager historyCache(m_cacheRoot);
         if(historyCache.Valid()){
             m_cacheRoot=historyCache.Root();
-            WritePrivateProfileStringW(L"Storage",L"CacheDirectory",m_cacheRoot.c_str(),SettingsPath().c_str());
+            SaveCacheSettings();
             LOG("Neural cache directory: "<<WideToUtf8(m_cacheRoot.wstring()));
             m_recent=std::make_unique<RecentMediaHistory>(historyCache.Root()/L"recent-videos.dat");
             if(!m_recent->Load())LOG("Recent videos could not be loaded; existing file preserved until next successful playback.");
@@ -699,6 +700,8 @@ public:
 
 private:
     static constexpr UINT_PTR kActivityTimerId=0xD155;
+    static constexpr UINT_PTR kFullscreenTimerId=0xD156;
+    static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
 
     void UpdateRecentMenu(){
@@ -748,7 +751,7 @@ private:
     }
     void ExportCachedVideo(){
         if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
-        const auto output=PickExportFile(m_hwnd,m_displayTitle);if(output.empty())return;
+        const auto output=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());if(output.empty())return;
         const auto neural=m_neuralPath,source=std::filesystem::path(m_path),helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{m_exportWorker=std::jthread([target,output,neural,source,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=output;completion->result=CachedVideoExporter(helpers).Run({neural,source,output},stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
         catch(const std::system_error&){MessageBoxW(m_hwnd,L"The export worker could not start. Try again.",L"Export failed",MB_OK|MB_ICONERROR);return;}
@@ -826,7 +829,8 @@ private:
     }
 
     int Dip(int value)const{return MulDiv(value,static_cast<int>(ActiveWindowDpi(m_hwnd)),USER_DEFAULT_SCREEN_DPI);}
-    int ControlHeight()const{return Dip(CONTROL_H_DIP);}
+    bool ControlsVisible()const{return !m_loaded||!m_fullscreen||!m_fullscreenControlsHidden;}
+    int ControlHeight()const{return ControlsVisible()?Dip(CONTROL_H_DIP):0;}
     void UpdateFontsForDpi(UINT dpi){
         const UINT activeDpi=dpi==0?USER_DEFAULT_SCREEN_DPI:dpi;
         HFONT regular=CreateFontW(-MulDiv(16,static_cast<int>(activeDpi),USER_DEFAULT_SCREEN_DPI),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
@@ -854,11 +858,45 @@ private:
         wchar_t buf[64]{};swprintf_s(buf,L"%.6f",value);const auto path=SettingsPath();WritePrivateProfileStringW(section,key,buf,path.c_str());
     }
 
+    static bool SameCachePath(const std::filesystem::path& a,const std::filesystem::path& b){
+        if(a.empty()||b.empty())return false;
+        std::error_code ea,eb;
+        const auto ca=std::filesystem::weakly_canonical(a,ea),cb=std::filesystem::weakly_canonical(b,eb);
+        return !ea&&!eb&&_wcsicmp(ca.c_str(),cb.c_str())==0;
+    }
+    void SaveCacheSettings()const{
+        if(m_cacheRoot.empty())return;
+        const auto portable=ExecutableDirectory()/L"cache"/L"v1";
+        const auto legacy=NeuralCacheManager::LegacyDefaultRoot();
+        const auto resolvedLegacy=NeuralCacheManager::ResolvedLegacyDefaultRoot();
+        const auto isLegacy=[&](const std::filesystem::path& root){
+            return (legacy&&SameCachePath(root,*legacy))||(resolvedLegacy&&SameCachePath(root,*resolvedLegacy));
+        };
+        std::wstring savedDirectory(32768,L'\0');
+        const DWORD savedLength=GetPrivateProfileStringW(L"Storage",L"CacheDirectory",L"",savedDirectory.data(),static_cast<DWORD>(savedDirectory.size()),SettingsPath().c_str());
+        savedDirectory.resize(savedLength);
+        const auto savedRoot=std::filesystem::path(savedDirectory);
+        const bool explicitRoot=GetPrivateProfileIntW(L"Storage",L"CacheDirectoryAutomatic",-1,SettingsPath().c_str())==0&&
+            (SameCachePath(m_cacheRoot,savedRoot)||(isLegacy(m_cacheRoot)&&isLegacy(savedRoot)));
+        const bool automatic=!explicitRoot&&(SameCachePath(m_cacheRoot,portable)||isLegacy(m_cacheRoot));
+        WritePrivateProfileStringW(L"Storage",L"CacheDirectory",m_cacheRoot.c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Storage",L"CacheDirectoryAutomatic",automatic?L"1":L"0",SettingsPath().c_str());
+    }
     void LoadVideoSettings(){
         std::wstring cacheDirectory(32768,L'\0');
         const DWORD cacheLength=GetPrivateProfileStringW(L"Storage",L"CacheDirectory",L"",cacheDirectory.data(),static_cast<DWORD>(cacheDirectory.size()),SettingsPath().c_str());
         cacheDirectory.resize(cacheLength);m_cacheRoot=std::filesystem::path(cacheDirectory);
         if(!m_cacheRoot.is_absolute()||cacheLength>=32767)m_cacheRoot.clear();
+        const auto legacy=NeuralCacheManager::LegacyDefaultRoot();
+        const UINT automatic=GetPrivateProfileIntW(L"Storage",L"CacheDirectoryAutomatic",-1,SettingsPath().c_str());
+        // Previous releases saved their default as an absolute path. Re-select
+        // automatic storage on startup so a portable folder can move with its EXE.
+        bool oldAutomatic=automatic==UINT(-1)&&legacy&&SameCachePath(m_cacheRoot,*legacy);
+        if(automatic==UINT(-1)&&!m_cacheRoot.empty()&&!oldAutomatic){
+            const auto resolvedLegacy=NeuralCacheManager::ResolvedLegacyDefaultRoot();
+            oldAutomatic=resolvedLegacy&&SameCachePath(m_cacheRoot,*resolvedLegacy);
+        }
+        if(automatic==1||oldAutomatic)m_cacheRoot.clear();
         m_volume=std::clamp(ReadIniFloat(L"Playback",L"Volume",1.0f),0.0f,1.0f);
         m_muted=ReadIniFloat(L"Playback",L"Muted",0.0f)==1.0f;
         m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
@@ -878,7 +916,7 @@ private:
     }
 
     void SaveVideoSettings()const{
-        if(!m_cacheRoot.empty())WritePrivateProfileStringW(L"Storage",L"CacheDirectory",m_cacheRoot.c_str(),SettingsPath().c_str());
+        SaveCacheSettings();
         WriteIniFloat(L"Playback",L"Volume",m_volume);
         WriteIniFloat(L"Playback",L"Muted",m_muted?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
@@ -1023,6 +1061,9 @@ private:
         return a?a->WndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
     }
     static LRESULT CALLBACK ViewportWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
+        auto* app=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(GetParent(h),GWLP_USERDATA));
+        if(app&&m==WM_MOUSEMOVE)app->FullscreenPointerMoved(h,l);
+        if(app&&m==WM_LBUTTONDOWN){app->m_fullscreenKeyboardFocus=false;SetFocus(app->m_hwnd);return 0;}
         switch(m){
         case WM_ERASEBKGND:return 1;
         case WM_PAINT:{
@@ -1046,7 +1087,8 @@ private:
         if(a){
             if(m==WM_ERASEBKGND)return 1;
             if(m==WM_PAINT){PAINTSTRUCT ps{};BeginPaint(h,&ps);EndPaint(h,&ps);return 0;}
-            if(m==WM_LBUTTONDOWN){SetFocus(a->m_hwnd);return 0;}
+            if(m==WM_MOUSEMOVE){a->FullscreenPointerMoved(h,l);return 0;}
+            if(m==WM_LBUTTONDOWN){a->m_fullscreenKeyboardFocus=false;SetFocus(a->m_hwnd);return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
             if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN)return SendMessageW(a->m_hwnd,m,w,l);
             if(m==WM_DROPFILES)return SendMessageW(a->m_hwnd,m,w,l); // main window owns DragFinish().
@@ -1079,7 +1121,7 @@ private:
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
-        m_haveNext=m_decoder.ReadNext(m_next);Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
+        m_haveNext=m_decoder.ReadNext(m_next);if(!m_decoder.IsStillImage())Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
         RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();RecordOriginalRecent();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
@@ -1240,6 +1282,7 @@ private:
     }
 
     void RequestSeek(double sec,bool resumeAfter) {
+        if(m_decoder.IsStillImage()){sec=0.0;resumeAfter=false;}
         if(!m_loaded)return;sec=ClampSeek(sec);if(!m_cachedPlayback&&m_sourceKind==MediaSourceKind::YouTube){StartYouTubeSeek(sec,resumeAfter);return;}
         if(!m_seekPending) m_currentSec=Position();
         m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;Audio().Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
@@ -1328,18 +1371,18 @@ private:
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
     }
 
-    RECT TimelineRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(24),c.right-Dip(18),c.bottom-Dip(14)};}
+    RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(24),c.right-Dip(18),c.bottom-Dip(14)};}
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
-    std::vector<ToolbarItem> ToolbarItems()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
+    std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
     ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||NeuralJobActive(),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,UpscalingAvailable(),false};}
-    std::optional<RECT> VolumeRect()const{RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
+    std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
     RECT TimeTextRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(16),c.bottom-Dip(55),Dip(142),c.bottom-Dip(32)};}
     RECT StatusRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(143),c.bottom-Dip(55),VolumeRect()?c.right-Dip(203):c.right-Dip(16),c.bottom-Dip(32)};}
     void InvalidatePlaybackProgress(){
-        if(!m_hwnd||!m_loaded)return;
+        if(!m_hwnd||!m_loaded||!ControlsVisible())return;
         RECT timeline=TimelineRect();InflateRect(&timeline,Dip(6),Dip(4));InvalidateRect(m_hwnd,&timeline,FALSE);
         const RECT time=TimeTextRect();InvalidateRect(m_hwnd,&time,FALSE);
     }
@@ -1473,6 +1516,7 @@ private:
             for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
             if(!YouTubePlaybackAvailable()){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);const bool compactReason=idle.subtitle.top==idle.subtitle.bottom;std::wstring reason=T(compactReason?L"idle.youtube_unavailable_compact":L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);}return;
         }
+        if(!ControlsVisible())return;
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
         const auto toolbarItems=ToolbarItems();
         for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact);}
@@ -1689,7 +1733,7 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         const VideoFrame first=*m_synchronizedPlayback.VisibleFrame();if(!RenderVideoFrame(first,true)){Unload();return false;}
         m_neuralPath=completion.neuralPath;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
-        m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();
+        if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
         m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
         RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
@@ -1877,7 +1921,7 @@ private:
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
     }
     std::wstring BuildStatusText()const{
-        if(m_exportWorker.joinable())return L"Exporting cached video - File > Cancel export to stop";
+        if(m_exportWorker.joinable())return L"Exporting processed media - File > Cancel export to stop";
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
         if(m_cachedPlayback){std::wstring text=L"Neural cached playback · "+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
@@ -1940,6 +1984,7 @@ private:
     }
 
     void FocusNextToolbarAction(bool reverse){
+        RevealFullscreenControls();m_fullscreenKeyboardFocus=m_fullscreen;
         const auto items=FocusableItems();m_focusedToolbarAction=NextFocusableToolbarAction(items,m_focusedToolbarAction,reverse,ToolbarState());InvalidateControls();
     }
 
@@ -1950,7 +1995,9 @@ private:
 
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);
+        m_fullscreenKeyboardFocus=false;
         if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
+        if(!ControlsVisible())return;
         if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
         if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
         const auto items=ToolbarItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);InvalidateControls();}
@@ -1973,7 +2020,72 @@ private:
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
-    void ToggleFullscreen(){if(!m_fullscreen){m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&mi);SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle&~(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU));SetWindowPos(m_hwnd,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED);m_fullscreen=true;}else{SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle);SetWindowPos(m_hwnd,nullptr,m_savedRect.left,m_savedRect.top,m_savedRect.right-m_savedRect.left,m_savedRect.bottom-m_savedRect.top,SWP_NOZORDER|SWP_FRAMECHANGED);m_fullscreen=false;}Layout();}
+    void StopFullscreenTimer(){
+        if(m_fullscreenTimer){KillTimer(m_hwnd,m_fullscreenTimer);m_fullscreenTimer=0;}
+    }
+    void RestoreFullscreenMenu(){
+        if(m_fullscreenMenu&&GetMenu(m_hwnd)!=m_fullscreenMenu){
+            SetMenu(m_hwnd,m_fullscreenMenu);
+            // Source and feature availability may have changed while detached.
+            UpdateYouTubeQualitySelection(m_fullscreenMenu,m_youtubeSourceQuality);
+            SyncSourceActionAvailability();
+            DrawMenuBar(m_hwnd);
+        }
+    }
+    void RevealFullscreenControls(){
+        if(!m_fullscreen)return;
+        m_fullscreenLastInput=Clock::now();
+        if(m_fullscreenControlsHidden){
+            m_fullscreenControlsHidden=false;
+            RestoreFullscreenMenu();Layout();InvalidateRect(m_hwnd,nullptr,FALSE);
+        }
+        if(!m_fullscreenTimer)m_fullscreenTimer=SetTimer(m_hwnd,kFullscreenTimerId,250,nullptr);
+    }
+    void FullscreenPointerMoved(HWND source,LPARAM position){
+        if(!m_fullscreen)return;
+        POINT screen{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
+        if(!ClientToScreen(source,&screen))return;
+        // Resizing child windows can synthesize WM_MOUSEMOVE at a stationary
+        // pointer. Only physical movement should reveal or restart the timer.
+        if(m_fullscreenPointerKnown&&screen.x==m_fullscreenPointer.x&&screen.y==m_fullscreenPointer.y)return;
+        m_fullscreenPointer=screen;m_fullscreenPointerKnown=true;
+        if(m_fullscreenKeyboardFocus){m_fullscreenKeyboardFocus=false;m_focusedToolbarAction=ToolbarAction::None;}
+        RevealFullscreenControls();
+    }
+    void AutoHideFullscreenControls(){
+        if(!m_fullscreen||m_fullscreenControlsHidden)return;
+        const HWND capture=GetCapture();
+        const bool interacting=m_dragSeek||m_dragVolume||m_pressedToolbarAction!=ToolbarAction::None||
+            (capture&&(capture==m_hwnd||IsChild(m_hwnd,capture)))||m_fullscreenMenuLoop||
+            m_fullscreenKeyboardFocus||!IsWindowEnabled(m_hwnd)||
+            (m_adjustWnd&&IsWindowVisible(m_adjustWnd));
+        if(interacting){m_fullscreenLastInput=Clock::now();return;}
+        if(Clock::now()-m_fullscreenLastInput<kFullscreenIdleDelay)return;
+        m_fullscreenControlsHidden=true;m_focusedToolbarAction=ToolbarAction::None;
+        m_hoverAction=ToolbarAction::None;m_pressedToolbarAction=ToolbarAction::None;
+        StopFullscreenTimer();SetMenu(m_hwnd,nullptr);DrawMenuBar(m_hwnd);
+        Layout();InvalidateRect(m_hwnd,nullptr,FALSE);
+    }
+    void ToggleFullscreen(){
+        if(!m_fullscreen){
+            m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);
+            m_fullscreenMenu=GetMenu(m_hwnd);m_fullscreen=true;m_fullscreenControlsHidden=true;
+            m_fullscreenKeyboardFocus=false;m_focusedToolbarAction=ToolbarAction::None;
+            m_hoverAction=ToolbarAction::None;m_pressedToolbarAction=ToolbarAction::None;
+            m_dragSeek=false;m_dragVolume=false;if(GetCapture()==m_hwnd)ReleaseCapture();
+            m_fullscreenPointerKnown=GetCursorPos(&m_fullscreenPointer)!=FALSE;
+            SetMenu(m_hwnd,nullptr);
+            MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&mi);
+            SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle&~(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU));
+            SetWindowPos(m_hwnd,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED|SWP_NOACTIVATE);
+        }else{
+            m_fullscreen=false;m_fullscreenControlsHidden=false;m_fullscreenKeyboardFocus=false;
+            StopFullscreenTimer();RestoreFullscreenMenu();m_fullscreenMenu=nullptr;
+            SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle);
+            SetWindowPos(m_hwnd,nullptr,m_savedRect.left,m_savedRect.top,m_savedRect.right-m_savedRect.left,m_savedRect.bottom-m_savedRect.top,SWP_NOZORDER|SWP_FRAMECHANGED|SWP_NOACTIVATE);
+        }
+        Layout();InvalidateRect(m_hwnd,nullptr,FALSE);
+    }
 
     LRESULT WndProc(HWND h,UINT m,WPARAM w,LPARAM l){
         switch(m){
@@ -1982,7 +2094,15 @@ private:
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
         case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}break;
+        case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();break;
+        case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();break;
+        case WM_SYSKEYDOWN:if(w==VK_MENU)RevealFullscreenControls();break;
+        case WM_SYSCOMMAND:if((w&0xfff0)==SC_KEYMENU)RevealFullscreenControls();break;
+        case WM_NCDESTROY:
+            StopFullscreenTimer();
+            if(m_fullscreenMenu){if(IsMenu(m_fullscreenMenu)&&GetMenu(h)!=m_fullscreenMenu)DestroyMenu(m_fullscreenMenu);m_fullscreenMenu=nullptr;}
+            break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
         case WM_DESTROY:CancelExport();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();m_running=false;PostQuitMessage(0);return 0;
@@ -2001,7 +2121,12 @@ private:
         }
         case WM_SIZE:Layout();SyncActivityFeedback();return 0;
         case WM_PAINT:Paint();return 0;
-        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));return 0;}
+        case WM_NCMOUSEMOVE:{
+            POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};
+            if(ScreenToClient(h,&point))FullscreenPointerMoved(h,MAKELPARAM(point.x,point.y));
+            break;
+        }
+        case WM_MOUSEMOVE:{FullscreenPointerMoved(h,l);m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(!m_trackingMouse){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,h,0};m_trackingMouse=TrackMouseEvent(&tracking)!=FALSE;}if(m_dragSeek&&GetCapture()==h){const double preview=SecondsFromX(m_mouseX);if(preview!=m_seekPreview){m_seekPreview=preview;InvalidatePlaybackProgress();}}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);SetHoverAction(ToolbarActionAt(m_mouseX,m_mouseY));return 0;}
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
@@ -2013,6 +2138,7 @@ private:
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:
+            if(w==VK_F10)RevealFullscreenControls();
             if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='G'){ToggleDepthMode();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&NeuralJobActive()){CancelNeuralJob();return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
@@ -2045,6 +2171,11 @@ private:
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
+    HMENU m_fullscreenMenu=nullptr;
+    UINT_PTR m_fullscreenTimer=0;
+    bool m_fullscreenControlsHidden=false,m_fullscreenMenuLoop=false,m_fullscreenKeyboardFocus=false,m_fullscreenPointerKnown=false;
+    POINT m_fullscreenPointer{};
+    Clock::time_point m_fullscreenLastInput=Clock::now();
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;

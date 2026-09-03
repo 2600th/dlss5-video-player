@@ -308,6 +308,23 @@ std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::
     return resolved;
 }
 
+std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::path& root)
+{
+    std::error_code error;
+    auto resolved = CanonicalOrAbsolute(root, error);
+    if (error || resolved.empty() || resolved == resolved.root_path() ||
+        resolved.parent_path().empty()) return std::nullopt;
+    std::filesystem::create_directories(resolved, error);
+    if (error) return std::nullopt;
+    const auto writableRoot = ResolveWritableRoot(resolved);
+    if (!writableRoot) return std::nullopt;
+    for (const auto directory : {L"sources", L"renders", L"staging"}) {
+        std::filesystem::create_directories(*writableRoot / directory, error);
+        if (error) return std::nullopt;
+    }
+    return writableRoot;
+}
+
 bool MoveToInvalidDirectory(const std::filesystem::path& root,
                             const std::filesystem::path& source,
                             std::wstring_view prefix)
@@ -496,8 +513,18 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
 
 std::optional<std::filesystem::path> NeuralCacheManager::DefaultRoot()
 {
+    std::wstring executable(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+        static_cast<DWORD>(executable.size()));
+    if (!length || length >= executable.size()) return std::nullopt;
+    executable.resize(length);
+    return std::filesystem::path(executable).parent_path() / L"cache" / L"v1";
+}
+
+std::optional<std::filesystem::path> NeuralCacheManager::LegacyDefaultRoot()
+{
     PWSTR localAppData = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_CREATE, nullptr,
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr,
                                     &localAppData)) || !localAppData) return std::nullopt;
     std::filesystem::path result = std::filesystem::path(localAppData) /
         L"DLSSVideoPlayer" / L"NeuralCache" / L"v1";
@@ -505,28 +532,30 @@ std::optional<std::filesystem::path> NeuralCacheManager::DefaultRoot()
     return result;
 }
 
+std::optional<std::filesystem::path> NeuralCacheManager::ResolvedLegacyDefaultRoot()
+{
+    const auto legacy = LegacyDefaultRoot();
+    if (!legacy) return std::nullopt;
+    std::error_code error;
+    if (!std::filesystem::is_directory(*legacy, error) || error) return std::nullopt;
+    return ResolveWritableRoot(*legacy);
+}
+
 NeuralCacheManager::NeuralCacheManager(std::filesystem::path root)
 {
-    if (root.empty()) {
-        const auto resolved = DefaultRoot();
-        if (!resolved) return;
-        root = *resolved;
+    std::optional<std::filesystem::path> writableRoot;
+    if (!root.empty()) {
+        writableRoot = PrepareWritableRoot(root);
+    } else {
+        if (const auto portable = DefaultRoot())
+            writableRoot = PrepareWritableRoot(*portable);
+        if (!writableRoot) {
+            if (const auto fallback = LegacyDefaultRoot())
+                writableRoot = PrepareWritableRoot(*fallback);
+        }
     }
-    std::error_code error;
-    root_ = CanonicalOrAbsolute(root, error);
-    if (error || root_.empty() || root_ == root_.root_path() ||
-        root_.parent_path().empty()) return;
-    std::filesystem::create_directories(root_, error);
-    if (error) return;
-    const auto writableRoot = ResolveWritableRoot(root_);
     if (!writableRoot) return;
     root_ = *writableRoot;
-    std::filesystem::create_directories(root_ / L"sources", error);
-    if (error) return;
-    std::filesystem::create_directories(root_ / L"renders", error);
-    if (error) return;
-    std::filesystem::create_directories(root_ / L"staging", error);
-    if (error) return;
     valid_ = true;
 }
 

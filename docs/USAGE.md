@@ -1,15 +1,15 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.13.0, including recent history, settings-aware cache identity,
-cached-video export and highest-bitrate YouTube selection.
+This guide covers v0.14.0, including recent history, settings-aware cache identity,
+media export and highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;
 legacy language settings in the INI are ignored.
 
 ## Open, render and compare
 
-Open a local video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
-select a trailer under **File > Upcoming games**. With the experimental runtime
+Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
+select a trailer under **File > Game trailers**. With the experimental runtime
 available, the player acquires the source, checks its cache, renders on a miss,
 and validates the complete result before opening synchronized playback.
 
@@ -17,6 +17,19 @@ Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
 mouse-wheel volume are already supported. Cancellation can fall back to the
 original when a local source has been acquired; an incomplete render is never reused.
+
+Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
+single processed frame; the cache uses a one-second carrier without adding
+frames to photo exports. GIF animation is decoded once, preserving its delays
+on a centisecond timeline for processing. The normal neural-runtime and
+source-dimension requirements still apply. Animated WebP and camera RAW are
+not included in the supported photo formats.
+
+Press `F11` or double-click the image to enter fullscreen. The menu and controls
+hide immediately. Move the mouse to reveal them; they hide again after 2.5
+seconds idle. Dragging, an open menu/dialog or keyboard control focus keeps
+them visible. `Tab` reveals controls for keyboard access; `Esc`/`F11` restores
+the window (an active render or download consumes `Esc` to cancel first).
 
 **DLSS Upscaling** is independent and starts off on a fresh installation. Select
 1440p or 2160p output in the DLSS menu. It runs during playback on either view,
@@ -42,7 +55,7 @@ different codecs. The neural output encoder and intensity are independent.
 videos, newest first. Reopening an entry moves it to the top. Local entries point
 to the original file; YouTube entries retain the page identity and selected quality.
 Validated cached YouTube sources can reopen without resolving or downloading again,
-including when selected from Upcoming games or pasted again at the same quality.
+including when selected from Game trailers or pasted again at the same quality.
 New downloads must match the duration reported by YouTube using decoded video
 timestamps. Downloads made before the highest-bitrate selection policy require
 one replacement download on reopening. Successful downloads under the new policy
@@ -55,12 +68,17 @@ cache entries eligible for removal after active work finishes. Local originals
 and exported files are never deleted by this policy. Older untracked cache data
 and abandoned staging data are not swept by the five-entry history.
 
-Cache data normally lives in `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`.
-Windows package virtualization may redirect it into the launching app's private
-LocalCache directory. The player resolves the writable physical root, saves it
-under `[Storage] CacheDirectory` in `DLSSVideoPlayer.ini` beside the executable,
-and reuses that location on subsequent launches. The startup log also prints
-`Neural cache directory:` with the actual path. Ownership checks still apply.
+Cache data prefers `cache\v1` beside `DLSSVideoPlayer.exe`, independent of the
+working directory. The player verifies it can write there and falls back to
+`%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1` if that folder cannot be used.
+Windows package virtualization may redirect the fallback into private LocalCache.
+The physical path is recorded under `[Storage] CacheDirectory` and in the startup
+log. `CacheDirectoryAutomatic=1` reselects storage at each launch so moving a
+portable installation works. For an explicit custom absolute path, set
+`CacheDirectoryAutomatic=0`; an invalid custom path does not silently fall back.
+Old automatic LocalAppData settings migrate to the new preference. Existing
+cache files at the old location remain untouched; copy or clear them separately
+if desired. Ownership checks still apply.
 
 Within that directory, `sources/<key>/source.mkv` contains the original YouTube
 download, including acquired audio. `renders/<key>/neural.mkv` contains the
@@ -92,14 +110,22 @@ not affect the offline render. This adds no unverified sliders or presets.
 Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
 in the player; the old quality arguments and 4K launch scripts are retired.
 
-## Export a cached video
+## Export processed media
 
-1. Open a video and wait for validated cached playback.
-2. Choose **File > Export cached video**.
-3. Select a new `.mkv` filename. Existing files are not overwritten.
+1. Open a photo, GIF or video and wait for validated cached playback.
+2. Choose **File > Export processed media**.
+3. Choose a format and a new filename. Existing files are not overwritten.
 4. Continue playback while export runs, or use **File > Cancel export**.
 
-Export stream-copies the cached neural video and available source audio tracks,
+PNG is the default for photos, GIF for animation, and MKV for video. PNG and
+JPEG export the first processed frame. GIF exports animation with a generated
+palette at 50 fps and loops continuously; delays are rounded to 20 ms so common
+viewers do not slow down very short frame delays. MP4 transcodes video to H.264,
+audio to AAC, and compatible text subtitles to MP4 text. MP4 pads odd dimensions
+by at most one pixel for codec compatibility; photo exports retain source size.
+GIFs and photos have no audio or subtitle tracks.
+
+MKV stream-copies the cached neural video and available source audio tracks,
 compatible subtitle tracks, font attachments, metadata and chapters. Subtitles
 remain separate; they are not enhanced or burned into the image. Export does not
 add subtitle display or track selection to the player itself.

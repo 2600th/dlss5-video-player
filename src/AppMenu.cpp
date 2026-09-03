@@ -56,11 +56,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
         AppendMenuW(examples, MF_STRING | (youtubeAvailable ? 0 : MF_GRAYED),
                     IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index), example.title.data());
     }
-    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Upcoming games");
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Game trailers");
     AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, L"Export cached video...");
+    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, L"Export processed media...");
     AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, L"Cancel export");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");

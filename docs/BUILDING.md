@@ -84,13 +84,13 @@ fresh clean build and verifies an explicit file allowlist and manifest:
 
 ```powershell
 ./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix ''
-./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.13.0-win64.zip -PackageSuffix ''
+./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.14.0-win64.zip -PackageSuffix ''
 ```
 
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
-`dlss5-video-player-v0.13.0-win64.zip` name.
+`dlss5-video-player-v0.14.0-win64.zip` name.
 
 `package_release.bat` wraps the complete package with the default `-upscaling`
 suffix. `package_public_release.bat` creates the smaller core package:

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-09-03
+
+- Replace the example menu with six official trailers featuring human characters,
+  all under three minutes, under **File > Game trailers**.
+- Open and process photos (PNG/JPEG/BMP/TIFF/static WebP) and animated GIFs.
+  Export processed media to PNG, JPEG, GIF, MP4 or MKV, with atomic publication
+  and cancellation. Single photos use one captured frame; GIF processing keeps
+  centisecond timing and GIF export uses viewer-compatible 20 ms frame delays.
+- Preserve odd photo dimensions during neural caching and MP4 export instead of
+  allowing NVENC or YUV 4:2:0 encoding to pad them to even dimensions.
+- Prefer a writable `cache/v1` folder beside the EXE, falling back to LocalAppData.
+  Automatic storage follows portable moves; explicit custom locations remain supported.
+- Hide the menu and controls on fullscreen entry, reveal them on mouse movement,
+  and hide them after 2.5 seconds idle while preserving keyboard and drag interaction.
 - Honor YouTube's advertised stream-availability time before opening resolved
   media URLs, preventing premature HTTP 403 failures. Preserve cancellation and
   the resolver timeout, including fractional availability timestamps.

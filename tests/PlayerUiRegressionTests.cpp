@@ -31,6 +31,7 @@ struct PlayerAppTestAccess {
     static void Run()
     {
         PlayerApp app(AppOptions{});
+        CheckCacheSettings(app);
         // Saved playback choices must survive a reload, with invalid volume clamped.
         app.m_volume = 0.35f; app.m_muted = true; app.m_fill = true;
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
@@ -106,7 +107,7 @@ struct PlayerAppTestAccess {
         const auto recentFile=app.SettingsPath().parent_path()/L"recent-regression.dat";
         app.m_recent=std::make_unique<RecentMediaHistory>(recentFile);
         NeuralJobCompletion remembered{};remembered.sourceKind=MediaSourceKind::YouTube;
-        remembered.pageUrl=L"https://www.youtube.com/watch?v=VQRLujxTm3c";
+        remembered.pageUrl=kExampleVideos[0].url;
         remembered.displayTitle=L"Trailer & comparison";remembered.sourceQuality=YouTubeSourceQuality::P1080;
         remembered.sourceKey=std::string(64,'a');remembered.renderKey=std::string(64,'b');
         app.RecordRecent(remembered);
@@ -325,9 +326,271 @@ struct PlayerAppTestAccess {
         CHECK(DestroyWindow(app.m_hwnd));
         app.m_hwnd = nullptr;
         CHECK(UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance));
+        CheckFullscreenLifecycle();
     }
 
 private:
+    static void CheckCacheSettings(PlayerApp& app)
+    {
+        const auto settings=app.SettingsPath();
+        const auto writeRoot=[&](const std::filesystem::path& root,const wchar_t* automatic){
+            CHECK(WritePrivateProfileStringW(L"Storage",L"CacheDirectory",root.c_str(),settings.c_str()));
+            CHECK(WritePrivateProfileStringW(L"Storage",L"CacheDirectoryAutomatic",automatic,settings.c_str()));
+        };
+        const auto automaticFlag=[&]{
+            return GetPrivateProfileIntW(L"Storage",L"CacheDirectoryAutomatic",-1,settings.c_str());
+        };
+
+        const auto legacy=NeuralCacheManager::LegacyDefaultRoot();
+        CHECK(legacy.has_value());
+        if(legacy){
+            // Old versions persisted their default without an ownership flag.
+            writeRoot(*legacy,nullptr);
+            app.LoadVideoSettings();
+            CHECK(app.m_cacheRoot.empty());
+            // An explicitly selected default-looking root still belongs to the
+            // user and must retain its custom setting when saved again.
+            writeRoot(*legacy,L"0");app.LoadVideoSettings();
+            CHECK_EQ(app.m_cacheRoot,*legacy);
+            app.SaveCacheSettings();CHECK_EQ(automaticFlag(),UINT{0});
+
+            if(const auto physical=ExistingWritableCacheRoot(*legacy)){
+                // MSIX can merge logical reads with package-private writes;
+                // previous releases persisted the physical writable location.
+                writeRoot(*physical,nullptr);app.LoadVideoSettings();
+                CHECK(app.m_cacheRoot.empty());
+                app.m_cacheRoot=*physical;app.SaveCacheSettings();
+                CHECK_EQ(automaticFlag(),UINT{1});
+                writeRoot(*physical,L"0");app.LoadVideoSettings();
+                CHECK_EQ(app.m_cacheRoot,*physical);
+                app.SaveCacheSettings();CHECK_EQ(automaticFlag(),UINT{0});
+                // Cache initialization resolves the logical explicit path to
+                // its physical write location without changing user intent.
+                writeRoot(*legacy,L"0");app.LoadVideoSettings();
+                app.m_cacheRoot=*physical;app.SaveCacheSettings();
+                CHECK_EQ(automaticFlag(),UINT{0});
+                app.LoadVideoSettings();CHECK_EQ(app.m_cacheRoot,*physical);
+            }
+        }
+        const auto movedRoot=settings.parent_path()/L"previous-installation"/L"cache"/L"v1";
+        writeRoot(movedRoot,L"1");
+        app.LoadVideoSettings();
+        CHECK(app.m_cacheRoot.empty());
+
+        const auto existingCustom=settings.parent_path();
+        const auto missingCustom=settings.parent_path()/
+            (L"uncreated-explicit-cache-"+std::to_wstring(GetCurrentProcessId()));
+        CHECK(std::filesystem::exists(existingCustom));
+        CHECK(!std::filesystem::exists(missingCustom));
+        for(const auto& custom:{existingCustom,missingCustom}){
+            writeRoot(custom,L"0");
+            app.LoadVideoSettings();
+            CHECK_EQ(app.m_cacheRoot,custom);
+            app.SaveCacheSettings();
+            CHECK_EQ(automaticFlag(),UINT{0});
+            app.m_cacheRoot.clear();app.LoadVideoSettings();
+            CHECK_EQ(app.m_cacheRoot,custom);
+        }
+        app.m_cacheRoot=app.ExecutableDirectory()/L"cache"/L"v1";
+        app.SaveCacheSettings();
+        CHECK_EQ(automaticFlag(),UINT{1});
+        app.LoadVideoSettings();
+        CHECK(app.m_cacheRoot.empty());
+
+        // The UI test executable has its own settings file. Leave storage empty
+        // for the existing playback and cache-lifecycle regression fixtures.
+        app.m_cacheRoot.clear();
+        CHECK(WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,settings.c_str()));
+        CHECK(WritePrivateProfileStringW(L"Storage",L"CacheDirectoryAutomatic",nullptr,settings.c_str()));
+    }
+
+    static std::optional<std::filesystem::path> ExistingWritableCacheRoot(const std::filesystem::path& root)
+    {
+        std::error_code error;
+        if(!std::filesystem::is_directory(root,error))return std::nullopt;
+        const auto probe=root/(L".ui-migration-probe-"+std::to_wstring(GetCurrentProcessId())+
+            L"-"+std::to_wstring(GetTickCount64()));
+        const HANDLE file=CreateFileW(probe.c_str(),GENERIC_WRITE,
+            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE,nullptr);
+        CHECK(file!=INVALID_HANDLE_VALUE);
+        if(file==INVALID_HANDLE_VALUE)return std::nullopt;
+        std::wstring finalPath(32768,L'\0');
+        const DWORD length=GetFinalPathNameByHandleW(file,finalPath.data(),
+            static_cast<DWORD>(finalPath.size()),FILE_NAME_NORMALIZED);
+        CloseHandle(file);
+        CHECK(length>0&&length<finalPath.size());
+        if(!length||length>=finalPath.size())return std::nullopt;
+        finalPath.resize(length);
+        const auto resolved=std::filesystem::canonical(std::filesystem::path(finalPath).parent_path(),error);
+        CHECK(!error);
+        return error?std::nullopt:std::optional<std::filesystem::path>(resolved);
+    }
+
+    static void CheckFullscreenLifecycle()
+    {
+        PlayerApp app(AppOptions{});
+        const HINSTANCE instance=GetModuleHandleW(nullptr);
+        WNDCLASSW mainClass{};mainClass.hInstance=instance;
+        mainClass.lpszClassName=L"DLSSFullscreenRegressionMain";
+        mainClass.lpfnWndProc=PlayerApp::WndProcStatic;
+        CHECK(RegisterClassW(&mainClass));
+        WNDCLASSW viewportClass=mainClass;
+        viewportClass.lpszClassName=L"DLSSFullscreenRegressionViewport";
+        viewportClass.lpfnWndProc=PlayerApp::ViewportWndProcStatic;
+        CHECK(RegisterClassW(&viewportClass));
+        WNDCLASSW renderClass=mainClass;
+        renderClass.lpszClassName=L"DLSSFullscreenRegressionRender";
+        renderClass.lpfnWndProc=PlayerApp::RenderWndProcStatic;
+        CHECK(RegisterClassW(&renderClass));
+        const HMENU menu=app_menu::CreateMenuBar(app.m_loc,true);
+        app.m_hwnd=CreateWindowExW(0,mainClass.lpszClassName,L"Fullscreen regression",
+            WS_OVERLAPPEDWINDOW,100,100,1440,880,nullptr,menu,instance,&app);
+        CHECK(app.m_hwnd);
+        app.m_viewport=CreateWindowExW(0,viewportClass.lpszClassName,nullptr,
+            WS_CHILD|WS_VISIBLE,0,0,100,100,app.m_hwnd,nullptr,instance,nullptr);
+        app.m_renderWnd=CreateWindowExW(0,renderClass.lpszClassName,nullptr,
+            WS_CHILD|WS_VISIBLE,0,0,100,100,app.m_viewport,nullptr,instance,&app);
+        CHECK(app.m_viewport&&app.m_renderWnd);
+        app.m_loaded=true;app.Layout();
+        RECT before{};GetWindowRect(app.m_hwnd,&before);
+        const LONG style=GetWindowLongW(app.m_hwnd,GWL_STYLE);
+
+        SendMessageW(app.m_hwnd,WM_KEYDOWN,VK_F11,0);
+        CHECK(app.m_fullscreen);
+        CHECK(GetMenu(app.m_hwnd)==nullptr);
+        RECT client{},viewport{};
+        GetClientRect(app.m_hwnd,&client);GetClientRect(app.m_viewport,&viewport);
+        CHECK(EqualRect(&client,&viewport));
+        CHECK(app.ToolbarItems().empty());
+        CHECK(app.FocusableItems().empty());
+        CHECK(!app.VolumeRect().has_value());
+        const RECT timeline=app.TimelineRect();
+        CHECK(IsRectEmpty(&timeline));
+        SendMessageW(app.m_hwnd,WM_LBUTTONDOWN,0,MAKELPARAM(client.right/2,client.bottom-20));
+        CHECK(!app.m_dragSeek&&!app.m_dragVolume);
+        CHECK_EQ(app.m_pressedToolbarAction,ToolbarAction::None);
+        SendMessageW(app.m_hwnd,WM_LBUTTONUP,0,MAKELPARAM(client.right/2,client.bottom-20));
+
+        HDC dc=CreateCompatibleDC(nullptr);
+        drawnText.clear();app.RenderUi(dc,client);
+        CHECK(drawnText.empty());
+        CHECK(DeleteDC(dc));
+
+        // Child resizing can synthesize motion without the physical pointer
+        // moving. That message must not immediately undo fullscreen hiding.
+        POINT pointer=app.m_fullscreenPointer;
+        ScreenToClient(app.m_renderWnd,&pointer);
+        SendMessageW(app.m_renderWnd,WM_MOUSEMOVE,0,MAKELPARAM(pointer.x,pointer.y));
+        CHECK(GetMenu(app.m_hwnd)==nullptr);
+
+        // Real movement over the render child restores the actual menu and
+        // available controls, then an idle timer removes them again.
+        MoveFullscreenPointer(app,app.m_renderWnd);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        CHECK(!app.ToolbarItems().empty());
+        GetClientRect(app.m_hwnd,&client);GetClientRect(app.m_viewport,&viewport);
+        CHECK(viewport.bottom<client.bottom);
+        CHECK(app.m_fullscreenTimer!=0);
+        const UINT_PTR timer=app.m_fullscreenTimer;
+        SendMessageW(app.m_hwnd,WM_TIMER,timer,0);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu); // No early hide.
+        app.m_fullscreenLastInput=Clock::now()-std::chrono::seconds(3);
+        SendMessageW(app.m_hwnd,WM_NCMOUSEMOVE,HTMENU,
+            MAKELPARAM(app.m_fullscreenPointer.x+7,app.m_fullscreenPointer.y+5));
+        SendMessageW(app.m_hwnd,WM_TIMER,timer,0);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu); // Native-menu movement is activity too.
+        ExpireFullscreenIdle(app);
+        CHECK(GetMenu(app.m_hwnd)==nullptr);
+        CHECK_EQ(app.m_fullscreenTimer,UINT_PTR{0});
+
+        // Letterbox bars belong to a different child window.
+        MoveFullscreenPointer(app,app.m_viewport);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        // A late worker update while the menu is detached must be reconciled.
+        ExpireFullscreenIdle(app);
+        app.m_upscaleTargetHeight=2160;
+        app.SyncFeatureMenuState();
+        MoveFullscreenPointer(app,app.m_hwnd);
+        CHECK((GetMenuState(menu,IDM_UPSCALE_2160,MF_BYCOMMAND)&MF_CHECKED)!=0);
+
+        // Do not hide underneath pointer capture, a native menu, a modal
+        // dialog (disabled owner), adjustments, or keyboard navigation.
+        const auto volume=app.VolumeRect();CHECK(volume.has_value());
+        if(volume){
+            SendMessageW(app.m_hwnd,WM_LBUTTONDOWN,0,MAKELPARAM(volume->left,volume->top));
+            CHECK(app.m_dragVolume);
+            ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+            SendMessageW(app.m_hwnd,WM_LBUTTONUP,0,MAKELPARAM(volume->left,volume->top));
+            CHECK(!app.m_dragVolume);
+        }
+        SendMessageW(app.m_hwnd,WM_ENTERMENULOOP,FALSE,0);
+        ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        SendMessageW(app.m_hwnd,WM_EXITMENULOOP,FALSE,0);
+        EnableWindow(app.m_hwnd,FALSE);
+        ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        EnableWindow(app.m_hwnd,TRUE);
+        app.m_adjustWnd=CreateWindowExW(0,L"STATIC",L"Adjustment regression",WS_POPUP,
+            -30000,-30000,10,10,app.m_hwnd,nullptr,instance,nullptr);
+        ShowWindow(app.m_adjustWnd,SW_SHOWNOACTIVATE);
+        ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        CHECK(DestroyWindow(app.m_adjustWnd));app.m_adjustWnd=nullptr;
+        ExpireFullscreenIdle(app);CHECK(GetMenu(app.m_hwnd)==nullptr);
+        SendMessageW(app.m_renderWnd,WM_KEYDOWN,VK_TAB,0);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        CHECK(app.m_focusedToolbarAction!=ToolbarAction::None);
+        ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        MoveFullscreenPointer(app,app.m_renderWnd);
+        ExpireFullscreenIdle(app);CHECK(GetMenu(app.m_hwnd)==nullptr);
+
+        // Use a genuine queued Win32 timer once as well as deterministic idle
+        // deadlines, proving registration and dispatch through the window proc.
+        MoveFullscreenPointer(app,app.m_hwnd);
+        app.m_fullscreenLastInput=Clock::now()-std::chrono::seconds(3);
+        Sleep(300);
+        MSG timerMessage{};bool receivedTimer=false;
+        while(PeekMessageW(&timerMessage,app.m_hwnd,WM_TIMER,WM_TIMER,PM_REMOVE)){
+            receivedTimer|=timerMessage.wParam==timer;
+            DispatchMessageW(&timerMessage);
+        }
+        CHECK(receivedTimer);
+        CHECK(GetMenu(app.m_hwnd)==nullptr);
+
+        SendMessageW(app.m_hwnd,WM_KEYDOWN,VK_F11,0);
+        CHECK(!app.m_fullscreen);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        CHECK_EQ(GetWindowLongW(app.m_hwnd,GWL_STYLE),style);
+        RECT restored{};GetWindowRect(app.m_hwnd,&restored);
+        CHECK(EqualRect(&before,&restored));
+        CHECK(!app.ToolbarItems().empty());
+        SendMessageW(app.m_hwnd,WM_TIMER,timer,0);
+        CHECK_EQ(GetMenu(app.m_hwnd),menu); // Stale timers cannot hide windowed UI.
+        SendMessageW(app.m_hwnd,WM_KEYDOWN,VK_F11,0);
+        CHECK(GetMenu(app.m_hwnd)==nullptr);
+        app.m_loaded=false;
+        CHECK(DestroyWindow(app.m_hwnd));
+        CHECK(!IsMenu(menu)); // Detached menu remains owned until destruction.
+        app.m_hwnd=nullptr;app.m_viewport=nullptr;app.m_renderWnd=nullptr;
+        MSG quit{};PeekMessageW(&quit,nullptr,WM_QUIT,WM_QUIT,PM_REMOVE);
+        CHECK(UnregisterClassW(renderClass.lpszClassName,instance));
+        CHECK(UnregisterClassW(viewportClass.lpszClassName,instance));
+        CHECK(UnregisterClassW(mainClass.lpszClassName,instance));
+    }
+
+    static void MoveFullscreenPointer(PlayerApp& app,HWND target)
+    {
+        POINT pointer=app.m_fullscreenPointer;
+        pointer.x+=17;pointer.y+=11;
+        ScreenToClient(target,&pointer);
+        SendMessageW(target,WM_MOUSEMOVE,0,MAKELPARAM(pointer.x,pointer.y));
+    }
+
+    static void ExpireFullscreenIdle(PlayerApp& app)
+    {
+        app.m_fullscreenLastInput=Clock::now()-std::chrono::seconds(3);
+        SendMessageW(app.m_hwnd,WM_TIMER,PlayerApp::kFullscreenTimerId,0);
+    }
+
     static void CheckLoadingFeedback(PlayerApp& app)
     {
         // A wall-clock-only animation must never manufacture completed work.
