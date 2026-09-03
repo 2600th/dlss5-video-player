@@ -12,7 +12,7 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-if ($version -cne '0.14.0') { throw "This assembler is locked to release 0.14.0; VERSION is '$version'." }
+if ($version -cne '0.14.1') { throw "This assembler is locked to release 0.14.1; VERSION is '$version'." }
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -90,8 +90,8 @@ function Invoke-FreshReleaseBuild {
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
         ProductName = 'DLSS Video Player'
-        FileVersion = '0.14.0.0'
-        ProductVersion = '0.14.0.0'
+        FileVersion = '0.14.1.0'
+        ProductVersion = '0.14.1.0'
         OriginalFilename = 'DLSSVideoPlayer.exe'
     }
     foreach ($name in $expectedIdentity.Keys) {
@@ -111,7 +111,7 @@ function Invoke-FreshReleaseBuild {
         }
     }
 
-    Write-Host 'Fresh clean DLSSVideoPlayer 0.14.0.0 build verified.'
+    Write-Host 'Fresh clean DLSSVideoPlayer 0.14.1.0 build verified.'
 }
 
 function Assert-HashLock {

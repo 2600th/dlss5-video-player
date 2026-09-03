@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.14.0 LANGUAGES CXX RC)
+project(DLSSVideoPlayer VERSION 0.14.1 LANGUAGES CXX RC)
 
 include(CTest)
 

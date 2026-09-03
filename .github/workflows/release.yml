@@ -61,4 +61,4 @@ jobs:
         with:
           generate_release_notes: true
           prerelease: true
-          files: dist/DLSSVideoPlayer-v0.14.0-core-win64.zip
+          files: dist/DLSSVideoPlayer-v0.14.1-core-win64.zip

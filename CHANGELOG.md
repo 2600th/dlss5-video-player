@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.14.1 - 2026-09-03
+
+- Make the fullscreen lifecycle regression portable across narrow and high-DPI
+  Windows test desktops so the release gate validates supported window sizes.
+
 ## 0.14.0 - 2026-09-03
 
 - Replace the example menu with six official trailers featuring human characters,

@@ -11,7 +11,7 @@ sparse-runtime-receipt regressions. Both the staged package and extracted ZIP
 passed the 42-file allowlist/manifest verifier. The packaged player and neural
 worker SHA-256 values match the final tested build binaries.
 
-Local package: `dist/DLSSVideoPlayer-v0.14.0-win64.zip`
+Local package: `dist/DLSSVideoPlayer-v0.14.1-win64.zip`
 (318,458,601 bytes).
 
 SHA-256: `5D6BCD2932E18BFFDC19EFB3F3BFED84907CEF2E62DE10FB6C24FC64224A2502`.

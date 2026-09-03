@@ -57,7 +57,7 @@ quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
-When the complete experimental layout is active, v0.14.0 defaults to
+When the complete experimental layout is active, v0.14.1 defaults to
 exact 1080p for YouTube Auto and native-resolution DLAA. If exact 1080p is not
 available, Auto uses the highest compatible source up to 4K. Manual source
 choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.

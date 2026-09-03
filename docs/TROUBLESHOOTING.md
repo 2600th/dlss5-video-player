@@ -1,7 +1,7 @@
 # Troubleshooting
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe v0.14.0.
+These instructions describe v0.14.1.
 
 ## The player cannot find the neural runtime
 

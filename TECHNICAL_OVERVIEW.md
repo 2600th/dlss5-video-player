@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-Version 0.14.0 prepares a complete neural video, reuses the validated result,
+Version 0.14.1 prepares a complete neural video, reuses the validated result,
 and compares it with the original at the same timestamp. Start with the
 [usage guide](docs/USAGE.md) for controls, cache locations, preferences and export.
 

@@ -445,8 +445,11 @@ private:
         CHECK(RegisterClassW(&renderClass));
         const HMENU menu=app_menu::CreateMenuBar(app.m_loc,true);
         app.m_hwnd=CreateWindowExW(0,mainClass.lpszClassName,L"Fullscreen regression",
-            WS_OVERLAPPEDWINDOW,100,100,1440,880,nullptr,menu,instance,&app);
+            WS_OVERLAPPEDWINDOW,100,100,800,600,nullptr,menu,instance,&app);
         CHECK(app.m_hwnd);
+        const POINT minimum=MinimumPlayerWindowTrackSize(app.m_hwnd,ActiveWindowDpi(app.m_hwnd));
+        CHECK(SetWindowPos(app.m_hwnd,nullptr,100,100,std::max<LONG>(800,minimum.x),std::max<LONG>(600,minimum.y),
+                           SWP_NOZORDER|SWP_NOACTIVATE));
         app.m_viewport=CreateWindowExW(0,viewportClass.lpszClassName,nullptr,
             WS_CHILD|WS_VISIBLE,0,0,100,100,app.m_hwnd,nullptr,instance,nullptr);
         app.m_renderWnd=CreateWindowExW(0,renderClass.lpszClassName,nullptr,
@@ -516,14 +519,12 @@ private:
 
         // Do not hide underneath pointer capture, a native menu, a modal
         // dialog (disabled owner), adjustments, or keyboard navigation.
-        const auto volume=app.VolumeRect();CHECK(volume.has_value());
-        if(volume){
-            SendMessageW(app.m_hwnd,WM_LBUTTONDOWN,0,MAKELPARAM(volume->left,volume->top));
-            CHECK(app.m_dragVolume);
-            ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
-            SendMessageW(app.m_hwnd,WM_LBUTTONUP,0,MAKELPARAM(volume->left,volume->top));
-            CHECK(!app.m_dragVolume);
-        }
+        // Hosted Windows runners can expose a 1024-pixel desktop, where the
+        // toolbar intentionally omits the volume slider. Exercise the capture
+        // guard directly so this check does not depend on monitor width.
+        SetCapture(app.m_hwnd);CHECK_EQ(GetCapture(),app.m_hwnd);
+        ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
+        CHECK(ReleaseCapture());
         SendMessageW(app.m_hwnd,WM_ENTERMENULOOP,FALSE,0);
         ExpireFullscreenIdle(app);CHECK_EQ(GetMenu(app.m_hwnd),menu);
         SendMessageW(app.m_hwnd,WM_EXITMENULOOP,FALSE,0);
