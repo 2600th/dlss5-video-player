@@ -71,6 +71,11 @@ add_executable(DLSSVideoPlayer WIN32
     src/NeuralWorker.h
     src/SynchronizedPlayback.cpp
     src/SynchronizedPlayback.h
+    src/FrameIdentity.h
+    src/GuideControls.h
+    src/NeuralWorkerProtocol.h
+    src/NeuralPreflight.cpp
+    src/NeuralPreflight.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -90,10 +95,12 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
 add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
+    src/NeuralPreflight.cpp src/NeuralCache.cpp
     src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
     src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
     src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
-target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
 target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include")
 target_compile_options(NeuralWorker PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
 target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
@@ -230,6 +237,8 @@ if(BUILD_TESTING)
         tests/TestSupport.h
         src/NeuralCache.cpp
         src/NeuralCache.h
+        src/NeuralPreflight.cpp
+        src/NeuralPreflight.h
         src/MediaPipeline.cpp
         src/MediaPipeline.h
         src/OfflineNeuralRenderer.cpp

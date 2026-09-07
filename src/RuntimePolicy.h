@@ -16,6 +16,12 @@ enum class GpuGeneration {
 struct DetectedGpu {
     GpuGeneration generation{GpuGeneration::Unsupported};
     std::wstring description;
+    uint32_t vendorId{};
+    uint32_t deviceId{};
+    uint64_t dedicatedVideoMemoryBytes{};
+    // User-mode driver version reported by DXGI ("32.0.15.6164"); empty when
+    // the adapter does not report one.
+    std::wstring driverVersion;
 };
 
 struct NeuralRenderDefaults {

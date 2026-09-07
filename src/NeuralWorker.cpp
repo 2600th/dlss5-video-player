@@ -1,14 +1,18 @@
 #include "NeuralWorker.h"
+#include "NeuralWorkerProtocol.h"
 
 #include <windows.h>
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
@@ -17,55 +21,13 @@
 #include <utility>
 #include <vector>
 
+using namespace neural_worker_protocol;
+
 namespace {
 
-constexpr uint32_t kProtocolMagic = 0x3152574Eu; // NWR1
-constexpr uint16_t kProtocolVersion = 1;
-constexpr uint32_t kMaximumPayloadBytes = 16 * 1024;
-constexpr uint32_t kMaximumDetailBytes = 4 * 1024;
-
-enum class WireKind : uint16_t { Progress = 1, Result = 2 };
-
-#pragma pack(push, 1)
-struct WireHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t kind;
-    uint32_t payloadBytes;
-};
-
-struct WireProgress {
-    uint32_t phase;
-    uint64_t completedFrames;
-    uint64_t totalFrames;
-    uint64_t bytes;
-    int64_t elapsedMilliseconds;
-    int64_t estimatedRemainingMilliseconds;
-};
-
-struct WireResult {
-    uint8_t ok;
-    uint8_t cancelled;
-    uint8_t encoder;
-    uint8_t feature18ArmedBeforeCapture;
-    uint8_t upscalingOff;
-    uint8_t inlineInterceptionContract;
-    uint8_t feature18Created;
-    uint8_t feature18Evaluated;
-    uint8_t laterFailure;
-    uint8_t reserved[7];
-    uint64_t frameCount;
-    int64_t duration100ns;
-    uint64_t nativeEvaluations;
-    uint64_t verifiedNeuralFrames;
-    uint64_t highestObservedEvaluation;
-    uint32_t detailBytes;
-};
-#pragma pack(pop)
-
-static_assert(sizeof(WireHeader) == 12);
-static_assert(sizeof(WireProgress) == 44);
-static_assert(sizeof(WireResult) == 60);
+constexpr std::wstring_view kWorkerMode = L"--neural-worker";
+constexpr std::wstring_view kPreflightMode = L"--neural-preflight";
+constexpr std::wstring_view kRestartedFlag = L"--configuration-restarted";
 
 std::wstring QuoteArgument(std::wstring_view value)
 {
@@ -120,25 +82,42 @@ void KillAndWait(HANDLE job, HANDLE process)
     if (process) WaitForSingleObject(process, 2000);
 }
 
-bool IsBooleanByte(uint8_t value)
+bool ParseUnsigned(std::wstring_view text, uint64_t& value)
 {
-    return value == 0 || value == 1;
+    if (text.empty()) return false;
+    value = 0;
+    for (const wchar_t character : text) {
+        if (character < L'0' || character > L'9') return false;
+        const uint64_t digit = static_cast<uint64_t>(character - L'0');
+        if (value > (std::numeric_limits<uint64_t>::max() - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    return true;
 }
 
-bool IsKnownPhase(uint32_t phase)
+bool ParseDouble(std::wstring_view text, double& value)
 {
-    return phase <= static_cast<uint32_t>(NeuralRenderPhase::Ready);
+    if (text.empty() || text.size() >= 128) return false;
+    std::wstring copy(text);
+    wchar_t* end = nullptr;
+    value = std::wcstod(copy.c_str(), &end);
+    return end == copy.c_str() + copy.size() && std::isfinite(value);
 }
 
-bool IsKnownEncoder(uint8_t encoder)
+std::string Narrow(std::wstring_view text)
 {
-    return encoder == static_cast<uint8_t>(EncoderKind::HevcNvenc) ||
-        encoder == static_cast<uint8_t>(EncoderKind::H264Software);
+    std::string narrow;
+    narrow.reserve(text.size());
+    for (const wchar_t character : text) {
+        if (character > 0x7F) return {};
+        narrow.push_back(static_cast<char>(character));
+    }
+    return narrow;
 }
 
-bool IsZeroed(std::span<const uint8_t> bytes)
+std::wstring HandleText(HANDLE handle)
 {
-    return std::all_of(bytes.begin(), bytes.end(), [](uint8_t value) { return value == 0; });
+    return std::to_wstring(reinterpret_cast<uintptr_t>(handle));
 }
 
 class MetadataReader {
@@ -173,13 +152,11 @@ public:
         }
     }
 
-    bool Complete() const
-    {
-        return !malformed_ && bytes_.empty() && result_.has_value();
-    }
-
+    bool Complete() const { return !malformed_ && bytes_.empty() && result_.has_value(); }
+    bool PreflightComplete() const { return !malformed_ && bytes_.empty() && preflight_.has_value(); }
     bool Malformed() const { return malformed_; }
     const NeuralRenderResult& Result() const { return *result_; }
+    const PreflightPayload& Preflight() const { return *preflight_; }
 
 private:
     bool Consume()
@@ -188,24 +165,38 @@ private:
         while (bytes_.size() - offset >= sizeof(WireHeader)) {
             WireHeader header{};
             std::memcpy(&header, bytes_.data() + offset, sizeof(header));
-            if (header.magic != kProtocolMagic || header.version != kProtocolVersion ||
+            if (header.magic != kMagic || header.version != kVersion ||
                 header.payloadBytes > kMaximumPayloadBytes ||
                 (header.kind != static_cast<uint16_t>(WireKind::Progress) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Result))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Result) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Preflight))) {
                 malformed_ = true;
                 return false;
             }
             const size_t messageBytes = sizeof(header) + static_cast<size_t>(header.payloadBytes);
             if (bytes_.size() - offset < messageBytes) break;
-            const std::byte* payload = bytes_.data() + offset + sizeof(header);
-            if (header.kind == static_cast<uint16_t>(WireKind::Progress)) {
-                if (result_.has_value() || !ConsumeProgress(payload, header.payloadBytes)) {
-                    malformed_ = true;
-                    return false;
+            const std::span<const std::byte> payload(bytes_.data() + offset + sizeof(header), header.payloadBytes);
+            // A terminal message (result or preflight) must be the last one.
+            if (result_.has_value() || preflight_.has_value()) { malformed_ = true; return false; }
+            switch (static_cast<WireKind>(header.kind)) {
+                case WireKind::Progress: {
+                    const auto progress = DecodeProgress(payload);
+                    if (!progress) { malformed_ = true; return false; }
+                    if (progress_) progress_(*progress);
+                    break;
                 }
-            } else if (result_.has_value() || !ConsumeResult(payload, header.payloadBytes)) {
-                malformed_ = true;
-                return false;
+                case WireKind::Result: {
+                    auto result = DecodeResult(payload);
+                    if (!result) { malformed_ = true; return false; }
+                    result_ = std::move(result);
+                    break;
+                }
+                case WireKind::Preflight: {
+                    auto preflight = DecodePreflight(payload);
+                    if (!preflight) { malformed_ = true; return false; }
+                    preflight_ = std::move(preflight);
+                    break;
+                }
             }
             offset += messageBytes;
         }
@@ -213,62 +204,10 @@ private:
         return true;
     }
 
-    bool ConsumeProgress(const std::byte* payload, uint32_t bytes)
-    {
-        if (bytes != sizeof(WireProgress)) return false;
-        WireProgress wire{};
-        std::memcpy(&wire, payload, sizeof(wire));
-        if (!IsKnownPhase(wire.phase) || wire.completedFrames > wire.totalFrames ||
-            wire.elapsedMilliseconds < 0 || wire.estimatedRemainingMilliseconds < 0) return false;
-        if (progress_) {
-            progress_({static_cast<NeuralRenderPhase>(wire.phase), wire.completedFrames, wire.totalFrames,
-                wire.bytes, std::chrono::milliseconds(wire.elapsedMilliseconds),
-                std::chrono::milliseconds(wire.estimatedRemainingMilliseconds)});
-        }
-        return true;
-    }
-
-    bool ConsumeResult(const std::byte* payload, uint32_t bytes)
-    {
-        if (bytes < sizeof(WireResult)) return false;
-        WireResult wire{};
-        std::memcpy(&wire, payload, sizeof(wire));
-        if (!IsBooleanByte(wire.ok) || !IsBooleanByte(wire.cancelled) || !IsKnownEncoder(wire.encoder) ||
-            !IsBooleanByte(wire.feature18ArmedBeforeCapture) || !IsBooleanByte(wire.upscalingOff) ||
-            !IsBooleanByte(wire.inlineInterceptionContract) || !IsBooleanByte(wire.feature18Created) ||
-            !IsBooleanByte(wire.feature18Evaluated) || !IsBooleanByte(wire.laterFailure) ||
-            !IsZeroed(wire.reserved) || wire.detailBytes > kMaximumDetailBytes ||
-            (wire.detailBytes % sizeof(wchar_t)) != 0 ||
-            bytes != sizeof(WireResult) + wire.detailBytes) return false;
-
-        NeuralRenderResult result;
-        result.ok = wire.ok != 0;
-        result.cancelled = wire.cancelled != 0;
-        result.encoder = static_cast<EncoderKind>(wire.encoder);
-        result.frameCount = wire.frameCount;
-        result.duration100ns = wire.duration100ns;
-        result.nativeEvaluations = wire.nativeEvaluations;
-        result.verifiedNeuralFrames = wire.verifiedNeuralFrames;
-        result.feature18ArmedBeforeCapture = wire.feature18ArmedBeforeCapture != 0;
-        result.evidence = {wire.upscalingOff != 0, wire.inlineInterceptionContract != 0,
-            wire.feature18Created != 0, wire.feature18Evaluated != 0, wire.laterFailure != 0,
-            wire.highestObservedEvaluation};
-        if (wire.detailBytes) {
-            const auto* detail = reinterpret_cast<const wchar_t*>(payload + sizeof(WireResult));
-            result.detail.assign(detail, detail + wire.detailBytes / sizeof(wchar_t));
-            if (result.detail.find(L'\0') != std::wstring::npos) return false;
-        }
-        if (result.ok && (result.cancelled || !result.frameCount || result.duration100ns <= 0 ||
-                          !result.nativeEvaluations || result.verifiedNeuralFrames < result.frameCount ||
-                          !result.feature18ArmedBeforeCapture || !result.evidence.Valid())) return false;
-        if (result.cancelled && result.ok) return false;
-        result_ = std::move(result);
-        return true;
-    }
-
     OfflineNeuralRenderer::ProgressCallback progress_;
     std::vector<std::byte> bytes_;
     std::optional<NeuralRenderResult> result_;
+    std::optional<PreflightPayload> preflight_;
     bool malformed_{};
 };
 
@@ -277,51 +216,21 @@ std::wstring ErrorDetail(std::wstring_view operation)
     return std::wstring(operation) + L" (Win32 error " + std::to_wstring(GetLastError()) + L").";
 }
 
-} // namespace
+struct LaunchOutcome {
+    bool launched{};
+    bool cancelled{};
+    DWORD exitCode{static_cast<DWORD>(-1)};
+    std::wstring detail;
+};
 
-bool neural_worker_detail::HasValidWorkerArgumentShape(std::span<const std::wstring_view> arguments)
+// Launches the helper with the metadata pipe (and optional inheritable pause
+// event), pumps its messages into `reader`, and returns once it exits or the
+// caller cancels. The job object kills the whole helper tree on close.
+LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
+                           const std::function<std::vector<std::wstring>(HANDLE metadata, HANDLE pause)>& arguments,
+                           HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop)
 {
-    if ((arguments.size() != 16 && arguments.size() != 17) ||
-        arguments[1] != L"--neural-worker" ||
-        (arguments.size() == 17 && arguments[16] != L"--configuration-restarted")) return false;
-    constexpr std::array<std::wstring_view, 7> expected{
-        L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps",
-        L"--duration-100ns"};
-    std::array<bool, expected.size()> seen{};
-    for (size_t index = 2; index < 16; index += 2) {
-        if (arguments[index + 1].empty()) return false;
-        const auto it = std::find(expected.begin(), expected.end(), arguments[index]);
-        if (it == expected.end()) return false;
-        const size_t expectedIndex = static_cast<size_t>(it - expected.begin());
-        if (seen[expectedIndex]) return false;
-        seen[expectedIndex] = true;
-    }
-    return std::all_of(seen.begin(), seen.end(), [](bool value) { return value; });
-}
-
-static NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
-                                   const NeuralRenderRequest& request,
-                                   OfflineNeuralRenderer::ProgressCallback progress,
-                                   std::stop_token stop, bool configurationRestarted)
-{
-    NeuralRenderResult result;
-    std::error_code fileError;
-    if (executable.empty() || !std::filesystem::is_regular_file(executable, fileError) || fileError) {
-        result.detail = L"The isolated neural helper executable is unavailable.";
-        return result;
-    }
-    if (request.sourcePath.empty() || request.stagingVideoPath.empty() || !request.width || !request.height ||
-        !std::isfinite(request.fps) || request.fps <= 0.0 || !std::isfinite(request.durationSeconds) ||
-        request.durationSeconds <= 0.0) {
-        result.detail = L"Invalid neural helper request.";
-        return result;
-    }
-    if (stop.stop_requested()) {
-        result.cancelled = true;
-        result.detail = L"Neural rendering was cancelled before the helper started.";
-        return result;
-    }
-
+    LaunchOutcome outcome;
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     HANDLE metadataRead = nullptr;
     HANDLE metadataWrite = nullptr;
@@ -329,16 +238,26 @@ static NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& ex
         !SetHandleInformation(metadataRead, HANDLE_FLAG_INHERIT, 0)) {
         if (metadataRead) CloseHandle(metadataRead);
         if (metadataWrite) CloseHandle(metadataWrite);
-        result.detail = ErrorDetail(L"Creating the neural helper metadata pipe failed");
-        return result;
+        outcome.detail = ErrorDetail(L"Creating the neural helper metadata pipe failed");
+        return outcome;
+    }
+    HANDLE inheritedPause = nullptr;
+    if (pauseEvent && !DuplicateHandle(GetCurrentProcess(), pauseEvent, GetCurrentProcess(), &inheritedPause,
+                                       SYNCHRONIZE, TRUE, 0)) {
+        CloseHandle(metadataRead); CloseHandle(metadataWrite);
+        outcome.detail = ErrorDetail(L"Sharing the neural helper pause event failed");
+        return outcome;
     }
     HANDLE job = CreateKillOnCloseJob();
     if (!job) {
         CloseHandle(metadataRead); CloseHandle(metadataWrite);
-        result.detail = ErrorDetail(L"Creating the neural helper job failed");
-        return result;
+        if (inheritedPause) CloseHandle(inheritedPause);
+        outcome.detail = ErrorDetail(L"Creating the neural helper job failed");
+        return outcome;
     }
 
+    std::array<HANDLE, 2> inherited{metadataWrite, inheritedPause};
+    const DWORD inheritedCount = inheritedPause ? 2 : 1;
     SIZE_T attributeBytes = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
     std::vector<std::byte> attributes(attributeBytes);
@@ -346,21 +265,15 @@ static NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& ex
     const bool attributeListInitialized = attributeBytes &&
         InitializeProcThreadAttributeList(attributeList, 1, 0, &attributeBytes) != FALSE;
     if (!attributeListInitialized || !UpdateProcThreadAttribute(attributeList, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &metadataWrite, sizeof(metadataWrite), nullptr, nullptr)) {
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited.data(), inheritedCount * sizeof(HANDLE), nullptr, nullptr)) {
         if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
         CloseHandle(job); CloseHandle(metadataRead); CloseHandle(metadataWrite);
-        result.detail = ErrorDetail(L"Restricting neural helper handle inheritance failed");
-        return result;
+        if (inheritedPause) CloseHandle(inheritedPause);
+        outcome.detail = ErrorDetail(L"Restricting neural helper handle inheritance failed");
+        return outcome;
     }
 
-    std::vector<std::wstring> arguments{
-        L"--neural-worker", L"--metadata-handle", std::to_wstring(reinterpret_cast<uintptr_t>(metadataWrite)),
-        L"--source", request.sourcePath.wstring(), L"--staging", request.stagingVideoPath.wstring(),
-        L"--width", std::to_wstring(request.width), L"--height", std::to_wstring(request.height),
-        L"--fps", std::to_wstring(request.fps), L"--duration-100ns",
-        std::to_wstring(static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0)))};
-    if (configurationRestarted) arguments.emplace_back(L"--configuration-restarted");
-    std::wstring command = MakeCommandLine(executable, arguments);
+    std::wstring command = MakeCommandLine(executable, arguments(metadataWrite, inheritedPause));
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
     startup.lpAttributeList = attributeList;
@@ -370,11 +283,11 @@ static NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& ex
         executable.parent_path().c_str(), &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributeList);
     CloseHandle(metadataWrite);
-    metadataWrite = nullptr;
+    if (inheritedPause) CloseHandle(inheritedPause);
     if (!created) {
         CloseHandle(job); CloseHandle(metadataRead);
-        result.detail = ErrorDetail(L"Starting the isolated neural helper failed");
-        return result;
+        outcome.detail = ErrorDetail(L"Starting the isolated neural helper failed");
+        return outcome;
     }
     const bool assigned = AssignProcessToJobObject(job, process.hProcess) != FALSE;
     const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
@@ -382,57 +295,288 @@ static NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& ex
     if (!assigned || resumed == static_cast<DWORD>(-1)) {
         KillAndWait(job, process.hProcess);
         CloseHandle(process.hProcess); CloseHandle(job); CloseHandle(metadataRead);
-        result.detail = assigned ? ErrorDetail(L"Resuming the isolated neural helper failed") :
-                                  L"The isolated neural helper could not be assigned to its job.";
-        return result;
+        outcome.detail = assigned ? ErrorDetail(L"Resuming the isolated neural helper failed") :
+                                    L"The isolated neural helper could not be assigned to its job.";
+        return outcome;
     }
+    outcome.launched = true;
 
-    MetadataReader reader(progress);
-    bool cancelled = false;
     for (;;) {
         if (!reader.ReadAvailable(metadataRead)) break;
         const DWORD wait = WaitForSingleObject(process.hProcess, 20);
         if (wait == WAIT_OBJECT_0) break;
         if (wait != WAIT_TIMEOUT) break;
         if (stop.stop_requested()) {
-            cancelled = true;
+            outcome.cancelled = true;
             KillAndWait(job, process.hProcess);
             break;
         }
     }
     reader.ReadAvailable(metadataRead);
-    DWORD exitCode = static_cast<DWORD>(-1);
-    GetExitCodeProcess(process.hProcess, &exitCode);
-    CloseHandle(metadataRead); CloseHandle(process.hProcess); CloseHandle(job);
-
-    if (cancelled || stop.stop_requested()) {
-        result.cancelled = true;
-        result.detail = L"Neural rendering was cancelled.";
-        return result;
-    }
+    GetExitCodeProcess(process.hProcess, &outcome.exitCode);
     // The old process is signalled and all its handles are closed here. Waiting
     // for full exit releases ReShade.log before the next proxy loads; overlapping
     // helpers otherwise put the real evidence in ReShade.log1.
-    if (exitCode == neural_worker_detail::kConfigurationChangedExitCode &&
-        !configurationRestarted && !reader.Malformed()) {
-        return RunNeuralWorkerAttempt(executable, request, std::move(progress), stop, true);
+    CloseHandle(metadataRead); CloseHandle(process.hProcess); CloseHandle(job);
+    return outcome;
+}
+
+bool ValidRequest(const NeuralRenderRequest& request)
+{
+    if (request.sourcePath.empty() || request.stagingVideoPath.empty() || !request.width || !request.height ||
+        !std::isfinite(request.fps) || request.fps <= 0.0 || !std::isfinite(request.durationSeconds) ||
+        request.durationSeconds <= 0.0) return false;
+    if (request.range.start100ns < 0 || request.range.end100ns < 0) return false;
+    if (request.range.end100ns && request.range.end100ns <= request.range.start100ns) return false;
+    return true;
+}
+
+NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
+                                          const NeuralRenderRequest& request,
+                                          const OfflineNeuralRenderer::ProgressCallback& progress,
+                                          std::stop_token stop, bool configurationRestarted)
+{
+    NeuralRenderResult result;
+    result.jobId = request.jobId;
+    if (stop.stop_requested()) {
+        result.cancelled = true;
+        result.failure = NeuralRenderFailure::Cancelled;
+        result.detail = L"Neural rendering was cancelled before the helper started.";
+        return result;
     }
-    if (exitCode != 0) {
-        result.detail = L"The isolated neural helper failed before producing a result.";
+    MetadataReader reader(progress);
+    const LaunchOutcome launch = LaunchHelper(executable,
+        [&](HANDLE metadata, HANDLE pause) {
+            return neural_worker_detail::BuildWorkerArguments(request, metadata, pause, configurationRestarted);
+        }, request.pauseEvent, reader, stop);
+    if (!launch.launched) {
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = launch.detail;
+        return result;
+    }
+    if (launch.cancelled || stop.stop_requested()) {
+        result.cancelled = true;
+        result.failure = NeuralRenderFailure::Cancelled;
+        result.detail = L"Neural rendering was cancelled.";
+        return result;
+    }
+    if (launch.exitCode == neural_worker_detail::kConfigurationChangedExitCode &&
+        !configurationRestarted && !reader.Malformed()) {
+        return RunNeuralWorkerAttempt(executable, request, progress, stop, true);
+    }
+    if (launch.exitCode != 0) {
+        result.failure = NeuralRenderFailure::WorkerCrashed;
+        result.detail = L"The isolated neural helper exited with code " + std::to_wstring(launch.exitCode) +
+                        L" before producing a result.";
         return result;
     }
     if (!reader.Complete()) {
+        result.failure = NeuralRenderFailure::Protocol;
         result.detail = reader.Malformed() ? L"The isolated neural helper returned malformed metadata." :
                                              L"The isolated neural helper returned incomplete metadata.";
         return result;
     }
-    return reader.Result();
+    result = reader.Result();
+    if (result.jobId != request.jobId) {
+        NeuralRenderResult mismatch;
+        mismatch.jobId = request.jobId;
+        mismatch.failure = NeuralRenderFailure::Identity;
+        mismatch.detail = L"The isolated neural helper reported a result for a different job.";
+        return mismatch;
+    }
+    return result;
+}
+
+} // namespace
+
+std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
+    const NeuralRenderRequest& request, HANDLE metadata, HANDLE pauseEvent, bool configurationRestarted)
+{
+    std::vector<std::wstring> arguments{
+        std::wstring(kWorkerMode), L"--metadata-handle", HandleText(metadata),
+        L"--source", request.sourcePath.wstring(), L"--staging", request.stagingVideoPath.wstring(),
+        L"--width", std::to_wstring(request.width), L"--height", std::to_wstring(request.height),
+        L"--fps", std::to_wstring(request.fps), L"--duration-100ns",
+        std::to_wstring(static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0))),
+        L"--job-id", std::to_wstring(request.jobId),
+        L"--range-start-100ns", std::to_wstring(request.range.start100ns),
+        L"--range-end-100ns", std::to_wstring(request.range.end100ns),
+        L"--preroll-frames", std::to_wstring(request.prerollFrames),
+        L"--frame-retry-limit", std::to_wstring(request.frameRetryLimit)};
+    const std::string guides = CanonicalGuideControls(request.guides);
+    arguments.emplace_back(L"--guides");
+    arguments.emplace_back(guides.begin(), guides.end());
+    if (pauseEvent) {
+        arguments.emplace_back(L"--pause-event");
+        arguments.emplace_back(HandleText(pauseEvent));
+    }
+    if (configurationRestarted) arguments.emplace_back(kRestartedFlag);
+    return arguments;
+}
+
+std::vector<std::wstring> neural_worker_detail::BuildPreflightArguments(HANDLE metadata, bool configurationRestarted)
+{
+    std::vector<std::wstring> arguments{std::wstring(kPreflightMode), L"--metadata-handle", HandleText(metadata)};
+    if (configurationRestarted) arguments.emplace_back(kRestartedFlag);
+    return arguments;
+}
+
+std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::ParseWorkerArguments(
+    std::span<const std::wstring_view> arguments)
+{
+    if (arguments.size() < 2) return std::nullopt;
+    WorkerArguments parsed;
+    if (arguments[1] == kPreflightMode) parsed.preflight = true;
+    else if (arguments[1] != kWorkerMode) return std::nullopt;
+    size_t end = arguments.size();
+    if (end > 2 && arguments[end - 1] == kRestartedFlag) {
+        parsed.configurationRestarted = true;
+        --end;
+    }
+    if (((end - 2) % 2) != 0) return std::nullopt;
+
+    enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
+               RetryLimit, Guides, PauseEvent, KeyCount };
+    constexpr std::array<std::wstring_view, KeyCount> names{
+        L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
+        L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
+        L"--guides", L"--pause-event"};
+    std::array<std::optional<std::wstring_view>, KeyCount> values{};
+    for (size_t index = 2; index < end; index += 2) {
+        const auto found = std::find(names.begin(), names.end(), arguments[index]);
+        if (found == names.end()) return std::nullopt;
+        auto& slot = values[static_cast<size_t>(found - names.begin())];
+        if (slot.has_value()) return std::nullopt;
+        slot = arguments[index + 1];
+    }
+    uint64_t rawHandle = 0;
+    if (!values[Metadata] || !ParseUnsigned(*values[Metadata], rawHandle) || !rawHandle) return std::nullopt;
+    parsed.metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawHandle));
+    if (parsed.preflight) {
+        for (size_t key = 0; key < KeyCount; ++key) {
+            if (key != Metadata && values[key].has_value()) return std::nullopt;
+        }
+        return parsed;
+    }
+    constexpr std::array<Key, 12> required{Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart,
+                                           RangeEnd, Preroll, RetryLimit, Guides};
+    for (const Key key : required) if (!values[key]) return std::nullopt;
+    if (values[Source]->empty() || values[Staging]->empty()) return std::nullopt;
+    uint64_t width = 0, height = 0, duration = 0, jobId = 0, rangeStart = 0, rangeEnd = 0, preroll = 0,
+             retryLimit = 0;
+    double fps = 0.0;
+    if (!ParseUnsigned(*values[Width], width) || !ParseUnsigned(*values[Height], height) ||
+        !ParseUnsigned(*values[Duration], duration) || !ParseDouble(*values[Fps], fps) ||
+        !ParseUnsigned(*values[JobId], jobId) || !ParseUnsigned(*values[RangeStart], rangeStart) ||
+        !ParseUnsigned(*values[RangeEnd], rangeEnd) || !ParseUnsigned(*values[Preroll], preroll) ||
+        !ParseUnsigned(*values[RetryLimit], retryLimit) || !width || !height || width > UINT32_MAX ||
+        height > UINT32_MAX || !duration || duration > INT64_MAX || fps <= 0.0 || rangeStart > INT64_MAX ||
+        rangeEnd > INT64_MAX || preroll > UINT32_MAX || retryLimit > UINT32_MAX) return std::nullopt;
+    const auto guides = ParseGuideControls(Narrow(*values[Guides]));
+    if (!guides) return std::nullopt;
+    NeuralRenderRequest& request = parsed.request;
+    request.sourcePath = *values[Source];
+    request.stagingVideoPath = *values[Staging];
+    request.width = static_cast<uint32_t>(width);
+    request.height = static_cast<uint32_t>(height);
+    request.fps = fps;
+    request.durationSeconds = static_cast<double>(duration) / 10000000.0;
+    request.jobId = jobId;
+    request.range = {static_cast<int64_t>(rangeStart), static_cast<int64_t>(rangeEnd)};
+    request.prerollFrames = static_cast<uint32_t>(preroll);
+    request.frameRetryLimit = static_cast<uint32_t>(retryLimit);
+    request.guides = *guides;
+    if (values[PauseEvent]) {
+        uint64_t rawPause = 0;
+        if (!ParseUnsigned(*values[PauseEvent], rawPause) || !rawPause) return std::nullopt;
+        request.pauseEvent = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawPause));
+    }
+    if (!ValidRequest(request)) return std::nullopt;
+    return parsed;
 }
 
 NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
                                    const NeuralRenderRequest& request,
                                    OfflineNeuralRenderer::ProgressCallback progress,
-                                   std::stop_token stop)
+                                   std::stop_token stop, uint32_t crashRelaunchLimit)
 {
-    return RunNeuralWorkerAttempt(executable, request, std::move(progress), stop, false);
+    NeuralRenderResult result;
+    result.jobId = request.jobId;
+    std::error_code fileError;
+    if (executable.empty() || !std::filesystem::is_regular_file(executable, fileError) || fileError) {
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = L"The isolated neural helper executable is unavailable.";
+        return result;
+    }
+    if (!ValidRequest(request)) {
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = L"Invalid neural helper request.";
+        return result;
+    }
+    // Bounded from-zero relaunch: a crashed helper or a removed device leaves
+    // no temporal history to resume, so the whole sequence restarts in a fresh
+    // process. Frames are never spliced across helper instances.
+    for (uint32_t attempt = 0;; ++attempt) {
+        result = RunNeuralWorkerAttempt(executable, request, progress, stop, false);
+        const bool relaunchable = !result.ok && !result.cancelled &&
+            (result.failure == NeuralRenderFailure::WorkerCrashed ||
+             result.failure == NeuralRenderFailure::DeviceRemoved ||
+             result.failure == NeuralRenderFailure::GpuStall);
+        if (!relaunchable) return result;
+        if (attempt >= crashRelaunchLimit) {
+            result.failure = NeuralRenderFailure::RetryExhausted;
+            result.detail = L"The neural helper did not recover after " + std::to_wstring(attempt + 1) +
+                            L" attempt(s): " + result.detail;
+            return result;
+        }
+        if (progress) {
+            NeuralRenderProgress recovering{};
+            recovering.phase = NeuralRenderPhase::Recovering;
+            recovering.recovering = result.failure;
+            recovering.retries = attempt + 1;
+            progress(recovering);
+        }
+    }
+}
+
+NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable, std::stop_token stop)
+{
+    NeuralPreflightResult result;
+    std::error_code fileError;
+    if (executable.empty() || !std::filesystem::is_regular_file(executable, fileError) || fileError) {
+        result.detail = L"The isolated neural helper executable is unavailable.";
+        return result;
+    }
+    for (bool restarted = false;; restarted = true) {
+        if (stop.stop_requested()) {
+            result.cancelled = true;
+            result.detail = L"Neural preflight was cancelled.";
+            return result;
+        }
+        MetadataReader reader({});
+        const LaunchOutcome launch = LaunchHelper(executable,
+            [&](HANDLE metadata, HANDLE) { return neural_worker_detail::BuildPreflightArguments(metadata, restarted); },
+            nullptr, reader, stop);
+        if (!launch.launched) { result.detail = launch.detail; return result; }
+        if (launch.cancelled || stop.stop_requested()) {
+            result.cancelled = true;
+            result.detail = L"Neural preflight was cancelled.";
+            return result;
+        }
+        if (launch.exitCode == neural_worker_detail::kConfigurationChangedExitCode && !restarted &&
+            !reader.Malformed()) continue;
+        if (launch.exitCode != 0) {
+            result.detail = L"The neural preflight helper exited with code " + std::to_wstring(launch.exitCode) + L".";
+            return result;
+        }
+        if (!reader.PreflightComplete()) {
+            result.detail = reader.Malformed() ? L"The neural preflight helper returned malformed metadata." :
+                                                 L"The neural preflight helper returned no receipt.";
+            return result;
+        }
+        result.ok = reader.Preflight().ok;
+        result.json = reader.Preflight().json;
+        if (!result.ok) result.detail = L"The neural runtime preflight did not arm feature 18.";
+        return result;
+    }
 }

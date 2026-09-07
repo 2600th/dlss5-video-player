@@ -1,5 +1,7 @@
 #pragma once
 
+#include "FrameIdentity.h"
+#include "GuideControls.h"
 #include "MediaPipeline.h"
 
 #include <windows.h>
@@ -22,6 +24,76 @@ enum class NeuralRenderPhase {
     Encoding,
     Validating,
     Ready,
+    Preflight,
+    Paused,
+    Recovering,
+};
+
+// Explicit failure classification. Every failed job names exactly one kind so
+// the player can show a distinct state instead of a generic failure and so
+// receipts record what actually stopped the render.
+enum class NeuralRenderFailure : uint8_t {
+    None,
+    Source,
+    Encoder,
+    Neural,
+    GpuStall,
+    DeviceRemoved,
+    WorkerCrashed,
+    RetryExhausted,
+    Cancelled,
+    Preflight,
+    Identity,
+    Protocol,
+};
+
+constexpr std::string_view NeuralRenderFailureName(NeuralRenderFailure failure) noexcept
+{
+    switch (failure) {
+        case NeuralRenderFailure::None: return "none";
+        case NeuralRenderFailure::Source: return "source";
+        case NeuralRenderFailure::Encoder: return "encoder";
+        case NeuralRenderFailure::Neural: return "neural";
+        case NeuralRenderFailure::GpuStall: return "gpu-stall";
+        case NeuralRenderFailure::DeviceRemoved: return "device-removed";
+        case NeuralRenderFailure::WorkerCrashed: return "worker-crashed";
+        case NeuralRenderFailure::RetryExhausted: return "retry-exhausted";
+        case NeuralRenderFailure::Cancelled: return "cancelled";
+        case NeuralRenderFailure::Preflight: return "preflight";
+        case NeuralRenderFailure::Identity: return "identity";
+        case NeuralRenderFailure::Protocol: return "protocol";
+    }
+    return "unknown";
+}
+
+// Half-open source interval [start, end) on the decoder's CFR timeline. Both
+// zero means the whole source. The encoded output always starts at pts 0; the
+// absolute start is recorded beside it so playback can realign.
+struct NeuralRenderRange {
+    int64_t start100ns{};
+    int64_t end100ns{};
+
+    friend bool operator==(const NeuralRenderRange&, const NeuralRenderRange&) = default;
+    constexpr bool Whole() const noexcept { return start100ns == 0 && end100ns == 0; }
+};
+
+// Frames evaluated (never captured) before the first captured frame so the
+// temporal history at the range start matches a continuous render.
+inline constexpr uint32_t kDefaultPrerollFrames = 60;
+// Exact-frame retries of the same frame before the job is classified as
+// retry-exhausted. Retries never skip a frame.
+inline constexpr uint32_t kDefaultFrameRetryLimit = 3;
+
+struct NeuralRenderTiming {
+    uint64_t samples{};
+    double neuralGpuMsP50{};
+    double neuralGpuMsP95{};
+    double neuralGpuMsMax{};
+    double guideMsMean{};
+    double captureMsMean{};
+    uint64_t peakLocalVramMiB{};
+
+    friend bool operator==(const NeuralRenderTiming&, const NeuralRenderTiming&) = default;
 };
 
 struct NeuralRuntimeEvidence {
@@ -47,6 +119,14 @@ struct NeuralRenderRequest {
     uint32_t height{};
     double fps{};
     double durationSeconds{};
+    uint64_t jobId{};
+    NeuralRenderRange range{};
+    uint32_t prerollFrames{kDefaultPrerollFrames};
+    GuideControls guides{};
+    uint32_t frameRetryLimit{kDefaultFrameRetryLimit};
+    // Manual-reset event owned by the caller. Signalled means "pause"; the
+    // worker checks it between frames and reports NeuralRenderPhase::Paused.
+    HANDLE pauseEvent{};
 };
 
 struct NeuralRenderProgress {
@@ -56,6 +136,9 @@ struct NeuralRenderProgress {
     uint64_t bytes{};
     std::chrono::milliseconds elapsed{};
     std::chrono::milliseconds estimatedRemaining{};
+    // Non-None only while phase == Recovering: the failure being retried.
+    NeuralRenderFailure recovering{NeuralRenderFailure::None};
+    uint32_t retries{};
 };
 
 struct NeuralRenderResult {
@@ -68,10 +151,25 @@ struct NeuralRenderResult {
     uint64_t verifiedNeuralFrames{};
     bool feature18ArmedBeforeCapture{};
     NeuralRuntimeEvidence evidence{};
+    NeuralRenderFailure failure{NeuralRenderFailure::None};
+    uint64_t jobId{};
+    uint32_t historyResets{};
+    uint32_t frameRetries{};
+    // Absolute source pts of the first captured frame (== range.start100ns
+    // for range renders, 0 for whole-source renders).
+    int64_t firstTimestamp100ns{};
+    NeuralRenderTiming timing{};
     std::wstring detail;
 };
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment);
+
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+// Reads ReShade.log from `offset`, polling until the runtime evidence in the
+// segment stabilizes (or a bounded wait elapses). Shared by the offline job and
+// the preflight probe so both judge feature 18 from the same evidence rules.
+std::string ReadNeuralRuntimeLogSegment(const std::filesystem::path& path, uintmax_t offset);
+#endif
 
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 enum class OfflineFrameRead { FrameReady, EndOfStream, Error, Cancelled };
@@ -80,6 +178,8 @@ struct OfflineDecodedFrame {
     std::vector<uint8_t> bgra;
     int64_t timestamp100ns{};
     bool discontinuity{};
+    uint64_t frameNumber{};
+    uint32_t sourceGeneration{};
 };
 
 class IFrameSource {

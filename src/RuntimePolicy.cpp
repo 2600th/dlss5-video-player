@@ -151,13 +151,25 @@ DetectedGpu DetectHighPerformanceGpu()
 
         DXGI_ADAPTER_DESC3 adapterDescription{};
         const HRESULT descriptionResult = adapter->GetDesc3(&adapterDescription);
-        adapter->Release();
         if (FAILED(descriptionResult) || (adapterDescription.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE) != 0) {
+            adapter->Release();
             continue;
         }
-
+        DetectedGpu detected{ClassifyGpu(adapterDescription.VendorId, adapterDescription.Description),
+                             adapterDescription.Description};
+        detected.vendorId = adapterDescription.VendorId;
+        detected.deviceId = adapterDescription.DeviceId;
+        detected.dedicatedVideoMemoryBytes = adapterDescription.DedicatedVideoMemory;
+        LARGE_INTEGER driver{};
+        if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver))) {
+            detected.driverVersion = std::to_wstring(driver.HighPart >> 16) + L'.' +
+                                     std::to_wstring(driver.HighPart & 0xFFFF) + L'.' +
+                                     std::to_wstring(driver.LowPart >> 16) + L'.' +
+                                     std::to_wstring(driver.LowPart & 0xFFFF);
+        }
+        adapter->Release();
         factory->Release();
-        return {ClassifyGpu(adapterDescription.VendorId, adapterDescription.Description), adapterDescription.Description};
+        return detected;
     }
 
     factory->Release();

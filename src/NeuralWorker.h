@@ -2,17 +2,40 @@
 
 #include "OfflineNeuralRenderer.h"
 
+#include <windows.h>
+
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <stop_token>
+#include <string>
 #include <string_view>
+#include <vector>
 
 // Starts the isolated neural-cache helper and accepts only a complete, validated
 // helper result. The caller retains ownership of cache staging/promotion.
+// Worker crashes and device removal are retried from frame zero at most
+// `crashRelaunchLimit` times; exhaustion reports NeuralRenderFailure::RetryExhausted.
+inline constexpr uint32_t kDefaultCrashRelaunchLimit = 1;
 NeuralRenderResult RunNeuralWorker(
     const std::filesystem::path& executable,
     const NeuralRenderRequest& request,
     OfflineNeuralRenderer::ProgressCallback progress = {},
+    std::stop_token stop = {},
+    uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit);
+
+// Short Feature-18 probe run in the same isolated helper before a render. The
+// JSON receipt names GPU, driver, runtime/consumer versions and every feature
+// creation result observed; `ok` is false when the probe could not arm the
+// neural contract. Never renders or touches the cache.
+struct NeuralPreflightResult {
+    bool ok{};
+    bool cancelled{};
+    std::string json;
+    std::wstring detail;
+};
+NeuralPreflightResult RunNeuralPreflight(
+    const std::filesystem::path& executable,
     std::stop_token stop = {});
 
 namespace neural_worker_detail {
@@ -21,8 +44,18 @@ namespace neural_worker_detail {
 // Only its hook-free parent may launch the replacement, at most once.
 inline constexpr unsigned long kConfigurationChangedExitCode = 75;
 
-// Kept shared with NeuralWorkerMain so focused tests cover the exact argument
-// envelope accepted by the executable before it parses individual values.
-bool HasValidWorkerArgumentShape(std::span<const std::wstring_view> arguments);
+struct WorkerArguments {
+    HANDLE metadata{};
+    bool preflight{};
+    bool configurationRestarted{};
+    NeuralRenderRequest request;
+};
+
+// Exact argument envelope accepted by the helper executable. Shared with
+// NeuralWorkerMain so the launcher and the parser cannot drift apart.
+std::vector<std::wstring> BuildWorkerArguments(const NeuralRenderRequest& request, HANDLE metadata,
+                                               HANDLE pauseEvent, bool configurationRestarted);
+std::vector<std::wstring> BuildPreflightArguments(HANDLE metadata, bool configurationRestarted);
+std::optional<WorkerArguments> ParseWorkerArguments(std::span<const std::wstring_view> arguments);
 
 } // namespace neural_worker_detail

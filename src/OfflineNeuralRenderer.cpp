@@ -421,7 +421,12 @@ std::filesystem::path ModuleDirectory()
     if(!length||length>=path.size())return {};path.resize(length);return std::filesystem::path(path).parent_path();
 }
 
-std::string ReadLogSegment(const std::filesystem::path& path,uintmax_t offset)
+#endif
+
+} // namespace
+
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+std::string ReadNeuralRuntimeLogSegment(const std::filesystem::path& path,uintmax_t offset)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
     uintmax_t lastSegmentSize=std::numeric_limits<uintmax_t>::max();
@@ -445,7 +450,6 @@ std::string ReadLogSegment(const std::filesystem::path& path,uintmax_t offset)
 }
 #endif
 
-} // namespace
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment)
 {
@@ -494,7 +498,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     uintmax_t logOffset=std::filesystem::file_size(logPath,error);if(error)logOffset=0;
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-        [logPath,logOffset]{return ReadLogSegment(logPath,logOffset);},
+        [logPath,logOffset]{return ReadNeuralRuntimeLogSegment(logPath,logOffset);},
         []{return SteadyClock::now();});
 #endif
 }
