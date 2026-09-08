@@ -40,21 +40,44 @@ Both markers stay inside the source. In always names a frame that exists, and
 Out is the exclusive end, so marking Out on the last frame means "to the end"
 and renders it. A range that names no frame is refused before a render starts.
 
-The DLSS menu renders less than the whole video: `F` renders only the current
-frame, `Shift+F` a four-second clip from it, and `Ctrl+R` the marked range;
-**Render whole video** starts a full render. Each result opens as cached
-playback of that range, seeking stays inside it and the status line shows
-`Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short `NR intensity/struct/tone` summary
-of the settings it was rendered with. **Advanced > Open render receipt** opens
-the entry's `receipt.json` with the full record. `Space` pauses and resumes a
-running render. The recent-video history keeps one render per source, so a new
+Neural rendering has two shapes. **Turn it on while watching** with the
+toolbar's Neural Rendering button, the DLSS menu entry or `N`: the render
+starts at the playhead — to the Out marker when the playhead sits inside a
+marked range, otherwise to the end of the source — and a panel over the
+current frame collects a lead of four seconds before playback resumes on the
+rendered frames. Rendering keeps running behind playback; if the playhead
+reaches the render head the panel returns until the buffer refills, and `Space`
+pauses playback rather than the render. Turning the button off stops the
+session and hands the same frame back to the original. On an RTX 5090 the
+render sustains about 0.99 s of 1080p30 video per second of playback, so the
+lead holds; heavier sources (4K, 60 fps) rebuffer.
+
+**Convert to a file** with the DLSS menu's **Convert & save** submenu:
+`Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
+and **Save converted video** writes the result out. `F` and `Shift+F` still
+render just the current frame or a four-second clip as a quick look. Each
+result opens as cached playback of that range, seeking stays inside it and the
+status line shows `Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short
+`NR intensity/struct/tone` summary of the settings it was rendered with.
+**Advanced > Open render receipt** opens the entry's `receipt.json` with the
+full record. The recent-video history keeps one render per source, so a new
 preview or range render for the same file displaces the previous entry.
+
+Neural settings preview themselves. With playback paused, changing a slider in
+**Neural settings** re-renders that one frame 700 ms after the sliders settle
+and shows the result in place of it, so settings can be compared on the actual
+picture; the toggle reads `Neural Rendering · Settings preview` while such a
+frame is displayed. **Apply** applies the settings to what is on screen — it
+restarts an active session at the playhead or re-previews the paused frame —
+and never starts a whole-video render. Saving a converted video refuses an
+entry that was rendered with settings you have since changed, and offers to
+convert that range again.
 
 The timeline shows both states at once: the marked range is a solid violet block
 between a green In tick and an orange Out tick, played progress is blue, and a
 teal stripe along the bottom names the part of the source that already has
-cached neural frames. During cached playback that stripe is why seeking stays
-inside the rendered range.
+neural frames — during an active session it grows with the render head, which
+is also how far ahead you can seek.
 
 Marking a range on a YouTube stream starts downloading that source in the
 background, because a render always works from a local copy. Playback continues
@@ -172,12 +195,13 @@ not affect the offline render. This adds no unverified sliders or presets.
 Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
 in the player; the old quality arguments and 4K launch scripts are retired.
 
-## Export processed media
+## Save a converted video
 
-1. Open a photo, GIF or video and wait for validated cached playback.
-2. Choose **File > Export processed media**.
+1. Open a photo, GIF or video and wait for validated cached playback, or
+   convert a clip or the whole video first.
+2. Choose **DLSS > Convert & save > Save converted video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
-4. Continue playback while export runs, or use **File > Cancel export**.
+4. Continue playback while saving runs, or use **Cancel saving**.
 
 PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated

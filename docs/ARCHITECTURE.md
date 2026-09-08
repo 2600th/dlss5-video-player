@@ -131,6 +131,36 @@ After the render, `receipt.json` (preflight, lock checks, request, result,
 timing, digests) is written beside `neural.mkv`, hashed into the schema-4
 manifest and summarized in one log line.
 
+## Active neural session
+
+A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
+makes the helper rotate its encoder every N captured frames: the next segment's
+encoder starts before the current one is finished, finalization runs on a
+private FIFO thread, and each finished file is announced over the metadata pipe
+as a protocol v3 `Segment` message (index, absolute first pts and frame number,
+frame count, frame duration, file name). Temporal history, priming and preroll
+are untouched — only the encoder rotates.
+
+The player collects those messages into a `NeuralSegmentIndex` and hands it to
+`SynchronizedPlayback::OpenLive`, which pairs the original against the growing
+set, rebasing each segment with its own first pts and opening the next segment
+before the current one runs out. Reading past the render head returns
+`WaitingForRender`, which the player treats as "buffer", not "stop". When the
+job ends the segments are concatenated (`ConcatenateMedia`) into the single
+`neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
+
+Sizing follows measurement rather than preference: one job costs about 6.2 s
+before its first frame (preflight process, ReShade stabilization, up to 120
+priming frames, reopen and seek, 60 preroll frames) and then renders ~32 fps at
+1080p. A fresh job per chunk only breaks even with realtime playback at a 103 s
+chunk, so the session is one long job with a 4 s lead-in and a 2 s resume
+threshold.
+
+A settings change while the player is paused runs the same machinery for one
+frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented
+in place of the paused picture, and because it is an ordinary range render the
+repeat of a setting is a cache hit.
+
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
 settings write until the helper exits, so a second player instance cannot

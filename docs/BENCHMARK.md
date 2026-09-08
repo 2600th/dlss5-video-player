@@ -89,9 +89,17 @@ sequence so byte-identical outputs are visible directly.
 Observations (P0-3 guide proof):
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
-- `mask-off` is byte-identical to `baseline` on both clips: the estimated
-  bias/disocclusion mask has no measurable effect on the active consumer for
-  this content. Do not spend on better masks until a clip shows a difference.
+- `mask-off` is byte-identical to `baseline` on both clips. The mask is not
+  missing: running the shipping `TemporalGuideGenerator` over decoded frames of
+  `cuts-motion` produces a disocclusion mask in [0,1] with 5–24 % of grid cells
+  non-zero (0 % on the static text clip, which is correct), and that A channel
+  becomes the R8 texture bound to `DLSS_Input_Bias_Current_Color_Mask`,
+  `DLSS_DisocclusionMask` and `DLSS_ResponsivityMask` at evaluate time. The
+  consumer simply does not change its output for it. Motion vectors from the
+  same measurement are real as well — mean |mv| 47 px with the global estimate
+  tracking each pan on the motion clip, 0.8 px and global (0,0) on the static
+  clip — and `mv-off` does change the output. Do not spend on better masks
+  until a clip shows a difference.
 - `mv-off` and `depth-off` change the output. On these synthetic clips the
   estimated motion vectors slightly *hurt* (mv-off: +0.30 dB PSNR, +0.018
   SSIM and −0.9 flicker on the cuts clip; +0.10 dB and −0.07 flicker on the

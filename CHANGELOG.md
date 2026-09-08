@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Turn neural rendering on while watching. The toggle starts a render at the
+  playhead (to the Out marker when the playhead is inside a marked range, else
+  to the end of the source) and playback follows the render head: a buffering
+  panel over the current frame collects a 4 s lead, playback resumes on the
+  rendered frames, and it rebuffers if the playhead catches up. The timeline's
+  teal lane grows with the head, seeks clamp to it, and a finished session is
+  concatenated into the ordinary cache entry. Measured on an RTX 5090: the
+  render sustains 0.99 s of 1080p30 video per second of playback, so the lead
+  holds; 4K or 60 fps sources will rebuffer.
+- Preview neural settings on the paused frame. Moving a slider re-renders the
+  frame the player is paused on 700 ms after the sliders settle and shows the
+  result in its place; the toggle reads "Settings preview" while that frame is
+  displayed. Repeating a setting is a cache hit (~2.5 s instead of ~12 s).
+- **Apply** in the neural settings dialog now applies: it restarts an active
+  session or re-previews the paused frame instead of launching a whole-video
+  re-render. Writing files moved to **Convert & save**: convert the marked
+  clip, convert the whole video, save the converted video, cancel saving.
+  Saving refuses an entry rendered with settings that have since changed and
+  offers to convert that range again, so a saved file matches the selection.
+
 - Open media without rendering it first. A YouTube URL plays from its stream as
   soon as it resolves (about 6 seconds here), a local file replays a validated
   cache entry when one exists, and otherwise the original plays immediately;

@@ -31,7 +31,8 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 - **Replay recent videos.** The last five distinct videos persist across
   launches. Acquired YouTube sources and neural renders are reused after validation.
 - **Keep experiments consistent.** Neural settings are saved with each render
-  and included in its cache identity. A settings change triggers a new render.
+  and included in its cache identity. With playback paused, a settings change
+  re-renders that frame so the choice is made on the picture itself.
 - **Take the result with you.** Export processed photos as PNG/JPEG, animations
   as GIF, or videos as MP4/MKV. MKV preserves available source audio, compatible
   subtitles and chapters without re-encoding.
@@ -54,10 +55,11 @@ YouTube selection. See the [changelog](CHANGELOG.md).
    `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.
 4. Open a local file (`Ctrl+O`), paste a public YouTube URL (`Ctrl+L`), or choose
    **File > Game trailers**.
-5. Let preparation finish. Press `D` to compare neural and original views;
-   enable **DLSS Upscaling** separately if desired.
-6. Reopen through **File > Recent videos**, or choose **File > Export processed
-   media** to save the prepared result.
+5. Press `D` to turn neural rendering on from the playhead: the picture waits a
+   few seconds for its buffer, then plays rendered. Use **Video > Compare** for
+   blend, split or wipe; enable **DLSS Upscaling** separately if desired.
+6. Reopen through **File > Recent videos**, or use **DLSS > Convert & save** to
+   convert a clip or the whole video and write it to a file.
 
 The publishable core package has fewer capabilities than the complete experimental
 layout. Build inputs and package contents are explained in [Building](docs/BUILDING.md).
@@ -68,15 +70,16 @@ layout. Build inputs and package contents are explained in [Building](docs/BUILD
 | --- | --- |
 | Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
-| Compare original and neural views | `D`; **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
+| Compare original and neural views | **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
 | Seek / step a paused cached frame | Timeline or `Left` / `Right`; `.` to step |
 | Mark In / Out, exact timecode | `I` / `O`, `Shift+I` to clear; `Ctrl+G` |
-| Render only part of a video | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked range |
+| Turn neural rendering on while watching | `D` or the Neural Rendering button; it renders from the playhead and buffers |
+| Convert part or all of a video to a file | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked clip, **DLSS > Convert & save** |
 | Neural model and guide settings | `Ctrl+N` |
 | Volume / mute | Volume control or mouse wheel; `M` to mute |
 | Fit or fill / fullscreen | `A` / `F11` |
 | Image adjustments | `Ctrl+E` |
-| Replay / export | **File > Recent videos / Export cached video** |
+| Replay / save | **File > Recent videos** / **DLSS > Convert & save** |
 
 Volume, mute, fit/fill, comparison view and mode, upscaling preference/output,
 YouTube quality, image adjustments, neural settings and guide switches are saved
