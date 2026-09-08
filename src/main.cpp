@@ -2269,9 +2269,9 @@ private:
     }
     void RenderWholeSource(){if(m_loaded)RenderRangeOfCurrentSource(NeuralRenderRange{});}
     // Active neural rendering ------------------------------------------------
-    // Steady-state rendering is ~32 fps at 1080p against 30 fps of playback on
-    // the reference GPU, while one job costs ~6 s before its first frame.
-    // Chunked jobs therefore cannot keep up (break-even is a 103 s chunk): the
+    // Fitted over three range renders of one clip: 29.1 ms per frame (34.4 fps
+    // at 1080p) plus 7.3 s of fixed cost per job. Chunked jobs therefore cannot
+    // keep up with 30 fps playback (break-even is a 57 s chunk): the
     // session is one long job that publishes finalized segments while it runs,
     // and playback follows the render head, buffering when it catches up.
     static constexpr double kLiveSegmentSeconds=2.0;
@@ -2401,9 +2401,11 @@ private:
         if(m_playing||m_liveSession)return;
         m_previewTimer=SetTimer(m_hwnd,kPreviewTimerId,kPreviewSettleMs,nullptr);
     }
+    // A seek or a resume makes a queued preview meaningless: it would render a
+    // frame the player has already left.
     void CancelPausedSettingsPreview(){
         if(m_previewTimer&&m_hwnd){KillTimer(m_hwnd,m_previewTimer);}
-        m_previewTimer=0;
+        m_previewTimer=0;m_previewQueued=false;
     }
     void StartPausedSettingsPreview(){
         CancelPausedSettingsPreview();
@@ -2458,7 +2460,7 @@ private:
     bool LiveSessionNeedsRebase()const{
         if(!m_liveSession||m_liveAttached||m_dragSeek||m_seeking||m_seekPending)return false;
         const double at=Position(),start=double(m_liveRange.start100ns)*1e-7;
-        // Restarting costs a fresh ~6 s startup plus the 4 s lead-in, and the
+        // Restarting costs a fresh ~7.3 s startup plus the 4 s lead-in, and the
         // running job covers about a second of video per second, so waiting is
         // cheaper for anything the head reaches within that budget.
         return at+0.5<start||at>std::max(start,LiveHeadSeconds())+kLiveRebaseAhead;
