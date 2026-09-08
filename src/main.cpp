@@ -841,6 +841,11 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     return result;
 }
 
+// How a neural job relates to what is on screen: an offline job replaces
+// playback, a live session renders behind it, and a preview re-renders the one
+// frame the player is paused on.
+enum class NeuralJobKind { Offline, Live, Preview };
+
 class PlayerApp {
 #ifdef PLAYER_APP_TESTING
     friend struct PlayerAppTestAccess;
@@ -898,6 +903,7 @@ public:
     void Tick() {
         PruneRecentCache();
         ReapSourcePrefetch();
+        UpdateLiveSession();
         if(m_seekPending) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
@@ -931,6 +937,7 @@ public:
         double due=double(m_next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
+            m_previewShown=false;
             RememberRenderedCachedPair();
             if(m_cachedPlayback)++m_cachedPresentedFrames;
             ++m_fpsWindowFrames;
@@ -954,8 +961,12 @@ public:
 private:
     static constexpr UINT_PTR kActivityTimerId=0xD155;
     static constexpr UINT_PTR kFullscreenTimerId=0xD156;
+    static constexpr UINT_PTR kPreviewTimerId=0xD157;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
+    // A job that renders behind the loaded media: the player keeps the window,
+    // and only its own panel and lanes report progress.
+    bool JobBehindPlayback()const{return m_liveSession||m_previewJob;}
 
     void UpdateRecentMenu(){
         if(!m_hwnd||!m_recent)return;
@@ -1037,6 +1048,9 @@ private:
     void AnimateActivity(){
         SyncActivityFeedback();
         if(!m_activityTimer)return;
+        // An active session keeps the player on screen: only the buffering panel
+        // and the status line animate, never the full-window pre-render surface.
+        if(m_liveSession){RefreshBufferOverlay();const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);return;}
         if(m_loaded&&!NeuralJobActive()){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);return;}
         RECT c{};GetClientRect(m_hwnd,&c);
         const auto surface=LayoutPreRenderSurface(c.right-c.left,c.bottom-c.top,ActiveWindowDpi(m_hwnd));
@@ -1066,6 +1080,9 @@ private:
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
         if(read==SynchronizedReadResult::PairReady){const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;m_next=*visible;m_haveNext=true;return true;}
         if(read==SynchronizedReadResult::NotReady)return false;
+        // The playhead reached the render head: wait for the next segment
+        // instead of ending playback.
+        if(read==SynchronizedReadResult::WaitingForRender){EnterLiveBuffering();return false;}
         m_haveNext=false;m_playing=false;Audio().Pause(true);if(read==SynchronizedReadResult::EndOfStream)LOG("Cached playback completed: presented="<<m_cachedPresentedFrames<<" dropped="<<m_droppedFrames);
         if(read==SynchronizedReadResult::OutOfSync||read==SynchronizedReadResult::Error){const std::wstring message=T(read==SynchronizedReadResult::OutOfSync?L"neural.sync.warning":L"error.decode"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);}
         InvalidateControls();InvalidatePlaybackProgress();return false;
@@ -1418,6 +1435,8 @@ private:
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH),checked(IDC_NS_GUIDE_MASK)};
         if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
+        // Sliders fire continuously; the preview waits for them to settle.
+        SchedulePausedSettingsPreview();
     }
 
     // The persisted guide switches also drive the live (non-cached) guide
@@ -1483,7 +1502,7 @@ private:
         case WM_HSCROLL:ReadNeuralSettingControls(h);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettingsAndRender();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             if(((id==IDC_NS_PRESET||id==IDC_NS_STYLE)&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GUIDE_MASK)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
@@ -1579,6 +1598,7 @@ private:
     }
 
     void Unload() {
+        if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession();}
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -1745,7 +1765,10 @@ private:
         // Seeking to the container end has no frame to decode: the restarted
         // decoder returns nothing and the seek pays for a second restart.
         if(const int64_t last=LastFramePts(m_decoder.FrameRate(),SourceDuration100ns());last>0)high=std::min(high,double(last)*1e-7);
-        if(m_cachedPlayback&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
+        // An active session can only serve what is rendered: seeking stops at the
+        // head, and a target past it would wait for frames that do not exist yet.
+        if(m_cachedPlayback&&m_liveSession&&m_liveSegments){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_liveSegments->Head100ns())*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
+        else if(m_cachedPlayback&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
         if(high>0)return std::clamp(sec,low,high);return std::max(low,sec);
     }
 
@@ -1761,7 +1784,7 @@ private:
     }
 
     bool PerformSeek(double sec,bool resumeAfter) {
-        if(!m_loaded||m_seeking)return false;SetSeeking(true);sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
+        if(!m_loaded||m_seeking)return false;SetSeeking(true);m_previewShown=false;CancelPausedSettingsPreview();sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
         // Seek is deliberately transactional and performed from Tick(), never from a mouse message.
         // Shut down the audio producer first, wait for GPU work, then restart the video decoder.
         Audio().Stop();
@@ -1805,7 +1828,9 @@ private:
     }
 
     void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){const double playbackClock=Position();m_currentSec=playback_timing::PausePosition(m_currentSec,playbackClock);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
-    void TogglePause(){if(NeuralJobActive()){SetNeuralJobPaused(!NeuralJobPaused());return;}SetPaused(m_playing);}
+    // Space pauses playback during an active session; the render behind it keeps
+    // filling the buffer, and only an offline job takes the pause event.
+    void TogglePause(){if(NeuralJobActive()&&!JobBehindPlayback()){SetNeuralJobPaused(!NeuralJobPaused());return;}if(m_liveBuffering){m_liveResumePlaying=!m_liveResumePlaying;InvalidateControls();return;}CancelPausedSettingsPreview();SetPaused(m_playing);}
     void StepCachedFrame(){
         if(!m_loaded||!m_cachedPlayback||m_playing||m_seeking)return;
         Audio().Pause(true);
@@ -1850,7 +1875,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||NeuralJobActive(),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,UpscalingAvailable(),false};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable(),UpscalingAvailable(),false};}
     std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -1908,7 +1933,7 @@ private:
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=m_cachedPlayback&&m_comparisonView==ComparisonView::Neural;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active};}
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active};}
         case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,UpscalingAvailable()?(UpscalingActive()?L"DLSS Upscaling · On":L"DLSS Upscaling · Off"):L"DLSS Upscaling · Unavailable",enabled,UpscalingActive()};
         case ToolbarAction::ToggleFrameGeneration:return{UiIcon::Sparkles,L"Frame Generation · Unavailable",false,false};
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill?L"Fit":L"Fill",enabled,m_fill};
@@ -1963,7 +1988,9 @@ private:
     void RenderUi(HDC dc,const RECT& c){
         m_neuralCancelBounds={};
         HBRUSH windowBg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,windowBg);DeleteObject(windowBg);
-        if(NeuralJobActive()||(!m_loaded&&m_youtubeLifecycle.IsResolving())){
+        // An active session renders behind live playback, so it never takes the
+        // window: its feedback is the buffering panel and the coverage lane.
+        if((NeuralJobActive()&&!JobBehindPlayback())||(!m_loaded&&m_youtubeLifecycle.IsResolving())){
             const bool neural=NeuralJobActive();
             const PreRenderSurfaceLayout surface=LayoutPreRenderSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));m_neuralCancelBounds=surface.cancelButton;
             const bool paused=neural&&m_neuralLifecycle.state==NeuralPlaybackState::Paused;
@@ -2004,18 +2031,24 @@ private:
         // acts on), played progress in the middle, and the part of the source
         // that already has cached neural frames along the bottom (teal).
         const LONG height=tr.bottom-tr.top,coverageLane=std::max<LONG>(2,height/4);
-        RECT rendered=tr;const bool renderedSpan=m_cachedPlayback;
+        // A session paints coverage up to the render head, because that is how
+        // far playback can go; a finished entry paints its whole range.
+        const int64_t liveHead=m_liveSession&&m_liveSegments?m_liveSegments->Head100ns():0;
+        RECT rendered=tr;const bool renderedSpan=m_cachedPlayback||liveHead>m_liveRange.start100ns;
         if(renderedSpan){
-            if(!m_cachedRange.Whole()){rendered.left=markerX(m_cachedRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(m_cachedRange.end100ns));}
+            if(m_liveSession){rendered.left=markerX(m_liveRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(liveHead));}
+            else if(!m_cachedRange.Whole()){rendered.left=markerX(m_cachedRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(m_cachedRange.end100ns));}
             RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};
             HBRUSH nb=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&band,nb);DeleteObject(nb);
         }
-        // Played progress starts at the rendered range when one is playing,
-        // because seeking is clamped to it.
-        RECT done{renderedSpan?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
-        done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,renderedSpan?rendered.right:tr.right);
+        // Played progress is clamped to the rendered span only while playback is
+        // actually on it; a session that has not attached yet still plays the
+        // original anywhere in the source.
+        const bool clampProgress=m_cachedPlayback;
+        RECT done{clampProgress?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
+        done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,clampProgress?rendered.right:tr.right);
         HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);
-        if(renderedSpan&&!m_cachedRange.Whole()){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);RECT startEdge{rendered.left,tr.top,rendered.left+std::max(1,Dip(1)),tr.bottom},endEdge{rendered.right-std::max(1,Dip(1)),tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
+        if(renderedSpan&&(m_liveSession||!m_cachedRange.Whole())){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);RECT startEdge{rendered.left,tr.top,rendered.left+std::max(1,Dip(1)),tr.bottom},endEdge{rendered.right-std::max(1,Dip(1)),tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
         // The selection is drawn last and fills the track, so it reads at a
         // glance; the coverage lane stays visible beneath it.
         if(m_markers.in100ns&&m_markers.out100ns&&*m_markers.out100ns>*m_markers.in100ns){
@@ -2183,18 +2216,18 @@ private:
     // Renders [start,end) of the source that is loaded now. A YouTube source
     // reuses its owned source-cache entry when the recent history still names
     // one; otherwise the job acquires the source before rendering the range.
-    bool RenderRangeOfCurrentSource(NeuralRenderRange range){
+    bool RenderRangeOfCurrentSource(NeuralRenderRange range,NeuralJobKind kind=NeuralJobKind::Offline){
         if(!RangeRenderAvailable()){LOG("Render request ignored: loaded="<<m_loaded<<" job="<<NeuralJobActive()<<" resolving="<<m_youtubeLifecycle.IsResolving()<<" prerender="<<NeuralPreRenderEnabled()<<" haveSource="<<!m_path.empty()<<" cachedSourceKey="<<CachedYouTubeSourceKey().has_value()<<" duration="<<m_decoder.DurationSeconds());return false;}
         if(m_sourceKind==MediaSourceKind::YouTube){
             const std::wstring page=m_youtubePageUrl,title=m_displayTitle;
             if(const auto sourceKey=CachedYouTubeSourceKey()){
-                StartNeuralJob(page,{},title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,*sourceKey,0.0,range);return true;
+                StartNeuralJob(page,{},title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,*sourceKey,0.0,range,false,kind);return true;
             }
             const std::wstring media=m_path,audio=m_youtubeAudioUrl;const double duration=m_decoder.DurationSeconds();
-            StartNeuralJob(media,audio,title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,{},duration,range);return true;
+            StartNeuralJob(media,audio,title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,{},duration,range,false,kind);return true;
         }
         const std::wstring source=m_path,title=m_displayTitle;
-        StartNeuralJob(source,{},title,{},MediaSourceKind::LocalFile,m_youtubeSourceQuality,{},0.0,range);return true;
+        StartNeuralJob(source,{},title,{},MediaSourceKind::LocalFile,m_youtubeSourceQuality,{},0.0,range,false,kind);return true;
     }
     int64_t SourceDuration100ns()const{return static_cast<int64_t>(std::llround(m_decoder.DurationSeconds()*1e7));}
     int64_t Position100ns()const{return static_cast<int64_t>(std::llround(Position()*1e7));}
@@ -2207,6 +2240,240 @@ private:
         RenderRangeOfCurrentSource(*range);
     }
     void RenderWholeSource(){if(m_loaded)RenderRangeOfCurrentSource(NeuralRenderRange{});}
+    // Active neural rendering ------------------------------------------------
+    // Steady-state rendering is ~32 fps at 1080p against 30 fps of playback on
+    // the reference GPU, while one job costs ~6 s before its first frame.
+    // Chunked jobs therefore cannot keep up (break-even is a 103 s chunk): the
+    // session is one long job that publishes finalized segments while it runs,
+    // and playback follows the render head, buffering when it catches up.
+    static constexpr double kLiveSegmentSeconds=2.0;
+    static constexpr double kLiveStartLead=4.0;
+    static constexpr double kLiveResumeLead=2.0;
+    bool LiveSessionAvailable()const{return RangeRenderAvailable()&&!m_cachedPlayback&&!m_decoder.IsStillImage();}
+    double LiveHeadSeconds()const{return m_liveSegments?double(m_liveSegments->Head100ns())*1e-7:0.0;}
+    double LiveLeadSeconds()const{const double head=LiveHeadSeconds();return head>0.0?std::max(0.0,head-Position()):0.0;}
+    bool LiveSessionFinished()const{return m_liveSegments&&m_liveSegments->Finished();}
+    // One render job from the playhead: to the Out marker when the playhead sits
+    // inside a marked range, otherwise to the end of the source.
+    void StartLiveNeuralSession(){
+        if(!LiveSessionAvailable()){LOG("Active neural session refused: loaded="<<m_loaded<<" cached="<<m_cachedPlayback<<" renderable="<<RangeRenderAvailable());return;}
+        const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
+        if(!(fps>0.0)||duration<=0)return;
+        const int64_t at=SnapToFrame(Position100ns());
+        NeuralRenderRange range{at,duration};
+        if(const auto marked=RangeFromMarkers(m_markers,fps,duration);marked&&at>=marked->start100ns&&at<marked->end100ns)range.end100ns=marked->end100ns;
+        if(range.end100ns<=range.start100ns)return;
+        m_liveDirectory=m_cacheRoot/L"live";
+        std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);std::filesystem::create_directories(m_liveDirectory,ec);
+        if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
+        m_liveSegments=std::make_shared<NeuralSegmentIndex>();m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_neuralRequested=true;
+        EnterLiveBuffering();
+        if(!RenderRangeOfCurrentSource(range,NeuralJobKind::Live)){StopLiveNeuralSession(true);return;}
+        LOG("Active neural session started at "<<double(range.start100ns)*1e-7<<" s through "<<double(range.end100ns)*1e-7<<" s.");
+        SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+    }
+    // Drops the session state and its segment files without touching playback;
+    // callers that keep playing detach the pair first.
+    void ReleaseLiveSession(){
+        m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveRange={};
+        HideBufferOverlay();
+        if(m_liveSegments){m_liveSegments->Finish();m_liveSegments.reset();}
+        if(!m_liveDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);m_liveDirectory.clear();}
+    }
+    // Stops the render and, when playback already followed it, hands the same
+    // frame back to the original stream.
+    void StopLiveNeuralSession(bool keepPlaying){
+        if(!m_liveSession)return;
+        const double at=Position();const bool wasPlaying=m_playing||m_liveResumePlaying;const bool attached=m_liveAttached;
+        m_liveSession=false;m_liveBuffering=false;HideBufferOverlay();
+        CancelNeuralJob(false);
+        if(attached){
+            m_haveNext=false;m_next=VideoFrame{};
+            m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
+            if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
+        }
+        ReleaseLiveSession();
+        m_neuralRequested=false;
+        if(attached&&keepPlaying&&m_loaded)RequestSeek(at,wasPlaying);
+        SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+        LOG("Active neural session stopped at "<<at<<" s.");
+    }
+    // The job ended while its output is still playing: publish or report, but
+    // never reload playback from the cache entry it just wrote.
+    void CompleteLiveNeuralJob(const NeuralJobCompletion& completion){
+        const bool covered=m_liveSegments&&!m_liveSegments->Empty();
+        if(m_liveSegments)m_liveSegments->Finish();
+        if(completion.result.ok){
+            m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);
+            LOG("Active neural session rendered "<<completion.result.frameCount<<" frames and published its cache entry.");
+        }else{
+            TransitionToFailure(completion.result.failure);
+            LOG("Active neural session ended early: kind="<<NeuralRenderFailureName(completion.result.failure)<<" covered="<<covered<<" detail="<<WideToUtf8(completion.result.detail));
+            if(!covered){StopLiveNeuralSession(true);return;}
+        }
+        SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+    }
+    // Moves playback from the original stream onto the growing render, at the
+    // frame that is on screen.
+    bool AttachLiveNeural(){
+        if(!m_liveSession||m_liveAttached||!m_loaded||!m_liveSegments)return false;
+        const double at=std::max(Position(),double(m_liveRange.start100ns)*1e-7);
+        if(!m_liveSegments->Containing(static_cast<int64_t>(std::llround(at*1e7))))return false;
+        const bool wasPlaying=m_playing||m_liveResumePlaying;
+        Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
+        if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns})){LOG("Active neural playback could not open the live pair.");return false;}
+        if(!m_synchronizedPlayback.SeekSeconds(at)||!m_synchronizedPlayback.VisibleFrame()){LOG("Active neural playback could not position the live pair at "<<at<<" s.");m_synchronizedPlayback.Close();return false;}
+        const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
+        m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
+        m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_neuralSettings;m_cachedGuides=m_renderGuides;m_cachedReceiptPath.clear();m_neuralPath.clear();
+        m_comparisonView=ComparisonView::Neural;m_synchronizedPlayback.SetView(ComparisonView::Neural);
+        if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
+        if(!RenderVideoFrame(frame,true)){LOG("Active neural playback could not present its first pair.");m_synchronizedPlayback.Close();m_cachedPlayback=false;m_comparisonView=ComparisonView::Original;return false;}
+        RememberRenderedCachedPair();m_cachedPresentedFrames=1;m_currentSec=double(frame.timestamp100ns)*1e-7;m_guideReset=false;m_dlssReset=false;
+        if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
+        m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=wasPlaying;m_synchronizedPlayback.SetPaused(!wasPlaying);
+        m_liveAttached=true;
+        LOG("Active neural playback attached at "<<m_currentSec<<" s with "<<LiveLeadSeconds()<<" s buffered.");
+        SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();return true;
+    }
+    void EnterLiveBuffering(){
+        if(!m_liveSession||m_liveBuffering)return;
+        m_liveResumePlaying=m_playing||m_liveResumePlaying;
+        if(m_playing){m_currentSec=Position();m_playing=false;}
+        m_liveBuffering=true;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);
+        LOG("Neural buffer empty at "<<m_currentSec<<" s; head="<<LiveHeadSeconds()<<" s.");
+        ShowBufferOverlay();InvalidateControls();UpdateCachedStatus();
+    }
+    void ExitLiveBuffering(){
+        if(!m_liveBuffering)return;
+        LOG("Neural buffer filled at "<<m_currentSec<<" s with "<<LiveLeadSeconds()<<" s ahead; resume="<<m_liveResumePlaying);
+        m_liveBuffering=false;HideBufferOverlay();
+        if(m_liveResumePlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
+        m_liveResumePlaying=false;InvalidateControls();UpdateCachedStatus();
+    }
+    // Neural settings preview -------------------------------------------------
+    // A settings change is only worth a render when the picture is standing
+    // still, so the paused frame is re-rendered once the sliders settle. A
+    // repeat of the same settings is a cache hit and comes back immediately.
+    static constexpr UINT kPreviewSettleMs=700;
+    bool PausedPreviewAvailable()const{
+        return m_loaded&&!m_playing&&!m_seeking&&!m_seekPending&&!m_liveSession&&!m_previewJob&&m_renderer&&!m_decoder.IsStillImage()&&RangeRenderAvailable();
+    }
+    void SchedulePausedSettingsPreview(){
+        if(!m_hwnd||!m_loaded)return;
+        if(m_previewTimer){KillTimer(m_hwnd,m_previewTimer);m_previewTimer=0;}
+        if(m_playing||m_liveSession)return;
+        m_previewTimer=SetTimer(m_hwnd,kPreviewTimerId,kPreviewSettleMs,nullptr);
+    }
+    void CancelPausedSettingsPreview(){
+        if(m_previewTimer&&m_hwnd){KillTimer(m_hwnd,m_previewTimer);}
+        m_previewTimer=0;
+    }
+    void StartPausedSettingsPreview(){
+        CancelPausedSettingsPreview();
+        if(!PausedPreviewAvailable())return;
+        const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
+        if(!(fps>0.0)||duration<=0)return;
+        const NeuralRenderRange range=SingleFrameRange(SnapToFrame(Position100ns()),fps,duration);
+        if(range.end100ns<=range.start100ns)return;
+        m_previewRange=range;m_previewJob=true;
+        ShowBufferOverlay();
+        if(!RenderRangeOfCurrentSource(range,NeuralJobKind::Preview)){m_previewJob=false;HideBufferOverlay();return;}
+        LOG("Neural settings preview started for frame at "<<double(range.start100ns)*1e-7<<" s: "<<CanonicalNeuralSettings(m_neuralSettings));
+        UpdateCachedStatus();InvalidateControls();
+    }
+    // Presents the rendered frame in place of the paused one; playback stays
+    // exactly where it was, so the next setting can be compared against it.
+    void CompletePausedPreview(const NeuralJobCompletion& completion){
+        m_previewJob=false;HideBufferOverlay();
+        const bool stillHere=m_loaded&&!m_playing&&SnapToFrame(Position100ns())==m_previewRange.start100ns;
+        if(!completion.result.ok||completion.neuralPath.empty()){
+            LOG("Neural settings preview failed: "<<NeuralRenderFailureName(completion.result.failure)<<" detail="<<WideToUtf8(completion.result.detail));
+            TransitionToFailure(completion.result.failure);SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();return;
+        }
+        m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);
+        if(stillHere){
+            VideoDecoder preview;VideoFrame frame;
+            if(preview.Open(completion.neuralPath.wstring(),MediaSourceKind::LocalFile)&&preview.ReadNext(frame)){
+                frame.timestamp100ns=m_previewRange.start100ns;
+                m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
+                if(RenderVideoFrame(frame,true)){m_lastNeuralFrame=frame;m_previewShown=true;LOG("Neural settings preview presented for the paused frame.");}
+                m_guideReset=false;m_dlssReset=false;
+            }else LOG("Neural settings preview could not decode its rendered frame.");
+            preview.Close();
+        }else LOG("Neural settings preview discarded: the paused frame moved.");
+        SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();
+    }
+    // UI-thread side of the session: adopt new coverage, start playing once the
+    // lead-in is buffered, and resume after a rebuffer.
+    void UpdateLiveSession(){
+        if(!m_liveSession)return;
+        const int64_t head=m_liveSegments?m_liveSegments->Head100ns():0;
+        if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
+        const bool finished=LiveSessionFinished();
+        const double lead=LiveLeadSeconds();
+        if(!m_liveAttached){
+            if((lead>=kLiveStartLead||(finished&&lead>0.0))&&AttachLiveNeural())ExitLiveBuffering();
+            return;
+        }
+        if(m_liveBuffering&&(lead>=kLiveResumeLead||finished))ExitLiveBuffering();
+    }
+    // Buffering panel. A popup owned by the main window, because the video is a
+    // D3D12 child window that a sibling would have to fight for z-order.
+    static LRESULT CALLBACK BufferWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
+        auto* app=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        if(m==WM_ERASEBKGND)return 1;
+        if(m==WM_PAINT&&app){PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT c{};GetClientRect(h,&c);app->PaintBufferOverlay(dc,c);EndPaint(h,&ps);return 0;}
+        return DefWindowProcW(h,m,w,l);
+    }
+    void ShowBufferOverlay(){
+        if(!m_hwnd||!m_renderWnd)return;
+        if(!m_bufferWnd){
+            static constexpr const wchar_t* kClassName=L"DLSSVideoBufferClassV1";
+            const HINSTANCE instance=reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd,GWLP_HINSTANCE));
+            WNDCLASSW cls{};cls.lpfnWndProc=BufferWndProcStatic;cls.hInstance=instance;cls.lpszClassName=kClassName;cls.hCursor=LoadCursor(nullptr,IDC_ARROW);cls.hbrBackground=nullptr;
+            if(!RegisterClassW(&cls)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+            m_bufferWnd=CreateWindowExW(WS_EX_LAYERED|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,kClassName,L"",WS_POPUP,0,0,10,10,m_hwnd,nullptr,instance,this);
+            if(!m_bufferWnd)return;
+            SetLayeredWindowAttributes(m_bufferWnd,0,236,LWA_ALPHA);
+        }
+        PositionBufferOverlay(true);
+        ShowWindow(m_bufferWnd,SW_SHOWNOACTIVATE);
+    }
+    void PositionBufferOverlay(bool force=false){
+        if(!m_bufferWnd||!m_renderWnd)return;
+        RECT video{};if(!GetWindowRect(m_renderWnd,&video))return;
+        if(!force&&EqualRect(&video,&m_bufferAnchor))return;
+        m_bufferAnchor=video;
+        const int width=std::min<LONG>(Dip(360),std::max<LONG>(Dip(200),video.right-video.left-Dip(32)));
+        const int height=Dip(112);
+        SetWindowPos(m_bufferWnd,HWND_TOP,static_cast<int>(video.left+((video.right-video.left)-width)/2),static_cast<int>(video.top+((video.bottom-video.top)-height)/2),width,height,SWP_NOACTIVATE);
+    }
+    void HideBufferOverlay(){if(m_bufferWnd&&IsWindowVisible(m_bufferWnd))ShowWindow(m_bufferWnd,SW_HIDE);}
+    void RefreshBufferOverlay(){if(m_bufferWnd&&IsWindowVisible(m_bufferWnd)){PositionBufferOverlay();InvalidateRect(m_bufferWnd,nullptr,FALSE);}}
+    void PaintBufferOverlay(HDC dc,const RECT& c){
+        HBRUSH panel=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&c,panel);DeleteObject(panel);
+        HBRUSH edge=CreateSolidBrush(ui_palette::NeuralCoverage);FrameRect(dc,&c,edge);DeleteObject(edge);
+        const RECT spinner{c.left+Dip(16),c.top+Dip(16),c.left+Dip(40),c.top+Dip(40)};
+        DrawActivitySpinner(dc,spinner,ResolveActivityVisual({},ActivityElapsedMs(),0,0,false,m_activityMotionEnabled).spinnerStep);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(242,243,245));HGDIOBJ oldFont=SelectObject(dc,m_font);
+        RECT title{c.left+Dip(50),c.top+Dip(14),c.right-Dip(16),c.top+Dip(38)};
+        const std::wstring heading=m_previewJob?T(L"neural.preview.title"):m_liveAttached?T(L"neural.live.buffering"):T(L"neural.live.title");
+        DrawTextW(dc,heading.c_str(),-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,m_fontSmall);SetTextColor(dc,ui_palette::SecondaryText);
+        const double lead=LiveLeadSeconds(),target=m_liveAttached?kLiveResumeLead:kLiveStartLead;
+        wchar_t detail[128]={};
+        if(m_previewJob)swprintf_s(detail,L"%s",T(L"neural.preview.detail").c_str());
+        else swprintf_s(detail,L"%.1f s %s · %llu frames rendered",lead,T(L"neural.live.lead").c_str(),static_cast<unsigned long long>(m_neuralProgress.completedFrames));
+        RECT line{c.left+Dip(50),c.top+Dip(38),c.right-Dip(16),c.top+Dip(58)};
+        DrawTextW(dc,detail,-1,&line,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        SelectObject(dc,oldFont);
+        RECT track{c.left+Dip(16),c.bottom-Dip(30),c.right-Dip(16),c.bottom-Dip(22)};
+        HBRUSH trackBrush=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&track,trackBrush);DeleteObject(trackBrush);
+        RECT fill=track;fill.right=track.left+static_cast<LONG>(std::lround((track.right-track.left)*std::clamp(m_previewJob?0.0:(target>0.0?lead/target:0.0),0.0,1.0)));
+        if(fill.right>fill.left){HBRUSH fillBrush=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&fill,fillBrush);DeleteObject(fillBrush);}
+    }
     void MarkersChanged(){UpdateCachedStatus();InvalidatePlaybackProgress();}
     // Markers sit on the decoder's frame grid so their timecodes and the
     // rendered range name exact frames.
@@ -2289,9 +2556,12 @@ private:
     // `prepareOnly` acquires and identifies the source, replays a validated
     // cache entry when one exists, and otherwise stops before the feature-18
     // probe so the player can open the original for range selection.
-    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0,NeuralRenderRange range={},bool prepareOnly=false){
+    // A Live or Preview job renders behind the loaded media instead of
+    // replacing it: Live streams segments, Preview renders one paused frame.
+    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0,NeuralRenderRange range={},bool prepareOnly=false,NeuralJobKind kind=NeuralJobKind::Offline){
         if(mediaUrl.empty())return;
-        CancelNeuralJob(false);Unload();
+        CancelNeuralJob(false);
+        if(kind==NeuralJobKind::Offline)Unload();
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
@@ -2300,7 +2570,12 @@ private:
             // flight: the job waits for it rather than downloading again.
             const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch](std::stop_token stop){
+            // An active session renders into its own directory of segment files;
+            // the cache entry is the concatenation published when the job ends.
+            const std::shared_ptr<NeuralSegmentIndex> liveIndex=kind==NeuralJobKind::Live?m_liveSegments:nullptr;
+            const std::filesystem::path liveDirectory=kind==NeuralJobKind::Live?m_liveDirectory:std::filesystem::path{};
+            const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,segmentFrames](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -2384,12 +2659,31 @@ private:
                     if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;LOG("Neural preflight failed: "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;
                     NeuralRenderReceiptInputs receipt{preflight.json,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
-                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop);
+                    NeuralSegmentSink sink{};
+                    if(liveIndex){
+                        // Every finalized segment is playable on arrival; the
+                        // player reads them behind the render head.
+                        sink.onSegment=[&](const NeuralRenderSegment& segment){
+                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.index=segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
+                            LOG("Neural segment "<<segment.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
+                            liveIndex->Append(std::move(entry));
+                        };
+                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding published segments.");liveIndex->Restart();};
+                    }
+                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink);
+                    if(liveIndex)liveIndex->Finish();
                     receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
                     LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
+                    if(liveIndex){
+                        // The session's cache entry is one file, joined from the
+                        // segments playback is still reading.
+                        std::vector<std::filesystem::path> parts;parts.reserve(liveIndex->Count());
+                        for(size_t index=0;index<liveIndex->Count();++index)if(const auto segment=liveIndex->At(index))parts.push_back(segment->path);
+                        if(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging/L"neural.mkv",stop)!=EncodeError::None){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;}
+                    }
                     const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
                     const std::string receiptJson=BuildNeuralRenderReceiptJson(receipt);const auto receiptDigest=Sha256Bytes(receiptJson);
                     {std::ofstream receiptFile(*staging/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural render receipt could not be staged.";goto finish;}}
@@ -2444,6 +2738,10 @@ private:
     void CompleteNeuralJob(uint64_t token){
         auto completion=m_neuralCompletions.Take(token);if(!completion||!m_neuralLifecycle.Accept(completion->generation))return;
         if(m_neuralWorker.joinable()){m_neuralWorker.join();m_neuralWorker=std::jthread{};}m_neuralProgressMessages.Clear();m_pendingNeuralTitle.clear();m_neuralCancelBounds={};
+        // An active session already plays what the job produced: keep the media
+        // loaded and only record how the job ended.
+        if(m_previewJob)return CompletePausedPreview(*completion);
+        if(m_liveSession)return CompleteLiveNeuralJob(*completion);
         if(completion->cachedSourceUnavailable){m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);StartYouTubeResolution(completion->pageUrl,completion->displayTitle,completion->sourceQuality,0.0,true,NetworkCommitKind::InitialOpen,false);return;}
         if(completion->result.cancelled){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath))LoadOriginalFallback(*completion);else InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();return;}
         // Prepared: the source is cached and identified, no render exists yet.
@@ -2620,16 +2918,24 @@ private:
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
     }
+    // Lead-in state of an active session, in front of everything else because it
+    // is why playback is waiting.
+    std::wstring LiveSessionStatusText()const{
+        wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
+        return (m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead")+
+            L" \u00b7 head "+FormatTimecode(m_liveSegments?m_liveSegments->Head100ns():0,m_decoder.FrameRate(),true);
+    }
     std::wstring BuildStatusText()const{
         if(m_exportWorker.joinable())return L"Exporting processed media - File > Cancel export to stop";
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
-        if(m_cachedPlayback){std::wstring text=L"Neural cached playback · "+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!m_cachedRange.Whole())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
+        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!m_cachedRange.Whole())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
         status.upscalingStatus=UpscalingStatus();std::wstring text=BuildPlayerStatusText(status);
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
-        else if(RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        else if(!m_liveSession&&RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
         if(SourcePrefetchActive())text=T(L"status.preparing_source")+L" \u00b7 "+text;
         if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;return text;
     }
@@ -2752,7 +3058,14 @@ private:
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
     void SetVolumeFromX(int x){const auto volumeRect=VolumeRect();if(!volumeRect)return;const RECT& r=*volumeRect;const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);const float volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));const bool changed=volume!=m_volume||m_muted;if(!changed)return;m_volume=volume;m_muted=false;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
     void ToggleMute(){m_muted=!m_muted;Audio().SetVolume(m_muted?0.0f:m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}
-    void ToggleNeuralRendering(){if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering))return;m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;if(m_renderer)m_renderer->SetComparison(EffectiveComparison());const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();}
+    // With a rendered pair loaded the toggle switches which member is presented.
+    // Without one it is how an active session is started, and how it is stopped.
+    void ToggleNeuralRendering(){
+        if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering))return;
+        if(m_liveSession){StopLiveNeuralSession(true);return;}
+        if(!m_cachedPlayback){StartLiveNeuralSession();return;}
+        m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;if(m_renderer)m_renderer->SetComparison(EffectiveComparison());const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();
+    }
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
@@ -2842,7 +3155,7 @@ private:
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
         case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();break;
         case WM_SYSKEYDOWN:if(w==VK_MENU)RevealFullscreenControls();break;
@@ -2974,6 +3287,21 @@ private:
     std::filesystem::path m_cachedReceiptPath;
     // Manual-reset event shared with the render helper: signalled means pause.
     HANDLE m_neuralPauseEvent=nullptr;
+    // Active neural rendering: the render job runs while playback continues and
+    // the player consumes finalized segments as they land. m_liveDirectory holds
+    // those segments until the session ends; the promoted cache entry is a
+    // separate concatenated copy.
+    std::shared_ptr<NeuralSegmentIndex> m_liveSegments;
+    bool m_liveSession=false,m_liveAttached=false,m_liveBuffering=false,m_liveResumePlaying=false;
+    NeuralRenderRange m_liveRange{};
+    // Debounced re-render of the paused frame after a neural settings change.
+    bool m_previewJob=false,m_previewShown=false;
+    NeuralRenderRange m_previewRange{};
+    UINT_PTR m_previewTimer=0;
+    std::filesystem::path m_liveDirectory;
+    int64_t m_livePaintedHead=0;
+    HWND m_bufferWnd=nullptr;
+    RECT m_bufferAnchor{};
 };
 
 int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)

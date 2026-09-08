@@ -380,8 +380,10 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
     case ToolbarAction::Aspect:
         return availability.mediaLoaded && !availability.seeking;
     case ToolbarAction::ToggleNeuralRendering:
+        // Either a rendered pair is loaded, or a render can be started from the
+        // playhead and the toggle becomes the way to start it.
         return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
-               availability.neuralRenderingAvailable;
+               (availability.neuralRenderingAvailable || availability.neuralSessionAvailable);
     case ToolbarAction::ToggleUpscaling:
         return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
                availability.upscalingAvailable;
