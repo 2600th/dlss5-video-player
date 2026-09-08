@@ -322,7 +322,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     uint32_t width = 0, height = 0;
     double avgRate = 0.0, rawRate = 0.0, duration = 0.0;
     double videoDuration = 0.0;
-    std::string format;
+    std::string format,codecName,pixelFormat;
     double displayAspect = 0.0, sampleAspect = 1.0;
     std::istringstream in(text);
     std::string line;
@@ -335,8 +335,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         try {
             if (key == "width") width = static_cast<uint32_t>(std::stoul(value));
             else if (key == "format_name") format = value;
-            else if (key == "codec_name" && value != "N/A") m_hardwareProfile = value;
-            else if (key == "pix_fmt" && value != "N/A") m_hardwareProfile += "/" + value;
+            else if (key == "codec_name" && value != "N/A") codecName = value;
+            else if (key == "pix_fmt" && value != "N/A") pixelFormat = value;
             else if (key == "height") height = static_cast<uint32_t>(std::stoul(value));
             else if (key == "display_aspect_ratio" && value != "N/A") {
                 const size_t c=value.find(':'); if(c!=std::string::npos){ double a=std::stod(value.substr(0,c)), b=std::stod(value.substr(c+1)); if(b>0) displayAspect=a/b; }
@@ -350,6 +350,9 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             else if (key == "duration" && value != "N/A" && duration <= 0.0) duration = std::stod(value);
         } catch (...) {}
     }
+    // ffprobe prints stream entries in its own order, so the key is composed
+    // once both fields are in hand.
+    m_hardwareProfile = codecName.empty() ? pixelFormat : (pixelFormat.empty() ? codecName : codecName + "/" + pixelFormat);
 
     if (!width || !height) {
         LOG("ffprobe returned no usable video dimensions.");

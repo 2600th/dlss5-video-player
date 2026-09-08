@@ -24,9 +24,11 @@
   while codecs the GPU does handle keep using it; a seek to the container end
   stops at the last frame instead of paying for a second restart; and dragging
   the timeline now decodes the frame under the cursor (throttled, local and
-  cached sources) instead of showing nothing until the mouse is released, which
-  also keeps the play state and skips the duplicate seek on release. Measured on
-  a 1080p FFV1 clip: 820-1290 ms per seek before, 336-401 ms after.
+  cached sources) instead of showing nothing until the mouse is released. The
+  audio helper is no longer respawned per scrub step, the play state survives the
+  drag - including one interrupted by losing mouse capture - and a release that
+  lands on the frame already decoded skips the duplicate seek. Measured on a
+  1080p FFV1 clip: 820-1290 ms per seek before, 336-401 ms after.
 - Keep In/Out markers inside the source. A rounded duration and a rounded frame
   rate can grid a frame just inside the end that the source never emits (a
   30.03 s clip at 59.94 fps grids frame 1800 at 300299799 against a 300300000

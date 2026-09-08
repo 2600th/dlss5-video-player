@@ -1775,7 +1775,10 @@ private:
             if(!m_synchronizedPlayback.SeekSeconds(sec)||!m_synchronizedPlayback.VisibleFrame()){LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;}
             m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
             if(!RenderVideoFrame(frame,true)){m_playing=false;m_synchronizedPlayback.SetPaused(true);SetSeeking(false);return false;}RememberRenderedCachedPair();
-            m_currentSec=double(frame.timestamp100ns)*1e-7;const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}
+            // A drag preview would respawn the audio helper on every step; the
+            // release restarts it once.
+            m_currentSec=double(frame.timestamp100ns)*1e-7;
+            if(!m_dragSeek){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
             m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter;m_synchronizedPlayback.SetPaused(!resumeAfter);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return true;
         }
         m_haveNext=false;m_next=VideoFrame{};
@@ -1797,7 +1800,7 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;SetSeeking(false);return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
-        const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
+        if(!m_dragSeek){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");}
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
@@ -2723,11 +2726,11 @@ private:
     void MouseUp(int x,int y){
         if(m_dragSeek){
             const double target=m_seekPreview;m_dragSeek=false;if(GetCapture()==m_hwnd)ReleaseCapture();
-            // The scrub already decoded this frame: resume instead of paying for
-            // an identical seek on release.
+            // The scrub already decoded this frame: restore sound and playback
+            // instead of paying for an identical seek on release.
             const double frame=1.0/std::max(1.0,m_decoder.FrameRate());
             if(!m_seeking&&!m_seekPending&&std::abs(target-m_currentSec)<=frame*0.5){
-                if(m_dragWasPlaying)SetPaused(false);InvalidateControls();InvalidatePlaybackProgress();return;
+                EndScrub();InvalidateControls();InvalidatePlaybackProgress();return;
             }
             RequestSeek(target,m_dragWasPlaying);return;
         }
@@ -2753,6 +2756,13 @@ private:
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
+    // A drag leaves the audio helper stopped; the frame under the cursor is
+    // already on screen, so only sound and the play state have to come back.
+    void EndScrub(){
+        if(!m_loaded)return;
+        if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!m_dragWasPlaying);}
+        if(m_dragWasPlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
+    }
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
     void StopFullscreenTimer(){
         if(m_fullscreenTimer){KillTimer(m_hwnd,m_fullscreenTimer);m_fullscreenTimer=0;}
@@ -2864,7 +2874,7 @@ private:
         case WM_MOUSELEAVE:m_trackingMouse=false;m_mouseX=-999;m_mouseY=-999;SetHoverAction(ToolbarAction::None);return 0;
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
         case WM_LBUTTONUP:MouseUp(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
-        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;InvalidateControls();}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
+        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
         case WM_DROPFILES:{HDROP d=reinterpret_cast<HDROP>(w);wchar_t p[32768]{};UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);if(count>0&&DragQueryFileW(d,0,p,static_cast<UINT>(std::size(p))))Load(p);DragFinish(d);return 0;}
