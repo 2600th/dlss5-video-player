@@ -94,8 +94,9 @@ void TimecodeParseTests()
 
 void MarkerTests()
 {
-    const auto range = [](std::optional<int64_t> in, std::optional<int64_t> out, int64_t duration = kTenSeconds) {
-        return RangeFromMarkers({in, out}, duration);
+    const auto range = [](std::optional<int64_t> in, std::optional<int64_t> out, int64_t duration = kTenSeconds,
+                          double fps = 60.0) {
+        return RangeFromMarkers({in, out}, fps, duration);
     };
     const auto inside = range(20000000, 50000000);
     CHECK(inside.has_value());
@@ -116,10 +117,28 @@ void MarkerTests()
     CHECK(whole.has_value() && whole->Whole());
     const auto overshoot = range(0, 2 * kTenSeconds);
     CHECK(overshoot.has_value() && overshoot->Whole());
-    // Markers produced by ParseTimecode stay on the grid.
-    const auto typed = range(ParseTimecode(L"00:00:01:00", k23976), ParseTimecode(L"0:00:02.002", k23976));
+    const auto typed = range(ParseTimecode(L"00:00:01:00", k23976), ParseTimecode(L"0:00:02.002", k23976), kTenSeconds, k23976);
     CHECK(typed.has_value());
     if (typed) { CHECK_EQ(FramePts(24, k23976), typed->start100ns); CHECK_EQ(FramePts(48, k23976), typed->end100ns); }
+    // The CFR grid runs past the container duration by up to one frame. A
+    // marker inside that remainder names no decodable frame: rendering it would
+    // ask the helper to prime on nothing, so it is rejected.
+    for (const double fps : kRates) {
+        const uint64_t frames = static_cast<uint64_t>(std::ceil(10.0 * fps));
+        const int64_t lastFrame = FramePts(frames - 1, fps), pastEnd = FramePts(frames, fps);
+        CHECK_EQ(lastFrame, LastFramePts(fps, kTenSeconds));
+        CHECK(!range(pastEnd, pastEnd + 1000, kTenSeconds, fps).has_value());
+        // The last real frame still renders, and Out snaps up to the source end.
+        const auto tail = range(lastFrame, lastFrame + 1, kTenSeconds, fps);
+        CHECK(tail.has_value());
+        if (tail) { CHECK_EQ(lastFrame, tail->start100ns); CHECK_EQ(FramePts(frames, fps), tail->end100ns); }
+        // Markers between grid points snap out to cover every touched frame.
+        const auto snapped = range(FramePts(2, fps) + 500, FramePts(5, fps) - 500, kTenSeconds, fps);
+        CHECK(snapped.has_value());
+        if (snapped) { CHECK_EQ(FramePts(2, fps), snapped->start100ns); CHECK_EQ(FramePts(5, fps), snapped->end100ns); }
+    }
+    CHECK_EQ(int64_t{0}, LastFramePts(0.0, kTenSeconds));
+    CHECK_EQ(int64_t{0}, LastFramePts(60.0, 0));
 }
 
 void SingleFrameTests()

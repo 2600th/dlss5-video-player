@@ -33,6 +33,10 @@ orange ticks on the timeline, and the status line names them as `hh:mm:ss:ff`.
 `Ctrl+G` opens **Playback > Go to timecode**, which accepts `hh:mm:ss:ff`,
 `h:mm:ss.mmm` or `f<frame>` and can seek or set either marker.
 
+Both markers stay inside the source. In always names a frame that exists, and
+Out is the exclusive end, so marking Out on the last frame means "to the end"
+and renders it. A range that names no frame is refused before a render starts.
+
 The DLSS menu renders less than the whole video: `F` renders only the current
 frame, `Shift+F` a four-second clip from it, and `Ctrl+R` the marked range;
 **Render whole video** starts a full render. Each result opens as cached

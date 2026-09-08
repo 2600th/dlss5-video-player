@@ -2049,7 +2049,7 @@ private:
     void PreviewClip(){if(!m_loaded)return;RenderRangeOfCurrentSource(ClipPreviewRange(Position100ns(),m_decoder.FrameRate(),SourceDuration100ns()));}
     void RenderMarkedRange(){
         if(!m_loaded)return;
-        const auto range=RangeFromMarkers(m_markers,SourceDuration100ns());
+        const auto range=RangeFromMarkers(m_markers,m_decoder.FrameRate(),SourceDuration100ns());
         if(!range){const std::wstring message=T(L"range.invalid"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONINFORMATION);return;}
         RenderRangeOfCurrentSource(*range);
     }
@@ -2058,7 +2058,22 @@ private:
     // Markers sit on the decoder's frame grid so their timecodes and the
     // rendered range name exact frames.
     int64_t SnapToFrame(int64_t pts)const{const double fps=m_decoder.FrameRate();return fps>0?FramePts(FrameIndexNearest(pts,fps),fps):pts;}
-    void SetMarker(bool in,std::optional<int64_t> pts){if(!m_loaded)return;if(pts)pts=SnapToFrame(*pts);(in?m_markers.in100ns:m_markers.out100ns)=pts;MarkersChanged();}
+    // A marker always stays inside the source: the CFR grid runs up to one frame
+    // past the container duration, and a marker in that remainder describes a
+    // range with nothing to decode. In names a frame, so it stops at the last
+    // one. Out is the exclusive end, and playback stops on the last frame, so an
+    // Out there means "to the end" - otherwise the final frame could never be
+    // marked for rendering.
+    void SetMarker(bool in,std::optional<int64_t> pts){
+        if(!m_loaded)return;
+        if(pts){
+            const int64_t duration=SourceDuration100ns(),last=LastFramePts(m_decoder.FrameRate(),duration);
+            int64_t value=std::max<int64_t>(0,SnapToFrame(*pts));
+            if(last>0)value=in?std::min(value,last):(value>=last?duration:value);
+            pts=value;
+        }
+        (in?m_markers.in100ns:m_markers.out100ns)=pts;MarkersChanged();
+    }
     void ClearMarkers(){if(!m_loaded)return;m_markers={};MarkersChanged();}
     // Timecode dialog handler: false leaves the dialog open with its error.
     bool ApplyTimecodeText(const std::wstring& text,TimecodeAction action){

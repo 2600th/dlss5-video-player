@@ -25,9 +25,16 @@ uint64_t FrameIndexNearest(int64_t pts100ns, double fps);
 // the frame containing it, the out marker snaps up so any partially covered
 // frame is rendered. The end is clamped to the source's last grid boundary. A
 // range covering every frame returns Whole(). nullopt when a marker is missing,
-// in >= out after snapping, in lies at or beyond the source end, or fps or the
-// duration is invalid.
-std::optional<NeuralRenderRange> RangeFromMarkers(const RangeMarkers& markers, int64_t sourceDuration100ns);
+// in >= out, in lies at or beyond the source's last frame, or fps or the
+// duration is invalid. A range must name at least one frame that exists: a
+// marker inside the sub-frame remainder past the last frame is rejected, not
+// rendered as an empty range.
+std::optional<NeuralRenderRange> RangeFromMarkers(const RangeMarkers& markers, double fps, int64_t sourceDuration100ns);
+
+// Timestamp of the last frame a source of this duration contains; 0 when fps
+// or the duration is invalid. Markers are clamped to it so they always name a
+// frame that can be decoded.
+int64_t LastFramePts(double fps, int64_t sourceDuration100ns);
 
 // Exactly the frame containing at100ns (clamped to the last source frame).
 NeuralRenderRange SingleFrameRange(int64_t at100ns, double fps, int64_t sourceDuration100ns);

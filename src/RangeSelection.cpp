@@ -102,14 +102,24 @@ uint64_t FrameIndexNearest(int64_t pts100ns, double fps)
     return static_cast<uint64_t>(index);
 }
 
-std::optional<NeuralRenderRange> RangeFromMarkers(const RangeMarkers& markers, int64_t sourceDuration100ns)
+std::optional<NeuralRenderRange> RangeFromMarkers(const RangeMarkers& markers, double fps, int64_t sourceDuration100ns)
 {
-    if (!markers.in100ns || !markers.out100ns || sourceDuration100ns <= 0) return std::nullopt;
-    const int64_t start = *markers.in100ns;
-    const int64_t end = std::min(*markers.out100ns, sourceDuration100ns);
-    if (start < 0 || start >= end) return std::nullopt;
-    if (start == 0 && end == sourceDuration100ns) return NeuralRenderRange{};
-    return NeuralRenderRange{start, end};
+    if (!markers.in100ns || !markers.out100ns || !ValidFps(fps) || sourceDuration100ns <= 0) return std::nullopt;
+    if (*markers.in100ns < 0 || *markers.out100ns <= *markers.in100ns) return std::nullopt;
+    const uint64_t frameCount = SourceFrameCount(sourceDuration100ns, fps);
+    const uint64_t startIndex = FrameIndexAtOrBefore(*markers.in100ns, fps);
+    // The grid runs past the container duration by up to one frame. A marker in
+    // that remainder names no decodable frame, so the render would prime on
+    // nothing: reject it instead.
+    if (startIndex >= frameCount) return std::nullopt;
+    const uint64_t endIndex = std::min(std::max(FrameIndexAtOrAfter(*markers.out100ns, fps), startIndex + 1), frameCount);
+    return GridRange(startIndex, endIndex, frameCount, fps);
+}
+
+int64_t LastFramePts(double fps, int64_t sourceDuration100ns)
+{
+    if (!ValidFps(fps) || sourceDuration100ns <= 0) return 0;
+    return FramePts(SourceFrameCount(sourceDuration100ns, fps) - 1, fps);
 }
 
 NeuralRenderRange SingleFrameRange(int64_t at100ns, double fps, int64_t sourceDuration100ns)

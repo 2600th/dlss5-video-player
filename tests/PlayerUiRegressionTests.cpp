@@ -410,7 +410,7 @@ private:
         CHECK(app.ApplyTimecodeText(L"00:00:03:00", TimecodeAction::SetOut));
         CHECK_EQ(app.m_markers.out100ns.value_or(0), int64_t{30000000});
         CHECK(app.BuildStatusText().find(L" \u00b7 In 00:00:01:15 \u00b7 Out 00:00:03:00") != std::wstring::npos);
-        const auto range = RangeFromMarkers(app.m_markers, 100000000);
+        const auto range = RangeFromMarkers(app.m_markers, app.m_decoder.FrameRate(), 100000000);
         CHECK(range.has_value());
         if (range) { CHECK_EQ(range->start100ns, int64_t{15000000}); CHECK_EQ(range->end100ns, int64_t{30000000}); }
         CHECK(!app.ApplyTimecodeText(L"nonsense", TimecodeAction::Go));
@@ -423,7 +423,7 @@ private:
         app.m_seekPending = false;
         // Markers only render as a range when In precedes Out.
         CHECK(app.ApplyTimecodeText(L"0:00.500", TimecodeAction::SetOut));
-        CHECK(!RangeFromMarkers(app.m_markers, 100000000).has_value());
+        CHECK(!RangeFromMarkers(app.m_markers, app.m_decoder.FrameRate(), 100000000).has_value());
         app.HandleCommand(IDM_CLEAR_MARKS);
         CHECK(!app.m_markers.in100ns.has_value() && !app.m_markers.out100ns.has_value());
         CHECK(app.BuildStatusText().find(L"In ") == std::wstring::npos);

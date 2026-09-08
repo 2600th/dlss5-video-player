@@ -15,6 +15,12 @@
   green, played progress in the middle, and a violet stripe along the bottom
   marks the part of the source that has cached neural frames. The status line
   leads with the In/Out timecodes, or with how to mark a range.
+- Keep In/Out markers inside the source. A marker used to be able to land in the
+  sub-frame remainder past the last frame, and rendering that range asked the
+  helper to prime on nothing: it failed with `frames=0/0` and "Feature 18 could
+  not be primed from the source". In now stops at the last frame, Out on the
+  last frame means the source end so the final frame is renderable, and a range
+  that names no frame is refused before the render starts.
 
 - Verify the staged neural runtime against the embedded packaging lock and run a
   Feature 18 preflight in the isolated helper before every render; each cache
