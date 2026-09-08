@@ -801,6 +801,9 @@ public:
     // re-resolving seek path. A synchronized cache pair and an acquired local
     // copy of a stream are ordinary files, whatever the source identity says.
     bool NetworkPlayback()const{return m_sourceKind==MediaSourceKind::YouTube&&!m_cachedPlayback&&!m_cachedSourceFile;}
+    // Decode semantics of the loaded payload: an acquired copy of a stream is a
+    // local file even though its identity stays networked.
+    MediaSourceKind DecodeKind()const{return m_cachedSourceFile?MediaSourceKind::LocalFile:m_sourceKind;}
 
     void Tick() {
         PruneRecentCache();
@@ -1692,7 +1695,7 @@ private:
         VideoFrame f; bool got=readAt(sec,f);
         if(!got){
             LOG("Seek decoder restart failed; reopening the same file for recovery.");
-            m_decoder.Close(); if(m_decoder.Open(m_path,m_sourceKind))got=readAt(sec,f);
+            m_decoder.Close(); if(m_decoder.Open(m_path,DecodeKind()))got=readAt(sec,f);
         }
         if(!got){
             LOG("Seek failed without crashing; playback remains paused.");m_playing=false;SetSeeking(false);m_currentSec=sec;UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return false;
@@ -2028,7 +2031,7 @@ private:
     // reuses its owned source-cache entry when the recent history still names
     // one; otherwise the job acquires the source before rendering the range.
     bool RenderRangeOfCurrentSource(NeuralRenderRange range){
-        if(!RangeRenderAvailable())return false;
+        if(!RangeRenderAvailable()){LOG("Render request ignored: loaded="<<m_loaded<<" job="<<NeuralJobActive()<<" resolving="<<m_youtubeLifecycle.IsResolving()<<" prerender="<<NeuralPreRenderEnabled()<<" haveSource="<<!m_path.empty()<<" cachedSourceKey="<<CachedYouTubeSourceKey().has_value()<<" duration="<<m_decoder.DurationSeconds());return false;}
         if(m_sourceKind==MediaSourceKind::YouTube){
             const std::wstring page=m_youtubePageUrl,title=m_displayTitle;
             if(const auto sourceKey=CachedYouTubeSourceKey()){
@@ -2153,23 +2156,36 @@ private:
                         if(sourcePath.empty()){
                             LOG("Source cache miss or invalid entry; acquiring source.");
                             NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
-                            const auto staging=cache.BeginSourceStaging(sourceKey);if(!staging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
+                            auto staging=cache.BeginSourceStaging(sourceKey);if(!staging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
+                            std::string acquiredKey=sourceKey;
                             MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv",expectedDurationSeconds};MediaMaterializer materializer(moduleDirectory);auto materialized=materializer.Run(request,stop);
                             if(!materialized.ok&&materialized.error!=MaterializeError::Cancelled&&!pageUrl.empty()&&!stop.stop_requested()){
                                 // Resolved googlevideo URLs expire while a video plays.
                                 // Re-resolve the page once and retry the download.
                                 LOG("Source acquisition failed; re-resolving the page URL once.");
                                 YouTubeResolver refresher;const ResolveResult refreshed=refresher.Resolve(pageUrl,sourceQuality,stop);
-                                if(refreshed.error==ResolveError::None&&!refreshed.mediaUrl.empty()){
-                                    request.videoUrl=refreshed.mediaUrl;request.audioUrl=refreshed.audioUrl;
+                                const std::string refreshedIdentity=refreshed.error==ResolveError::None?StableYouTubeStreamIdentity(refreshed.mediaUrl,refreshed.audioUrl):std::string{};
+                                if(!refreshedIdentity.empty()){
+                                    // The identity names the selected formats, so a different one is
+                                    // a different source: stage it under its own key instead of
+                                    // promoting it as the first attempt's.
+                                    NeuralCacheIdentity retryIdentity=sourceIdentity;retryIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+refreshedIdentity;
+                                    const std::string retryKey=BuildNeuralCacheKey(retryIdentity);
+                                    if(retryKey!=acquiredKey){
+                                        LOG("Re-resolved source identity changed; staging under key="<<retryKey);
+                                        cache.MarkInvalid(*staging);auto retryStaging=cache.BeginSourceStaging(retryKey);
+                                        if(!retryStaging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
+                                        staging=std::move(retryStaging);acquiredKey=retryKey;completion->sourceKey=retryKey;
+                                    }
+                                    request.videoUrl=refreshed.mediaUrl;request.audioUrl=refreshed.audioUrl;request.output=*staging/L"source.mkv";
                                     materialized=materializer.Run(request,stop);
                                 }
                             }
                             if(!materialized.ok){cache.MarkInvalid(*staging);completion->result.cancelled=materialized.error==MaterializeError::Cancelled;completion->result.detail=materialized.detail;goto finish;}
                             const ProbeResult sourceProbe=ProbeMedia(moduleDirectory,*staging/L"source.mkv",stop);
                             NeuralCacheManifest sourceManifest{};sourceManifest.encoder=kCompleteSourcePolicy;sourceManifest.width=sourceProbe.width;sourceManifest.height=sourceProbe.height;sourceManifest.frameCount=sourceProbe.frameCount;sourceManifest.duration100ns=sourceProbe.duration100ns;
-                            if(!sourceProbe.ok||!cache.PromoteSource(sourceKey,*staging,sourceManifest)){cache.MarkInvalid(*staging);completion->result.detail=L"The acquired source failed validation.";goto finish;}
-                            const auto promoted=cache.LookupSource(sourceKey);if(!promoted){completion->result.detail=L"The acquired source was not reusable.";goto finish;}sourcePath=promoted->payloadPath;
+                            if(!sourceProbe.ok||!cache.PromoteSource(acquiredKey,*staging,sourceManifest)){cache.MarkInvalid(*staging);completion->result.detail=L"The acquired source failed validation.";goto finish;}
+                            const auto promoted=cache.LookupSource(acquiredKey);if(!promoted){completion->result.detail=L"The acquired source was not reusable.";goto finish;}sourcePath=promoted->payloadPath;
                         }
                         }
                     }else sourcePath=std::filesystem::absolute(std::filesystem::path(mediaUrl));
