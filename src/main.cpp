@@ -2760,6 +2760,9 @@ private:
     // already on screen, so only sound and the play state have to come back.
     void EndScrub(){
         if(!m_loaded)return;
+        // A scrub seek still queued will restart audio and playback itself; it
+        // only needs to know the play state the drag started from.
+        if(m_seekPending||m_seeking){m_seekResumePlaying=m_dragWasPlaying;return;}
         if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!m_dragWasPlaying);}
         if(m_dragWasPlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
     }
