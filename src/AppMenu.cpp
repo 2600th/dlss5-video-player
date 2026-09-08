@@ -43,7 +43,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), convert = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -59,9 +59,6 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Game trailers");
     AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
-    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, L"Export processed media...");
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, L"Cancel export");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
     add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out"); add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr); add(play, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
@@ -79,7 +76,14 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(upscaleOutput,MF_STRING,IDM_UPSCALE_2160,L"2160p (4K)");
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),L"Upscaling output");
     add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
-    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); add(dlss, IDM_RENDER_RANGE, L"menu.render_range"); add(dlss, IDM_RENDER_WHOLE, L"menu.render_whole"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    // Conversion writes a neural video to disk with the settings in the neural
+    // settings dialog; it is deliberately separate from watching with the
+    // rendering turned on.
+    add(convert, IDM_RENDER_RANGE, L"menu.render_range"); add(convert, IDM_RENDER_WHOLE, L"menu.render_whole"); AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
+    add(convert, IDM_EXPORT_CACHED_VIDEO, L"menu.export_cached"); add(convert, IDM_CANCEL_EXPORT, L"menu.cancel_export");
+    const std::wstring convertName = localizer.Get(L"menu.convert");
+    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
     add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");

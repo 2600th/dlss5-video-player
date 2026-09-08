@@ -1178,8 +1178,11 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(entries, L"Pause neural render\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
     CHECK(has_menu_entry(entries, L"Preview this frame (neural)\tF", app_menu::IDM_PREVIEW_FRAME));
     CHECK(has_menu_entry(entries, L"Preview 4 s clip (neural)\tShift+F", app_menu::IDM_PREVIEW_CLIP));
-    CHECK(has_menu_entry(entries, L"Render marked range (neural)\tCtrl+R", app_menu::IDM_RENDER_RANGE));
-    CHECK(has_menu_entry(entries, L"Render whole video (neural)", app_menu::IDM_RENDER_WHOLE));
+    // Conversion writes a file; it lives in its own submenu beside saving.
+    CHECK(has_menu_entry(entries, L"Convert marked clip to neural video\tCtrl+R", app_menu::IDM_RENDER_RANGE));
+    CHECK(has_menu_entry(entries, L"Convert whole video to neural video", app_menu::IDM_RENDER_WHOLE));
+    CHECK(has_menu_entry(entries, L"Save converted video...", app_menu::IDM_EXPORT_CACHED_VIDEO));
+    CHECK(has_menu_entry(entries, L"Cancel saving", app_menu::IDM_CANCEL_EXPORT));
     CHECK(has_menu_entry(entries, L"Neural settings...\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
     CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
     CHECK(has_menu_entry(entries, L"Zoom 2x\tZ", app_menu::IDM_COMPARE_ZOOM));

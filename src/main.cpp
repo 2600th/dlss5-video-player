@@ -1017,6 +1017,13 @@ private:
     }
     void ExportCachedVideo(){
         if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
+        // The file on disk carries the settings it was rendered with. Saving it
+        // after the user changed them would write something they never saw.
+        if(m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides){
+            const std::wstring message=T(L"export.settings_changed"),caption=T(L"app.title");
+            if(MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_YESNO|MB_ICONQUESTION)==IDYES)RenderRangeOfCurrentSource(m_cachedRange);
+            return;
+        }
         const auto output=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());if(output.empty())return;
         CachedExportRequest request{m_neuralPath,std::filesystem::path(m_path),output};if(!m_cachedRange.Whole()){request.rangeStartSeconds=double(m_cachedRange.start100ns)*1e-7;request.rangeDurationSeconds=double(m_cachedRange.end100ns-m_cachedRange.start100ns)*1e-7;}
         const auto helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
@@ -1488,12 +1495,19 @@ private:
             WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
-    // Re-renders what is playing now (the cached range, else the whole source)
-    // with the settings in the dialog. Nothing loaded: the values stay saved
-    // for the next open.
-    void ApplyNeuralSettingsAndRender(){
+    // Apply changes what the player is showing now: an active session restarts
+    // at the playhead with the new settings, a paused frame is re-previewed at
+    // once. Writing a converted file is a separate, explicit action.
+    void ApplyNeuralSettings(){
         SaveVideoSettings();
-        RenderRangeOfCurrentSource(m_cachedPlayback?m_cachedRange:NeuralRenderRange{});
+        if(m_liveSession){
+            const double at=Position();
+            LOG("Neural settings applied; restarting the active session at "<<at<<" s.");
+            StopLiveNeuralSession(true);
+            StartLiveNeuralSession();
+            return;
+        }
+        StartPausedSettingsPreview();
     }
 
     LRESULT NeuralWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
@@ -1503,7 +1517,7 @@ private:
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
-            if(id==IDC_NS_APPLY){ApplyNeuralSettingsAndRender();return 0;}
+            if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
             if(((id==IDC_NS_PRESET||id==IDC_NS_STYLE)&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GUIDE_MASK)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
