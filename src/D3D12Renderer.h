@@ -8,6 +8,7 @@
 #include <vector>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
+#include "FrameIdentity.h"
 
 #ifdef D3D12_RENDERER_TESTING
 #include <functional>
@@ -23,11 +24,25 @@ struct D3D12RendererDeleter {
 };
 using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
 D3D12RendererOwner MakeD3D12Renderer();
+struct GuideFrame;
 
 struct CapturedVideoFrame {
     std::vector<uint8_t> bgra;
     uint32_t width{};
     uint32_t height{};
+    FrameIdentity id;
+};
+
+// Which member of an original/neural pair the presentation shader shows.
+enum class ComparisonMode { Neural, Original, Blend, SplitVertical, Wipe };
+
+struct ComparisonSettings {
+    ComparisonMode mode = ComparisonMode::Neural;
+    float amount = 0.5f;       // Blend: lerp(original, neural, amount)
+    float splitX = 0.5f;       // SplitVertical/Wipe divider, in image UV [0,1]
+    float zoomScale = 1.0f;    // >= 1 magnifies around the zoom center
+    float zoomCenterX = 0.5f;
+    float zoomCenterY = 0.5f;
 };
 
 class D3D12Renderer {
@@ -57,6 +72,15 @@ public:
                              uint32_t gridW, uint32_t gridH,
                              bool temporalReset, float frameTimeMs,
                              CapturedVideoFrame& capture);
+    // Identity-checked entry points: the guide must have been generated for
+    // exactly `frame` (same source sample, same job); otherwise the frame is
+    // rejected and logged. The temporal reset comes from guide.id.reset or a
+    // feature (re)creation performed during this frame.
+    bool RenderFrame(const uint8_t* bgra, size_t bytes, const FrameIdentity& frame,
+                     const GuideFrame& guide, float frameTimeMs);
+    bool RenderFrameForCache(const uint8_t* bgra, size_t bytes, const FrameIdentity& frame,
+                             const GuideFrame& guide, float frameTimeMs,
+                             CapturedVideoFrame& capture);
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -79,11 +103,29 @@ public:
     bool PresentCurrent();
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; }
     const ColorSettings& GetColorSettings() const { return m_colorSettings; }
+    void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; }
+    const ComparisonSettings& GetComparison() const { return m_comparison; }
+    // Source-size BGRA reference (the original member of the current pair). May be
+    // called before RenderFrame or PresentCurrent; the copy rides on that submission.
+    bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes);
+
+    d3d12_renderer_detail::FenceWaitResult LastFenceWaitResult() const { return m_lastFenceWaitResult; }
+    bool GpuUnusable() const { return m_gpuUnusable; }
+    // GPU time between the timestamp queries bracketing the last resolved DLSS
+    // Evaluate; 0 until the first evaluated frame's fence has completed.
+    double LastNeuralGpuMs() const { return m_lastNeuralGpuMs; }
+    // Running maximum of the adapter's local-segment CurrentUsage sampled per frame.
+    uint64_t PeakLocalVideoMemoryMiB() const { return m_peakLocalVideoMemoryMiB; }
 
 private:
     friend struct D3D12RendererDeleter;
     ~D3D12Renderer();
     static constexpr uint32_t FrameCount = 3;
+    // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
+    // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
+    static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
+    static constexpr uint32_t PresentConstantCount = 16;
+    static constexpr uint32_t ReferenceSRV = 7;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -109,7 +151,17 @@ private:
     bool WaitForFrameSlot(uint32_t slot);
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
+    bool RenderFrameInternal(const uint8_t* bgra, size_t bytes,
+                             const float* guideGridRGBA32F, size_t guideBytes,
+                             uint32_t gridW, uint32_t gridH,
+                             bool temporalReset, float frameTimeMs,
+                             const FrameIdentity* identity);
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
+    void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
+    void SetPresentConstants(ID3D12GraphicsCommandList* cmd, const ColorSettings& colors,
+                             const ComparisonSettings& comparison, bool useReference);
+    void HarvestNeuralTimings();
+    void SampleLocalVideoMemory();
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
@@ -125,6 +177,7 @@ private:
 
     Microsoft::WRL::ComPtr<IDXGIFactory6> m_factory;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> m_adapter;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> m_adapter3;
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapchain;
@@ -161,9 +214,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheOutput;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_timestampReadback;
 
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
+    uint8_t* m_referenceMapped[FrameCount]{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};
@@ -174,6 +232,14 @@ private:
 
     bool m_sourceInCopyDest = true;
     bool m_gridInCopyDest = true;
+    bool m_referenceInCopyDest = true;
+    bool m_referencePending = false;   // upload slot holds pixels not yet copied
+    bool m_hasReference = false;       // a reference copy has been submitted
+    uint32_t m_referenceUploadSlot = 0;
+    bool m_neuralTimingPending[FrameCount]{};
+    uint64_t m_timestampFrequency = 0;
+    double m_lastNeuralGpuMs = 0.0;
+    uint64_t m_peakLocalVideoMemoryMiB = 0;
     bool m_colorInRT = true;
     bool m_guidesInRT = true;
     bool m_depthInWrite = true;
@@ -186,6 +252,7 @@ private:
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};
+    ComparisonSettings m_comparison{};
     bool m_lastDLSSUsed = false;
     bool m_gpuUnusable = false;
     d3d12_renderer_detail::FenceWaitResult m_lastFenceWaitResult =
