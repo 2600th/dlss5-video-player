@@ -47,11 +47,17 @@ the entry's `receipt.json` with the full record. `Space` pauses and resumes a
 running render. The recent-video history keeps one render per source, so a new
 preview or range render for the same file displaces the previous entry.
 
-The timeline carries three lanes so no state hides another: the marked range
-sits along the top in green between its In and Out ticks, played progress fills
-the middle in blue, and a violet stripe along the bottom names the part of the
-source that has cached neural frames. During cached playback that stripe is why
-seeking stays inside the rendered range.
+The timeline shows both states at once: the marked range is a solid violet block
+between a green In tick and an orange Out tick, played progress is blue, and a
+teal stripe along the bottom names the part of the source that already has
+cached neural frames. During cached playback that stripe is why seeking stays
+inside the rendered range.
+
+Marking a range on a YouTube stream starts downloading that source in the
+background, because a render always works from a local copy. Playback continues
+while it runs and the status line says so; the render then starts on the file
+instead of waiting for the whole download, and later renders of the same source
+and quality reuse it.
 
 ### Compare the neural result
 

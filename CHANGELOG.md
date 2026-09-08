@@ -11,10 +11,14 @@
   video is opened, and re-resolve the page URL once when the resolved stream
   URLs have expired. A source played from its cached copy seeks locally instead
   of re-opening the network stream, and end of file ends playback.
-- Show what is rendered on the timeline: the marked range runs along the top in
-  green, played progress in the middle, and a violet stripe along the bottom
-  marks the part of the source that has cached neural frames. The status line
-  leads with the In/Out timecodes, or with how to mark a range.
+- Make the marked range unmissable: the timeline is taller, the selection is a
+  solid violet block across the track between DPI-scaled green/orange In and Out
+  ticks that reach past it, cached neural coverage moved to a teal stripe along
+  the bottom, and the status line leads with the In/Out timecodes.
+- Download a streamed source in the background as soon as a range is marked, so
+  a render starts on a local file instead of waiting for the whole video. One
+  acquisition is shared: the render waits for the background copy rather than
+  downloading the same source again, and later renders reuse it.
 - Keep In/Out markers inside the source. A rounded duration and a rounded frame
   rate can grid a frame just inside the end that the source never emits (a
   30.03 s clip at 59.94 fps grids frame 1800 at 300299799 against a 300300000

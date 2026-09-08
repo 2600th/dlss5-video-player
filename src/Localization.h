@@ -100,7 +100,8 @@ private:
             {L"error.frame", L"No video frame could be decoded. Try another file."},
             {L"error.seek", L"Could not seek. Try restarting playback."},
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
-            {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"}
+            {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"},
+            {L"status.preparing_source", L"Downloading this source for rendering\u2026"}
         };
         return strings;
     }

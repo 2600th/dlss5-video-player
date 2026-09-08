@@ -752,6 +752,95 @@ static std::wstring TimeText(double sec) {
     if(h) swprintf_s(b,L"%d:%02d:%02d",h,m,s); else swprintf_s(b,L"%02d:%02d",m,s); return b;
 }
 
+// One complete local copy of a YouTube source in the cache: identity, lookup,
+// download, validation and promotion. A render and the background acquisition
+// that starts when a range is marked both go through this, so they can never
+// disagree about the key or download the same source twice.
+struct SourceAcquisition {
+    std::string key;
+    std::filesystem::path path;   // empty when nothing was acquired
+    std::wstring detail;
+    bool cancelled{};
+};
+
+// Published by the background acquisition; a render waits on `finished` and
+// then reuses `key`.
+struct SourcePrefetchState {
+    std::atomic<bool> finished{false};
+    std::string key;
+};
+
+static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
+                                              const std::filesystem::path& moduleDirectory,
+                                              const std::wstring& mediaUrl,
+                                              const std::wstring& audioUrl,
+                                              const std::wstring& pageUrl,
+                                              YouTubeSourceQuality sourceQuality,
+                                              double expectedDurationSeconds,
+                                              const std::function<void()>& onDownloadStart,
+                                              std::stop_token stop)
+{
+    SourceAcquisition result{};
+    const std::string videoId=CanonicalYouTubeVideoId(pageUrl);
+    const std::string streamIdentity=StableYouTubeStreamIdentity(mediaUrl,audioUrl);
+    if(videoId.empty()||streamIdentity.empty()||!std::isfinite(expectedDurationSeconds)||expectedDurationSeconds<=0.0){
+        result.detail=L"The YouTube source format or duration is unavailable.";return result;
+    }
+    NeuralCacheIdentity sourceIdentity{};
+    sourceIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+streamIdentity;
+    sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality=kCompleteSourcePolicy;
+    result.key=BuildNeuralCacheKey(sourceIdentity);
+    LOG("Checking source cache key="<<result.key);
+    if(const auto cached=cache.LookupSource(result.key)){
+        const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
+        if(stop.stop_requested()){result.cancelled=true;result.detail=L"Neural render was cancelled.";return result;}
+        const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(std::max<uint64_t>(1,cached->manifest.frameCount))+1);
+        const bool valid=cachedProbe.ok&&cached->manifest.encoder==kCompleteSourcePolicy&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::abs(cachedProbe.duration100ns/10000000.0-expectedDurationSeconds)<=1.0;
+        if(valid){result.path=cached->payloadPath;LOG("Source cache hit: content hash and metadata verified; download skipped.");return result;}
+        if(!cache.Quarantine(*cached)){result.detail=L"The invalid source cache entry could not be quarantined.";return result;}
+    }
+    LOG("Source cache miss or invalid entry; acquiring source.");
+    if(onDownloadStart)onDownloadStart();
+    auto staging=cache.BeginSourceStaging(result.key);
+    if(!staging){result.detail=L"Source cache staging could not be created.";return result;}
+    MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv",expectedDurationSeconds};
+    MediaMaterializer materializer(moduleDirectory);
+    auto materialized=materializer.Run(request,stop);
+    if(!materialized.ok&&materialized.error!=MaterializeError::Cancelled&&!pageUrl.empty()&&!stop.stop_requested()){
+        // Resolved googlevideo URLs expire while a video plays. Re-resolve the
+        // page once and retry the download.
+        LOG("Source acquisition failed; re-resolving the page URL once.");
+        YouTubeResolver refresher;const ResolveResult refreshed=refresher.Resolve(pageUrl,sourceQuality,stop);
+        const std::string refreshedIdentity=refreshed.error==ResolveError::None?StableYouTubeStreamIdentity(refreshed.mediaUrl,refreshed.audioUrl):std::string{};
+        if(!refreshedIdentity.empty()){
+            // The identity names the selected formats, so a different one is a
+            // different source: stage it under its own key instead of promoting
+            // it as the first attempt's.
+            NeuralCacheIdentity retryIdentity=sourceIdentity;
+            retryIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+refreshedIdentity;
+            const std::string retryKey=BuildNeuralCacheKey(retryIdentity);
+            if(retryKey!=result.key){
+                LOG("Re-resolved source identity changed; staging under key="<<retryKey);
+                cache.MarkInvalid(*staging);
+                auto retryStaging=cache.BeginSourceStaging(retryKey);
+                if(!retryStaging){result.detail=L"Source cache staging could not be created.";return result;}
+                staging=std::move(retryStaging);result.key=retryKey;
+            }
+            request.videoUrl=refreshed.mediaUrl;request.audioUrl=refreshed.audioUrl;request.output=*staging/L"source.mkv";
+            materialized=materializer.Run(request,stop);
+        }
+    }
+    if(!materialized.ok){cache.MarkInvalid(*staging);result.cancelled=materialized.error==MaterializeError::Cancelled;result.detail=materialized.detail;return result;}
+    const ProbeResult sourceProbe=ProbeMedia(moduleDirectory,*staging/L"source.mkv",stop);
+    NeuralCacheManifest sourceManifest{};sourceManifest.encoder=kCompleteSourcePolicy;sourceManifest.width=sourceProbe.width;sourceManifest.height=sourceProbe.height;
+    sourceManifest.frameCount=sourceProbe.frameCount;sourceManifest.duration100ns=sourceProbe.duration100ns;
+    if(!sourceProbe.ok||!cache.PromoteSource(result.key,*staging,sourceManifest)){cache.MarkInvalid(*staging);result.detail=L"The acquired source failed validation.";return result;}
+    const auto promoted=cache.LookupSource(result.key);
+    if(!promoted){result.detail=L"The acquired source was not reusable.";return result;}
+    result.path=promoted->payloadPath;
+    return result;
+}
+
 class PlayerApp {
 #ifdef PLAYER_APP_TESTING
     friend struct PlayerAppTestAccess;
@@ -805,8 +894,10 @@ public:
     // local file even though its identity stays networked.
     MediaSourceKind DecodeKind()const{return m_cachedSourceFile?MediaSourceKind::LocalFile:m_sourceKind;}
 
+
     void Tick() {
         PruneRecentCache();
+        ReapSourcePrefetch();
         if(m_seekPending) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
@@ -1749,7 +1840,7 @@ private:
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
     }
 
-    RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(24),c.right-Dip(18),c.bottom-Dip(14)};}
+    RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(28),c.right-Dip(18),c.bottom-Dip(14)};}
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
@@ -1902,27 +1993,35 @@ private:
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
         double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec,Position());RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
         const auto markerX=[&](int64_t pts){return tr.left+int(std::lround((tr.right-tr.left)*(d>0?std::clamp(double(pts)*1e-7/d,0.0,1.0):0.0)));};
-        // Three lanes in one track, so no state hides another: marked range on
-        // top (green), played progress in the middle (blue), and the part of the
-        // source that has cached neural frames along the bottom (violet).
-        const LONG lane=std::max<LONG>(2,(tr.bottom-tr.top)/3);
+        // Three lanes in one track, so no state hides another: the In/Out
+        // selection on top (violet, the loudest because it is what the render
+        // acts on), played progress in the middle, and the part of the source
+        // that already has cached neural frames along the bottom (teal).
+        const LONG height=tr.bottom-tr.top,coverageLane=std::max<LONG>(2,height/4);
         RECT rendered=tr;const bool renderedSpan=m_cachedPlayback;
         if(renderedSpan){
             if(!m_cachedRange.Whole()){rendered.left=markerX(m_cachedRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(m_cachedRange.end100ns));}
-            RECT band{rendered.left,tr.bottom-lane,rendered.right,tr.bottom};
-            HBRUSH nb=CreateSolidBrush(ui_palette::NeuralRange);FillRect(dc,&band,nb);DeleteObject(nb);
+            RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};
+            HBRUSH nb=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&band,nb);DeleteObject(nb);
         }
         // Played progress starts at the rendered range when one is playing,
         // because seeking is clamped to it.
-        RECT done{renderedSpan?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-lane:tr.bottom};
+        RECT done{renderedSpan?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
         done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,renderedSpan?rendered.right:tr.right);
         HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);
-        // Boundaries last: a range render's edges stay visible over both lanes.
-        if(renderedSpan&&!m_cachedRange.Whole()){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralRangeEdge);RECT startEdge{rendered.left,tr.top,rendered.left+1,tr.bottom},endEdge{rendered.right-1,tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
-        if(m_markers.in100ns&&m_markers.out100ns&&*m_markers.out100ns>*m_markers.in100ns){RECT span{markerX(*m_markers.in100ns),tr.top,markerX(*m_markers.out100ns),tr.top+std::max<LONG>(1,(tr.bottom-tr.top)/3)};HBRUSH sb=CreateSolidBrush(RGB(150,190,140));FillRect(dc,&span,sb);DeleteObject(sb);}
-        const auto markerTick=[&](int64_t pts,COLORREF color){const int x=markerX(pts);RECT tick{x-1,tr.top-Dip(6),x+1,tr.bottom};HBRUSH mb=CreateSolidBrush(color);FillRect(dc,&tick,mb);DeleteObject(mb);};
-        if(m_markers.in100ns)markerTick(*m_markers.in100ns,RGB(96,200,120));if(m_markers.out100ns)markerTick(*m_markers.out100ns,RGB(240,160,64));
-        int kx=done.right;DrawSolidEllipse(dc,RECT{kx-5,tr.top-3,kx+5,tr.bottom+3},RGB(246,246,248),"Timeline knob");
+        if(renderedSpan&&!m_cachedRange.Whole()){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);RECT startEdge{rendered.left,tr.top,rendered.left+std::max(1,Dip(1)),tr.bottom},endEdge{rendered.right-std::max(1,Dip(1)),tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
+        // The selection is drawn last and fills the track, so it reads at a
+        // glance; the coverage lane stays visible beneath it.
+        if(m_markers.in100ns&&m_markers.out100ns&&*m_markers.out100ns>*m_markers.in100ns){
+            RECT span{markerX(*m_markers.in100ns),tr.top,markerX(*m_markers.out100ns),renderedSpan?tr.bottom-coverageLane:tr.bottom};
+            if(span.right<=span.left)span.right=span.left+std::max(1,Dip(1));
+            HBRUSH sb=CreateSolidBrush(ui_palette::MarkedRange);FillRect(dc,&span,sb);DeleteObject(sb);
+            RECT rail{span.left,tr.top,span.right,tr.top+std::max<LONG>(1,Dip(2))};HBRUSH rb=CreateSolidBrush(ui_palette::MarkedRangeEdge);FillRect(dc,&rail,rb);DeleteObject(rb);
+        }
+        const int tickWidth=std::max(2,Dip(3)),tickRise=Dip(8);
+        const auto markerTick=[&](int64_t pts,COLORREF color){const int x=markerX(pts);RECT tick{x-tickWidth/2,tr.top-tickRise,x-tickWidth/2+tickWidth,tr.bottom+std::max(1,Dip(2))};HBRUSH mb=CreateSolidBrush(color);FillRect(dc,&tick,mb);DeleteObject(mb);};
+        if(m_markers.in100ns)markerTick(*m_markers.in100ns,RGB(96,220,130));if(m_markers.out100ns)markerTick(*m_markers.out100ns,RGB(255,168,64));
+        const int knobR=std::max(4,Dip(6));int kx=done.right;DrawSolidEllipse(dc,RECT{kx-knobR,tr.top-Dip(2),kx+knobR,tr.bottom+Dip(2)},RGB(246,246,248),"Timeline knob");
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,Dip(18),c.bottom-Dip(50),time.c_str(),int(time.size()));
         RECT sr{Dip(145),c.bottom-Dip(53),volumeRect?c.right-Dip(205):c.right-Dip(18),c.bottom-Dip(34)};
         if(m_youtubeLifecycle.IsResolving()){
@@ -2020,6 +2119,54 @@ private:
         for(const auto& entry:m_recent->Entries())if(entry.youtube&&entry.id==id&&entry.sourceQuality==static_cast<int>(m_youtubeSourceQuality)&&!entry.sourceKey.empty())return entry.sourceKey;
         return std::nullopt;
     }
+    bool SourcePrefetchActive()const{return m_prefetchState&&!m_prefetchState->finished.load(std::memory_order_acquire);}
+    // Downloads the playing stream into the source cache while playback
+    // continues, so a render starts on a local file instead of waiting for the
+    // whole video. Only a live stream needs it, and only once per source.
+    void EnsureSourcePrefetch(){
+        if(!m_loaded||!NeuralPreRenderEnabled()||!NetworkPlayback())return;
+        if(m_prefetchWorker.joinable()||CachedYouTubeSourceKey())return;
+        if(m_path.empty()||m_youtubePageUrl.empty())return;
+        const double duration=m_decoder.DurationSeconds();
+        if(!std::isfinite(duration)||duration<=0.0)return;
+        auto state=std::make_shared<SourcePrefetchState>();
+        const std::wstring media=m_path,audio=m_youtubeAudioUrl,page=m_youtubePageUrl;
+        const auto quality=m_youtubeSourceQuality;const auto cacheRoot=m_cacheRoot,moduleDirectory=ExecutableDirectory();
+        try{
+            m_prefetchWorker=std::jthread([state,cacheRoot,moduleDirectory,media,audio,page,quality,duration](std::stop_token stop){
+                NeuralCacheManager cache(cacheRoot);
+                if(cache.Valid()){
+                    const SourceAcquisition acquired=AcquireYouTubeSource(cache,moduleDirectory,media,audio,page,quality,duration,{},stop);
+                    if(!acquired.path.empty())state->key=acquired.key;
+                }
+                state->finished.store(true,std::memory_order_release);
+            });
+        }catch(const std::system_error&){LOG("Background source acquisition could not be started.");return;}
+        m_prefetchState=state;m_prefetchPageUrl=page;m_prefetchQuality=quality;m_prefetchTitle=m_displayTitle;
+        LOG("Range marked on a stream; acquiring its source in the background.");
+        UpdateCachedStatus();
+    }
+    // UI-thread side of the background acquisition: adopt a finished copy into
+    // the recent history so the next render reuses it, and stop one that no
+    // longer belongs to the loaded source.
+    void ReapSourcePrefetch(){
+        if(!m_prefetchWorker.joinable())return;
+        if(!m_prefetchState||m_prefetchState->finished.load(std::memory_order_acquire)){
+            m_prefetchWorker.join();
+            const std::string key=m_prefetchState?m_prefetchState->key:std::string{};
+            const std::wstring page=m_prefetchPageUrl,title=m_prefetchTitle;const auto quality=m_prefetchQuality;
+            m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();
+            if(key.empty()){LOG("Background source acquisition finished without a reusable copy.");UpdateCachedStatus();return;}
+            LOG("Background source acquisition complete; a render will reuse it.");
+            NeuralJobCompletion owned{};owned.sourceKind=MediaSourceKind::YouTube;owned.pageUrl=page;owned.displayTitle=title;owned.sourceQuality=quality;owned.sourceKey=key;
+            RecordRecent(owned,true);UpdateCachedStatus();return;
+        }
+        // A different video is playing now: the download is worthless.
+        if(m_loaded&&!NeuralJobActive()&&m_youtubePageUrl!=m_prefetchPageUrl){
+            LOG("Loaded source changed; stopping the background acquisition.");
+            m_prefetchWorker.request_stop();m_prefetchWorker.join();m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();UpdateCachedStatus();
+        }
+    }
     bool RangeRenderAvailable()const{
         if(!m_loaded||NeuralJobActive()||m_youtubeLifecycle.IsResolving()||!NeuralPreRenderEnabled()||m_path.empty())return false;
         if(m_sourceKind!=MediaSourceKind::YouTube)return true;
@@ -2073,6 +2220,10 @@ private:
             pts=value;
         }
         (in?m_markers.in100ns:m_markers.out100ns)=pts;MarkersChanged();
+        // Marking is the first sign that a render is coming, and a streamed
+        // source has to be acquired before it can be rendered. Start that
+        // download now, while the user is still choosing the other marker.
+        if(pts)EnsureSourcePrefetch();
     }
     void ClearMarkers(){if(!m_loaded)return;m_markers={};MarkersChanged();}
     // Timecode dialog handler: false leaves the dialog open with its error.
@@ -2139,8 +2290,11 @@ private:
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
             HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;
+            // The background acquisition of this very source, when one is in
+            // flight: the job waits for it rather than downloading again.
+            const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -2148,60 +2302,31 @@ private:
                 {
                     std::filesystem::path sourcePath;
                     if(sourceKind==MediaSourceKind::YouTube){
-                        if(!reuseSourceKey.empty()){
-                            const auto cached=cache.LookupSource(reuseSourceKey);
-                            if(!cached||cached->manifest.encoder!=kCompleteSourcePolicy){completion->cachedSourceUnavailable=true;goto finish;}
-                            sourcePath=cached->payloadPath;completion->sourceKey=reuseSourceKey;
-                            LOG("Recent source cache verified; network resolution skipped.");
-                        }else{
-                        const std::string videoId=CanonicalYouTubeVideoId(pageUrl);
-                        const std::string streamIdentity=StableYouTubeStreamIdentity(mediaUrl,audioUrl);
-                        if(videoId.empty()||streamIdentity.empty()||!std::isfinite(expectedDurationSeconds)||expectedDurationSeconds<=0.0){completion->result.detail=L"The YouTube source format or duration is unavailable.";goto finish;}
-                        NeuralCacheIdentity sourceIdentity{};sourceIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+streamIdentity;sourceIdentity.applicationVersion=DLSS_VIDEO_PLAYER_VERSION;sourceIdentity.quality=kCompleteSourcePolicy;
-                        const std::string sourceKey=BuildNeuralCacheKey(sourceIdentity);completion->sourceKey=sourceKey;
-                        LOG("Checking source cache key="<<sourceKey);
-                        if(const auto cached=cache.LookupSource(sourceKey)){
-                            const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
-                            if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                            const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                            const bool valid=cachedProbe.ok&&cached->manifest.encoder==kCompleteSourcePolicy&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::abs(cachedProbe.duration100ns/10000000.0-expectedDurationSeconds)<=1.0;
-                            if(valid){sourcePath=cached->payloadPath;LOG("Source cache hit: content hash and metadata verified; download skipped.");}
-                            else if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid source cache entry could not be quarantined.";goto finish;}
-                        }
-                        if(sourcePath.empty()){
-                            LOG("Source cache miss or invalid entry; acquiring source.");
-                            NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
-                            auto staging=cache.BeginSourceStaging(sourceKey);if(!staging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
-                            std::string acquiredKey=sourceKey;
-                            MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv",expectedDurationSeconds};MediaMaterializer materializer(moduleDirectory);auto materialized=materializer.Run(request,stop);
-                            if(!materialized.ok&&materialized.error!=MaterializeError::Cancelled&&!pageUrl.empty()&&!stop.stop_requested()){
-                                // Resolved googlevideo URLs expire while a video plays.
-                                // Re-resolve the page once and retry the download.
-                                LOG("Source acquisition failed; re-resolving the page URL once.");
-                                YouTubeResolver refresher;const ResolveResult refreshed=refresher.Resolve(pageUrl,sourceQuality,stop);
-                                const std::string refreshedIdentity=refreshed.error==ResolveError::None?StableYouTubeStreamIdentity(refreshed.mediaUrl,refreshed.audioUrl):std::string{};
-                                if(!refreshedIdentity.empty()){
-                                    // The identity names the selected formats, so a different one is
-                                    // a different source: stage it under its own key instead of
-                                    // promoting it as the first attempt's.
-                                    NeuralCacheIdentity retryIdentity=sourceIdentity;retryIdentity.sourceDigest="youtube="+videoId+"|quality="+std::to_string(static_cast<int>(sourceQuality))+"|"+refreshedIdentity;
-                                    const std::string retryKey=BuildNeuralCacheKey(retryIdentity);
-                                    if(retryKey!=acquiredKey){
-                                        LOG("Re-resolved source identity changed; staging under key="<<retryKey);
-                                        cache.MarkInvalid(*staging);auto retryStaging=cache.BeginSourceStaging(retryKey);
-                                        if(!retryStaging){completion->result.detail=L"Source cache staging could not be created.";goto finish;}
-                                        staging=std::move(retryStaging);acquiredKey=retryKey;completion->sourceKey=retryKey;
-                                    }
-                                    request.videoUrl=refreshed.mediaUrl;request.audioUrl=refreshed.audioUrl;request.output=*staging/L"source.mkv";
-                                    materialized=materializer.Run(request,stop);
-                                }
+                        std::string reuseKey=reuseSourceKey;
+                        if(reuseKey.empty()&&prefetch){
+                            // A background acquisition started when the user marked a
+                            // range. Wait for it instead of downloading the same
+                            // source a second time.
+                            if(!prefetch->finished.load(std::memory_order_acquire)){
+                                LOG("Waiting for the background source acquisition.");
+                                NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
+                                while(!prefetch->finished.load(std::memory_order_acquire)&&!stop.stop_requested())
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                             }
-                            if(!materialized.ok){cache.MarkInvalid(*staging);completion->result.cancelled=materialized.error==MaterializeError::Cancelled;completion->result.detail=materialized.detail;goto finish;}
-                            const ProbeResult sourceProbe=ProbeMedia(moduleDirectory,*staging/L"source.mkv",stop);
-                            NeuralCacheManifest sourceManifest{};sourceManifest.encoder=kCompleteSourcePolicy;sourceManifest.width=sourceProbe.width;sourceManifest.height=sourceProbe.height;sourceManifest.frameCount=sourceProbe.frameCount;sourceManifest.duration100ns=sourceProbe.duration100ns;
-                            if(!sourceProbe.ok||!cache.PromoteSource(acquiredKey,*staging,sourceManifest)){cache.MarkInvalid(*staging);completion->result.detail=L"The acquired source failed validation.";goto finish;}
-                            const auto promoted=cache.LookupSource(acquiredKey);if(!promoted){completion->result.detail=L"The acquired source was not reusable.";goto finish;}sourcePath=promoted->payloadPath;
+                            if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
+                            reuseKey=prefetch->key;
                         }
+                        if(!reuseKey.empty()){
+                            const auto cached=cache.LookupSource(reuseKey);
+                            if(!cached||cached->manifest.encoder!=kCompleteSourcePolicy){completion->cachedSourceUnavailable=true;goto finish;}
+                            sourcePath=cached->payloadPath;completion->sourceKey=reuseKey;
+                            LOG("Owned source cache verified; network resolution skipped.");
+                        }else{
+                            const SourceAcquisition acquired=AcquireYouTubeSource(cache,moduleDirectory,mediaUrl,audioUrl,pageUrl,sourceQuality,expectedDurationSeconds,
+                                [&]{NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);},stop);
+                            if(!acquired.key.empty())completion->sourceKey=acquired.key;
+                            if(acquired.path.empty()){completion->result.cancelled=acquired.cancelled;completion->result.detail=acquired.detail;goto finish;}
+                            sourcePath=acquired.path;
                         }
                     }else sourcePath=std::filesystem::absolute(std::filesystem::path(mediaUrl));
                     completion->sourcePath=sourcePath;
@@ -2499,6 +2624,7 @@ private:
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
         else if(RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
+        if(SourcePrefetchActive())text=T(L"status.preparing_source")+L" \u00b7 "+text;
         if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;return text;
     }
     // Short canonical of the settings a cache entry was rendered with; the
@@ -2775,6 +2901,12 @@ private:
     // The loaded original is the acquired local copy of a network source: its
     // identity stays YouTube, but decode, seek and audio are local-file work.
     bool m_cachedSourceFile=false;
+    // Background acquisition of a streamed source, started when a range is
+    // marked so a render does not wait for the whole download.
+    std::shared_ptr<SourcePrefetchState> m_prefetchState;
+    std::jthread m_prefetchWorker;
+    std::wstring m_prefetchPageUrl,m_prefetchTitle;
+    YouTubeSourceQuality m_prefetchQuality{YouTubeSourceQuality::Auto};
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
     UINT_PTR m_activityTimer=0;
