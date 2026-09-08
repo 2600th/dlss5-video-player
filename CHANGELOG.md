@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Open media without rendering it first. A prepared open acquires and identifies
+  the source, replays a validated cache entry when one exists, and otherwise
+  plays the original immediately; In/Out markers, previews, **Render marked
+  range** and **Render whole video** decide what is rendered. A 2:47 YouTube
+  source now reaches a playing frame in about 22 seconds instead of a full
+  whole-video render.
+- Play an acquired YouTube source from its local cache copy: seeking no longer
+  re-opens the network stream, and end of file ends playback instead of waiting
+  for stream data.
+
 - Verify the staged neural runtime against the embedded packaging lock and run a
   Feature 18 preflight in the isolated helper before every render; each cache
   entry now carries `receipt.json` (GPU, driver, ReShade/RenoDX/DLSS-NR versions,

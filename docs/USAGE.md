@@ -10,13 +10,18 @@ legacy language settings in the INI are ignored.
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
 select a trailer under **File > Game trailers**. With the experimental runtime
-available, the player acquires the source, checks its cache, renders on a miss,
-and validates the complete result before opening synchronized playback.
+available, the player acquires the source, identifies it and checks its cache.
+A validated cache entry opens straight away as synchronized playback; on a miss
+the **original starts playing** and nothing is rendered until you ask for it.
+Opening a video therefore costs a download, not a whole-video render: the status
+line leads with `Mark I/O, then Ctrl+R renders the marked range`.
+
+A YouTube source is played from the acquired local copy, so seeking, pausing and
+the timeline are frame-accurate and never re-open the network stream.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
-mouse-wheel volume are already supported. Cancellation can fall back to the
-original when a local source has been acquired; an incomplete render is never reused.
+mouse-wheel volume are already supported. An incomplete render is never reused.
 
 ### Preview first: markers, timecodes and ranges
 

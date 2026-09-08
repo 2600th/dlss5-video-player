@@ -7,13 +7,17 @@ Local file / validated YouTube download
   |                                  |
   |                                  +-> source audio -> playback clock
   v
-Source + runtime lock + preflight + settings cache lookup
+Source + runtime lock + settings cache lookup
   |
-  +-> miss: NeuralWorker.exe --neural-preflight (Feature 18 probe receipt)
-  |         NeuralWorker.exe --neural-worker
-  |           sequential decode from range start - preroll -> temporal guides
-  |           -> GPU guide expansion -> native DLAA carrier + RenoDX feature 18
-  |           -> capture -> encode -> independent validation -> receipt -> cache
+  +-> hit:  validated neural cache -> synchronized playback
+  |
+  +-> miss: the original plays now; the user chooses what to render
+  |         (one frame / 4 s clip / marked range / whole video)
+  |           NeuralWorker.exe --neural-preflight (Feature 18 probe receipt)
+  |           NeuralWorker.exe --neural-worker
+  |             sequential decode from range start - preroll -> temporal guides
+  |             -> GPU guide expansion -> native DLAA carrier + RenoDX feature 18
+  |             -> capture -> encode -> independent validation -> receipt -> cache
   v
 Original + validated neural cache -> synchronized decoded frame pairs
   |
@@ -21,6 +25,13 @@ Original + validated neural cache -> synchronized decoded frame pairs
   |
   +-> cached neural frames -> PNG/JPEG/GIF or MP4/MKV export
 ```
+
+Opening media never starts a whole-video render. A prepared open acquires and
+identifies the source, replays a validated cache entry when one exists, and
+otherwise stops before the Feature 18 probe so the original can play while the
+user marks a range. An acquired network source is played from its local cache
+copy: the identity stays YouTube for cache and history, while decode, seek and
+audio are ordinary local-file work.
 
 The main player has no ReShade proxy. The worker hosts the experimental runtime
 in `neural-runtime/`. Source/core builds without that runtime use the native

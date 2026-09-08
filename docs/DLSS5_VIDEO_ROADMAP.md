@@ -23,6 +23,11 @@ _Current as of September 8, 2026._
 > ablation in [Benchmark](BENCHMARK.md). Item 5's "validated segment
 > checkpoints" are realized as bounded from-zero relaunches plus exact-frame
 > retries; mid-job resume that preserves temporal state remains future work.
+>
+> Item 6 is now the **open default**: opening a local file or a YouTube URL
+> acquires and identifies the source, replays a validated cache entry when one
+> exists, and otherwise plays the original. Rendering is always an explicit
+> choice (frame, 4 s clip, marked range, whole video).
 
 ### 1. Runtime preflight and exact version locking
 

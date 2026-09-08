@@ -99,7 +99,8 @@ private:
             {L"error.renderer", L"DLSS is unavailable. Update the NVIDIA driver or use safe mode, then try again."},
             {L"error.frame", L"No video frame could be decoded. Try another file."},
             {L"error.seek", L"Could not seek. Try restarting playback."},
-            {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"}
+            {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
+            {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"}
         };
         return strings;
     }
