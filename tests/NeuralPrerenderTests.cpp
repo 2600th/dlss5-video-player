@@ -1,5 +1,6 @@
 #include "NeuralCache.h"
 #include "MediaPipeline.h"
+#include "NeuralSegmentIndex.h"
 #include "OfflineNeuralRenderer.h"
 #include "SynchronizedPlayback.h"
 #include "TestSupport.h"
@@ -17,6 +18,8 @@
 #include <future>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -1488,6 +1491,231 @@ void synchronized_playback_original_only_mode_remains_available_after_cancel_tes
     CHECK(!playback.SetView(ComparisonView::Neural));CHECK_EQ(ComparisonView::Original,playback.View());
 }
 
+constexpr int64_t kLiveFrame100ns=333333;
+
+// One stream per path: 30 fps frames rebased to the file's own zero with
+// authoritative frame numbers, exactly like a finalized segment file.
+struct LiveFrameLibrary {
+    struct Stream {
+        std::vector<VideoFrame> frames;
+        int opens{},closes{},seeks{},notReadyReads{};
+        bool failOpen{};
+    };
+    Stream& Add(const std::filesystem::path& path,uint64_t frameCount)
+    {
+        Stream& stream=streams[path];
+        stream.frames.clear();
+        for(uint64_t index=0;index<frameCount;++index){
+            VideoFrame frame;
+            frame.bgra={uint8_t(index),0,0,255};
+            frame.timestamp100ns=int64_t(index)*kLiveFrame100ns;
+            frame.frameNumber=index;
+            stream.frames.push_back(std::move(frame));
+        }
+        return stream;
+    }
+    std::map<std::filesystem::path,Stream> streams;
+};
+
+class LiveLibrarySource final : public ISynchronizedFrameSource {
+public:
+    explicit LiveLibrarySource(LiveFrameLibrary& library):library_(library){}
+    bool Open(const std::filesystem::path& path,std::stop_token stop) override
+    {
+        stream_=nullptr;
+        const auto found=library_.streams.find(path);
+        if(found==library_.streams.end()||found->second.failOpen||stop.stop_requested())return false;
+        stream_=&found->second;++stream_->opens;index_=0;return true;
+    }
+    void Close() override { if(stream_)++stream_->closes;stream_=nullptr; }
+    VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
+    {
+        if(stop.stop_requested())return VideoReadResult::Cancelled;
+        if(!stream_)return VideoReadResult::Error;
+        if(stream_->notReadyReads>0){--stream_->notReadyReads;return VideoReadResult::NotReady;}
+        if(index_>=stream_->frames.size())return VideoReadResult::EndOfStream;
+        frame=stream_->frames[index_++];return VideoReadResult::FrameReady;
+    }
+    bool SeekSeconds(double seconds) override
+    {
+        if(!stream_)return false;
+        ++stream_->seeks;
+        const int64_t target=static_cast<int64_t>(seconds*10000000.0);
+        index_=0;
+        while(index_<stream_->frames.size()&&stream_->frames[index_].timestamp100ns<target)++index_;
+        return true;
+    }
+    uint32_t Width() const override { return 4; }
+    uint32_t Height() const override { return 4; }
+    double FrameRate() const override { return 30.0; }
+    double DurationSeconds() const override
+    {
+        if(!stream_||stream_->frames.empty())return 0.0;
+        return double(stream_->frames.back().timestamp100ns+kLiveFrame100ns)*1e-7;
+    }
+private:
+    LiveFrameLibrary& library_;
+    LiveFrameLibrary::Stream* stream_{};
+    size_t index_{};
+};
+
+NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
+                                uint64_t frameCount)
+{
+    NeuralSegment segment;
+    segment.path=std::move(path);segment.index=index;segment.firstFrameNumber=firstFrame;
+    segment.firstTimestamp100ns=int64_t(firstFrame)*kLiveFrame100ns;
+    segment.end100ns=int64_t(firstFrame+frameCount)*kLiveFrame100ns;
+    segment.frameCount=frameCount;
+    return segment;
+}
+
+SynchronizedPlayback::SegmentSourceFactory LiveSegmentFactory(LiveFrameLibrary& library)
+{
+    return [&library]{return std::make_unique<LiveLibrarySource>(library);};
+}
+
+void neural_segment_index_orders_appends_and_locates_by_timestamp_test()
+{
+    NeuralSegmentIndex index;
+    CHECK(index.Empty());CHECK(!index.Finished());CHECK_EQ(size_t{0},index.Count());
+    CHECK_EQ(int64_t{0},index.Start100ns());CHECK_EQ(int64_t{0},index.Head100ns());
+    CHECK_EQ(uint64_t{0},index.TotalFrames());
+    CHECK(!index.At(0).has_value());CHECK(!index.Containing(0).has_value());
+
+    index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
+    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,3));
+    // A duplicate or late index would reorder an append-only timeline.
+    index.Append(LiveSegmentRecord(L"duplicate.mkv",1,18,3));
+    index.Append(LiveSegmentRecord(L"stale.mkv",0,0,3));
+    CHECK(!index.Empty());CHECK_EQ(size_t{2},index.Count());
+    CHECK_EQ(uint64_t{8},index.TotalFrames());
+    CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
+    CHECK_EQ(int64_t{18*kLiveFrame100ns},index.Head100ns());
+    CHECK(!index.At(2).has_value());
+    if(const auto second=index.At(1))
+        CHECK_EQ(std::filesystem::path(L"neural-00001.mkv"),second->path);
+
+    CHECK(!index.Containing(9*kLiveFrame100ns).has_value());
+    if(const auto first=index.Containing(10*kLiveFrame100ns))CHECK_EQ(uint64_t{0},first->index);
+    if(const auto beforeSeam=index.Containing(15*kLiveFrame100ns-1))CHECK_EQ(uint64_t{0},beforeSeam->index);
+    if(const auto afterSeam=index.Containing(15*kLiveFrame100ns))CHECK_EQ(uint64_t{1},afterSeam->index);
+    if(const auto tail=index.Containing(18*kLiveFrame100ns-1))CHECK_EQ(uint64_t{1},tail->index);
+    CHECK(!index.Containing(18*kLiveFrame100ns).has_value());
+
+    index.Finish();CHECK(index.Finished());
+    index.Restart();
+    CHECK(index.Empty());CHECK(!index.Finished());CHECK_EQ(size_t{0},index.Count());
+    CHECK_EQ(int64_t{0},index.Start100ns());CHECK_EQ(int64_t{0},index.Head100ns());
+    CHECK_EQ(uint64_t{0},index.TotalFrames());
+    CHECK(!index.Containing(10*kLiveFrame100ns).has_value());
+    // A relaunched job numbers its segments from zero again.
+    index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,20,4));
+    CHECK_EQ(size_t{1},index.Count());
+    CHECK_EQ(int64_t{20*kLiveFrame100ns},index.Start100ns());
+    CHECK_EQ(int64_t{24*kLiveFrame100ns},index.Head100ns());
+}
+
+void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);library.Add(L"neural-00000.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{10*kLiveFrame100ns,0},{}));
+    CHECK(playback.Live());CHECK(playback.NeuralAvailable());
+    CHECK_EQ(int64_t{0},playback.LiveHead100ns());
+    // Nothing is rendered yet: playback stalls instead of ending.
+    CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
+    CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
+    CHECK(playback.CurrentPair()==nullptr);
+
+    segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
+    CHECK_EQ(int64_t{15*kLiveFrame100ns},playback.LiveHead100ns());
+    for(uint64_t expected=10;expected<15;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+        CHECK_EQ(int64_t(expected)*kLiveFrame100ns,pair->timestamp100ns);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+        CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);
+        CHECK(!pair->neural.bgra.empty());
+    }
+    // The playhead caught the head again; the job still owes frames.
+    CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
+    CHECK(playback.SetView(ComparisonView::Neural));
+    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].opens);
+    segments->Finish();
+    CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+}
+
+void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
+    segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,5));
+    segments->Finish();
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{10*kLiveFrame100ns,0},{}));
+    std::vector<uint64_t> played;
+    for(int index=0;index<10;++index){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        played.push_back(pair->frameNumber);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+        CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);
+        // The next file is opened while the current one still serves frames.
+        if(index==0)CHECK_EQ(1,library.streams[L"neural-00001.mkv"].opens);
+    }
+    std::vector<uint64_t> expected;
+    for(uint64_t number=10;number<20;++number)expected.push_back(number);
+    CHECK_EQ(expected,played);
+    // The seam cost no reopen and no decode stall.
+    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].opens);
+    CHECK_EQ(1,library.streams[L"neural-00001.mkv"].opens);
+    CHECK_EQ(0,library.streams[L"neural-00001.mkv"].seeks);
+    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].closes);
+    // The original runs on past the last finalized segment.
+    CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+}
+
+void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
+    segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,5));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{10*kLiveFrame100ns,0},{}));
+    CHECK(playback.SeekSeconds(double(17*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* pair=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{17},pair->frameNumber);
+        CHECK_EQ(uint64_t{17},pair->neural.frameNumber);
+        CHECK_EQ(int64_t{17*kLiveFrame100ns},pair->neural.timestamp100ns);
+    }
+    // Past the render head: refused without unloading the session.
+    CHECK(!playback.SeekSeconds(double(25*kLiveFrame100ns)*1e-7,{}));
+    CHECK(playback.Live());CHECK(playback.NeuralAvailable());
+    if(const auto* held=playback.CurrentPair())CHECK_EQ(uint64_t{17},held->frameNumber);
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    if(const auto* next=playback.CurrentPair())CHECK_EQ(uint64_t{18},next->frameNumber);
+    // Seeking back reopens an earlier segment and seeks inside the file.
+    CHECK(playback.SeekSeconds(double(11*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* back=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{11},back->frameNumber);
+        CHECK_EQ(uint64_t{11},back->neural.frameNumber);
+    }
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    if(const auto* forward=playback.CurrentPair())CHECK_EQ(uint64_t{12},forward->frameNumber);
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -1620,6 +1848,10 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_rejects_incompatible_cached_stream_metadata_test();
     synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
+    neural_segment_index_orders_appends_and_locates_by_timestamp_test();
+    live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
+    live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
+    live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;

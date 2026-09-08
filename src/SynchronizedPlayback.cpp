@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -26,6 +27,8 @@ public:
 class TestFrameSource final : public FrameSource {
 public:
     explicit TestFrameSource(ISynchronizedFrameSource& source) : source_(source) {}
+    explicit TestFrameSource(std::unique_ptr<ISynchronizedFrameSource> source)
+        : owned_(std::move(source)),source_(*owned_) {}
     bool Open(const std::filesystem::path& path,std::stop_token stop)override{return source_.Open(path,stop);}
     void Close()override{source_.Close();}
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{return source_.Read(frame,stop);}
@@ -35,6 +38,7 @@ public:
     double FrameRate()const override{return source_.FrameRate();}
     double DurationSeconds()const override{return source_.DurationSeconds();}
 private:
+    std::unique_ptr<ISynchronizedFrameSource> owned_;
     ISynchronizedFrameSource& source_;
 };
 #else
@@ -79,6 +83,8 @@ struct SynchronizedPlayback::Impl {
         VideoFrame frame;
         bool numbered{};
     };
+    // Outcome of comparing the two pending members.
+    enum class Match { Pair, Mismatch, Skew };
     std::unique_ptr<FrameSource> original;
     std::unique_ptr<FrameSource> neural;
     std::optional<Pending> pendingOriginal;
@@ -93,11 +99,34 @@ struct SynchronizedPlayback::Impl {
     uint64_t rangeOffsetFrames{};
     // First frame index outside the range; 0 when the range is open-ended.
     uint64_t rangeEndFrames{};
+    // Live mode: the neural member is a growing list of finalized files instead
+    // of one whole render. One decoder serves the segment under the playhead
+    // while a second one is opened ahead of the next boundary.
+    std::function<std::unique_ptr<FrameSource>()> makeSegmentSource;
+    std::shared_ptr<const NeuralSegmentIndex> segments;
+    std::unique_ptr<FrameSource> segmentSource;
+    std::unique_ptr<FrameSource> prefetchSource;
+    NeuralSegment segment{};
+    NeuralSegment prefetchSegment{};
+    std::optional<Pending> prefetchPending;
+    bool live{};
+    // Set when the open segment file ended before its declared window.
+    bool segmentExhausted{};
+    int64_t prefetchLead100ns{10000000};
 
     void ResetPublished()
     {
         pendingOriginal.reset();pendingNeural.reset();current.reset();
         view=ComparisonView::Original;paused=false;stepRequested=false;
+    }
+
+    void CloseSegmentSources()
+    {
+        if(segmentSource)segmentSource->Close();
+        if(prefetchSource)prefetchSource->Close();
+        segmentSource.reset();prefetchSource.reset();
+        segment=NeuralSegment{};prefetchSegment=NeuralSegment{};
+        prefetchPending.reset();segmentExhausted=false;
     }
 
     // End of the playable window in seconds on the original timeline.
@@ -118,20 +147,26 @@ struct SynchronizedPlayback::Impl {
         return pending.frame.timestamp100ns>=range.end100ns-tolerance100ns/2;
     }
 
-    SynchronizedReadResult ReadOne(FrameSource& source,std::optional<Pending>& pending,
-                                   std::stop_token stop,bool neuralMember)
+    SynchronizedReadResult ReadOneShifted(FrameSource& source,std::optional<Pending>& pending,
+                                          std::stop_token stop,int64_t timestampShift100ns,
+                                          uint64_t frameShift)
     {
         if(pending)return SynchronizedReadResult::PairReady;
         VideoFrame frame;const VideoReadResult read=source.Read(frame,stop);
         if(read!=VideoReadResult::FrameReady)return ConvertRead(read);
         Pending next{std::move(frame),false};
         next.numbered=next.frame.frameNumber!=0||next.frame.timestamp100ns==0;
-        if(neuralMember){
-            // The neural render starts at its own zero; place it on the original timeline.
-            next.frame.timestamp100ns+=range.start100ns;
-            next.frame.frameNumber+=rangeOffsetFrames;
-        }
+        next.frame.timestamp100ns+=timestampShift100ns;
+        next.frame.frameNumber+=frameShift;
         pending=std::move(next);return SynchronizedReadResult::PairReady;
+    }
+
+    SynchronizedReadResult ReadOne(FrameSource& source,std::optional<Pending>& pending,
+                                   std::stop_token stop,bool neuralMember)
+    {
+        // The neural render starts at its own zero; place it on the original timeline.
+        if(!neuralMember)return ReadOneShifted(source,pending,stop,0,0);
+        return ReadOneShifted(source,pending,stop,range.start100ns,rangeOffsetFrames);
     }
 
     SynchronizedReadResult CommitPair(SynchronizedFramePair& pair)
@@ -140,6 +175,24 @@ struct SynchronizedPlayback::Impl {
         pair.neural=pendingNeural?std::move(pendingNeural->frame):VideoFrame{};
         pair.timestamp100ns=pair.original.timestamp100ns;pair.frameNumber=pair.original.frameNumber;
         pendingOriginal.reset();pendingNeural.reset();return SynchronizedReadResult::PairReady;
+    }
+
+    // Both members are pending: decide whether they are the same source frame.
+    // A mismatch drops the earlier member so the next read can resynchronize.
+    Match MatchPending()
+    {
+        if(pendingOriginal->numbered&&pendingNeural->numbered){
+            const uint64_t originalNumber=pendingOriginal->frame.frameNumber;
+            const uint64_t neuralNumber=pendingNeural->frame.frameNumber;
+            if(originalNumber==neuralNumber)return Match::Pair;
+            // Never present two different source frames as one pair.
+            if(originalNumber<neuralNumber)pendingOriginal.reset();else pendingNeural.reset();
+            return Match::Mismatch;
+        }
+        const int64_t difference=pendingOriginal->frame.timestamp100ns-pendingNeural->frame.timestamp100ns;
+        if(std::llabs(difference)<=tolerance100ns)return Match::Pair;
+        if(difference<0)pendingOriginal.reset();else pendingNeural.reset();
+        return Match::Skew;
     }
 
     SynchronizedReadResult BuildPair(SynchronizedFramePair& pair,std::stop_token stop)
@@ -166,18 +219,148 @@ struct SynchronizedPlayback::Impl {
                 if(neuralRead==SynchronizedReadResult::EndOfStream)return SynchronizedReadResult::OutOfSync;
                 return neuralRead;
             }
-            if(pendingOriginal->numbered&&pendingNeural->numbered){
-                const uint64_t originalNumber=pendingOriginal->frame.frameNumber;
-                const uint64_t neuralNumber=pendingNeural->frame.frameNumber;
-                if(originalNumber==neuralNumber)return CommitPair(pair);
-                // Never present two different source frames as one pair. Drop the
-                // earlier member so the next read can resynchronize, and report it.
-                if(originalNumber<neuralNumber)pendingOriginal.reset();else pendingNeural.reset();
-                return SynchronizedReadResult::OutOfSync;
+            switch(MatchPending()){
+                case Match::Pair:return CommitPair(pair);
+                case Match::Mismatch:return SynchronizedReadResult::OutOfSync;
+                case Match::Skew:break;
             }
-            const int64_t difference=pendingOriginal->frame.timestamp100ns-pendingNeural->frame.timestamp100ns;
-            if(std::llabs(difference)<=tolerance100ns)return CommitPair(pair);
-            if(difference<0)pendingOriginal.reset();else pendingNeural.reset();
+        }
+        return SynchronizedReadResult::OutOfSync;
+    }
+
+    // Indices start at zero and strictly increase, so a segment never sits past
+    // its own index; the direct hit is the rule and the scan the exception.
+    std::optional<NeuralSegment> SegmentByIndex(uint64_t index)const
+    {
+        const size_t count=segments->Count();
+        if(index>=count)return std::nullopt;
+        if(auto direct=segments->At(static_cast<size_t>(index));direct&&direct->index==index)return direct;
+        for(size_t position=0;position<count;++position)
+            if(auto candidate=segments->At(position);candidate&&candidate->index==index)return candidate;
+        return std::nullopt;
+    }
+
+    bool SegmentCovers(const NeuralSegment& candidate,const Pending& pending)const
+    {
+        // Frame numbers are exact on the CFR grid; timestamps of a seeked source
+        // are not, and a boundary is exactly where that fuzz would mispick.
+        if(pending.numbered&&candidate.frameCount)
+            return pending.frame.frameNumber>=candidate.firstFrameNumber&&
+                   pending.frame.frameNumber<candidate.firstFrameNumber+candidate.frameCount;
+        return pending.frame.timestamp100ns>=candidate.firstTimestamp100ns&&
+               pending.frame.timestamp100ns<candidate.end100ns;
+    }
+
+    // No finalized segment covers the playhead: waiting, ending or broken.
+    SynchronizedReadResult ClassifyUncovered(int64_t timestamp100ns)const
+    {
+        const bool finished=segments->Finished();
+        if(timestamp100ns>=segments->Head100ns())
+            return finished?SynchronizedReadResult::EndOfStream:SynchronizedReadResult::WaitingForRender;
+        // Behind the render start: only a relaunch from further back covers it.
+        if(timestamp100ns<segments->Start100ns())
+            return finished?SynchronizedReadResult::OutOfSync:SynchronizedReadResult::WaitingForRender;
+        // A hole between two finalized segments is a producer contract break.
+        return SynchronizedReadResult::OutOfSync;
+    }
+
+    SynchronizedReadResult AdoptSegment(NeuralSegment wanted,int64_t timestamp100ns,std::stop_token stop)
+    {
+        // Only a disagreement between number and timestamp coverage can ask for
+        // the file already open; serving it beats reopening it every frame.
+        if(segmentSource&&segment.index==wanted.index)return SynchronizedReadResult::PairReady;
+        // The boundary is free when prefetch already opened and warmed the file.
+        if(prefetchSource&&prefetchSegment.index==wanted.index){
+            if(segmentSource)segmentSource->Close();
+            segmentSource=std::move(prefetchSource);segment=std::move(prefetchSegment);
+            pendingNeural=std::move(prefetchPending);prefetchPending.reset();
+            prefetchSegment=NeuralSegment{};segmentExhausted=false;
+            return SynchronizedReadResult::PairReady;
+        }
+        auto source=makeSegmentSource?makeSegmentSource():nullptr;
+        if(!source)return SynchronizedReadResult::Error;
+        if(!source->Open(wanted.path,stop))
+            return stop.stop_requested()?SynchronizedReadResult::Cancelled:SynchronizedReadResult::Error;
+        if(source->Width()!=original->Width()||source->Height()!=original->Height()){
+            source->Close();return SynchronizedReadResult::Error;
+        }
+        // Segment files start at their own zero, so entering one mid-way (a seek)
+        // seeks the file, not the source timeline.
+        const int64_t local=timestamp100ns-wanted.firstTimestamp100ns;
+        if(local>=tolerance100ns/2&&!source->SeekSeconds(double(local)*1e-7)){
+            source->Close();return SynchronizedReadResult::Error;
+        }
+        if(segmentSource)segmentSource->Close();
+        segmentSource=std::move(source);segment=std::move(wanted);
+        pendingNeural.reset();segmentExhausted=false;
+        return SynchronizedReadResult::PairReady;
+    }
+
+    // Makes segmentSource the decoder that serves the pending original frame.
+    SynchronizedReadResult SelectSegment(int64_t timestamp100ns,std::stop_token stop)
+    {
+        if(segmentSource&&!segmentExhausted&&SegmentCovers(segment,*pendingOriginal))
+            return SynchronizedReadResult::PairReady;
+        if(segmentSource&&segmentExhausted){
+            auto following=SegmentByIndex(segment.index+1);
+            if(!following)
+                return segments->Finished()?SynchronizedReadResult::EndOfStream
+                                           :SynchronizedReadResult::WaitingForRender;
+            return AdoptSegment(std::move(*following),timestamp100ns,stop);
+        }
+        auto covering=segments->Containing(timestamp100ns);
+        if(!covering)return ClassifyUncovered(timestamp100ns);
+        return AdoptSegment(std::move(*covering),timestamp100ns,stop);
+    }
+
+    // A boundary costs a process start plus a first decode, so the next file is
+    // opened and warmed once the playhead enters the lead window of the current
+    // segment. Failures are silent: the next committed frame tries again.
+    void PrefetchNextSegment(int64_t timestamp100ns,std::stop_token stop)
+    {
+        if(!segmentSource||stop.stop_requested())return;
+        if(!prefetchSource){
+            if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
+            auto following=SegmentByIndex(segment.index+1);
+            if(!following)return;
+            auto source=makeSegmentSource?makeSegmentSource():nullptr;
+            if(!source||!source->Open(following->path,stop))return;
+            prefetchSource=std::move(source);prefetchSegment=std::move(*following);
+        }
+        if(!prefetchPending)
+            ReadOneShifted(*prefetchSource,prefetchPending,stop,prefetchSegment.firstTimestamp100ns,
+                           prefetchSegment.firstFrameNumber);
+    }
+
+    SynchronizedReadResult BuildLivePair(SynchronizedFramePair& pair,std::stop_token stop)
+    {
+        if(!original||!segments)return SynchronizedReadResult::Error;
+        for(size_t guard=0;guard<4096;++guard){
+            const auto originalRead=ReadOne(*original,pendingOriginal,stop,false);
+            if(originalRead!=SynchronizedReadResult::PairReady)return originalRead;
+            if(range.end100ns>0&&PastRangeEnd(*pendingOriginal)){
+                pendingOriginal.reset();return SynchronizedReadResult::EndOfStream;
+            }
+            const int64_t timestamp100ns=pendingOriginal->frame.timestamp100ns;
+            const auto selected=SelectSegment(timestamp100ns,stop);
+            if(selected!=SynchronizedReadResult::PairReady)return selected;
+            const auto neuralRead=ReadOneShifted(*segmentSource,pendingNeural,stop,
+                                                 segment.firstTimestamp100ns,segment.firstFrameNumber);
+            if(neuralRead==SynchronizedReadResult::EndOfStream){
+                // The file ended inside its declared window; continue in the
+                // next segment rather than reporting the source as broken.
+                segmentExhausted=true;continue;
+            }
+            if(neuralRead!=SynchronizedReadResult::PairReady)return neuralRead;
+            switch(MatchPending()){
+                case Match::Pair:{
+                    const auto committed=CommitPair(pair);
+                    PrefetchNextSegment(pair.timestamp100ns,stop);
+                    return committed;
+                }
+                case Match::Mismatch:return SynchronizedReadResult::OutOfSync;
+                case Match::Skew:break;
+            }
         }
         return SynchronizedReadResult::OutOfSync;
     }
@@ -187,6 +370,7 @@ SynchronizedPlayback::SynchronizedPlayback() : impl_(std::make_unique<Impl>())
 {
 #ifndef SYNCHRONIZED_PLAYBACK_TESTING
     impl_->original=std::make_unique<DecoderFrameSource>();
+    impl_->makeSegmentSource=[]{return std::unique_ptr<FrameSource>(std::make_unique<DecoderFrameSource>());};
 #endif
 }
 
@@ -197,6 +381,18 @@ SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
 {
     impl_->original=std::make_unique<TestFrameSource>(original);
     impl_->neural=std::make_unique<TestFrameSource>(neural);
+}
+
+SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
+                                             SegmentSourceFactory segments)
+    : impl_(std::make_unique<Impl>())
+{
+    impl_->original=std::make_unique<TestFrameSource>(original);
+    impl_->makeSegmentSource=[factory=std::move(segments)]()->std::unique_ptr<FrameSource>{
+        auto source=factory?factory():nullptr;
+        if(!source)return nullptr;
+        return std::make_unique<TestFrameSource>(std::move(source));
+    };
 }
 #endif
 
@@ -256,12 +452,47 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
     impl_->ResetPublished();impl_->opened=true;return true;
 }
 
+bool SynchronizedPlayback::OpenLive(const std::filesystem::path& originalPath,
+                                    std::shared_ptr<const NeuralSegmentIndex> segments,
+                                    SynchronizedRange range,std::stop_token stop)
+{
+    Close();
+    if(!impl_->original||!impl_->makeSegmentSource||originalPath.empty()||!segments)return false;
+    if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
+    if(!impl_->original->Open(originalPath,stop))return false;
+    const double originalFps=impl_->original->FrameRate();
+    if(!impl_->original->Width()||!impl_->original->Height()||
+       !std::isfinite(originalFps)||originalFps<=0.0){
+        impl_->original->Close();return false;
+    }
+    const double startSeconds=double(range.start100ns)*1e-7;
+    const double originalDuration=impl_->original->DurationSeconds();
+    if(range.end100ns>0&&double(range.end100ns)*1e-7>originalDuration+1.0/originalFps+1e-6){
+        impl_->original->Close();return false;
+    }
+    if(range.start100ns>0&&(startSeconds>=originalDuration||!impl_->original->SeekSeconds(startSeconds))){
+        impl_->original->Close();return false;
+    }
+    // Nothing to validate against: the render is still producing its files.
+    impl_->neural.reset();
+    impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/originalFps));
+    impl_->range=range;
+    impl_->rangeOffsetFrames=static_cast<uint64_t>(std::llround(startSeconds*originalFps));
+    impl_->rangeEndFrames=range.end100ns>0
+        ? static_cast<uint64_t>(std::llround(double(range.end100ns)*1e-7*originalFps)) : 0;
+    // One second of lead is more than an ffmpeg start plus a first decode.
+    impl_->prefetchLead100ns=std::max<int64_t>(10000000,2*impl_->tolerance100ns);
+    impl_->segments=std::move(segments);impl_->live=true;
+    impl_->ResetPublished();impl_->opened=true;return true;
+}
+
 SynchronizedRange SynchronizedPlayback::Range()const{return impl_->range;}
 
 void SynchronizedPlayback::Close()
 {
     if(!impl_)return;
     if(impl_->original)impl_->original->Close();if(impl_->neural)impl_->neural->Close();
+    impl_->CloseSegmentSources();impl_->segments.reset();impl_->live=false;
     impl_->opened=false;impl_->ResetPublished();
 }
 
@@ -269,15 +500,19 @@ SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token s
 {
     if(!impl_->opened)return SynchronizedReadResult::Error;
     if(impl_->paused&&!impl_->stepRequested)return SynchronizedReadResult::NotReady;
-    SynchronizedFramePair pair;const auto result=impl_->BuildPair(pair,stop);
+    SynchronizedFramePair pair;
+    const auto result=impl_->live?impl_->BuildLivePair(pair,stop):impl_->BuildPair(pair,stop);
     if(result==SynchronizedReadResult::PairReady)impl_->current=std::move(pair);
-    if(impl_->stepRequested&&result!=SynchronizedReadResult::NotReady)impl_->stepRequested=false;
+    // WaitingForRender produced no frame, so a requested step is still pending.
+    if(impl_->stepRequested&&result!=SynchronizedReadResult::NotReady&&
+       result!=SynchronizedReadResult::WaitingForRender)impl_->stepRequested=false;
     return result;
 }
 
 bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
 {
     if(!impl_->opened||!std::isfinite(seconds)||seconds<0.0||stop.stop_requested())return false;
+    if(impl_->live)return SeekLive(seconds,stop);
     // The timeline endpoint is after the last frame, not a decodable timestamp.
     const double start=double(impl_->range.start100ns)*1e-7;
     const double duration=impl_->EndSeconds();
@@ -314,10 +549,37 @@ bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
     Close();return false;
 }
 
+// Live mode: only a finalized segment is seekable. An uncovered target is not a
+// failure of the session, so nothing is closed and the caller decides.
+bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
+{
+    const double start=double(impl_->range.start100ns)*1e-7;
+    if(seconds<start)seconds=start;
+    const int64_t target=static_cast<int64_t>(std::llround(seconds*10000000.0));
+    if(impl_->range.end100ns>0&&target>=impl_->range.end100ns)return false;
+    if(!impl_->segments||!impl_->segments->Containing(target))return false;
+    if(!impl_->original->SeekSeconds(seconds))return false;
+    impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
+    // Segment decoders are positioned for the old playhead; pairing is driven by
+    // the original's pts, so the next read reopens whatever now covers it.
+    impl_->CloseSegmentSources();
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    SynchronizedFramePair candidate;
+    for(;;){
+        const auto result=impl_->BuildLivePair(candidate,stop);
+        if(result==SynchronizedReadResult::PairReady){
+            impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
+        }
+        if(result!=SynchronizedReadResult::NotReady)return false;
+        if(stop.stop_requested()||std::chrono::steady_clock::now()>=deadline)return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+}
+
 bool SynchronizedPlayback::SetView(ComparisonView view)
 {
     if(!impl_->opened)return false;
-    if(view==ComparisonView::Neural&&(!impl_->neural||!impl_->current))return false;
+    if(view==ComparisonView::Neural&&((!impl_->neural&&!impl_->live)||!impl_->current))return false;
     impl_->view=view;return true;
 }
 
@@ -332,4 +594,8 @@ const SynchronizedFramePair* SynchronizedPlayback::CurrentPair()const
 void SynchronizedPlayback::SetPaused(bool paused){impl_->paused=paused;if(!paused)impl_->stepRequested=false;}
 bool SynchronizedPlayback::Paused()const{return impl_->paused;}
 bool SynchronizedPlayback::Step(){if(!impl_->opened||!impl_->paused)return false;impl_->stepRequested=true;return true;}
-bool SynchronizedPlayback::NeuralAvailable()const{return impl_->opened&&impl_->neural!=nullptr;}
+bool SynchronizedPlayback::NeuralAvailable()const
+{return impl_->opened&&(impl_->neural!=nullptr||(impl_->live&&impl_->segments!=nullptr));}
+bool SynchronizedPlayback::Live()const{return impl_->opened&&impl_->live;}
+int64_t SynchronizedPlayback::LiveHead100ns()const
+{return impl_->live&&impl_->segments?impl_->segments->Head100ns():0;}
