@@ -2228,6 +2228,63 @@ void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
     CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
 }
 
+void neural_pause_suspends_rendering_and_resumes_without_advancing_test()
+{
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Ready));
+    CHECK_EQ(NeuralPlaybackState::Paused,lifecycle.state);
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+}
+
+void neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test()
+{
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Ready));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::RetryExhausted));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+    lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Failed));
+    lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Idle));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::RetryExhausted));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Recovering));
+}
+
+void neural_failure_kind_selects_the_lifecycle_state_test()
+{
+    CHECK_EQ(NeuralPlaybackState::RetryExhausted,StateForFailure(NeuralRenderFailure::RetryExhausted));
+    CHECK_EQ(NeuralPlaybackState::OriginalOnly,StateForFailure(NeuralRenderFailure::Cancelled));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::DeviceRemoved));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::Preflight));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::WorkerCrashed));
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(StateForFailure(NeuralRenderFailure::RetryExhausted)));
+    CHECK_EQ(std::wstring(L"RetryExhausted"),std::wstring(NeuralPlaybackStateName(lifecycle.state)));
+    CHECK_EQ(std::wstring(L"Paused"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Paused)));
+    CHECK_EQ(std::wstring(L"Recovering"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Recovering)));
+}
+
 void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test()
 {
     CHECK_EQ(ComparisonView::Neural,ToggleComparisonView(ComparisonView::Original));
@@ -5261,6 +5318,9 @@ int wmain(int argc, wchar_t* argv[])
     neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test();
     neural_completion_publishes_only_after_probe_and_manifest_validation_test();
     neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
+    neural_pause_suspends_rendering_and_resumes_without_advancing_test();
+    neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();
+    neural_failure_kind_selects_the_lifecycle_state_test();
     dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
     source_change_cancels_and_joins_the_owned_job_before_replacement_test();
     youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();

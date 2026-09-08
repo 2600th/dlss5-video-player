@@ -4,7 +4,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -102,6 +106,126 @@ std::set<std::filesystem::path> Files(const std::filesystem::path& directory)
     std::set<std::filesystem::path> files;
     for (const auto& entry : std::filesystem::directory_iterator(directory)) files.insert(entry.path());
     return files;
+}
+
+size_t IndexOf(const std::vector<std::wstring>& arguments, std::wstring_view value, size_t from = 0)
+{
+    for (size_t i = from; i < arguments.size(); ++i)
+        if (arguments[i] == value) return i;
+    return arguments.size();
+}
+
+void ExportArgumentTests()
+{
+    // The seek belongs to the source input: it must follow the neural video's
+    // -i and precede the source's, so the rendered range is never seeked. The
+    // zero start and duration are output options placed after every input.
+    const std::filesystem::path neural = L"C:/cache/neural.mkv", source = L"C:/media/source.mkv", staging = L"C:/out/.stage.tmp";
+    for (const auto* extension : {L"clip.mkv", L"clip.mp4"}) {
+        const auto whole = BuildCachedExportArguments({neural, source, extension}, staging, false);
+        CHECK_EQ(whole.size(), IndexOf(whole, L"-ss"));
+        CHECK_EQ(whole.size(), IndexOf(whole, L"-t"));
+        CHECK_EQ(staging.wstring(), whole.back());
+
+        const auto ranged = BuildCachedExportArguments({neural, source, extension, 12.5, 3.25}, staging, false);
+        const size_t neuralInput = IndexOf(ranged, L"-i");
+        const size_t seek = IndexOf(ranged, L"-ss");
+        const size_t sourceInput = IndexOf(ranged, L"-i", neuralInput + 1);
+        const size_t outputStart = IndexOf(ranged, L"-ss", seek + 1);
+        const size_t duration = IndexOf(ranged, L"-t");
+        CHECK(neuralInput < ranged.size() && sourceInput < ranged.size());
+        CHECK(seek < ranged.size() && outputStart < ranged.size() && duration < ranged.size());
+        CHECK_EQ(neural.wstring(), ranged[neuralInput + 1]);
+        CHECK_EQ(source.wstring(), ranged[sourceInput + 1]);
+        CHECK(neuralInput < seek);
+        CHECK(seek < sourceInput);
+        CHECK(sourceInput < outputStart);
+        CHECK(outputStart < duration);
+        CHECK_EQ(std::wstring(L"12.5"), ranged[seek + 1]);
+        CHECK_EQ(std::wstring(L"0"), ranged[outputStart + 1]);
+        CHECK_EQ(std::wstring(L"3.25"), ranged[duration + 1]);
+        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-i", sourceInput + 1));
+        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-ss", outputStart + 1));
+        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-t", duration + 1));
+        // Removing the trim yields exactly the untrimmed command.
+        auto stripped = ranged;
+        stripped.erase(stripped.begin() + static_cast<std::ptrdiff_t>(outputStart), stripped.begin() + static_cast<std::ptrdiff_t>(outputStart) + 4);
+        stripped.erase(stripped.begin() + static_cast<std::ptrdiff_t>(seek), stripped.begin() + static_cast<std::ptrdiff_t>(seek) + 2);
+        CHECK(stripped == whole);
+
+        // A start without a duration runs to the source end.
+        const auto openEnded = BuildCachedExportArguments({neural, source, extension, 2.0, 0.0}, staging, false);
+        CHECK(IndexOf(openEnded, L"-ss") < IndexOf(openEnded, L"-i", IndexOf(openEnded, L"-i") + 1));
+        CHECK_EQ(openEnded.size(), IndexOf(openEnded, L"-t"));
+        // A duration from the very start needs no seek.
+        const auto head = BuildCachedExportArguments({neural, source, extension, 0.0, 1.5}, staging, false);
+        CHECK_EQ(head.size(), IndexOf(head, L"-ss"));
+        CHECK(IndexOf(head, L"-i", IndexOf(head, L"-i") + 1) < IndexOf(head, L"-t"));
+        CHECK_EQ(std::wstring(L"1.5"), head[IndexOf(head, L"-t") + 1]);
+    }
+    // GIF and still exports read the neural video only; nothing to trim.
+    for (const auto* extension : {L"clip.gif", L"clip.png", L"clip.jpg"}) {
+        const auto ranged = BuildCachedExportArguments({neural, source, extension, 12.5, 3.25}, staging, false);
+        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-ss"));
+        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-t"));
+        CHECK_EQ(std::ptrdiff_t{1}, std::count(ranged.begin(), ranged.end(), L"-i"));
+        CHECK_EQ(ranged.size(), IndexOf(ranged, source.wstring()));
+    }
+}
+
+void RangeExportTests(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto source = fixture.path / L"source.mkv";
+    const auto cached = fixture.path / L"cached.mkv";
+    const auto log = fixture.path / L"tool.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    // A 4 s source whose audio is a tone only inside [1 s, 3 s); the neural
+    // render covers exactly that range. Any pre-roll or shift shows up as
+    // silence at an edge of the exported audio or a non-zero video start.
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"color=red:s=64x48:r=5:d=4",
+        L"-f", L"lavfi", L"-i", L"aevalsrc=0.5*sin(440*2*PI*t)*gte(t\\,1)*lt(t\\,3):s=44100:d=4",
+        L"-map", L"0:v", L"-map", L"1:a", L"-c:v", L"ffv1", L"-c:a", L"pcm_s16le", source.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=5:d=2", L"-c:v", L"ffv1", cached.wstring()}, log));
+    if (!std::filesystem::exists(source) || !std::filesystem::exists(cached)) return;
+    CachedVideoExporter exporter(helpers);
+    const auto peak = [](std::string_view pcm) {
+        int maximum = 0;
+        for (size_t i = 0; i + 1 < pcm.size(); i += 2)
+            maximum = std::max(maximum, std::abs(static_cast<int16_t>(static_cast<uint8_t>(pcm[i]) | (static_cast<uint8_t>(pcm[i + 1]) << 8))));
+        return maximum;
+    };
+    for (const auto* name : {L"range.mkv", L"range.mp4"}) {
+        const auto output = fixture.path / name;
+        const auto result = exporter.Run({cached, source, output, 1.0, 2.0}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        const auto video = Probe(helpers, output, log, {L"-count_frames", L"-select_streams", L"v:0",
+            L"-show_entries", L"stream=start_time,nb_read_frames", L"-of", L"default=noprint_wrappers=1"});
+        CHECK(video.find("nb_read_frames=10") != std::string::npos);
+        CHECK(video.find("start_time=0.000000") != std::string::npos);
+        const auto pcm = fixture.path / L"exported.pcm";
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", output.wstring(), L"-map", L"0:a:0",
+            L"-ac", L"1", L"-ar", L"44100", L"-f", L"s16le", pcm.wstring()}, log));
+        const auto samples = Read(pcm);
+        std::filesystem::remove(pcm);
+        constexpr size_t bytesPerSecond = 44100 * 2, window = bytesPerSecond / 10;
+        CHECK(samples.size() > bytesPerSecond * 19 / 10 && samples.size() < bytesPerSecond * 21 / 10);
+        if (samples.size() < 2 * window) continue;
+        CHECK(peak(std::string_view(samples).substr(0, window)) > 8000);
+        CHECK(peak(std::string_view(samples).substr(samples.size() - window)) > 8000);
+    }
+    const auto files = Files(fixture.path);
+    for (const auto [start, duration] : {std::pair{-1.0, 2.0}, std::pair{1.0, -2.0},
+             std::pair{std::nan(""), 2.0}, std::pair{1.0, std::numeric_limits<double>::infinity()}}) {
+        const auto rejected = exporter.Run({cached, source, fixture.path / L"rejected.mkv", start, duration}, {});
+        CHECK(!rejected.ok);
+        CHECK_EQ(MaterializeError::InvalidRequest, rejected.error);
+    }
+    CHECK_EQ(files, Files(fixture.path));
 }
 
 void MaterializationPreservesFullVideoTest(const std::filesystem::path& helpers)
@@ -469,7 +593,9 @@ int wmain(int argc, wchar_t** argv)
     }
     MaterializationPreservesFullVideoTest(helpers);
     MaterializationRejectsShortVideoWithLongAudioTest(helpers);
+    ExportArgumentTests();
     ExportTests(helpers);
+    RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";

@@ -445,25 +445,49 @@ ParsedUpdate UpdateExactIniKey(
     return {false, {}, std::move(content)};
 }
 
-ParsedUpdate ParseAndUpdateNeural(std::string_view ini, bool enable)
+constexpr std::pair<std::string_view, std::string_view> kManagedNeuralSettings[]{
+    {"EnableHooks", "2"},
+    {"NeuralUplift", "1"},
+    {"NREnableUpscaling", "0"},
+};
+
+bool ValidOverride(const NeuralAddonOverride& entry)
+{
+    const auto& [key, value] = entry;
+    if (key.empty() || Trim(key) != key || key.front() == '[' || key.front() == ';' ||
+        key.front() == '#') return false;
+    if (key.find_first_of(std::string_view("=\r\n\0", 4)) != std::string::npos) return false;
+    if (value.find_first_of(std::string_view("\r\n\0", 3)) != std::string::npos) return false;
+    return std::ranges::none_of(kManagedNeuralSettings,
+        [&](const auto& managed) { return key == managed.first; });
+}
+
+ParsedUpdate ParseAndUpdateNeural(std::string_view ini, bool enable,
+                                  std::span<const NeuralAddonOverride> overrides)
 {
     ParsedUpdate updated = ParseAndUpdate(ini, kNeuralAddonCanonical, !enable);
     if (updated.malformed || !enable) return updated;
 
     const bool addonEnabled = updated.addonEnabled;
     // RenoDX's persisted controls are documented and exercised by the
-    // MIT-licensed DLSS5-Feeder project. Keep this list deliberately narrow:
-    // use the raw-NGX-only hook mode, turn the neural pass on, keep neural
-    // upscaling off, and preserve every user-owned style/intensity/guide
+    // MIT-licensed DLSS5-Feeder project. Keep the managed list deliberately
+    // narrow: use the raw-NGX-only hook mode, turn the neural pass on, keep
+    // neural upscaling off, and preserve every user-owned style/intensity/guide
     // setting. This player does not use Streamline, so mode 2 avoids an
     // unnecessary Streamline hook.
-    constexpr std::pair<std::string_view, std::string_view> settings[]{
-        {"EnableHooks", "2"},
-        {"NeuralUplift", "1"},
-        {"NREnableUpscaling", "0"},
-    };
-    for (const auto& [key, value] : settings) {
+    for (const auto& [key, value] : kManagedNeuralSettings) {
         updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection, key, value);
+        if (updated.malformed) return updated;
+    }
+    // Caller-owned tuning follows the managed contract and may never rename or
+    // replace one of its keys.
+    for (const auto& entry : overrides) {
+        if (!ValidOverride(entry)) {
+            return {true, "Invalid [" + std::string(kNeuralSettingsSection) + "] override '"
+                + entry.first + "'"};
+        }
+        updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection,
+                                    entry.first, entry.second);
         if (updated.malformed) return updated;
     }
     updated.addonEnabled = addonEnabled;
@@ -620,9 +644,10 @@ std::string UpdateDisabledAddonsIni(std::string_view ini, std::string_view addon
     return updated.content;
 }
 
-std::string UpdateNeuralAddonIni(std::string_view ini, bool enable)
+std::string UpdateNeuralAddonIni(std::string_view ini, bool enable,
+                                 std::span<const NeuralAddonOverride> overrides)
 {
-    const ParsedUpdate updated = ParseAndUpdateNeural(ini, enable);
+    const ParsedUpdate updated = ParseAndUpdateNeural(ini, enable, overrides);
     if (updated.malformed) {
         throw std::invalid_argument(updated.error);
     }
@@ -635,11 +660,11 @@ ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     bool changed,
     bool desiredEnabled)
 {
-    const ParsedUpdate previous = ParseAndUpdateNeural(previousIni, desiredEnabled);
+    const ParsedUpdate previous = ParseAndUpdateNeural(previousIni, desiredEnabled, {});
     if (previous.malformed) {
         return {false, changed, false, false, std::wstring(previous.error.begin(), previous.error.end())};
     }
-    const ParsedUpdate final = ParseAndUpdateNeural(finalIni, desiredEnabled);
+    const ParsedUpdate final = ParseAndUpdateNeural(finalIni, desiredEnabled, {});
     if (final.malformed) {
         return {false, changed, previous.addonEnabled, false, std::wstring(final.error.begin(), final.error.end())};
     }
@@ -650,14 +675,15 @@ ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     return {true, changed, previous.addonEnabled, final.addonEnabled, {}};
 }
 
-ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool enable)
+ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool enable,
+                                  std::span<const NeuralAddonOverride> overrides)
 {
     const ReadResult originalRead = ReadIniFile(iniPath);
     if (!originalRead.ok) {
         return {false, false, false, false, originalRead.error};
     }
 
-    const ParsedUpdate updated = ParseAndUpdateNeural(originalRead.content, enable);
+    const ParsedUpdate updated = ParseAndUpdateNeural(originalRead.content, enable, overrides);
     if (updated.malformed) {
         return {false, false, false, false, std::wstring(updated.error.begin(), updated.error.end())};
     }
@@ -674,7 +700,7 @@ ConfigUpdate ConfigureNeuralAddon(const std::filesystem::path& iniPath, bool ena
         return {false, true, updated.addonEnabled, false,
             L"Unable to verify updated ReShade.ini: " + finalRead.error};
     }
-    const ParsedUpdate observed = ParseAndUpdateNeural(finalRead.content, enable);
+    const ParsedUpdate observed = ParseAndUpdateNeural(finalRead.content, enable, overrides);
     if (observed.malformed || observed.content != finalRead.content) {
         const std::string detail = observed.malformed
             ? observed.error

@@ -1,0 +1,8 @@
+#pragma once
+
+#include <string_view>
+
+// Generated from packaging/runtime-lock.json at configure time. The player and
+// the helper verify the staged neural runtime against this exact lock before
+// every render; a drifted file is reported by name and refuses the render.
+inline constexpr std::string_view kRuntimeLockJson = R"lock(@RUNTIME_LOCK_JSON@)lock";

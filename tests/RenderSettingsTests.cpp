@@ -1,5 +1,6 @@
 #include "ReShadeConfig.h"
 #include "NeuralCache.h"
+#include "NeuralSettings.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -140,6 +141,7 @@ void authenticated_settings_survive_promotion_and_tampering_invalidates_cache()
 void manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension()
 {
     auto manifest = RenderManifest();
+    manifest.schema = 3;
     const auto old = SerializeNeuralCacheManifest(manifest);
     CHECK(old.find("settingsDigest") == std::string::npos);
     CHECK(ParseNeuralCacheManifest(old).has_value());
@@ -153,6 +155,248 @@ void manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension(
     CHECK(!ParseNeuralCacheManifest(duplicate));
     manifest.settingsDigest = "invalid";
     CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+}
+
+void default_identity_key_is_stable_and_range_or_guides_change_it()
+{
+    // Literal captured from the schema-1 canonical form before range/guide
+    // terms existed: existing whole-source renders must stay addressable.
+    NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
+                                 std::string(64, 'b'), "DLAA", false};
+    const std::string legacyKey = "56136bfab17f031abae0079a342d19f09680f5907528bd30cc4639546ee650bb";
+    CHECK_EQ(legacyKey, BuildNeuralCacheKey(identity));
+    identity.settingsDigest = std::string(64, 'c');
+    const std::string settingsKey = "bd1702969599b85ec594036c3d1235380bc4d7e3ee988544f49cb5d7d138d6e5";
+    CHECK_EQ(settingsKey, BuildNeuralCacheKey(identity));
+
+    identity.range = NeuralRenderRange{10000000, 30000000};
+    const auto rangeKey = BuildNeuralCacheKey(identity);
+    CHECK(rangeKey != settingsKey);
+    identity.range = NeuralRenderRange{0, 30000000};
+    const auto openStartKey = BuildNeuralCacheKey(identity);
+    CHECK(openStartKey != settingsKey);
+    CHECK(openStartKey != rangeKey);
+    identity.range = {};
+    CHECK_EQ(settingsKey, BuildNeuralCacheKey(identity));
+
+    identity.guides = CanonicalGuideControls(GuideControls{true, false, true});
+    const auto guidesKey = BuildNeuralCacheKey(identity);
+    CHECK(guidesKey != settingsKey);
+    identity.range = NeuralRenderRange{10000000, 30000000};
+    CHECK(BuildNeuralCacheKey(identity) != guidesKey);
+    CHECK(BuildNeuralCacheKey(identity) != rangeKey);
+}
+
+void schema_three_manifests_parse_with_defaults_and_stay_reusable()
+{
+    // Byte-exact schema-3 manifest as written by the previous release.
+    const std::string legacy =
+        "{\"schema\":3,\"kind\":\"render\",\"state\":\"complete\",\"sourceDigest\":\"" +
+        std::string(64, 'a') + "\",\"neuralDigest\":\"" + std::string(64, 'd') +
+        "\",\"runtimeDigest\":\"" + std::string(64, 'b') +
+        "\",\"encoder\":\"hevc_nvenc\",\"width\":1920,\"height\":1080,\"frameCount\":10,"
+        "\"duration100ns\":3333333,\"nativeEvaluations\":10,\"verifiedNeuralFrames\":10,"
+        "\"observedFeature18Evaluations\":11,\"feature18Created\":true,"
+        "\"feature18ArmedBeforeCapture\":true,\"upscaling\":false}\n";
+    const auto parsed = ParseNeuralCacheManifest(legacy);
+    CHECK(parsed.has_value());
+    if (!parsed) return;
+    CHECK_EQ(uint32_t{3}, parsed->schema);
+    CHECK(IsReusableNeuralCacheManifest(*parsed));
+    CHECK_EQ(int64_t{0}, parsed->rangeStart100ns);
+    CHECK_EQ(int64_t{0}, parsed->rangeEnd100ns);
+    CHECK(parsed->guides.empty());
+    CHECK_EQ(uint64_t{0}, parsed->jobId);
+    CHECK_EQ(uint32_t{0}, parsed->historyResets);
+    CHECK(parsed->receiptDigest.empty());
+    // Re-serializing a schema-3 manifest stays byte-identical.
+    CHECK_EQ(legacy, SerializeNeuralCacheManifest(*parsed));
+    // Schema 3 never carried the schema-4 fields.
+    auto extended = legacy;
+    extended.insert(extended.rfind('}'), ",\"rangeStart100ns\":0");
+    CHECK(!ParseNeuralCacheManifest(extended));
+}
+
+void schema_four_manifest_round_trips_with_receipt_digest()
+{
+    auto manifest = RenderManifest();
+    manifest.state = NeuralCacheState::Complete;
+    manifest.neuralDigest = std::string(64, 'd');
+    manifest.settingsDigest = std::string(64, 'e');
+    manifest.rangeStart100ns = 10000000;
+    manifest.rangeEnd100ns = 13333333;
+    manifest.guides = "mv=1,depth=0,mask=1";
+    manifest.jobId = 42;
+    manifest.historyResets = 3;
+    manifest.receiptDigest = std::string(64, 'f');
+    const auto bytes = SerializeNeuralCacheManifest(manifest);
+    const std::string tail =
+        ",\"upscaling\":false,\"settingsDigest\":\"" + std::string(64, 'e') +
+        "\",\"rangeStart100ns\":10000000,\"rangeEnd100ns\":13333333,"
+        "\"guides\":\"mv=1,depth=0,mask=1\",\"jobId\":42,\"historyResets\":3,"
+        "\"receiptDigest\":\"" + std::string(64, 'f') + "\"}\n";
+    CHECK(bytes.starts_with("{\"schema\":4,"));
+    CHECK(bytes.ends_with(tail));
+    const auto parsed = ParseNeuralCacheManifest(bytes);
+    CHECK(parsed.has_value());
+    if (parsed) {
+        CHECK_EQ(manifest, *parsed);
+        CHECK(IsReusableNeuralCacheManifest(*parsed));
+    }
+    // Empty digests and a whole-source range are valid schema-4 defaults.
+    auto plain = RenderManifest();
+    const auto plainParsed = ParseNeuralCacheManifest(SerializeNeuralCacheManifest(plain));
+    CHECK(plainParsed.has_value());
+    if (plainParsed) CHECK_EQ(plain, *plainParsed);
+    // Schema 4 is fixed and ordered: a missing trailing field is rejected.
+    auto truncated = bytes;
+    truncated.erase(truncated.find(",\"receiptDigest\""));
+    truncated += "}\n";
+    CHECK(!ParseNeuralCacheManifest(truncated));
+    manifest.receiptDigest = "nothex";
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+    manifest.receiptDigest.clear();
+    manifest.guides = "mv=1";
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+    manifest.guides.clear();
+    manifest.rangeEnd100ns = manifest.rangeStart100ns;
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+    manifest.rangeEnd100ns = 0;
+    CHECK(ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)).has_value());
+    manifest.schema = 5;
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+}
+
+void receipt_is_authenticated_on_promotion_and_lookup()
+{
+    TempDirectory temp;
+    NeuralCacheManager cache(temp.path / L"cache");
+    const std::string key(64, 'c');
+    auto manifest = RenderManifest();
+    const std::string receipt = "{\"schema\":1,\"ok\":true}\n";
+    manifest.receiptDigest = Sha256Bytes(receipt).value_or("");
+    manifest.jobId = 7;
+    manifest.historyResets = 1;
+    auto staging = cache.BeginRenderStaging(key);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    Write(*staging / L"neural.mkv", "encoded video");
+    CHECK(!cache.PromoteRender(key, *staging, manifest));
+    Write(*staging / L"receipt.json", receipt);
+    CHECK(cache.PromoteRender(key, *staging, manifest));
+    const auto found = cache.LookupRender(key);
+    CHECK(found.has_value());
+    if (!found) return;
+    CHECK_EQ(uint32_t{4}, found->manifest.schema);
+    CHECK_EQ(manifest.receiptDigest, found->manifest.receiptDigest);
+    CHECK_EQ(uint64_t{7}, found->manifest.jobId);
+    CHECK_EQ(receipt, Read(found->directory / L"receipt.json"));
+    Write(found->directory / L"receipt.json", receipt + " ");
+    CHECK(!cache.LookupRender(key));
+}
+
+void overrides_follow_managed_keys_and_replace_existing_values()
+{
+    constexpr std::string_view input =
+        "[RenoDX.DLSS5]\nNRIntensity=1.25\nNRStyle=2\nFutureTuning=red,blue\n";
+    const std::string base = UpdateNeuralAddonIni(input, true);
+    const std::vector<NeuralAddonOverride> overrides{
+        {"NRIntensity", "1.000000"}, {"NRPreset", "3"}};
+    constexpr std::string_view expected =
+        "[RenoDX.DLSS5]\nNRIntensity=1.000000\nNRStyle=2\nFutureTuning=red,blue\n"
+        "EnableHooks=2\nNeuralUplift=1\nNREnableUpscaling=0\nNRPreset=3\n"
+        "[ADDON]\nDisabledAddons=\n";
+    const std::string updated = UpdateNeuralAddonIni(input, true, overrides);
+    CHECK_EQ(std::string(expected), updated);
+    CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true, overrides));
+    CHECK_EQ(base, UpdateNeuralAddonIni(input, true, {}));
+    // Overrides never replace the managed contract and never apply while
+    // disabling.
+    CHECK_EQ(UpdateNeuralAddonIni(input, false), UpdateNeuralAddonIni(input, false, overrides));
+    CHECK(UpdateNeuralAddonIni(input, false, overrides).find("NRPreset") == std::string::npos);
+    for (const auto& bad : std::vector<NeuralAddonOverride>{
+            {"", "1"}, {"NR=Style", "1"}, {" NRStyle", "1"}, {"[NRStyle", "1"},
+            {"NRStyle", "1\nNRIntensity=2"}, {"NREnableUpscaling", "1"},
+            {"EnableHooks", "3"}, {"NeuralUplift", "0"}}) {
+        bool rejected = false;
+        try { (void)UpdateNeuralAddonIni(input, true, std::span{&bad, 1}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        CHECK(rejected);
+    }
+    TempDirectory temp;
+    const auto path = temp.path / L"ReShade.ini";
+    Write(path, input);
+    const ConfigUpdate configured = ConfigureNeuralAddon(path, true, overrides);
+    CHECK(configured.ok);
+    CHECK(configured.changed);
+    CHECK_EQ(std::string(expected), Read(path));
+    const ConfigUpdate again = ConfigureNeuralAddon(path, true, overrides);
+    CHECK(again.ok);
+    CHECK(!again.changed);
+    const auto snapshot = ReadNeuralAddonSettingsSnapshot(path);
+    CHECK(snapshot.has_value());
+    if (snapshot) {
+        CHECK(snapshot->find("NRIntensity=1.000000\n") != std::string::npos);
+        CHECK(snapshot->find("NRPreset=3\n") != std::string::npos);
+    }
+}
+
+void neural_settings_round_trip_and_format_renodx_overrides()
+{
+    const auto defaults = NeuralAddonOverridesFor(NeuralSettings{});
+    const std::vector<NeuralAddonOverride> expected{
+        {"NRIntensity", "1.000000"}, {"NRLocalTone", "1.000000"},
+        {"NRLocalStructure", "1.000000"}, {"NRSkinStructure", "-1.000000"},
+        {"NRColorStrength", "1.000000"}, {"NRPreset", "0"}, {"NRStyle", "0"},
+        {"NRAutoMask", "1"}};
+    CHECK(expected == defaults);
+    CHECK_EQ(std::string("intensity=1.000000 localTone=1.000000 localStructure=1.000000 "
+                         "skinStructure=-1.000000 colorStrength=1.000000 preset=0 style=0 "
+                         "autoMask=1"),
+             CanonicalNeuralSettings(NeuralSettings{}));
+
+    NeuralSettings tuned;
+    tuned.intensity = 1.05f;
+    tuned.localTone = 0.5f;
+    tuned.localStructure = 1.5f;
+    tuned.skinStructure = 0.25f;
+    tuned.colorStrength = 0.75f;
+    tuned.preset = 2;
+    tuned.style = 1;
+    tuned.autoMask = false;
+    const auto tunedOverrides = NeuralAddonOverridesFor(tuned);
+    CHECK_EQ(std::string("1.050000"), tunedOverrides[0].second);
+    CHECK_EQ(std::string("0.250000"), tunedOverrides[3].second);
+    CHECK_EQ(std::string("2"), tunedOverrides[5].second);
+    CHECK_EQ(std::string("0"), tunedOverrides[7].second);
+    CHECK(CanonicalNeuralSettings(tuned) != CanonicalNeuralSettings(NeuralSettings{}));
+
+    TempDirectory temp;
+    const auto ini = temp.path / L"DLSSVideoPlayer.ini";
+    NeuralSettings missing;
+    CHECK(!LoadNeuralSettings(ini, missing));
+    CHECK(missing == NeuralSettings{});
+    Write(ini, "[Playback]\r\nVolume=0.500000\r\n");
+    CHECK(!LoadNeuralSettings(ini, missing));
+    CHECK(SaveNeuralSettings(ini, tuned));
+    NeuralSettings loaded;
+    CHECK(LoadNeuralSettings(ini, loaded));
+    CHECK(loaded == tuned);
+    // Unrelated sections survive and the settings live in [NeuralSettings].
+    const auto text = Read(ini);
+    CHECK(text.find("[Playback]") != std::string::npos);
+    CHECK(text.find("[NeuralSettings]") != std::string::npos);
+    CHECK(text.find("Intensity=1.050000") != std::string::npos);
+    // Out-of-range and partial entries clamp and keep defaults elsewhere.
+    Write(ini, "[NeuralSettings]\r\nIntensity=9\r\nSkinStructure=-4\r\nPreset=7\r\nAutoMask=5\r\n");
+    NeuralSettings clamped;
+    CHECK(LoadNeuralSettings(ini, clamped));
+    CHECK_EQ(2.0f, clamped.intensity);
+    CHECK_EQ(-1.0f, clamped.skinStructure);
+    CHECK_EQ(3, clamped.preset);
+    CHECK(clamped.autoMask);
+    CHECK_EQ(1.0f, clamped.localTone);
+    CHECK_EQ(0, clamped.style);
 }
 
 void removing_one_owned_entry_preserves_other_entries_and_outside_files()
@@ -231,6 +475,12 @@ int main()
     ambiguous_settings_and_unreadable_files_fail_closed();
     authenticated_settings_survive_promotion_and_tampering_invalidates_cache();
     manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension();
+    default_identity_key_is_stable_and_range_or_guides_change_it();
+    schema_three_manifests_parse_with_defaults_and_stay_reusable();
+    schema_four_manifest_round_trips_with_receipt_digest();
+    receipt_is_authenticated_on_promotion_and_lookup();
+    overrides_follow_managed_keys_and_replace_existing_values();
+    neural_settings_round_trip_and_format_renodx_overrides();
     removing_one_owned_entry_preserves_other_entries_and_outside_files();
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
     return test_support::failure_count ? EXIT_FAILURE : EXIT_SUCCESS;

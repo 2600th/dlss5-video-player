@@ -15,6 +15,7 @@
 #include <utility>
 #include <thread>
 #include "UiLayout.h"
+#include "FrameIdentity.h"
 
 #ifdef VIDEO_DECODER_TESTING
 struct VideoDecoderTestAccess;
@@ -24,7 +25,21 @@ struct VideoFrame {
     std::vector<uint8_t> bgra;
     int64_t timestamp100ns = 0;
     bool discontinuity = false;
+    // Position on the decoder's constant-frame-rate timeline:
+    // llround(timestamp100ns * fps / 1e7). Identical between an original and
+    // its neural render because both decode the same CFR timeline.
+    uint64_t frameNumber = 0;
+    // Bumped by Open/OpenSequential, SeekSeconds and any internal decoder
+    // restart, so frames from different decoder sessions never pair.
+    uint32_t sourceGeneration = 0;
 };
+
+inline FrameIdentity IdentityOf(const VideoFrame& frame, uint32_t historyGeneration,
+                                uint64_t jobId, HistoryReset reset)
+{
+    return FrameIdentity{frame.frameNumber, frame.timestamp100ns, frame.sourceGeneration,
+                         historyGeneration, jobId, reset};
+}
 
 enum class VideoReadResult {
     FrameReady,
@@ -127,6 +142,8 @@ private:
     uint64_t m_ffmpegFrameIndex = 0;
     int64_t m_ffmpegSeekBase100ns = 0;
     FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
+    uint32_t m_sourceGeneration = 0;
+    bool m_restartDiscontinuity = false;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;
     std::vector<uint8_t> m_pendingFrame;
     size_t m_pendingFrameBytes = 0;

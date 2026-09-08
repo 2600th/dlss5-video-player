@@ -79,6 +79,7 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_stillImage,other.m_stillImage);swap(m_gif,other.m_gif);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
     swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_sourceGeneration,other.m_sourceGeneration);swap(m_restartDiscontinuity,other.m_restartDiscontinuity);
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
 #ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
@@ -125,6 +126,7 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     m_gif = false;
     m_displayAspect = 0.0;
     m_sourceKind = sourceKind;
+    ++m_sourceGeneration;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
 
@@ -501,6 +503,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
     m_ffmpegAcceleration = acceleration;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
+    m_restartDiscontinuity = false;
     const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
         acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
     LOG("FFmpeg raw BGRA process started with " << accelerationName << ".");
@@ -546,7 +549,13 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
         static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
     LOG("FFmpeg hardware path exited with code " << exitCode << "; trying " <<
         (next == FFmpegAcceleration::D3D11Va ? "D3D11VA" : "software") << " fallback.");
-    return StartFFmpeg(resumeSeconds, next);
+    if (!StartFFmpeg(resumeSeconds, next)) return false;
+    // The resumed process starts a fresh timeline segment: frames already
+    // handed out belong to the previous decoder session and must not pair or
+    // share temporal history with the first resumed frame.
+    ++m_sourceGeneration;
+    m_restartDiscontinuity = true;
+    return true;
 }
 
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
@@ -616,7 +625,10 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
 
     out.timestamp100ns = m_ffmpegSeekBase100ns +
         static_cast<int64_t>((static_cast<double>(m_ffmpegFrameIndex) / m_fps) * 10000000.0);
-    out.discontinuity = (m_ffmpegFrameIndex == 0 && m_ffmpegSeekBase100ns != 0);
+    out.discontinuity = (m_ffmpegFrameIndex == 0 && (m_ffmpegSeekBase100ns != 0 || m_restartDiscontinuity));
+    out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(out.timestamp100ns) * m_fps * 1e-7));
+    out.sourceGeneration = m_sourceGeneration;
+    m_restartDiscontinuity = false;
     ++m_ffmpegFrameIndex;
     return VideoReadResult::FrameReady;
 }
@@ -707,6 +719,7 @@ bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
     const uint32_t oldW=m_width, oldH=m_height;
     m_width=width; m_height=height; m_stride=static_cast<int32_t>(m_width*4u);
     if (StartFFmpeg(0.0)) {
+        ++m_sourceGeneration;
         if(restartQueue)StartFrameQueue();
         LOG("FFmpeg realtime decode scale: " << m_nativeWidth << "x" << m_nativeHeight << " -> " << m_width << "x" << m_height);
         return true;
@@ -715,6 +728,7 @@ bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
     LOG("FFmpeg decode downscale failed; restoring native decode size.");
     m_width=oldW; m_height=oldH; m_stride=static_cast<int32_t>(m_width*4u);
     const bool restored=StartFFmpeg(0.0);
+    if(restored)++m_sourceGeneration;
     if(restartQueue&&restored)StartFrameQueue();
     return restored;
 }
@@ -831,6 +845,8 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
 
         out.timestamp100ns = timestamp;
         out.discontinuity = (flags & MF_SOURCE_READERF_STREAMTICK) != 0;
+        out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_fps * 1e-7));
+        out.sourceGeneration = m_sourceGeneration;
         return true;
     }
 }
@@ -853,6 +869,7 @@ bool VideoDecoder::SeekSeconds(double seconds) {
         const bool restartQueue=m_frameQueueEnabled;
         if(restartQueue)StopFrameQueue();
         const bool started=StartFFmpeg(seconds);
+        if(started)++m_sourceGeneration;
         if(restartQueue&&started)StartFrameQueue();
         return started;
     }
@@ -868,5 +885,6 @@ bool VideoDecoder::SeekSeconds(double seconds) {
         LOG("Media Foundation seek failed hr=0x" << std::hex << hr);
         return false;
     }
+    ++m_sourceGeneration;
     return true;
 }

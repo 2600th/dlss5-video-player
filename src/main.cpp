@@ -1164,9 +1164,10 @@ private:
                 candidate->renderer->DLSSAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);
                 GuideFrame guide;
-                candidate->guides.SetDepthMode(m_guides.GetDepthMode());
+                candidate->guides.SetControls(m_guides.Controls());
                 if(candidate->guides.Generate(m_lastPlaybackFrame.bgra.data(),m_decoder.Width(),m_decoder.Height(),
-                    m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),true,guide)){
+                    m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
+                    IdentityOf(m_lastPlaybackFrame,m_historyGeneration,0,HistoryReset::FirstFrame),guide)){
                     ready=candidate->renderer->RenderFrame(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
                         true,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
@@ -1211,10 +1212,18 @@ private:
 
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
         if(!m_renderer)return false; GuideFrame g;
-        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),resetGuide,g))return false;
+        // Translate the legacy reset flags into a named reason: a fresh load is
+        // the first frame; a seek/reload reset outranks a decoder discontinuity,
+        // which outranks a dropped frame.
+        HistoryReset reason=HistoryReset::None;
+        if(m_lastRenderedTs<0)reason=HistoryReset::FirstFrame;
+        else if(m_guideReset||m_dlssReset)reason=HistoryReset::Seek;
+        else if(resetGuide)reason=f.discontinuity?HistoryReset::Seek:HistoryReset::Drop;
+        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),IdentityOf(f,m_historyGeneration,0,reason),g))return false;
+        m_historyGeneration=g.id.historyGeneration;
         float ms=float(1000.0/std::max(1.0,m_decoder.FrameRate()));
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
-        bool r=m_dlssReset||resetGuide||!g.hasHistory;
+        bool r=m_dlssReset||!g.hasHistory;
         bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,ms);
         if(ok){
             m_lastPlaybackFrame=f;
@@ -1851,9 +1860,10 @@ private:
     }
     bool ValidatePreparedFrame(const YouTubeCompletion& completion,D3D12Renderer& renderer,TemporalGuideGenerator& guides){
         if(!NetworkPreparedGeometryIsValid(completion.configuration,completion.decoder->Width(),completion.decoder->Height(),completion.firstFrame.bgra.size()))return false;
-        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),true,guide))return false;
+        const FrameIdentity identity=IdentityOf(completion.firstFrame,0,0,HistoryReset::FirstFrame);
+        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),identity,guide))return false;
         const float frameMs=float(1000.0/std::max(1.0,completion.decoder->FrameRate()));
-        return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,true,frameMs);
+        return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),identity,guide,frameMs);
     }
     bool InstallPreparedYouTube(YouTubeCompletion& completion,std::unique_ptr<PreparedRendererCandidate> candidate){
         const std::wstring source=std::move(completion.result.mediaUrl),audioSource=std::move(completion.result.audioUrl),pageUrl=std::move(completion.pageUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;D3D12RendererOwner oldRenderer;std::unique_ptr<AudioPlayer> oldNetworkAudio;
@@ -2017,7 +2027,7 @@ private:
     void ToggleNeuralRendering(){if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering))return;m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();}
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
-    void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
+    void ToggleDepthMode(){GuideControls controls=m_guides.Controls();controls.depth=!controls.depth;m_guides.SetControls(controls);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
     void StopFullscreenTimer(){
@@ -2179,7 +2189,7 @@ private:
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
-    bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;
+    bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
     UINT_PTR m_activityTimer=0;
     bool m_activityBusy=false,m_activityMotionEnabled=true;

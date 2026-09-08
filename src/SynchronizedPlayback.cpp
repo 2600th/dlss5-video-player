@@ -71,16 +71,26 @@ SynchronizedReadResult ConvertRead(VideoReadResult result)
 } // namespace
 
 struct SynchronizedPlayback::Impl {
+    // A decoded frame plus whether its frame number is authoritative. Frame 0
+    // legitimately carries frameNumber 0, so a zero number is only trusted when
+    // the (pre-offset) pts is also zero; otherwise the source did not stamp
+    // identities and pairing falls back to timestamp tolerance.
+    struct Pending {
+        VideoFrame frame;
+        bool numbered{};
+    };
     std::unique_ptr<FrameSource> original;
     std::unique_ptr<FrameSource> neural;
-    std::optional<VideoFrame> pendingOriginal;
-    std::optional<VideoFrame> pendingNeural;
+    std::optional<Pending> pendingOriginal;
+    std::optional<Pending> pendingNeural;
     std::optional<SynchronizedFramePair> current;
     ComparisonView view{ComparisonView::Original};
     bool opened{};
     bool paused{};
     bool stepRequested{};
     int64_t tolerance100ns{333334};
+    SynchronizedRange range{};
+    uint64_t rangeOffsetFrames{};
 
     void ResetPublished()
     {
@@ -88,20 +98,43 @@ struct SynchronizedPlayback::Impl {
         view=ComparisonView::Original;paused=false;stepRequested=false;
     }
 
-    SynchronizedReadResult ReadOne(FrameSource& source,std::optional<VideoFrame>& pending,
-                                   std::stop_token stop)
+    // End of the playable window in seconds on the original timeline.
+    double EndSeconds()const
+    {
+        double end=range.end100ns>0?double(range.end100ns)*1e-7:original->DurationSeconds();
+        if(neural)end=std::min(end,double(range.start100ns)*1e-7+neural->DurationSeconds());
+        return end;
+    }
+
+    SynchronizedReadResult ReadOne(FrameSource& source,std::optional<Pending>& pending,
+                                   std::stop_token stop,bool neuralMember)
     {
         if(pending)return SynchronizedReadResult::PairReady;
         VideoFrame frame;const VideoReadResult read=source.Read(frame,stop);
-        if(read==VideoReadResult::FrameReady){pending=std::move(frame);return SynchronizedReadResult::PairReady;}
-        return ConvertRead(read);
+        if(read!=VideoReadResult::FrameReady)return ConvertRead(read);
+        Pending next{std::move(frame),false};
+        next.numbered=next.frame.frameNumber!=0||next.frame.timestamp100ns==0;
+        if(neuralMember){
+            // The neural render starts at its own zero; place it on the original timeline.
+            next.frame.timestamp100ns+=range.start100ns;
+            next.frame.frameNumber+=rangeOffsetFrames;
+        }
+        pending=std::move(next);return SynchronizedReadResult::PairReady;
+    }
+
+    SynchronizedReadResult CommitPair(SynchronizedFramePair& pair)
+    {
+        pair.original=std::move(pendingOriginal->frame);
+        pair.neural=pendingNeural?std::move(pendingNeural->frame):VideoFrame{};
+        pair.timestamp100ns=pair.original.timestamp100ns;pair.frameNumber=pair.original.frameNumber;
+        pendingOriginal.reset();pendingNeural.reset();return SynchronizedReadResult::PairReady;
     }
 
     SynchronizedReadResult BuildPair(SynchronizedFramePair& pair,std::stop_token stop)
     {
         if(!original)return SynchronizedReadResult::Error;
         for(size_t guard=0;guard<4096;++guard){
-            const auto originalRead=ReadOne(*original,pendingOriginal,stop);
+            const auto originalRead=ReadOne(*original,pendingOriginal,stop,false);
             if(originalRead!=SynchronizedReadResult::PairReady){
                 if(!neural||originalRead!=SynchronizedReadResult::EndOfStream)return originalRead;
                 if(pendingNeural)return SynchronizedReadResult::OutOfSync;
@@ -112,21 +145,26 @@ struct SynchronizedPlayback::Impl {
                 if(neuralRead==VideoReadResult::FrameReady)return SynchronizedReadResult::OutOfSync;
                 return SynchronizedReadResult::Error;
             }
-            if(!neural){
-                pair.original=std::move(*pendingOriginal);pair.neural={};
-                pair.timestamp100ns=pair.original.timestamp100ns;pendingOriginal.reset();return SynchronizedReadResult::PairReady;
+            if(range.end100ns>0&&pendingOriginal->frame.timestamp100ns>=range.end100ns){
+                pendingOriginal.reset();return SynchronizedReadResult::EndOfStream;
             }
-            const auto neuralRead=ReadOne(*neural,pendingNeural,stop);
+            if(!neural)return CommitPair(pair);
+            const auto neuralRead=ReadOne(*neural,pendingNeural,stop,true);
             if(neuralRead!=SynchronizedReadResult::PairReady){
                 if(neuralRead==SynchronizedReadResult::EndOfStream)return SynchronizedReadResult::OutOfSync;
                 return neuralRead;
             }
-            const int64_t difference=pendingOriginal->timestamp100ns-pendingNeural->timestamp100ns;
-            if(std::llabs(difference)<=tolerance100ns){
-                pair.original=std::move(*pendingOriginal);pair.neural=std::move(*pendingNeural);
-                pair.timestamp100ns=pair.original.timestamp100ns;
-                pendingOriginal.reset();pendingNeural.reset();return SynchronizedReadResult::PairReady;
+            if(pendingOriginal->numbered&&pendingNeural->numbered){
+                const uint64_t originalNumber=pendingOriginal->frame.frameNumber;
+                const uint64_t neuralNumber=pendingNeural->frame.frameNumber;
+                if(originalNumber==neuralNumber)return CommitPair(pair);
+                // Never present two different source frames as one pair. Drop the
+                // earlier member so the next read can resynchronize, and report it.
+                if(originalNumber<neuralNumber)pendingOriginal.reset();else pendingNeural.reset();
+                return SynchronizedReadResult::OutOfSync;
             }
+            const int64_t difference=pendingOriginal->frame.timestamp100ns-pendingNeural->frame.timestamp100ns;
+            if(std::llabs(difference)<=tolerance100ns)return CommitPair(pair);
             if(difference<0)pendingOriginal.reset();else pendingNeural.reset();
         }
         return SynchronizedReadResult::OutOfSync;
@@ -155,13 +193,23 @@ SynchronizedPlayback::SynchronizedPlayback(SynchronizedPlayback&&) noexcept=defa
 SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&&) noexcept=default;
 
 bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
-                                const std::filesystem::path& neuralPath,std::stop_token stop)
+                                const std::filesystem::path& neuralPath,std::stop_token stop,
+                                SynchronizedRange range)
 {
     Close();if(!impl_->original||originalPath.empty())return false;
+    if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
     if(!impl_->original->Open(originalPath,stop))return false;
     const double originalFps=impl_->original->FrameRate();
     if(!impl_->original->Width()||!impl_->original->Height()||
        !std::isfinite(originalFps)||originalFps<=0.0){
+        impl_->original->Close();return false;
+    }
+    const double startSeconds=double(range.start100ns)*1e-7;
+    const double originalDuration=impl_->original->DurationSeconds();
+    if(range.end100ns>0&&double(range.end100ns)*1e-7>originalDuration+1.0/originalFps+1e-6){
+        impl_->original->Close();return false;
+    }
+    if(range.start100ns>0&&(startSeconds>=originalDuration||!impl_->original->SeekSeconds(startSeconds))){
         impl_->original->Close();return false;
     }
     const bool useNeural=!neuralPath.empty();
@@ -173,27 +221,28 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
         const double fps=originalFps;
         const double neuralFps=impl_->neural->FrameRate();
         const double durationTolerance=fps>0.0?1.0/fps:0.0;
+        const double expectedDuration=
+            (range.end100ns>0?double(range.end100ns)*1e-7:originalDuration)-startSeconds;
         if(impl_->original->Width()!=impl_->neural->Width()||
            impl_->original->Height()!=impl_->neural->Height()||
            !std::isfinite(fps)||fps<=0.0||!std::isfinite(neuralFps)||
            std::abs(fps-neuralFps)>0.01||
-           std::abs(impl_->original->DurationSeconds()-impl_->neural->DurationSeconds())>
-                durationTolerance+1e-6){
+           std::abs(expectedDuration-impl_->neural->DurationSeconds())>durationTolerance+1e-6){
             impl_->neural->Close();impl_->original->Close();return false;
         }
         impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/fps));
     }else{
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
         impl_->neural.reset();
-#else
-        impl_->neural.reset();
-#endif
         const double fps=originalFps;
         if(std::isfinite(fps)&&fps>0.0)
             impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/fps));
     }
+    impl_->range=range;
+    impl_->rangeOffsetFrames=static_cast<uint64_t>(std::llround(startSeconds*originalFps));
     impl_->ResetPublished();impl_->opened=true;return true;
 }
+
+SynchronizedRange SynchronizedPlayback::Range()const{return impl_->range;}
 
 void SynchronizedPlayback::Close()
 {
@@ -216,18 +265,18 @@ bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
 {
     if(!impl_->opened||!std::isfinite(seconds)||seconds<0.0||stop.stop_requested())return false;
     // The timeline endpoint is after the last frame, not a decodable timestamp.
-    const double duration=impl_->neural?
-        std::min(impl_->original->DurationSeconds(),impl_->neural->DurationSeconds()):
-        impl_->original->DurationSeconds();
+    const double start=double(impl_->range.start100ns)*1e-7;
+    const double duration=impl_->EndSeconds();
     const double frameDuration=1.0/impl_->original->FrameRate();
     if(std::isfinite(duration)&&duration>0.0)
-        seconds=std::min(seconds,std::max(0.0,duration-frameDuration));
+        seconds=std::min(seconds,std::max(start,duration-frameDuration));
+    seconds=std::max(seconds,start);
     // Restarting FFmpeg is asynchronous. Retain either ready half of the pair
     // while the other decoder warms up; NotReady is not a failed seek.
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
     for(int attempt=0;attempt<2;++attempt){
         if(stop.stop_requested()||!impl_->original->SeekSeconds(seconds)||
-           (impl_->neural&&!impl_->neural->SeekSeconds(seconds))){Close();return false;}
+           (impl_->neural&&!impl_->neural->SeekSeconds(seconds-start))){Close();return false;}
         impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
         SynchronizedFramePair candidate;
         SynchronizedReadResult result;
@@ -242,9 +291,9 @@ bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
         }
         // Container/audio duration may round past the last video PTS. At the
         // tail only, retry one frame earlier instead of unloading a valid pair.
-        if(attempt==0&&seconds>0.0&&seconds>=duration-2.0*frameDuration&&
+        if(attempt==0&&seconds>start&&seconds>=duration-2.0*frameDuration&&
            (result==SynchronizedReadResult::EndOfStream||result==SynchronizedReadResult::OutOfSync)){
-            seconds=std::max(0.0,seconds-frameDuration);continue;
+            seconds=std::max(start,seconds-frameDuration);continue;
         }
         break;
     }

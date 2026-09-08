@@ -16,7 +16,8 @@
 
 namespace {
 
-constexpr uint32_t kSchema = 3;
+constexpr uint32_t kSchema = 4;
+constexpr uint32_t kLegacySchema = 3;
 constexpr uint32_t kMinDimension = 64;
 constexpr uint32_t kMaxWidth = 7680;
 constexpr uint32_t kMaxHeight = 4320;
@@ -252,13 +253,26 @@ bool ReadBoolField(JsonCursor& cursor, std::string_view key, bool& value, bool c
     return !comma || cursor.Expect(',');
 }
 
+bool RangeFieldsValid(int64_t start100ns, int64_t end100ns)
+{
+    return start100ns >= 0 && end100ns >= 0 && (end100ns == 0 || end100ns > start100ns);
+}
+
 bool CommonManifestFieldsValid(const NeuralCacheManifest& manifest)
 {
-    return manifest.schema == kSchema &&
-           manifest.width >= kMinDimension && manifest.width <= kMaxWidth &&
+    if (manifest.schema != kSchema && manifest.schema != kLegacySchema) return false;
+    if (manifest.schema == kLegacySchema &&
+        (manifest.rangeStart100ns != 0 || manifest.rangeEnd100ns != 0 ||
+         !manifest.guides.empty() || manifest.jobId != 0 || manifest.historyResets != 0 ||
+         !manifest.receiptDigest.empty())) return false;
+    return manifest.width >= kMinDimension && manifest.width <= kMaxWidth &&
            manifest.height >= kMinDimension && manifest.height <= kMaxHeight &&
            manifest.frameCount > 0 && manifest.duration100ns > 0 &&
-           !manifest.encoder.empty() && !manifest.upscaling;
+           !manifest.encoder.empty() && !manifest.upscaling &&
+           RangeFieldsValid(manifest.rangeStart100ns, manifest.rangeEnd100ns) &&
+           (manifest.guides.empty() || ParseGuideControls(manifest.guides).has_value()) &&
+           (manifest.settingsDigest.empty() || IsHexDigest(manifest.settingsDigest)) &&
+           (manifest.receiptDigest.empty() || IsHexDigest(manifest.receiptDigest));
 }
 
 bool IsStrictDescendant(const std::filesystem::path& root,
@@ -379,9 +393,15 @@ std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
     AppendField(canonical, "runtime", identity.runtimeDigest);
     AppendField(canonical, "quality", identity.quality);
     AppendField(canonical, "upscaling", identity.upscaling ? "1" : "0");
-    // Source identities and legacy callers retain their existing keys.
+    // Source identities and legacy callers retain their existing keys: every
+    // later term is appended only when it differs from the historical default.
     if (!identity.settingsDigest.empty())
         AppendField(canonical, "settings", identity.settingsDigest);
+    if (!identity.range.Whole())
+        AppendField(canonical, "range", std::to_string(identity.range.start100ns) + "-" +
+                                        std::to_string(identity.range.end100ns));
+    if (!identity.guides.empty())
+        AppendField(canonical, "guides", identity.guides);
     return Sha256Bytes(canonical).value_or(std::string{});
 }
 
@@ -426,7 +446,7 @@ std::optional<std::string> BuildRuntimeDigest(
 
 std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
 {
-    return "{\"schema\":" + std::to_string(manifest.schema) +
+    std::string json = "{\"schema\":" + std::to_string(manifest.schema) +
         ",\"kind\":\"" + std::string(KindName(manifest.kind)) +
         "\",\"state\":\"" + std::string(StateName(manifest.state)) +
         "\",\"sourceDigest\":\"" + JsonEscape(manifest.sourceDigest) +
@@ -444,9 +464,21 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
         ",\"feature18Created\":" + (manifest.feature18Created ? "true" : "false") +
         ",\"feature18ArmedBeforeCapture\":" +
             (manifest.feature18ArmedBeforeCapture ? "true" : "false") +
-        ",\"upscaling\":" + (manifest.upscaling ? "true" : "false") +
-        (manifest.settingsDigest.empty() ? std::string{} :
-            ",\"settingsDigest\":\"" + JsonEscape(manifest.settingsDigest) + "\"") + "}\n";
+        ",\"upscaling\":" + (manifest.upscaling ? "true" : "false");
+    if (manifest.schema == kLegacySchema) {
+        // Schema 3 keeps its single optional extension byte-for-byte.
+        if (!manifest.settingsDigest.empty())
+            json += ",\"settingsDigest\":\"" + JsonEscape(manifest.settingsDigest) + "\"";
+        return json + "}\n";
+    }
+    json += ",\"settingsDigest\":\"" + JsonEscape(manifest.settingsDigest) +
+        "\",\"rangeStart100ns\":" + std::to_string(manifest.rangeStart100ns) +
+        ",\"rangeEnd100ns\":" + std::to_string(manifest.rangeEnd100ns) +
+        ",\"guides\":\"" + JsonEscape(manifest.guides) +
+        "\",\"jobId\":" + std::to_string(manifest.jobId) +
+        ",\"historyResets\":" + std::to_string(manifest.historyResets) +
+        ",\"receiptDigest\":\"" + JsonEscape(manifest.receiptDigest) + "\"}\n";
+    return json;
 }
 
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes)
@@ -475,13 +507,26 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
         !ReadBoolField(cursor, "feature18ArmedBeforeCapture",
                        manifest.feature18ArmedBeforeCapture) ||
         !ReadBoolField(cursor, "upscaling", manifest.upscaling, false)) return std::nullopt;
-    // Schema 3's only optional extension. Reject duplicate/unknown fields.
-    if (cursor.Expect(',') &&
-        !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest, false))
+    if (manifest.schema == kLegacySchema) {
+        // Schema 3's only optional extension. Reject duplicate/unknown fields.
+        if (cursor.Expect(',') &&
+            !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest, false))
+            return std::nullopt;
+    } else if (manifest.schema == kSchema) {
+        // Schema 4 is fixed and ordered; every field is required.
+        if (!cursor.Expect(',') ||
+            !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest) ||
+            !ReadIntegerField(cursor, "rangeStart100ns", manifest.rangeStart100ns) ||
+            !ReadIntegerField(cursor, "rangeEnd100ns", manifest.rangeEnd100ns) ||
+            !ReadStringField(cursor, "guides", manifest.guides) ||
+            !ReadIntegerField(cursor, "jobId", manifest.jobId) ||
+            !ReadIntegerField(cursor, "historyResets", manifest.historyResets) ||
+            !ReadStringField(cursor, "receiptDigest", manifest.receiptDigest, false))
+            return std::nullopt;
+    } else {
         return std::nullopt;
-    if (!cursor.Expect('}') || !cursor.Finished() ||
-        (!manifest.settingsDigest.empty() && !IsHexDigest(manifest.settingsDigest)))
-        return std::nullopt;
+    }
+    if (!cursor.Expect('}') || !cursor.Finished()) return std::nullopt;
 
     if (kind == "source") manifest.kind = NeuralCacheEntryKind::Source;
     else if (kind == "render") manifest.kind = NeuralCacheEntryKind::Render;
@@ -498,7 +543,6 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
 {
     if (manifest.state != NeuralCacheState::Complete || !CommonManifestFieldsValid(manifest))
         return false;
-    if (!manifest.settingsDigest.empty() && !IsHexDigest(manifest.settingsDigest)) return false;
     if (manifest.kind == NeuralCacheEntryKind::Source) {
         return IsHexDigest(manifest.sourceDigest) && manifest.neuralDigest.empty() &&
                !manifest.feature18Created;
@@ -618,6 +662,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     if (!manifest->settingsDigest.empty() &&
         Sha256File(directory / L"neural-settings.ini") != manifest->settingsDigest)
         return std::nullopt;
+    if (!manifest->receiptDigest.empty() &&
+        Sha256File(directory / L"receipt.json") != manifest->receiptDigest)
+        return std::nullopt;
     const auto payload = directory /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
     const auto digest = Sha256File(payload);
@@ -661,12 +708,20 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         manifest.observedFeature18Evaluations = 0;
         manifest.feature18Created = false;
         manifest.feature18ArmedBeforeCapture = false;
+        manifest.rangeStart100ns = 0;
+        manifest.rangeEnd100ns = 0;
+        manifest.guides.clear();
+        manifest.jobId = 0;
+        manifest.historyResets = 0;
+        manifest.receiptDigest.clear();
     } else {
         manifest.neuralDigest = *digest;
     }
     if (!IsReusableNeuralCacheManifest(manifest)) return false;
     if (!manifest.settingsDigest.empty() &&
         Sha256File(staging / L"neural-settings.ini") != manifest.settingsDigest) return false;
+    if (!manifest.receiptDigest.empty() &&
+        Sha256File(staging / L"receipt.json") != manifest.receiptDigest) return false;
     const auto manifestPath = staging / L"manifest.json";
     {
         std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);

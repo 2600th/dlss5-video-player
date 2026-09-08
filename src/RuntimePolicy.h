@@ -1,5 +1,7 @@
 #pragma once
 
+#include "OfflineNeuralRenderer.h"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -64,7 +66,21 @@ enum class NeuralPlaybackState {
     OriginalOnly,
     Cancelling,
     Failed,
+    // Render job suspended by the user; resumes to Rendering.
+    Paused,
+    // Job retrying the same frame / relaunching the worker; resolves to
+    // Rendering, Failed, RetryExhausted or Cancelling.
+    Recovering,
+    // Bounded retries spent. Terminal like Failed.
+    RetryExhausted,
 };
+
+const wchar_t* NeuralPlaybackStateName(NeuralPlaybackState state) noexcept;
+
+// Lifecycle state a job failure lands in: RetryExhausted stays distinct so
+// the UI can say the retries were spent, Cancelled is the user's choice and
+// offers the original, every other failure is Failed.
+NeuralPlaybackState StateForFailure(NeuralRenderFailure failure) noexcept;
 
 struct NeuralPlaybackLifecycle {
     NeuralPlaybackState state{NeuralPlaybackState::Idle};

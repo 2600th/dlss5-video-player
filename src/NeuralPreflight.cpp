@@ -281,8 +281,10 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             GuideFrame guide;
             for (; attempts < kProbeFrameLimit && !renderer->DLSSFeatureCreated(); ++attempts) {
                 FillProbeFrame(frame, attempts);
+                const FrameIdentity probeFrame{attempts, static_cast<int64_t>(double(attempts) * 1e7 / kProbeFps),
+                                               0, 0, 0, attempts == 0 ? HistoryReset::FirstFrame : HistoryReset::None};
                 if (!guides.Generate(frame.data(), kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight, kProbeFps,
-                                     attempts == 0, guide) ||
+                                     probeFrame, guide) ||
                     !renderer->RenderFrame(frame.data(), frame.size(), guide.guideGridRGBA32F.data(),
                                            guide.guideGridRGBA32F.size() * sizeof(float), guide.gridW, guide.gridH,
                                            attempts == 0, static_cast<float>(1000.0 / kProbeFps))) {

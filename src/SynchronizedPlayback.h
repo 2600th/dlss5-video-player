@@ -12,10 +12,19 @@ constexpr ComparisonView ToggleComparisonView(ComparisonView view) noexcept
     return view == ComparisonView::Original ? ComparisonView::Neural : ComparisonView::Original;
 }
 
+// Half-open window [start100ns, end100ns) of the original timeline that the
+// neural member covers; end 0 = the original's end. The neural file starts at
+// its own zero, so its frames are shifted by start100ns before pairing.
+struct SynchronizedRange {
+    int64_t start100ns{};
+    int64_t end100ns{};
+};
+
 struct SynchronizedFramePair {
     VideoFrame original;
     VideoFrame neural;
     int64_t timestamp100ns{};
+    uint64_t frameNumber{};
 };
 
 enum class SynchronizedReadResult {
@@ -57,7 +66,9 @@ public:
 
     bool Open(const std::filesystem::path& originalPath,
               const std::filesystem::path& neuralPath = {},
-              std::stop_token stop = {});
+              std::stop_token stop = {},
+              SynchronizedRange range = {});
+    SynchronizedRange Range() const;
     void Close();
     SynchronizedReadResult ReadNextAvailable(std::stop_token stop = {});
     bool SeekSeconds(double seconds, std::stop_token stop = {});
