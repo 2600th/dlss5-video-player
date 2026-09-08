@@ -12,6 +12,7 @@
 #include <deque>
 #include <mutex>
 #include <stop_token>
+#include <optional>
 #include <utility>
 #include <thread>
 #include "UiLayout.h"
@@ -101,8 +102,17 @@ private:
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
                     FFmpegAcceleration initialAcceleration);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
+    // Restarts (seeks, resizes, recovery) default to the path that last produced
+    // frames instead of re-running a hardware chain that already failed.
     bool StartFFmpeg(double seekSeconds,
-                     FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda);
+                     std::optional<FFmpegAcceleration> acceleration = std::nullopt);
+#ifdef VIDEO_DECODER_TESTING
+public:
+    // The dead-path memory is process-wide, so a test that exercises the
+    // fallback chain has to start from a clean slate.
+    static void ResetAccelerationAvailabilityForTesting();
+private:
+#endif
     bool ReadNextFFmpeg(VideoFrame& out);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
     VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop);

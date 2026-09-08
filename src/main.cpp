@@ -1742,6 +1742,9 @@ private:
     // desynchronize the pair, so the timeline is clamped to the last range frame.
     double ClampSeek(double sec)const{
         double low=0.0,high=m_decoder.DurationSeconds();
+        // Seeking to the container end has no frame to decode: the restarted
+        // decoder returns nothing and the seek pays for a second restart.
+        if(const int64_t last=LastFramePts(m_decoder.FrameRate(),SourceDuration100ns());last>0)high=std::min(high,double(last)*1e-7);
         if(m_cachedPlayback&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
         if(high>0)return std::clamp(sec,low,high);return std::max(low,sec);
     }

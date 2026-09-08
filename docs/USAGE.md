@@ -16,10 +16,11 @@ straight away as synchronized neural playback. Otherwise the **original starts
 playing** and the status line leads with
 `Mark I/O, then Ctrl+R renders the marked range`.
 
-The first render of a streamed source downloads it once into the cache, so the
-download happens when you ask for a render, not when you open the video. Later
-renders and reopens of the same source and quality reuse that copy, and a source
-played from the cache seeks locally instead of re-opening the network stream.
+A streamed source is downloaded into the cache once, and that starts as soon as
+you mark a range rather than when you open the video, so the render begins on a
+local file. Later renders and reopens of the same source and quality reuse that
+copy, and a source played from the cache seeks locally instead of re-opening the
+network stream.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Timeline seeking and

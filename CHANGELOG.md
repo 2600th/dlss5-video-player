@@ -7,18 +7,22 @@
   cache entry when one exists, and otherwise the original plays immediately;
   In/Out markers, the frame and clip previews, **Render marked range** and
   **Render whole video** decide what is rendered.
-- Acquire a streamed source when its first render is requested, not when the
-  video is opened, and re-resolve the page URL once when the resolved stream
-  URLs have expired. A source played from its cached copy seeks locally instead
-  of re-opening the network stream, and end of file ends playback.
+- Acquire a streamed source once, into the cache, and start it when a range is
+  marked rather than when the video is opened or the render is requested: the
+  download runs in the background while playback continues, and the render waits
+  for that copy instead of starting a second one. The page URL is re-resolved
+  once when the stream URLs have expired. A source played from its cached copy
+  seeks locally instead of re-opening the network stream, and end of file ends
+  playback.
 - Make the marked range unmissable: the timeline is taller, the selection is a
   solid violet block across the track between DPI-scaled green/orange In and Out
   ticks that reach past it, cached neural coverage moved to a teal stripe along
   the bottom, and the status line leads with the In/Out timecodes.
-- Download a streamed source in the background as soon as a range is marked, so
-  a render starts on a local file instead of waiting for the whole video. One
-  acquisition is shared: the render waits for the background copy rather than
-  downloading the same source again, and later renders reuse it.
+- Seek in about a third of the time. A hardware decode path that fails once is
+  remembered for the whole run, so every restart no longer relaunches ffmpeg
+  twice on paths that cannot work here, and a seek to the container end stops at
+  the last frame instead of paying for a second restart. Measured on a 1080p
+  clip: 820-1290 ms per seek before, 336-401 ms after.
 - Keep In/Out markers inside the source. A rounded duration and a rounded frame
   rate can grid a frame just inside the end that the source never emits (a
   30.03 s clip at 59.94 fps grids frame 1800 at 300299799 against a 300300000

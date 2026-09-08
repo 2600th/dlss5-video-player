@@ -61,8 +61,12 @@ struct VideoDecoderTestAccess {
         const std::filesystem::path& helperDirectory,
         std::chrono::milliseconds probeTimeout = std::chrono::milliseconds{250},
         std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120},
-        VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None)
+        VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None,
+        bool resetAcceleration = true)
     {
+        // Dead hardware paths are remembered process-wide; a test decoder starts
+        // from a clean slate unless it is checking exactly that memory.
+        if(resetAcceleration)VideoDecoder::ResetAccelerationAvailabilityForTesting();
         VideoDecoder::Settings settings;
         settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
         return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
@@ -3876,6 +3880,37 @@ void video_decoder_hardware_failure_falls_back_to_software_test()
     CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),accelerationOrder);
 }
 
+// A failed hardware path stays failed: the next decoder in the same process
+// launches software directly, which is what keeps a seek to one process start.
+void video_decoder_remembers_dead_hardware_paths_test()
+{
+    MediaFixture fixture;
+    {
+        const auto first=fixture.directory/L"first-order.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",first.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2});
+        CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
+        VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+        for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+            result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline;)
+            {result=decoder->ReadNextAvailable(frame);Sleep(5);}
+        CHECK_EQ(VideoReadResult::FrameReady,result);
+        CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(first));
+    }
+    // Same process, new decoder, no reset: the two dead paths are skipped.
+    const auto second=fixture.directory/L"second-order.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",second.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2},
+                                                VideoDecoder::FailureStage::None,false);
+    CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+        result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline;)
+        {result=decoder->ReadNextAvailable(frame);Sleep(5);}
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    CHECK_EQ(std::string("software\n"),read_binary_file(second));
+}
+
 void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
 {
     MediaFixture fixture;
@@ -5402,6 +5437,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
+    video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();

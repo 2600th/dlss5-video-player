@@ -401,7 +401,28 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     return true;
 }
 
-bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration acceleration) {
+// A hardware path that fails once fails for every source this build opens: the
+// bundled ffmpeg either has the filters or it does not. Remembering that across
+// decoders keeps a seek from paying for the same two dead process launches.
+namespace {
+std::atomic<bool> g_cudaDecodeUnavailable{false};
+std::atomic<bool> g_d3d11DecodeUnavailable{false};
+} // namespace
+
+
+#ifdef VIDEO_DECODER_TESTING
+void VideoDecoder::ResetAccelerationAvailabilityForTesting()
+{
+    g_cudaDecodeUnavailable.store(false,std::memory_order_relaxed);
+    g_d3d11DecodeUnavailable.store(false,std::memory_order_relaxed);
+}
+#endif
+bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
+    FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
+    if(acceleration==FFmpegAcceleration::Cuda&&g_cudaDecodeUnavailable.load(std::memory_order_relaxed))
+        acceleration=FFmpegAcceleration::D3D11Va;
+    if(acceleration==FFmpegAcceleration::D3D11Va&&g_d3d11DecodeUnavailable.load(std::memory_order_relaxed))
+        acceleration=FFmpegAcceleration::Software;
     StopFFmpeg();
     seekSeconds = std::max(0.0, seekSeconds);
     if (m_stillImage || m_gif) acceleration = FFmpegAcceleration::Software;
@@ -543,6 +564,9 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     if (exitCode == 0 || exitCode == STILL_ACTIVE || m_ffmpegAcceleration == FFmpegAcceleration::Software)
         return false;
+    // Remember the dead path so no later decoder or seek launches it again.
+    if(m_ffmpegAcceleration==FFmpegAcceleration::Cuda)g_cudaDecodeUnavailable.store(true,std::memory_order_relaxed);
+    else g_d3d11DecodeUnavailable.store(true,std::memory_order_relaxed);
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
     const double resumeSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
