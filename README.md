@@ -68,15 +68,19 @@ layout. Build inputs and package contents are explained in [Building](docs/BUILD
 | --- | --- |
 | Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
-| Compare original and neural views | `D` |
+| Compare original and neural views | `D`; **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
 | Seek / step a paused cached frame | Timeline or `Left` / `Right`; `.` to step |
+| Mark In / Out, exact timecode | `I` / `O`, `Shift+I` to clear; `Ctrl+G` |
+| Render only part of a video | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked range |
+| Neural model and guide settings | `Ctrl+N` |
 | Volume / mute | Volume control or mouse wheel; `M` to mute |
 | Fit or fill / fullscreen | `A` / `F11` |
 | Image adjustments | `Ctrl+E` |
 | Replay / export | **File > Recent videos / Export cached video** |
 
-Volume, mute, fit/fill, comparison view, upscaling preference/output, YouTube
-quality and image adjustments are saved across launches.
+Volume, mute, fit/fill, comparison view and mode, upscaling preference/output,
+YouTube quality, image adjustments, neural settings and guide switches are saved
+across launches.
 
 | Setting | Fresh-install default |
 | --- | --- |
