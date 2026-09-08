@@ -15,12 +15,15 @@
   green, played progress in the middle, and a violet stripe along the bottom
   marks the part of the source that has cached neural frames. The status line
   leads with the In/Out timecodes, or with how to mark a range.
-- Keep In/Out markers inside the source. A marker used to be able to land in the
-  sub-frame remainder past the last frame, and rendering that range asked the
-  helper to prime on nothing: it failed with `frames=0/0` and "Feature 18 could
-  not be primed from the source". In now stops at the last frame, Out on the
-  last frame means the source end so the final frame is renderable, and a range
-  that names no frame is refused before the render starts.
+- Keep In/Out markers inside the source. A rounded duration and a rounded frame
+  rate can grid a frame just inside the end that the source never emits (a
+  30.03 s clip at 59.94 fps grids frame 1800 at 300299799 against a 300300000
+  duration); marking there asked the helper to render a range with nothing to
+  decode, which failed with `frames=0/0` and "Feature 18 could not be primed
+  from the source". A frame now counts only when it starts at least half a frame
+  before the end, In stops at the last emitted frame, Out on that frame means
+  the source end so the final frame is renderable, and a range that names no
+  frame is refused before the render starts.
 
 - Verify the staged neural runtime against the embedded packaging lock and run a
   Feature 18 preflight in the isolated helper before every render; each cache

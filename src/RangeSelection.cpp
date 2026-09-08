@@ -42,11 +42,16 @@ uint64_t FrameIndexAtOrAfter(int64_t pts100ns, double fps)
     return index;
 }
 
-// Number of frames starting before the source ends; FramePts(count) is the
-// first grid boundary at or beyond the container duration.
+// Number of frames the source actually emits. A rounded duration and a rounded
+// frame rate can place a grid frame just inside the end that never exists (a
+// 30.03 s source at 59.9401 fps grids frame 1800 at 300299799 against a
+// 300300000 duration), so a frame counts only when it starts at least half a
+// frame before the end. FramePts(count) is the first boundary at or past it.
 uint64_t SourceFrameCount(int64_t duration100ns, double fps)
 {
-    return FrameIndexAtOrBefore(duration100ns - 1, fps) + 1;
+    const int64_t limit = duration100ns - static_cast<int64_t>(kTicksPerSecond / fps / 2.0);
+    if (limit <= 0) return 1;
+    return FrameIndexAtOrBefore(limit, fps) + 1;
 }
 
 NeuralRenderRange GridRange(uint64_t startIndex, uint64_t endIndex, uint64_t frameCount, double fps)

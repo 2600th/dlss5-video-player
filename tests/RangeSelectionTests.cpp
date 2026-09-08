@@ -137,6 +137,25 @@ void MarkerTests()
         CHECK(snapped.has_value());
         if (snapped) { CHECK_EQ(FramePts(2, fps), snapped->start100ns); CHECK_EQ(FramePts(5, fps), snapped->end100ns); }
     }
+    // The case this rule was written for, with its measured numbers: a 30.03 s
+    // YouTube source reported at 59.9401 fps emits 1800 frames (0..1799), but
+    // the grid places frame 1800 at 300299799 - inside the rounded duration.
+    // Marking there produced range=[30.0299 s,30.03 s), which rendered nothing.
+    constexpr double kReported5994 = 59.9401;
+    constexpr int64_t kThirtySeconds = 300300000;
+    CHECK_EQ(int64_t{300132966}, FramePts(1799, kReported5994));
+    CHECK_EQ(int64_t{300299799}, FramePts(1800, kReported5994));
+    CHECK_EQ(FramePts(1799, kReported5994), LastFramePts(kReported5994, kThirtySeconds));
+    CHECK(!range(FramePts(1800, kReported5994), kThirtySeconds, kThirtySeconds, kReported5994).has_value());
+    const auto lastEmitted = range(FramePts(1799, kReported5994), kThirtySeconds, kThirtySeconds, kReported5994);
+    CHECK(lastEmitted.has_value());
+    if (lastEmitted) {
+        CHECK_EQ(FramePts(1799, kReported5994), lastEmitted->start100ns);
+        CHECK_EQ(FramePts(1800, kReported5994), lastEmitted->end100ns);
+    }
+    // In at the start with Out at the source end is the whole source.
+    const auto everything = range(0, kThirtySeconds, kThirtySeconds, kReported5994);
+    CHECK(everything.has_value() && everything->Whole());
     CHECK_EQ(int64_t{0}, LastFramePts(0.0, kTenSeconds));
     CHECK_EQ(int64_t{0}, LastFramePts(60.0, 0));
 }
