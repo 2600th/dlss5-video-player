@@ -368,6 +368,23 @@ NeuralPlaybackState StateForFailure(NeuralRenderFailure failure) noexcept
     }
 }
 
+NeuralPlaybackState StateForProgressPhase(NeuralRenderPhase phase, NeuralPlaybackState current) noexcept
+{
+    switch (phase) {
+    case NeuralRenderPhase::Acquiring:
+    case NeuralRenderPhase::Preflight: return NeuralPlaybackState::Acquiring;
+    case NeuralRenderPhase::Decoding:
+    case NeuralRenderPhase::NeuralRendering:
+    case NeuralRenderPhase::Encoding: return NeuralPlaybackState::Rendering;
+    case NeuralRenderPhase::Validating: return NeuralPlaybackState::Validating;
+    case NeuralRenderPhase::Paused: return NeuralPlaybackState::Paused;
+    case NeuralRenderPhase::Recovering: return NeuralPlaybackState::Recovering;
+    case NeuralRenderPhase::CheckingCache:
+    case NeuralRenderPhase::Ready: return current;
+    }
+    return current;
+}
+
 void NeuralPlaybackLifecycle::Invalidate()
 {
     ++generation;

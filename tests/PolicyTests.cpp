@@ -2285,6 +2285,38 @@ void neural_failure_kind_selects_the_lifecycle_state_test()
     CHECK_EQ(std::wstring(L"Recovering"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Recovering)));
 }
 
+void neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test()
+{
+    // Phases without a state of their own never move the job.
+    CHECK_EQ(NeuralPlaybackState::Acquiring,StateForProgressPhase(NeuralRenderPhase::CheckingCache,NeuralPlaybackState::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Validating,StateForProgressPhase(NeuralRenderPhase::Ready,NeuralPlaybackState::Validating));
+    CHECK_EQ(NeuralPlaybackState::Acquiring,StateForProgressPhase(NeuralRenderPhase::Preflight,NeuralPlaybackState::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Validating,StateForProgressPhase(NeuralRenderPhase::Validating,NeuralPlaybackState::Rendering));
+    // A worker walking through preflight, decode, pause, resume, a frame retry and
+    // encode lands in exactly the states the UI presents.
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    const auto advance=[&](NeuralRenderPhase phase){return lifecycle.Transition(StateForProgressPhase(phase,lifecycle.state));};
+    CHECK(!advance(NeuralRenderPhase::Preflight));
+    CHECK_EQ(NeuralPlaybackState::Acquiring,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Decoding));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Paused));
+    CHECK_EQ(NeuralPlaybackState::Paused,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::NeuralRendering));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Recovering));
+    CHECK_EQ(NeuralPlaybackState::Recovering,lifecycle.state);
+    // A relaunched helper re-acquires while the job is still recovering.
+    CHECK(!advance(NeuralRenderPhase::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Recovering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Encoding));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Validating));
+    CHECK(!advance(NeuralRenderPhase::Ready));
+    CHECK_EQ(NeuralPlaybackState::Validating,lifecycle.state);
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
+}
+
 void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test()
 {
     CHECK_EQ(ComparisonView::Neural,ToggleComparisonView(ComparisonView::Original));
@@ -5321,6 +5353,7 @@ int wmain(int argc, wchar_t* argv[])
     neural_pause_suspends_rendering_and_resumes_without_advancing_test();
     neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();
     neural_failure_kind_selects_the_lifecycle_state_test();
+    neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test();
     dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
     source_change_cancels_and_joins_the_owned_job_before_replacement_test();
     youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();

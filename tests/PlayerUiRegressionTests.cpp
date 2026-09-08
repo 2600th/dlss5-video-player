@@ -5,6 +5,7 @@
 
 namespace {
 std::vector<std::wstring> drawnText;
+std::wstring lastMessageBox;
 int messageBoxes = 0;
 
 int WINAPI CaptureDrawText(HDC dc, LPCWSTR text, int count, LPRECT rect, UINT format)
@@ -13,8 +14,9 @@ int WINAPI CaptureDrawText(HDC dc, LPCWSTR text, int count, LPRECT rect, UINT fo
     return DrawTextW(dc, text, count, rect, format);
 }
 
-int WINAPI CaptureMessageBox(HWND, LPCWSTR, LPCWSTR, UINT)
+int WINAPI CaptureMessageBox(HWND, LPCWSTR text, LPCWSTR, UINT)
 {
+    lastMessageBox = text ? text : L"";
     ++messageBoxes;
     return IDOK;
 }
@@ -36,6 +38,8 @@ struct PlayerAppTestAccess {
         app.m_volume = 0.35f; app.m_muted = true; app.m_fill = true;
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
+        app.m_renderGuides = GuideControls{false, true, false};
+        app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
         app.m_cacheRoot=savedCacheRoot;
         app.SaveVideoSettings();
@@ -43,17 +47,25 @@ struct PlayerAppTestAccess {
         app.m_volume = 1.0f; app.m_muted = false; app.m_fill = false;
         app.m_neuralRequested = true; app.m_upscaleTargetHeight = 1440;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
+        app.m_renderGuides = {}; app.m_neuralSettings = {};
         app.LoadVideoSettings();
         CHECK_EQ(app.m_cacheRoot,savedCacheRoot);
         CHECK(std::abs(app.m_volume - 0.35f) < 0.001f);
         CHECK(app.m_muted && app.m_fill && !app.m_neuralRequested);
         CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
         CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
+        CHECK((app.m_renderGuides == GuideControls{false, true, false}));
+        CHECK(app.m_neuralSettings.intensity == 1.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
+        // Absent guide keys mean every guide is on, matching a fresh install.
+        for (const wchar_t* key : {L"MotionVectors", L"Depth", L"Mask"})
+            WritePrivateProfileStringW(L"NeuralGuides", key, nullptr, app.SettingsPath().c_str());
+        app.LoadVideoSettings();
+        CHECK(app.m_renderGuides.IsDefault());
         app.WriteIniFloat(L"Playback", L"Volume", 2.0f);
         app.LoadVideoSettings();
         CHECK_EQ(app.m_volume, 1.0f);
         app.m_muted = false; app.m_fill = false; app.m_neuralRequested = true;
-        app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
+        app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto; app.m_neuralSettings = {};
         app.m_cacheRoot.clear();
         WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,app.SettingsPath().c_str());
         app.SaveVideoSettings();
@@ -299,6 +311,38 @@ struct PlayerAppTestAccess {
         CHECK(Contains(L"Checking saved video"));
         CHECK(Contains(L"Verifying cache; no re-encoding"));
         CHECK(!Contains(L"Preparing encoder\u2026"));
+
+        // Pausing holds the lifecycle and the spinner until the user resumes,
+        // even when the helper still reports a frame that was already in
+        // flight; Space drives the same path while a job is active.
+        CHECK(app.m_neuralLifecycle.Transition(NeuralPlaybackState::Rendering));
+        CHECK(!app.NeuralJobPaused());
+        app.WndProc(app.m_hwnd, WM_KEYDOWN, VK_SPACE, 0);
+        CHECK(app.NeuralJobPaused());
+        CHECK_EQ(NeuralPlaybackState::Paused, app.m_neuralLifecycle.state);
+        CHECK(app.NeuralJobActive());
+        drawnText.clear();
+        app.RenderUi(dc, RECT{0, 0, 800, 600});
+        CHECK(Contains(L"Paused"));
+        QueueProgress(app, NeuralRenderPhase::NeuralRendering);
+        CHECK_EQ(NeuralPlaybackState::Paused, app.m_neuralLifecycle.state);
+        app.SetNeuralJobPaused(false);
+        CHECK(!app.NeuralJobPaused());
+        CHECK_EQ(NeuralPlaybackState::Rendering, app.m_neuralLifecycle.state);
+        QueueProgress(app, NeuralRenderPhase::Paused);
+        CHECK_EQ(NeuralPlaybackState::Rendering, app.m_neuralLifecycle.state);
+        QueueProgress(app, NeuralRenderPhase::Recovering, NeuralRenderFailure::GpuStall, 2);
+        CHECK_EQ(NeuralPlaybackState::Recovering, app.m_neuralLifecycle.state);
+        drawnText.clear();
+        app.RenderUi(dc, RECT{0, 0, 800, 600});
+        CHECK(Contains(L"Recovering (attempt 2 \u00b7 gpu-stall)"));
+        QueueProgress(app, NeuralRenderPhase::Encoding);
+        CHECK_EQ(NeuralPlaybackState::Rendering, app.m_neuralLifecycle.state);
+        app.SetNeuralJobPaused(true);
+        app.CancelNeuralJob(false);
+        CHECK(!app.NeuralJobPaused());
+        CHECK(!app.NeuralJobActive());
+        app.m_neuralProgress = {};
         CHECK(DeleteDC(dc));
 
         // Cancelled and failed completions must restore the native menu, not
@@ -306,6 +350,12 @@ struct PlayerAppTestAccess {
         CompleteTerminalJob(app, true);
         CompleteTerminalJob(app, false);
         CHECK_EQ(1, messageBoxes);
+        // Retry exhaustion keeps its own terminal state and the fallback
+        // message names the failure kind before the helper's detail.
+        CompleteTerminalJob(app, false, NeuralRenderFailure::RetryExhausted);
+        CHECK_EQ(2, messageBoxes);
+        CHECK(lastMessageBox.find(L"gave up after retrying") != std::wstring::npos);
+        CHECK(lastMessageBox.find(L"Controlled render failure") != std::wstring::npos);
 
         // An obsolete completion must not unlock a newer active render.
         const uint64_t oldGeneration = app.m_neuralLifecycle.Begin();
@@ -673,11 +723,13 @@ private:
             checkCommand(IDM_EXAMPLE_VIDEO_FIRST + static_cast<UINT>(index));
     }
 
-    static uint64_t QueueCompletion(PlayerApp& app, uint64_t generation, bool cancelled)
+    static uint64_t QueueCompletion(PlayerApp& app, uint64_t generation, bool cancelled,
+                                    NeuralRenderFailure failure = NeuralRenderFailure::None)
     {
         auto completion = std::make_unique<NeuralJobCompletion>();
         completion->generation = generation;
         completion->result.cancelled = cancelled;
+        completion->result.failure = failure;
         completion->result.detail = L"Controlled render failure";
         uint64_t token = 0;
         CHECK(app.m_neuralCompletions.RegisterAndPost(std::move(completion),
@@ -685,17 +737,32 @@ private:
         return token;
     }
 
-    static void CompleteTerminalJob(PlayerApp& app, bool cancelled)
+    static void QueueProgress(PlayerApp& app, NeuralRenderPhase phase,
+                              NeuralRenderFailure recovering = NeuralRenderFailure::None, uint32_t retries = 0)
+    {
+        auto message = std::make_unique<NeuralProgressMessage>();
+        message->generation = app.m_neuralLifecycle.generation;
+        message->progress.phase = phase;
+        message->progress.recovering = recovering;
+        message->progress.retries = retries;
+        uint64_t token = 0;
+        CHECK(app.m_neuralProgressMessages.RegisterAndPost(std::move(message),
+            [&](uint64_t registered) { token = registered; return true; }));
+        app.CompleteNeuralProgress(token);
+    }
+
+    static void CompleteTerminalJob(PlayerApp& app, bool cancelled,
+                                    NeuralRenderFailure failure = NeuralRenderFailure::None)
     {
         const uint64_t generation = app.m_neuralLifecycle.Begin();
         app.m_neuralWorker = std::jthread([] {});
         app.SyncSourceActionAvailability();
         CheckSourceMenus(app, false);
-        const uint64_t token = QueueCompletion(app, generation, cancelled);
+        const uint64_t token = QueueCompletion(app, generation, cancelled, failure);
         app.CompleteNeuralJob(token);
         CHECK(!app.NeuralJobActive());
         CHECK(!app.m_neuralWorker.joinable());
-        CHECK_EQ(cancelled ? NeuralPlaybackState::OriginalOnly : NeuralPlaybackState::Failed,
+        CHECK_EQ(cancelled ? NeuralPlaybackState::OriginalOnly : StateForFailure(failure),
                  app.m_neuralLifecycle.state);
         CheckSourceMenus(app, true);
     }

@@ -82,6 +82,11 @@ const wchar_t* NeuralPlaybackStateName(NeuralPlaybackState state) noexcept;
 // offers the original, every other failure is Failed.
 NeuralPlaybackState StateForFailure(NeuralRenderFailure failure) noexcept;
 
+// Lifecycle state a worker progress phase drives the job into. Phases that
+// carry no state of their own (CheckingCache, Ready) keep `current`; the
+// decode/render/encode phases return to Rendering from Paused or Recovering.
+NeuralPlaybackState StateForProgressPhase(NeuralRenderPhase phase, NeuralPlaybackState current) noexcept;
+
 struct NeuralPlaybackLifecycle {
     NeuralPlaybackState state{NeuralPlaybackState::Idle};
     uint64_t generation{};

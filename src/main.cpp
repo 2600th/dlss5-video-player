@@ -46,6 +46,11 @@
 #include "MediaPipeline.h"
 #include "OfflineNeuralRenderer.h"
 #include "NeuralWorker.h"
+#include "NeuralPreflight.h"
+#include "NeuralReceipt.h"
+#include "NeuralSettings.h"
+#include "RangeSelection.h"
+#include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "resources.h"
@@ -408,6 +413,8 @@ struct NeuralJobCompletion {
     bool cacheHit{};
     bool cachedSourceUnavailable{};
     std::string sourceKey, renderKey;
+    NeuralRenderRange range;
+    std::filesystem::path receiptPath;
 };
 
 struct ExportCompletion {
@@ -603,8 +610,8 @@ class PlayerApp {
     friend struct PlayerAppTestAccess;
 #endif
 public:
-    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont);}
+    explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
 
     bool Create(HINSTANCE hi) {
         m_loc.Initialize();
@@ -752,8 +759,9 @@ private:
     void ExportCachedVideo(){
         if(!m_cachedPlayback||m_neuralPath.empty()||m_exportWorker.joinable())return;
         const auto output=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());if(output.empty())return;
-        const auto neural=m_neuralPath,source=std::filesystem::path(m_path),helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
-        try{m_exportWorker=std::jthread([target,output,neural,source,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=output;completion->result=CachedVideoExporter(helpers).Run({neural,source,output},stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
+        CachedExportRequest request{m_neuralPath,std::filesystem::path(m_path),output};if(!m_cachedRange.Whole()){request.rangeStartSeconds=double(m_cachedRange.start100ns)*1e-7;request.rangeDurationSeconds=double(m_cachedRange.end100ns-m_cachedRange.start100ns)*1e-7;}
+        const auto helpers=ExecutableDirectory();HWND target=m_hwnd;auto* completions=&m_exportCompletions;
+        try{m_exportWorker=std::jthread([target,request,helpers,completions](std::stop_token stop){auto completion=std::make_unique<ExportCompletion>();completion->output=request.output;completion->result=CachedVideoExporter(helpers).Run(request,stop);completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});});}
         catch(const std::system_error&){MessageBoxW(m_hwnd,L"The export worker could not start. Try again.",L"Export failed",MB_OK|MB_ICONERROR);return;}
         SyncFeatureMenuState();UpdateCachedStatus();
     }
@@ -913,6 +921,10 @@ private:
         m_colorSettings.gamma=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Gamma",1.0f),0.25f,3.0f);
         m_colorSettings.temperature=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Temperature",0.0f),-1.0f,1.0f);
         m_colorSettings.tint=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Tint",0.0f),-1.0f,1.0f);
+        m_renderGuides.motionVectors=GetPrivateProfileIntW(L"NeuralGuides",L"MotionVectors",1,SettingsPath().c_str())!=0;
+        m_renderGuides.depth=GetPrivateProfileIntW(L"NeuralGuides",L"Depth",1,SettingsPath().c_str())!=0;
+        m_renderGuides.mask=GetPrivateProfileIntW(L"NeuralGuides",L"Mask",1,SettingsPath().c_str())!=0;
+        m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
     }
 
     void SaveVideoSettings()const{
@@ -930,6 +942,10 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Gamma",m_colorSettings.gamma);
         WriteIniFloat(L"VideoAdjustments",L"Temperature",m_colorSettings.temperature);
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
+        WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"NeuralGuides",L"Mask",m_renderGuides.mask?L"1":L"0",SettingsPath().c_str());
+        SaveNeuralSettings(SettingsPath(),m_neuralSettings);
     }
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
@@ -1126,7 +1142,7 @@ private:
     }
 
     void Unload() {
-        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();
+        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -1339,7 +1355,7 @@ private:
     }
 
     void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){const double playbackClock=Position();m_currentSec=playback_timing::PausePosition(m_currentSec,playbackClock);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&m_sourceKind==MediaSourceKind::LocalFile&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
-    void TogglePause(){SetPaused(m_playing);}
+    void TogglePause(){if(NeuralJobActive()){SetNeuralJobPaused(!NeuralJobPaused());return;}SetPaused(m_playing);}
     void StepCachedFrame(){
         if(!m_loaded||!m_cachedPlayback||m_playing||m_seeking)return;
         Audio().Pause(true);
@@ -1500,14 +1516,15 @@ private:
         if(NeuralJobActive()||(!m_loaded&&m_youtubeLifecycle.IsResolving())){
             const bool neural=NeuralJobActive();
             const PreRenderSurfaceLayout surface=LayoutPreRenderSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));m_neuralCancelBounds=surface.cancelButton;
+            const bool paused=neural&&m_neuralLifecycle.state==NeuralPlaybackState::Paused;
             const uint64_t completed=neural?m_neuralProgress.completedFrames:0,total=neural?m_neuralProgress.totalFrames:0;
             const auto visual=ResolveActivityVisual(surface.progressTrack,ActivityElapsedMs(),completed,total,
-                neural&&m_neuralProgress.phase==NeuralRenderPhase::NeuralRendering,m_activityMotionEnabled);
+                neural&&m_neuralProgress.phase==NeuralRenderPhase::NeuralRendering,m_activityMotionEnabled&&!paused);
             DrawActivitySpinner(dc,surface.spinner,visual.spinnerStep);
             SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(242,243,245));HGDIOBJ oldFont=SelectObject(dc,m_font);
             std::wstring title=neural?(m_pendingNeuralTitle.empty()?L"Preparing neural-rendered playback":m_pendingNeuralTitle):(m_pendingYouTubeTitle.empty()?L"YouTube video":m_pendingYouTubeTitle);RECT row=surface.title;DrawTextW(dc,title.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
             SelectObject(dc,m_fontSmall);SetTextColor(dc,ui_palette::SecondaryText);
-            const std::wstring phase=neural?T(NeuralPhaseTextKey(m_neuralProgress.phase)):L"Loading YouTube video";row=surface.phase;DrawTextW(dc,phase.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            const std::wstring phase=!neural?L"Loading YouTube video":paused?T(L"neural.phase.paused"):NeuralPhaseText(m_neuralProgress);row=surface.phase;DrawTextW(dc,phase.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
             const std::wstring resolution=neural?(m_neuralSourceWidth?std::to_wstring(m_neuralSourceWidth)+L" × "+std::to_wstring(m_neuralSourceHeight):L"Reading source metadata…"):L"Finding a playable source…";row=surface.resolution;DrawTextW(dc,resolution.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
             const std::wstring frames=total?(!visual.indeterminate?std::to_wstring(visual.percent)+L"% · ":L"")+std::to_wstring(completed)+L" / "+std::to_wstring(total)+L" frames":L"";row=surface.frameCount;DrawTextW(dc,frames.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
             const auto elapsed=std::max<uint64_t>(ActivityElapsedMs()/1000,neural?static_cast<uint64_t>(std::max<int64_t>(0,m_neuralProgress.elapsed.count()/1000)):0);
@@ -1610,14 +1627,51 @@ private:
     }
 
     bool NeuralPreRenderEnabled()const{return m_opt.neuralAddonConfigured&&!m_opt.safeMode;}
-    bool NeuralJobActive()const{return m_neuralWorker.joinable()||m_neuralLifecycle.state==NeuralPlaybackState::Acquiring||m_neuralLifecycle.state==NeuralPlaybackState::Rendering||m_neuralLifecycle.state==NeuralPlaybackState::Validating||m_neuralLifecycle.state==NeuralPlaybackState::Cancelling;}
+    bool NeuralJobActive()const{switch(m_neuralLifecycle.state){case NeuralPlaybackState::Acquiring:case NeuralPlaybackState::Rendering:case NeuralPlaybackState::Validating:case NeuralPlaybackState::Cancelling:case NeuralPlaybackState::Paused:case NeuralPlaybackState::Recovering:return true;default:return m_neuralWorker.joinable();}}
+    bool NeuralJobPaused()const{return m_neuralPauseEvent&&WaitForSingleObject(m_neuralPauseEvent,0)==WAIT_OBJECT_0;}
+    void SetNeuralJobPaused(bool paused){
+        if(!NeuralJobActive()||!m_neuralPauseEvent||paused==NeuralJobPaused())return;
+        if(paused)SetEvent(m_neuralPauseEvent);else ResetEvent(m_neuralPauseEvent);
+        m_neuralLifecycle.Transition(paused?NeuralPlaybackState::Paused:NeuralPlaybackState::Rendering);
+        if(!paused&&m_neuralProgress.phase==NeuralRenderPhase::Paused)m_neuralProgress.phase=NeuralRenderPhase::NeuralRendering;
+        LOG("Neural pre-render "<<(paused?"paused":"resumed")<<" by the user; state="<<WideToUtf8(NeuralPlaybackStateName(m_neuralLifecycle.state)));
+        if(m_hwnd)InvalidateRect(m_hwnd,nullptr,FALSE);
+    }
+    // Renders [start,end) of the source that is loaded now. YouTube sources
+    // reuse their owned source-cache entry through the recent history; a
+    // network stream without one cannot be range-rendered here.
+    bool RenderRangeOfCurrentSource(NeuralRenderRange range){
+        if(!m_loaded||NeuralJobActive()||m_youtubeLifecycle.IsResolving()||!NeuralPreRenderEnabled()||m_path.empty())return false;
+        if(m_sourceKind==MediaSourceKind::YouTube){
+            if(!m_recent||m_youtubePageUrl.empty())return false;
+            const auto id=CanonicalYouTubeVideoId(m_youtubePageUrl);
+            for(const auto& entry:m_recent->Entries())if(entry.youtube&&entry.id==id&&entry.sourceQuality==static_cast<int>(m_youtubeSourceQuality)&&!entry.sourceKey.empty()){
+                const std::wstring url=m_youtubePageUrl,title=m_displayTitle;const auto sourceKey=entry.sourceKey;
+                StartNeuralJob(url,{},title,url,MediaSourceKind::YouTube,m_youtubeSourceQuality,sourceKey,0.0,range);return true;
+            }
+            return false;
+        }
+        const std::wstring source=m_path,title=m_displayTitle;
+        StartNeuralJob(source,{},title,{},MediaSourceKind::LocalFile,m_youtubeSourceQuality,{},0.0,range);return true;
+    }
     static std::filesystem::path ExecutableDirectory(){std::filesystem::path executable;std::wstring error;return CurrentExecutablePath(executable,error)?executable.parent_path():std::filesystem::path{};}
     static std::string GpuPathName(GpuGeneration generation){return generation==GpuGeneration::Rtx40Ada?"rtx40":generation==GpuGeneration::Rtx50Blackwell?"rtx50":"unsupported";}
-    static const wchar_t* NeuralPhaseTextKey(NeuralRenderPhase phase){switch(phase){case NeuralRenderPhase::CheckingCache:return L"neural.phase.cache";case NeuralRenderPhase::Acquiring:return L"neural.phase.acquiring";case NeuralRenderPhase::Decoding:case NeuralRenderPhase::NeuralRendering:return L"neural.phase.rendering";case NeuralRenderPhase::Encoding:return L"neural.phase.encoding";case NeuralRenderPhase::Validating:return L"neural.phase.validating";case NeuralRenderPhase::Ready:return L"neural.phase.ready";}return L"neural.phase.acquiring";}
+    static const wchar_t* NeuralPhaseTextKey(NeuralRenderPhase phase){switch(phase){case NeuralRenderPhase::CheckingCache:return L"neural.phase.cache";case NeuralRenderPhase::Acquiring:return L"neural.phase.acquiring";case NeuralRenderPhase::Decoding:case NeuralRenderPhase::NeuralRendering:return L"neural.phase.rendering";case NeuralRenderPhase::Encoding:return L"neural.phase.encoding";case NeuralRenderPhase::Validating:return L"neural.phase.validating";case NeuralRenderPhase::Ready:return L"neural.phase.ready";case NeuralRenderPhase::Preflight:return L"neural.phase.preflight";case NeuralRenderPhase::Paused:return L"neural.phase.paused";case NeuralRenderPhase::Recovering:return L"neural.phase.recovering";}return L"neural.phase.acquiring";}
+    std::wstring NeuralPhaseText(const NeuralRenderProgress& progress)const{std::wstring text=T(NeuralPhaseTextKey(progress.phase));if(progress.phase==NeuralRenderPhase::Recovering){const auto failure=NeuralRenderFailureName(progress.recovering);text+=L" (attempt "+std::to_wstring(progress.retries)+L" \u00b7 "+std::wstring(failure.begin(),failure.end())+L")";}return text;}
+    static const wchar_t* NeuralFailureTextKey(NeuralRenderFailure failure){switch(failure){case NeuralRenderFailure::GpuStall:return L"neural.failure.gpu-stall";case NeuralRenderFailure::DeviceRemoved:return L"neural.failure.device-removed";case NeuralRenderFailure::WorkerCrashed:return L"neural.failure.worker-crashed";case NeuralRenderFailure::RetryExhausted:return L"neural.failure.retry-exhausted";case NeuralRenderFailure::Preflight:return L"neural.failure.preflight";case NeuralRenderFailure::Identity:return L"neural.failure.identity";case NeuralRenderFailure::Protocol:return L"neural.failure.protocol";default:return nullptr;}}
+    // Lands the lifecycle in the failure's state. RetryExhausted is only
+    // reachable through Recovering; a crash-relaunch that ran out of retries
+    // mid-render steps through it rather than degrading to plain Failed.
+    void TransitionToFailure(NeuralRenderFailure failure){
+        const NeuralPlaybackState next=StateForFailure(failure);
+        if(m_neuralLifecycle.Transition(next))return;
+        if(next==NeuralPlaybackState::RetryExhausted&&m_neuralLifecycle.Transition(NeuralPlaybackState::Recovering)&&m_neuralLifecycle.Transition(next))return;
+        m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);
+    }
     void DrainNeuralMessages(){m_neuralProgressMessages.Clear();m_neuralCompletions.Clear();if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){};}
     void CancelNeuralJob(bool updateUi=true){
         if(!NeuralJobActive())return;
-        m_neuralLifecycle.Transition(NeuralPlaybackState::Cancelling);
+        m_neuralLifecycle.Transition(NeuralPlaybackState::Cancelling);if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         if(m_neuralWorker.joinable()){m_neuralWorker.request_stop();m_neuralWorker.join();m_neuralWorker=std::jthread{};}
         std::unique_ptr<NeuralJobCompletion> cancelledCompletion;
         if(m_hwnd){MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){
@@ -1633,15 +1687,15 @@ private:
         }
         LOG("Neural pre-render cancelled and worker stopped.");
     }
-    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0){
+    void StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0,NeuralRenderRange range={}){
         if(mediaUrl.empty())return;
         CancelNeuralJob(false);Unload();
-        const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;
+        const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -1690,39 +1744,58 @@ private:
                     NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;postProgress(checking);
                     const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration*10000000.0));
                     const int64_t frameDurationTolerance=static_cast<int64_t>(std::ceil(10000000.0/fps));
-                    constexpr std::array<std::wstring_view,12> runtimeFiles{L"nvngx_dlssnr.dll",L"nvngx_dlss.dll",L"dxgi.dll",L"renodx-dlss5.addon64",L"sl.common.dll",L"sl.dlss.dll",L"sl.dlss_g.dll",L"sl.dlss_nr.dll",L"sl.interposer.dll",L"sl.nis.dll",L"sl.pcl.dll",L"sl.reflex.dll"};
-                    const auto runtimeDigest=BuildRuntimeDigest(moduleDirectory/L"neural-runtime",runtimeFiles,stop);if(!runtimeDigest){completion->result.detail=L"The configured neural runtime is incomplete.";goto finish;}
-                    const auto configured=ConfigureNeuralAddon(moduleDirectory/L"neural-runtime"/L"ReShade.ini",true);
+                    if(!range.Whole()&&(range.start100ns<0||range.end100ns<=range.start100ns||range.start100ns>=sourceDuration100ns)){completion->result.failure=NeuralRenderFailure::Source;completion->result.detail=L"The requested render range lies outside the source.";goto finish;}
+                    // A range render is exactly [start,end) long; a whole render matches the source.
+                    const int64_t expectedDuration100ns=range.Whole()?sourceDuration100ns:range.end100ns-range.start100ns;
+                    const auto runtimeDirectory=moduleDirectory/L"neural-runtime";
+                    const auto runtimeDigest=BuildRuntimeDigest(runtimeDirectory,LockedRuntimeFileNames(),stop);if(!runtimeDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The configured neural runtime is incomplete.";goto finish;}
+                    // The lock names every drifted file; a mismatch is refused, never repaired by swapping runtimes.
+                    const std::vector<RuntimeLockCheck> lockChecks=VerifyRuntimeLock(runtimeDirectory,EmbeddedRuntimeLock(),stop);
+                    if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
+                    if(!RuntimeLockSatisfied(lockChecks)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"The neural runtime does not match the locked stack: "+drift;goto finish;}
+                    const auto overrides=NeuralAddonOverridesFor(settings);const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",true,overrides);
                     if(!configured.ok){completion->result.detail=L"The neural settings could not be prepared.";goto finish;}
-                    std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(moduleDirectory/L"neural-runtime"/L"ReShade.ini",&settingsError);
+                    std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini",&settingsError);
                     if(!settingsSnapshot){completion->result.detail=settingsError.empty()?L"The neural settings could not be read.":settingsError;goto finish;}
                     const auto settingsDigest=Sha256Bytes(*settingsSnapshot);if(!settingsDigest){completion->result.detail=L"The neural settings digest could not be computed.";goto finish;}
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,"DLAA|strict-timeline-v3|armed-inline-interception-v3",false,*settingsDigest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;
-                    LOG("Checking neural cache key="<<renderKey);
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,"DLAA|strict-timeline-v3|armed-inline-interception-v3",false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides)};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;
+                    LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey)){
                         // LookupRender already verifies the full payload hash and
                         // strict feature-18 manifest. Do not decode every frame again.
                         const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
                         if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                        const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-sourceDuration100ns)<=frameDurationTolerance;
-                        if(valid){completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;goto finish;}
+                        const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cached->manifest.rangeStart100ns==range.start100ns&&cached->manifest.rangeEnd100ns==range.end100ns&&cached->manifest.guides==identity.guides&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-expectedDuration100ns)<=frameDurationTolerance;
+                        if(valid){completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->result.jobId=cached->manifest.jobId;completion->result.historyResets=cached->manifest.historyResets;completion->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;completion->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion->receiptPath=cached->directory/L"receipt.json";goto finish;}
                         if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
                     }
                     LOG("Neural cache miss or invalid entry; starting a new render.");
+                    // The feature-18 probe needs the GPU; only a cache miss pays for it.
+                    NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
+                    const auto workerExecutable=runtimeDirectory/L"NeuralWorker.exe";
+                    const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
+                    if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
+                    if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;LOG("Neural preflight failed: "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,*staging/L"neural.mkv",width,height,fps,duration};completion->result=RunNeuralWorker(moduleDirectory/L"neural-runtime"/L"NeuralWorker.exe",request,postProgress,stop);
+                    NeuralRenderRequest request{nullptr,sourcePath,*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;
+                    NeuralRenderReceiptInputs receipt{preflight.json,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
+                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop);
+                    receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
+                    LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
-                    const auto finalSettings=ReadNeuralAddonSettingsSnapshot(moduleDirectory/L"neural-runtime"/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
+                    const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
+                    const std::string receiptJson=BuildNeuralRenderReceiptJson(receipt);const auto receiptDigest=Sha256Bytes(receiptJson);
+                    {std::ofstream receiptFile(*staging/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural render receipt could not be staged.";goto finish;}}
                     const ProbeResult probe=ProbeMedia(moduleDirectory,*staging/L"neural.mkv",stop);
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
-                    manifest.settingsDigest=*settingsDigest;
-                    const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&std::llabs(probe.duration100ns-completion->result.duration100ns)<=frameDurationTolerance&&std::llabs(probe.duration100ns-sourceDuration100ns)<=frameDurationTolerance&&std::llabs(completion->result.duration100ns-sourceDuration100ns)<=frameDurationTolerance;
+                    manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
+                    const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&std::llabs(probe.duration100ns-completion->result.duration100ns)<=frameDurationTolerance&&std::llabs(probe.duration100ns-expectedDuration100ns)<=frameDurationTolerance&&std::llabs(completion->result.duration100ns-expectedDuration100ns)<=frameDurationTolerance;
                     NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
                     if(!CanPublishNeuralCompletion(completion->result.ok,probeMatches,IsReusableNeuralCacheManifest(publishCandidate))||!cache.PromoteRender(renderKey,*staging,manifest)){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;}
-                    if(const auto promoted=cache.LookupRender(renderKey))completion->neuralPath=promoted->payloadPath;else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
+                    if(const auto promoted=cache.LookupRender(renderKey)){completion->neuralPath=promoted->payloadPath;completion->receiptPath=promoted->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
                 }
             finish:
                 completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
@@ -1731,25 +1804,36 @@ private:
     }
     bool LoadCachedPlayback(const NeuralJobCompletion& completion){
         Unload();
-        if(!m_decoder.Open(completion.sourcePath.wstring(),MediaSourceKind::LocalFile)||!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath)){Unload();return false;}
+        if(!m_decoder.Open(completion.sourcePath.wstring(),MediaSourceKind::LocalFile)||!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns})){Unload();return false;}
         m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         ShowWindow(m_viewport,SW_SHOW);Layout();m_renderer=MakeD3D12Renderer();
         if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())){Unload();return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_activeQuality=DefaultNeuralCarrierQuality();
         const ComparisonView desiredView=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;
-        if(m_synchronizedPlayback.ReadNextAvailable()!=SynchronizedReadResult::PairReady||!m_synchronizedPlayback.SetView(desiredView)||!m_synchronizedPlayback.VisibleFrame()){Unload();return false;}
+        // Decoder start-up (and any hardware-decode fallback) is asynchronous:
+        // wait for the first pair within the same bound the seek path uses.
+        SynchronizedReadResult firstRead=SynchronizedReadResult::NotReady;
+        for(const auto deadline=Clock::now()+std::chrono::seconds(10);firstRead==SynchronizedReadResult::NotReady&&Clock::now()<deadline;){firstRead=m_synchronizedPlayback.ReadNextAvailable();if(firstRead==SynchronizedReadResult::NotReady)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+        if(firstRead!=SynchronizedReadResult::PairReady||!m_synchronizedPlayback.SetView(desiredView)||!m_synchronizedPlayback.VisibleFrame()){LOG("Cached playback could not produce its first synchronized pair (result="<<static_cast<int>(firstRead)<<").");Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         const VideoFrame first=*m_synchronizedPlayback.VisibleFrame();if(!RenderVideoFrame(first,true)){Unload();return false;}
-        m_neuralPath=completion.neuralPath;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
+        m_neuralPath=completion.neuralPath;m_cachedRange=completion.range;m_cachedReceiptPath=completion.receiptPath;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
         if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
         m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
         RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
     void CompleteNeuralProgress(uint64_t token){
-        auto message=m_neuralProgressMessages.Take(token);if(!message||!m_neuralLifecycle.Accept(message->generation))return;m_neuralProgress=message->progress;m_neuralSourceWidth=message->width;m_neuralSourceHeight=message->height;
-        if(message->progress.phase==NeuralRenderPhase::Validating)m_neuralLifecycle.Transition(NeuralPlaybackState::Validating);else if(message->progress.phase!=NeuralRenderPhase::Acquiring&&message->progress.phase!=NeuralRenderPhase::CheckingCache)m_neuralLifecycle.Transition(NeuralPlaybackState::Rendering);
+        auto message=m_neuralProgressMessages.Take(token);if(!message||!m_neuralLifecycle.Accept(message->generation))return;
+        // A pause report that arrives after the user already resumed is stale.
+        if(message->progress.phase==NeuralRenderPhase::Paused&&!NeuralJobPaused())message->progress.phase=NeuralRenderPhase::NeuralRendering;
+        m_neuralProgress=message->progress;m_neuralSourceWidth=message->width;m_neuralSourceHeight=message->height;
+        const NeuralPlaybackState next=StateForProgressPhase(message->progress.phase,m_neuralLifecycle.state);
+        // The worker may still report a frame that was in flight when the user
+        // paused; the pause event, not that report, decides when rendering resumes.
+        const bool holdPause=m_neuralLifecycle.state==NeuralPlaybackState::Paused&&next==NeuralPlaybackState::Rendering&&NeuralJobPaused();
+        if(!holdPause)m_neuralLifecycle.Transition(next);
         InvalidateRect(m_hwnd,nullptr,FALSE);
     }
     void CompleteNeuralJob(uint64_t token){
@@ -1758,10 +1842,10 @@ private:
         if(completion->cachedSourceUnavailable){m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);StartYouTubeResolution(completion->pageUrl,completion->displayTitle,completion->sourceQuality,0.0,true,NetworkCommitKind::InitialOpen,false);return;}
         if(completion->result.cancelled){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath))LoadOriginalFallback(*completion);else InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();return;}
         if(completion->result.ok&&!completion->neuralPath.empty()&&LoadCachedPlayback(*completion)){m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(*completion);SyncSourceActionAvailability();if(completion->cacheHit)LOG("Verified neural cache hit opened without re-rendering.");else LOG("Verified neural cache playback opened.");return;}
-        m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);LOG("Neural pre-render failed: "<<WideToUtf8(completion->result.detail));
+        TransitionToFailure(completion->result.failure);LOG("Neural pre-render failed: kind="<<NeuralRenderFailureName(completion->result.failure)<<" state="<<WideToUtf8(NeuralPlaybackStateName(m_neuralLifecycle.state))<<" detail="<<WideToUtf8(completion->result.detail));
         SyncSourceActionAvailability();
         if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath)){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);LoadOriginalFallback(*completion);}
-        else{const std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
+        else{std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;if(const wchar_t* kind=NeuralFailureTextKey(completion->result.failure))detail=T(kind)+L"\n\n"+detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
     }
     static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,[[maybe_unused]] uint32_t maxW,[[maybe_unused]] uint32_t maxH,[[maybe_unused]] bool qualityExplicit,[[maybe_unused]] NVSDK_NGX_PerfQuality_Value explicitQuality){
         if(!completion.result.ok||stop.stop_requested())return;
@@ -2197,6 +2281,15 @@ private:
     uint32_t m_upscaleTargetHeight=1440;
     std::wstring m_upscalingError;
     VideoFrame m_lastPlaybackFrame;
+    // Read when a job starts; changing them only affects the next render.
+    GuideControls m_renderGuides;
+    NeuralSettings m_neuralSettings;
+    // Range of the playing cache entry (Whole() for full renders) and its
+    // receipt.json beside the payload (empty when the entry has none).
+    NeuralRenderRange m_cachedRange;
+    std::filesystem::path m_cachedReceiptPath;
+    // Manual-reset event shared with the render helper: signalled means pause.
+    HANDLE m_neuralPauseEvent=nullptr;
 };
 
 int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
