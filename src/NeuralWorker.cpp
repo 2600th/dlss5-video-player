@@ -223,11 +223,12 @@ struct LaunchOutcome {
     std::wstring detail;
 };
 
-// ReShade writes its log when the proxy loads and rotates to ReShade.log1 when
-// a previous file is still present or held. A stale log would let the helper
-// read a former session's feature-18 evidence, or make it read the wrong file
-// entirely. The parent loads no hooks and always waits for full helper exit,
-// so it can retire both files before every launch.
+// ReShade truncates its log when the proxy loads and rotates to ReShade.log1
+// when a previous file is still held open. Retiring both files before a launch
+// keeps the helper on ReShade.log in the normal case; it is best effort only,
+// because Windows refuses to delete a file another process holds without
+// FILE_SHARE_DELETE. The helper therefore also selects its log by session
+// (ResolveNeuralRuntimeLogPath) instead of trusting the name.
 void RemoveStaleRuntimeLogs(const std::filesystem::path& runtimeDirectory)
 {
     if (runtimeDirectory.empty()) return;

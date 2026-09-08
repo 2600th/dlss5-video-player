@@ -259,10 +259,9 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
 {
     using Clock = std::chrono::steady_clock;
     const auto started = Clock::now();
-    const std::filesystem::path logPath = moduleDirectory / L"ReShade.log";
-    std::error_code error;
-    uintmax_t logOffset = std::filesystem::file_size(logPath, error);
-    if (error) logOffset = 0;
+    // The proxy's log file is chosen by session, not by name: ReShade rotates
+    // to ReShade.log1 when another process still holds ReShade.log, and a
+    // previous session's file may still be present.
 
     std::string failure;
     uint32_t attempts = 0;
@@ -298,9 +297,10 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             if (!created && failure.empty()) failure = "Feature 18 was not created within the probe budget.";
         }
     }
-    const std::string segment = ReadNeuralRuntimeLogSegment(logPath, logOffset);
+    const std::string segment = ReadNeuralRuntimeSessionLog(moduleDirectory);
     const NeuralRuntimeEvidence evidence = ParseNeuralRuntimeEvidence(segment);
-    const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(ReadWholeFile(logPath));
+    const std::filesystem::path logPath = ResolveNeuralRuntimeLogPath(moduleDirectory);
+    const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(logPath.empty() ? segment : ReadWholeFile(logPath));
     const auto observations = CollectFeature18Observations(segment);
     const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
     const bool ok = failure.empty() && created && evidence.Valid();

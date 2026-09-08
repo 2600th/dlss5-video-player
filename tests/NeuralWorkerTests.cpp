@@ -201,8 +201,12 @@ int RunRealWorker(int argc, wchar_t** argv)
             return EXIT_FAILURE;
         }
         request.range = {static_cast<int64_t>(std::llround(start * 1e7)), static_cast<int64_t>(std::llround(end * 1e7))};
-        const std::wstring guidesText(argv[11]);
-        const auto guides = ParseGuideControls(std::string(guidesText.begin(), guidesText.end()));
+        std::string guidesText;
+        for (const wchar_t character : std::wstring_view(argv[11])) {
+            if (character > 0x7F) { std::wcerr << L"Invalid --real-worker guides.\n"; return EXIT_FAILURE; }
+            guidesText.push_back(static_cast<char>(character));
+        }
+        const auto guides = ParseGuideControls(guidesText);
         if (!guides) {
             std::wcerr << L"Invalid --real-worker guides.\n";
             return EXIT_FAILURE;
@@ -234,7 +238,7 @@ int RunRealWorker(int argc, wchar_t** argv)
         << L", evaluated=" << result.evidence.feature18Evaluated
         << L", laterFailure=" << result.evidence.laterFailure
         << L", highest=" << result.evidence.highestObservedEvaluation << L"}"
-        << L" failure=" << std::wstring(NeuralRenderFailureName(result.failure).begin(), NeuralRenderFailureName(result.failure).end())
+        << L" failure=" << std::string(NeuralRenderFailureName(result.failure)).c_str()
         << L" jobId=" << result.jobId << L" historyResets=" << result.historyResets << L" frameRetries=" << result.frameRetries
         << L" firstTimestamp100ns=" << result.firstTimestamp100ns
         << L" timing={samples=" << result.timing.samples << L", neuralGpuMsP50=" << result.timing.neuralGpuMsP50

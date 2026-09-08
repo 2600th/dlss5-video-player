@@ -613,25 +613,63 @@ std::filesystem::path ModuleDirectory()
 } // namespace
 
 #ifndef OFFLINE_NEURAL_RENDERER_TESTING
-std::string ReadNeuralRuntimeLogSegment(const std::filesystem::path& path,uintmax_t offset)
+namespace {
+
+uint64_t FileTimeValue(const FILETIME& time)
+{
+    ULARGE_INTEGER value{};value.LowPart=time.dwLowDateTime;value.HighPart=time.dwHighDateTime;
+    return value.QuadPart;
+}
+
+uint64_t ProcessStartFileTime()
+{
+    FILETIME creation{},exit{},kernel{},user{};
+    if(!GetProcessTimes(GetCurrentProcess(),&creation,&exit,&kernel,&user))return 0;
+    return FileTimeValue(creation);
+}
+
+std::optional<uint64_t> LastWriteFileTime(const std::filesystem::path& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if(!GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&attributes))return std::nullopt;
+    return FileTimeValue(attributes.ftLastWriteTime);
+}
+
+} // namespace
+
+std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& runtimeDirectory)
+{
+    // ReShade truncates its log when the proxy loads, and rotates to
+    // ReShade.log1 when ReShade.log is still held. A file last written before
+    // this process started belongs to an earlier session and must never be
+    // read as evidence.
+    static const uint64_t started=ProcessStartFileTime();
+    std::filesystem::path best;uint64_t newest=0;
+    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1"}){
+        const std::filesystem::path candidate=runtimeDirectory/name;
+        const auto written=LastWriteFileTime(candidate);
+        if(!written||*written<started)continue;
+        if(best.empty()||*written>newest){best=candidate;newest=*written;}
+    }
+    return best;
+}
+
+std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
-    uintmax_t lastSegmentSize=std::numeric_limits<uintmax_t>::max();
+    uintmax_t lastSize=std::numeric_limits<uintmax_t>::max();
     int stableSamples=0;
     for(int attempt=0;attempt<20;++attempt){
-        std::error_code error;const auto size=std::filesystem::file_size(path,error);
-        // A proxy that (re)creates the log after the offset was captured leaves
-        // a smaller file. Read that fresh session from its start instead of
-        // waiting for a segment that can never appear.
-        const uintmax_t start=(!error&&size<offset)?0u:offset;
-        if(!error&&size>=start&&size-start<=Limit){
-            const uintmax_t segmentSize=size-start;
+        const std::filesystem::path path=ResolveNeuralRuntimeLogPath(runtimeDirectory);
+        std::error_code error;
+        const auto size=path.empty()?uintmax_t{0}:std::filesystem::file_size(path,error);
+        if(!path.empty()&&!error&&size<=Limit){
             std::ifstream input(path,std::ios::binary);
-            if(input){input.seekg(static_cast<std::streamoff>(start));
+            if(input){
                 latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
                 const auto evidence=ParseNeuralRuntimeEvidence(latest);
-                stableSamples=segmentSize==lastSegmentSize?stableSamples+1:1;
-                lastSegmentSize=segmentSize;
+                stableSamples=size==lastSize?stableSamples+1:1;
+                lastSize=size;
                 if((evidence.Valid()||evidence.laterFailure)&&stableSamples>=3)return latest;
             }
         }
@@ -688,11 +726,10 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
                   testEvidenceProvider_,clock,paused);
 #else
-    const auto logPath=ModuleDirectory()/L"ReShade.log";std::error_code error;
-    uintmax_t logOffset=std::filesystem::file_size(logPath,error);if(error)logOffset=0;
+    const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-        [logPath,logOffset]{return ReadNeuralRuntimeLogSegment(logPath,logOffset);},
+        [runtimeDirectory]{return ReadNeuralRuntimeSessionLog(runtimeDirectory);},
         []{return SteadyClock::now();},
         [pauseEvent=request.pauseEvent]{
             return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;

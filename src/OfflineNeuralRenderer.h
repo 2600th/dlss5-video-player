@@ -165,10 +165,17 @@ struct NeuralRenderResult {
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment);
 
 #ifndef OFFLINE_NEURAL_RENDERER_TESTING
-// Reads ReShade.log from `offset`, polling until the runtime evidence in the
-// segment stabilizes (or a bounded wait elapses). Shared by the offline job and
-// the preflight probe so both judge feature 18 from the same evidence rules.
-std::string ReadNeuralRuntimeLogSegment(const std::filesystem::path& path, uintmax_t offset);
+// Reads the ReShade log that this process's proxy session is writing and polls
+// until its feature-18 evidence stabilizes (or a bounded wait elapses).
+// ReShade rotates to ReShade.log1 when ReShade.log is held by another process
+// and a previous session's file may still be present, so the file is chosen by
+// write time against this process's start time rather than by name. Shared by
+// the offline job and the preflight probe so both judge feature 18 from the
+// same evidence rules.
+std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory);
+// The log file selected by that rule; empty when neither candidate belongs to
+// this process's session.
+std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& runtimeDirectory);
 #endif
 
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
