@@ -112,6 +112,14 @@ After the render, `receipt.json` (preflight, lock checks, request, result,
 timing, digests) is written beside `neural.mkv`, hashed into the schema-4
 manifest and summarized in one log line.
 
+The runtime directory has exactly one writer at a time. A job holds a
+session-scoped lease (a named mutex derived from that directory) from the
+settings write until the helper exits, so a second player instance cannot
+interleave its neural settings or its proxy log with this render; it is
+refused with a distinct preflight failure instead. The helper still selects
+its log by session, because a crashed holder can leave a file that Windows
+will not let the next launch delete.
+
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
 quality, upscaling state, and a canonical neural-settings digest form the render identity.

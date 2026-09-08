@@ -4,10 +4,10 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <span>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,6 +37,28 @@ struct NeuralPreflightResult {
 NeuralPreflightResult RunNeuralPreflight(
     const std::filesystem::path& executable,
     std::stop_token stop = {});
+
+// Serializes every use of the shared neural-runtime directory. The parent
+// rewrites ReShade.ini with the render's neural settings per job and the
+// helper's proxy owns ReShade.log, so two concurrent renders would swap each
+// other's settings and evidence under cache keys that claim otherwise. Hold
+// this from the settings write until the helper has exited.
+class NeuralRuntimeLease {
+public:
+    explicit NeuralRuntimeLease(const std::filesystem::path& runtimeDirectory,
+                                std::chrono::milliseconds wait = std::chrono::seconds{5});
+    ~NeuralRuntimeLease();
+    NeuralRuntimeLease(const NeuralRuntimeLease&) = delete;
+    NeuralRuntimeLease& operator=(const NeuralRuntimeLease&) = delete;
+
+    bool Held() const noexcept { return held_; }
+    // Session-scoped name derived from the directory; stable across processes.
+    static std::wstring MutexName(const std::filesystem::path& runtimeDirectory);
+
+private:
+    void* mutex_{};
+    bool held_{};
+};
 
 namespace neural_worker_detail {
 

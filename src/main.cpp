@@ -2141,6 +2141,11 @@ private:
                     const std::vector<RuntimeLockCheck> lockChecks=VerifyRuntimeLock(runtimeDirectory,EmbeddedRuntimeLock(),stop);
                     if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     if(!RuntimeLockSatisfied(lockChecks)){const std::wstring drift=DescribeRuntimeLockDrift(lockChecks);LOG("Neural runtime lock drift; render refused: "<<WideToUtf8(drift));completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"The neural runtime does not match the locked stack: "+drift;goto finish;}
+                    // One writer at a time: the settings written below and the
+                    // helper's proxy log are shared per runtime directory, so a
+                    // second player instance must not interleave with this job.
+                    NeuralRuntimeLease runtimeLease(runtimeDirectory);
+                    if(!runtimeLease.Held()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=L"Another neural render is using the experimental runtime. Wait for it to finish, then try again.";LOG("Neural runtime is in use by another render; refusing to share it.");goto finish;}
                     const auto overrides=NeuralAddonOverridesFor(settings);const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",true,overrides);
                     if(!configured.ok){completion->result.detail=L"The neural settings could not be prepared.";goto finish;}
                     std::wstring settingsError;const auto settingsSnapshot=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini",&settingsError);

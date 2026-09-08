@@ -329,6 +329,34 @@ void synchronized_range_ends_on_a_rebased_original_timestamp_test()
     CHECK_EQ(SynchronizedReadResult::EndOfStream, playback.ReadNextAvailable({}));
 }
 
+void synchronized_range_ending_on_the_last_source_frame_completes_test()
+{
+    // Previewing the tail of a video produces a range whose end is the source
+    // duration: no frame after it exists, so the original hits EOF instead of
+    // tripping the end test. That must still end playback cleanly.
+    IdentitySource original(Sequence(0, 40), 40);
+    IdentitySource neural(Sequence(0, 3), 3);
+    SynchronizedPlayback playback(original, neural);
+    CHECK(playback.Open(L"o", L"n", {}, SynchronizedRange{37 * kSyncFrame100ns, 40 * kSyncFrame100ns}));
+    for (uint64_t expected = 37; expected < 40; ++expected) {
+        CHECK_EQ(SynchronizedReadResult::PairReady, playback.ReadNextAvailable({}));
+        const auto* pair = playback.CurrentPair();
+        CHECK(pair != nullptr);
+        if (!pair) return;
+        CHECK_EQ(expected, pair->frameNumber);
+    }
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, playback.ReadNextAvailable({}));
+
+    // The same applies to a single last frame, which is what the one-frame
+    // preview produces at the end of a source.
+    IdentitySource lastOriginal(Sequence(0, 40), 40);
+    IdentitySource lastNeural(Sequence(0, 1), 1);
+    SynchronizedPlayback lastFrame(lastOriginal, lastNeural);
+    CHECK(lastFrame.Open(L"o", L"n", {}, SynchronizedRange{39 * kSyncFrame100ns, 40 * kSyncFrame100ns}));
+    CHECK_EQ(SynchronizedReadResult::PairReady, lastFrame.ReadNextAvailable({}));
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, lastFrame.ReadNextAvailable({}));
+}
+
 void synchronized_range_rejects_a_neural_render_of_the_wrong_length_test()
 {
     IdentitySource original(Sequence(0, 40), 40);
@@ -420,6 +448,7 @@ int main()
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
     synchronized_range_ends_on_a_rebased_original_timestamp_test();
+    synchronized_range_ending_on_the_last_source_frame_completes_test();
     synchronized_range_rejects_a_neural_render_of_the_wrong_length_test();
     synchronized_range_seek_clamps_into_the_window_test();
     synchronized_playback_reports_a_frame_number_mismatch_test();

@@ -462,6 +462,35 @@ void preflight_receipt_round_trips_and_restarts_once_test()
     CHECK(!missing.detail.empty());
 }
 
+void runtime_lease_admits_one_holder_per_directory_test()
+{
+    const std::filesystem::path runtime = L"D:/example/neural-runtime";
+    // The name identifies the directory, not the process or the path spelling.
+    CHECK(NeuralRuntimeLease::MutexName(runtime) == NeuralRuntimeLease::MutexName(L"D:\\Example\\neural-runtime\\"));
+    CHECK(NeuralRuntimeLease::MutexName(runtime) != NeuralRuntimeLease::MutexName(L"D:/example/other-runtime"));
+    CHECK(NeuralRuntimeLease::MutexName(runtime).starts_with(L"Local\\DLSSVideoPlayer.neural-runtime."));
+
+    auto heldElsewhere = [&](const std::filesystem::path& directory) {
+        // Ownership is per thread, so a competing holder must be another thread.
+        bool held = false;
+        std::jthread other([&] { NeuralRuntimeLease lease(directory, 0ms); held = lease.Held(); });
+        other.join();
+        return held;
+    };
+    {
+        NeuralRuntimeLease lease(runtime);
+        CHECK(lease.Held());
+        CHECK(!heldElsewhere(runtime));
+        // A different runtime directory is unaffected.
+        CHECK(heldElsewhere(L"D:/example/other-runtime"));
+    }
+    // Releasing lets the next render in.
+    CHECK(heldElsewhere(runtime));
+    // An empty directory is not a shared resource and never blocks.
+    NeuralRuntimeLease none(L"");
+    CHECK(!none.Held());
+}
+
 void protocol_rejects_inconsistent_results_test()
 {
     NeuralRenderResult okWithFailure;
@@ -516,6 +545,7 @@ int wmain(int argc, wchar_t** argv)
     request_fields_reach_the_helper_intact_test();
     crashed_helper_is_relaunched_at_most_once_test();
     preflight_receipt_round_trips_and_restarts_once_test();
+    runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
     configuration_retry_is_sequential_and_bounded_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

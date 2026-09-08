@@ -595,3 +595,42 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
         return result;
     }
 }
+
+std::wstring NeuralRuntimeLease::MutexName(const std::filesystem::path& runtimeDirectory)
+{
+    // FNV-1a over the normalized, lower-cased directory: every process must
+    // derive the same name for the same runtime, and the name must stay well
+    // inside the kernel object-name length limit for long paths.
+    std::wstring path = runtimeDirectory.lexically_normal().wstring();
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    uint64_t hash = 1469598103934665603ull;
+    for (wchar_t character : path) {
+        if (character >= L'A' && character <= L'Z') character = wchar_t(character - L'A' + L'a');
+        if (character == L'/') character = L'\\';
+        hash = (hash ^ static_cast<uint64_t>(character)) * 1099511628211ull;
+    }
+    std::wstring name = L"Local\\DLSSVideoPlayer.neural-runtime.";
+    for (int shift = 60; shift >= 0; shift -= 4) name.push_back(L"0123456789abcdef"[(hash >> shift) & 0xF]);
+    return name;
+}
+
+NeuralRuntimeLease::NeuralRuntimeLease(const std::filesystem::path& runtimeDirectory,
+                                       std::chrono::milliseconds wait)
+{
+    if (runtimeDirectory.empty()) return;
+    const std::wstring name = MutexName(runtimeDirectory);
+    mutex_ = CreateMutexW(nullptr, FALSE, name.c_str());
+    if (!mutex_) return;
+    const DWORD milliseconds = wait.count() <= 0
+        ? 0u : static_cast<DWORD>(std::min<long long>(wait.count(), INFINITE - 1));
+    // WAIT_ABANDONED means the previous holder died without releasing it: the
+    // runtime is ours, and its stale log is retired before the next launch.
+    const DWORD result = WaitForSingleObject(mutex_, milliseconds);
+    held_ = result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
+}
+
+NeuralRuntimeLease::~NeuralRuntimeLease()
+{
+    if (mutex_ && held_) ReleaseMutex(mutex_);
+    if (mutex_) CloseHandle(mutex_);
+}

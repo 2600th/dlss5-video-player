@@ -7,6 +7,12 @@
   entry now carries `receipt.json` (GPU, driver, ReShade/RenoDX/DLSS-NR versions,
   module hashes, feature-18 observations, effective settings, timing) hashed
   into a schema-4 manifest, summarized in one log line.
+- Allow only one render at a time to use the shared experimental runtime: a job
+  leases the runtime directory from the settings write until the helper exits,
+  so a second player instance can no longer swap its neural settings or proxy
+  log into another render; it is refused with a clear message instead. Feature-18
+  evidence is read from the log of the session that produced it, never from a
+  stale or foreign one.
 - Attach a frame identity (frame number, timestamp, source generation, history
   generation, job id, reset reason) to every decoded frame, guide and neural
   result; reject mismatches; log every temporal reset with its reason. Cuts
