@@ -2760,6 +2760,7 @@ private:
     // already on screen, so only sound and the play state have to come back.
     void EndScrub(){
         if(!m_loaded)return;
+        LOG("Scrub ended: pending="<<(m_seekPending||m_seeking)<<" resume="<<m_dragWasPlaying<<" at="<<m_currentSec);
         // A scrub seek still queued will restart audio and playback itself; it
         // only needs to know the play state the drag started from.
         if(m_seekPending||m_seeking){m_seekResumePlaying=m_dragWasPlaying;return;}
