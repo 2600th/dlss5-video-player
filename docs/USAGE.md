@@ -23,8 +23,10 @@ copy, and a source played from the cache seeks locally instead of re-opening the
 network stream.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
-Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
-mouse-wheel volume are already supported. An incomplete render is never reused.
+Pause with `Space` and press `.` to step a cached frame. Dragging the timeline
+shows the frame under the cursor while you drag and keeps playing afterwards if
+it was playing; mouse-wheel volume works anywhere in the window. An incomplete
+render is never reused.
 
 ### Preview first: markers, timecodes and ranges
 

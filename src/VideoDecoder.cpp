@@ -15,6 +15,8 @@
 #include <utility>
 #include <system_error>
 #include <string_view>
+#include <map>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -303,9 +305,10 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 }
 
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
+    m_hardwareProfile.clear();
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
+        L"-show_entries stream=width,height,codec_name,pix_fmt,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -332,6 +335,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         try {
             if (key == "width") width = static_cast<uint32_t>(std::stoul(value));
             else if (key == "format_name") format = value;
+            else if (key == "codec_name" && value != "N/A") m_hardwareProfile = value;
+            else if (key == "pix_fmt" && value != "N/A") m_hardwareProfile += "/" + value;
             else if (key == "height") height = static_cast<uint32_t>(std::stoul(value));
             else if (key == "display_aspect_ratio" && value != "N/A") {
                 const size_t c=value.find(':'); if(c!=std::string::npos){ double a=std::stod(value.substr(0,c)), b=std::stod(value.substr(c+1)); if(b>0) displayAspect=a/b; }
@@ -401,27 +406,52 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     return true;
 }
 
-// A hardware path that fails once fails for every source this build opens: the
-// bundled ffmpeg either has the filters or it does not. Remembering that across
-// decoders keeps a seek from paying for the same two dead process launches.
+// A hardware path that cannot even start is a property of the codec plus this
+// build's ffmpeg, not of the file: remembering it per codec keeps every later
+// open and every seek from paying for the same dead process launches, while an
+// unsupported codec never downgrades the ones the GPU does handle.
 namespace {
-std::atomic<bool> g_cudaDecodeUnavailable{false};
-std::atomic<bool> g_d3d11DecodeUnavailable{false};
-} // namespace
+constexpr unsigned kCudaUnavailable=1u,kD3d11Unavailable=2u;
+std::mutex g_accelerationMemoMutex;
+std::map<std::string,unsigned> g_accelerationMemo;
 
+unsigned UnavailableAccelerations(const std::string& profile)
+{
+    std::scoped_lock lock(g_accelerationMemoMutex);
+    const auto found=g_accelerationMemo.find(profile.empty()?std::string("unknown"):profile);
+    return found==g_accelerationMemo.end()?0u:found->second;
+}
+
+void RememberUnavailableAcceleration(const std::string& profile,unsigned path)
+{
+    const std::string key=profile.empty()?std::string("unknown"):profile;
+    bool added=false;
+    {
+        std::scoped_lock lock(g_accelerationMemoMutex);
+        unsigned& paths=g_accelerationMemo[key];
+        added=(paths&path)==0;
+        paths|=path;
+    }
+    if(added)
+        LOG("Hardware decode path " << (path==kCudaUnavailable?"cuda":"d3d11va")
+            << " is unavailable for " << key << "; later opens and seeks skip it.");
+}
+} // namespace
 
 #ifdef VIDEO_DECODER_TESTING
 void VideoDecoder::ResetAccelerationAvailabilityForTesting()
 {
-    g_cudaDecodeUnavailable.store(false,std::memory_order_relaxed);
-    g_d3d11DecodeUnavailable.store(false,std::memory_order_relaxed);
+    std::scoped_lock lock(g_accelerationMemoMutex);
+    g_accelerationMemo.clear();
 }
 #endif
+
 bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
     FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
-    if(acceleration==FFmpegAcceleration::Cuda&&g_cudaDecodeUnavailable.load(std::memory_order_relaxed))
+    const unsigned unavailable=UnavailableAccelerations(m_hardwareProfile);
+    if(acceleration==FFmpegAcceleration::Cuda&&(unavailable&kCudaUnavailable))
         acceleration=FFmpegAcceleration::D3D11Va;
-    if(acceleration==FFmpegAcceleration::D3D11Va&&g_d3d11DecodeUnavailable.load(std::memory_order_relaxed))
+    if(acceleration==FFmpegAcceleration::D3D11Va&&(unavailable&kD3d11Unavailable))
         acceleration=FFmpegAcceleration::Software;
     StopFFmpeg();
     seekSeconds = std::max(0.0, seekSeconds);
@@ -564,9 +594,12 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     if (exitCode == 0 || exitCode == STILL_ACTIVE || m_ffmpegAcceleration == FFmpegAcceleration::Software)
         return false;
-    // Remember the dead path so no later decoder or seek launches it again.
-    if(m_ffmpegAcceleration==FFmpegAcceleration::Cuda)g_cudaDecodeUnavailable.store(true,std::memory_order_relaxed);
-    else g_d3d11DecodeUnavailable.store(true,std::memory_order_relaxed);
+    // A path that dies before its first frame cannot decode this codec here, so
+    // later opens skip it. One that fails after delivering frames is a stream or
+    // position problem and must not disqualify the hardware for everything else.
+    if(m_ffmpegFrameIndex==0)
+        RememberUnavailableAcceleration(m_hardwareProfile,
+            m_ffmpegAcceleration==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
     const double resumeSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +

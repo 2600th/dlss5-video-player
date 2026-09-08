@@ -89,6 +89,9 @@ public:
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
     const wchar_t* BackendName() const;
+    // ffprobe's codec/pixel format for the open source. Hardware decode support
+    // is per codec, so the memo of dead paths is keyed by this, never global.
+    std::string m_hardwareProfile;
 
 private:
     bool m_stillImage{false};
