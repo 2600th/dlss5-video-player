@@ -177,18 +177,37 @@ int RunRealPreflight(int argc, wchar_t** argv)
 
 int RunRealWorker(int argc, wchar_t** argv)
 {
-    if (argc != 9) {
-        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds>\n";
+    if (argc != 9 && argc != 12) {
+        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds> [rangeStartSec rangeEndSec mv=1,depth=1,mask=1]\n";
         return EXIT_FAILURE;
     }
     NeuralRenderRequest request;
     request.sourcePath = argv[3];
     request.stagingVideoPath = argv[4];
+    request.jobId = static_cast<uint64_t>(GetTickCount64());
     if (!ParseUnsigned32(argv[5], request.width) || !ParseUnsigned32(argv[6], request.height) ||
         !request.width || !request.height || !ParsePositiveDouble(argv[7], request.fps) ||
         !ParsePositiveDouble(argv[8], request.durationSeconds)) {
         std::wcerr << L"Invalid --real-worker dimensions, FPS, or duration.\n";
         return EXIT_FAILURE;
+    }
+    if (argc == 12) {
+        double start = 0.0, end = 0.0;
+        std::wstring copy(argv[9]);
+        wchar_t* stop = nullptr;
+        start = std::wcstod(copy.c_str(), &stop);
+        if (!ParsePositiveDouble(argv[10], end) || start < 0.0 || end <= start) {
+            std::wcerr << L"Invalid --real-worker range.\n";
+            return EXIT_FAILURE;
+        }
+        request.range = {static_cast<int64_t>(std::llround(start * 1e7)), static_cast<int64_t>(std::llround(end * 1e7))};
+        const std::wstring guidesText(argv[11]);
+        const auto guides = ParseGuideControls(std::string(guidesText.begin(), guidesText.end()));
+        if (!guides) {
+            std::wcerr << L"Invalid --real-worker guides.\n";
+            return EXIT_FAILURE;
+        }
+        request.guides = *guides;
     }
     NeuralRenderPhase lastPhase = NeuralRenderPhase::CheckingCache;
     uint64_t lastReportedFrames = 0;
@@ -214,7 +233,14 @@ int RunRealWorker(int argc, wchar_t** argv)
         << L", created=" << result.evidence.feature18Created
         << L", evaluated=" << result.evidence.feature18Evaluated
         << L", laterFailure=" << result.evidence.laterFailure
-        << L", highest=" << result.evidence.highestObservedEvaluation << L"} detail=" << result.detail << L'\n';
+        << L", highest=" << result.evidence.highestObservedEvaluation << L"}"
+        << L" failure=" << std::wstring(NeuralRenderFailureName(result.failure).begin(), NeuralRenderFailureName(result.failure).end())
+        << L" jobId=" << result.jobId << L" historyResets=" << result.historyResets << L" frameRetries=" << result.frameRetries
+        << L" firstTimestamp100ns=" << result.firstTimestamp100ns
+        << L" timing={samples=" << result.timing.samples << L", neuralGpuMsP50=" << result.timing.neuralGpuMsP50
+        << L", p95=" << result.timing.neuralGpuMsP95 << L", max=" << result.timing.neuralGpuMsMax
+        << L", guideMsMean=" << result.timing.guideMsMean << L", captureMsMean=" << result.timing.captureMsMean
+        << L", peakLocalVramMiB=" << result.timing.peakLocalVramMiB << L"} detail=" << result.detail << L'\n';
     return result.ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

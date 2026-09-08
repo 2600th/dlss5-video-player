@@ -182,10 +182,20 @@ struct OfflineDecodedFrame {
     uint32_t sourceGeneration{};
 };
 
+// Output of one evaluator submission. `id` is the identity the evaluator
+// stamped on its output (guide/capture identity); `id.reset` != None means the
+// evaluator actually reset temporal history for this frame, whether the job
+// asked for it or a cut was detected inside the guide generator.
+struct OfflineEvaluation {
+    std::vector<uint8_t> bgra;
+    FrameIdentity id{};
+};
+
 class IFrameSource {
 public:
     virtual ~IFrameSource() = default;
-    virtual bool Open(const std::filesystem::path& path, std::stop_token stop) = 0;
+    virtual bool Open(const std::filesystem::path& path, std::stop_token stop,
+                      double seekSeconds) = 0;
     virtual void Close() = 0;
     virtual OfflineFrameRead Read(OfflineDecodedFrame& frame, std::stop_token stop) = 0;
 };
@@ -193,12 +203,17 @@ public:
 class INeuralFrameEvaluator {
 public:
     virtual ~INeuralFrameEvaluator() = default;
-    virtual bool Initialize(HWND renderWindow, uint32_t width, uint32_t height, double fps) = 0;
-    virtual bool Submit(const OfflineDecodedFrame& frame, bool temporalReset, bool capture,
-                        std::vector<uint8_t>& bgra) = 0;
+    virtual bool Initialize(HWND renderWindow, uint32_t width, uint32_t height, double fps,
+                            const GuideControls& guides) = 0;
+    virtual bool Submit(const OfflineDecodedFrame& frame, const FrameIdentity& id, bool capture,
+                        OfflineEvaluation& out) = 0;
     virtual bool FeatureCreated() const = 0;
     virtual uint64_t EvaluationCount() const = 0;
     virtual void ResetTemporal() = 0;
+    // Classification of the most recent failed Submit.
+    virtual NeuralRenderFailure LastFailure() const = 0;
+    virtual double LastNeuralGpuMs() const { return 0.0; }
+    virtual uint64_t PeakLocalVideoMemoryMiB() const { return 0; }
 };
 
 class IFrameEncoder {
@@ -220,10 +235,12 @@ public:
 
     OfflineNeuralRenderer() = default;
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
+    // `paused` replaces NeuralRenderRequest::pauseEvent: true while the job
+    // must hold between frames.
     OfflineNeuralRenderer(IFrameSource& source, INeuralFrameEvaluator& evaluator,
                           IFrameEncoder& encoder,
                           std::function<std::string()> evidenceProvider,
-                          Clock clock = {});
+                          Clock clock = {}, std::function<bool()> paused = {});
 #endif
 
     NeuralRenderResult Run(const NeuralRenderRequest& request,
@@ -237,5 +254,6 @@ private:
     IFrameEncoder* testEncoder_{};
     std::function<std::string()> testEvidenceProvider_;
     Clock testClock_;
+    std::function<bool()> testPaused_;
 #endif
 };
