@@ -98,8 +98,12 @@ Observations (P0-3 guide proof):
   consumer simply does not change its output for it. Motion vectors from the
   same measurement are real as well — mean |mv| 47 px with the global estimate
   tracking each pan on the motion clip, 0.8 px and global (0,0) on the static
-  clip — and `mv-off` does change the output. Do not spend on better masks
-  until a clip shows a difference.
+  clip — and `mv-off` does change the output. They are also coarse: the flow is
+  estimated on a 160×90 grid, so pan magnitudes land on 12 px steps, and the
+  static clip still shows 12–36 px outliers on ~19 % of cells where flat or
+  repetitive regions confuse block matching. That is the likely reason `mv-off`
+  slightly *improves* PSNR below. Do not spend on better masks until a clip
+  shows a difference; motion vectors are worth improving before masks are.
 - `mv-off` and `depth-off` change the output. On these synthetic clips the
   estimated motion vectors slightly *hurt* (mv-off: +0.30 dB PSNR, +0.018
   SSIM and −0.9 flicker on the cuts clip; +0.10 dB and −0.07 flicker on the

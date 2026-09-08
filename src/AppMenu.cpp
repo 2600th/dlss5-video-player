@@ -81,7 +81,8 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // settings dialog; it is deliberately separate from watching with the
     // rendering turned on.
     add(convert, IDM_RENDER_RANGE, L"menu.render_range"); add(convert, IDM_RENDER_WHOLE, L"menu.render_whole"); AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
-    add(convert, IDM_EXPORT_CACHED_VIDEO, L"menu.export_cached"); add(convert, IDM_CANCEL_EXPORT, L"menu.cancel_export");
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, localizer.Get(L"menu.export_cached").c_str());
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, localizer.Get(L"menu.cancel_export").c_str());
     const std::wstring convertName = localizer.Get(L"menu.convert");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");

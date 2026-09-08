@@ -131,36 +131,6 @@ After the render, `receipt.json` (preflight, lock checks, request, result,
 timing, digests) is written beside `neural.mkv`, hashed into the schema-4
 manifest and summarized in one log line.
 
-## Active neural session
-
-A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
-makes the helper rotate its encoder every N captured frames: the next segment's
-encoder starts before the current one is finished, finalization runs on a
-private FIFO thread, and each finished file is announced over the metadata pipe
-as a protocol v3 `Segment` message (index, absolute first pts and frame number,
-frame count, frame duration, file name). Temporal history, priming and preroll
-are untouched — only the encoder rotates.
-
-The player collects those messages into a `NeuralSegmentIndex` and hands it to
-`SynchronizedPlayback::OpenLive`, which pairs the original against the growing
-set, rebasing each segment with its own first pts and opening the next segment
-before the current one runs out. Reading past the render head returns
-`WaitingForRender`, which the player treats as "buffer", not "stop". When the
-job ends the segments are concatenated (`ConcatenateMedia`) into the single
-`neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
-
-Sizing follows measurement rather than preference: one job costs about 6.2 s
-before its first frame (preflight process, ReShade stabilization, up to 120
-priming frames, reopen and seek, 60 preroll frames) and then renders ~32 fps at
-1080p. A fresh job per chunk only breaks even with realtime playback at a 103 s
-chunk, so the session is one long job with a 4 s lead-in and a 2 s resume
-threshold.
-
-A settings change while the player is paused runs the same machinery for one
-frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented
-in place of the paused picture, and because it is an ordinary range render the
-repeat of a setting is a cache hit.
-
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
 settings write until the helper exits, so a second player instance cannot
@@ -224,6 +194,44 @@ last-presented pair, so comparison never advances ahead of the audio clock.
 Seeking waits for both restarted decoders to produce a pair; temporary
 `NotReady` results do not unload playback. Tail seeks account for container
 duration padding with a bounded earlier-frame retry.
+
+## Active neural session
+
+A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
+makes the helper rotate its encoder every N captured frames: the next segment's
+encoder starts before the current one is finished, finalization runs on a
+private FIFO thread, and each finished file is announced over the metadata pipe
+as a protocol v3 `Segment` message (index, absolute first pts and frame number,
+frame count, frame duration, file name). Temporal history, priming and preroll
+are untouched — only the encoder rotates.
+
+The player collects those messages into a `NeuralSegmentIndex` and hands it to
+`SynchronizedPlayback::OpenLive`, which pairs the original against the growing
+set, rebasing each segment with its own first pts and opening the next segment
+before the current one runs out. Reading past the render head returns
+`WaitingForRender`, which the player treats as "buffer", not "stop". When the
+job ends the segments are concatenated (`ConcatenateMedia`) into the single
+`neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
+
+Sizing follows measurement rather than preference. Timing three range renders
+of the same clip (75, 150 and 225 frames: 9.64 s, 11.43 s, 14.00 s) and fitting
+a line gives **29.1 ms per frame (34.4 fps) plus 7.3 s of fixed cost** per job —
+the preflight process, ReShade stabilization, up to 120 priming frames, the
+reopen and seek, and 60 preroll frames. A fresh job per chunk therefore only
+breaks even with realtime 30 fps playback at a 57 s chunk, which is why the
+session is one long job with a 4 s lead-in and a 2 s resume threshold.
+
+Inside a live session the effective rate is lower: encoder rotation every 2 s
+and the player decoding and presenting on the same GPU bring it to 0.99 s of
+1080p30 video per second of wall time (measured over 50 s of segments). That
+holds a constant lead rather than growing one, so a heavier source (4K, 60 fps)
+will rebuffer, and the buffering path is not an edge case but the release
+valve.
+
+A settings change while the player is paused runs the same machinery for one
+frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented
+in place of the paused picture, and because it is an ordinary range render the
+repeat of a setting is a cache hit.
 
 ## NGX integration
 

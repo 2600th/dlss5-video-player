@@ -41,7 +41,7 @@ Out is the exclusive end, so marking Out on the last frame means "to the end"
 and renders it. A range that names no frame is refused before a render starts.
 
 Neural rendering has two shapes. **Turn it on while watching** with the
-toolbar's Neural Rendering button, the DLSS menu entry or `N`: the render
+toolbar's Neural Rendering button, the DLSS menu entry or `D`: the render
 starts at the playhead — to the Out marker when the playhead sits inside a
 marked range, otherwise to the end of the source — and a panel over the
 current frame collects a lead of four seconds before playback resumes on the
