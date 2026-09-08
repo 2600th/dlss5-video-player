@@ -3,21 +3,28 @@
 ## High-level pipeline
 
 ```text
-Local file / validated YouTube download
-  |                                  |
-  |                                  +-> source audio -> playback clock
+Local file                        YouTube URL
+  |                                 |
+  |                                 +-> resolved stream -> playback now
   v
 Source + runtime lock + settings cache lookup
   |
   +-> hit:  validated neural cache -> synchronized playback
   |
-  +-> miss: the original plays now; the user chooses what to render
-  |         (one frame / 4 s clip / marked range / whole video)
-  |           NeuralWorker.exe --neural-preflight (Feature 18 probe receipt)
-  |           NeuralWorker.exe --neural-worker
-  |             sequential decode from range start - preroll -> temporal guides
-  |             -> GPU guide expansion -> native DLAA carrier + RenoDX feature 18
-  |             -> capture -> encode -> independent validation -> receipt -> cache
+  +-> miss: the original plays; the user chooses what to render
+            (one frame / 4 s clip / marked range / whole video)
+  |
+  v
+Render request
+  |
+  +-> network source without a cached copy: acquire it once
+  |     (re-resolves the page URL once when the stream URLs expired)
+  |
+  +-> NeuralWorker.exe --neural-preflight (Feature 18 probe receipt)
+      NeuralWorker.exe --neural-worker
+        sequential decode from range start - preroll -> temporal guides
+        -> GPU guide expansion -> native DLAA carrier + RenoDX feature 18
+        -> capture -> encode -> independent validation -> receipt -> cache
   v
 Original + validated neural cache -> synchronized decoded frame pairs
   |
@@ -26,12 +33,13 @@ Original + validated neural cache -> synchronized decoded frame pairs
   +-> cached neural frames -> PNG/JPEG/GIF or MP4/MKV export
 ```
 
-Opening media never starts a whole-video render. A prepared open acquires and
-identifies the source, replays a validated cache entry when one exists, and
-otherwise stops before the Feature 18 probe so the original can play while the
-user marks a range. An acquired network source is played from its local cache
-copy: the identity stays YouTube for cache and history, while decode, seek and
-audio are ordinary local-file work.
+Opening media never starts a whole-video render and never waits for a download.
+A local open is identified against the cache and replays a validated entry; a
+YouTube open plays the resolved stream. Acquisition belongs to the first render
+of a streamed source, which stages one complete copy in the cache. A source
+played from that copy keeps its YouTube identity for cache and history while
+decode, seek and audio are ordinary local-file work; only a live stream uses the
+non-blocking read and the re-resolving seek path.
 
 The main player has no ReShade proxy. The worker hosts the experimental runtime
 in `neural-runtime/`. Source/core builds without that runtime use the native

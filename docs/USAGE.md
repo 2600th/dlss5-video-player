@@ -9,15 +9,17 @@ legacy language settings in the INI are ignored.
 ## Open, render and compare
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
-select a trailer under **File > Game trailers**. With the experimental runtime
-available, the player acquires the source, identifies it and checks its cache.
-A validated cache entry opens straight away as synchronized playback; on a miss
-the **original starts playing** and nothing is rendered until you ask for it.
-Opening a video therefore costs a download, not a whole-video render: the status
-line leads with `Mark I/O, then Ctrl+R renders the marked range`.
+select a trailer under **File > Game trailers**. Opening media never starts a
+whole-video render. A YouTube URL plays from its stream as soon as it resolves;
+a local file is identified against the cache first, and a validated entry opens
+straight away as synchronized neural playback. Otherwise the **original starts
+playing** and the status line leads with
+`Mark I/O, then Ctrl+R renders the marked range`.
 
-A YouTube source is played from the acquired local copy, so seeking, pausing and
-the timeline are frame-accurate and never re-open the network stream.
+The first render of a streamed source downloads it once into the cache, so the
+download happens when you ask for a render, not when you open the video. Later
+renders and reopens of the same source and quality reuse that copy, and a source
+played from the cache seeks locally instead of re-opening the network stream.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
@@ -40,6 +42,12 @@ of the settings it was rendered with. **Advanced > Open render receipt** opens
 the entry's `receipt.json` with the full record. `Space` pauses and resumes a
 running render. The recent-video history keeps one render per source, so a new
 preview or range render for the same file displaces the previous entry.
+
+The timeline carries three lanes so no state hides another: the marked range
+sits along the top in green between its In and Out ticks, played progress fills
+the middle in blue, and a violet stripe along the bottom names the part of the
+source that has cached neural frames. During cached playback that stripe is why
+seeking stays inside the rendered range.
 
 ### Compare the neural result
 

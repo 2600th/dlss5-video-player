@@ -132,8 +132,11 @@ toggle, not a claim that every source gains visible detail.
 
 ## Limits to know
 
-- Neural rendering prepares the complete video before playback. Processing time
-  and results vary by source and hardware; this is not real-time neural rendering.
+- Neural rendering is offline: a render produces a cached video that plays back
+  beside the original. Opening media plays it right away, and you choose what to
+  render (a frame, a 4 s clip, a marked range, or the whole video). Processing
+  time and results vary by source and hardware; this is not real-time neural
+  rendering.
 - Motion and depth guides are estimated from video. Artifacts are possible;
   RTX 40 neural compatibility has not been hardware-verified for this build.
 - Export copies the cached 8-bit video. Playback adjustments and runtime upscaling

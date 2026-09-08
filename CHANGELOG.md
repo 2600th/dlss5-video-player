@@ -2,15 +2,19 @@
 
 ## Unreleased
 
-- Open media without rendering it first. A prepared open acquires and identifies
-  the source, replays a validated cache entry when one exists, and otherwise
-  plays the original immediately; In/Out markers, previews, **Render marked
-  range** and **Render whole video** decide what is rendered. A 2:47 YouTube
-  source now reaches a playing frame in about 22 seconds instead of a full
-  whole-video render.
-- Play an acquired YouTube source from its local cache copy: seeking no longer
-  re-opens the network stream, and end of file ends playback instead of waiting
-  for stream data.
+- Open media without rendering it first. A YouTube URL plays from its stream as
+  soon as it resolves (about 6 seconds here), a local file replays a validated
+  cache entry when one exists, and otherwise the original plays immediately;
+  In/Out markers, the frame and clip previews, **Render marked range** and
+  **Render whole video** decide what is rendered.
+- Acquire a streamed source when its first render is requested, not when the
+  video is opened, and re-resolve the page URL once when the resolved stream
+  URLs have expired. A source played from its cached copy seeks locally instead
+  of re-opening the network stream, and end of file ends playback.
+- Show what is rendered on the timeline: the marked range runs along the top in
+  green, played progress in the middle, and a violet stripe along the bottom
+  marks the part of the source that has cached neural frames. The status line
+  leads with the In/Out timecodes, or with how to mark a range.
 
 - Verify the staged neural runtime against the embedded packaging lock and run a
   Feature 18 preflight in the isolated helper before every render; each cache

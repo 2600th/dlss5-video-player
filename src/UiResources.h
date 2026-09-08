@@ -29,6 +29,9 @@ inline constexpr COLORREF Hover = RGB(62, 65, 70);
 inline constexpr COLORREF PrimaryBlue = RGB(55, 139, 226);
 inline constexpr COLORREF PrimaryText = RGB(240, 240, 242);
 inline constexpr COLORREF SecondaryText = RGB(160, 164, 172);
+// The part of a source that has cached neural frames, and its boundary edge.
+inline constexpr COLORREF NeuralRange = RGB(124, 92, 196);
+inline constexpr COLORREF NeuralRangeEdge = RGB(178, 148, 240);
 
 } // namespace ui_palette
 
