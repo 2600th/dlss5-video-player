@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -111,6 +112,25 @@ struct NeuralRuntimeEvidence {
     }
 };
 
+// One finalized output file produced while the job is still running. Each file
+// starts at its own pts zero; firstTimestamp100ns places it on the source
+// timeline and end100ns is exclusive.
+struct NeuralRenderSegment {
+    uint64_t index{};
+    uint64_t firstFrameNumber{};
+    int64_t firstTimestamp100ns{};
+    int64_t end100ns{};
+    uint64_t frameCount{};
+    std::wstring fileName;          // relative to the staging directory
+};
+
+// Consumer of finalized segments. onSegment is called from the job's finalize
+// thread, in index order, only after that file's encoder exited successfully.
+struct NeuralSegmentSink {
+    std::function<void(const NeuralRenderSegment&)> onSegment;
+    std::function<void()> onRestart; // a from-zero relaunch invalidated every earlier segment
+};
+
 struct NeuralRenderRequest {
     HWND renderWindow{};
     std::filesystem::path sourcePath;
@@ -124,6 +144,9 @@ struct NeuralRenderRequest {
     uint32_t prerollFrames{kDefaultPrerollFrames};
     GuideControls guides{};
     uint32_t frameRetryLimit{kDefaultFrameRetryLimit};
+    // Frames per finalized output file. 0 keeps the single-file behaviour:
+    // every captured frame goes to stagingVideoPath and no segment is emitted.
+    uint32_t segmentFrames{0};
     // Manual-reset event owned by the caller. Signalled means "pause"; the
     // worker checks it between frames and reports NeuralRenderPhase::Paused.
     HANDLE pauseEvent{};
@@ -243,16 +266,20 @@ public:
     OfflineNeuralRenderer() = default;
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     // `paused` replaces NeuralRenderRequest::pauseEvent: true while the job
-    // must hold between frames.
+    // must hold between frames. `encoderFactory` supplies the extra encoders a
+    // segmented job rotates through; a single-file job never calls it.
     OfflineNeuralRenderer(IFrameSource& source, INeuralFrameEvaluator& evaluator,
                           IFrameEncoder& encoder,
                           std::function<std::string()> evidenceProvider,
-                          Clock clock = {}, std::function<bool()> paused = {});
+                          Clock clock = {}, std::function<bool()> paused = {},
+                          std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory = {});
 #endif
 
+    // `segments` is used only when request.segmentFrames > 0.
     NeuralRenderResult Run(const NeuralRenderRequest& request,
                            ProgressCallback progress = {},
-                           std::stop_token stop = {});
+                           std::stop_token stop = {},
+                           const NeuralSegmentSink& segments = {});
 
 private:
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
@@ -262,5 +289,6 @@ private:
     std::function<std::string()> testEvidenceProvider_;
     Clock testClock_;
     std::function<bool()> testPaused_;
+    std::function<std::unique_ptr<IFrameEncoder>()> testEncoderFactory_;
 #endif
 };

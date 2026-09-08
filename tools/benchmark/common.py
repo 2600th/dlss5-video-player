@@ -27,8 +27,8 @@ FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # src/NeuralWorkerProtocol.h
 WIRE_MAGIC = 0x3152574E  # NWR1
-WIRE_VERSION = 2
-KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT = 1, 2, 3
+WIRE_VERSION = 3
+KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT = 1, 2, 3, 4
 PHASES = ["Idle", "Decoding", "Priming", "Rendering", "Encoding", "Validating", "Completed", "Failed",
           "Cancelled", "Ready", "Preflight", "Paused", "Recovering"]
 FAILURES = ["None", "Source", "Encoder", "Neural", "GpuStall", "DeviceRemoved", "WorkerCrashed",
@@ -38,11 +38,13 @@ CONFIGURATION_CHANGED_EXIT = 75
 PROGRESS_STRUCT = struct.Struct("<IQQQqqII")  # 52 bytes
 RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQI")  # 140 bytes
 PREFLIGHT_STRUCT = struct.Struct("<B3xI")  # 8 bytes
+SEGMENT_STRUCT = struct.Struct("<QQqQqI")  # 44 bytes, then nameBytes of UTF-16LE
 assert PROGRESS_STRUCT.size == 52 and RESULT_STRUCT.size == 140 and PREFLIGHT_STRUCT.size == 8
+assert SEGMENT_STRUCT.size == 44
 
 
 def decode_metadata(data: bytes) -> list[dict]:
-    """Decodes every complete NWR1 v2 message in ``data``.
+    """Decodes every complete NWR1 v3 message in ``data``.
 
     Progress records carry ``kind='progress'``, the final record ``kind='result'``
     and a preflight probe ``kind='preflight'`` with the parsed JSON receipt.
@@ -85,6 +87,12 @@ def decode_metadata(data: bytes) -> list[dict]:
             except json.JSONDecodeError:
                 parsed = None
             records.append(dict(kind="preflight", ok=bool(ok), json=parsed, raw=text))
+        elif kind == KIND_SEGMENT and len(payload) >= SEGMENT_STRUCT.size:
+            index, first_frame, first_pts, frames, frame_duration, name_bytes = SEGMENT_STRUCT.unpack_from(payload)
+            name = payload[SEGMENT_STRUCT.size:SEGMENT_STRUCT.size + name_bytes].decode("utf-16le", "replace")
+            records.append(dict(kind="segment", index=index, first_frame_number=first_frame,
+                                first_timestamp_100ns=first_pts, frame_count=frames,
+                                frame_duration_100ns=frame_duration, name=name))
     return records
 
 

@@ -125,6 +125,14 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Losslessly joins already-encoded parts into one Matroska file, in the given
+// order, through FFmpeg's concat demuxer. Every part must share the same codec
+// and dimensions, which finalized neural segments of one job do.
+EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
+                             std::span<const std::filesystem::path> parts,
+                             const std::filesystem::path& output,
+                             std::stop_token stop = {});
+
 enum class MediaProbeMode { FullValidation, CachedMetadata };
 
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,

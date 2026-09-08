@@ -1,9 +1,10 @@
 #pragma once
 
 // Versioned metadata pipe between the hook-free player and the isolated
-// neural helper. Only progress, preflight and final results cross the pipe;
-// encoded video stays in the cache. This header is the single definition
-// shared by the parent launcher, the helper executable and the tests.
+// neural helper. Only progress, finalized-segment announcements, preflight and
+// final results cross the pipe; encoded video stays in the cache. This header
+// is the single definition shared by the parent launcher, the helper
+// executable and the tests.
 
 #include "OfflineNeuralRenderer.h"
 
@@ -14,18 +15,21 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
-#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neural_worker_protocol {
 
 inline constexpr uint32_t kMagic = 0x3152574Eu; // NWR1
-inline constexpr uint16_t kVersion = 2;
+inline constexpr uint16_t kVersion = 3;
 inline constexpr uint32_t kMaximumPayloadBytes = 64 * 1024;
 inline constexpr uint32_t kMaximumDetailBytes = 4 * 1024;
+// A segment name is a bare file name joined to the staging directory by the
+// parent, never a path.
+inline constexpr uint32_t kMaximumSegmentNameBytes = 512;
 
-enum class WireKind : uint16_t { Progress = 1, Result = 2, Preflight = 3 };
+enum class WireKind : uint16_t { Progress = 1, Result = 2, Preflight = 3, Segment = 4 };
 
 #pragma pack(push, 1)
 struct WireHeader {
@@ -77,6 +81,20 @@ struct WireResult {
     uint32_t detailBytes;
 };
 
+// Followed by `nameBytes` of UTF-16 file name (name only, no directory). Sent
+// only after that file's encoder exited successfully, so the file is complete
+// and independently playable. Non-terminal: segments arrive in strictly
+// increasing index order starting at 0, and a repeated 0 means the helper
+// restarted the sequence from scratch.
+struct WireSegment {
+    uint64_t index;
+    uint64_t firstFrameNumber;
+    int64_t firstTimestamp100ns;
+    uint64_t frameCount;
+    int64_t frameDuration100ns;
+    uint32_t nameBytes;
+};
+
 // Followed by `jsonBytes` of UTF-8 JSON describing the probed runtime.
 struct WirePreflight {
     uint8_t ok;
@@ -89,6 +107,7 @@ static_assert(sizeof(WireHeader) == 12);
 static_assert(sizeof(WireProgress) == 52);
 static_assert(sizeof(WireResult) == 140);
 static_assert(sizeof(WirePreflight) == 8);
+static_assert(sizeof(WireSegment) == 44);
 
 inline bool IsKnownPhase(uint32_t phase) noexcept
 {
@@ -107,6 +126,15 @@ inline bool IsKnownEncoder(uint8_t encoder) noexcept
 }
 
 inline bool IsBooleanByte(uint8_t value) noexcept { return value == 0 || value == 1; }
+
+// A segment file name must be usable exactly as written inside the staging
+// directory: no directory component, no traversal, no NUL.
+inline bool IsValidSegmentName(std::wstring_view name) noexcept
+{
+    return !name.empty() && name.find_first_of(L"\\/:") == std::wstring_view::npos &&
+           name.find(L'\0') == std::wstring_view::npos &&
+           name.find(L"..") == std::wstring_view::npos;
+}
 
 inline bool WriteAll(HANDLE handle, const void* data, size_t bytes)
 {
@@ -158,6 +186,51 @@ inline std::optional<NeuralRenderProgress> DecodeProgress(std::span<const std::b
     progress.recovering = static_cast<NeuralRenderFailure>(wire.recovering);
     progress.retries = wire.retries;
     return progress;
+}
+
+// `frameDuration100ns` is the job's CFR frame duration; the decoder rebuilds
+// the segment's exclusive end from it, so the message stays fixed size.
+inline std::vector<std::byte> EncodeSegment(const NeuralRenderSegment& segment,
+                                            int64_t frameDuration100ns)
+{
+    std::wstring name = segment.fileName;
+    const size_t maxCharacters = kMaximumSegmentNameBytes / sizeof(wchar_t);
+    if (name.size() > maxCharacters) name.resize(maxCharacters);
+    WireSegment wire{};
+    wire.index = segment.index;
+    wire.firstFrameNumber = segment.firstFrameNumber;
+    wire.firstTimestamp100ns = segment.firstTimestamp100ns;
+    wire.frameCount = segment.frameCount;
+    wire.frameDuration100ns = frameDuration100ns;
+    wire.nameBytes = static_cast<uint32_t>(name.size() * sizeof(wchar_t));
+    std::vector<std::byte> payload(sizeof(wire) + wire.nameBytes);
+    std::memcpy(payload.data(), &wire, sizeof(wire));
+    if (wire.nameBytes) std::memcpy(payload.data() + sizeof(wire), name.data(), wire.nameBytes);
+    return payload;
+}
+
+inline std::optional<NeuralRenderSegment> DecodeSegment(std::span<const std::byte> payload)
+{
+    if (payload.size() < sizeof(WireSegment)) return std::nullopt;
+    WireSegment wire{};
+    std::memcpy(&wire, payload.data(), sizeof(wire));
+    if (!wire.frameCount || wire.frameDuration100ns <= 0 || wire.firstTimestamp100ns < 0 ||
+        !wire.nameBytes || wire.nameBytes > kMaximumSegmentNameBytes ||
+        (wire.nameBytes % sizeof(wchar_t)) != 0 ||
+        payload.size() != sizeof(WireSegment) + wire.nameBytes) return std::nullopt;
+    const uint64_t duration = static_cast<uint64_t>(wire.frameDuration100ns);
+    const uint64_t headroom = static_cast<uint64_t>(INT64_MAX - wire.firstTimestamp100ns);
+    if (wire.frameCount > headroom / duration) return std::nullopt;
+    NeuralRenderSegment segment;
+    segment.index = wire.index;
+    segment.firstFrameNumber = wire.firstFrameNumber;
+    segment.firstTimestamp100ns = wire.firstTimestamp100ns;
+    segment.frameCount = wire.frameCount;
+    segment.end100ns = wire.firstTimestamp100ns + static_cast<int64_t>(wire.frameCount * duration);
+    const auto* name = reinterpret_cast<const wchar_t*>(payload.data() + sizeof(WireSegment));
+    segment.fileName.assign(name, name + wire.nameBytes / sizeof(wchar_t));
+    if (!IsValidSegmentName(segment.fileName)) return std::nullopt;
+    return segment;
 }
 
 inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)

@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <mfapi.h>
 
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -38,6 +39,13 @@ public:
         const WireProgress wire = EncodeProgress(progress);
         std::lock_guard lock(mutex_);
         return WriteMessage(handle_, WireKind::Progress, &wire, sizeof(wire));
+    }
+
+    bool WriteSegment(const NeuralRenderSegment& segment, int64_t frameDuration100ns)
+    {
+        const std::vector<std::byte> payload = EncodeSegment(segment, frameDuration100ns);
+        std::lock_guard lock(mutex_);
+        return WriteMessage(handle_, WireKind::Segment, payload.data(), static_cast<uint32_t>(payload.size()));
     }
 
     bool WriteResult(const NeuralRenderResult& result)
@@ -199,11 +207,20 @@ int wmain(int argc, wchar_t** argv)
     NeuralRenderRequest request = arguments->request;
     request.renderWindow = renderWindow;
     NeuralRenderResult result;
+    // Segment messages are written from the renderer's finalize thread; the
+    // writer's lock keeps them from interleaving with progress messages.
+    const int64_t frameDuration = static_cast<int64_t>(std::llround(10000000.0 / request.fps));
+    NeuralSegmentSink segments;
+    if (request.segmentFrames) {
+        segments.onSegment = [&](const NeuralRenderSegment& segment) {
+            metadata.WriteSegment(segment, frameDuration);
+        };
+    }
     const bool pumped = RunWithMessagePump([&] {
         OfflineNeuralRenderer renderer;
         result = renderer.Run(request, [&](const NeuralRenderProgress& progress) {
             metadata.WriteProgress(progress);
-        });
+        }, {}, segments);
     });
     DestroyWindow(renderWindow);
     if (!pumped) return fail(L"The helper could not create its render completion event.");

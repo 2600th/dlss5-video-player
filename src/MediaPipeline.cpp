@@ -714,6 +714,94 @@ void RawVideoEncoder::Cancel()
     impl_->active = false;
 }
 
+namespace {
+
+std::string NarrowUtf8(std::wstring_view value)
+{
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string text(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), text.data(),
+                        size, nullptr, nullptr);
+    return text;
+}
+
+// One `file` directive per part. FFmpeg reads the list as UTF-8 and treats the
+// quoted value literally, so only the quote itself needs escaping; forward
+// slashes avoid any backslash-escape ambiguity.
+std::string ConcatListText(std::span<const std::filesystem::path> parts)
+{
+    std::string text;
+    for (const auto& part : parts) {
+        std::error_code error;
+        std::wstring absolute = std::filesystem::absolute(part, error).wstring();
+        if (error || absolute.empty()) return {};
+        for (wchar_t& character : absolute) if (character == L'\\') character = L'/';
+        const std::string narrow = NarrowUtf8(absolute);
+        if (narrow.empty()) return {};
+        text += "file '";
+        for (const char character : narrow) {
+            if (character == '\'') text += "'\\''";
+            else text.push_back(character);
+        }
+        text += "'\n";
+    }
+    return text;
+}
+
+bool WriteWholeFile(const std::filesystem::path& path, std::string_view text)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    size_t offset = 0;
+    bool ok = true;
+    while (ok && offset < text.size()) {
+        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(text.size() - offset, 1024 * 1024));
+        DWORD written = 0;
+        ok = WriteFile(file, text.data() + offset, wanted, &written, nullptr) && written != 0;
+        offset += written;
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+} // namespace
+
+EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
+                             std::span<const std::filesystem::path> parts,
+                             const std::filesystem::path& output,
+                             std::stop_token stop)
+{
+    if (parts.empty() || output.empty()) return EncodeError::InvalidSpecification;
+    std::error_code error;
+    for (const auto& part : parts) {
+        if (part.empty() || !std::filesystem::is_regular_file(part, error) || error)
+            return EncodeError::InvalidSpecification;
+    }
+    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return EncodeError::HelperMissing;
+    if (stop.stop_requested()) return EncodeError::Cancelled;
+    const std::string text = ConcatListText(parts);
+    if (text.empty()) return EncodeError::InvalidSpecification;
+    // Beside the output: the staging directory is ours and stays writable.
+    const std::filesystem::path list = output.parent_path() / (output.filename().wstring() + L".concat.txt");
+    if (!WriteWholeFile(list, text)) return EncodeError::StartFailed;
+    const std::vector<std::wstring> arguments{
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
+        L"-f", L"concat", L"-safe", L"0", L"-i", list.wstring(),
+        L"-c", L"copy", L"-f", L"matroska", output.wstring()};
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
+    std::filesystem::remove(list, error);
+    if (!capture.started) return EncodeError::StartFailed;
+    if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
+    if (capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
+        return EncodeError::FinishFailed;
+    return EncodeError::None;
+}
+
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
                        const std::filesystem::path& media,
                        std::stop_token stop, MediaProbeMode mode)

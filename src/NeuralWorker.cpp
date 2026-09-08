@@ -122,8 +122,8 @@ std::wstring HandleText(HANDLE handle)
 
 class MetadataReader {
 public:
-    explicit MetadataReader(OfflineNeuralRenderer::ProgressCallback progress)
-        : progress_(std::move(progress)) {}
+    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments)
+        : progress_(std::move(progress)), segments_(std::move(segments)) {}
 
     bool ReadAvailable(HANDLE pipe)
     {
@@ -143,13 +143,19 @@ public:
                 malformed_ = true;
                 return false;
             }
-            if (bytes_.size() + read > kMaximumPayloadBytes * 2u) {
-                malformed_ = true;
-                return false;
-            }
-            bytes_.insert(bytes_.end(), chunk.begin(), chunk.begin() + read);
-            if (!Consume()) return false;
+            if (!Push(std::span<const std::byte>(chunk.data(), read))) return false;
         }
+    }
+
+    // The same decoder, fed from memory instead of the pipe.
+    bool Push(std::span<const std::byte> chunk)
+    {
+        if (bytes_.size() + chunk.size() > kMaximumPayloadBytes * 2u) {
+            malformed_ = true;
+            return false;
+        }
+        bytes_.insert(bytes_.end(), chunk.begin(), chunk.end());
+        return Consume();
     }
 
     bool Complete() const { return !malformed_ && bytes_.empty() && result_.has_value(); }
@@ -169,7 +175,8 @@ private:
                 header.payloadBytes > kMaximumPayloadBytes ||
                 (header.kind != static_cast<uint16_t>(WireKind::Progress) &&
                  header.kind != static_cast<uint16_t>(WireKind::Result) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Preflight))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Preflight) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Segment))) {
                 malformed_ = true;
                 return false;
             }
@@ -197,6 +204,21 @@ private:
                     preflight_ = std::move(preflight);
                     break;
                 }
+                case WireKind::Segment: {
+                    auto segment = DecodeSegment(payload);
+                    if (!segment) { malformed_ = true; return false; }
+                    // Indices arrive in order. A repeated 0 is the helper
+                    // restarting the sequence: every earlier file is gone.
+                    if (segment->index == 0) {
+                        if (lastSegmentIndex_ && segments_.onRestart) segments_.onRestart();
+                    } else if (!lastSegmentIndex_ || segment->index != *lastSegmentIndex_ + 1) {
+                        malformed_ = true;
+                        return false;
+                    }
+                    lastSegmentIndex_ = segment->index;
+                    if (segments_.onSegment) segments_.onSegment(*segment);
+                    break;
+                }
             }
             offset += messageBytes;
         }
@@ -205,6 +227,8 @@ private:
     }
 
     OfflineNeuralRenderer::ProgressCallback progress_;
+    NeuralSegmentSink segments_;
+    std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
     std::optional<NeuralRenderResult> result_;
     std::optional<PreflightPayload> preflight_;
@@ -349,6 +373,7 @@ bool ValidRequest(const NeuralRenderRequest& request)
 NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
                                           const NeuralRenderRequest& request,
                                           const OfflineNeuralRenderer::ProgressCallback& progress,
+                                          const NeuralSegmentSink& segments,
                                           std::stop_token stop, bool configurationRestarted)
 {
     NeuralRenderResult result;
@@ -359,7 +384,7 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
         result.detail = L"Neural rendering was cancelled before the helper started.";
         return result;
     }
-    MetadataReader reader(progress);
+    MetadataReader reader(progress, segments);
     const LaunchOutcome launch = LaunchHelper(executable,
         [&](HANDLE metadata, HANDLE pause) {
             return neural_worker_detail::BuildWorkerArguments(request, metadata, pause, configurationRestarted);
@@ -377,7 +402,7 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
     }
     if (launch.exitCode == neural_worker_detail::kConfigurationChangedExitCode &&
         !configurationRestarted && !reader.Malformed()) {
-        return RunNeuralWorkerAttempt(executable, request, progress, stop, true);
+        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true);
     }
     if (launch.exitCode != 0) {
         result.failure = NeuralRenderFailure::WorkerCrashed;
@@ -421,6 +446,10 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
     const std::string guides = CanonicalGuideControls(request.guides);
     arguments.emplace_back(L"--guides");
     arguments.emplace_back(guides.begin(), guides.end());
+    if (request.segmentFrames) {
+        arguments.emplace_back(L"--segment-frames");
+        arguments.emplace_back(std::to_wstring(request.segmentFrames));
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -451,11 +480,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     if (((end - 2) % 2) != 0) return std::nullopt;
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
-               RetryLimit, Guides, PauseEvent, KeyCount };
+               RetryLimit, Guides, SegmentFrames, PauseEvent, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
-        L"--guides", L"--pause-event"};
+        L"--guides", L"--segment-frames", L"--pause-event"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -501,6 +530,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     request.prerollFrames = static_cast<uint32_t>(preroll);
     request.frameRetryLimit = static_cast<uint32_t>(retryLimit);
     request.guides = *guides;
+    // Optional: absent means one output file for the whole range.
+    if (values[SegmentFrames]) {
+        uint64_t segmentFrames = 0;
+        if (!ParseUnsigned(*values[SegmentFrames], segmentFrames) || segmentFrames > UINT32_MAX)
+            return std::nullopt;
+        request.segmentFrames = static_cast<uint32_t>(segmentFrames);
+    }
     if (values[PauseEvent]) {
         uint64_t rawPause = 0;
         if (!ParseUnsigned(*values[PauseEvent], rawPause) || !rawPause) return std::nullopt;
@@ -513,7 +549,8 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
 NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
                                    const NeuralRenderRequest& request,
                                    OfflineNeuralRenderer::ProgressCallback progress,
-                                   std::stop_token stop, uint32_t crashRelaunchLimit)
+                                   std::stop_token stop, const NeuralSegmentSink& segments,
+                                   uint32_t crashRelaunchLimit)
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
@@ -532,7 +569,11 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
     // no temporal history to resume, so the whole sequence restarts in a fresh
     // process. Frames are never spliced across helper instances.
     for (uint32_t attempt = 0;; ++attempt) {
-        result = RunNeuralWorkerAttempt(executable, request, progress, stop, false);
+        // A relaunch renders the range again from frame zero, so every segment
+        // the previous helper published names a file that is about to be
+        // rewritten.
+        if (attempt && segments.onRestart) segments.onRestart();
+        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false);
         const bool relaunchable = !result.ok && !result.cancelled &&
             (result.failure == NeuralRenderFailure::WorkerCrashed ||
              result.failure == NeuralRenderFailure::DeviceRemoved ||
@@ -554,6 +595,25 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
     }
 }
 
+neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadataStream(
+    std::span<const std::byte> bytes)
+{
+    MetadataStreamOutcome outcome;
+    NeuralSegmentSink sink;
+    sink.onSegment = [&](const NeuralRenderSegment& segment) { outcome.segments.push_back(segment); };
+    sink.onRestart = [&] { ++outcome.restarts; outcome.segments.clear(); };
+    MetadataReader reader([&](const NeuralRenderProgress&) { ++outcome.progressUpdates; }, sink);
+    // Deliberately fragmented: the pipe delivers arbitrary chunks and a message
+    // header can straddle two reads.
+    constexpr size_t chunkBytes = 7;
+    for (size_t offset = 0; offset < bytes.size(); offset += chunkBytes) {
+        if (!reader.Push(bytes.subspan(offset, std::min(chunkBytes, bytes.size() - offset)))) break;
+    }
+    outcome.malformed = reader.Malformed();
+    outcome.complete = reader.Complete();
+    return outcome;
+}
+
 NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable, std::stop_token stop)
 {
     NeuralPreflightResult result;
@@ -568,7 +628,7 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
             result.detail = L"Neural preflight was cancelled.";
             return result;
         }
-        MetadataReader reader({});
+        MetadataReader reader({}, {});
         const LaunchOutcome launch = LaunchHelper(executable,
             [&](HANDLE metadata, HANDLE) { return neural_worker_detail::BuildPreflightArguments(metadata, restarted); },
             nullptr, reader, stop);

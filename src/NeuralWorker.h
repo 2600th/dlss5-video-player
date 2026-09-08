@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -18,12 +19,16 @@
 // helper result. The caller retains ownership of cache staging/promotion.
 // Worker crashes and device removal are retried from frame zero at most
 // `crashRelaunchLimit` times; exhaustion reports NeuralRenderFailure::RetryExhausted.
+// `segments` receives the files a segmented job finalizes while it renders:
+// onSegment for each finalized file, onRestart whenever the sequence begins
+// again from index zero and every earlier file must be discarded.
 inline constexpr uint32_t kDefaultCrashRelaunchLimit = 1;
 NeuralRenderResult RunNeuralWorker(
     const std::filesystem::path& executable,
     const NeuralRenderRequest& request,
     OfflineNeuralRenderer::ProgressCallback progress = {},
     std::stop_token stop = {},
+    const NeuralSegmentSink& segments = {},
     uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit);
 
 // Short Feature-18 probe run in the same isolated helper before a render. The
@@ -81,5 +86,17 @@ std::vector<std::wstring> BuildWorkerArguments(const NeuralRenderRequest& reques
                                                HANDLE pauseEvent, bool configurationRestarted);
 std::vector<std::wstring> BuildPreflightArguments(HANDLE metadata, bool configurationRestarted);
 std::optional<WorkerArguments> ParseWorkerArguments(std::span<const std::wstring_view> arguments);
+
+// Outcome of running one metadata byte stream through the parent's decoder.
+// Exposed so the accept/reject rules can be exercised without a live helper:
+// the pipe reader inside RunNeuralWorker is this same decoder fed from a pipe.
+struct MetadataStreamOutcome {
+    bool malformed{};
+    bool complete{};                    // a valid result terminated the stream
+    size_t progressUpdates{};
+    size_t restarts{};                  // sequences that began again at index 0
+    std::vector<NeuralRenderSegment> segments;
+};
+MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes);
 
 } // namespace neural_worker_detail

@@ -48,6 +48,80 @@ NeuralRenderRequest TestRequest(std::wstring_view sourceName)
     return request;
 }
 
+// 60 fps: the duration the helper derives from the request's frame rate.
+constexpr int64_t kTestFrameDuration100ns = 166'667;
+
+std::wstring SegmentFileName(uint64_t index)
+{
+    std::wstring digits = std::to_wstring(index);
+    if (digits.size() < 5) digits.insert(0, 5 - digits.size(), L'0');
+    return L"neural-" + digits + L".mkv";
+}
+
+NeuralRenderSegment TestSegment(uint64_t index, uint64_t frames)
+{
+    NeuralRenderSegment segment;
+    segment.index = index;
+    segment.firstFrameNumber = index * frames;
+    segment.firstTimestamp100ns = static_cast<int64_t>(index * frames) * kTestFrameDuration100ns;
+    segment.frameCount = frames;
+    segment.end100ns = segment.firstTimestamp100ns + static_cast<int64_t>(frames) * kTestFrameDuration100ns;
+    segment.fileName = SegmentFileName(index);
+    return segment;
+}
+
+// A name one character past the cap, which EncodeSegment would truncate.
+std::vector<std::byte> OversizedSegmentPayload(const NeuralRenderSegment& segment)
+{
+    const std::wstring name(kMaximumSegmentNameBytes / sizeof(wchar_t) + 1, L'n');
+    WireSegment wire{};
+    wire.index = segment.index;
+    wire.firstFrameNumber = segment.firstFrameNumber;
+    wire.firstTimestamp100ns = segment.firstTimestamp100ns;
+    wire.frameCount = segment.frameCount;
+    wire.frameDuration100ns = kTestFrameDuration100ns;
+    wire.nameBytes = static_cast<uint32_t>(name.size() * sizeof(wchar_t));
+    std::vector<std::byte> payload(sizeof(wire) + wire.nameBytes);
+    std::memcpy(payload.data(), &wire, sizeof(wire));
+    std::memcpy(payload.data() + sizeof(wire), name.data(), wire.nameBytes);
+    return payload;
+}
+
+template <class T>
+std::span<const std::byte> AsBytes(const T& value)
+{
+    return std::span<const std::byte>(reinterpret_cast<const std::byte*>(&value), sizeof(value));
+}
+
+void AppendMessage(std::vector<std::byte>& stream, uint16_t version, WireKind kind,
+                   std::span<const std::byte> payload)
+{
+    const WireHeader header{kProtocolMagic, version, static_cast<uint16_t>(kind),
+                            static_cast<uint32_t>(payload.size())};
+    const auto* first = reinterpret_cast<const std::byte*>(&header);
+    stream.insert(stream.end(), first, first + sizeof(header));
+    stream.insert(stream.end(), payload.begin(), payload.end());
+}
+
+void AppendMessage(std::vector<std::byte>& stream, WireKind kind, std::span<const std::byte> payload)
+{
+    AppendMessage(stream, kProtocolVersion, kind, payload);
+}
+
+NeuralRenderResult ValidFakeResult(uint64_t jobId)
+{
+    NeuralRenderResult result;
+    result.ok = true;
+    result.encoder = EncoderKind::H264Software;
+    result.feature18ArmedBeforeCapture = true;
+    result.evidence = {true, true, true, true, false, 75};
+    result.frameCount = 48;
+    result.duration100ns = 8'000'000;
+    result.nativeEvaluations = 48;
+    result.verifiedNeuralFrames = 48;
+    result.jobId = jobId;
+    return result;
+}
 
 int RunFakeWorker(int argc, wchar_t** argv)
 {
@@ -111,6 +185,14 @@ int RunFakeWorker(int argc, wchar_t** argv)
     progress.estimatedRemaining = 200ms;
     const WireProgress wireProgress = EncodeProgress(progress);
     if (!WriteMessage(handle, WireKind::Progress, &wireProgress, sizeof(wireProgress))) return 13;
+    if (source == L"segment-source.mkv") {
+        // Two finalized files announced while the job is still running.
+        for (uint64_t index = 0; index < 2; ++index) {
+            const auto payload = EncodeSegment(TestSegment(index, 24), kTestFrameDuration100ns);
+            if (!WriteMessage(handle, WireKind::Segment, payload.data(),
+                              static_cast<uint32_t>(payload.size()))) return 16;
+        }
+    }
     NeuralRenderResult result;
     result.ok = true;
     result.encoder = EncoderKind::H264Software;
@@ -132,6 +214,7 @@ int RunFakeWorker(int argc, wchar_t** argv)
         result.detail = L"guides=" + std::wstring(guides.begin(), guides.end()) +
                         L" preroll=" + std::to_wstring(parsed->request.prerollFrames) +
                         L" retry=" + std::to_wstring(parsed->request.frameRetryLimit) +
+                        L" segments=" + std::to_wstring(parsed->request.segmentFrames) +
                         L" range=" + std::to_wstring(parsed->request.range.start100ns) + L"-" +
                         std::to_wstring(parsed->request.range.end100ns) +
                         L" pause=" + (parsed->request.pauseEvent ? L"1" : L"0");
@@ -266,6 +349,7 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     request.prerollFrames = 12;
     request.frameRetryLimit = 5;
     request.guides = {true, false, true};
+    request.segmentFrames = 96;
     const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
     const HANDLE pause = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(456));
     auto view = [](const std::vector<std::wstring>& arguments) {
@@ -293,6 +377,7 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
         CHECK(parsedNormal->request.prerollFrames == 12);
         CHECK(parsedNormal->request.frameRetryLimit == 5);
         CHECK(parsedNormal->request.guides == request.guides);
+        CHECK(parsedNormal->request.segmentFrames == 96);
     }
     const auto restarted = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, true);
     const auto restartedView = view(restarted);
@@ -301,6 +386,17 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     if (parsedRestarted) {
         CHECK(parsedRestarted->configurationRestarted);
         CHECK(parsedRestarted->request.pauseEvent == nullptr);
+    }
+    // Absent --segment-frames means one output file for the whole range.
+    NeuralRenderRequest single = request;
+    single.segmentFrames = 0;
+    const auto unsegmented = neural_worker_detail::BuildWorkerArguments(single, metadata, nullptr, false);
+    for (const auto& argument : unsegmented) CHECK(argument != L"--segment-frames");
+    const auto unsegmentedView = view(unsegmented);
+    const auto parsedSingle = neural_worker_detail::ParseWorkerArguments(unsegmentedView);
+    CHECK(parsedSingle.has_value());
+    if (parsedSingle) {
+        CHECK(parsedSingle->request.segmentFrames == 0);
     }
     auto malformed = restarted;
     malformed.back() = L"--unexpected";
@@ -407,6 +503,7 @@ void request_fields_reach_the_helper_intact_test()
     request.guides = {false, true, false};
     request.prerollFrames = 7;
     request.frameRetryLimit = 2;
+    request.segmentFrames = 90;
     request.range = {30'000'000, 50'000'000};
     HANDLE pause = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     request.pauseEvent = pause;
@@ -414,14 +511,17 @@ void request_fields_reach_the_helper_intact_test()
     CloseHandle(pause);
     CHECK(result.ok);
     if (!result.ok) std::wcerr << L"detail: " << result.detail << L" failure=" << static_cast<int>(result.failure) << L'\n';
-    CHECK(result.detail == L"guides=mv=0,depth=1,mask=0 preroll=7 retry=2 range=30000000-50000000 pause=1");
+    CHECK(result.detail == L"guides=mv=0,depth=1,mask=0 preroll=7 retry=2 segments=90 range=30000000-50000000 pause=1");
 }
 
 void crashed_helper_is_relaunched_at_most_once_test()
 {
     std::vector<NeuralRenderProgress> progress;
+    size_t restarts = 0;
+    NeuralSegmentSink sink;
+    sink.onRestart = [&] { ++restarts; };
     const NeuralRenderResult crashed = RunNeuralWorker(CurrentExecutable(), TestRequest(L"crash-source.mkv"),
-        [&](const NeuralRenderProgress& update) { progress.push_back(update); });
+        [&](const NeuralRenderProgress& update) { progress.push_back(update); }, {}, sink);
     CHECK(!crashed.ok);
     CHECK(!crashed.cancelled);
     CHECK(crashed.failure == NeuralRenderFailure::RetryExhausted);
@@ -439,9 +539,11 @@ void crashed_helper_is_relaunched_at_most_once_test()
     }
     CHECK(recovering == 1);
     CHECK(rendering == 2);
+    // The relaunch renders from frame zero: any published segment is invalid.
+    CHECK(restarts == 1);
 
     const NeuralRenderResult removed = RunNeuralWorker(CurrentExecutable(),
-        TestRequest(L"device-removed-source.mkv"), {}, {}, 0);
+        TestRequest(L"device-removed-source.mkv"), {}, {}, {}, 0);
     CHECK(!removed.ok);
     CHECK(removed.failure == NeuralRenderFailure::RetryExhausted);
     CHECK(removed.detail.find(L"fake device removal") != std::wstring::npos);
@@ -516,6 +618,136 @@ void protocol_rejects_inconsistent_results_test()
     CHECK(!DecodeProgress(std::span<const std::byte>(reinterpret_cast<const std::byte*>(&wire), sizeof(wire))).has_value());
 }
 
+void segment_messages_round_trip_and_reject_malformed_test()
+{
+    const NeuralRenderSegment segment = TestSegment(3, 48);
+    const auto decoded = DecodeSegment(EncodeSegment(segment, kTestFrameDuration100ns));
+    CHECK(decoded.has_value());
+    if (decoded) {
+        CHECK(decoded->index == 3);
+        CHECK(decoded->firstFrameNumber == segment.firstFrameNumber);
+        CHECK(decoded->firstTimestamp100ns == segment.firstTimestamp100ns);
+        CHECK(decoded->frameCount == 48);
+        CHECK(decoded->end100ns == segment.end100ns);
+        CHECK(decoded->fileName == L"neural-00003.mkv");
+    }
+    NeuralRenderSegment empty = segment;
+    empty.frameCount = 0;
+    CHECK(!DecodeSegment(EncodeSegment(empty, kTestFrameDuration100ns)).has_value());
+    CHECK(!DecodeSegment(EncodeSegment(segment, 0)).has_value());
+    CHECK(!DecodeSegment(EncodeSegment(segment, -1)).has_value());
+    NeuralRenderSegment nested = segment;
+    nested.fileName = L"sub/neural-00003.mkv";
+    CHECK(!DecodeSegment(EncodeSegment(nested, kTestFrameDuration100ns)).has_value());
+    nested.fileName = L"sub\\neural-00003.mkv";
+    CHECK(!DecodeSegment(EncodeSegment(nested, kTestFrameDuration100ns)).has_value());
+    NeuralRenderSegment traversal = segment;
+    traversal.fileName = L"neural..mkv";
+    CHECK(!DecodeSegment(EncodeSegment(traversal, kTestFrameDuration100ns)).has_value());
+    NeuralRenderSegment unnamed = segment;
+    unnamed.fileName.clear();
+    CHECK(!DecodeSegment(EncodeSegment(unnamed, kTestFrameDuration100ns)).has_value());
+    // The encoder caps the name; a hand-built oversized payload is refused.
+    NeuralRenderSegment longName = segment;
+    longName.fileName.assign(400, L'n');
+    const auto capped = DecodeSegment(EncodeSegment(longName, kTestFrameDuration100ns));
+    CHECK(capped.has_value());
+    if (capped) CHECK(capped->fileName.size() == kMaximumSegmentNameBytes / sizeof(wchar_t));
+    CHECK(!DecodeSegment(OversizedSegmentPayload(segment)).has_value());
+    const auto payload = EncodeSegment(segment, kTestFrameDuration100ns);
+    CHECK(!DecodeSegment(std::span<const std::byte>(payload.data(), payload.size() - 2)).has_value());
+}
+
+void metadata_reader_accepts_segments_before_the_result_test()
+{
+    const WireProgress progress = EncodeProgress([] {
+        NeuralRenderProgress value;
+        value.phase = NeuralRenderPhase::NeuralRendering;
+        value.completedFrames = 24;
+        value.totalFrames = 48;
+        return value;
+    }());
+    const auto resultPayload = EncodeResult(ValidFakeResult(4242));
+    const auto segmentPayload = [](uint64_t index) {
+        return EncodeSegment(TestSegment(index, 24), kTestFrameDuration100ns);
+    };
+    std::vector<std::byte> stream;
+    AppendMessage(stream, WireKind::Progress, AsBytes(progress));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(0));
+    AppendMessage(stream, WireKind::Segment, segmentPayload(1));
+    AppendMessage(stream, WireKind::Result, resultPayload);
+    const auto accepted = neural_worker_detail::DecodeMetadataStream(stream);
+    CHECK(!accepted.malformed);
+    CHECK(accepted.complete);
+    CHECK(accepted.progressUpdates == 1);
+    CHECK(accepted.restarts == 0);
+    CHECK(accepted.segments.size() == 2);
+    if (accepted.segments.size() == 2) {
+        CHECK(accepted.segments[0].index == 0);
+        CHECK(accepted.segments[0].fileName == L"neural-00000.mkv");
+        CHECK(accepted.segments[1].index == 1);
+        CHECK(accepted.segments[1].firstTimestamp100ns == accepted.segments[0].end100ns);
+    }
+
+    // A segment can never follow the terminal result.
+    std::vector<std::byte> afterResult = stream;
+    AppendMessage(afterResult, WireKind::Segment, segmentPayload(2));
+    const auto rejected = neural_worker_detail::DecodeMetadataStream(afterResult);
+    CHECK(rejected.malformed);
+    CHECK(!rejected.complete);
+
+    // A skipped index is malformed; a repeated 0 restarts the sequence.
+    std::vector<std::byte> gap;
+    AppendMessage(gap, WireKind::Segment, segmentPayload(0));
+    AppendMessage(gap, WireKind::Segment, segmentPayload(2));
+    CHECK(neural_worker_detail::DecodeMetadataStream(gap).malformed);
+    std::vector<std::byte> replay;
+    AppendMessage(replay, WireKind::Segment, segmentPayload(0));
+    AppendMessage(replay, WireKind::Segment, segmentPayload(1));
+    AppendMessage(replay, WireKind::Segment, segmentPayload(0));
+    AppendMessage(replay, WireKind::Result, resultPayload);
+    const auto restarted = neural_worker_detail::DecodeMetadataStream(replay);
+    CHECK(!restarted.malformed);
+    CHECK(restarted.complete);
+    CHECK(restarted.restarts == 1);
+    CHECK(restarted.segments.size() == 1);
+
+    // A helper speaking the previous protocol version is refused outright.
+    std::vector<std::byte> older;
+    AppendMessage(older, static_cast<uint16_t>(kProtocolVersion - 1), WireKind::Segment, segmentPayload(0));
+    CHECK(neural_worker_detail::DecodeMetadataStream(older).malformed);
+    std::vector<std::byte> broken;
+    AppendMessage(broken, WireKind::Segment, OversizedSegmentPayload(TestSegment(0, 24)));
+    CHECK(neural_worker_detail::DecodeMetadataStream(broken).malformed);
+}
+
+void running_helper_publishes_segments_before_its_result_test()
+{
+    NeuralRenderRequest request = TestRequest(L"segment-source.mkv");
+    request.jobId = 5150;
+    request.segmentFrames = 24;
+    std::vector<NeuralRenderSegment> segments;
+    size_t restarts = 0;
+    NeuralSegmentSink sink;
+    sink.onSegment = [&](const NeuralRenderSegment& segment) { segments.push_back(segment); };
+    sink.onRestart = [&] { ++restarts; };
+    const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(), request, {}, {}, sink);
+    CHECK(result.ok);
+    CHECK(result.jobId == 5150);
+    CHECK(restarts == 0);
+    CHECK(segments.size() == 2);
+    if (segments.size() == 2) {
+        CHECK(segments[0].index == 0);
+        CHECK(segments[0].frameCount == 24);
+        CHECK(segments[0].firstFrameNumber == 0);
+        CHECK(segments[0].fileName == L"neural-00000.mkv");
+        CHECK(segments[1].index == 1);
+        CHECK(segments[1].firstFrameNumber == 24);
+        CHECK(segments[1].fileName == L"neural-00001.mkv");
+        CHECK(segments[1].firstTimestamp100ns == segments[0].end100ns);
+    }
+}
+
 void configuration_retry_is_sequential_and_bounded_test()
 {
     size_t progressCount = 0;
@@ -547,6 +779,9 @@ int wmain(int argc, wchar_t** argv)
     preflight_receipt_round_trips_and_restarts_once_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
+    segment_messages_round_trip_and_reject_malformed_test();
+    metadata_reader_accepts_segments_before_the_result_test();
+    running_helper_publishes_segments_before_its_result_test();
     configuration_retry_is_sequential_and_bounded_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
