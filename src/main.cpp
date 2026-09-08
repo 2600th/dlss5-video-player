@@ -722,7 +722,7 @@ static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title,
     for(wchar_t& c:suggested)if(c==L'<'||c==L'>'||c==L':'||c==L'"'||c==L'/'||c==L'\\'||c==L'|'||c==L'?'||c==L'*')c=L'_';
     suggested+=L"-neural";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
     const wchar_t filter[]=L"Matroska video (*.mkv)\0*.mkv\0MP4 video (*.mp4)\0*.mp4\0Animated GIF (*.gif)\0*.gif\0PNG photo (*.png)\0*.png\0JPEG photo (*.jpg)\0*.jpg;*.jpeg\0\0";
-    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.nFilterIndex=photo?4:animation?3:1;dialog.lpstrDefExt=photo?L"png":animation?L"gif":L"mkv";dialog.lpstrTitle=L"Export processed media to a new file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));dialog.lpstrFilter=filter;dialog.nFilterIndex=photo?4:animation?3:1;dialog.lpstrDefExt=photo?L"png":animation?L"gif":L"mkv";dialog.lpstrTitle=L"Save the converted video to a new file";dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST;
     return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
 }
 
@@ -1809,7 +1809,12 @@ private:
         }
         if(m_cachedPlayback){
             m_haveNext=false;m_next=VideoFrame{};m_synchronizedPlayback.SetPaused(false);
-            if(!m_synchronizedPlayback.SeekSeconds(sec)||!m_synchronizedPlayback.VisibleFrame()){LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;}
+            if(!m_synchronizedPlayback.SeekSeconds(sec)||!m_synchronizedPlayback.VisibleFrame()){
+                // A live pair only holds what is rendered. Outside it the
+                // original takes the frame back and the session rebases there.
+                if(m_liveSession){LOG("Live seek to "<<sec<<" s is not rendered; handing playback back to the original.");DetachLivePlayback();SetSeeking(false);RequestSeek(sec,resumeAfter);return false;}
+                LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;
+            }
             m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
             if(!RenderVideoFrame(frame,true)){m_playing=false;m_synchronizedPlayback.SetPaused(true);SetSeeking(false);return false;}RememberRenderedCachedPair();
             // A drag preview would respawn the audio helper on every step; the
@@ -1866,7 +1871,10 @@ private:
         m_playStartSec=m_currentSec;m_playStart=Clock::now();
         InvalidatePlaybackProgress();UpdateCachedStatus();
     }
-    void StopPlayback(){if(NeuralJobActive()){CancelNeuralJob();return;}if(m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return;}RequestSeek(0,false);}
+    // Stop ends an active session the same way the toggle does: the render dies
+    // and the original keeps the frame, instead of a cancelled job leaving the
+    // session state behind.
+    void StopPlayback(){if(m_liveSession){StopLiveNeuralSession(true);return;}if(NeuralJobActive()){CancelNeuralJob();return;}if(m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return;}RequestSeek(0,false);}
 
     void UpdateTitle(){
         if(!m_hwnd)return;
@@ -2309,6 +2317,9 @@ private:
         ReleaseLiveSession();
         m_neuralRequested=false;
         if(attached&&keepPlaying&&m_loaded)RequestSeek(at,wasPlaying);
+        // Buffering paused the original; stopping before the session ever
+        // attached has to hand that playback back.
+        else if(keepPlaying&&m_loaded&&wasPlaying&&!m_playing)SetPaused(false);
         SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
         LOG("Active neural session stopped at "<<at<<" s.");
     }
@@ -2319,7 +2330,10 @@ private:
         if(m_liveSegments)m_liveSegments->Finish();
         if(completion.result.ok){
             m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);
-            LOG("Active neural session rendered "<<completion.result.frameCount<<" frames and published its cache entry.");
+            // Playback stays on the segments, but the published entry is what
+            // "Save converted video" and the receipt need.
+            m_neuralPath=completion.neuralPath;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;
+            LOG("Active neural session rendered "<<completion.result.frameCount<<" frames and published its cache entry; save="<<(m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!ActivityBusy())<<" entry="<<(m_neuralPath.empty()?std::string("(none)"):WideToUtf8(m_neuralPath.wstring())));
         }else{
             TransitionToFailure(completion.result.failure);
             LOG("Active neural session ended early: kind="<<NeuralRenderFailureName(completion.result.failure)<<" covered="<<covered<<" detail="<<WideToUtf8(completion.result.detail));
@@ -2418,10 +2432,29 @@ private:
         }else LOG("Neural settings preview discarded: the paused frame moved.");
         SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();
     }
+    // Playback leaves the live pair and continues on the original decoder; the
+    // session keeps rendering and re-attaches when it covers the playhead again.
+    void DetachLivePlayback(){
+        if(!m_liveAttached)return;
+        m_liveAttached=false;m_haveNext=false;m_next=VideoFrame{};
+        m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
+        if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
+    }
+    // A committed seek out of the rendered part restarts the session there:
+    // waiting for the head to travel to a distant playhead would take minutes.
+    bool LiveSessionNeedsRebase()const{
+        if(!m_liveSession||m_liveAttached||m_dragSeek||m_seeking||m_seekPending)return false;
+        const double at=Position(),start=double(m_liveRange.start100ns)*1e-7;
+        return at+0.5<start||at>std::max(start,LiveHeadSeconds())+2.0;
+    }
     // UI-thread side of the session: adopt new coverage, start playing once the
-    // lead-in is buffered, and resume after a rebuffer.
+    // lead-in is buffered, resume after a rebuffer, and rebase after a seek.
     void UpdateLiveSession(){
         if(!m_liveSession)return;
+        if(LiveSessionNeedsRebase()){
+            LOG("Active neural session rebased to "<<Position()<<" s after a seek out of its range.");
+            StopLiveNeuralSession(true);StartLiveNeuralSession();return;
+        }
         const int64_t head=m_liveSegments?m_liveSegments->Head100ns():0;
         if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
         const bool finished=LiveSessionFinished();
