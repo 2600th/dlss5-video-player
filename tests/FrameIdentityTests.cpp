@@ -225,13 +225,17 @@ constexpr int64_t kSyncFrame100ns = 400000;
 
 class IdentitySource final : public ISynchronizedFrameSource {
 public:
-    explicit IdentitySource(std::vector<uint64_t> frameNumbers, uint64_t totalFrames)
+    // `skew100ns` mimics a seeked FFmpeg source whose rebased timestamps land
+    // a few ticks below the canonical CFR grid; frame numbers stay exact
+    // because the decoder rounds them onto the grid.
+    explicit IdentitySource(std::vector<uint64_t> frameNumbers, uint64_t totalFrames,
+                            int64_t skew100ns = 0)
         : duration(double(totalFrames) / kSyncFps)
     {
         for (const uint64_t number : frameNumbers) {
             VideoFrame frame;
             frame.bgra = {uint8_t(number), 0, 0, 255};
-            frame.timestamp100ns = int64_t(number) * kSyncFrame100ns;
+            frame.timestamp100ns = int64_t(number) * kSyncFrame100ns + skew100ns;
             frame.frameNumber = number;
             frame.sourceGeneration = generation;
             frames.push_back(std::move(frame));
@@ -251,7 +255,9 @@ public:
     {
         ++generation;
         lastSeekSeconds = seconds;
-        const int64_t target = std::llround(seconds * 1e7);
+        // FFmpeg's input seek lands on the frame containing the requested time,
+        // so a timestamp a few ticks below the request is not skipped.
+        const int64_t target = std::llround(seconds * 1e7) - kSyncFrame100ns / 2;
         index = 0;
         while (index < frames.size() && frames[index].timestamp100ns < target) ++index;
         return true;
@@ -300,6 +306,26 @@ void synchronized_range_offsets_neural_frames_onto_the_original_timeline_test()
         CHECK_EQ(uint8_t(expected - 10), pair->neural.bgra[0]);
     }
     // The original continues past the range; playback ends at range.end.
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, playback.ReadNextAvailable({}));
+}
+
+void synchronized_range_ends_on_a_rebased_original_timestamp_test()
+{
+    // A seek inside a range render rebases the original's timestamps slightly
+    // early. The first frame after the range must still end playback instead
+    // of pairing against an exhausted neural stream.
+    IdentitySource original(Sequence(0, 40), 40, -3);
+    IdentitySource neural(Sequence(0, 3), 3);
+    SynchronizedPlayback playback(original, neural);
+    const SynchronizedRange range{10 * kSyncFrame100ns, 13 * kSyncFrame100ns};
+    CHECK(playback.Open(L"o", L"n", {}, range));
+    for (uint64_t expected = 10; expected < 13; ++expected) {
+        CHECK_EQ(SynchronizedReadResult::PairReady, playback.ReadNextAvailable({}));
+        const auto* pair = playback.CurrentPair();
+        CHECK(pair != nullptr);
+        if (!pair) return;
+        CHECK_EQ(expected, pair->frameNumber);
+    }
     CHECK_EQ(SynchronizedReadResult::EndOfStream, playback.ReadNextAvailable({}));
 }
 
@@ -393,6 +419,7 @@ int main()
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
+    synchronized_range_ends_on_a_rebased_original_timestamp_test();
     synchronized_range_rejects_a_neural_render_of_the_wrong_length_test();
     synchronized_range_seek_clamps_into_the_window_test();
     synchronized_playback_reports_a_frame_number_mismatch_test();

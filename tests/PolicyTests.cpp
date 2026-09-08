@@ -1160,6 +1160,96 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
     if (menu) DestroyMenu(menu);
 }
 
+void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Mark In\tI", app_menu::IDM_MARK_IN));
+    CHECK(has_menu_entry(entries, L"Mark Out\tO", app_menu::IDM_MARK_OUT));
+    CHECK(has_menu_entry(entries, L"Clear Marks\tShift+I / Shift+O", app_menu::IDM_CLEAR_MARKS));
+    CHECK(has_menu_entry(entries, L"Go to timecode...\tCtrl+G", app_menu::IDM_GOTO_TIMECODE));
+    CHECK(has_menu_entry(entries, L"Pause neural render\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(has_menu_entry(entries, L"Preview this frame (neural)\tF", app_menu::IDM_PREVIEW_FRAME));
+    CHECK(has_menu_entry(entries, L"Preview 4 s clip (neural)\tShift+F", app_menu::IDM_PREVIEW_CLIP));
+    CHECK(has_menu_entry(entries, L"Render marked range (neural)\tCtrl+R", app_menu::IDM_RENDER_RANGE));
+    CHECK(has_menu_entry(entries, L"Render whole video (neural)", app_menu::IDM_RENDER_WHOLE));
+    CHECK(has_menu_entry(entries, L"Neural settings...\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
+    CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
+    CHECK(has_menu_entry(entries, L"Zoom 2x\tZ", app_menu::IDM_COMPARE_ZOOM));
+    // Depth is a persisted guide switch in the neural settings dialog now.
+    CHECK(!has_menu_text(entries, L"Estimated / flat depth proxy\tG"));
+    HMENU video = find_top_level_submenu(menu, L"Video");
+    HMENU compare = find_top_level_submenu(video, L"Compare");
+    CHECK(compare != nullptr);
+    std::vector<MenuEntry> compareEntries;
+    if (compare) collect_menu_entries(compare, compareEntries);
+    CHECK(has_menu_entry(compareEntries, L"Neural", app_menu::IDM_COMPARE_NEURAL));
+    CHECK(has_menu_entry(compareEntries, L"Blend", app_menu::IDM_COMPARE_BLEND));
+    CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
+    CHECK(has_menu_entry(compareEntries, L"Wipe", app_menu::IDM_COMPARE_WIPE));
+    CHECK(has_menu_entry(compareEntries, L"Blend less\t[", app_menu::IDM_COMPARE_BLEND_LESS));
+    CHECK(has_menu_entry(compareEntries, L"Blend more\t]", app_menu::IDM_COMPARE_BLEND_MORE));
+
+    // A fresh bar has nothing loaded: every range, render and compare item is grayed.
+    const auto grayed = [&](UINT command) {
+        return (GetMenuState(menu, command, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) != 0;
+    };
+    const auto checked = [&](UINT command) {
+        return (GetMenuState(menu, command, MF_BYCOMMAND) & MF_CHECKED) != 0;
+    };
+    for (const UINT command : {app_menu::IDM_MARK_IN, app_menu::IDM_GOTO_TIMECODE, app_menu::IDM_PREVIEW_FRAME,
+                               app_menu::IDM_RENDER_WHOLE, app_menu::IDM_PAUSE_NEURAL_RENDER, app_menu::IDM_OPEN_RENDER_RECEIPT,
+                               app_menu::IDM_COMPARE_BLEND, app_menu::IDM_COMPARE_ZOOM})
+        CHECK(grayed(command));
+    CHECK(checked(app_menu::IDM_COMPARE_NEURAL));
+
+    CHECK(app_menu::UpdateRenderActionAvailability(menu, true, false, true, true, true));
+    CHECK(!grayed(app_menu::IDM_MARK_OUT));
+    CHECK(grayed(app_menu::IDM_PREVIEW_CLIP));
+    CHECK(!grayed(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(checked(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(!grayed(app_menu::IDM_OPEN_RENDER_RECEIPT));
+    CHECK(app_menu::UpdateRenderActionAvailability(menu, true, true, false, true, false));
+    CHECK(!grayed(app_menu::IDM_RENDER_RANGE));
+    CHECK(grayed(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(!checked(app_menu::IDM_PAUSE_NEURAL_RENDER)); // No job: a stale pause flag never shows.
+
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_SPLIT, true));
+    CHECK(!grayed(app_menu::IDM_COMPARE_WIPE));
+    CHECK(checked(app_menu::IDM_COMPARE_SPLIT));
+    CHECK(!checked(app_menu::IDM_COMPARE_NEURAL));
+    CHECK(checked(app_menu::IDM_COMPARE_ZOOM));
+    CHECK(app_menu::UpdateComparisonMenu(menu, false, true, 999u, false));
+    CHECK(grayed(app_menu::IDM_COMPARE_SPLIT));
+    CHECK(!grayed(app_menu::IDM_COMPARE_ZOOM)); // Zoom is view-independent.
+    CHECK(checked(app_menu::IDM_COMPARE_NEURAL)); // Unknown selection falls back to Neural.
+    CHECK(!checked(app_menu::IDM_COMPARE_ZOOM));
+
+    using app_menu::CommandForPlayerKey;
+    CHECK(CommandForPlayerKey('I', false, false) == app_menu::IDM_MARK_IN);
+    CHECK(CommandForPlayerKey('O', false, false) == app_menu::IDM_MARK_OUT);
+    CHECK(CommandForPlayerKey('I', false, true) == app_menu::IDM_CLEAR_MARKS);
+    CHECK(CommandForPlayerKey('O', false, true) == app_menu::IDM_CLEAR_MARKS);
+    CHECK(CommandForPlayerKey('G', true, false) == app_menu::IDM_GOTO_TIMECODE);
+    CHECK(CommandForPlayerKey('F', false, false) == app_menu::IDM_PREVIEW_FRAME);
+    CHECK(CommandForPlayerKey('F', false, true) == app_menu::IDM_PREVIEW_CLIP);
+    CHECK(CommandForPlayerKey('R', true, false) == app_menu::IDM_RENDER_RANGE);
+    CHECK(CommandForPlayerKey('N', true, false) == app_menu::IDM_NEURAL_SETTINGS);
+    CHECK(CommandForPlayerKey('Z', false, false) == app_menu::IDM_COMPARE_ZOOM);
+    CHECK(CommandForPlayerKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
+    CHECK(CommandForPlayerKey(VK_OEM_6, false, false) == app_menu::IDM_COMPARE_BLEND_MORE);
+    // Existing single-letter and Ctrl accelerators keep their owners.
+    for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('R'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
+        CHECK(!CommandForPlayerKey(key, false, false).has_value());
+    for (const UINT key : {'O', 'E', 'L', 'I', 'F', 'Z'})
+        CHECK(!CommandForPlayerKey(key, true, false).has_value());
+    CHECK(!CommandForPlayerKey('G', true, true).has_value());
+    if (menu) DestroyMenu(menu);
+}
+
 void player_menu_is_english_only_and_retains_advanced_commands_test()
 {
     Localizer localizer;
@@ -5286,6 +5376,7 @@ int wmain(int argc, wchar_t* argv[])
     advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
     feature_menu_uses_distinct_controls_and_honest_availability_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
+    range_preview_and_comparison_menus_route_keys_and_gate_availability_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();
     youtube_availability_drives_real_menu_and_idle_action_consistently_test();

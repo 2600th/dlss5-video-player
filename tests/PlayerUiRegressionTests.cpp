@@ -40,6 +40,7 @@ struct PlayerAppTestAccess {
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
         app.m_renderGuides = GuideControls{false, true, false};
         app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
+        app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.amount = 0.3f; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
         app.m_cacheRoot=savedCacheRoot;
         app.SaveVideoSettings();
@@ -47,7 +48,7 @@ struct PlayerAppTestAccess {
         app.m_volume = 1.0f; app.m_muted = false; app.m_fill = false;
         app.m_neuralRequested = true; app.m_upscaleTargetHeight = 1440;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
-        app.m_renderGuides = {}; app.m_neuralSettings = {};
+        app.m_renderGuides = {}; app.m_neuralSettings = {}; app.m_comparison = {};
         app.LoadVideoSettings();
         CHECK_EQ(app.m_cacheRoot,savedCacheRoot);
         CHECK(std::abs(app.m_volume - 0.35f) < 0.001f);
@@ -56,6 +57,16 @@ struct PlayerAppTestAccess {
         CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
         CHECK((app.m_renderGuides == GuideControls{false, true, false}));
         CHECK(app.m_neuralSettings.intensity == 1.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
+        CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
+        CHECK(std::abs(app.m_comparison.amount - 0.3f) < 0.001f && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
+        CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
+        // Original is a view, not a comparison mode; an out-of-range mode falls back to Neural.
+        WritePrivateProfileStringW(L"Comparison", L"Mode", L"1", app.SettingsPath().c_str());
+        app.WriteIniFloat(L"Comparison", L"Amount", 4.0f);
+        app.LoadVideoSettings();
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        CHECK_EQ(app.m_comparison.amount, 1.0f);
+        app.m_comparison = {};
         // Absent guide keys mean every guide is on, matching a fresh install.
         for (const wchar_t* key : {L"MotionVectors", L"Depth", L"Mask"})
             WritePrivateProfileStringW(L"NeuralGuides", key, nullptr, app.SettingsPath().c_str());
@@ -65,7 +76,7 @@ struct PlayerAppTestAccess {
         app.LoadVideoSettings();
         CHECK_EQ(app.m_volume, 1.0f);
         app.m_muted = false; app.m_fill = false; app.m_neuralRequested = true;
-        app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto; app.m_neuralSettings = {};
+        app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto; app.m_neuralSettings = {}; app.m_comparison = {};
         app.m_cacheRoot.clear();
         WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,app.SettingsPath().c_str());
         app.SaveVideoSettings();
@@ -211,6 +222,9 @@ struct PlayerAppTestAccess {
         const std::wstring cachedStatusBeforeFeatureStatusFix = app.BuildStatusText();
         CHECK(cachedStatusBeforeFeatureStatusFix.find(L"DLSS SR unavailable") != std::wstring::npos);
         CHECK(cachedStatusBeforeFeatureStatusFix.find(L"FG unavailable") != std::wstring::npos);
+        CheckMarkersAndTimecode(app);
+        CheckComparisonAvailability(app);
+        CheckNeuralSettingsDialog(app);
 
         app.m_seeking = false;
         app.m_cachedPlayback = false;
@@ -380,6 +394,165 @@ struct PlayerAppTestAccess {
     }
 
 private:
+    static void CheckMarkersAndTimecode(PlayerApp& app)
+    {
+        // Loaded cached playback with a bare renderer object; the closed
+        // decoder reports 30 fps and an unknown duration.
+        app.m_seeking = false; app.m_seekPending = false; app.m_playing = false;
+        app.m_currentSec = 1.51; // Off-grid position snaps to frame 45 at 30 fps.
+        app.HandleCommand(IDM_MARK_IN);
+        CHECK(app.m_markers.in100ns.has_value() && !app.m_markers.out100ns.has_value());
+        CHECK_EQ(app.m_markers.in100ns.value_or(0), int64_t{15000000});
+        CHECK(app.BuildStatusText().find(L" \u00b7 In 00:00:01:15") != std::wstring::npos);
+        CHECK(app.BuildStatusText().find(L"Out ") == std::wstring::npos);
+        // The timecode dialog handler: non-drop, frame and millisecond forms
+        // land on the frame grid; invalid text is refused without side effects.
+        CHECK(app.ApplyTimecodeText(L"00:00:03:00", TimecodeAction::SetOut));
+        CHECK_EQ(app.m_markers.out100ns.value_or(0), int64_t{30000000});
+        CHECK(app.BuildStatusText().find(L" \u00b7 In 00:00:01:15 \u00b7 Out 00:00:03:00") != std::wstring::npos);
+        const auto range = RangeFromMarkers(app.m_markers, 100000000);
+        CHECK(range.has_value());
+        if (range) { CHECK_EQ(range->start100ns, int64_t{15000000}); CHECK_EQ(range->end100ns, int64_t{30000000}); }
+        CHECK(!app.ApplyTimecodeText(L"nonsense", TimecodeAction::Go));
+        CHECK(!app.ApplyTimecodeText(L"", TimecodeAction::SetIn));
+        CHECK(!app.m_seekPending);
+        CHECK_EQ(app.m_markers.in100ns.value_or(0), int64_t{15000000});
+        CHECK(app.ApplyTimecodeText(L"f75", TimecodeAction::Go));
+        CHECK(app.m_seekPending);
+        CHECK(std::abs(app.m_pendingSeekSec - 2.5) < 1e-9);
+        app.m_seekPending = false;
+        // Markers only render as a range when In precedes Out.
+        CHECK(app.ApplyTimecodeText(L"0:00.500", TimecodeAction::SetOut));
+        CHECK(!RangeFromMarkers(app.m_markers, 100000000).has_value());
+        app.HandleCommand(IDM_CLEAR_MARKS);
+        CHECK(!app.m_markers.in100ns.has_value() && !app.m_markers.out100ns.has_value());
+        CHECK(app.BuildStatusText().find(L"In ") == std::wstring::npos);
+        // Cached range playback names its range and the settings it was rendered with.
+        app.m_cachedRange = NeuralRenderRange{15000000, 30000000};
+        app.m_cachedSettings.intensity = 1.25f; app.m_cachedGuides.depth = false;
+        const std::wstring rangeStatus = app.BuildStatusText();
+        CHECK(rangeStatus.find(L"Range 00:00:01:15\u201300:00:03:00") != std::wstring::npos);
+        CHECK(rangeStatus.find(L"NR 1.25/struct 1.00/tone 1.00/mv=1,depth=0,mask=1") != std::wstring::npos);
+        // Seeks stay inside the cached range; Stop returns to its first frame.
+        CHECK(std::abs(app.ClampSeek(0.0) - 1.5) < 1e-9);
+        CHECK(std::abs(app.ClampSeek(9.0) - (3.0 - 1.0 / 30.0)) < 1e-9);
+        CHECK(std::abs(app.ClampSeek(2.0) - 2.0) < 1e-9);
+        app.m_cachedRange = {}; app.m_cachedSettings = {}; app.m_cachedGuides = {};
+        CHECK(app.BuildStatusText().find(L"Range ") == std::wstring::npos);
+        CHECK(app.BuildStatusText().find(L"NR 1.00/struct 1.00/tone 1.00 ") == std::wstring::npos);
+        // Markers belong to the loaded source.
+        app.HandleCommand(IDM_MARK_OUT);
+        app.Unload();
+        CHECK(!app.m_markers.out100ns.has_value());
+        app.m_loaded = true; app.m_cachedPlayback = true; app.m_havePresentedPair = true;
+        app.m_renderer = MakeD3D12Renderer();
+    }
+
+    static void CheckComparisonAvailability(PlayerApp& app)
+    {
+        const HMENU menu = GetMenu(app.m_hwnd);
+        const auto grayed = [&](UINT command) {
+            return (GetMenuState(menu, command, MF_BYCOMMAND) & (MFS_DISABLED | MFS_GRAYED)) != 0;
+        };
+        app.m_neuralRequested = true; app.m_comparisonView = ComparisonView::Neural;
+        app.SyncFeatureMenuState();
+        CHECK(app.ComparisonModesAvailable());
+        CHECK(!grayed(IDM_COMPARE_SPLIT) && !grayed(IDM_COMPARE_ZOOM));
+        app.HandleCommand(IDM_COMPARE_SPLIT);
+        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        CHECK(app.m_renderer->GetComparison().mode == ComparisonMode::SplitVertical);
+        CHECK((GetMenuState(menu, IDM_COMPARE_SPLIT, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        app.m_comparison.amount = 0.5f;
+        app.HandleCommand(IDM_COMPARE_BLEND_MORE);
+        app.HandleCommand(IDM_COMPARE_BLEND_MORE);
+        CHECK(std::abs(app.m_comparison.amount - 0.7f) < 0.001f);
+        for (int step = 0; step < 12; ++step) app.HandleCommand(IDM_COMPARE_BLEND_LESS);
+        CHECK_EQ(app.m_comparison.amount, 0.0f);
+        app.HandleCommand(IDM_COMPARE_ZOOM);
+        CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
+        CHECK((GetMenuState(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        // The original view has no pair member to compare against: items gray
+        // out and presentation is forced to Neural while the choice is kept.
+        app.m_neuralRequested = false; app.m_comparisonView = ComparisonView::Original;
+        app.SyncFeatureMenuState();
+        CHECK(!app.ComparisonModesAvailable());
+        CHECK(grayed(IDM_COMPARE_SPLIT) && grayed(IDM_COMPARE_BLEND_MORE));
+        CHECK(!grayed(IDM_COMPARE_ZOOM));
+        CHECK(app.EffectiveComparison().mode == ComparisonMode::Neural);
+        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        app.HandleCommand(IDM_COMPARE_WIPE);
+        CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
+        app.HandleCommand(IDM_COMPARE_ZOOM);
+        CHECK_EQ(app.m_comparison.zoomScale, 1.0f);
+        app.m_neuralRequested = true; app.m_comparisonView = ComparisonView::Neural;
+        app.m_cachedPlayback = false;
+        app.SyncFeatureMenuState();
+        CHECK(grayed(IDM_COMPARE_SPLIT));
+        app.m_cachedPlayback = true;
+        app.HandleCommand(IDM_COMPARE_NEURAL);
+        CHECK(app.m_comparison.mode == ComparisonMode::Neural);
+        app.m_comparison = {};
+        app.SyncFeatureMenuState();
+    }
+
+    static void CheckNeuralSettingsDialog(PlayerApp& app)
+    {
+        app.m_neuralSettings = {}; app.m_renderGuides = {};
+        app.ShowNeuralSettings();
+        CHECK(app.m_neuralWnd != nullptr);
+        if (!app.m_neuralWnd) return;
+        const HWND dialog = app.m_neuralWnd;
+        const auto setTrack = [&](int id, int pos) { SendMessageW(GetDlgItem(dialog, id), TBM_SETPOS, TRUE, pos); };
+        setTrack(IDC_NS_INTENSITY, 150); setTrack(IDC_NS_SKIN, 25); setTrack(IDC_NS_COLOR, 40);
+        app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK(std::abs(app.m_neuralSettings.intensity - 1.5f) < 0.001f);
+        CHECK(std::abs(app.m_neuralSettings.skinStructure + 0.75f) < 0.001f);
+        CHECK(std::abs(app.m_neuralSettings.colorStrength - 0.4f) < 0.001f);
+        CHECK_EQ(std::wstring(L"1.50"), ReadText(GetDlgItem(dialog, IDC_NS_INTENSITY + 100)));
+        SendMessageW(GetDlgItem(dialog, IDC_NS_PRESET), CB_SETCURSEL, 3, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_PRESET, CBN_SELCHANGE), 0);
+        CHECK_EQ(app.m_neuralSettings.preset, 3);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_STYLE), CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), 0);
+        CHECK_EQ(app.m_neuralSettings.style, 2);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_AUTOMASK), BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), 0);
+        CHECK(!app.m_neuralSettings.autoMask);
+        // Guide switches persist for the next render and reach the live guide generator.
+        CHECK(app.m_guides.Controls().depth);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_GUIDE_DEPTH, BN_CLICKED), 0);
+        CHECK((app.m_renderGuides == GuideControls{true, false, true}));
+        CHECK(!app.m_guides.Controls().depth);
+        CHECK(app.m_guideReset && app.m_dlssReset);
+        // Apply saves the values even when nothing can be rendered right now.
+        app.m_opt.neuralAddonConfigured = false;
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_APPLY, BN_CLICKED), 0);
+        CHECK(!app.NeuralJobActive());
+        {
+            NeuralSettings saved;
+            CHECK(LoadNeuralSettings(app.SettingsPath(), saved));
+            CHECK(saved == app.m_neuralSettings);
+            CHECK_EQ(GetPrivateProfileIntW(L"NeuralGuides", L"Depth", 1, app.SettingsPath().c_str()), UINT{0});
+        }
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_RESET, BN_CLICKED), 0);
+        CHECK(app.m_neuralSettings == NeuralSettings{});
+        CHECK(app.m_renderGuides.IsDefault());
+        CHECK(app.m_guides.Controls().depth);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_neuralWnd == nullptr);
+        CHECK(!IsWindow(dialog));
+    }
+
+    static std::wstring ReadText(HWND window)
+    {
+        wchar_t text[64]{};
+        GetWindowTextW(window, text, 64);
+        return text;
+    }
+
     static void CheckCacheSettings(PlayerApp& app)
     {
         const auto settings=app.SettingsPath();

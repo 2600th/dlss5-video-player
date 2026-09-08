@@ -223,6 +223,19 @@ struct LaunchOutcome {
     std::wstring detail;
 };
 
+// ReShade writes its log when the proxy loads and rotates to ReShade.log1 when
+// a previous file is still present or held. A stale log would let the helper
+// read a former session's feature-18 evidence, or make it read the wrong file
+// entirely. The parent loads no hooks and always waits for full helper exit,
+// so it can retire both files before every launch.
+void RemoveStaleRuntimeLogs(const std::filesystem::path& runtimeDirectory)
+{
+    if (runtimeDirectory.empty()) return;
+    std::error_code error;
+    std::filesystem::remove(runtimeDirectory / L"ReShade.log", error);
+    std::filesystem::remove(runtimeDirectory / L"ReShade.log1", error);
+}
+
 // Launches the helper with the metadata pipe (and optional inheritable pause
 // event), pumps its messages into `reader`, and returns once it exits or the
 // caller cancels. The job object kills the whole helper tree on close.
@@ -231,6 +244,7 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
                            HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop)
 {
     LaunchOutcome outcome;
+    RemoveStaleRuntimeLogs(executable.parent_path());
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     HANDLE metadataRead = nullptr;
     HANDLE metadataWrite = nullptr;

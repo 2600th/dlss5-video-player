@@ -18,6 +18,41 @@ Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
 mouse-wheel volume are already supported. Cancellation can fall back to the
 original when a local source has been acquired; an incomplete render is never reused.
 
+### Preview first: markers, timecodes and ranges
+
+Press `I` and `O` to mark In and Out at the current frame; `Shift+I` or
+`Shift+O` clears both. Markers snap to the source frame grid, draw as green and
+orange ticks on the timeline, and the status line names them as `hh:mm:ss:ff`.
+`Ctrl+G` opens **Playback > Go to timecode**, which accepts `hh:mm:ss:ff`,
+`h:mm:ss.mmm` or `f<frame>` and can seek or set either marker.
+
+The DLSS menu renders less than the whole video: `F` renders only the current
+frame, `Shift+F` a four-second clip from it, and `Ctrl+R` the marked range;
+**Render whole video** starts a full render. Each result opens as cached
+playback of that range, seeking stays inside it and the status line shows
+`Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short `NR intensity/struct/tone` summary
+of the settings it was rendered with. **Advanced > Open render receipt** opens
+the entry's `receipt.json` with the full record. `Space` pauses and resumes a
+running render. The recent-video history keeps one render per source, so a new
+preview or range render for the same file displaces the previous entry.
+
+### Compare the neural result
+
+**Video > Compare** works during cached playback on the neural view. **Blend**
+mixes the original into the neural frame (`[` and `]` step the amount by 0.1);
+**Split** and **Wipe** show the original left of a divider you drag in the
+image, Wipe adding a white line. `Z` zooms 2x around the mouse position in the
+image. Pause and step with `.` to judge a single frame; `D` still switches the
+whole view between original and neural. The modes gray out on the original
+view or outside cached playback and are remembered in `[Comparison]`.
+
+**DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
+local structure, local tone, skin structure, color strength, preset, style and
+automatic mask, plus the motion-vector, depth and mask guide switches. These
+change the render identity: **Apply & re-render** saves them and re-renders the
+current range (or the whole source), while playback image adjustments remain
+instant. The guide switches also drive the live debug views immediately.
+
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding
 frames to photo exports. GIF animation is decoded once, preserving its delays
@@ -94,8 +129,9 @@ export. This is a count-based retention policy, not a byte quota or a backup.
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, upscaling preference and output size, YouTube quality and
-image adjustments. Keep the player in a writable folder to persist preferences.
+original/neural view, upscaling preference and output size, YouTube quality,
+image adjustments, comparison mode, neural settings and guide switches. Keep
+the player in a writable folder to persist preferences.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

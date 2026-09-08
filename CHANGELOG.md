@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- Verify the staged neural runtime against the embedded packaging lock and run a
+  Feature 18 preflight in the isolated helper before every render; each cache
+  entry now carries `receipt.json` (GPU, driver, ReShade/RenoDX/DLSS-NR versions,
+  module hashes, feature-18 observations, effective settings, timing) hashed
+  into a schema-4 manifest, summarized in one log line.
+- Attach a frame identity (frame number, timestamp, source generation, history
+  generation, job id, reset reason) to every decoded frame, guide and neural
+  result; reject mismatches; log every temporal reset with its reason. Cuts
+  now need both a high post-alignment residual and a low luma-histogram overlap,
+  so fast pans no longer reset history while real cuts always do.
+- Classify neural render failures (GPU stall, device removed, worker crash,
+  retry exhausted, preflight, identity, protocol) with explicit player states,
+  retry the exact frame a bounded number of times, relaunch a crashed helper
+  from frame zero at most once, and pause/resume a render with Space. A failed
+  frame is never omitted from the output.
+- Add In/Out markers, exact timecode entry, single-frame and 4 s neural
+  previews with temporal pre-roll, and range renders whose cache entries,
+  synchronized playback and exports (audio/subtitles trimmed) follow the range.
+- Add Blend, Split, Wipe and Zoom comparison presentation against the original
+  member of the synchronized pair, and a Neural settings dialog with separate
+  Intensity, Structure, Tone, Skin, Color, Preset, Style, Auto-mask and guide
+  (motion/depth/mask) controls that become part of the cache identity.
+- Add a repeatable quality benchmark (`tools/benchmark`): synthetic corpus,
+  worker driver with guide/setting ablation and two-pass chaining, flicker,
+  color-shift, PSNR/SSIM, OCR and face-consistency metrics, blind A/B pairs,
+  plus a documented reference run (`docs/BENCHMARK.md`).
+
 ## 0.14.1 - 2026-09-03
 
 - Make the fullscreen lifecycle regression portable across narrow and high-DPI

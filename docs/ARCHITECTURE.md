@@ -7,13 +7,13 @@ Local file / validated YouTube download
   |                                  |
   |                                  +-> source audio -> playback clock
   v
-Source + runtime + settings cache lookup
+Source + runtime lock + preflight + settings cache lookup
   |
-  +-> miss: NeuralWorker.exe
-  |           sequential decode -> temporal guides -> GPU guide expansion
-  |           -> native DLAA carrier + RenoDX feature 18
-  |           -> capture -> encode -> independent validation -> neural cache
-  |
+  +-> miss: NeuralWorker.exe --neural-preflight (Feature 18 probe receipt)
+  |         NeuralWorker.exe --neural-worker
+  |           sequential decode from range start - preroll -> temporal guides
+  |           -> GPU guide expansion -> native DLAA carrier + RenoDX feature 18
+  |           -> capture -> encode -> independent validation -> receipt -> cache
   v
 Original + validated neural cache -> synchronized decoded frame pairs
   |
@@ -48,6 +48,17 @@ A normal movie does not contain engine motion vectors or depth. `TemporalGuideGe
 
 CPU analysis is performed on a compact grid. D3D12 expands the result to the exact DLSS render dimensions.
 
+Every decoded frame carries a `FrameIdentity` (frame number on the CFR
+timeline, timestamp, source generation, history generation, job id, reset
+reason). `Generate` classifies each reset (first frame, seek, drop, cut,
+source change, retry, preroll) and stamps the identity on the guide; the
+renderer refuses a guide built for a different source frame, derives the NGX
+reset from the guide's reason and logs it; the offline job rejects captured
+output whose identity does not match the submitted frame. A cut requires both
+a high post-alignment residual and a low luma-histogram overlap, so fast pans
+keep history and real cuts never do. Guide controls (motion, depth, mask) can
+each be neutralized for ablation; the choice is part of the cache identity.
+
 ## D3D12 renderer
 
 `D3D12Renderer` owns:
@@ -69,13 +80,37 @@ FFmpeg encoder process. The same persistent NGX/feature-18 session is retained
 across the sequence; an add-on-requested feature recreation does not break the
 job's monotonic successful-submission count.
 
+The renderer also holds a source-size reference texture (the original member
+of a synchronized pair) so the presentation shader can show Blend, Split, Wipe
+and Zoom comparisons instantly without re-rendering; cache capture always
+samples the neural output with identity constants. Timestamp queries around
+the DLSS evaluation and a per-frame local VRAM sample feed the render receipt.
+
 ## Offline neural job and cache
 
-`OfflineNeuralRenderer` decodes sequentially from frame zero, primes feature
-18, restarts the source from zero, rejects non-monotonic timestamps, evaluates
-and captures every frame, and finishes the encoder.
+`OfflineNeuralRenderer` validates the requested range, primes feature 18,
+reopens the source at `start - preroll`, evaluates the preroll frames without
+capturing, captures `[start, end)`, rejects non-monotonic timestamps or
+non-consecutive frame numbers, and finishes the encoder. Encoded timestamps
+start at zero; the absolute start is recorded in the manifest and the
+receipt so synchronized playback and export realign to the source.
 If NVENC cannot start or write, the entire sequence restarts from zero with
 software H.264 rather than splicing incompatible temporal histories.
+A frame whose evaluation fails (or stalls) is retried a bounded number of
+times with the same identity; exhaustion fails the job as retry-exhausted
+and never skips the frame. Device removal fails the job immediately and the
+launcher relaunches the helper from zero at most once. The helper checks an
+inherited pause event between frames and resumes without a temporal reset.
+
+Before every render the player verifies the staged runtime against the
+embedded `packaging/runtime-lock.json` (size, SHA-256, file version) and
+refuses drift instead of adopting a newer stack. On a cache miss the helper
+first runs `--neural-preflight`: a synthetic Feature 18 probe whose JSON
+receipt records GPU, driver, ReShade/RenoDX/DLSS-NR banner versions, every
+locked module's hash and every feature-18 creation/evaluation observation.
+After the render, `receipt.json` (preflight, lock checks, request, result,
+timing, digests) is written beside `neural.mkv`, hashed into the schema-4
+manifest and summarized in one log line.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
@@ -109,7 +144,8 @@ encodes PNG/JPEG single frames, palette GIFs at 50 fps, and H.264/AAC MP4 with
 compatible text subtitles. An owned,
 cancellable FFmpeg process writes a unique sibling stage, published without
 overwriting an existing destination. Export has no render or subtitle-composition
-pass. Preferences use the existing executable-adjacent INI.
+pass. Range renders trim the exported source audio, subtitles and chapters to
+the rendered range. Preferences use the existing executable-adjacent INI.
 
 Still-image demuxers produce one frame at 1 fps with a one-second cache carrier.
 Neural feature warm-up can reuse that frame up to 120 times; capture reopens the
@@ -182,21 +218,18 @@ therefore update the displayed frame without starting a new neural render.
 
 ## Remaining work
 
-The shipped cache/settings/history/export work is described in [Usage](USAGE.md).
-The remaining priorities are:
+The shipped cache/settings/history/export work is described in [Usage](USAGE.md);
+the prioritized plan is [the roadmap](DLSS5_VIDEO_ROADMAP.md). Its P0 items
+(runtime preflight, benchmark, guide ablation, frame identity, stall
+recovery, range preview, comparison controls) are implemented; the
+measured guide ablation lives in [Benchmark](BENCHMARK.md). Next are the P1
+items: source-color/HDR preservation, confidence-aware optical flow, stable
+protection masks, RTX Video modes and GPU-resident buffered viewing.
 
-1. Verified neural controls and presets, with paused wipe, linked zoom and loop
-   comparison to judge their effect.
-2. Watch-original-first playback, bounded previews, and selective cache cleanup
-   with a storage quota.
-3. A sequential job queue, stronger source-timestamp/VFR coverage, subtitle and
-   audio-track selection, and measured frame pacing.
-4. Measured research into NVOFA guidance, official-runtime compatibility and
-   RTX Video SR. Adopt a backend only after capability, quality and performance
-   evidence; keep a working fallback.
-
-Complete HDR processing, GPU-resident transfers, interpolation and durable
-render resume require separate pipeline work. Resume must account for temporal
-neural state; frame indices and encoded segments alone are insufficient.
-Compose subtitles after enhancement, with burn-in only as an explicit export
-choice. These are pending ideas, not current features or release commitments.
+Durable mid-job resume is deliberately a from-zero relaunch: a validated
+segment checkpoint would have to carry the temporal neural state at the
+boundary (a preroll re-evaluation, not just frame indices and encoded
+segments), and the relaunch bound already covers the observed failure
+modes. Compose subtitles after enhancement, with burn-in only as an explicit
+export choice. These are pending ideas, not current features or release
+commitments.

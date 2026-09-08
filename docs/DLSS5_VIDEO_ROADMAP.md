@@ -18,6 +18,12 @@ _Current as of September 8, 2026._
 
 ## P0 — Build first
 
+> Status (2026-09-08): items 1–7 are implemented in this tree. See
+> [Architecture](ARCHITECTURE.md), [Usage](USAGE.md) and the measured guide
+> ablation in [Benchmark](BENCHMARK.md). Item 5's "validated segment
+> checkpoints" are realized as bounded from-zero relaunches plus exact-frame
+> retries; mid-job resume that preserves temporal state remains future work.
+
 ### 1. Runtime preflight and exact version locking
 
 Before every render, run a short Feature 18 probe and record:

@@ -91,6 +91,8 @@ struct SynchronizedPlayback::Impl {
     int64_t tolerance100ns{333334};
     SynchronizedRange range{};
     uint64_t rangeOffsetFrames{};
+    // First frame index outside the range; 0 when the range is open-ended.
+    uint64_t rangeEndFrames{};
 
     void ResetPublished()
     {
@@ -104,6 +106,16 @@ struct SynchronizedPlayback::Impl {
         double end=range.end100ns>0?double(range.end100ns)*1e-7:original->DurationSeconds();
         if(neural)end=std::min(end,double(range.start100ns)*1e-7+neural->DurationSeconds());
         return end;
+    }
+
+    // A seeked FFmpeg source rebases its timestamps a few ticks below the
+    // canonical CFR grid, so the first out-of-range frame can still compare
+    // less than range.end100ns. Decide on the frame index when the source
+    // stamps identities, and keep a half-frame margin for sources that do not.
+    bool PastRangeEnd(const Pending& pending)const
+    {
+        if(pending.numbered&&rangeEndFrames)return pending.frame.frameNumber>=rangeEndFrames;
+        return pending.frame.timestamp100ns>=range.end100ns-tolerance100ns/2;
     }
 
     SynchronizedReadResult ReadOne(FrameSource& source,std::optional<Pending>& pending,
@@ -145,7 +157,7 @@ struct SynchronizedPlayback::Impl {
                 if(neuralRead==VideoReadResult::FrameReady)return SynchronizedReadResult::OutOfSync;
                 return SynchronizedReadResult::Error;
             }
-            if(range.end100ns>0&&pendingOriginal->frame.timestamp100ns>=range.end100ns){
+            if(range.end100ns>0&&PastRangeEnd(*pendingOriginal)){
                 pendingOriginal.reset();return SynchronizedReadResult::EndOfStream;
             }
             if(!neural)return CommitPair(pair);
@@ -239,6 +251,8 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
     }
     impl_->range=range;
     impl_->rangeOffsetFrames=static_cast<uint64_t>(std::llround(startSeconds*originalFps));
+    impl_->rangeEndFrames=range.end100ns>0
+        ? static_cast<uint64_t>(std::llround(double(range.end100ns)*1e-7*originalFps)) : 0;
     impl_->ResetPublished();impl_->opened=true;return true;
 }
 

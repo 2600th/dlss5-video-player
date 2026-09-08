@@ -620,10 +620,14 @@ std::string ReadNeuralRuntimeLogSegment(const std::filesystem::path& path,uintma
     int stableSamples=0;
     for(int attempt=0;attempt<20;++attempt){
         std::error_code error;const auto size=std::filesystem::file_size(path,error);
-        if(!error&&size>=offset&&size-offset<=Limit){
-            const uintmax_t segmentSize=size-offset;
+        // A proxy that (re)creates the log after the offset was captured leaves
+        // a smaller file. Read that fresh session from its start instead of
+        // waiting for a segment that can never appear.
+        const uintmax_t start=(!error&&size<offset)?0u:offset;
+        if(!error&&size>=start&&size-start<=Limit){
+            const uintmax_t segmentSize=size-start;
             std::ifstream input(path,std::ios::binary);
-            if(input){input.seekg(static_cast<std::streamoff>(offset));
+            if(input){input.seekg(static_cast<std::streamoff>(start));
                 latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
                 const auto evidence=ParseNeuralRuntimeEvidence(latest);
                 stableSamples=segmentSize==lastSegmentSize?stableSamples+1:1;
