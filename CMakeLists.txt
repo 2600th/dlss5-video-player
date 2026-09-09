@@ -79,6 +79,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/SynchronizedPlayback.cpp
     src/SynchronizedPlayback.h
     src/NeuralSegmentIndex.h
+    src/LiveSessionPolicy.h
     src/FrameIdentity.h
     src/GuideControls.h
     src/NeuralWorkerProtocol.h

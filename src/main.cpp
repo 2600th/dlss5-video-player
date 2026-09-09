@@ -42,6 +42,7 @@
 #include "CompletionRegistry.h"
 #include "NetworkMediaTransaction.h"
 #include "PlaybackTiming.h"
+#include "LiveSessionPolicy.h"
 #include "NeuralCache.h"
 #include "RecentMedia.h"
 #include "MediaPipeline.h"
@@ -2228,8 +2229,10 @@ private:
             NeuralJobCompletion owned{};owned.sourceKind=MediaSourceKind::YouTube;owned.pageUrl=page;owned.displayTitle=title;owned.sourceQuality=quality;owned.sourceKey=key;
             RecordRecent(owned,true);UpdateCachedStatus();return;
         }
-        // A different video is playing now: the download is worthless.
-        if(m_loaded&&!NeuralJobActive()&&m_youtubePageUrl!=m_prefetchPageUrl){
+        // A different video is playing now: the download is worthless. An offline
+        // job owns the prefetch it will consume, but a live session renders what is
+        // already on screen, so a download for some other page is still worthless.
+        if(m_loaded&&(!NeuralJobActive()||m_liveSession)&&m_youtubePageUrl!=m_prefetchPageUrl){
             LOG("Loaded source changed; stopping the background acquisition.");
             m_prefetchWorker.request_stop();m_prefetchWorker.join();m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();UpdateCachedStatus();
         }
@@ -2275,13 +2278,25 @@ private:
     // session is one long job that publishes finalized segments while it runs,
     // and playback follows the render head, buffering when it catches up.
     static constexpr double kLiveSegmentSeconds=2.0;
-    static constexpr double kLiveStartLead=4.0;
-    static constexpr double kLiveResumeLead=2.0;
-    static constexpr double kLiveRebaseAhead=15.0;
+    static constexpr double kLiveStartLead=live_session::kStartLead;
+    static constexpr double kLiveResumeLead=live_session::kResumeLead;
     bool LiveSessionAvailable()const{return RangeRenderAvailable()&&!m_cachedPlayback&&!m_decoder.IsStillImage();}
     double LiveHeadSeconds()const{return m_liveSegments?double(m_liveSegments->Head100ns())*1e-7:0.0;}
-    double LiveLeadSeconds()const{const double head=LiveHeadSeconds();return head>0.0?std::max(0.0,head-Position()):0.0;}
+    double LiveLeadSeconds()const{return live_session::Lead(LiveSessionView());}
     bool LiveSessionFinished()const{return m_liveSegments&&m_liveSegments->Finished();}
+    // Rendering is linear in pixel count, so a source too large for this GPU can
+    // be recognised before a single frame is rendered. Saying so beats letting the
+    // user watch a loader that will never clear.
+    bool ConfirmLiveSessionPace(double fps){
+        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps);
+        if(forecast.keepsUp)return true;
+        LOG("Active neural session forecast: "<<m_decoder.Width()<<"x"<<m_decoder.Height()<<" at "<<fps
+            <<" fps renders at about "<<forecast.renderFps<<" fps ("<<forecast.realtimeRatio<<"x realtime).");
+        wchar_t text[512];
+        swprintf_s(text,T(L"neural.live.slow").c_str(),m_decoder.Width(),m_decoder.Height(),fps,
+                   forecast.renderFps,forecast.realtimeRatio);
+        return MessageBoxW(m_hwnd,text,T(L"neural.live.title").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
+    }
     // One render job from the playhead: to the Out marker when the playhead sits
     // inside a marked range, otherwise to the end of the source.
     void StartLiveNeuralSession(){
@@ -2292,10 +2307,11 @@ private:
         NeuralRenderRange range{at,duration};
         if(const auto marked=RangeFromMarkers(m_markers,fps,duration);marked&&at>=marked->start100ns&&at<marked->end100ns)range.end100ns=marked->end100ns;
         if(range.end100ns<=range.start100ns)return;
+        if(!ConfirmLiveSessionPace(fps))return;
         m_liveDirectory=m_cacheRoot/L"live";
         std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);std::filesystem::create_directories(m_liveDirectory,ec);
         if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
-        m_liveSegments=std::make_shared<NeuralSegmentIndex>();m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_neuralRequested=true;
+        m_liveSegments=std::make_shared<NeuralSegmentIndex>();m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
         EnterLiveBuffering();
         if(!RenderRangeOfCurrentSource(range,NeuralJobKind::Live)){StopLiveNeuralSession(true);return;}
         LOG("Active neural session started at "<<double(range.start100ns)*1e-7<<" s through "<<double(range.end100ns)*1e-7<<" s.");
@@ -2304,7 +2320,7 @@ private:
     // Drops the session state and its segment files without touching playback;
     // callers that keep playing detach the pair first.
     void ReleaseLiveSession(){
-        m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveRange={};
+        m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveStartTick=0;m_liveRange={};
         HideBufferOverlay();
         if(m_liveSegments){m_liveSegments->Finish();m_liveSegments.reset();}
         if(!m_liveDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);m_liveDirectory.clear();}
@@ -2458,12 +2474,12 @@ private:
     // A committed seek out of the rendered part restarts the session there:
     // waiting for the head to travel to a distant playhead would take minutes.
     bool LiveSessionNeedsRebase()const{
-        if(!m_liveSession||m_liveAttached||m_dragSeek||m_seeking||m_seekPending)return false;
-        const double at=Position(),start=double(m_liveRange.start100ns)*1e-7;
-        // Restarting costs a fresh ~7.3 s startup plus the 4 s lead-in, and the
-        // running job covers about a second of video per second, so waiting is
-        // cheaper for anything the head reaches within that budget.
-        return at+0.5<start||at>std::max(start,LiveHeadSeconds())+kLiveRebaseAhead;
+        if(!m_liveSession)return false;
+        return live_session::NeedsRebase(LiveSessionView());
+    }
+    live_session::SessionView LiveSessionView()const{
+        return {Position(),double(m_liveRange.start100ns)*1e-7,LiveHeadSeconds(),m_liveAttached,LiveSessionFinished(),
+                m_dragSeek||m_seeking||m_seekPending};
     }
     // UI-thread side of the session: adopt new coverage, start playing once the
     // lead-in is buffered, resume after a rebuffer, and rebase after a seek.
@@ -2475,13 +2491,12 @@ private:
         }
         const int64_t head=m_liveSegments?m_liveSegments->Head100ns():0;
         if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
-        const bool finished=LiveSessionFinished();
-        const double lead=LiveLeadSeconds();
+        const live_session::SessionView view=LiveSessionView();
         if(!m_liveAttached){
-            if((lead>=kLiveStartLead||(finished&&lead>0.0))&&AttachLiveNeural())ExitLiveBuffering();
+            if(live_session::ShouldAttach(view)&&AttachLiveNeural())ExitLiveBuffering();
             return;
         }
-        if(m_liveBuffering&&(lead>=kLiveResumeLead||finished))ExitLiveBuffering();
+        if(m_liveBuffering&&live_session::ShouldResume(view))ExitLiveBuffering();
     }
     // Buffering panel. A popup owned by the main window, because the video is a
     // D3D12 child window that a sibling would have to fight for z-order.
@@ -2987,8 +3002,20 @@ private:
     // is why playback is waiting.
     std::wstring LiveSessionStatusText()const{
         wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
-        return (m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead")+
+        std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead")+
             L" \u00b7 head "+FormatTimecode(m_liveSegments?m_liveSegments->Head100ns():0,m_decoder.FrameRate(),true);
+        // The forecast is a constant for one GPU; this is what the render is
+        // actually managing here, including whatever else the machine is doing.
+        if(const double ratio=LiveRealtimeRatio();ratio>0.0&&ratio<0.98){
+            wchar_t pace[48]={};swprintf_s(pace,L" \u00b7 %.2fx real time",ratio);text+=pace;
+        }
+        return text;
+    }
+    // Video seconds covered per second of wall clock.
+    double LiveRealtimeRatio()const{
+        if(!m_liveSession||!m_liveSegments||!m_liveStartTick)return 0.0;
+        return live_session::RealtimeRatio(double(m_liveSegments->Head100ns()-m_liveRange.start100ns)*1e-7,
+                                           double(GetTickCount64()-m_liveStartTick)/1000.0);
     }
     std::wstring BuildStatusText()const{
         if(m_exportWorker.joinable())return L"Exporting processed media - File > Cancel export to stop";
@@ -3087,7 +3114,7 @@ private:
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);
         m_fullscreenKeyboardFocus=false;
-        if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
+        if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(m_liveSession)StopLiveNeuralSession(true);else if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
         if(!ControlsVisible())return;
         if(!m_loaded){const auto items=FocusableItems();const ToolbarAction action=ResolveToolbarHover(items,POINT{x,y},ToolbarState());if(action!=ToolbarAction::None){m_focusedToolbarAction=action;m_pressedToolbarAction=action;SetCapture(m_hwnd);for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);break;}}return;}
         if(!m_seeking){RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_dragWasPlaying=m_playing;m_lastScrubSeek={};m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateControls();return;}const auto vr=VolumeRect();if(vr&&PtIn(*vr,x,y)){m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}}
@@ -3364,7 +3391,7 @@ private:
     NeuralRenderRange m_previewRange{};
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;
-    int64_t m_livePaintedHead=0;
+    int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;
     HWND m_bufferWnd=nullptr;
     RECT m_bufferAnchor{};
 };

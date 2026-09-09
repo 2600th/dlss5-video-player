@@ -57,6 +57,7 @@ private:
             {L"neural.live.stop", L"Stop"},
             {L"neural.live.started", L"Neural rendering started at the playhead; playback resumes when the buffer fills."},
             {L"neural.live.unavailable", L"Neural rendering cannot start for this source."},
+            {L"neural.live.slow", L"This video is %ux%u at %.6g fps. On this GPU neural rendering runs at about %.3g frames per second, which is %.2gx real time, so watching it live would pause to buffer almost continuously.\n\nConvert the clip instead (DLSS > Convert & save) to watch it smoothly afterwards.\n\nStart the live session anyway?"},
             {L"neural.preview.title", L"Previewing neural settings"},
             {L"neural.preview.detail", L"Rendering this frame with the new settings"},
             {L"neural.failure.gpu-stall", L"The GPU stalled during neural rendering."},

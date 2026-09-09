@@ -1,5 +1,7 @@
 #include "NeuralCache.h"
+#include "LiveSessionPolicy.h"
 #include "MediaPipeline.h"
+#include "PlaybackTiming.h"
 #include "NeuralSegmentIndex.h"
 #include "OfflineNeuralRenderer.h"
 #include "SynchronizedPlayback.h"
@@ -1716,6 +1718,90 @@ void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
     if(const auto* forward=playback.CurrentPair())CHECK_EQ(uint64_t{12},forward->frameNumber);
 }
 
+// The session's UI-thread decisions: when playback may start, when a rebuffer
+// ends, and when chasing the render head is worse than restarting it.
+void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test()
+{
+    live_session::SessionView view{};
+    view.rangeStartSec=10.0;view.positionSec=10.0;
+    CHECK(!live_session::ShouldAttach(view));                     // nothing rendered yet
+    view.headSec=13.0;
+    CHECK(!live_session::ShouldAttach(view));                     // 3 s is short of the 4 s lead
+    view.headSec=14.0;
+    CHECK(live_session::ShouldAttach(view));
+    // A finished job never grows again, so waiting for a full lead would hang.
+    live_session::SessionView tail{};
+    tail.rangeStartSec=10.0;tail.positionSec=10.0;tail.headSec=10.5;tail.finished=true;
+    CHECK(live_session::ShouldAttach(tail));
+    CHECK(!live_session::ShouldAttach({.positionSec=10.0,.rangeStartSec=10.0,.headSec=10.0,.attached=false,.finished=true}));
+    // Resuming after a rebuffer needs less than starting did.
+    live_session::SessionView playing{};
+    playing.attached=true;playing.rangeStartSec=10.0;playing.positionSec=20.0;playing.headSec=21.5;
+    CHECK(!live_session::ShouldAttach(playing));                  // already attached
+    CHECK(!live_session::ShouldResume(playing));
+    playing.headSec=22.0;
+    CHECK(live_session::ShouldResume(playing));
+    playing.headSec=20.1;playing.finished=true;
+    CHECK(std::abs(live_session::Lead(playing)-0.1)<1e-9);
+}
+
+void live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test()
+{
+    live_session::SessionView view{};
+    view.rangeStartSec=10.0;view.headSec=20.0;
+    view.positionSec=25.0;
+    CHECK(!live_session::NeedsRebase(view));                      // 5 s ahead: waiting is cheaper
+    view.positionSec=34.9;
+    CHECK(!live_session::NeedsRebase(view));                      // just inside the 15 s budget
+    view.positionSec=35.1;
+    CHECK(live_session::NeedsRebase(view));                       // past it: restart at the playhead
+    // Backwards always leaves coverage, but frame snapping can nudge a few
+    // milliseconds behind the start without meaning a seek.
+    view.positionSec=9.9;
+    CHECK(!live_session::NeedsRebase(view));
+    view.positionSec=9.4;
+    CHECK(live_session::NeedsRebase(view));
+    // An attached session clamps seeks to the head instead, and a seek in
+    // flight has not committed to anything yet.
+    live_session::SessionView attached=view;attached.attached=true;
+    CHECK(!live_session::NeedsRebase(attached));
+    live_session::SessionView seeking=view;seeking.seeking=true;
+    CHECK(!live_session::NeedsRebase(seeking));
+    // A head that has not moved past the range start still rebases forward.
+    CHECK(live_session::NeedsRebase({.positionSec=40.0,.rangeStartSec=10.0,.headSec=0.0}));
+}
+
+void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
+{
+    CHECK_EQ(0.0,live_session::RealtimeRatio(3.0,4.0));           // 4 s in, still mostly startup
+    CHECK_EQ(0.0,live_session::RealtimeRatio(0.0,30.0));          // no coverage yet
+    CHECK_EQ(0.5,live_session::RealtimeRatio(10.0,20.0));
+    CHECK_EQ(1.0,live_session::RealtimeRatio(20.0,20.0));
+}
+
+// Cost is linear in pixel count, so whether a session can follow playback is
+// decided before a frame is rendered. Anchored on measured rates: 35.3 ms per
+// 1080p frame, 65.5 at 1440p, 142.3 at 2160p.
+void live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test()
+{
+    const auto hd=playback_timing::ForecastLiveRender(1920,1080,30.0);
+    CHECK(hd.msPerFrame>34.0&&hd.msPerFrame<36.5);
+    CHECK(hd.renderFps>27.0&&hd.renderFps<30.0);
+    CHECK(!hd.keepsUp);                                            // 28 rendered against 30 wanted
+    const auto hd24=playback_timing::ForecastLiveRender(1920,1080,24.0);
+    CHECK(hd24.keepsUp);
+    const auto uhd=playback_timing::ForecastLiveRender(3840,2160,30.0);
+    CHECK(uhd.msPerFrame>138.0&&uhd.msPerFrame<148.0);
+    CHECK(!uhd.keepsUp);
+    CHECK(uhd.realtimeRatio>0.20&&uhd.realtimeRatio<0.26);
+    // A 720p source has room to spare even at 60 fps.
+    CHECK(playback_timing::ForecastLiveRender(1280,720,60.0).keepsUp);
+    CHECK(!playback_timing::ForecastLiveRender(2560,1440,30.0).keepsUp);
+    // Unknown geometry or frame rate must never block the user on a guess.
+    CHECK(playback_timing::ForecastLiveRender(0,0,30.0).keepsUp);
+    CHECK(playback_timing::ForecastLiveRender(1920,1080,0.0).keepsUp);
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -1852,6 +1938,10 @@ int wmain(int argc, wchar_t* argv[])
     live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
+    live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
+    live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
+    live_session_pace_reports_nothing_until_startup_stops_dominating_test();
+    live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;
