@@ -22,6 +22,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -1296,6 +1297,197 @@ void offline_job_passes_guide_controls_to_the_evaluator_test()
     CHECK(result.ok);CHECK(evaluator.controls.motionVectors);CHECK(!evaluator.controls.depth);CHECK(evaluator.controls.mask);
 }
 
+// One rotating segment encoder, with the on-disk behaviour of the real one:
+// Start() creates the file, WriteFrame() appends a byte naming the encoder kind
+// so a surviving file can be traced to the attempt that wrote it, Finish()
+// keeps it, and Cancel() leaves removal to the writer. The writer thread, the
+// finalize thread and the test all observe this farm, so it is mutex-guarded.
+class SegmentEncoders {
+public:
+    size_t Start(const std::filesystem::path& output)
+    {
+        std::lock_guard lock(mutex_);
+        std::ofstream file(output, std::ios::binary | std::ios::trunc);
+        live_.push_back(output);
+        starts_.push_back(output);
+        return starts_.size() - 1;
+    }
+    EncodeError Write(size_t id, EncoderKind kind)
+    {
+        std::lock_guard lock(mutex_);
+        if (kind == EncoderKind::HevcNvenc && failNvencWriteAt &&
+            ++nvencWrites_ == *failNvencWriteAt) return EncodeError::WriteFailed;
+        std::ofstream file(starts_[id], std::ios::binary | std::ios::app);
+        file.put(kind == EncoderKind::HevcNvenc ? 'n' : 's');
+        return EncodeError::None;
+    }
+    EncodeError Finish(size_t id)
+    {
+        std::lock_guard lock(mutex_);
+        Retire(id);
+        finished_.push_back(starts_[id]);
+        return EncodeError::None;
+    }
+    void Cancel(size_t id)
+    {
+        std::lock_guard lock(mutex_);
+        Retire(id);
+    }
+    size_t Started()
+    {
+        std::lock_guard lock(mutex_);
+        return starts_.size();
+    }
+    // Encoders that were started and never finished or cancelled: in production
+    // each one is a live ffmpeg process.
+    size_t Live()
+    {
+        std::lock_guard lock(mutex_);
+        return live_.size();
+    }
+    bool Finalized(const std::filesystem::path& path)
+    {
+        std::lock_guard lock(mutex_);
+        return std::find(finished_.begin(), finished_.end(), path) != finished_.end();
+    }
+    std::optional<size_t> failNvencWriteAt;
+
+private:
+    void Retire(size_t id)
+    {
+        const auto live = std::find(live_.begin(), live_.end(), starts_[id]);
+        if (live != live_.end()) live_.erase(live);
+    }
+    std::mutex mutex_;
+    std::vector<std::filesystem::path> starts_, live_, finished_;
+    size_t nvencWrites_{};
+};
+
+class FakeSegmentEncoder final : public IFrameEncoder {
+public:
+    explicit FakeSegmentEncoder(SegmentEncoders& farm) : farm_(farm) {}
+    EncodeError Start(const EncoderSpec& spec, const std::filesystem::path& output) override
+    {
+        kind_ = spec.kind;id_ = farm_.Start(output);
+        return EncodeError::None;
+    }
+    EncodeError WriteFrame(std::span<const uint8_t>, std::stop_token stop) override
+    {
+        if (stop.stop_requested()) return EncodeError::Cancelled;
+        return farm_.Write(id_, kind_);
+    }
+    EncodeError Finish(std::stop_token stop) override
+    {
+        return stop.stop_requested() ? EncodeError::Cancelled : farm_.Finish(id_);
+    }
+    void Cancel() override { farm_.Cancel(id_); }
+
+private:
+    SegmentEncoders& farm_;
+    EncoderKind kind_{EncoderKind::HevcNvenc};
+    size_t id_{};
+};
+
+std::function<std::unique_ptr<IFrameEncoder>()> SegmentEncoderFactory(SegmentEncoders& farm)
+{
+    return [&farm] { return std::unique_ptr<IFrameEncoder>(std::make_unique<FakeSegmentEncoder>(farm)); };
+}
+
+// OfflineRequest's staging file is neural.partial.mkv, so its segments are
+// neural.partial-00000.mkv and so on.
+std::filesystem::path OfflineSegmentPath(const std::filesystem::path& directory, uint64_t index)
+{
+    std::wstring digits = std::to_wstring(index);
+    if (digits.size() < 5) digits.insert(0, 5 - digits.size(), L'0');
+    return directory / (L"neural.partial-" + digits + L".mkv");
+}
+
+// The sink runs on the job's finalize thread; Run() joins it before returning,
+// so the test reads what it recorded without any further synchronization.
+void segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    SegmentEncoders farm;
+    std::vector<NeuralRenderSegment> announced;std::vector<bool> finalizedAtAnnouncement;
+    NeuralSegmentSink sink;
+    sink.onSegment=[&](const NeuralRenderSegment& segment){
+        announced.push_back(segment);
+        finalizedAtAnnouncement.push_back(farm.Finalized(fixture.Path()/segment.fileName));
+    };
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence(),{},{},
+                              SegmentEncoderFactory(farm));
+    auto request=EvenOfflineRequest(fixture.Path());request.segmentFrames=2;
+    const NeuralRenderResult result=job.Run(request,{},{},sink);
+    CHECK(result.ok);CHECK_EQ(uint64_t{5},result.frameCount);
+    CHECK_EQ(size_t{3},announced.size());
+    for(size_t index=0;index<announced.size();++index){
+        CHECK_EQ(uint64_t(index),announced[index].index);
+        // A file is published only once its own encoder exited successfully.
+        CHECK(finalizedAtAnnouncement[index]);
+        CHECK_EQ(std::string(index+1==announced.size()?"n":"nn"),
+                 ReadBytes(fixture.Path()/announced[index].fileName));
+    }
+    CHECK_EQ(uint64_t{2},announced[0].frameCount);CHECK_EQ(uint64_t{1},announced[2].frameCount);
+    // Every rotation arms the following file ahead of time, so the job ends
+    // holding one it never wrote to: no process and no file may survive it.
+    CHECK_EQ(size_t{4},farm.Started());CHECK_EQ(size_t{0},farm.Live());
+    CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3)));
+}
+
+void segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    SegmentEncoders farm;farm.failNvencWriteAt=3;   // first frame of segment 1
+    size_t restarts=0;std::vector<NeuralRenderSegment> announced;
+    NeuralSegmentSink sink;
+    sink.onSegment=[&](const NeuralRenderSegment& segment){announced.push_back(segment);};
+    sink.onRestart=[&]{++restarts;};
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence(),{},{},
+                              SegmentEncoderFactory(farm));
+    auto request=EvenOfflineRequest(fixture.Path());request.segmentFrames=2;
+    const NeuralRenderResult result=job.Run(request,{},{},sink);
+    CHECK(result.ok);CHECK_EQ(EncoderKind::H264Software,result.encoder);
+    CHECK_EQ(uint64_t{5},result.frameCount);CHECK_EQ(size_t{1},restarts);
+    CHECK(announced.size()>=size_t{3});
+    for(size_t index=0;index<3;++index){
+        const auto& segment=announced[announced.size()-3+index];
+        CHECK_EQ(uint64_t(index),segment.index);
+    }
+    // Renumbering from zero only means anything if nothing of the abandoned
+    // attempt is left: no NVENC-written file, no armed file, no live encoder.
+    CHECK_EQ(size_t{0},farm.Live());
+    for(uint64_t index=0;index<3;++index){
+        CHECK_EQ(std::string(index==2?"s":"ss"),
+                 ReadBytes(OfflineSegmentPath(fixture.Path(),index)));
+    }
+    CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3)));
+}
+
+void segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    SegmentEncoders farm;std::stop_source stop;
+    std::vector<NeuralRenderSegment> announced;
+    NeuralSegmentSink sink;
+    sink.onSegment=[&](const NeuralRenderSegment& segment){announced.push_back(segment);};
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence(),{},{},
+                              SegmentEncoderFactory(farm));
+    auto request=EvenOfflineRequest(fixture.Path());request.segmentFrames=2;
+    const NeuralRenderResult result=job.Run(request,[&](const NeuralRenderProgress& progress){
+        if(progress.completedFrames==3)stop.request_stop();
+    },stop.get_token(),sink);
+    CHECK(!result.ok);CHECK(result.cancelled);
+    // No orphan ffmpeg, and no file on disk that no consumer was ever told
+    // about: the half-written segment and the armed next one are both gone.
+    CHECK_EQ(size_t{0},farm.Live());
+    for(uint64_t index=0;index<5;++index){
+        const auto path=OfflineSegmentPath(fixture.Path(),index);
+        const bool published=std::any_of(announced.begin(),announced.end(),
+            [&](const NeuralRenderSegment& segment){return segment.fileName==path.filename();});
+        CHECK_EQ(published,std::filesystem::exists(path));
+    }
+}
+
 void reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test()
 {
     const auto valid=ParseNeuralRuntimeEvidence(ValidNeuralEvidence());
@@ -1920,6 +2112,9 @@ int wmain(int argc, wchar_t* argv[])
     offline_pause_still_honours_cancellation_test();
     offline_identity_mismatch_from_the_evaluator_fails_the_job_test();
     offline_job_passes_guide_controls_to_the_evaluator_test();
+    segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_test();
+    segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test();
+    segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test();
     reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test();
     reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
     reshade_evidence_rejects_any_failure_or_passthrough_in_the_job_segment_test();

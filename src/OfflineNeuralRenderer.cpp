@@ -137,11 +137,22 @@ std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoP
            (stagingVideoPath.stem().wstring() + L"-" + digits + stagingVideoPath.extension().wstring());
 }
 
-// Rotating encoder used only when request.segmentFrames > 0. Every N captured
-// frames the next file's encoder is started before the full one is handed to a
-// private finalize thread, so the render loop never waits for ffmpeg to mux and
-// exit. That thread publishes each completed file through the sink in index
-// order; a failed finalize surfaces to the render loop as an encode error.
+// Captured frames queued for the writer thread. Deep enough to cover a freshly
+// spawned ffmpeg bringing up its encoder (~110 ms of not draining its stdin)
+// without stalling the render loop, and bounded in bytes so a large frame size
+// cannot balloon the queue.
+inline constexpr size_t kQueuedFrameBytes = size_t{64} << 20;
+
+// Rotating encoder used only when request.segmentFrames > 0. The render loop
+// only hands frames over: a private writer thread owns the file being written,
+// rotates to the next one and pushes each full file to a private finalize
+// thread, which muxes it, reaps its ffmpeg, publishes it through the sink in
+// index order, and starts the following file's encoder ahead of time. So the
+// render loop pays neither the process spawn (~140 ms), nor the stall a fresh
+// ffmpeg takes before it drains its pipe (~110 ms per file), nor the per-frame
+// pipe write. An encoder failure surfaces to the render loop on a later
+// Write() or at Finish(), which fails the attempt exactly as a synchronous
+// write error did.
 template<class Encoder>
 class SegmentWriter {
 public:
@@ -165,46 +176,57 @@ public:
         started_ = 0;written_ = 0;spec_ = spec;
         {
             std::lock_guard lock(mutex_);
-            failure_ = EncodeError::None;quit_ = false;closing_ = false;
+            failure_ = EncodeError::None;quit_ = false;closing_ = false;writing_ = true;
         }
         if (previous && sink_.onRestart) sink_.onRestart();
-        worker_ = std::jthread([this] { Drain(); });
+        finalizer_ = std::jthread([this] { Finalize(); });
+        writer_ = std::jthread([this] { WriteQueuedFrames(); });
+        // Segment 0's encoder starts while the attempt prerolls, so the first
+        // captured frame never waits for a spawn either.
+        RequestWarm(0);
     }
 
-    EncodeError Write(const JobFrame& frame, std::span<const uint8_t> bgra, std::stop_token stop)
+    // Hands one captured frame to the writer thread. This blocks only when the
+    // encoder has fallen kQueuedFrameBytes behind, which no longer happens for
+    // an ffmpeg start-up stall.
+    EncodeError Write(const JobFrame& frame, std::vector<uint8_t>&& bgra, std::stop_token stop)
     {
-        {
-            std::lock_guard lock(mutex_);
+        const size_t bytes = bgra.size();
+        std::unique_lock lock(mutex_);
+        if (failure_ != EncodeError::None) return failure_;
+        // One frame is always allowed through, however large it is.
+        if (queuedBytes_ && queuedBytes_ + bytes > kQueuedFrameBytes) {
+            space_.wait(lock, stop, [&] {
+                return quit_ || failure_ != EncodeError::None ||
+                       queuedBytes_ + bytes <= kQueuedFrameBytes;
+            });
+            if (stop.stop_requested() || quit_) return EncodeError::Cancelled;
             if (failure_ != EncodeError::None) return failure_;
         }
-        const uint64_t index = written_ / segmentFrames_;
-        if (!current_ || index != currentIndex_) {
-            const EncodeError rotated = Rotate(index, frame);
-            if (rotated != EncodeError::None) return rotated;
-        }
-        const EncodeError error = current_->WriteFrame(bgra, stop);
-        if (error != EncodeError::None) return error;
-        ++written_;++currentFrames_;currentLast_ = frame.timestamp100ns;
+        frames_.push_back(Frame{std::move(bgra), frame.frameNumber, frame.timestamp100ns});
+        queuedBytes_ += bytes;
+        lock.unlock();
+        work_.notify_all();
         return EncodeError::None;
     }
 
-    // Finalizes the last partial segment and waits for every pending file, so
-    // no segment can ever be published after the job's result.
+    // Writes every queued frame, finalizes the last partial segment and waits
+    // for every pending file, so no segment can ever be published after the
+    // job's result.
     EncodeError Finish()
     {
-        if (current_) {
-            if (currentFrames_) Handoff();
-            else DropCurrent();
-        }
         {
             std::lock_guard lock(mutex_);
             closing_ = true;
         }
+        work_.notify_all();ready_.notify_all();
+        if (writer_.joinable()) writer_.join();
         ready_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        if (finalizer_.joinable()) finalizer_.join();
+        DropWarm();
         std::lock_guard lock(mutex_);
         if (failure_ != EncodeError::None) return failure_;
-        return queue_.empty() ? EncodeError::None : EncodeError::FinishFailed;
+        return frames_.empty() && queue_.empty() ? EncodeError::None : EncodeError::FinishFailed;
     }
 
     void Cancel()
@@ -213,43 +235,180 @@ public:
             std::lock_guard lock(mutex_);
             quit_ = true;
         }
-        ready_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        work_.notify_all();ready_.notify_all();space_.notify_all();
+        if (writer_.joinable()) writer_.join();
+        if (finalizer_.joinable()) finalizer_.join();
         std::deque<Pending> abandoned;
         {
             std::lock_guard lock(mutex_);
             abandoned.swap(queue_);
+            frames_.clear();queuedBytes_ = 0;
         }
         // Published files stay; only the unfinished ones are removed.
         for (auto& pending : abandoned) {
             pending.encoder->Cancel();
             Remove(pending.segment.index);
         }
+        DropWarm();
         if (current_) DropCurrent();
     }
 
 private:
+    struct Frame {
+        std::vector<uint8_t> bgra;
+        uint64_t frameNumber{};
+        int64_t timestamp100ns{};
+    };
     struct Pending {
         std::unique_ptr<Encoder> encoder;
         NeuralRenderSegment segment;
     };
 
-    EncodeError Rotate(uint64_t index, const JobFrame& frame)
+    // Writer thread: owns current_, written_ and the current segment's tally.
+    void WriteQueuedFrames()
     {
-        std::unique_ptr<Encoder> next = factory_ ? factory_() : nullptr;
-        if (!next) return EncodeError::InvalidSpecification;
-        const EncodeError startError = next->Start(spec_, SegmentFilePath(staging_, index));
-        if (startError != EncodeError::None) {
-            next->Cancel();
-            return startError;
+        for (;;) {
+            Frame frame;
+            {
+                std::unique_lock lock(mutex_);
+                work_.wait(lock, [this] {
+                    return quit_ || closing_ || !frames_.empty() ||
+                           failure_ != EncodeError::None;
+                });
+                // Cancel() and the failure path clean up behind this thread.
+                if (quit_ || failure_ != EncodeError::None) break;
+                if (frames_.empty()) {
+                    if (!closing_) continue;
+                    lock.unlock();
+                    if (current_) {
+                        if (currentFrames_) Handoff();
+                        else DropCurrent();
+                    }
+                    break;
+                }
+                frame = std::move(frames_.front());
+                frames_.pop_front();
+                queuedBytes_ -= frame.bgra.size();
+            }
+            space_.notify_all();
+            const EncodeError error = WriteFrame(frame);
+            if (error != EncodeError::None) {
+                Fail(error);
+                return;
+            }
+        }
+        {
+            std::lock_guard lock(mutex_);
+            writing_ = false;
+        }
+        ready_.notify_all();
+    }
+
+    EncodeError WriteFrame(const Frame& frame)
+    {
+        const uint64_t index = written_ / segmentFrames_;
+        if (!current_ || index != currentIndex_) {
+            const EncodeError rotated = Rotate(index, frame);
+            if (rotated != EncodeError::None) return rotated;
+        }
+        const EncodeError error = current_->WriteFrame(frame.bgra, stop_);
+        if (error != EncodeError::None) return error;
+        ++written_;++currentFrames_;currentLast_ = frame.timestamp100ns;
+        return EncodeError::None;
+    }
+
+    // Pointer swaps in the steady state: the encoder for `index` was started by
+    // the finalize thread a whole segment ago. Only a job without a factory or
+    // a start the finalize thread never reached pays a spawn here.
+    EncodeError Rotate(uint64_t index, const Frame& frame)
+    {
+        std::unique_ptr<Encoder> next;
+        const EncodeError warmError = ClaimWarm(index, next);
+        if (warmError != EncodeError::None) return warmError;
+        if (!next) {
+            next = factory_ ? factory_() : nullptr;
+            if (!next) return EncodeError::InvalidSpecification;
+            NoteStarted(index);
+            const EncodeError startError = next->Start(spec_, SegmentFilePath(staging_, index));
+            if (startError != EncodeError::None) {
+                next->Cancel();
+                Remove(index);
+                return startError;
+            }
         }
         if (current_ && currentFrames_) Handoff();
         current_ = std::move(next);
         currentIndex_ = index;currentFrames_ = 0;
         currentFirstFrameNumber_ = frame.frameNumber;
         currentFirstTimestamp_ = frame.timestamp100ns;currentLast_ = frame.timestamp100ns;
-        started_ = std::max(started_, index + 1);
+        RequestWarm(index + 1);
         return EncodeError::None;
+    }
+
+    // Arms the encoder for `index` on the finalize thread. Rotate() always
+    // claims exactly the index armed by the previous rotation, so an armed
+    // encoder is never overwritten.
+    void RequestWarm(uint64_t index)
+    {
+        if (!factory_) return;
+        {
+            std::lock_guard lock(mutex_);
+            if (quit_ || failure_ != EncodeError::None) return;
+            warmIndex_ = index;warmPending_ = true;warmError_ = EncodeError::None;
+        }
+        NoteStarted(index);
+        ready_.notify_all();
+    }
+
+    // Takes the encoder armed for `index`. It waits only in the pathological
+    // case where the finalize thread has not performed the start yet (a segment
+    // shorter than one spawn, or a long mux queued ahead of it); `next` stays
+    // empty when nothing was armed for this index and the caller must spawn it.
+    EncodeError ClaimWarm(uint64_t index, std::unique_ptr<Encoder>& next)
+    {
+        std::unique_lock lock(mutex_);
+        if (warmIndex_ == index && (warmPending_ || warm_ || warmError_ != EncodeError::None)) {
+            warmDone_.wait(lock, [this] { return !warmPending_; });
+            const EncodeError error = warmError_;
+            warmError_ = EncodeError::None;
+            next = std::move(warm_);
+            if (error != EncodeError::None) return error;
+        }
+        if (!quit_) return EncodeError::None;
+        // Cancelled while this file was armed: hand nothing back, and leave
+        // neither a process nor a file behind for the cancel to trip over.
+        lock.unlock();
+        if (next) {
+            next->Cancel();next.reset();
+            Remove(index);
+        }
+        return EncodeError::Cancelled;
+    }
+
+    // Discards an armed encoder nobody will write to: kills its ffmpeg and
+    // removes the file it opened, so neither an orphan process nor a stray
+    // neural-NNNNN.mkv survives a finished or cancelled job. Both threads must
+    // already be joined, so no start can land after this.
+    void DropWarm()
+    {
+        std::unique_ptr<Encoder> warm;
+        uint64_t index = 0;
+        {
+            std::lock_guard lock(mutex_);
+            warm = std::move(warm_);index = warmIndex_;
+            warmPending_ = false;warmError_ = EncodeError::None;
+        }
+        if (!warm) return;
+        warm->Cancel();
+        Remove(index);
+    }
+
+    // Every file the attempt may have opened, so a restart or a cancel deletes
+    // it even if it was only armed.
+    void NoteStarted(uint64_t index)
+    {
+        std::lock_guard lock(mutex_);
+        started_ = std::max(started_, index + 1);
     }
 
     void Handoff()
@@ -276,24 +435,80 @@ private:
         current_.reset();currentFrames_ = 0;
     }
 
-    void Drain()
+    // A half-written file is not a segment: the render loop learns of the error
+    // on its next Write() or at Finish(), and nothing is published.
+    void Fail(EncodeError error)
+    {
+        std::deque<Frame> dropped;
+        {
+            std::lock_guard lock(mutex_);
+            failure_ = error;writing_ = false;
+            dropped.swap(frames_);queuedBytes_ = 0;
+        }
+        space_.notify_all();ready_.notify_all();
+        if (current_) DropCurrent();
+    }
+
+    void Finalize()
     {
         for (;;) {
             Pending pending;
+            uint64_t warmIndex = 0;
+            bool startWarm = false;
             {
                 std::unique_lock lock(mutex_);
-                ready_.wait(lock, [this] { return quit_ || closing_ || !queue_.empty(); });
-                if (quit_ || queue_.empty()) return;
-                pending = std::move(queue_.front());
-                queue_.pop_front();
+                ready_.wait(lock, [this] {
+                    return quit_ || !queue_.empty() || warmPending_ || (closing_ && !writing_);
+                });
+                // A finished file wins over arming the next one: a consumer is
+                // waiting on the file, nobody waits on the spawn. Arming keeps
+                // working while closing, because draining the queued frames can
+                // still cross a segment boundary.
+                if (!quit_ && !queue_.empty()) {
+                    pending = std::move(queue_.front());
+                    queue_.pop_front();
+                } else if (!quit_ && warmPending_) {
+                    startWarm = true;warmIndex = warmIndex_;
+                } else {
+                    // Leaving an armed request outstanding would block a
+                    // Rotate() waiting on it; an empty slot only means the
+                    // writer thread spawns that encoder itself.
+                    warmPending_ = false;
+                    lock.unlock();
+                    warmDone_.notify_all();
+                    return;
+                }
+            }
+            if (startWarm) {
+                std::unique_ptr<Encoder> warm = factory_();
+                const EncodeError error = warm
+                    ? warm->Start(spec_, SegmentFilePath(staging_, warmIndex))
+                    : EncodeError::InvalidSpecification;
+                if (error != EncodeError::None) {
+                    if (warm) warm->Cancel();
+                    warm.reset();
+                    Remove(warmIndex);
+                }
+                {
+                    std::lock_guard lock(mutex_);
+                    warm_ = std::move(warm);warmError_ = error;warmPending_ = false;
+                }
+                warmDone_.notify_all();
+                continue;
             }
             // The mux and process exit happen here, off the render loop.
             const EncodeError error = pending.encoder->Finish(stop_);
             if (error != EncodeError::None) {
                 pending.encoder->Cancel();
                 Remove(pending.segment.index);
-                std::lock_guard lock(mutex_);
-                failure_ = error;
+                {
+                    std::lock_guard lock(mutex_);
+                    failure_ = error;
+                    // A Rotate() blocked on an armed start must see the failure
+                    // rather than wait for a thread that is exiting.
+                    if (warmPending_) {warmPending_ = false;warmError_ = error;}
+                }
+                space_.notify_all();warmDone_.notify_all();work_.notify_all();
                 return;
             }
             if (sink_.onSegment) sink_.onSegment(pending.segment);
@@ -316,13 +531,24 @@ private:
     std::unique_ptr<Encoder> current_;
     uint64_t currentIndex_{},currentFrames_{},currentFirstFrameNumber_{};
     int64_t currentFirstTimestamp_{},currentLast_{};
-    uint64_t written_{},started_{};
+    uint64_t written_{};
     std::mutex mutex_;
+    std::condition_variable work_;
     std::condition_variable ready_;
+    std::condition_variable warmDone_;
+    // The render loop waits here, and only here, when the encoder falls behind.
+    std::condition_variable_any space_;
+    std::deque<Frame> frames_;
+    size_t queuedBytes_{};
     std::deque<Pending> queue_;
-    std::jthread worker_;
+    std::jthread finalizer_;
+    std::jthread writer_;
+    // The encoder for the next file, started ahead of time by the finalizer.
+    std::unique_ptr<Encoder> warm_;
+    uint64_t warmIndex_{},started_{};
+    EncodeError warmError_{EncodeError::None};
     EncodeError failure_{EncodeError::None};
-    bool quit_{},closing_{};
+    bool warmPending_{},quit_{},closing_{},writing_{};
 };
 
 template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
@@ -498,7 +724,8 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         AttemptResult attempt;
         const EncoderSpec spec{request.width, request.height, request.fps, kind};
         if (writer) {
-            // The first segment's encoder starts with the first captured frame.
+            // Segment 0's encoder is armed here and starts while this attempt
+            // prerolls, so the first captured frame never waits for a spawn.
             writer->BeginAttempt(spec);
         } else {
             const EncodeError startError = encoder.Start(spec, request.stagingVideoPath);
@@ -606,15 +833,18 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 }
                 if (capture >= 120) {abort(NeuralRenderFailure::Neural);return attempt;}
             }
+            // A segmented job takes ownership of the captured pixels; the
+            // single-file encoder still writes them on this thread.
+            const uint64_t captured = evaluation.bgra.size();
             const EncodeError writeError = writer
-                ? writer->Write(frame, evaluation.bgra, stop)
+                ? writer->Write(frame, std::move(evaluation.bgra), stop)
                 : encoder.WriteFrame(evaluation.bgra, stop);
             if (writeError != EncodeError::None) {
                 attempt.failure = writeError == EncodeError::Cancelled
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
                 attempt.encoderError=writeError;cancelOutput();return attempt;
             }
-            ++attempt.frames;++attempt.evaluations;attempt.bytes+=evaluation.bgra.size();
+            ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured;
             if (!attempt.hasTimestamp) {
                 attempt.firstTimestamp=frame.timestamp100ns;
                 attempt.hasTimestamp=true;
