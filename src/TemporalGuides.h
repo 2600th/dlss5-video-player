@@ -8,7 +8,8 @@
 struct GuideFrame {
     // Compact analysis grid consumed by a GPU expansion pass:
     // R = motion X, G = motion Y (current -> previous, already in DLSS input pixels)
-    // B = depth proxy [0,1], A = BiasCurrentColor/disocclusion mask [0,1].
+    // B = depth proxy [0,1], A unused (kept only so the texture stays RGBA32F,
+    // which is the widest 32-bit float format with guaranteed bilinear filtering).
     std::vector<float> guideGridRGBA32F;
     uint32_t gridW = 0;
     uint32_t gridH = 0;
@@ -60,7 +61,7 @@ private:
     void EstimateFlow(const std::vector<float>& cur, const std::vector<float>& prev,
                       uint32_t gw, uint32_t gh,
                       std::vector<float>& flowX, std::vector<float>& flowY,
-                      std::vector<float>& mismatch, std::vector<float>& confidence,
+                      std::vector<float>& confidence,
                       float& globalX, float& globalY, float& globalCost) const;
     void MedianFlow(std::vector<float>& x, std::vector<float>& y,
                     const std::vector<float>& confidence,

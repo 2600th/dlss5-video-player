@@ -1294,7 +1294,7 @@ void offline_job_passes_guide_controls_to_the_evaluator_test()
     OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
     auto request=EvenOfflineRequest(fixture.Path());request.guides.depth=false;
     const auto result=job.Run(request,{},{});
-    CHECK(result.ok);CHECK(evaluator.controls.motionVectors);CHECK(!evaluator.controls.depth);CHECK(evaluator.controls.mask);
+    CHECK(result.ok);CHECK(evaluator.controls.motionVectors);CHECK(!evaluator.controls.depth);
 }
 
 // One rotating segment encoder, with the on-disk behaviour of the real one:

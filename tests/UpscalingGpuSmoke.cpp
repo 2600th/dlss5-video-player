@@ -6,8 +6,26 @@
 #include <mfapi.h>
 #include <chrono>
 #include <iostream>
+#include "GuideControls.h"
+#include <filesystem>
+#include <fstream>
+
+// With five arguments it becomes a guide A/B probe instead: it renders the first
+// N frames through the real DLSS-SR path with the named guides and writes every
+// captured output frame to a raw BGRA file, so two runs can be compared pixel by
+// pixel. That is how the question "does this guide reach the consumer" is
+// answered for the upscaling feature, which is a different NGX feature from the
+// neural rendering the helper drives.
+int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames);
 
 int wmain(int argc,wchar_t** argv) {
+    if(argc==6){
+        const std::wstring wide(argv[4]);
+        std::string text;for(const wchar_t c:wide){if(c>0x7F)return 2;text.push_back(char(c));}
+        const auto controls=ParseGuideControls(text);
+        if(!controls)return 2;
+        return RunGuideProbe(argv[1],std::wcstoul(argv[2],nullptr,10),*controls,argv[3],std::wcstoul(argv[5],nullptr,10));
+    }
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -60,6 +78,42 @@ int wmain(int argc,wchar_t** argv) {
                 <<" comparisonModes="<<presented<<" identityRejected="<<rejected<<" fenceWait="<<int(renderer->LastFenceWaitResult())<<"\n";
             code=ok&&count>0&&renderer->DLSSEvaluations()==count&&rejected&&presented==5&&renderer->LastNeuralGpuMs()>0.0&&
                 !GetModuleHandleW(L"renodx-dlss5.addon64")&&!GetModuleHandleW(L"nvngx_dlssnr.dll")?0:5;
+        }else std::cout<<"SR initialization rejected; see DLSSVideoPlayer.log\n";
+        renderer.reset();DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames)
+{
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const auto target=UpscalingTarget(decoder.Width(),decoder.Height(),targetHeight);
+        if(!target.grows)return 4;
+        HWND window=CreateWindowExW(0,L"STATIC",L"guide probe",WS_POPUP,0,0,100,100,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        auto renderer=MakeD3D12Renderer();
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(decoder.Width(),decoder.Height(),decoder.FrameRate());
+        if(renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
+            NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&renderer->DLSSAvailable()){
+            TemporalGuideGenerator guides;guides.SetControls(controls);
+            VideoFrame frame;uint32_t count=0;bool ok=true;
+            std::ofstream out(std::filesystem::path(rawOut),std::ios::binary|std::ios::trunc);
+            const float frameMs=float(1000/decoder.FrameRate());
+            while(ok&&count<frames&&decoder.ReadNext(frame)){
+                GuideFrame guide;CapturedVideoFrame captured;
+                const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,count==0?HistoryReset::FirstFrame:HistoryReset::None);
+                ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
+                   renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captured);
+                if(ok){out.write(reinterpret_cast<const char*>(captured.bgra.data()),std::streamsize(captured.bgra.size()));++count;}
+            }
+            out.close();
+            std::cout<<"guides="<<CanonicalGuideControls(controls)
+                <<" frames="<<count<<" output="<<target.width<<"x"<<target.height
+                <<" evaluations="<<renderer->DLSSEvaluations()<<"\n";
+            code=ok&&count==frames?0:5;
         }else std::cout<<"SR initialization rejected; see DLSSVideoPlayer.log\n";
         renderer.reset();DestroyWindow(window);
     }

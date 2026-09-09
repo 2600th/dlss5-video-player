@@ -159,14 +159,14 @@ void manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension(
 
 void default_identity_key_is_stable_and_range_or_guides_change_it()
 {
-    // Literal captured from the schema-1 canonical form before range/guide
-    // terms existed: existing whole-source renders must stay addressable.
+    // Literal captured from the schema-2 canonical form (schema 2 retired every
+    // key written while the dead bias-mask guide was still part of the render).
     NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
                                  std::string(64, 'b'), "DLAA", false};
-    const std::string legacyKey = "56136bfab17f031abae0079a342d19f09680f5907528bd30cc4639546ee650bb";
+    const std::string legacyKey = "cb7ee88ed3bd79823a095f4330f9616221533e9c26746b6703001c98d088f2d2";
     CHECK_EQ(legacyKey, BuildNeuralCacheKey(identity));
     identity.settingsDigest = std::string(64, 'c');
-    const std::string settingsKey = "bd1702969599b85ec594036c3d1235380bc4d7e3ee988544f49cb5d7d138d6e5";
+    const std::string settingsKey = "50c16936c3de29b5fbaecec66964424ea1d3dd106654b202099cf7ebd8ed1c47";
     CHECK_EQ(settingsKey, BuildNeuralCacheKey(identity));
 
     identity.range = NeuralRenderRange{10000000, 30000000};
@@ -179,7 +179,7 @@ void default_identity_key_is_stable_and_range_or_guides_change_it()
     identity.range = {};
     CHECK_EQ(settingsKey, BuildNeuralCacheKey(identity));
 
-    identity.guides = CanonicalGuideControls(GuideControls{true, false, true});
+    identity.guides = CanonicalGuideControls(GuideControls{true, false});
     const auto guidesKey = BuildNeuralCacheKey(identity);
     CHECK(guidesKey != settingsKey);
     identity.range = NeuralRenderRange{10000000, 30000000};
@@ -225,7 +225,7 @@ void schema_four_manifest_round_trips_with_receipt_digest()
     manifest.settingsDigest = std::string(64, 'e');
     manifest.rangeStart100ns = 10000000;
     manifest.rangeEnd100ns = 13333333;
-    manifest.guides = "mv=1,depth=0,mask=1";
+    manifest.guides = "mv=1,depth=0";
     manifest.jobId = 42;
     manifest.historyResets = 3;
     manifest.receiptDigest = std::string(64, 'f');
@@ -233,7 +233,7 @@ void schema_four_manifest_round_trips_with_receipt_digest()
     const std::string tail =
         ",\"upscaling\":false,\"settingsDigest\":\"" + std::string(64, 'e') +
         "\",\"rangeStart100ns\":10000000,\"rangeEnd100ns\":13333333,"
-        "\"guides\":\"mv=1,depth=0,mask=1\",\"jobId\":42,\"historyResets\":3,"
+        "\"guides\":\"mv=1,depth=0\",\"jobId\":42,\"historyResets\":3,"
         "\"receiptDigest\":\"" + std::string(64, 'f') + "\"}\n";
     CHECK(bytes.starts_with("{\"schema\":4,"));
     CHECK(bytes.ends_with(tail));

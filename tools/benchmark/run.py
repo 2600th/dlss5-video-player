@@ -36,7 +36,7 @@ import psutil
 from common import (CONFIGURATION_CHANGED_EXIT, CORPUS, FFMPEG, FFPROBE, FLAGS, PROFILES, RELEASE_RUNTIME,
                     RUNS, RUNTIME_SNAPSHOT, decode_metadata, load_manifest, probe, write_json)
 
-DEFAULT_GUIDES = "mv=1,depth=1,mask=1"
+DEFAULT_GUIDES = "mv=1,depth=1"
 PASS2_OVERRIDES = {"NRIntensity": "0.750000"}
 
 
@@ -48,9 +48,8 @@ def profile(guides=DEFAULT_GUIDES, overrides=None, passes=1, description=""):
 # difference in the analysis attributes to that factor alone.
 ABLATION = {
     "baseline": profile(description="all guides, RenoDX defaults"),
-    "mv-off": profile("mv=0,depth=1,mask=1", description="zero motion vectors"),
-    "depth-off": profile("mv=1,depth=0,mask=1", description="constant depth 0.75"),
-    "mask-off": profile("mv=1,depth=1,mask=0", description="zero temporal mask"),
+    "mv-off": profile("mv=0,depth=1", description="zero motion vectors"),
+    "depth-off": profile("mv=1,depth=0", description="constant depth 0.75"),
     "automask-off": profile(overrides={"NRAutoMask": "0"}, description="RenoDX automatic mask disabled"),
     "structure-0": profile(overrides={"NRLocalStructure": "0.000000"}, description="local structure strength 0"),
     "tone-0": profile(overrides={"NRLocalTone": "0.000000"}, description="local tone strength 0"),

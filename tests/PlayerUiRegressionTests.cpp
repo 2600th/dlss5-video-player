@@ -38,7 +38,7 @@ struct PlayerAppTestAccess {
         app.m_volume = 0.35f; app.m_muted = true; app.m_fill = true;
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
-        app.m_renderGuides = GuideControls{false, true, false};
+        app.m_renderGuides = GuideControls{false, true};
         app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
         app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.amount = 0.3f; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
@@ -55,7 +55,7 @@ struct PlayerAppTestAccess {
         CHECK(app.m_muted && app.m_fill && !app.m_neuralRequested);
         CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
         CHECK(app.m_youtubeSourceQuality == YouTubeSourceQuality::P1440);
-        CHECK((app.m_renderGuides == GuideControls{false, true, false}));
+        CHECK((app.m_renderGuides == GuideControls{false, true}));
         CHECK(app.m_neuralSettings.intensity == 1.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK(std::abs(app.m_comparison.amount - 0.3f) < 0.001f && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
@@ -68,7 +68,7 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.amount, 1.0f);
         app.m_comparison = {};
         // Absent guide keys mean every guide is on, matching a fresh install.
-        for (const wchar_t* key : {L"MotionVectors", L"Depth", L"Mask"})
+        for (const wchar_t* key : {L"MotionVectors", L"Depth"})
             WritePrivateProfileStringW(L"NeuralGuides", key, nullptr, app.SettingsPath().c_str());
         app.LoadVideoSettings();
         CHECK(app.m_renderGuides.IsDefault());
@@ -432,7 +432,7 @@ private:
         app.m_cachedSettings.intensity = 1.25f; app.m_cachedGuides.depth = false;
         const std::wstring rangeStatus = app.BuildStatusText();
         CHECK(rangeStatus.find(L"Range 00:00:01:15\u201300:00:03:00") != std::wstring::npos);
-        CHECK(rangeStatus.find(L"NR 1.25/struct 1.00/tone 1.00/mv=1,depth=0,mask=1") != std::wstring::npos);
+        CHECK(rangeStatus.find(L"NR 1.25/struct 1.00/tone 1.00/mv=1,depth=0") != std::wstring::npos);
         // Seeks stay inside the cached range; Stop returns to its first frame.
         CHECK(std::abs(app.ClampSeek(0.0) - 1.5) < 1e-9);
         CHECK(std::abs(app.ClampSeek(9.0) - (3.0 - 1.0 / 30.0)) < 1e-9);
@@ -522,7 +522,7 @@ private:
         CHECK(app.m_guides.Controls().depth);
         SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_SETCHECK, BST_UNCHECKED, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_GUIDE_DEPTH, BN_CLICKED), 0);
-        CHECK((app.m_renderGuides == GuideControls{true, false, true}));
+        CHECK((app.m_renderGuides == GuideControls{true, false}));
         CHECK(!app.m_guides.Controls().depth);
         CHECK(app.m_guideReset && app.m_dlssReset);
         // Apply saves the values even when nothing can be rendered right now.

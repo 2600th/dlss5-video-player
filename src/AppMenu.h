@@ -37,7 +37,6 @@ inline constexpr UINT IDM_VIEW_FINAL = 302;
 inline constexpr UINT IDM_VIEW_INPUT = 303;
 inline constexpr UINT IDM_VIEW_MV = 304;
 inline constexpr UINT IDM_VIEW_DEPTH = 305;
-inline constexpr UINT IDM_VIEW_MASK = 306;
 inline constexpr UINT IDM_DLSS_UPSCALING = 308;
 inline constexpr UINT IDM_FRAME_GENERATION = 309;
 inline constexpr UINT IDM_PREVIEW_FRAME = 310;

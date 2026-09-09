@@ -218,7 +218,6 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
                                          ID3D12Resource* output,
                                          ID3D12Resource* depth,
                                          ID3D12Resource* motion,
-                                         ID3D12Resource* biasCurrentColor,
                                          bool reset,
                                          float frameTimeMs,
                                          float jitterX,
@@ -228,14 +227,6 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_Output, output);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_Depth, depth);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_MotionVectors, motion);
-    NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, biasCurrentColor);
-    // The same conservative correspondence-failure mask is also valid as the newer
-    // disocclusion/responsivity hints. Supplying all three names makes the temporal
-    // contract visible to current NGX consumers without inventing extra image content.
-#ifdef NVSDK_NGX_Parameter_DLSS_DisocclusionMask
-    NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_DLSS_DisocclusionMask, biasCurrentColor);
-    NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_DLSS_ResponsivityMask, biasCurrentColor);
-#endif
 
     // Required/meaningful temporal constants.
     NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Jitter_Offset_X, jitterX);
@@ -257,14 +248,6 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_Depth_Subrect_Base_Y, 0);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_X, 0);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_MV_SubrectBase_Y, 0);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_X, 0);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_Y, 0);
-#ifdef NVSDK_NGX_Parameter_DLSS_DisocclusionMask
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_DisocclusionMask_Subrect_Base_X, 0);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_DisocclusionMask_Subrect_Base_Y, 0);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_ResponsivityMask_Subrect_Base_X, 0);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_ResponsivityMask_Subrect_Base_Y, 0);
-#endif
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0);
     NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, 0);
 
@@ -319,14 +302,13 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
                            ID3D12Resource* output,
                            ID3D12Resource* depth,
                            ID3D12Resource* motion,
-                           ID3D12Resource* biasCurrentColor,
                            bool reset,
                            float frameTimeMs,
                            float jitterX,
                            float jitterY) {
-    if (!Available() || !m_handle || !cmd || !color || !output || !depth || !motion || !biasCurrentColor) return false;
+    if (!Available() || !m_handle || !cmd || !color || !output || !depth || !motion) return false;
 
-    FillEvaluateParameters(color, output, depth, motion, biasCurrentColor, reset, frameTimeMs, jitterX, jitterY);
+    FillEvaluateParameters(color, output, depth, motion, reset, frameTimeMs, jitterX, jitterY);
 
     // NVIDIA's current nvsdk_ngx_helpers.h finishes the D3D12 DLSS helper with
     // NVSDK_NGX_D3D12_EvaluateFeature_C. The leaked/generic RenoDX NR add-on also
@@ -354,7 +336,6 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
             << " color=" << m_renderW << "x" << m_renderH
             << " depth=" << m_renderW << "x" << m_renderH
             << " mv=" << m_renderW << "x" << m_renderH
-            << " bias=R8 " << m_renderW << "x" << m_renderH
             << " output=" << m_outputW << "x" << m_outputH
             << " jitter=(" << jitterX << "," << jitterY << ") reset=" << (reset?1:0));
     }

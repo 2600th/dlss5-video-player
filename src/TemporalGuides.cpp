@@ -171,7 +171,7 @@ constexpr float kRoundTripCells = 0.8f;
 void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const std::vector<float>& prev,
                                            uint32_t gw, uint32_t gh,
                                            std::vector<float>& flowX, std::vector<float>& flowY,
-                                           std::vector<float>& mismatch, std::vector<float>& confidence,
+                                           std::vector<float>& confidence,
                                            float& globalX, float& globalY, float& globalCost) const {
     const int w = int(gw), h = int(gh);
     // First find a coarse whole-frame translation. This is especially valuable for camera pans.
@@ -214,7 +214,6 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
     // is a cell whose content does not support ANY displacement.
     flowX.assign(size_t(gw) * gh, 0.0f);
     flowY.assign(size_t(gw) * gh, 0.0f);
-    mismatch.assign(size_t(gw) * gh, bestGlobal);
     confidence.assign(size_t(gw) * gh, 0.0f);
     constexpr int localRadius = 3;
     constexpr int localSpan = 2 * localRadius + 1;
@@ -317,7 +316,6 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
                     const size_t oi = size_t(yy) * gw + xx;
                     flowX[oi] = fbx;
                     flowY[oi] = fby;
-                    mismatch[oi] = best;
                     confidence[oi] = conf;
                 }
             }
@@ -425,7 +423,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     std::vector<float> cur;
     DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur);
 
-    std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f), mismatch(size_t(gw) * gh, 1.0f);
+    std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f);
     std::vector<float> confidence(size_t(gw) * gh, 0.0f);
     float globalX = 0.0f, globalY = 0.0f;
     // A repeat re-evaluates against the same previous distinct frame; a new
@@ -434,7 +432,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     bool history = reset == HistoryReset::None && m_havePrev && reference.size() == cur.size();
     float globalCost = 0.0f;
     if (history) {
-        EstimateFlow(cur, reference, gw, gh, fx, fy, mismatch, confidence, globalX, globalY, globalCost);
+        EstimateFlow(cur, reference, gw, gh, fx, fy, confidence, globalX, globalY, globalCost);
         // Judge cuts on correspondence quality plus histogram overlap, so fast
         // camera pans are not mistaken for cuts and real cuts never keep history.
         if (IsSceneCut(globalCost, LumaHistogramIntersection(cur, reference))) {
@@ -442,7 +440,6 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
             reset = HistoryReset::Cut;
             std::fill(fx.begin(), fx.end(), 0.0f);
             std::fill(fy.begin(), fy.end(), 0.0f);
-            std::fill(mismatch.begin(), mismatch.end(), 1.0f);
             globalX = globalY = 0.0f;
             m_prevDepth.clear();
         } else {
@@ -455,10 +452,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     if (m_controls.depth) BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
     else depthGrid.assign(size_t(gw) * gh, 0.75f);
     const bool emitMotion = history && m_controls.motionVectors;
-    const bool emitMask = history && m_controls.mask;
 
     // Keep CPU output compact. A D3D12 MRT pass bilinearly expands this grid to
-    // full render-resolution R16G16 motion + R32 depth + R8 bias textures.
+    // full render-resolution R16G16 motion, and a depth pass writes B into the
+    // NGX depth resource.
     out.gridW = gw;
     out.gridH = gh;
     out.guideGridRGBA32F.assign(size_t(gw) * gh * 4u, 0.0f);
@@ -468,21 +465,12 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     for (uint32_t y = 0; y < gh; ++y) {
         for (uint32_t x = 0; x < gw; ++x) {
             const size_t i = size_t(y) * gw + x;
-            float mask = 0.0f;
-            if (emitMask) {
-                const uint32_t xl = x ? x - 1 : x;
-                const uint32_t xr = std::min(gw - 1, x + 1);
-                const uint32_t yt = y ? y - 1 : y;
-                const uint32_t yb = std::min(gh - 1, y + 1);
-                const float dx = fx[size_t(y) * gw + xr] - fx[size_t(y) * gw + xl];
-                const float dy = fy[size_t(yb) * gw + x] - fy[size_t(yt) * gw + x];
-                if (mismatch[i] > 0.115f || std::abs(dx) + std::abs(dy) > 2.5f) mask = 1.0f;
-            }
             const size_t o = i * 4u;
             out.guideGridRGBA32F[o + 0] = emitMotion ? fx[i] * gridToRenderX : 0.0f;
             out.guideGridRGBA32F[o + 1] = emitMotion ? fy[i] * gridToRenderY : 0.0f;
             out.guideGridRGBA32F[o + 2] = depthGrid[i];
-            out.guideGridRGBA32F[o + 3] = mask;
+            // A stays 0: the RGBA32F layout is kept because a 96-bit RGB32F
+            // texture has no guaranteed bilinear filtering, which this grid needs.
         }
     }
 

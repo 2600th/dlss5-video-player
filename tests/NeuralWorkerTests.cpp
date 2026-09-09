@@ -261,7 +261,7 @@ int RunRealPreflight(int argc, wchar_t** argv)
 int RunRealWorker(int argc, wchar_t** argv)
 {
     if (argc != 9 && argc != 12 && argc != 13) {
-        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds> [rangeStartSec rangeEndSec mv=1,depth=1,mask=1 [segmentFrames]]\n";
+        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds> [rangeStartSec rangeEndSec mv=1,depth=1 [segmentFrames]]\n";
         return EXIT_FAILURE;
     }
     NeuralRenderRequest request;
@@ -364,7 +364,7 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     request.range = {10'000'000, 30'000'000};
     request.prerollFrames = 12;
     request.frameRetryLimit = 5;
-    request.guides = {true, false, true};
+    request.guides = {true, false};
     request.segmentFrames = 96;
     const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
     const HANDLE pause = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(456));
@@ -425,10 +425,17 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     CHECK(!neural_worker_detail::ParseWorkerArguments(duplicatedView).has_value());
     auto badGuides = normal;
     for (size_t index = 0; index + 1 < badGuides.size(); ++index) {
-        if (badGuides[index] == L"--guides") badGuides[index + 1] = L"mv=2,depth=1,mask=1";
+        if (badGuides[index] == L"--guides") badGuides[index + 1] = L"mv=2,depth=1";
     }
     const auto badGuidesView = view(badGuides);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badGuidesView).has_value());
+    auto retiredGuides = normal;
+    for (size_t index = 0; index + 1 < retiredGuides.size(); ++index) {
+        if (retiredGuides[index] == L"--guides") retiredGuides[index + 1] = L"mv=1,depth=1,mask=1";
+    }
+    const auto retiredGuidesView = view(retiredGuides);
+    // The mask field was deleted: a stale argv carrying it is not a valid contract.
+    CHECK(!neural_worker_detail::ParseWorkerArguments(retiredGuidesView).has_value());
     auto badRange = normal;
     for (size_t index = 0; index + 1 < badRange.size(); ++index) {
         if (badRange[index] == L"--range-end-100ns") badRange[index + 1] = L"5000000";
@@ -516,7 +523,7 @@ void valid_result_preserves_all_verification_fields_test()
 void request_fields_reach_the_helper_intact_test()
 {
     NeuralRenderRequest request = TestRequest(L"echo-request-source.mkv");
-    request.guides = {false, true, false};
+    request.guides = {false, true};
     request.prerollFrames = 7;
     request.frameRetryLimit = 2;
     request.segmentFrames = 90;
@@ -527,7 +534,7 @@ void request_fields_reach_the_helper_intact_test()
     CloseHandle(pause);
     CHECK(result.ok);
     if (!result.ok) std::wcerr << L"detail: " << result.detail << L" failure=" << static_cast<int>(result.failure) << L'\n';
-    CHECK(result.detail == L"guides=mv=0,depth=1,mask=0 preroll=7 retry=2 segments=90 range=30000000-50000000 pause=1");
+    CHECK(result.detail == L"guides=mv=0,depth=1 preroll=7 retry=2 segments=90 range=30000000-50000000 pause=1");
 }
 
 void crashed_helper_is_relaunched_at_most_once_test()

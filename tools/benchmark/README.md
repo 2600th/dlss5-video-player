@@ -53,12 +53,12 @@ manifest records an rgb24 `framemd5` sequence digest per clip, and
 
 A profile is `{guides, overrides, passes}`:
 
-- `guides` is the canonical `--guides` string (`mv=1,depth=1,mask=1`). A disabled guide is still uploaded with neutral values (motion 0, depth 0.75, mask 0) so the DLSS input contract is unchanged.
+- `guides` is the canonical `--guides` string (`mv=1,depth=1`). A disabled guide is still uploaded with neutral values (motion 0, depth 0.75) so the DLSS input contract is unchanged.
 - `overrides` are exact-case `[RenoDX.DLSS5]` keys written into the profile's `ReShade.ini` after the three managed keys (`EnableHooks=2`, `NeuralUplift=1`, `NREnableUpscaling=0`). Known RenoDX 4.70 keys: `NRIntensity`, `NRLocalTone`, `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset` (0-3), `NRStyle` (0 default, 1 natural, 2 cinematic), `NRAutoMask`.
 - `passes` 1 or 2.
 
 `run.ABLATION` changes one factor per profile: `baseline`, `mv-off`, `depth-off`,
-`mask-off`, `automask-off`, `structure-0`, `tone-0`, `intensity-0` (control),
+`automask-off`, `structure-0`, `tone-0`, `intensity-0` (control),
 `preset-1..3`, `style-natural`, `style-cinematic`, `two-pass`. Custom sets:
 `--profile-file profiles.json` with `{name: {guides, overrides, passes, description}}`.
 

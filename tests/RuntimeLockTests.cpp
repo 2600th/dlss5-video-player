@@ -300,7 +300,7 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "\"finished\":\"1970-01-02T01:01:01.001Z\""));
     CHECK(Contains(json, "\"source\":\"C:\\\\media\\\\clip \\\"one\\\".mkv\""));
     CHECK(Contains(json, "\"range\":{\"start\":10000000,\"end\":30000000}"));
-    CHECK(Contains(json, "\"guides\":\"mv=1,depth=0,mask=1\""));
+    CHECK(Contains(json, "\"guides\":\"mv=1,depth=0\""));
     CHECK(Contains(json, "\"prerollFrames\":24"));
     CHECK(Contains(json, "\"preflight\":" + std::string(kSamplePreflight) + ",\"lock\":{\"satisfied\":false,\"checks\":["));
     CHECK(Contains(json, "{\"name\":\"nvngx_dlss.dll\",\"present\":true,\"sizeMatches\":true,\"hashMatches\":true,\"versionMatches\":true,\"actualSize\":58956400,"));

@@ -68,7 +68,7 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         m_renderW=sourceW; m_renderH=sourceH;
     }
     if(!CreateVideoResources()) return false;
-    LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs + R8 bias; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
+    LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
     return true;
 }
 
@@ -110,10 +110,10 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 }
 
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
-    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+4;
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
-    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=8;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_DESCRIPTOR_HEAP_DESC dh{};dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=1;
@@ -182,8 +182,7 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     // Depth comes directly from compact-guide B and is written through SV_Depth into
     // the exact typeless/D32 resource that NGX receives later in the frame.
     float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv+JitterUV,0).b);}
-    struct GuideOut{float2 mv:SV_Target0;float bias:SV_Target1;};
-    GuideOut PSExpandGuides(V i){float4 g=T.SampleLevel(S,i.uv+JitterUV,0);GuideOut o;o.mv=g.xy;o.bias=g.w>=0.5?1.0:0.0;return o;}
+    float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv+JitterUV,0).xy;}
 )";
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
@@ -200,8 +199,6 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     if(!HR(m_device->CreateRootSignature(0,sig->GetBufferPointer(),sig->GetBufferSize(),IID_PPV_ARGS(&m_rootSig)),"CreateRootSignature"))return false;
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};p.pRootSignature=m_rootSig.Get();p.VS={vs->GetBufferPointer(),vs->GetBufferSize()};p.PS={convert->GetBufferPointer(),convert->GetBufferSize()};
     p.BlendState.RenderTarget[0].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
-    p.BlendState.RenderTarget[1].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
-    p.BlendState.RenderTarget[2].RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
     p.SampleMask=UINT_MAX;p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;p.RasterizerState.DepthClipEnable=TRUE;
     p.DepthStencilState.DepthEnable=FALSE;p.DepthStencilState.StencilEnable=FALSE;p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;p.NumRenderTargets=1;p.SampleDesc={1,0};
     p.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoConvert)),"Create convert PSO"))return false;
@@ -213,10 +210,10 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
     p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
     p.PS={depth->GetBufferPointer(),depth->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebug)),"Create depth debug PSO"))return false;
-    p.PS={expand->GetBufferPointer(),expand->GetBufferSize()};p.NumRenderTargets=2;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.RTVFormats[1]=DXGI_FORMAT_R8_UNORM;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;
+    p.PS={expand->GetBufferPointer(),expand->GetBufferSize()};p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoExpandGuides)),"Create GPU guide expansion PSO"))return false;
     p.PS={depthWrite->GetBufferPointer(),depthWrite->GetBufferSize()};
-    p.NumRenderTargets=0;p.RTVFormats[0]=DXGI_FORMAT_UNKNOWN;p.RTVFormats[1]=DXGI_FORMAT_UNKNOWN;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;p.DSVFormat=DXGI_FORMAT_D32_FLOAT;
+    p.NumRenderTargets=0;p.RTVFormats[0]=DXGI_FORMAT_UNKNOWN;p.DSVFormat=DXGI_FORMAT_D32_FLOAT;
     p.DepthStencilState.DepthEnable=TRUE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;p.DepthStencilState.StencilEnable=FALSE;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthWrite)),"Create real depth-buffer PSO"))return false;
     return true;
@@ -265,8 +262,6 @@ bool D3D12Renderer::CreateVideoResources(){
     srv.Format=DXGI_FORMAT_R32_FLOAT;m_device->CreateShaderResourceView(m_depth.Get(),&srv,SRVCPU(3));
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};dsv.Format=DXGI_FORMAT_D32_FLOAT;dsv.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;m_device->CreateDepthStencilView(m_depth.Get(),&dsv,DSV());
 
-    auto bias=Tex2D(DXGI_FORMAT_R8_UNORM,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bias,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_biasCurrent)),"Create BiasCurrentColor mask"))return false;
-    m_biasCurrent->SetName(L"DLSS_BiasCurrentColor_Disocclusion_R8");srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(m_biasCurrent.Get(),&srv,SRVCPU(5));m_device->CreateRenderTargetView(m_biasCurrent.Get(),nullptr,RTV(FrameCount+2));
     auto grid=Tex2D(DXGI_FORMAT_R32G32B32A32_FLOAT,m_gridW,m_gridH,D3D12_RESOURCE_FLAG_NONE);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&grid,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_guideGrid)),"Create compact temporal guide grid"))return false;
     m_guideGrid->SetName(L"DLSS_CompactGuideGrid_RGBA32F");
     for(uint32_t i=0;i<FrameCount;++i) {
@@ -274,7 +269,7 @@ bool D3D12Renderer::CreateVideoResources(){
         if(!CreateUploadForTexture(grid,m_guideUpload[i],m_guideMapped[i],fp,rows,rowBytes,total,"Create compact guide upload"))return false;
         if(i==0){m_guideFootprint=fp;m_guideRows=rows;m_guideRowSize=rowBytes;m_guideUploadBytes=total;}
     }
-    srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;m_device->CreateShaderResourceView(m_guideGrid.Get(),&srv,SRVCPU(6));
+    srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;m_device->CreateShaderResourceView(m_guideGrid.Get(),&srv,SRVCPU(5));
     auto out=Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&out,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&m_dlssOutput)),"Create DLSS output"))return false;
     m_dlssOutput->SetName(L"DLSS_Output_Linear_FP16_UAV");
     srv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;m_device->CreateShaderResourceView(m_dlssOutput.Get(),&srv,SRVCPU(1));
@@ -285,7 +280,7 @@ bool D3D12Renderer::CreateVideoResources(){
         D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_cacheOutput)),
         "Create cache output"))return false;
     m_cacheOutput->SetName(L"Neural_Cache_Output_BGRA8_sRGB");
-    m_device->CreateRenderTargetView(m_cacheOutput.Get(),nullptr,RTV(FrameCount+3));
+    m_device->CreateRenderTargetView(m_cacheOutput.Get(),nullptr,RTV(FrameCount+2));
     m_device->GetCopyableFootprints(&cache,0,1,0,&m_cacheFootprint,&m_cacheRows,
                                     &m_cacheRowSize,&m_cacheReadbackBytes);
     if(!m_cacheReadbackBytes||m_cacheRows!=m_outputH||m_cacheRowSize!=uint64_t{m_outputW}*4u)
@@ -335,9 +330,8 @@ bool D3D12Renderer::CreateVideoResources(){
     LOG("DLSS resource contract ready: Color=R16G16B16A16_FLOAT " << m_renderW << "x" << m_renderH
         << ", MV=R16G16_FLOAT " << m_renderW << "x" << m_renderH
         << ", Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV " << m_renderW << "x" << m_renderH
-        << ", BiasCurrentColor=R8_UNORM " << m_renderW << "x" << m_renderH
         << ", Output=R16G16B16A16_FLOAT UAV " << m_outputW << "x" << m_outputH
-        << ", CompactGrid=R32G32B32A32_FLOAT " << m_gridW << "x" << m_gridH << " -> GPU MV/bias expansion + direct SV_Depth write"
+        << ", CompactGrid=R32G32B32A32_FLOAT " << m_gridW << "x" << m_gridH << " -> GPU MV expansion + direct SV_Depth write"
         << ", Reference=B8G8R8A8_UNORM " << m_sourceW << "x" << m_sourceH
         << ", NeuralTimestamps=" << FrameCount*2 << " @" << m_timestampFrequency << "Hz");
     return true;
@@ -393,21 +387,21 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     const float jitterY=DLSSEnabled()?Halton(uint32_t(m_framesPresented%1024)+1,3)-0.5f:0.0f;
     const float jitterUVX=jitterX/float(m_renderW), jitterUVY=jitterY/float(m_renderH);
 
-    // GPU-expand the compact CPU optical-flow/mask analysis to exact DLSS input
+    // GPU-expand the compact CPU optical-flow analysis to exact DLSS input
     // resolution. Depth is deliberately NOT mirrored through a color RT anymore:
     // it is written directly into the same typeless depth resource that NGX receives.
-    if(!m_guidesInRT){Barrier(cmd,m_motion.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);Barrier(cmd,m_biasCurrent.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);}m_guidesInRT=true;
+    if(!m_guidesInRT)Barrier(cmd,m_motion.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_guidesInRT=true;
     D3D12_VIEWPORT gvp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT gsc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&gvp);cmd->RSSetScissorRects(1,&gsc);
-    D3D12_CPU_DESCRIPTOR_HANDLE grt[2]={RTV(FrameCount+1),RTV(FrameCount+2)};cmd->OMSetRenderTargets(2,grt,FALSE,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoExpandGuides.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(6));float guideParams[4]={jitterUVX,jitterUVY,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
-    Barrier(cmd,m_motion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);Barrier(cmd,m_biasCurrent.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_guidesInRT=false;
+    auto grt=RTV(FrameCount+1);cmd->OMSetRenderTargets(1,&grt,FALSE,nullptr);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoExpandGuides.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));float guideParams[4]={jitterUVX,jitterUVY,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
+    Barrier(cmd,m_motion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_guidesInRT=false;
 
     // Populate the exact depth resource passed to NGX. The resource is R32_TYPELESS,
     // viewed as D32_FLOAT while writing and R32_FLOAT while sampling/debugging.
     if(!m_depthInWrite)Barrier(cmd,m_depth.Get(),DepthGuideReadState,D3D12_RESOURCE_STATE_DEPTH_WRITE);m_depthInWrite=true;
     D3D12_VIEWPORT dvp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT dsc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&dvp);cmd->RSSetScissorRects(1,&dsc);
     auto dsvh=DSV();cmd->OMSetRenderTargets(0,nullptr,FALSE,&dsvh);cmd->ClearDepthStencilView(dsvh,D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(6));cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
 
     if(!m_colorInRT)Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_colorInRT=true;
@@ -453,7 +447,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         if(!m_outputInUAV)Barrier(cmd,m_dlssOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);m_outputInUAV=true;
         const bool timed=m_timestampHeap&&m_timestampReadback&&m_timestampFrequency;
         if(timed)cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
-        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),m_biasCurrent.Get(),temporalReset,frameTimeMs,jitterX,jitterY);
+        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),temporalReset,frameTimeMs,jitterX,jitterY);
         if(timed&&used){
             cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u+1u);
             cmd->ResolveQueryData(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u,2,m_timestampReadback.Get(),uint64_t{slot}*2u*sizeof(uint64_t));
@@ -473,7 +467,6 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     switch(m_debugView){
         case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
         case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-        case DebugView::BiasMask:debugPixelResource=m_biasCurrent.Get();cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));break;
         case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
         default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
     }
@@ -573,7 +566,7 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     D3D12_VIEWPORT viewport{0,0,float(m_outputW),float(m_outputH),0,1};
     D3D12_RECT scissor{0,0,LONG(m_outputW),LONG(m_outputH)};
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
-    auto target=RTV(FrameCount+3);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
+    auto target=RTV(FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(target,black,0,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -648,7 +641,6 @@ bool D3D12Renderer::PresentCurrent(){
     switch(m_debugView){
         case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
         case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-        case DebugView::BiasMask:debugPixelResource=m_biasCurrent.Get();cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));break;
         case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
         default:
             cmd->SetPipelineState(m_psoPresent.Get());

@@ -161,7 +161,6 @@ static constexpr int IDC_NS_STYLE = 7307;
 static constexpr int IDC_NS_AUTOMASK = 7308;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
 static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
-static constexpr int IDC_NS_GUIDE_MASK = 7313;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -1196,7 +1195,6 @@ private:
         m_colorSettings.tint=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Tint",0.0f),-1.0f,1.0f);
         m_renderGuides.motionVectors=GetPrivateProfileIntW(L"NeuralGuides",L"MotionVectors",1,SettingsPath().c_str())!=0;
         m_renderGuides.depth=GetPrivateProfileIntW(L"NeuralGuides",L"Depth",1,SettingsPath().c_str())!=0;
-        m_renderGuides.mask=GetPrivateProfileIntW(L"NeuralGuides",L"Mask",1,SettingsPath().c_str())!=0;
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const UINT mode=GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str());
         m_comparison={};
@@ -1224,7 +1222,6 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
-        WritePrivateProfileStringW(L"NeuralGuides",L"Mask",m_renderGuides.mask?L"1":L"0",SettingsPath().c_str());
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Amount",m_comparison.amount);
@@ -1424,7 +1421,7 @@ private:
         const auto select=[&](int id,int index){if(HWND combo=GetDlgItem(h,id))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
         select(IDC_NS_PRESET,std::clamp(m_neuralSettings.preset,0,3));select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
-        check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);check(IDC_NS_GUIDE_MASK,m_renderGuides.mask);
+        check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         UpdateNeuralSettingValueLabels(h);
     }
 
@@ -1440,7 +1437,7 @@ private:
         m_neuralSettings.preset=sel(IDC_NS_PRESET,m_neuralSettings.preset);
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
-        const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH),checked(IDC_NS_GUIDE_MASK)};
+        const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
         // Sliders fire continuously; the preview waits for them to settle.
@@ -1477,7 +1474,6 @@ private:
         HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,394,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,392,116);
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,392,80);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MASK,L"neural.settings.guide_mask",336,392,98);
         HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,428,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
         HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,474,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
         HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,474,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
@@ -1526,7 +1522,7 @@ private:
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if(((id==IDC_NS_PRESET||id==IDC_NS_STYLE)&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GUIDE_MASK)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+            if(((id==IDC_NS_PRESET||id==IDC_NS_STYLE)&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -3073,7 +3069,7 @@ private:
     }
     void ShowDebugMenu(const RECT& anchor){
         UINT selected=IDM_VIEW_FINAL;
-        if(m_renderer){switch(m_renderer->GetDebugView()){case D3D12Renderer::DebugView::Input:selected=IDM_VIEW_INPUT;break;case D3D12Renderer::DebugView::MotionVectors:selected=IDM_VIEW_MV;break;case D3D12Renderer::DebugView::Depth:selected=IDM_VIEW_DEPTH;break;case D3D12Renderer::DebugView::BiasMask:selected=IDM_VIEW_MASK;break;case D3D12Renderer::DebugView::Final:break;}}
+        if(m_renderer){switch(m_renderer->GetDebugView()){case D3D12Renderer::DebugView::Input:selected=IDM_VIEW_INPUT;break;case D3D12Renderer::DebugView::MotionVectors:selected=IDM_VIEW_MV;break;case D3D12Renderer::DebugView::Depth:selected=IDM_VIEW_DEPTH;break;case D3D12Renderer::DebugView::Final:break;}}
         HMENU menu=app_menu::CreateDebugViewMenu(selected);if(!menu)return;
         POINT point{anchor.left,anchor.top};ClientToScreen(m_hwnd,&point);
         const UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,point.x,point.y,0,m_hwnd,nullptr);
@@ -3153,7 +3149,12 @@ private:
     // With a rendered pair loaded the toggle switches which member is presented.
     // Without one it is how an active session is started, and how it is stopped.
     void ToggleNeuralRendering(){
-        if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering))return;
+        if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering)){
+            LOG("Neural rendering toggle ignored: loaded="<<m_loaded<<" renderer="<<(m_renderer!=nullptr)<<" seeking="<<(m_seeking||m_seekPending)
+                <<" cachedPair="<<(m_cachedPlayback&&m_havePresentedPair)<<" sessionAvailable="<<LiveSessionAvailable()
+                <<" prerender="<<NeuralPreRenderEnabled()<<" stillImage="<<m_decoder.IsStillImage());
+            return;
+        }
         if(m_liveSession){StopLiveNeuralSession(true);return;}
         if(!m_cachedPlayback){StartLiveNeuralSession();return;}
         m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;if(m_renderer)m_renderer->SetComparison(EffectiveComparison());const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();
@@ -3292,7 +3293,7 @@ private:
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         case WM_KEYDOWN:
             if(w==VK_F10)RevealFullscreenControls();
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w=='5'){SetDebug(D3D12Renderer::DebugView::BiasMask);return 0;}if(w==VK_ESCAPE&&m_liveSession){StopLiveNeuralSession(true);return 0;}if(w==VK_ESCAPE&&NeuralJobActive()){CancelNeuralJob();return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w==VK_ESCAPE&&m_liveSession){StopLiveNeuralSession(true);return 0;}if(w==VK_ESCAPE&&NeuralJobActive()){CancelNeuralJob();return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -3311,7 +3312,7 @@ private:
         case IDM_FRAME_GENERATION:break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_CANCEL_EXPORT:CancelExport();break;
-        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIEW_MASK:SetDebug(D3D12Renderer::DebugView::BiasMask);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
+        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;

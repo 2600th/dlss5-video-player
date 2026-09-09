@@ -33,11 +33,10 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_MASK, L"Bias mask\t5");
-    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_MASK) {
+    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_DEPTH) {
         selectedCommand = IDM_VIEW_FINAL;
     }
-    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_MASK, selectedCommand, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_DEPTH, selectedCommand, MF_BYCOMMAND);
     return menu;
 }
 
@@ -68,7 +67,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_BLEND, L"menu.compare_blend"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr); add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom");
     const std::wstring compareName = localizer.Get(L"menu.compare"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); add(video, IDM_VIEW_MASK, L"menu.mask"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
+    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
     add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
     add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
     HMENU upscaleOutput=CreatePopupMenu();

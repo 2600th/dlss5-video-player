@@ -48,7 +48,7 @@ struct ComparisonSettings {
 class D3D12Renderer {
 public:
     D3D12Renderer()=default;
-    enum class DebugView { Final, Input, MotionVectors, Depth, BiasMask };
+    enum class DebugView { Final, Input, MotionVectors, Depth };
 
     struct ColorSettings {
         float brightness = 0.0f;   // exposure-like brightness, in stops (-2..+2)
@@ -125,7 +125,7 @@ private:
     // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
     static constexpr uint32_t PresentConstantCount = 16;
-    static constexpr uint32_t ReferenceSRV = 7;
+    static constexpr uint32_t ReferenceSRV = 6;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -209,7 +209,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssColor;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_depth;      // R32_TYPELESS: D32 DSV + R32 SRV, same resource passed to NGX
     Microsoft::WRL::ComPtr<ID3D12Resource> m_motion;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_biasCurrent;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssOutput;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];

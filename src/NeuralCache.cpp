@@ -384,7 +384,12 @@ std::optional<std::string> Sha256File(const std::filesystem::path& path, std::st
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
 {
     std::string canonical;
-    AppendField(canonical, "schema", "1");
+    // Key schema 2: the correspondence-failure mask guide was deleted, so a
+    // schema-1 entry was produced by a pipeline that still bound an R8 bias
+    // mask to NGX and whose guide term had a third field. Those entries must
+    // never be mistaken for matches, including the default-guides ones whose
+    // key carried no guide term at all.
+    AppendField(canonical, "schema", "2");
     AppendField(canonical, "source", identity.sourceDigest);
     AppendField(canonical, "width", std::to_string(identity.width));
     AppendField(canonical, "height", std::to_string(identity.height));

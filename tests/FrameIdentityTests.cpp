@@ -90,21 +90,18 @@ void guide_controls_neutralize_disabled_guides_test()
     CHECK(Channel(full, 0).anyNonZero || Channel(full, 1).anyNonZero);
     const auto fullDepth = Channel(full, 2);
     CHECK(fullDepth.maximum - fullDepth.minimum > 0.01f);
+    // A is unused padding kept only so the grid stays a filterable RGBA32F.
+    CHECK(!Channel(full, 3).anyNonZero);
 
     GuideFrame noMotion;
-    run(GuideControls{false, true, true}, noMotion);
+    run(GuideControls{false, true}, noMotion);
     CHECK(!Channel(noMotion, 0).anyNonZero);
     CHECK(!Channel(noMotion, 1).anyNonZero);
     CHECK_EQ(full.gridW, noMotion.gridW);
     CHECK_EQ(full.gridH, noMotion.gridH);
 
-    GuideFrame noMask;
-    run(GuideControls{true, true, false}, noMask);
-    CHECK(!Channel(noMask, 3).anyNonZero);
-    CHECK(Channel(noMask, 0).anyNonZero || Channel(noMask, 1).anyNonZero);
-
     GuideFrame flatDepth;
-    run(GuideControls{true, false, true}, flatDepth);
+    run(GuideControls{true, false}, flatDepth);
     const auto depth = Channel(flatDepth, 2);
     CHECK_EQ(0.75f, depth.minimum);
     CHECK_EQ(0.75f, depth.maximum);

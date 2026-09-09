@@ -1156,7 +1156,6 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
     CHECK(has_menu_entry(entries, L"DLSS input\t2", app_menu::IDM_VIEW_INPUT));
     CHECK(has_menu_entry(entries, L"Motion vectors\t3", app_menu::IDM_VIEW_MV));
     CHECK(has_menu_entry(entries, L"Depth\t4", app_menu::IDM_VIEW_DEPTH));
-    CHECK(has_menu_entry(entries, L"Bias mask\t5", app_menu::IDM_VIEW_MASK));
     for (const auto& entry : entries) {
         if (entry.command == app_menu::IDM_VIEW_DEPTH) CHECK((entry.state & MFS_CHECKED) != 0);
         else CHECK((entry.state & MFS_CHECKED) == 0);
