@@ -3676,6 +3676,30 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
     }
 }
 
+// Regression: StopFrameQueue used to reset m_frameTerminal back to NotReady after
+// joining the queue thread, and never notified. The queue thread exits on its own stop
+// token without publishing a terminal state, so a reader parked in ReadNextBlocking
+// waited forever on a predicate that could not become true again. ReadNext runs on the
+// UI message pump for local files, so that wedged the whole window.
+void video_decoder_close_releases_a_blocked_blocking_read_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::seconds{5});
+    // "/hold" never emits a frame, so the reader is guaranteed to park on the queue.
+    CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+    VideoFrame frameStorage;
+    VideoReadResult result=VideoReadResult::NotReady;
+    // A default-constructed stop token has no stop state, which is exactly how the UI
+    // path calls in: only the decoder shutdown can release this reader.
+    std::jthread reader([&]{result=decoder->ReadNextBlocking(frameStorage);});
+    Sleep(50);
+    const auto closeStarted=std::chrono::steady_clock::now();
+    decoder->Close();
+    reader.join();
+    CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
+    CHECK_EQ(VideoReadResult::Cancelled,result);
+}
+
 void video_decoder_hardware_failure_falls_back_to_software_test()
 {
     MediaFixture fixture;
@@ -5221,6 +5245,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
+    video_decoder_close_releases_a_blocked_blocking_read_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();

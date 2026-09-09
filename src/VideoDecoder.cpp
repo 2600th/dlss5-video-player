@@ -636,6 +636,16 @@ void VideoDecoder::StartFrameQueue() {
 }
 
 void VideoDecoder::StopFrameQueue() {
+    // Publish the shutdown and wake blocked readers BEFORE the queue thread goes away.
+    // FrameQueueLoop exits on its own stop token without setting a terminal state, so a
+    // reader parked in ReadNextBlocking would otherwise keep waiting on a predicate that
+    // can never become true again. ReadNext runs on the UI message pump for local files.
+    {
+        std::lock_guard lock(m_frameMutex);
+        m_frameQueueEnabled = false;
+        m_frameTerminal = VideoReadResult::Cancelled;
+    }
+    m_frameCv.notify_all();
     if (m_frameThread.joinable()) {
         m_frameThread.request_stop();
         m_frameCv.notify_all();
@@ -643,8 +653,9 @@ void VideoDecoder::StopFrameQueue() {
     }
     std::lock_guard lock(m_frameMutex);
     m_frameQueue.clear();
-    m_frameTerminal = VideoReadResult::NotReady;
-    m_frameQueueEnabled = false;
+    // m_frameTerminal deliberately keeps the Cancelled state. StartFrameQueue resets it.
+    // Clearing it back to NotReady here would re-arm the wedge for a reader that has not
+    // observed the shutdown yet.
 }
 
 void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
@@ -846,27 +857,33 @@ VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token 
 
 VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token stop) {
     if (m_backend == Backend::FFmpeg) {
-        if (m_frameQueueEnabled) {
+        {
             std::unique_lock lock(m_frameMutex);
-            if (!m_frameCv.wait(lock, stop, [this] {
-                return !m_frameQueue.empty() || m_frameTerminal != VideoReadResult::NotReady;
-            })) {
-                return VideoReadResult::Cancelled;
+            // Wait in slices rather than indefinitely so a queue thread that disappears
+            // without publishing a terminal state cannot wedge the caller.
+            while (m_frameQueueEnabled) {
+                if (stop.stop_requested()) return VideoReadResult::Cancelled;
+                if (!m_frameQueue.empty()) {
+                    out = std::move(m_frameQueue.front());
+                    m_frameQueue.pop_front();
+                    m_frameCv.notify_all();
+                    return VideoReadResult::FrameReady;
+                }
+                if (m_frameTerminal != VideoReadResult::NotReady) return m_frameTerminal;
+                (void)m_frameCv.wait_for(lock, stop, std::chrono::milliseconds(50), [this] {
+                    return !m_frameQueue.empty() ||
+                           m_frameTerminal != VideoReadResult::NotReady ||
+                           !m_frameQueueEnabled;
+                });
             }
-            if (stop.stop_requested()) return VideoReadResult::Cancelled;
-            if (!m_frameQueue.empty()) {
-                out = std::move(m_frameQueue.front());
-                m_frameQueue.pop_front();
-                m_frameCv.notify_all();
-                return VideoReadResult::FrameReady;
-            }
-            return m_frameTerminal;
         }
         for (;;) {
             const VideoReadResult result = ReadNextFFmpegProcessAvailable(out, stop);
             if (result != VideoReadResult::NotReady) return result;
             if (stop.stop_requested()) return VideoReadResult::Cancelled;
-            std::this_thread::yield();
+            // A yield() spin here pegs a core. This fallback only runs when the queue
+            // thread could not be created, but it must still idle politely.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
     if (m_backend == Backend::MediaFoundation) {
