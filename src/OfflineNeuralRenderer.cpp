@@ -367,15 +367,13 @@ struct ProductionSourceAdapter {
     }
     void Close(){decoder.Close();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
-        for(;;){
-            VideoFrame decoded;const auto read=decoder.ReadNextAvailable(decoded,stop);
-            if(read==VideoReadResult::NotReady){std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
-            frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity};
-            if(read==VideoReadResult::FrameReady)return JobRead::FrameReady;
-            if(read==VideoReadResult::EndOfStream)return JobRead::EndOfStream;
-            if(read==VideoReadResult::Cancelled)return JobRead::Cancelled;
-            return JobRead::Error;
-        }
+        VideoFrame decoded;
+        const auto read = decoder.ReadNextBlocking(decoded, stop);
+        frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity};
+        if (read == VideoReadResult::FrameReady) return JobRead::FrameReady;
+        if (read == VideoReadResult::EndOfStream) return JobRead::EndOfStream;
+        if (read == VideoReadResult::Cancelled) return JobRead::Cancelled;
+        return JobRead::Error;
     }
 };
 

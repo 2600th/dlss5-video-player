@@ -57,6 +57,7 @@ public:
     void Close();
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
+    VideoReadResult ReadNextBlocking(VideoFrame& out, std::stop_token stop = {});
     bool SeekSeconds(double seconds);
     bool SetDecodeSize(uint32_t width, uint32_t height);
     void Swap(VideoDecoder& other) noexcept;
@@ -81,7 +82,8 @@ private:
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
 
     bool OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
-                  std::stop_token stop, bool queueFrames);
+                  std::stop_token stop, bool queueFrames,
+                  FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda);
 
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
                     FFmpegAcceleration initialAcceleration);

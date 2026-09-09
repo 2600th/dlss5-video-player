@@ -127,7 +127,7 @@ struct ChildProcess {
         HANDLE stdinRead = nullptr;
         if (pipeInput) {
             SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-            if (!CreatePipe(&stdinRead, &stdinWrite, &security, 0)) return false;
+            if (!CreatePipe(&stdinRead, &stdinWrite, &security, 64 * 1024 * 1024)) return false;
             if (!SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0)) {
                 CloseHandle(stdinRead); CloseHandle(stdinWrite); stdinWrite = nullptr; return false;
             }
@@ -643,7 +643,7 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
     size_t offset = 0;
     while (offset < bgra.size()) {
         if (stop.stop_requested()) { Cancel(); return EncodeError::Cancelled; }
-        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(bgra.size() - offset, 1024 * 1024));
+        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(bgra.size() - offset, 16 * 1024 * 1024));
         DWORD written = 0;
         if (!WriteFile(impl_->process.stdinWrite, bgra.data() + offset, wanted, &written, nullptr) ||
             written == 0) {

@@ -104,16 +104,19 @@ void VideoDecoder::Close() {
 }
 
 bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
-    return OpenImpl(path,sourceKind,stop,true);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda);
 }
 
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
                                   std::stop_token stop) {
-    return OpenImpl(path,sourceKind,stop,false);
+    // Sequential offline decoding uses software decode to avoid competing with
+    // D3D12/NVENC, but enables the background frame queue so decode overlaps with GPU rendering.
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Software);
 }
 
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
-                            std::stop_token stop, bool queueFrames) {
+                            std::stop_token stop, bool queueFrames,
+                            FFmpegAcceleration acceleration) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -130,10 +133,9 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
 
     // FFmpeg is intentionally preferred. It makes playback independent from
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
-    if (OpenFFmpeg(path, stop,queueFrames?FFmpegAcceleration::Cuda:
-                                      FFmpegAcceleration::Software)) {
+    if (OpenFFmpeg(path, stop, acceleration)) {
         m_backend = Backend::FFmpeg;
-        if(queueFrames)StartFrameQueue();
+        if (queueFrames) StartFrameQueue();
         LOG("Video decoder selected: FFmpeg");
         return true;
     }
@@ -410,7 +412,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
     sa.bInheritHandle = TRUE;
 
     HANDLE readPipe = nullptr, writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 4 * 1024 * 1024)) {
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 64 * 1024 * 1024)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
         return false;
     }
@@ -550,12 +552,7 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
 }
 
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
-    for(;;){
-        const VideoReadResult result=ReadNextFFmpegAvailable(out,{});
-        if(result==VideoReadResult::FrameReady)return true;
-        if(result!=VideoReadResult::NotReady)return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    return ReadNextBlocking(out, {}) == VideoReadResult::FrameReady;
 }
 
 VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
@@ -591,7 +588,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     }
     DWORD got=0;
     if(available>0){
-        const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{4u<<20}}));
+        const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{16u<<20}}));
         if(want&&!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
         if(got){m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();}
     }
@@ -844,6 +841,37 @@ bool VideoDecoder::ReadNext(VideoFrame& out) {
 VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token stop) {
     if(m_backend==Backend::FFmpeg)return ReadNextFFmpegAvailable(out,stop);
     if(m_backend==Backend::MediaFoundation)return ReadNextMediaFoundation(out)?VideoReadResult::FrameReady:VideoReadResult::EndOfStream;
+    return VideoReadResult::Error;
+}
+
+VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token stop) {
+    if (m_backend == Backend::FFmpeg) {
+        if (m_frameQueueEnabled) {
+            std::unique_lock lock(m_frameMutex);
+            if (!m_frameCv.wait(lock, stop, [this] {
+                return !m_frameQueue.empty() || m_frameTerminal != VideoReadResult::NotReady;
+            })) {
+                return VideoReadResult::Cancelled;
+            }
+            if (stop.stop_requested()) return VideoReadResult::Cancelled;
+            if (!m_frameQueue.empty()) {
+                out = std::move(m_frameQueue.front());
+                m_frameQueue.pop_front();
+                m_frameCv.notify_all();
+                return VideoReadResult::FrameReady;
+            }
+            return m_frameTerminal;
+        }
+        for (;;) {
+            const VideoReadResult result = ReadNextFFmpegProcessAvailable(out, stop);
+            if (result != VideoReadResult::NotReady) return result;
+            if (stop.stop_requested()) return VideoReadResult::Cancelled;
+            std::this_thread::yield();
+        }
+    }
+    if (m_backend == Backend::MediaFoundation) {
+        return ReadNextMediaFoundation(out) ? VideoReadResult::FrameReady : VideoReadResult::EndOfStream;
+    }
     return VideoReadResult::Error;
 }
 
