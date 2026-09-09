@@ -2,10 +2,23 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
-#include <thread>
 #include <vector>
+
+#include "ParallelFor.h"
+
+namespace {
+// Grid work is small in absolute terms, so these keep tiny analysis grids on the calling
+// thread rather than paying dispatch for a few hundred cells.
+// Waking a parked worker costs single-digit microseconds, so a range has to carry more
+// work than that to be worth splitting off. These were tuned by measurement on a 1080p
+// grid: smaller values made guide generation slower, not faster.
+constexpr size_t kGuideRowGrain = 16;        // grid rows per range
+constexpr size_t kGuideCandidateGrain = 64;  // global-search candidates per range
+constexpr size_t kGuideLatticeGrain = 2;     // block-match lattice rows per range
+}  // namespace
 
 void TemporalGuideGenerator::Reset() {
     m_prevLuma.clear();
@@ -36,38 +49,60 @@ float TemporalGuideGenerator::Luma(const uint8_t* p) {
 void TemporalGuideGenerator::DownsampleLuma(const uint8_t* bgra, uint32_t w, uint32_t h,
                                              uint32_t gw, uint32_t gh, std::vector<float>& out) const {
     out.assign(size_t(gw) * gh, 0.0f);
-    for (uint32_t gy = 0; gy < gh; ++gy) {
-        const uint32_t y0 = uint32_t((uint64_t(gy) * h) / gh);
-        const uint32_t y1 = std::max(y0 + 1, uint32_t((uint64_t(gy + 1) * h) / gh));
-        for (uint32_t gx = 0; gx < gw; ++gx) {
-            const uint32_t x0 = uint32_t((uint64_t(gx) * w) / gw);
-            const uint32_t x1 = std::max(x0 + 1, uint32_t((uint64_t(gx + 1) * w) / gw));
-            // Four stratified samples are much cheaper than averaging every source pixel.
-            const uint32_t xs[2] = { x0, std::min(w - 1, (x0 + x1) / 2) };
-            const uint32_t ys[2] = { y0, std::min(h - 1, (y0 + y1) / 2) };
-            float s = 0.0f;
-            for (uint32_t yy : ys) for (uint32_t xx : xs)
-                s += Luma(bgra + (size_t(yy) * w + xx) * 4u);
-            out[size_t(gy) * gw + gx] = s * 0.25f;
+    // Each grid row samples a disjoint band of the source frame, so the rows are
+    // independent. The reads stride a whole 4K frame, which makes this more
+    // memory-latency bound than its op count suggests.
+    ParallelForRanges(size_t(gh), kGuideRowGrain, [&](size_t beginRow, size_t endRow) {
+        for (uint32_t gy = uint32_t(beginRow); gy < uint32_t(endRow); ++gy) {
+            const uint32_t y0 = uint32_t((uint64_t(gy) * h) / gh);
+            const uint32_t y1 = std::max(y0 + 1, uint32_t((uint64_t(gy + 1) * h) / gh));
+            for (uint32_t gx = 0; gx < gw; ++gx) {
+                const uint32_t x0 = uint32_t((uint64_t(gx) * w) / gw);
+                const uint32_t x1 = std::max(x0 + 1, uint32_t((uint64_t(gx + 1) * w) / gw));
+                // Four stratified samples are much cheaper than averaging every source pixel.
+                const uint32_t xs[2] = { x0, std::min(w - 1, (x0 + x1) / 2) };
+                const uint32_t ys[2] = { y0, std::min(h - 1, (y0 + y1) / 2) };
+                float s = 0.0f;
+                for (uint32_t yy : ys) for (uint32_t xx : xs)
+                    s += Luma(bgra + (size_t(yy) * w + xx) * 4u);
+                out[size_t(gy) * gw + gx] = s * 0.25f;
+            }
         }
-    }
+    });
 }
 
-static float PatchSad(const std::vector<float>& cur, const std::vector<float>& prev,
-                      int x, int y, int dx, int dy, int w, int h) {
+// Returns the candidate's full cost, penalty included, or +inf if it provably cannot
+// beat `best`.
+//
+// The early-out is exact, not an approximation. Taps are non-negative so the running sad
+// only grows, and count never exceeds nine, therefore sad/9 + penalty is a lower bound on
+// the final sad/count + penalty. A candidate pruned by it would have failed the strict
+// `< best` test anyway, so the selected vector is bit-identical to the exhaustive search.
+// Comparing against `best` directly rather than against a precomputed `best - penalty`
+// avoids a subtraction whose rounding could prune slightly too eagerly. For the same
+// reason the divisor is a real division: sad * (1.0f/9.0f) multiplies by a rounded
+// reciprocal and can land an ulp above sad/9, which is enough to prune a candidate that
+// should have won. IEEE division is correctly rounded and monotonic in the divisor, so
+// sad/9 <= sad/count for every count <= 9.
+static float PatchSadCost(const std::vector<float>& cur, const std::vector<float>& prev,
+                          int x, int y, int dx, int dy, int w, int h,
+                          float penalty, float best) {
     float sad = 0.0f;
     int count = 0;
     for (int py = -1; py <= 1; ++py) {
-        int cy = y + py, oy = cy + dy;
-        if (cy < 0 || cy >= h || oy < 0 || oy >= h) continue;
-        for (int px = -1; px <= 1; ++px) {
-            int cx = x + px, ox = cx + dx;
-            if (cx < 0 || cx >= w || ox < 0 || ox >= w) continue;
-            sad += std::abs(cur[size_t(cy) * w + cx] - prev[size_t(oy) * w + ox]);
-            ++count;
+        const int cy = y + py, oy = cy + dy;
+        if (cy >= 0 && cy < h && oy >= 0 && oy < h) {
+            for (int px = -1; px <= 1; ++px) {
+                const int cx = x + px, ox = cx + dx;
+                if (cx < 0 || cx >= w || ox < 0 || ox >= w) continue;
+                sad += std::abs(cur[size_t(cy) * w + cx] - prev[size_t(oy) * w + ox]);
+                ++count;
+            }
         }
+        if (sad / 9.0f + penalty >= best)
+            return std::numeric_limits<float>::infinity();
     }
-    return count ? sad / float(count) : 10.0f;
+    return (count ? sad / float(count) : 10.0f) + penalty;
 }
 
 static float SampleBilinear(const std::vector<float>& img, float x, float y, int w, int h) {
@@ -83,23 +118,29 @@ static float SampleBilinear(const std::vector<float>& img, float x, float y, int
     return a * (1.0f - ty) + b * ty;
 }
 
-static float PatchSadSubpixel(const std::vector<float>& cur, const std::vector<float>& prev,
-                              int x, int y, float dx, float dy, int w, int h) {
+// Same exact early-out as PatchSadCost. This one matters more: each tap costs a bilinear
+// fetch, and the refine sweeps twenty-five sub-positions per block.
+static float PatchSadSubpixelCost(const std::vector<float>& cur, const std::vector<float>& prev,
+                                  int x, int y, float dx, float dy, int w, int h,
+                                  float penalty, float best) {
     float sad = 0.0f;
     int count = 0;
     for (int py = -1; py <= 1; ++py) {
         const int cy = y + py;
-        if (cy < 0 || cy >= h) continue;
-        for (int px = -1; px <= 1; ++px) {
-            const int cx = x + px;
-            if (cx < 0 || cx >= w) continue;
-            const float pv = SampleBilinear(prev, float(cx) + dx, float(cy) + dy, w, h);
-            if (!std::isfinite(pv)) continue;
-            sad += std::abs(cur[size_t(cy) * w + cx] - pv);
-            ++count;
+        if (cy >= 0 && cy < h) {
+            for (int px = -1; px <= 1; ++px) {
+                const int cx = x + px;
+                if (cx < 0 || cx >= w) continue;
+                const float pv = SampleBilinear(prev, float(cx) + dx, float(cy) + dy, w, h);
+                if (!std::isfinite(pv)) continue;
+                sad += std::abs(cur[size_t(cy) * w + cx] - pv);
+                ++count;
+            }
         }
+        if (sad / 9.0f + penalty >= best)
+            return std::numeric_limits<float>::infinity();
     }
-    return count ? sad / float(count) : 10.0f;
+    return (count ? sad / float(count) : 10.0f) + penalty;
 }
 
 void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const std::vector<float>& prev,
@@ -113,8 +154,16 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
     float zeroGlobal = std::numeric_limits<float>::max();
     int bestGX = 0, bestGY = 0;
     constexpr int globalRadius = 7;
-    for (int dy = -globalRadius; dy <= globalRadius; ++dy) {
-        for (int dx = -globalRadius; dx <= globalRadius; ++dx) {
+    constexpr int globalSpan = globalRadius * 2 + 1;
+    // Score every candidate in parallel, then pick the winner with the original serial
+    // scan. Keeping the selection sequential preserves the first-minimum tie-break, so
+    // the chosen translation is bit-identical however the work was distributed.
+    std::array<float, size_t(globalSpan) * globalSpan> globalCosts{};
+    ParallelForRanges(globalCosts.size(), kGuideCandidateGrain,
+                      [&](size_t beginCandidate, size_t endCandidate) {
+        for (size_t i = beginCandidate; i < endCandidate; ++i) {
+            const int dy = int(i) / globalSpan - globalRadius;
+            const int dx = int(i) % globalSpan - globalRadius;
             float sad = 0.0f; int n = 0;
             for (int y = 4; y < h - 4; y += 4) {
                 const int oy = y + dy; if (oy < 0 || oy >= h) continue;
@@ -127,9 +176,15 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
             if (n) sad /= float(n);
             // Mild penalty avoids jumping to large vectors in flat/noisy regions.
             sad += 0.0015f * float(dx * dx + dy * dy);
-            if (dx == 0 && dy == 0) zeroGlobal = sad;
-            if (sad < bestGlobal) { bestGlobal = sad; bestGX = dx; bestGY = dy; }
+            globalCosts[i] = sad;
         }
+    });
+    for (size_t i = 0; i < globalCosts.size(); ++i) {
+        const int dy = int(i) / globalSpan - globalRadius;
+        const int dx = int(i) % globalSpan - globalRadius;
+        const float sad = globalCosts[i];
+        if (dx == 0 && dy == 0) zeroGlobal = sad;
+        if (sad < bestGlobal) { bestGlobal = sad; bestGX = dx; bestGY = dy; }
     }
     // A small independently moving object on an otherwise flat/static frame can make a
     // whole-frame translation look marginally better than zero. Do not smear that motion
@@ -149,36 +204,47 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
     // Solve local flow on a 2x2 lattice, then expand each result to the tiny block.
     // At a 160-wide analysis grid this retains useful object motion while making
     // 30/60 fps playback much less CPU-bound than matching every grid pixel.
-    const unsigned int hwThreads = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
+    //
+    // One body, run over a range of lattice rows. ParallelForRanges keeps it on the
+    // calling thread when the grid is too small to be worth splitting, so there is no
+    // separate serial copy to keep in sync.
     const int totalStepsY = (h + 1) / 2;
-    if (hwThreads <= 1 || totalStepsY < int(hwThreads * 2)) {
-        for (int y = 0; y < h; y += 2) {
+    ParallelForRanges(size_t(std::max(0, totalStepsY)), kGuideLatticeGrain, [&](size_t beginStep, size_t endStep) {
+        for (size_t step = beginStep; step < endStep; ++step) {
+            const int y = int(step) * 2;
             for (int x = 0; x < w; x += 2) {
                 float best = std::numeric_limits<float>::max();
                 int bx = bestGX, by = bestGY;
                 for (int oy = -localRadius; oy <= localRadius; ++oy) {
                     for (int ox = -localRadius; ox <= localRadius; ++ox) {
                         const int dx = bestGX + ox, dy = bestGY + oy;
-                        float cost = PatchSad(cur, prev, x, y, dx, dy, w, h);
-                        cost += 0.002f * float(ox * ox + oy * oy);
+                        const float penalty = 0.002f * float(ox * ox + oy * oy);
+                        const float cost = PatchSadCost(cur, prev, x, y, dx, dy, w, h,
+                                                        penalty, best);
                         if (cost < best) { best = cost; bx = dx; by = dy; }
                     }
                 }
                 float fbx = float(bx), fby = float(by);
+                // Integer block matching on a compact grid is too quantized after scaling to
+                // 1440p/4K. Refine the winning vector at quarter-grid precision using bilinear
+                // samples of the previous frame. This keeps the CPU implementation
+                // self-contained while giving DLSS materially smoother per-pixel motion.
                 if (best <= 0.18f) {
                     static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
                     float refined = best;
                     for (float sy : sub) {
                         for (float sx : sub) {
                             const float dx = float(bx) + sx, dy = float(by) + sy;
-                            float cost = PatchSadSubpixel(cur, prev, x, y, dx, dy, w, h);
-                            cost += 0.0015f * (sx * sx + sy * sy);
+                            const float penalty = 0.0015f * (sx * sx + sy * sy);
+                            const float cost = PatchSadSubpixelCost(cur, prev, x, y, dx, dy, w, h,
+                                                                    penalty, refined);
                             if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
                         }
                     }
                     best = refined;
                 }
 
+                // High mismatch means a cut/disocclusion/no reliable correspondence.
                 if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
                 for (int yy = y; yy < std::min(y + 2, h); ++yy) {
                     for (int xx = x; xx < std::min(x + 2, w); ++xx) {
@@ -190,75 +256,29 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
                 }
             }
         }
-    } else {
-        std::vector<std::jthread> workers;
-        workers.reserve(hwThreads);
-        const int stepsPerThread = (totalStepsY + int(hwThreads) - 1) / int(hwThreads);
-        for (unsigned int t = 0; t < hwThreads; ++t) {
-            const int startStep = t * stepsPerThread;
-            const int endStep = std::min(totalStepsY, startStep + stepsPerThread);
-            if (startStep >= endStep) break;
-            workers.emplace_back([=, &cur, &prev, &flowX, &flowY, &mismatch] {
-                for (int step = startStep; step < endStep; ++step) {
-                    const int y = step * 2;
-                    for (int x = 0; x < w; x += 2) {
-                        float best = std::numeric_limits<float>::max();
-                        int bx = bestGX, by = bestGY;
-                        for (int oy = -localRadius; oy <= localRadius; ++oy) {
-                            for (int ox = -localRadius; ox <= localRadius; ++ox) {
-                                const int dx = bestGX + ox, dy = bestGY + oy;
-                                float cost = PatchSad(cur, prev, x, y, dx, dy, w, h);
-                                cost += 0.002f * float(ox * ox + oy * oy);
-                                if (cost < best) { best = cost; bx = dx; by = dy; }
-                            }
-                        }
-                        float fbx = float(bx), fby = float(by);
-                        if (best <= 0.18f) {
-                            static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
-                            float refined = best;
-                            for (float sy : sub) {
-                                for (float sx : sub) {
-                                    const float dx = float(bx) + sx, dy = float(by) + sy;
-                                    float cost = PatchSadSubpixel(cur, prev, x, y, dx, dy, w, h);
-                                    cost += 0.0015f * (sx * sx + sy * sy);
-                                    if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
-                                }
-                            }
-                            best = refined;
-                        }
-
-                        if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
-                        for (int yy = y; yy < std::min(y + 2, h); ++yy) {
-                            for (int xx = x; xx < std::min(x + 2, w); ++xx) {
-                                const size_t oi = size_t(yy) * gw + xx;
-                                flowX[oi] = fbx;
-                                flowY[oi] = fby;
-                                mismatch[oi] = best;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    }
+    });
 }
 
 void TemporalGuideGenerator::MedianFlow(std::vector<float>& x, std::vector<float>& y,
                                          uint32_t gw, uint32_t gh) const {
     std::vector<float> ox = x, oy = y;
-    for (uint32_t py = 1; py + 1 < gh; ++py) {
-        for (uint32_t px = 1; px + 1 < gw; ++px) {
-            std::array<float, 9> xs{}, ys{}; size_t k = 0;
-            for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
-                const size_t idx = size_t(int(py) + j) * gw + size_t(int(px) + i);
-                xs[k] = ox[idx]; ys[k] = oy[idx]; ++k;
+    if (gh < 3) return;
+    // Reads come from the untouched copies, so rows are independent.
+    ParallelForRanges(size_t(gh - 2), kGuideRowGrain, [&](size_t beginRow, size_t endRow) {
+        for (uint32_t py = uint32_t(beginRow) + 1; py < uint32_t(endRow) + 1; ++py) {
+            for (uint32_t px = 1; px + 1 < gw; ++px) {
+                std::array<float, 9> xs{}, ys{}; size_t k = 0;
+                for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
+                    const size_t idx = size_t(int(py) + j) * gw + size_t(int(px) + i);
+                    xs[k] = ox[idx]; ys[k] = oy[idx]; ++k;
+                }
+                std::nth_element(xs.begin(), xs.begin() + 4, xs.end());
+                std::nth_element(ys.begin(), ys.begin() + 4, ys.end());
+                const size_t idx = size_t(py) * gw + px;
+                x[idx] = xs[4]; y[idx] = ys[4];
             }
-            std::nth_element(xs.begin(), xs.begin() + 4, xs.end());
-            std::nth_element(ys.begin(), ys.begin() + 4, ys.end());
-            const size_t idx = size_t(py) * gw + px;
-            x[idx] = xs[4]; y[idx] = ys[4];
         }
-    }
+    });
 }
 
 void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
@@ -268,11 +288,14 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
     depth.assign(size_t(gw) * gh, 0.75f);
     if (m_depthMode == DepthMode::Flat) return;
 
+    // Left serial on purpose: a grid of this size finishes well inside the cost of
+    // waking helper threads.
     float maxMotion = 1.0f;
     for (size_t i = 0; i < flowX.size(); ++i)
         maxMotion = std::max(maxMotion, std::sqrt(flowX[i] * flowX[i] + flowY[i] * flowY[i]));
 
-    for (uint32_t y = 0; y < gh; ++y) {
+    ParallelForRanges(size_t(gh), kGuideRowGrain, [&](size_t beginRow, size_t endRow) {
+    for (uint32_t y = uint32_t(beginRow); y < uint32_t(endRow); ++y) {
         for (uint32_t x = 0; x < gw; ++x) {
             const size_t idx = size_t(y) * gw + x;
             const float yn = gh > 1 ? float(y) / float(gh - 1) : 0.5f;
@@ -289,6 +312,7 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
             depth[idx] = d;
         }
     }
+    });
     m_prevDepth = depth;
 }
 
@@ -336,7 +360,8 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     const float gridToRenderX = float(renderW) / float(gw);
     const float gridToRenderY = float(renderH) / float(gh);
 
-    for (uint32_t y = 0; y < gh; ++y) {
+    ParallelForRanges(size_t(gh), kGuideRowGrain, [&](size_t beginRow, size_t endRow) {
+    for (uint32_t y = uint32_t(beginRow); y < uint32_t(endRow); ++y) {
         for (uint32_t x = 0; x < gw; ++x) {
             const size_t i = size_t(y) * gw + x;
             float mask = 0.0f;
@@ -356,6 +381,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
             out.guideGridRGBA32F[o + 3] = mask;
         }
     }
+    });
 
     out.hasHistory = history;
     out.globalMotionX = globalX * gridToRenderX;
