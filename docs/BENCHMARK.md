@@ -132,3 +132,45 @@ To A/B a guide against the **upscaling** feature rather than neural rendering,
 `UpscalingGpuSmoke.exe <clip> <targetHeight> <out.raw> mv=1,depth=1 <frames>`
 writes every captured output frame as raw BGRA, so two runs can be compared byte
 for byte. That is how the mask question was settled for DLSS-SR.
+
+## Which neural settings change the image (2026-09-09, same stack)
+
+Measured through the player, not the benchmark driver: with playback paused, each
+control was changed one at a time and the debounced single-frame preview it
+triggers was rendered. Every preview is an ordinary range render, so each
+distinct combination has its own cache entry; the entries were paired from the
+worker's `Checking neural cache key=… settings=…` log lines and compared as
+decoded rgb24 bytes, so every row below differs in exactly one field at the same
+source frame.
+
+| control | change | bytes differing | mean abs delta |
+|---|---|---:|---:|
+| Intensity | 1.00 → 0.40 | 84.75 % | 2.40 |
+| Local tone | 1.00 → 0.30 | 66.45 % | 1.14 |
+| Local structure | 1.00 → 0.30 | 53.41 % | 0.87 |
+| Style | 2 → 0 | 49.31 % | 0.79 |
+| Motion-vector guide | on → off | 39.79 % | 0.63 |
+| Depth guide | on → off (motion on) | 37.92 % | 0.57 |
+| Skin structure | +1.00 → −0.40 | 36.50 % | 0.56 |
+| Automatic mask | on → off | 36.08 % | 0.54 |
+| **Color strength** | 1.00 → 0.20 | **0 %** | 0 |
+| **Render preset** | 0→1, 0→2, 0→3, 1→3 | **0 %** | 0 |
+
+Six of the eight model parameters and both guides reach the output. **Color
+strength and render preset do not**, on any of the four preset pairs tried and
+from two independent baselines. This is not a plumbing fault on our side: the
+runtime `ReShade.ini` written for the render carries `NRColorStrength` and
+`NRPreset` next to the six keys that do work, so the add-on or the model ignores
+them — the same shape of result as the deleted mask guide and the inert SR preset
+hints.
+
+The depth guide only matters while motion vectors are on: with `mv=0`, toggling
+depth changes nothing (0 %), which is what a temporal consumer with no
+reprojection to perform should do. An earlier reading that called depth inert had
+motion vectors already off.
+
+Cost of a change: settings and guides are part of the render identity, so every
+distinct combination is rendered from scratch — 16 cold single-frame previews
+took a median of **10.6 s** each, and the 4 repeats of an already-rendered
+combination came back in **1.03 s** from cache. Changing color strength or the
+preset therefore costs a full re-render and produces byte-identical output.
