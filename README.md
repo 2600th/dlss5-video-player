@@ -14,15 +14,15 @@ Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
 intentionally silent.
 [Capture details and edit source](docs/media/README.md).
 
-**v0.15.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.15.0)
-with recent-video caching, settings snapshots, MKV export and highest-bitrate
-YouTube selection. See the [changelog](CHANGELOG.md).
+**v0.16.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.16.0)
+with neural rendering on every RTX generation, a keep-up forecast measured per
+GPU and source size, and a one-command runtime fetch. See the [changelog](CHANGELOG.md).
 
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.15.0 used an RTX 5090; the current
-> source and universal runtime were verified on an RTX 4080 SUPER and an RTX 5090.
+> components. Hardware verification for v0.16.0 used an RTX 4080 SUPER and an
+> RTX 5090 on the universal runtime; Turing and Ampere are enabled but unverified.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -51,7 +51,7 @@ YouTube selection. See the [changelog](CHANGELOG.md).
    experimental neural layout requires the separately supplied runtime
    described in [setup](docs/DLSS5_SETUP.md).
 2. [Build the current source](docs/BUILDING.md), or download the
-   [v0.15.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.15.0)
+   [v0.16.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.16.0)
    if you have repository access. GitHub's source ZIP is not a runnable package.
 3. Extract a packaged build into a **new folder** and keep all helpers and
    `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.

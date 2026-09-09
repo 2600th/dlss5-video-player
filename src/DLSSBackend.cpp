@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <iomanip>
 #include <cmath>
+#include <cctype>
+#include <string>
+#include <string_view>
 
 DLSSBackend::~DLSSBackend() { Shutdown(); }
 
@@ -38,6 +41,26 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     m_sessionKey = deviceIdentity;
     deviceIdentity->Release();
 
+    // NGX and its feature DLLs report through this callback. The full stream
+    // goes to ngx_logs/ as before; only lines that name a problem are copied
+    // beside the player's own, so a refused feature explains itself in one
+    // file without the ~170 lines of startup chatter each worker emits.
+    static NVSDK_NGX_FeatureCommonInfo commonInfo{};
+    commonInfo.LoggingInfo.LoggingCallback = [](const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature component) {
+        std::string_view text = message ? message : "";
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+        if (text.empty()) return;
+        std::string lowered(text);
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        for (std::string_view needle : {"error", "fail", "warn", "unsupported"}) {
+            if (lowered.find(needle) != std::string::npos) {
+                LOG("[NGX feature " << int(component) << "] " << text);
+                return;
+            }
+        }
+    };
+    commonInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+
     const bool sessionAcquired = ngx_session_detail::ProcessRegistry().Acquire(
         m_sessionKey,
         [&] {
@@ -45,7 +68,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
                 "50f09991-2962-44db-bad7-4be06dbbd1d2",
                 NVSDK_NGX_ENGINE_TYPE_CUSTOM,
                 "DLSSVideoPlayer-10.0",
-                logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
+                logDir.c_str(), device, &commonInfo, NVSDK_NGX_Version_API);
             return !NVSDK_NGX_FAILED(m_lastResult);
         });
     if (!sessionAcquired) {

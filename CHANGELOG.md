@@ -1,7 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 - 2026-09-09
 
+- NGX's own diagnostics reach `DLSSVideoPlayer.log`. `DLSSBackend::Initialize`
+  now hands NGX a `LoggingInfo` callback; lines that name an error, failure,
+  warning or unsupported condition are copied beside the player's own as
+  `[NGX feature N]`, so why a feature refused to create is read in one file at
+  the moment it happened. The complete stream still goes to `ngx_logs/`; the
+  ~170 startup lines each worker emits are not copied.
+- `tools/package_release.ps1` finds the locked runtime the fetch script staged.
+  The fetch stages each file under the lock's `sourceName`, so the universal
+  NR runtime sits in `external/runtime` as `nvngx_dlssnr_310.8.SF-v2.dll`;
+  the packager looked only for the `destination` name and refused with
+  "Locked input is missing" on a tree that `stage_runtime.ps1` had just
+  verified. It now resolves every locked input the way the stager does.
 - `tools/fetch_neural_runtime.ps1` fetches the whole locked neural runtime.
   Every file in `packaging/runtime-lock.json` comes from a public release, so
   the script downloads the five source archives, checks each archive's

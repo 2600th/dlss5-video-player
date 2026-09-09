@@ -400,7 +400,12 @@ The one defect found is in the keep-up forecast, not in neural rendering: see
 - One 30 s clip per resolution, one session each; no repeat runs, so run-to-run
   variance is unmeasured. The 1080p session was run once and passed once,
   against the 4080's two-of-two pre-fix failures.
-- The 4K30 keep-up gap was observed but not fixed, and no test covers it.
+- The 4K30 keep-up gap was observed during this run and not fixed in it. It
+  was fixed afterwards in `e16b1c4` (per-geometry pace samples in
+  `src/PlaybackTiming.h`), and
+  `live_render_forecast_predicts_from_this_gpu_measured_geometries_test` in
+  `tests/NeuralPrerenderTests.cpp` replays this machine's three measurements.
+  The 4K session itself was not re-run after the fix.
 - Only the neural path was exercised at these resolutions. Super Resolution,
   the range/offline render path, YouTube input, packaging
   (`package_release.ps1` / `verify_package.ps1`) and visual quality were not
