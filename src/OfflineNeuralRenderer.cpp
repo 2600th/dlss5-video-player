@@ -71,6 +71,14 @@ double NanosPerFrameMillis(uint64_t nanos, uint64_t frames)
     return double(nanos) / 1.0e6 / double(frames);
 }
 
+double Mean(const std::vector<double>& samples)
+{
+    if (samples.empty()) return 0.0;
+    double total = 0.0;
+    for (const double sample : samples) total += sample;
+    return total / double(samples.size());
+}
+
 enum class JobRead { FrameReady, EndOfStream, Error, Cancelled };
 
 struct JobFrame {
@@ -97,14 +105,31 @@ struct JobEvaluation {
 // the 33.3 ms live budget actually goes to, so the collection stays in and the
 // summary is logged once per attempt.
 struct StageSamples {
-    std::vector<double> read,guide,render,write,eval,frame;
-    // All six series advance together, which is what makes the per-frame
-    // residual (frame - read - eval - write) well defined.
+    // Per source frame. read/guide/eval are measured in the iteration that submitted the
+    // frame; render/write in the later iteration that drained its capture. Their sum is
+    // what one frame costs, but no single iteration ever pays all of it.
+    std::vector<double> read,guide,render,write,eval;
+    // Per source frame: reading it off the source through to handing its pixels to the
+    // encoder. That spans the whole pipeline, so it is roughly depth x loop time. It is a
+    // latency and must never be read as a rate.
+    std::vector<double> latency;
     void Push(double readMs, double guideMs, double renderMs, double evalMs, double writeMs,
-              double frameMs)
+              double latencyMs)
     {
         read.push_back(readMs);guide.push_back(guideMs);render.push_back(renderMs);
-        eval.push_back(evalMs);write.push_back(writeMs);frame.push_back(frameMs);
+        eval.push_back(evalMs);write.push_back(writeMs);latency.push_back(latencyMs);
+    }
+
+    // Per render-loop iteration, and the only series that answers how fast the export
+    // runs. These three advance together and are self-contained: `loop` is the
+    // iteration's wall time, `loopDrain` is what draining an older frame's capture cost
+    // inside it, and the residual is loop - read - eval - drain, which is genuinely
+    // unaccounted work rather than the pipeline latency the per-frame series carries.
+    std::vector<double> loop,loopDrain,loopResidual;
+    void PushLoop(double loopMs, double readMs, double evalMs, double drainMs)
+    {
+        loop.push_back(loopMs);loopDrain.push_back(drainMs);
+        loopResidual.push_back(loopMs - readMs - evalMs - drainMs);
     }
 };
 
@@ -150,8 +175,11 @@ void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
          << frames << " frames): total " << MillisPerFrame(accounted, frames)
          << " ms = source " << MillisPerFrame(stages.source, frames)
          << " + submit " << MillisPerFrame(stages.submit, frames)
-         << " + resolve " << MillisPerFrame(stages.resolve, frames)
+         << " + resolve wait " << MillisPerFrame(stages.resolve, frames)
          << " + encoder back pressure " << MillisPerFrame(stages.write, frames)
+         // The stage accumulators and the loop clock are independent measurements of the
+         // same rate. They should agree; a gap is work no stage is counting.
+         << " ms, measured loop " << Mean(attempt.stages.loop)
          << " ms." << detail;
     LOG(line.str());
 #else
@@ -192,14 +220,6 @@ double MillisecondsSince(SteadyClock::time_point start)
     return std::chrono::duration<double,std::milli>(SteadyClock::now()-start).count();
 }
 
-double Mean(const std::vector<double>& samples)
-{
-    if (samples.empty()) return 0.0;
-    double total = 0.0;
-    for (const double sample : samples) total += sample;
-    return total / double(samples.size());
-}
-
 double Quantile(std::vector<double> samples, double q)
 {
     if (samples.empty()) return 0.0;
@@ -208,11 +228,13 @@ double Quantile(std::vector<double> samples, double q)
     return samples[std::min(index, samples.size() - 1)];
 }
 
-// One line per stage, once per attempt: mean/p50/p95 plus the total the stage
-// cost over the whole attempt. `frame` is the wall time of a full loop
-// iteration. Captures are deliberately pipelined, so a frame's completion can
-// include work submitted for later source frames; this residual is latency in
-// that pipeline plus bookkeeping, not an independent throughput cost.
+// One line per stage, once per attempt: mean/p50/p95 plus the total the stage cost over
+// the whole attempt. The table is in two halves, and mixing them is the mistake it is
+// laid out to prevent. The per-frame rows say what a frame costs; `source frame latency`
+// is how long one frame takes to cross a deliberately pipelined renderer, so it grows
+// with pipeline depth and says nothing about throughput. The per-iteration rows below it
+// are the throughput: `render-loop throughput` is the wall time of one loop iteration,
+// and only its residual means work nothing else measured.
 void LogStageTable(const StageSamples& stages)
 {
     const auto row = [](const char* name, const std::vector<double>& samples) {
@@ -224,17 +246,15 @@ void LogStageTable(const StageSamples& stages)
     };
     row("read", stages.read);
     row("guide", stages.guide);
-    row("render+capture", stages.render);
+    // The readback copy runs on the resolve worker, so this is not the copy's cost: it is
+    // only the part of it that the decode, guide and submit it overlapped did not hide.
+    row("resolve wait(copy not hidden)", stages.render);
     row("submit(guide+render+gate)", stages.eval);
     row("write", stages.write);
-    row("frame latency", stages.frame);
-    std::vector<double> pipelineResidual;
-    pipelineResidual.reserve(stages.frame.size());
-    for (size_t index = 0; index < stages.frame.size(); ++index) {
-        pipelineResidual.push_back(stages.frame[index] - stages.read[index] -
-                                   stages.eval[index] - stages.write[index]);
-    }
-    row("pipeline residual", pipelineResidual);
+    row("source frame latency", stages.latency);
+    row("render-loop throughput", stages.loop);
+    row("loop drain(resolve+write)", stages.loopDrain);
+    row("loop unaccounted", stages.loopResidual);
 }
 
 NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVramMiB)
@@ -1000,6 +1020,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         std::deque<InFlightCapture> inFlight;
         uint64_t submitted = 0;
         evaluator.DiscardPending();
+        // What draining an older frame's capture cost inside the current iteration. The
+        // drain belongs to the iteration that runs it, not to the frame it drains, and
+        // keeping the two apart is what stops pipeline latency leaking into the
+        // throughput numbers. Reset at the top of every iteration.
+        double iterationDrainMs = 0.0;
 
         // Waits on the oldest in-flight capture only, then hands its pixels to the
         // segment writer or the encoder's feeder thread. The buffer is recycled from a
@@ -1123,6 +1148,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 }
             }
             const auto frameStart = SteadyClock::now();
+            iterationDrainMs = 0.0;
             JobFrame frame;
             JobRead read;
             {
@@ -1194,9 +1220,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 inFlight.push_back(std::move(queued));
                 ++submitted;
                 if (evaluator.Pending() >= evaluator.MaxPending()) {
+                    const auto drainStart = SteadyClock::now();
                     const NeuralRenderFailure failure = drainOldest();
+                    iterationDrainMs += MillisecondsSince(drainStart);
                     if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
                 }
+                attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs,
+                                        iterationDrainMs);
                 continue;
             }
             // The first captured frame stays synchronous: the receipt gate above needs
@@ -1229,6 +1259,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
             attempt.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
                                 MillisecondsSince(frameStart));
+            // Nothing is pipelined yet on this frame: it captured synchronously inside
+            // evalMs, so only the write is left to count as this iteration's drain.
+            attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs, writeMs);
             ++submitted;
         }
         while (!inFlight.empty()) {
@@ -1415,6 +1448,83 @@ NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
     return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
 }
 
+// Runs a capture's readback copy off the render loop.
+//
+// The copy is around 10 MiB of memcpy per frame and, taken inline, it was the largest
+// single item in the loop. It depends on nothing the loop does next, so it happens here
+// while the loop decodes, builds guides and submits the following frame. The readback slot
+// the view points into stays reserved by the renderer until Join returns, so the GPU
+// cannot land the next capture on top of the memory being copied.
+//
+// The worker thread is created on first use and lives for the job. Spawning one per frame
+// was never an option: Windows thread creation costs tens of microseconds, which is the
+// same reason the parallel passes share a pool rather than spawning.
+class DeferredCapture {
+public:
+    DeferredCapture()=default;
+    DeferredCapture(const DeferredCapture&)=delete;
+    DeferredCapture& operator=(const DeferredCapture&)=delete;
+    ~DeferredCapture(){Shutdown();}
+
+    // True while a posted copy has not been joined, and therefore while a readback slot
+    // is still spoken for.
+    bool Posted()const{std::scoped_lock lock(m_mutex);return m_posted;}
+
+    // Hands the copy to the worker. `scratch` is recycled as the destination buffer, so
+    // the full-frame allocation does not repeat every frame.
+    void Post(const D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>&& scratch){
+        if(!m_worker.joinable())m_worker=std::thread([this]{Loop();});
+        {
+            std::scoped_lock lock(m_mutex);
+            m_view=view;m_pixels=std::move(scratch);m_posted=true;m_busy=true;
+        }
+        m_wake.notify_one();
+    }
+
+    // Blocks until the posted copy has finished and moves its bytes into `pixels`.
+    // False when nothing was posted, which leaves `pixels` alone.
+    bool Join(std::vector<uint8_t>& pixels){
+        std::unique_lock lock(m_mutex);
+        if(!m_posted)return false;
+        m_idle.wait(lock,[this]{return !m_busy;});
+        pixels=std::move(m_pixels);m_pixels.clear();m_posted=false;
+        return true;
+    }
+
+    void Shutdown(){
+        if(!m_worker.joinable())return;
+        {std::scoped_lock lock(m_mutex);m_quit=true;}
+        m_wake.notify_one();
+        m_worker.join();
+    }
+
+private:
+    void Loop(){
+        for(;;){
+            std::unique_lock lock(m_mutex);
+            m_wake.wait(lock,[this]{return m_busy||m_quit;});
+            // A copy already posted is finished before quitting, so a Join racing the
+            // shutdown still gets its bytes rather than blocking forever.
+            if(!m_busy)return;
+            const D3D12Renderer::CaptureReadbackView view=m_view;
+            std::vector<uint8_t> pixels=std::move(m_pixels);
+            lock.unlock();
+            D3D12Renderer::CopyCaptureView(view,pixels);
+            lock.lock();
+            m_pixels=std::move(pixels);m_busy=false;
+            lock.unlock();
+            m_idle.notify_one();
+        }
+    }
+
+    mutable std::mutex m_mutex;
+    std::condition_variable m_wake,m_idle;
+    D3D12Renderer::CaptureReadbackView m_view{};
+    std::vector<uint8_t> m_pixels;
+    bool m_posted=false,m_busy=false,m_quit=false;
+    std::thread m_worker;
+};
+
 struct ProductionEvaluatorAdapter {
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
@@ -1424,9 +1534,17 @@ struct ProductionEvaluatorAdapter {
         width=w;height=h;fps=rate;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer||!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
-        guides.SetControls(controls);renderer->SetDLSS(true);return true;
+        // Nothing ever looks at this renderer's swapchain: the encoder is fed from the
+        // cache render target that EnqueueEvaluatedFrameCapture draws for itself.
+        guides.SetControls(controls);renderer->SetDLSS(true);renderer->SetHeadless(true);return true;
     }
     CapturedVideoFrame captureScratch;
+    // Declared after `renderer` so the worker is joined before the renderer, and with it
+    // the mapped readback memory a running copy is reading, goes away.
+    DeferredCapture deferred;
+    // Set when a readback slot could not be opened. The slot is gone by then, so every
+    // later capture would answer for the wrong frame; the drain has to stop instead.
+    bool resolveBroken=false;
     // Guide generation cost, split out of the submit stage for the stage log.
     // Shared by the synchronous and the pipelined submit paths, which differ
     // only in how the capture is read back.
@@ -1512,25 +1630,61 @@ struct ProductionEvaluatorAdapter {
     // On success every byte of pixels is overwritten, and the buffer is only resized
     // when it does not already hold exactly one frame, so handing back the previous
     // frame's buffer recycles it for this readback.
+    //
+    // The bytes are normally already there: the copy was posted at the end of the previous
+    // drain and ran while the loop decoded, guided and submitted a frame. What the caller
+    // times here is only the part of the copy that did not fit under that work. Before
+    // returning, the next oldest capture is posted so the same overlap covers the drain
+    // after this one, which is why the returned frame is still the oldest one: the posted
+    // copy and the deque the job drains advance together.
     bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
-        if(!renderer)return false;
-        captureScratch.pixels=std::move(pixels);
+        if(!renderer||resolveBroken)return false;
+        std::vector<uint8_t> spare=std::move(pixels);pixels.clear();
         const auto captureStart=SteadyClock::now();
-        const bool ok=renderer->ResolveOldestCapture(captureScratch);
+        bool ok;
+        if(deferred.Posted()){
+            ok=deferred.Join(pixels);
+            renderer->EndResolveOldestCapture();
+        }else{
+            // The job's first drain, and the tail flush once the ring has run dry: with
+            // nothing posted there is nothing to overlap, so this one is copied inline.
+            captureScratch.pixels=std::move(spare);spare.clear();
+            ok=renderer->ResolveOldestCapture(captureScratch);
+            pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+        }
         captureMs=MillisecondsSince(captureStart);
-        pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
-        return ok;
+        if(!ok)return false;
+        PostNextResolve(std::move(spare));
+        return true;
+    }
+    // Reserves the oldest remaining capture's readback slot and starts its copy on the
+    // worker. A slot that cannot be opened has already been retired by the renderer, which
+    // would slide every later frame's pixels one place against the job's deque, so the
+    // failure is latched and the next drain reports it instead.
+    void PostNextResolve(std::vector<uint8_t>&& scratch){
+        if(!renderer||!renderer->PendingCaptureCount())return;
+        D3D12Renderer::CaptureReadbackView view;
+        if(!renderer->BeginResolveOldestCapture(view)){
+            resolveBroken=true;
+            lastFailure=ClassifyRendererFailure(*renderer);
+            return;
+        }
+        deferred.Post(view,std::move(scratch));
     }
     void DiscardPending(){
         if(!renderer)return;
+        // The posted copy holds a slot, so it has to be joined before the ring can drain.
+        std::vector<uint8_t> dropped;
+        if(deferred.Join(dropped))renderer->EndResolveOldestCapture();
+        resolveBroken=false;
         while(renderer->PendingCaptureCount()){
             CapturedVideoFrame discarded;
             if(!renderer->ResolveOldestCapture(discarded))break;
         }
     }
-    // The cache render target is R8G8B8A8, so ffmpeg is told to consume RGBA and the
+    // The cache render target is B8G8R8A8, so ffmpeg is told to consume BGRA and the
     // per-pixel channel swizzle that used to run on every readback disappears.
-    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Rgba;}
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
     void ResetTemporal(){guides.Reset();DiscardPending();}
@@ -1545,9 +1699,16 @@ struct ProductionEvaluatorAdapter {
 // The cost is that an encoder error surfaces up to QueueCapacity frames late. The NVENC
 // to libx264 retry path already cancels and re-reads the source from frame zero, so it
 // still recovers; it just wastes a couple more frames before noticing.
+//
+// The queue absorbs the encoder's jitter, so its depth is a time budget, not a count. At
+// two frames it held ~13 ms and the render loop wore the difference: the write stage sat
+// at a p50 of 0.002 ms with a mean of 1.57, i.e. almost every frame handed over free
+// while a thin tail blocked for tens of milliseconds. Eight frames is ~50 ms at the rate
+// the loop actually runs. The memory is QueueCapacity plus the two buffers in
+// circulation, so it scales with frame size: ~106 MiB at 2578x1080, ~330 MiB at 4K.
 struct ProductionEncoderAdapter {
     RawVideoEncoder encoder;
-    static constexpr size_t QueueCapacity=2;
+    static constexpr size_t QueueCapacity=8;
 
     std::mutex mutex;
     std::condition_variable_any cv;

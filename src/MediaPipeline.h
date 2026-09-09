@@ -59,7 +59,7 @@ struct CachedExportRequest {
 inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
 
 // Layout of the raw frames fed to RawVideoEncoder::WriteFrame. The neural capture path
-// reads back an R8G8B8A8 render target, so letting ffmpeg consume RGBA directly removes
+// reads back a B8G8R8A8 render target, so letting ffmpeg consume BGRA directly removes
 // a full-frame channel swizzle on the CPU. Everything else still supplies BGRA.
 enum class EncoderPixelFormat { Bgra, Rgba };
 

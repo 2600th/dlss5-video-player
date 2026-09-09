@@ -65,6 +65,29 @@ public:
         return pool;
     }
 
+    // Run() keeps exactly one task slot, so two threads must never dispatch into the same
+    // pool at once. A caller that needs to fan out while another thread is already fanning
+    // out builds its own pool instead of sharing this one. Workers park on a semaphore, so
+    // an idle second pool costs nothing but its stacks.
+    explicit WorkerPool(size_t width = 0) { Construct(width ? width : DefaultWidth()); }
+
+    // Total parallelism a pool takes when its width is left unspecified. One core is left
+    // for the decoder queue thread and the ffmpeg child processes.
+    static size_t DefaultWidth()
+    {
+        const unsigned int hardware = std::max(1u, std::thread::hardware_concurrency());
+        return hardware > 1u ? size_t(hardware) - 1u : size_t(1);
+    }
+
+    ~WorkerPool()
+    {
+        stopping_.store(true, std::memory_order_release);
+        for (auto& worker : workers_) worker->go.release();
+        for (auto& worker : workers_) {
+            if (worker->thread.joinable()) worker->thread.join();
+        }
+    }
+
     WorkerPool(const WorkerPool&) = delete;
     WorkerPool& operator=(const WorkerPool&) = delete;
 
@@ -113,11 +136,8 @@ private:
         std::thread thread;
     };
 
-    WorkerPool()
+    void Construct(size_t width)
     {
-        const unsigned int hardware = std::max(1u, std::thread::hardware_concurrency());
-        // Leave one core for the decoder queue thread and the ffmpeg child processes.
-        const size_t width = hardware > 1u ? size_t(hardware) - 1u : size_t(1);
         workers_.reserve(width - 1u);
         for (size_t i = 0; i + 1u < width; ++i) {
             auto worker = std::make_unique<Worker>();
@@ -128,15 +148,6 @@ private:
                 break;  // Fewer workers than requested is fine; the caller still runs.
             }
             workers_.push_back(std::move(worker));
-        }
-    }
-
-    ~WorkerPool()
-    {
-        stopping_.store(true, std::memory_order_release);
-        for (auto& worker : workers_) worker->go.release();
-        for (auto& worker : workers_) {
-            if (worker->thread.joinable()) worker->thread.join();
         }
     }
 
@@ -180,17 +191,15 @@ private:
 #pragma warning(pop)
 #endif
 
-// Splits [0, count) into contiguous ranges and invokes body(begin, end) on each.
-//
-// minItemsPerRange keeps small workloads on the calling thread: the split only happens
-// when there is enough work for at least two ranges of that size. Contiguous ranges are
-// used rather than strided indices because every caller here streams memory.
+// Splits [0, count) into contiguous ranges and invokes body(begin, end) on each, fanning
+// out across the given pool. Pass a pool other than the default one only when this call
+// may overlap a dispatch made by another thread; see WorkerPool's constructor.
 template <class Body>
-void ParallelForRanges(size_t count, size_t minItemsPerRange, Body&& body)
+void ParallelForRangesIn(parallel_detail::WorkerPool& pool, size_t count,
+                         size_t minItemsPerRange, Body&& body)
 {
     if (count == 0) return;
 
-    auto& pool = parallel_detail::WorkerPool::Instance();
     size_t ranges = 1;
     if (minItemsPerRange > 0 && !parallel_detail::InPoolWorkerFlag())
         ranges = std::min<size_t>(pool.Width(), std::max<size_t>(1u, count / minItemsPerRange));
@@ -207,4 +216,14 @@ void ParallelForRanges(size_t count, size_t minItemsPerRange, Body&& body)
         body(begin, std::min(count, begin + perRange));
     };
     pool.Run(ranges, task);
+}
+
+// minItemsPerRange keeps small workloads on the calling thread: the split only happens
+// when there is enough work for at least two ranges of that size. Contiguous ranges are
+// used rather than strided indices because every caller here streams memory.
+template <class Body>
+void ParallelForRanges(size_t count, size_t minItemsPerRange, Body&& body)
+{
+    ParallelForRangesIn(parallel_detail::WorkerPool::Instance(), count, minItemsPerRange,
+                        std::forward<Body>(body));
 }

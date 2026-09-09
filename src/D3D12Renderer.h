@@ -9,6 +9,7 @@
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
 #include "FrameIdentity.h"
+#include "NgxSession.h"
 
 #ifdef D3D12_RENDERER_TESTING
 #include <functional>
@@ -27,8 +28,8 @@ D3D12RendererOwner MakeD3D12Renderer();
 struct GuideFrame;
 
 struct CapturedVideoFrame {
-    // Tightly packed 8-bit RGBA, matching the R8G8B8A8_UNORM cache render target. The
-    // encoder is configured with EncoderPixelFormat::Rgba so no channel swizzle is
+    // Tightly packed 8-bit BGRA, matching the B8G8R8A8_UNORM cache render target. The
+    // encoder is configured with EncoderPixelFormat::Bgra so no channel swizzle is
     // needed on the CPU. Named for the payload, not a channel order, because the test
     // hook may supply any layout.
     std::vector<uint8_t> pixels;
@@ -82,8 +83,20 @@ public:
                              CapturedVideoFrame& capture);
 
     // Number of readback slots, and therefore the number of captures that may be in
-    // flight before ResolveOldestCapture must be called.
-    static constexpr uint32_t CaptureSlots = 3;
+    // flight before ResolveOldestCapture must be called. One of them is normally spoken
+    // for by a copy still running on another thread (see BeginResolveOldestCapture), so
+    // the count is one above the GPU pipeline depth it supports.
+    static constexpr uint32_t CaptureSlots = 4;
+
+    // Where an enqueued capture's bytes are sitting, handed out so the copy out of them
+    // can run somewhere other than the render loop. Valid only between the
+    // BeginResolveOldestCapture that produced it and the matching End.
+    struct CaptureReadbackView {
+        const uint8_t* base = nullptr;   // first byte of row 0, footprint offset applied
+        size_t rowPitch = 0;             // may exceed width*4; rows are padded
+        size_t bytes = 0;                // tightly packed size the copy produces
+        uint32_t width = 0, height = 0;
+    };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
     // readback copy for the frame just rendered and signals a per-slot fence WITHOUT
@@ -98,6 +111,20 @@ public:
     // zero-fill both disappear. On failure the capture is cleared.
     bool ResolveOldestCapture(CapturedVideoFrame& capture);
 
+    // ResolveOldestCapture split in two, so the copy does not have to run on the thread
+    // that owns the renderer. Begin waits on the oldest slot's fence and describes its
+    // memory; the slot stays reserved, and PendingCaptureCount keeps counting it, until
+    // End retires it. Nothing may enqueue over a slot whose copy is still running, and
+    // holding one is exactly what the extra CaptureSlots entry pays for. Begin retires
+    // the slot itself when it fails, so a failure cannot wedge the ring; the caller must
+    // then not call End. Only CopyCaptureView is safe to run off the renderer's thread.
+    bool BeginResolveOldestCapture(CaptureReadbackView& view);
+    void EndResolveOldestCapture();
+    // Unpacks a view into tightly packed BGRA. Touches no renderer state, so it may run
+    // on any thread while the renderer keeps working, and it fans out on its own worker
+    // pool rather than the default one for that reason.
+    static void CopyCaptureView(const CaptureReadbackView& view, std::vector<uint8_t>& pixels);
+
     // Synchronous capture of the frame just rendered by RenderFrame. Valid only while
     // nothing is in flight. The offline job uses it for the first frame, whose evidence
     // receipt loop must read pixels back before deciding whether to resubmit.
@@ -109,10 +136,10 @@ public:
     //
     //  * FenceWaitNanos is time the CPU spent parked waiting for the GPU. A large share
     //    means the export is GPU bound and more CPU threads will not help.
-    //  * PresentNanos is time inside IDXGISwapChain::Present. The offline job renders to
-    //    a hidden window, but DXGI still queues presents and blocks once the frame
-    //    latency limit is reached, which caps the export at display rate no matter how
-    //    fast everything else runs.
+    //  * PresentNanos is time inside IDXGISwapChain::Present, where DXGI blocks once the
+    //    frame latency limit is reached. A headless export only presents the first
+    //    DelayedRecreateFrame frames, so past the start of a job this stops growing; a
+    //    total that keeps climbing means SetHeadless never took.
     uint64_t FenceWaitNanos() const { return m_fenceWaitNanos; }
     uint64_t RenderSlotWaitNanos() const { return m_renderSlotWaitNanos; }
     uint64_t CaptureSubmitSlotWaitNanos() const { return m_captureSubmitSlotWaitNanos; }
@@ -130,6 +157,18 @@ public:
         m_presentNanos = 0;
     }
 
+
+    // The offline export encodes the cache render target that EnqueueEvaluatedFrameCapture
+    // draws for itself, and its window is never shown, so the backbuffer pass RenderFrame
+    // records is thrown away: a full-resolution clear and draw of GPU work per frame, the
+    // CPU time inside Present, and the DXGI frame-latency stall that paces the export at
+    // display rate. Headless drops that pass. The early presents still go out, because the
+    // NGX feature is created and re-created against those frame counts and the swapchain
+    // hooks that watch for it need real presents to initialize.
+    void SetHeadless(bool headless) { m_headless = headless; }
+    bool PresentsThisFrame() const {
+        return !m_headless || m_framesPresented <= ngx_session_detail::DelayedRecreateFrame;
+    }
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -314,6 +353,7 @@ private:
     bool m_recreateRequested = false;
     bool m_delayedRecreateDone = false;
     bool m_preserveSource = false;
+    bool m_headless = false;
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};

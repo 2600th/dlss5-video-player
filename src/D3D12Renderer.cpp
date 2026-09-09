@@ -21,6 +21,27 @@ namespace {
 constexpr size_t kParallelCopyGrain = 2u * 1024u * 1024u;
 constexpr size_t kParallelRowGrain = 64u;
 
+// The readback copy runs on the offline export's resolve worker while the render loop is
+// still building the next frame's guides, and both fan out. A pool carries one task slot,
+// so sharing the default one would let the two dispatches overwrite each other. The
+// workers park on semaphores, so the second pool costs its stacks and nothing else.
+//
+// Its width is deliberately a fraction of the machine. The copy no longer has to finish
+// inside the loop, only before the next drain, so spare width buys nothing; meanwhile the
+// export's real competition for cores is the ffmpeg children, which both decode the source
+// in software and run the encoder. Taking every core for a copy that has a whole iteration
+// to finish in starves them, and their back pressure lands on the render loop anyway.
+// Whether that trade is real is visible in the stage table: the resolve wait row measures
+// the copy failing to keep up, and the write row measures the encoder failing to.
+constexpr size_t kCaptureCopyWidthDivisor = 4;
+
+parallel_detail::WorkerPool& CaptureCopyPool()
+{
+    static parallel_detail::WorkerPool pool(
+        std::max<size_t>(2u, parallel_detail::WorkerPool::DefaultWidth() / kCaptureCopyWidthDivisor));
+    return pool;
+}
+
 } // namespace
 
 static bool HR(HRESULT hr, const char* what) {
@@ -511,30 +532,38 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }
 
     m_lastDLSSUsed=used;
-    uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const bool finalView=(m_debugView==DebugView::Final);
-    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
-    // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
-    // debug/fallback presentation pass is temporarily made pixel-shader readable.
-    ID3D12Resource* debugPixelResource=nullptr;
-    D3D12_RESOURCE_STATES debugBefore=GuideReadState;
-    switch(m_debugView){
-        case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
-        case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-        case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
-        default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+    // Headless skips the whole backbuffer pass once the feature-lifetime presents are
+    // out. The offline capture redraws m_dlssOutput into m_cacheOutput on its own
+    // submission, so nothing downstream reads what this pass would have written.
+    const bool present=PresentsThisFrame();
+    if(present){
+        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const bool finalView=(m_debugView==DebugView::Final);
+        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
+        // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
+        // debug/fallback presentation pass is temporarily made pixel-shader readable.
+        ID3D12Resource* debugPixelResource=nullptr;
+        D3D12_RESOURCE_STATES debugBefore=GuideReadState;
+        switch(m_debugView){
+            case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
+            case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
+            case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
+            default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+        }
+        if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->DrawInstanced(3,1,0,0);
+        if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
+        Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     }
-    if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->DrawInstanced(3,1,0,0);
-    if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
-    Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    const auto presented=std::chrono::steady_clock::now();
-    HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
-    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now()-presented).count());
-    if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
+    if(present){
+        const auto presented=std::chrono::steady_clock::now();
+        HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+        m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now()-presented).count());
+        if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
+    }
     return SignalFrameSlot(slot);
 }
 
@@ -658,45 +687,61 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     return true;
 }
 
-bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
-    capture.width=0;capture.height=0;
-    if(!m_capturePending){capture.pixels.clear();return false;}
+bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
+    view=CaptureReadbackView{};
+    if(!m_capturePending)return false;
     const uint32_t readbackSlot=m_captureRead;
-    // Retire the slot whatever happens, so a failure cannot wedge the ring.
-    m_captureRead=(readbackSlot+1u)%CaptureSlots;
-    --m_capturePending;
-
     const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
     if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
-        capture.pixels.clear();return false;
+        EndResolveOldestCapture();return false;
     }
-    const size_t tightBytes=static_cast<size_t>(tightBytes64);
     if(!WaitForFenceValue(m_captureFence[readbackSlot], &m_captureResolveWaitNanos)){
-        capture.pixels.clear();return false;
+        EndResolveOldestCapture();return false;
     }
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
-    if(!base){capture.pixels.clear();return false;}
-    base+=m_cacheFootprint.Offset;
+    if(!base){EndResolveOldestCapture();return false;}
+    view.base=base+m_cacheFootprint.Offset;
+    view.rowPitch=size_t(m_cacheFootprint.Footprint.RowPitch);
+    view.bytes=static_cast<size_t>(tightBytes64);
+    view.width=m_outputW;view.height=m_outputH;
+    return true;
+}
 
+void D3D12Renderer::EndResolveOldestCapture(){
+    if(!m_capturePending)return;
+    m_captureRead=(m_captureRead+1u)%CaptureSlots;
+    --m_capturePending;
+}
+
+// static
+void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<uint8_t>&pixels){
     // Only resize when the caller handed back a differently sized buffer. Constructing a
     // fresh vector here value-initialised a whole frame, over 30 MB of pointless memset
     // per frame at 4K, immediately before overwriting every byte of it.
-    if(capture.pixels.size()!=tightBytes)capture.pixels.resize(tightBytes);
-    uint8_t*out=capture.pixels.data();
-    const size_t pitch=size_t(m_cacheFootprint.Footprint.RowPitch);
-    const size_t tightRow=size_t(m_outputW)*4u;
-    // No channel swizzle: the cache target is R8G8B8A8 and the encoder is started with
-    // EncoderPixelFormat::Rgba, so ffmpeg consumes this layout directly.
-    if(pitch==tightRow){
-        ParallelForRanges(tightBytes,kParallelCopyGrain,[&](size_t begin,size_t end){
-            memcpy(out+begin,base+begin,end-begin);
+    if(pixels.size()!=view.bytes)pixels.resize(view.bytes);
+    uint8_t*out=pixels.data();
+    const size_t tightRow=size_t(view.width)*4u;
+    auto&pool=CaptureCopyPool();
+    // No channel swizzle: the cache target is B8G8R8A8 and the encoder is started with
+    // EncoderPixelFormat::Bgra, so ffmpeg consumes this layout directly.
+    if(view.rowPitch==tightRow){
+        ParallelForRangesIn(pool,view.bytes,kParallelCopyGrain,[&](size_t begin,size_t end){
+            memcpy(out+begin,view.base+begin,end-begin);
         });
     }else{
-        ParallelForRanges(size_t(m_outputH),kParallelRowGrain,[&](size_t begin,size_t end){
-            for(size_t y=begin;y<end;++y)memcpy(out+tightRow*y,base+pitch*y,tightRow);
+        ParallelForRangesIn(pool,size_t(view.height),kParallelRowGrain,[&](size_t begin,size_t end){
+            for(size_t y=begin;y<end;++y)memcpy(out+tightRow*y,view.base+view.rowPitch*y,tightRow);
         });
     }
-    capture.width=m_outputW;capture.height=m_outputH;
+}
+
+bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
+    capture.width=0;capture.height=0;
+    CaptureReadbackView view;
+    if(!BeginResolveOldestCapture(view)){capture.pixels.clear();return false;}
+    CopyCaptureView(view,capture.pixels);
+    EndResolveOldestCapture();
+    capture.width=view.width;capture.height=view.height;
     return true;
 }
 
