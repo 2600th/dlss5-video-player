@@ -54,12 +54,16 @@ private:
     static float Luma(const uint8_t* p);
     void DownsampleLuma(const uint8_t* bgra, uint32_t w, uint32_t h,
                         uint32_t gw, uint32_t gh, std::vector<float>& out) const;
+    // Confidence is per grid cell in [0,1]: 0 means the cell was rejected and carries no
+    // motion, higher values mean the winning displacement both beat standing still by a
+    // margin and was a distinct minimum of the SAD landscape.
     void EstimateFlow(const std::vector<float>& cur, const std::vector<float>& prev,
                       uint32_t gw, uint32_t gh,
                       std::vector<float>& flowX, std::vector<float>& flowY,
-                      std::vector<float>& mismatch,
+                      std::vector<float>& mismatch, std::vector<float>& confidence,
                       float& globalX, float& globalY, float& globalCost) const;
     void MedianFlow(std::vector<float>& x, std::vector<float>& y,
+                    const std::vector<float>& confidence,
                     uint32_t gw, uint32_t gh) const;
     void BuildDepthProxy(const std::vector<float>& luma,
                          const std::vector<float>& flowX, const std::vector<float>& flowY,

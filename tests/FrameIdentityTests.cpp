@@ -218,6 +218,99 @@ void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
     CHECK_EQ(0.5f, TemporalGuideGenerator::LumaHistogramIntersection(dark, mixed));
 }
 
+
+// Aliasing trap. The analysis grid is 128x72 at this size, i.e. 10 source pixels per cell, so
+// vertical stripes with a 20 px period repeat exactly every two cells: a 20 px displacement
+// explains the static half of the frame exactly as well as standing still does. The other half
+// carries non-repeating value noise that really moves, which pulls the whole-frame estimate off
+// zero - and once the local search window is centred away from zero, the periodic half offers a
+// perfect match that corresponds to no motion at all.
+constexpr uint32_t kAliasW = 1280, kAliasH = 720;
+constexpr uint32_t kAliasCell = 10;      // kAliasW / analysis grid width
+constexpr uint32_t kAliasSplit = 768;    // left of this the content moves, right of it it does not
+constexpr int kAliasShift = 30;          // three cells, resolved decisively by the noise half
+
+double AliasHash(int x, int y)
+{
+    uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return double(h >> 8) / double(1u << 24);
+}
+
+// Smoothed value noise: structure at the analysis-cell scale with no repetition, so the moving
+// half has exactly one correct correspondence.
+double AliasNoise(double x, double y)
+{
+    constexpr double spacing = 24.0;
+    const double gx = x / spacing, gy = y / spacing;
+    const int x0 = int(std::floor(gx)), y0 = int(std::floor(gy));
+    const double tx = gx - double(x0), ty = gy - double(y0);
+    const double sx = tx * tx * (3.0 - 2.0 * tx), sy = ty * ty * (3.0 - 2.0 * ty);
+    const double top = AliasHash(x0, y0) * (1.0 - sx) + AliasHash(x0 + 1, y0) * sx;
+    const double bottom = AliasHash(x0, y0 + 1) * (1.0 - sx) + AliasHash(x0 + 1, y0 + 1) * sx;
+    return top * (1.0 - sy) + bottom * sy;
+}
+
+std::vector<uint8_t> AliasFrame(int shiftX)
+{
+    std::vector<uint8_t> bgra(size_t(kAliasW) * kAliasH * 4u);
+    for (uint32_t y = 0; y < kAliasH; ++y) {
+        for (uint32_t x = 0; x < kAliasW; ++x) {
+            const double v = x < kAliasSplit
+                ? 0.2 + 0.6 * AliasNoise(double(int(x) - shiftX), double(y))
+                : 0.5 + 0.18 * std::sin(double(x) * (6.283185307 / 20.0));
+            const uint8_t luma = uint8_t(std::clamp(v, 0.0, 1.0) * 255.0);
+            uint8_t* p = bgra.data() + (size_t(y) * kAliasW + x) * 4u;
+            p[0] = luma; p[1] = luma; p[2] = luma; p[3] = 255;
+        }
+    }
+    return bgra;
+}
+
+void flow_rejects_aliased_vectors_on_static_repetitive_content_test()
+{
+    TemporalGuideGenerator guides;
+    GuideFrame first, second;
+    const auto a = AliasFrame(0);
+    const auto b = AliasFrame(kAliasShift);
+    CHECK(guides.Generate(a.data(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(0), first));
+    CHECK(guides.Generate(b.data(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(1), second));
+    CHECK(second.hasHistory);
+    // The premise of the trap: the whole-frame estimate lands off zero (measured -20 px, a
+    // compromise between the two halves), so zero motion is no longer the cheapest candidate
+    // of the static half's search window - it carries the window's distance penalty.
+    CHECK(std::abs(second.globalMotionX) >= float(kAliasCell));
+
+    const uint32_t splitCell = kAliasSplit / kAliasCell;
+    size_t movingCells = 0, movingCorrect = 0, staticCells = 0, staticMoved = 0;
+    float worstStatic = 0.0f;
+    for (uint32_t y = 2; y + 2 < second.gridH; ++y) {
+        for (uint32_t x = 2; x + 2 < second.gridW; ++x) {
+            const size_t o = (size_t(y) * second.gridW + x) * 4u;
+            const float vx = second.guideGridRGBA32F[o + 0], vy = second.guideGridRGBA32F[o + 1];
+            if (x + 2 < splitCell) {
+                ++movingCells;
+                // Guide vectors point current -> previous, so content that moved +30 px reads -30.
+                if (std::abs(vx + float(kAliasShift)) <= 4.0f && std::abs(vy) <= 4.0f) ++movingCorrect;
+            } else if (x > splitCell + 2) {
+                ++staticCells;
+                const float magnitude = std::abs(vx) + std::abs(vy);
+                worstStatic = std::max(worstStatic, magnitude);
+                if (magnitude > 1.0f) ++staticMoved;
+            }
+        }
+    }
+    CHECK(movingCells > 1000 && staticCells > 500);
+    // Real motion still has to survive: the noise half moved and must report it.
+    CHECK(movingCorrect * 10 >= movingCells * 9);
+    // The static half must report no motion at all. The pre-confidence estimator emitted the
+    // aliased 20 px match in 3128 of these 3196 cells, because it only rejected vectors whose
+    // absolute residual was high and a perfect periodic match has none.
+    if (staticMoved) std::cerr << "static cells with motion: " << staticMoved << '/' << staticCells
+                               << " worst=" << worstStatic << " px\n";
+    CHECK_EQ(size_t{0}, staticMoved);
+}
+
 // Synchronized playback fakes stamp decoder-style identities on a 25 fps
 // timeline so range offsets are exact.
 constexpr double kSyncFps = 25.0;
@@ -445,6 +538,7 @@ int main()
     guide_controls_neutralize_disabled_guides_test();
     guide_generator_reports_reset_reasons_test();
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();
+    flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
     synchronized_range_ends_on_a_rebased_original_timestamp_test();
