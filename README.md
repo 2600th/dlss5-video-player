@@ -1,141 +1,157 @@
 # DLSS 5 Video Player
 
-Process a photo, GIF or video, replay its cached neural result, and compare it with the
-original at the same timestamp. A native Windows player for local media and
-public YouTube videos, with optional DLSS Super Resolution during playback.
+Run a video, photo or GIF through NVIDIA's DLSS 5 neural renderer, then look at
+the result next to the original on the same frame. Windows only. Needs an RTX
+card.
 
-[Get started](#get-started) · [Usage guide](docs/USAGE.md) · [Build from source](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 [![Watch the 30-second DLSS 5 Video Player demonstration](docs/media/neural-comparison-poster.jpg)](docs/media/neural-comparison-demo.mp4)
 
-**[Watch the 30-second demo](docs/media/neural-comparison-demo.mp4)** — actual player
-footage from The Witcher IV. Compare the same paused frame with Neural Rendering
-Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
-intentionally silent.
-[Capture details and edit source](docs/media/README.md).
-
-**v0.17.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.0)
-with a pipelined neural export (2.3x the render rate, bit-identical output),
-parallel guide generation, neural rendering on every RTX generation and a
-keep-up forecast measured per GPU and source size. See the [changelog](CHANGELOG.md).
+**[30-second demo](docs/media/neural-comparison-demo.mp4)** from The Witcher IV. A paused
+frame with neural rendering off, then on, then playback with it left on. 1080p
+H.264, no sound. [How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
-> This is an experimental community project, not an official NVIDIA DLSS 5
-> integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.17.0 used an RTX 4080 SUPER; v0.16.0
-> also used an RTX 5090. Both ran the universal runtime; Turing and Ampere are
-> enabled but unverified.
-> See [runtime details and notices](THIRD_PARTY.md).
+> This is a community project, not an NVIDIA product. The neural runtime is a
+> modified, unsigned community build. v0.17.0 was checked on an RTX 4080 SUPER;
+> v0.16.0 also on an RTX 5090. RTX 20 and 30 are enabled but nobody has run
+> them yet. Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
-## Why use it?
+## Download
 
-- **Compare the same moment.** Switch between original and cached neural video
-  without changing the playback timestamp.
-- **Replay recent videos.** The last five distinct videos persist across
-  launches. Acquired YouTube sources and neural renders are reused after validation.
-- **Keep experiments consistent.** Neural settings are saved with each render
-  and included in its cache identity. With playback paused, a settings change
-  re-renders that frame so the choice is made on the picture itself.
-- **Take the result with you.** Export processed photos as PNG/JPEG, animations
-  as GIF, or videos as MP4/MKV. MKV preserves available source audio, compatible
-  subtitles and chapters without re-encoding.
-- **Keep playback clear.** Fullscreen hides the menu and controls until the
-  mouse moves. Writable portable installs keep their cache beside the EXE.
-- **Choose playback upscaling separately.** Apply optional DLSS Super Resolution
-  to either view at 1440p or 2160p. The neural cache retains source resolution.
-- **Start with a game trailer.** Six official trailers featuring human characters,
-  each under three minutes, are available under **File > Game trailers**.
+**v0.17.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.0)
 
-## Get started
+| Package | What is in it | Size |
+| --- | --- | --- |
+| `dlss5-video-player-v0.17.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 323 MB |
+| `DLSSVideoPlayer-v0.17.0-core-win64.zip` | Player only, no neural runtime. | 33 MB |
 
-1. Use Windows x64 with an NVIDIA RTX GPU (GeForce RTX 20 through 50, or an
-   RTX-branded workstation/laptop part) and a suitable NVIDIA driver. The
-   experimental neural layout requires the separately supplied runtime
-   described in [setup](docs/DLSS5_SETUP.md).
-2. [Build the current source](docs/BUILDING.md), or download the
-   [v0.16.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.16.0)
-   if you have repository access. GitHub's source ZIP is not a runnable package.
-3. Extract a packaged build into a **new folder** and keep all helpers and
-   `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.
-4. Open a local file (`Ctrl+O`), paste a public YouTube URL (`Ctrl+L`), or choose
-   **File > Game trailers**.
-5. Press `D` to turn neural rendering on from the playhead: the picture waits a
-   few seconds for its buffer, then plays rendered. Use **Video > Compare** for
-   blend, split or wipe; enable **DLSS Upscaling** separately if desired.
-6. Reopen through **File > Recent videos**, or use **DLSS > Convert & save** to
-   convert a clip or the whole video and write it to a file.
+SHA-256 for both is on the release page. GitHub's "Source code" zip does not
+run; it has no runtime in it.
 
-The publishable core package has fewer capabilities than the complete experimental
-layout. Build inputs and package contents are explained in [Building](docs/BUILDING.md).
+## First run
 
-## Everyday controls
+1. Unzip into a **new, empty folder**. Keep `neural-runtime/` next to the exe.
+2. Run `DLSSVideoPlayer.exe`.
+3. Open a file (`Ctrl+O`), paste a public YouTube link (`Ctrl+L`), or pick
+   something from **File > Game trailers**.
+4. Press `D`. It buffers for a few seconds, then plays rendered.
+5. **Video > Compare** shows before and after as a split, a wipe or a blend.
+6. **DLSS > Convert & save** writes the rendered video to a file.
 
-| Action | Control |
+Next time, **File > Recent videos** reopens it with the render already done.
+
+## What it does
+
+- Renders while you watch. Press `D` at any point and playback continues on the
+  rendered frames a few seconds later. Turn it off and on again and it picks up
+  where it stopped instead of starting over.
+- Keeps the original and the render in step. Switching views does not move the
+  playhead, and you can pause and step frames on either.
+- Remembers the last five videos and their renders. A render is reused only if
+  the source, the runtime and the neural settings all still match.
+- Exports what you rendered. PNG or JPEG for photos, GIF for animations, MP4 or
+  MKV for video. MKV keeps the source audio, subtitles and chapters without
+  re-encoding them.
+- Optional DLSS Super Resolution on top, 1440p or 2160p, for either view. The
+  render itself stays at source resolution.
+- Neural settings live at `Ctrl+N`. Change one while paused and that frame is
+  re-rendered so you can judge on the picture. Settings are saved with each
+  render and are part of its cache identity.
+- Six official game trailers under **File > Game trailers**, each under three
+  minutes, for a quick first test.
+
+## What changed
+
+The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.17.0** (2026-09-10). The export got 2.3x faster and the pixels did not change.
+1080p30 on an RTX 4080 SUPER: 48.6 to 110.7 frames per second, and the output
+is bit for bit the same as 0.16.0. Guide generation went from 4.6 ms to 1.5 ms
+per frame. Most of this came from ctype-lab's PR #5; the parts that broke
+things were fixed or left out.
+
+**0.16.0** (2026-09-09). Runs on every RTX generation, 20 through 50, by
+switching to the universal 310.8.SF-v2 runtime. Fixed a wedge on the RTX 4080
+that killed every 1080p live session two seconds after preroll. The keep-up
+forecast now uses your GPU's own measured speed at each source size and warns
+before a session it expects to fall behind. `build_windows.bat` fetches the
+runtime by itself.
+
+**0.15.0** (2026-09-09). Press `D` while watching instead of rendering the whole
+file first. Toggling off and on resumes rather than re-rendering. 4K30 keeps up
+on an RTX 5090 (it ran at 0.23x real time before). Two neural controls that the
+model provably ignores were removed from the dialog.
+
+**0.14.0** (2026-09-03). Photos and GIFs, with PNG, JPEG, GIF, MP4 and MKV
+export. Six game trailers replaced the old example list. Fullscreen hides the
+controls until the mouse moves.
+
+**0.13.0** (2026-09-03). Recent-five history with cache reuse. Stream-copy MKV
+export with audio, subtitles and chapters. Runtime DLSS upscaling, off by
+default. The neural renderer moved into its own helper process.
+
+**0.12.0** (2026-09-01). Public YouTube playback. Separate Neural Rendering,
+DLSS Upscaling and Frame Generation controls. The RenoDX neural path, with
+pinned runtime hashes and a safe-mode escape hatch.
+
+## Controls
+
+| What | Key |
 | --- | --- |
-| Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
+| Open a file / a YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
-| Compare original and neural views | **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
-| Seek / step a paused cached frame | Timeline, or `Left` / `Right` for ten seconds; `.` to step one frame |
-| Mark In / Out, exact timecode | `I` / `O`, `Shift+I` to clear; `Ctrl+G` |
-| Turn neural rendering on while watching | `D` or the Neural Rendering button; it renders from the playhead and buffers |
-| Convert part or all of a video to a file | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked clip, **DLSS > Convert & save** |
-| Neural model and guide settings | `Ctrl+N` |
-| Volume / mute | Volume control or mouse wheel; `M` to mute |
-| Fit or fill / fullscreen | `A` / `F11` |
+| Neural rendering on or off | `D` |
+| Compare views | **Video > Compare**; `[` and `]` move the wipe, `Z` zooms |
+| Seek ten seconds / step one frame | `Left` / `Right`; `.` |
+| Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
+| Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
+| Neural settings | `Ctrl+N` |
 | Image adjustments | `Ctrl+E` |
-| Stop playback | `S` |
-| Debug views (final, DLSS input, motion vectors, depth) | `1` / `2` / `3` / `4`, or **Video** |
+| Volume, mute | Mouse wheel; `M` |
+| Fit or fill; fullscreen | `A`; `F11` |
+| Stop | `S` |
+| Debug views (final, DLSS input, motion, depth) | `1` `2` `3` `4` |
 | Re-hook the runtime | `F6` |
-| Replay / save | **File > Recent videos** / **DLSS > Convert & save** |
 
-Volume, mute, fit/fill, comparison view and mode, upscaling preference/output,
-YouTube quality, image adjustments, neural settings and guide switches are saved
-across launches.
+Everything you set is kept between launches: volume, view, upscaling, YouTube
+quality, image adjustments, neural settings and guide switches.
 
-| Setting | Fresh-install default |
-| --- | --- |
-| Neural Rendering | On; prepare or reuse a validated cache |
-| DLSS Upscaling | Off; 1440p output selected, with 2160p available |
-| YouTube source quality | Auto: prefer exact 1080p, otherwise highest available up to 4K |
-| Frame Generation | Unavailable; no backend is implemented |
+Defaults on a fresh install: neural rendering on, DLSS upscaling off (1440p
+selected when you turn it on), YouTube quality Auto (exact 1080p if it exists,
+otherwise the best available up to 4K). Frame Generation has no backend and
+stays unavailable.
 
-Manual YouTube choices are 1080p, 1440p and 2160p. Each selects the highest
-advertised video bitrate at that resolution, across available codecs and containers.
-Source quality and playback upscaling are separate.
-See [cache, settings and export details](docs/USAGE.md).
-
-See the [trailer list and runtimes](docs/EXAMPLE_VIDEOS.md) for the released and
-upcoming AAA games in **File > Game trailers**.
+More on the cache, settings and export in [USAGE.md](docs/USAGE.md). The
+trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 
 ## Screenshots
 
-Actual Windows captures of the v0.13.0 feature implementation on an RTX 5090.
-Images show interface states, not image-quality benchmarks. Open an image to
-inspect it at full size.
-
-### Recent videos and export
+Real captures on an RTX 5090, v0.13.0 interface. They show the UI, not image
+quality; click through for full size.
 
 ![File menu with Recent videos and the cached-video export command](docs/screenshots/current/recent-videos.jpg)
 
 <details>
-<summary>Matched original and neural face views</summary>
+<summary>Same frame, original and neural</summary>
 
 ![Cached neural view of Ciri in The Witcher IV daylight village sequence](docs/screenshots/current/neural-playback.jpg)
 
 ![Original video at the same paused timestamp as the neural view](docs/screenshots/current/original-comparison.jpg)
 
-Runtime upscaling is off in both comparison captures. These document a synchronized
-toggle, not a claim that every source gains visible detail.
+Upscaling is off in both. This shows the synchronized toggle, not a claim that
+every source gains detail.
 
-[Inspect the unscaled same-frame face crops](docs/screenshots/current/face-comparison.png).
+[Unscaled face crops from the same frame](docs/screenshots/current/face-comparison.png).
 
 </details>
 
-### Faces from three more trailers
+<details>
+<summary>Faces from three more trailers</summary>
 
-Same source pixels either side, no scaling or retouching, neural settings at
-their defaults. The right half of each figure is a real render from the shipping
-worker, not a mock-up.
+Same source pixels on both sides, no scaling or retouching, default settings.
+The right half of each is a real render from the shipping worker.
 
 ![Hellblade II close-up, original beside the neural render](docs/screenshots/current/face-hellblade.png)
 
@@ -143,9 +159,10 @@ worker, not a mock-up.
 
 ![Mafia The Old Country close-up, original beside the neural render](docs/screenshots/current/face-mafia.png)
 
-The differences are subtle and content-dependent: skin shading and fine texture
-move, silhouettes and framing do not. Judge a source on its own preview rather
-than on these.
+The change is subtle and depends on the source. Skin shading and fine texture
+move; silhouettes and framing do not. Judge your own footage on its own preview.
+
+</details>
 
 <details>
 <summary>Start screen</summary>
@@ -156,51 +173,44 @@ than on these.
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 
-## Limits to know
+## Limits
 
-- Neural rendering runs either as a cached render you play beside the original,
-  or behind live playback from the playhead. Measured 1080p30 cost: 11.9
-  ms/frame on an RTX 5090 (v0.16.0), 10.3 on an RTX 4080 SUPER. Whether 4K30 keeps up
-  depends on the source: the 5090 measured 1.165x real time on one 4K30 file
-  and 0.78x on a 6.3 Mbit/s re-encode. The player measures its own GPU at each
-  source size after the first session, warns with the predicted rate before a
-  session it expects to fall behind, and buffers when a running one does.
-- Motion and depth guides are estimated from video. Artifacts are possible.
-  Turing (RTX 20) and Ampere (RTX 30) run the universal runtime without native
-  FP8 and are several times slower; they have not been hardware-verified in
-  this project.
-- Export copies the cached 8-bit video. Playback adjustments and runtime upscaling
-  are not baked in; export does not restore HDR or lost source precision.
-- Compatible source subtitles remain separate in export. In-player subtitle
-  display, burn-in, queues, HDR processing and durable render resume are not included.
-- YouTube supports public, non-DRM videos without login. Availability and regional
-  access can change. Local playback remains available.
-- Recent history is limited to five videos, not a disk-size quota. Large videos
-  can consume substantial space; use **Advanced > Clear Neural Cache** when needed.
+- Speed. 1080p30 costs about 10.3 ms per frame on an RTX 4080 SUPER and 11.9 on
+  an RTX 5090. 4K30 depends on the file: the 5090 ran one at 1.165x real time
+  and a heavy re-encode at 0.78x. The player measures your GPU after the first
+  session and warns before one it expects to fall behind.
+- RTX 20 and 30 run the universal runtime without native FP8. Expect them to be
+  several times slower. Nobody has verified them in this project yet.
+- Motion and depth guides are estimated from the video. Artifacts happen.
+- Export copies the cached 8-bit render. Image adjustments and upscaling are not
+  baked in, and HDR or lost source precision is not restored.
+- Subtitles stay as separate tracks. No in-player subtitle display, no burn-in,
+  no queue, no HDR, no resume of an interrupted render across restarts.
+- YouTube: public, non-DRM videos only, no login. Availability can change.
+- History is five videos, not a size quota. Big videos take space.
+  **Advanced > Clear Neural Cache** frees it.
 
-## Development and help
+## Building and contributing
 
-The stack is C++20, Win32, Direct3D 12, FFmpeg and NVIDIA NGX. An isolated helper
-hosts the experimental neural runtime; playback upscaling runs in the player.
+C++20, Win32, Direct3D 12, FFmpeg, NVIDIA NGX. The neural runtime runs in a
+separate helper process; playback upscaling runs in the player.
 
 - [Build and test](docs/BUILDING.md)
-- [Architecture](docs/ARCHITECTURE.md) and [technical overview](TECHNICAL_OVERVIEW.md)
+- [Architecture](docs/ARCHITECTURE.md), [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- [Verification results](docs/VERIFICATION-2026-09-02.md), the [RTX 4080 SUPER record](docs/VERIFICATION-2026-09-09-RTX4080.md) and the [RTX 5090 record](docs/VERIFICATION-2026-09-09-RTX5090.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md) and [report an issue](https://github.com/2600th/dlss5-video-player/issues)
-- [Example video sources](docs/EXAMPLE_VIDEOS.md)
+- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md), [issues](https://github.com/2600th/dlss5-video-player/issues)
 
-For a bug report, include the build/revision, GPU, driver, source dimensions and
-frame rate, reproduction steps and relevant log excerpts. Remove private paths
-and signed media URLs before sharing logs. Changes should preserve the source
-resolution and neural-validation contracts; run CTest and relevant hardware
-smoke checks before proposing a renderer change.
+Bug report: build or commit, GPU, driver, source size and frame rate, steps,
+log excerpts. Strip private paths and signed media URLs from logs first.
 
-## Acknowledgments
+Pull request: run `ctest` green on a clean checkout of `main` before opening
+it. Renderer changes also need the GPU smoke test. Keep the source-resolution
+and neural-validation contracts intact.
 
-Built upon [DLSS 5 Video Player by Jessica Natalia Mods](https://gitlab.com/JessicaNataliaMods/dlss-5-video-player/).
-Credit to the original project and its contributors for the foundation this
-project builds on.
+## Credits and license
 
-Project source is [MIT-licensed](LICENSE). Third-party binaries, game footage and
-trademarks retain their own terms; see [third-party notices](THIRD_PARTY.md).
+Started from [DLSS 5 Video Player by Jessica Natalia Mods](https://gitlab.com/JessicaNataliaMods/dlss-5-video-player/).
+
+Project source is [MIT](LICENSE). Third-party binaries, game footage and
+trademarks keep their own terms; see [THIRD_PARTY.md](THIRD_PARTY.md).
