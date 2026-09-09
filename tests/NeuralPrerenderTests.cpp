@@ -1971,24 +1971,30 @@ void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
     CHECK_EQ(1.0,live_session::RealtimeRatio(20.0,20.0));
 }
 
-// Cost is linear in pixel count, so whether a session can follow playback is
-// decided before a frame is rendered. Anchored on measured rates: 35.3 ms per
-// 1080p frame, 65.5 at 1440p, 142.3 at 2160p.
+// Cost per frame is a fixed part plus a part proportional to pixel count, so
+// whether a session can follow playback is decided before a frame is rendered.
+// Anchored on measured rates: 12.50 ms per 1080p frame, 16.60 at 1440p,
+// 28.07 at 2160p.
 void live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test()
 {
     const auto hd=playback_timing::ForecastLiveRender(1920,1080,30.0);
-    CHECK(hd.msPerFrame>34.0&&hd.msPerFrame<36.5);
-    CHECK(hd.renderFps>27.0&&hd.renderFps<30.0);
-    CHECK(!hd.keepsUp);                                            // 28 rendered against 30 wanted
-    const auto hd24=playback_timing::ForecastLiveRender(1920,1080,24.0);
-    CHECK(hd24.keepsUp);
+    CHECK(hd.msPerFrame>12.2&&hd.msPerFrame<12.9);
+    CHECK(hd.renderFps>77.0&&hd.renderFps<82.0);
+    CHECK(hd.keepsUp);
+    const auto qhd=playback_timing::ForecastLiveRender(2560,1440,30.0);
+    CHECK(qhd.msPerFrame>16.2&&qhd.msPerFrame<17.0);
+    CHECK(qhd.keepsUp);
     const auto uhd=playback_timing::ForecastLiveRender(3840,2160,30.0);
-    CHECK(uhd.msPerFrame>138.0&&uhd.msPerFrame<148.0);
-    CHECK(!uhd.keepsUp);
-    CHECK(uhd.realtimeRatio>0.20&&uhd.realtimeRatio<0.26);
-    // A 720p source has room to spare even at 60 fps.
+    CHECK(uhd.msPerFrame>27.6&&uhd.msPerFrame<28.6);
+    CHECK(uhd.keepsUp);                                            // 35 rendered against 30 wanted
+    CHECK(uhd.realtimeRatio>1.15&&uhd.realtimeRatio<1.25);
+    // 4K60 is where it runs out: half the budget for twice the frames.
+    const auto uhd60=playback_timing::ForecastLiveRender(3840,2160,60.0);
+    CHECK(!uhd60.keepsUp);
+    CHECK(uhd60.realtimeRatio>0.55&&uhd60.realtimeRatio<0.62);
+    // 8K30 is far out of reach, and 1440p60 lands on the line.
+    CHECK(!playback_timing::ForecastLiveRender(7680,4320,30.0).keepsUp);
     CHECK(playback_timing::ForecastLiveRender(1280,720,60.0).keepsUp);
-    CHECK(!playback_timing::ForecastLiveRender(2560,1440,30.0).keepsUp);
     // Unknown geometry or frame rate must never block the user on a guess.
     CHECK(playback_timing::ForecastLiveRender(0,0,30.0).keepsUp);
     CHECK(playback_timing::ForecastLiveRender(1920,1080,0.0).keepsUp);

@@ -27,13 +27,20 @@ inline double LateFrameThreshold(double frameDuration)
     return std::max(0.0, frameDuration) * 1.5;
 }
 
-// Rendering cost is linear in pixel count. Measured on the reference GPU
-// (RTX 5090, driver 616.64) by timing segment arrivals, which excludes job
-// startup: 35.3 ms/frame at 1920x1080, 65.5 at 2560x1440, 142.3 at 3840x2160,
-// i.e. 17.1, 17.8 and 17.2 ms per megapixel. A session can only follow live
-// playback while that per-frame cost fits inside one frame interval, so a 4K30
-// source renders at about 0.2x realtime and would spend its life buffering.
-inline constexpr double kNeuralMillisecondsPerMegapixel = 17.2;
+// Rendering cost per frame is a fixed part plus a part proportional to pixel
+// count. Measured on the reference GPU (RTX 5090, driver 616.64) by timing
+// segment arrivals, which excludes job startup: 12.50 ms/frame at 1920x1080,
+// 16.60 at 2560x1440 and 28.07 at 3840x2160. A least-squares fit of those three
+// points is 7.35 ms + 2.50 ms per megapixel and reproduces them to within
+// 0.06 ms. The fixed part is the guide pass, the DLSS evaluate and the capture's
+// fence wait; the proportional part is the readback and the pixel work.
+//
+// A session can only follow live playback while that cost fits inside one frame
+// interval. At these rates 4K30 keeps up with about 19% to spare and 4K60 does
+// not, which is a very different conclusion from the same measurement before the
+// decoder stopped answering every 4 MiB chunk with a sleep.
+inline constexpr double kNeuralFrameFixedMs = 7.35;
+inline constexpr double kNeuralMillisecondsPerMegapixel = 2.50;
 
 struct LiveRenderForecast {
     double msPerFrame;      // predicted render cost of one frame
@@ -44,7 +51,8 @@ struct LiveRenderForecast {
 };
 
 inline LiveRenderForecast ForecastLiveRender(uint32_t width, uint32_t height, double sourceFps,
-                                             double msPerMegapixel = kNeuralMillisecondsPerMegapixel)
+                                             double msPerMegapixel = kNeuralMillisecondsPerMegapixel,
+                                             double fixedMs = kNeuralFrameFixedMs)
 {
     LiveRenderForecast forecast{};
     forecast.sourceFps = sourceFps;
@@ -54,7 +62,7 @@ inline LiveRenderForecast ForecastLiveRender(uint32_t width, uint32_t height, do
         forecast.keepsUp = true;
         return forecast;
     }
-    forecast.msPerFrame = megapixels * msPerMegapixel;
+    forecast.msPerFrame = fixedMs + megapixels * msPerMegapixel;
     forecast.renderFps = 1000.0 / forecast.msPerFrame;
     forecast.realtimeRatio = forecast.renderFps / sourceFps;
     // A couple of percent either way is inside run-to-run noise; only warn when
