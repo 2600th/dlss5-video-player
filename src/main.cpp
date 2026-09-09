@@ -1203,6 +1203,45 @@ private:
         m_comparison.amount=std::clamp(ReadIniFloat(L"Comparison",L"Amount",0.5f),0.0f,1.0f);
         m_comparison.splitX=std::clamp(ReadIniFloat(L"Comparison",L"SplitX",0.5f),0.0f,1.0f);
         m_comparison.zoomScale=ReadIniFloat(L"Comparison",L"ZoomScale",1.0f)>=kZoomScale?kZoomScale:1.0f;
+        LoadRenderPace();
+    }
+
+    // The steady-state neural render pace this machine measured last time, so
+    // the live-session forecast speaks for this GPU rather than the reference.
+    void LoadRenderPace(){
+        std::wstring gpu(512,L'\0');
+        const DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
+        gpu.resize(length);
+        m_renderPace={std::move(gpu),double(ReadIniFloat(L"NeuralPace",L"MsPerFrame",0.0f)),
+                      static_cast<uint32_t>(std::max(0.0f,ReadIniFloat(L"NeuralPace",L"Width",0.0f))),
+                      static_cast<uint32_t>(std::max(0.0f,ReadIniFloat(L"NeuralPace",L"Height",0.0f)))};
+    }
+    void SaveRenderPace()const{
+        WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_renderPace.gpu.c_str(),SettingsPath().c_str());
+        WriteIniFloat(L"NeuralPace",L"MsPerFrame",static_cast<float>(m_renderPace.msPerFrame));
+        WriteIniFloat(L"NeuralPace",L"Width",static_cast<float>(m_renderPace.width));
+        WriteIniFloat(L"NeuralPace",L"Height",static_cast<float>(m_renderPace.height));
+    }
+    // Scale on the reference render cost for the detected GPU: this machine's
+    // own measurement when it has one, otherwise the generation's prior.
+    double LiveRenderPaceScale()const{
+        if(m_renderPace.gpu==m_opt.detectedGpu.description){
+            const double measured=playback_timing::RenderPaceScale(m_renderPace.msPerFrame,m_renderPace.width,m_renderPace.height);
+            if(measured>0.0)return measured;
+        }
+        return RenderPacePrior(m_opt.detectedGpu.generation);
+    }
+    // Enough segments after the first to average out encoder spawn jitter.
+    static constexpr uint64_t kMinPaceFrames=120;
+    void RecordLiveRenderPace(){
+        if(!m_liveSegments||!m_livePaceWidth||!m_livePaceHeight)return;
+        const auto pace=m_liveSegments->Pace();
+        if(pace.frames<kMinPaceFrames||!(pace.wallMs>0.0))return;
+        m_renderPace={m_opt.detectedGpu.description,pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight};
+        SaveRenderPace();
+        LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<pace.MsPerFrame()
+            <<" ms/frame over "<<pace.frames<<" frames ("<<playback_timing::RenderPaceScale(pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight)
+            <<"x the reference GPU).");
     }
 
     void SaveVideoSettings()const{
@@ -2311,7 +2350,7 @@ private:
     // be recognised before a single frame is rendered. Saying so beats letting the
     // user watch a loader that will never clear.
     bool ConfirmLiveSessionPace(double fps){
-        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps);
+        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps,LiveRenderPaceScale());
         if(forecast.keepsUp)return true;
         LOG("Active neural session forecast: "<<m_decoder.Width()<<"x"<<m_decoder.Height()<<" at "<<fps
             <<" fps renders at about "<<forecast.renderFps<<" fps ("<<forecast.realtimeRatio<<"x realtime).");
@@ -2360,6 +2399,7 @@ private:
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
         }
         m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
         const int64_t renderFrom=std::max(range.start100ns,m_liveSegments->Head100ns());
         if(renderFrom<range.end100ns)m_liveSegments->Unfinish();
         EnterLiveBuffering();
@@ -2384,6 +2424,7 @@ private:
         }
         m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveStartTick=0;m_liveRange={};
         HideBufferOverlay();
+        RecordLiveRenderPace();
         m_liveSegments.reset();
         if(retain){m_liveDirectory.clear();return;}
         if(!m_liveDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);m_liveDirectory.clear();}
@@ -2669,7 +2710,7 @@ private:
         if(result<=32)LOG("Opening the render receipt failed: code="<<result<<" path="<<WideToUtf8(m_cachedReceiptPath.wstring()));
     }
     static std::filesystem::path ExecutableDirectory(){std::filesystem::path executable;std::wstring error;return CurrentExecutablePath(executable,error)?executable.parent_path():std::filesystem::path{};}
-    static std::string GpuPathName(GpuGeneration generation){return generation==GpuGeneration::Rtx40Ada?"rtx40":generation==GpuGeneration::Rtx50Blackwell?"rtx50":"unsupported";}
+    static std::string GpuPathName(GpuGeneration generation){return GpuGenerationPathName(generation);}
     static const wchar_t* NeuralPhaseTextKey(NeuralRenderPhase phase){switch(phase){case NeuralRenderPhase::CheckingCache:return L"neural.phase.cache";case NeuralRenderPhase::Acquiring:return L"neural.phase.acquiring";case NeuralRenderPhase::Decoding:case NeuralRenderPhase::NeuralRendering:return L"neural.phase.rendering";case NeuralRenderPhase::Encoding:return L"neural.phase.encoding";case NeuralRenderPhase::Validating:return L"neural.phase.validating";case NeuralRenderPhase::Ready:return L"neural.phase.ready";case NeuralRenderPhase::Preflight:return L"neural.phase.preflight";case NeuralRenderPhase::Paused:return L"neural.phase.paused";case NeuralRenderPhase::Recovering:return L"neural.phase.recovering";}return L"neural.phase.acquiring";}
     std::wstring NeuralPhaseText(const NeuralRenderProgress& progress)const{std::wstring text=T(NeuralPhaseTextKey(progress.phase));if(progress.phase==NeuralRenderPhase::Recovering){const auto failure=NeuralRenderFailureName(progress.recovering);text+=L" (attempt "+std::to_wstring(progress.retries)+L" \u00b7 "+std::wstring(failure.begin(),failure.end())+L")";}return text;}
     static const wchar_t* NeuralFailureTextKey(NeuralRenderFailure failure){switch(failure){case NeuralRenderFailure::GpuStall:return L"neural.failure.gpu-stall";case NeuralRenderFailure::DeviceRemoved:return L"neural.failure.device-removed";case NeuralRenderFailure::WorkerCrashed:return L"neural.failure.worker-crashed";case NeuralRenderFailure::RetryExhausted:return L"neural.failure.retry-exhausted";case NeuralRenderFailure::Preflight:return L"neural.failure.preflight";case NeuralRenderFailure::Identity:return L"neural.failure.identity";case NeuralRenderFailure::Protocol:return L"neural.failure.protocol";default:return nullptr;}}
@@ -3488,6 +3529,9 @@ private:
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;
     int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;
+    uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
+    struct MeasuredRenderPace{std::wstring gpu;double msPerFrame=0.0;uint32_t width=0,height=0;};
+    MeasuredRenderPace m_renderPace;
     HWND m_bufferWnd=nullptr;
     RECT m_bufferAnchor{};
 };

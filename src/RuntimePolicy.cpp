@@ -10,6 +10,10 @@ namespace {
 constexpr uint32_t kNvidiaVendorId = 0x10DE;
 constexpr std::wstring_view kSafeModeArgument = L"--safe-mode";
 constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-restarted";
+// RTX 4080 SUPER, driver 610.47: 15.31 ms/frame over 738 frames of a 1080p30
+// live session, 1.22x the reference cost. Measured by segment arrivals, the
+// same method as the reference numbers in PlaybackTiming.h.
+constexpr double kAdaRenderPacePrior = 1.22;
 
 bool ContainsCaseInsensitive(std::wstring_view text, std::wstring_view needle)
 {
@@ -90,18 +94,69 @@ GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description)
     if (vendorId != kNvidiaVendorId) {
         return GpuGeneration::Unsupported;
     }
+    if (ContainsCaseInsensitive(description, L"GeForce RTX 20")) {
+        return GpuGeneration::Rtx20Turing;
+    }
+    if (ContainsCaseInsensitive(description, L"GeForce RTX 30")) {
+        return GpuGeneration::Rtx30Ampere;
+    }
     if (ContainsCaseInsensitive(description, L"GeForce RTX 40")) {
         return GpuGeneration::Rtx40Ada;
     }
     if (ContainsCaseInsensitive(description, L"GeForce RTX 50")) {
         return GpuGeneration::Rtx50Blackwell;
     }
+    if (ContainsCaseInsensitive(description, L"RTX")) {
+        return GpuGeneration::OtherRtx;
+    }
     return GpuGeneration::OtherNvidia;
+}
+
+const char* GpuGenerationPathName(GpuGeneration generation) noexcept
+{
+    switch (generation) {
+        case GpuGeneration::Rtx20Turing: return "rtx20";
+        case GpuGeneration::Rtx30Ampere: return "rtx30";
+        case GpuGeneration::Rtx40Ada: return "rtx40";
+        case GpuGeneration::Rtx50Blackwell: return "rtx50";
+        case GpuGeneration::OtherRtx: return "rtx";
+        case GpuGeneration::OtherNvidia:
+        case GpuGeneration::Unsupported: break;
+    }
+    return "unsupported";
 }
 
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode)
 {
-    return !safeMode && (gpu == GpuGeneration::Rtx40Ada || gpu == GpuGeneration::Rtx50Blackwell);
+    if (safeMode) return false;
+    switch (gpu) {
+        case GpuGeneration::Rtx20Turing:
+        case GpuGeneration::Rtx30Ampere:
+        case GpuGeneration::Rtx40Ada:
+        case GpuGeneration::Rtx50Blackwell:
+        case GpuGeneration::OtherRtx:
+            return true;
+        case GpuGeneration::OtherNvidia:
+        case GpuGeneration::Unsupported:
+            break;
+    }
+    return false;
+}
+
+double RenderPacePrior(GpuGeneration generation) noexcept
+{
+    switch (generation) {
+        case GpuGeneration::Rtx50Blackwell: return 1.0;
+        // RTX 4080 SUPER, driver 610.47, 1920x1080 live session: measured
+        // against the same segment-arrival method as the reference numbers.
+        case GpuGeneration::Rtx40Ada: return kAdaRenderPacePrior;
+        case GpuGeneration::Rtx20Turing:
+        case GpuGeneration::Rtx30Ampere:
+        case GpuGeneration::OtherRtx:
+        case GpuGeneration::OtherNvidia:
+        case GpuGeneration::Unsupported: break;
+    }
+    return 0.0;
 }
 
 NeuralRenderDefaults ResolveNeuralRenderDefaults(

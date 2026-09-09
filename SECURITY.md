@@ -8,8 +8,8 @@ Offline neural jobs run in the package-local
 `neural-runtime/NeuralWorker.exe`. The experimental proxy/add-on belongs in
 that subdirectory; the player rejects the old root-level proxy layout.
 
-The experimental package intentionally contains a modified neural DLL with
-Authenticode `HashMismatch`, plus unsigned ReShade/RenoDX files. Those signature
+The experimental package intentionally contains a modified neural DLL whose
+NVIDIA signature was removed, plus unsigned ReShade/RenoDX files. Those signature
 states are disclosed separately from malware-scan results. The exact release
 inputs are pinned by size and SHA-256 and the package verifier rejects drift or
 unexpected files.

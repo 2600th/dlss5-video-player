@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "runtimeVersion": "310.8.0.0",
+  "runtimeVersion": "310.8.SF-v2",
   "entries": [
     {
-      "sourceName": "nvngx_dlssnr_ada_v51_async.dll",
+      "sourceName": "nvngx_dlssnr_310.8.SF-v2.dll",
       "destination": "nvngx_dlssnr.dll",
-      "size": 165840496,
-      "sha256": "4B8D19BC3EFF58A084F5ECA7489C921501C203450169FB82FF4F649A4482BA05",
-      "fileVersion": "310.8.0.0",
-      "signatureStatus": "HashMismatch",
-      "signerContains": "NVIDIA Corporation",
-      "provenance": "Community-modified RTX 40-targeted DLSS NR 310.8.0 runtime from RankFTW/rhi-repo release dlssnr-310.8.0-RTX40; the modification invalidates its embedded NVIDIA Authenticode signature, and binary architecture inspection reports RTX 40 and RTX 50 code targets.",
+      "size": 165830144,
+      "sha256": "6EB209E764F39872625DEBD6ABAF45E2BB6322F6F270F781F70C059AE30B3927",
+      "fileVersion": "310.8.2.0",
+      "signatureStatus": "NotSigned",
+      "signerContains": "",
+      "provenance": "ShortFuse's community-modified universal DLSS NR 310.8 runtime (string version 310.8.SF.0, numeric 310.8.2.0) from RankFTW/rhi-repo release dlssnr-310.8.SF-v2, GitHub verified archive digest 1da35941894994eb087e017577829e492454e9bae3a6a9397027069ceb74955c. The modification removes the embedded NVIDIA signature and extends the leaked 310.8.0 runtime to Turing, Ampere, Ada and Blackwell; the previous lock was the RTX 40-targeted dlssnr-310.8.0-RTX40 build.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
     },
     {

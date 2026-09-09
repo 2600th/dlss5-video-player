@@ -20,9 +20,18 @@ neural runtime. If only part of that layout is present, startup fails closed
 instead of loading a mixed runtime. Do not replace individual DLLs with files
 from another pack.
 
-On detected RTX 40 and RTX 50 GPUs, a complete experimental layout enables
-`renodx-dlss5.addon64` by default. RTX 40 support in this project relies on a
-community-modified 310.8.0 runtime and is not official NVIDIA support.
+On any detected NVIDIA RTX GPU - GeForce RTX 20, 30, 40 and 50, and RTX-branded
+workstation or laptop parts - a complete experimental layout enables
+`renodx-dlss5.addon64` by default. The locked neural runtime is ShortFuse's
+community-modified universal 310.8 build (`310.8.SF-v2`), which extends the
+leaked 310.8.0 runtime from Blackwell to Turing, Ampere and Ada. None of this
+is official NVIDIA support: NVIDIA ships DLSS 5 for RTX 50 and has announced
+RTX 40 for later. The product name only selects the cache label and the pace
+prior; whether feature 18 actually runs is decided by the runtime's own
+capability check and the strict evidence chain, which refuse the render rather
+than publish an unverified one. Turing and Ampere lack native FP8 tensor
+math, so the same network runs several times slower there; the offline cache
+still completes, and a live session simply buffers when it cannot keep up.
 
 The runtime lock currently selects RenoDX DLSS 5 add-on 4.70. Normal-mode
 helper bootstrap atomically enforces only these managed values in
@@ -43,10 +52,11 @@ Other RenoDX controls—including preset, style, intensity, automatic mask, and
 guide overrides—are preserved. Safe mode skips the neural helper entirely and
 does not change those user settings.
 
-The selected neural runtime is modified and reports Authenticode `HashMismatch`.
-Its embedded NVIDIA signature no longer validates. The ReShade proxy and RenoDX
-add-on are unsigned. These signature states do not establish malware or safety,
-and matching a SHA-256 lock proves only that a file is the expected byte stream.
+The selected neural runtime is modified and unsigned: its author removed the
+embedded NVIDIA signature (the previous RTX 40 lock reported Authenticode
+`HashMismatch` instead). The ReShade proxy and RenoDX add-on are unsigned.
+These signature states do not establish malware or safety, and matching a
+SHA-256 lock proves only that a file is the expected byte stream.
 See [third-party notices](../THIRD_PARTY.md) and the packaged
 `EXPERIMENTAL_RUNTIME_NOTICE.txt`.
 
@@ -80,12 +90,17 @@ marker rejects the complete job. Offline decoding uses the software FFmpeg path
 so CUDA resources remain available to feature 18 and NVENC; normal playback
 continues to prefer hardware decoding.
 
-On the tested RTX 5090, the complete GTA VI Trailer 2 run produced all 5,002
-frames at 1920 x 1080 / 30 fps, with default neural intensity 1.00 and no
-upscaling. Reopening the same example reused both source and neural caches.
-See the [verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md)
-for measurements and their limits. Physical RTX 40 neural output remains
-unverified on this system.
+On the tested RTX 5090 (v0.15.0, previous RTX 40-targeted runtime), the
+complete GTA VI Trailer 2 run produced all 5,002 frames at 1920 x 1080 / 30
+fps, with default neural intensity 1.00 and no upscaling. Reopening the same
+example reused both source and neural caches. See the
+[verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md)
+for measurements and their limits. On an RTX 4080 SUPER (driver 610.47) the
+universal runtime passed the strict GPU smoke and a full 1080p30 live session
+at 15.31 ms/frame; see the
+[RTX 4080 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX4080.md).
+Blackwell has not been re-verified on the universal runtime, and Turing and
+Ampere have no hardware verification in this project yet.
 
 The architecture follows lessons from [Zonnery's offline
 converter](https://github.com/Zonnery/dlss5-nr-player) and the verification
@@ -119,6 +134,6 @@ runtime SR evaluations appear in the player's separate `DLSSVideoPlayer.log`.
 
 If the experimental path is unstable, choose **Advanced > Restart in DLSS SR
 safe mode**. Safe mode skips the neural helper for that launch and keeps the
-official NGX path available. A later normal launch on an RTX 40/50 policy target
-enables neural pre-rendering again. Playback SR starts off on a fresh install
+official NGX path available. A later normal launch on an RTX GPU enables
+neural pre-rendering again. Playback SR starts off on a fresh install
 and subsequently follows the saved preference.

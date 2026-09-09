@@ -8,16 +8,19 @@ governed by their own licenses; the project's MIT license does not relicense
 them. This notice does not grant additional rights or override upstream terms.
 Keep this bundle private while redistribution permission remains unresolved.
 
-This package includes a community-modified RTX 40-targeted NVIDIA
-neural-rendering DLL. The modification invalidates its embedded Authenticode
-signature (HashMismatch). The ReShade proxy and RenoDX add-on are unsigned.
-These facts are separate from malware detection; a matching hash is not a
-malware scan or proof of legitimacy.
+This package includes a community-modified NVIDIA neural-rendering DLL
+(ShortFuse's universal 310.8.SF-v2 build). The modification removed its
+embedded Authenticode signature, so the file is unsigned. The ReShade proxy
+and RenoDX add-on are unsigned. These facts are separate from malware
+detection; a matching hash is not a malware scan or proof of legitimacy.
 
-The runtime policy recognizes RTX 40 and RTX 50 GPUs. NVIDIA's official DLSS 5
-launch support is RTX 50-only; RTX 40 compatibility here is an unofficial
-community modification. DLAA is the default native-resolution carrier, so
-spatial DLSS upscaling remains off until the user explicitly selects it.
+The runtime policy enables neural rendering on every detected NVIDIA RTX GPU
+(GeForce RTX 20 through 50 and RTX-branded workstation/laptop parts). NVIDIA's
+official DLSS 5 launch support is RTX 50-only, with RTX 40 announced for
+later; support for anything else here is an unofficial community
+modification, verified in this project on an RTX 4080 SUPER only. DLAA is the
+default native-resolution carrier, so spatial DLSS upscaling remains off until
+the user explicitly selects it.
 
 If the experimental path misbehaves, choose Advanced > Restart in DLSS SR safe
 mode, or launch `DLSSVideoPlayer.exe --safe-mode`. Safe mode disables the

@@ -8,12 +8,30 @@
 #include <string_view>
 #include <vector>
 
+// Every RTX-branded NVIDIA part has tensor cores and an NGX-capable driver.
+// The generation only chooses cache identity, the render-pace prior and the
+// receipt label; whether feature 18 actually runs is decided by the runtime's
+// own capability check and the strict evidence chain, which fail closed.
 enum class GpuGeneration {
+    Rtx20Turing,
+    Rtx30Ampere,
     Rtx40Ada,
     Rtx50Blackwell,
+    // RTX-branded workstation/laptop parts ("RTX A4000", "RTX 6000 Ada
+    // Generation", "RTX PRO 6000 Blackwell") outside the GeForce naming.
+    OtherRtx,
     OtherNvidia,
     Unsupported,
 };
+
+// Stable short label for the cache identity and receipt ("rtx40").
+const char* GpuGenerationPathName(GpuGeneration generation) noexcept;
+
+// Scale on the reference render cost (RTX 5090, see PlaybackTiming.h) a fresh
+// install assumes for a generation before this machine has measured its own
+// pace. 0 means unknown: the live-session forecast then stays silent instead
+// of guessing, and the session simply buffers when it cannot keep up.
+double RenderPacePrior(GpuGeneration generation) noexcept;
 
 struct DetectedGpu {
     GpuGeneration generation{GpuGeneration::Unsupported};

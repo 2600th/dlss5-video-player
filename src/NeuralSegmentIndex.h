@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -19,6 +20,17 @@ struct NeuralSegment {
     uint64_t frameCount{};
 };
 
+// Steady-state render pace observed from segment arrivals: wall time from the
+// first segment this run published to the latest, over the frames of every
+// segment after that first one. Excluding the first segment drops the job's
+// startup (helper launch, preroll) exactly the way the reference constants in
+// PlaybackTiming.h were measured.
+struct SegmentPace {
+    double wallMs{};
+    uint64_t frames{};
+    double MsPerFrame() const { return frames ? wallMs / double(frames) : 0.0; }
+};
+
 // Append-only, thread-safe. The render thread appends; the UI/playback threads read.
 class NeuralSegmentIndex {
 public:
@@ -29,6 +41,20 @@ public:
         if (!segments_.empty() && segment.index <= segments_.back().index) return;
         totalFrames_ += segment.frameCount;
         segments_.push_back(std::move(segment));
+        const auto now = std::chrono::steady_clock::now();
+        if (!paceStart_) {
+            paceStart_ = now;
+            paceBaseFrames_ = totalFrames_;
+        }
+        paceLatest_ = now;
+    }
+
+    SegmentPace Pace() const
+    {
+        const std::lock_guard lock(mutex_);
+        if (!paceStart_ || totalFrames_ <= paceBaseFrames_) return {};
+        return {std::chrono::duration<double, std::milli>(paceLatest_ - *paceStart_).count(),
+                totalFrames_ - paceBaseFrames_};
     }
 
     void Restart()
@@ -37,6 +63,7 @@ public:
         segments_.clear();
         totalFrames_ = 0;
         finished_ = false;
+        paceStart_.reset();
     }
 
     // Drops everything a later job appended, keeping the first `count`
@@ -49,6 +76,7 @@ public:
         for (size_t i = count; i < segments_.size(); ++i) totalFrames_ -= segments_[i].frameCount;
         segments_.resize(count);
         finished_ = false;
+        paceStart_.reset();
     }
 
     // Adopted coverage from an earlier job is complete as far as that job went;
@@ -58,6 +86,9 @@ public:
     {
         const std::lock_guard lock(mutex_);
         finished_ = false;
+        // Adopted coverage arrived under an earlier job; the next job's pace
+        // starts from its own first segment.
+        paceStart_.reset();
     }
 
     void Finish()
@@ -128,4 +159,7 @@ private:
     std::vector<NeuralSegment> segments_;
     uint64_t totalFrames_{};
     bool finished_{};
+    std::optional<std::chrono::steady_clock::time_point> paceStart_;
+    std::chrono::steady_clock::time_point paceLatest_{};
+    uint64_t paceBaseFrames_{};
 };
