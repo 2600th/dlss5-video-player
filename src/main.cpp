@@ -2412,11 +2412,16 @@ private:
         Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
         if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns})){LOG("Active neural playback could not open the live pair.");return false;}
         if(!m_synchronizedPlayback.SeekSeconds(at)||!m_synchronizedPlayback.VisibleFrame()){LOG("Active neural playback could not position the live pair at "<<at<<" s.");m_synchronizedPlayback.Close();return false;}
+        // The view has to switch before the frame is read: VisibleFrame returns
+        // whichever side the view selects, and reading it first presented the
+        // ORIGINAL frame. Playing hid that - the next pair arrived a frame later
+        // - but a paused player kept re-presenting it and looked unchanged.
+        m_comparisonView=ComparisonView::Neural;
+        if(!m_synchronizedPlayback.SetView(ComparisonView::Neural)){LOG("Active neural playback could not select the rendered view.");m_synchronizedPlayback.Close();m_comparisonView=ComparisonView::Original;return false;}
+        if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         m_cachedPlayback=true;m_cachedRange=m_liveRange;m_cachedSettings=m_neuralSettings;m_cachedGuides=m_renderGuides;m_cachedReceiptPath.clear();m_neuralPath.clear();
-        m_comparisonView=ComparisonView::Neural;m_synchronizedPlayback.SetView(ComparisonView::Neural);
-        if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         if(!RenderVideoFrame(frame,true)){LOG("Active neural playback could not present its first pair.");m_synchronizedPlayback.Close();m_cachedPlayback=false;m_comparisonView=ComparisonView::Original;return false;}
         RememberRenderedCachedPair();m_cachedPresentedFrames=1;m_currentSec=double(frame.timestamp100ns)*1e-7;m_guideReset=false;m_dlssReset=false;
         if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
