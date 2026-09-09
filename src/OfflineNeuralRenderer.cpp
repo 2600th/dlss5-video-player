@@ -1,5 +1,7 @@
 #include "OfflineNeuralRenderer.h"
 
+#include "Log.h"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -44,6 +46,22 @@ struct JobEvaluation {
     double neuralGpuMs{};
 };
 
+// Wall time of each render-loop stage, one sample per captured frame. Six
+// clock reads per frame (~150 ns) is the only evidence that says which stage
+// the 33.3 ms live budget actually goes to, so the collection stays in and the
+// summary is logged once per attempt.
+struct StageSamples {
+    std::vector<double> read,guide,render,write,eval,frame;
+    // All six series advance together, which is what makes the per-frame
+    // residual (frame - read - eval - write) well defined.
+    void Push(double readMs, double guideMs, double renderMs, double evalMs, double writeMs,
+              double frameMs)
+    {
+        read.push_back(readMs);guide.push_back(guideMs);render.push_back(renderMs);
+        eval.push_back(evalMs);write.push_back(writeMs);frame.push_back(frameMs);
+    }
+};
+
 struct AttemptResult {
     NeuralRenderFailure failure{NeuralRenderFailure::None};
     EncodeError encoderError{EncodeError::None};
@@ -55,8 +73,7 @@ struct AttemptResult {
     int64_t firstTimestamp{};
     int64_t lastTimestamp{};
     std::vector<double> neuralGpuMs;
-    double guideMsTotal{};
-    double captureMsTotal{};
+    StageSamples stages;
 };
 
 std::string LowerAscii(std::string_view value)
@@ -87,6 +104,55 @@ uint64_t HighestEvaluationCount(std::string_view lower)
     return highest;
 }
 
+double MillisecondsSince(SteadyClock::time_point start)
+{
+    return std::chrono::duration<double,std::milli>(SteadyClock::now()-start).count();
+}
+
+double Mean(const std::vector<double>& samples)
+{
+    if (samples.empty()) return 0.0;
+    double total = 0.0;
+    for (const double sample : samples) total += sample;
+    return total / double(samples.size());
+}
+
+double Quantile(std::vector<double> samples, double q)
+{
+    if (samples.empty()) return 0.0;
+    std::sort(samples.begin(), samples.end());
+    const size_t index = static_cast<size_t>(std::ceil(q * double(samples.size() - 1)));
+    return samples[std::min(index, samples.size() - 1)];
+}
+
+// One line per stage, once per attempt: mean/p50/p95 plus the total the stage
+// cost over the whole attempt. `frame` is the wall time of a full loop
+// iteration, so `unaccounted` is exactly what the named stages do not explain
+// (progress reporting, the receipt gate, retries, bookkeeping).
+void LogStageTable(const StageSamples& stages)
+{
+    const auto row = [](const char* name, const std::vector<double>& samples) {
+        double total = 0.0;
+        for (const double sample : samples) total += sample;
+        LOG("Render stage " << name << " n=" << samples.size()
+            << " mean=" << Mean(samples) << " p50=" << Quantile(samples, 0.5)
+            << " p95=" << Quantile(samples, 0.95) << " totalMs=" << total);
+    };
+    row("read", stages.read);
+    row("guide", stages.guide);
+    row("render+capture", stages.render);
+    row("submit(guide+render+gate)", stages.eval);
+    row("write", stages.write);
+    row("frame", stages.frame);
+    std::vector<double> unaccounted;
+    unaccounted.reserve(stages.frame.size());
+    for (size_t index = 0; index < stages.frame.size(); ++index) {
+        unaccounted.push_back(stages.frame[index] - stages.read[index] -
+                              stages.eval[index] - stages.write[index]);
+    }
+    row("unaccounted", unaccounted);
+}
+
 NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVramMiB)
 {
     NeuralRenderTiming timing;
@@ -102,8 +168,8 @@ NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVra
     timing.neuralGpuMsP50 = quantile(0.5);
     timing.neuralGpuMsP95 = quantile(0.95);
     timing.neuralGpuMsMax = samples.back();
-    timing.guideMsMean = attempt.guideMsTotal / double(timing.samples);
-    timing.captureMsMean = attempt.captureMsTotal / double(timing.samples);
+    timing.guideMsMean = Mean(attempt.stages.guide);
+    timing.captureMsMean = Mean(attempt.stages.render);
     return timing;
 }
 
@@ -551,6 +617,105 @@ private:
     bool warmPending_{},quit_{},closing_{},writing_{};
 };
 
+// One-frame lookahead over the source. A private thread runs the decoder while
+// the render thread has the previous frame on the GPU, which is the only
+// overlap the loop can take without changing what it does: the thread hands
+// over exactly what source.Read() produced, in the order it produced it, and
+// the render loop still classifies every status, validates every timestamp and
+// checks every identity itself.
+//
+// Depth is one frame, so at most three BGRA frames are alive (~25 MiB at
+// 1080p) and a cancel stays prompt: the decoder is never more than one read
+// ahead of the loop, and that read observes the job's stop token exactly as
+// the loop's own read did.
+template<class Source>
+class FramePrefetch {
+public:
+    FramePrefetch(Source& source, std::stop_token stop)
+        : source_(source), stop_(std::move(stop))
+    {
+        try {
+            worker_ = std::jthread([this] { Decode(); });
+        } catch (const std::system_error& error) {
+            // No thread: read on the render thread, exactly as before.
+            LOG("Source prefetch thread could not start; decoding synchronously. error="
+                << error.code().value());
+        }
+    }
+    ~FramePrefetch() { Stop(); }
+    FramePrefetch(const FramePrefetch&) = delete;
+    FramePrefetch& operator=(const FramePrefetch&) = delete;
+
+    JobRead Next(JobFrame& frame)
+    {
+        if (!worker_.joinable()) return source_.Read(frame, stop_);
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [this] { return item_.has_value() || terminal_.has_value(); });
+        if (!item_) return *terminal_;  // the decoder has nothing left to give
+        const JobRead read = item_->read;
+        frame = std::move(item_->frame);
+        item_.reset();
+        lock.unlock();
+        space_.notify_one();
+        return read;
+    }
+
+private:
+    struct Item {
+        JobRead read{};
+        JobFrame frame;
+    };
+
+    void Decode()
+    {
+        for (;;) {
+            {
+                std::unique_lock lock(mutex_);
+                space_.wait(lock, [this] { return !item_ || quit_; });
+                if (quit_) return;
+            }
+            Item item;
+            // A throwing read is the loop's failure to classify, not this
+            // thread's to swallow: it becomes the Error the loop would have
+            // seen, and the decoder is not touched again.
+            try {
+                item.read = source_.Read(item.frame, stop_);
+            } catch (...) {
+                item.read = JobRead::Error;
+            }
+            const JobRead read = item.read;
+            {
+                std::lock_guard lock(mutex_);
+                if (quit_) return;
+                if (read != JobRead::FrameReady) terminal_ = read;
+                item_ = std::move(item);
+            }
+            ready_.notify_one();
+            if (read != JobRead::FrameReady) return;
+        }
+    }
+
+    void Stop()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            quit_ = true;
+        }
+        space_.notify_all();ready_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    Source& source_;
+    std::stop_token stop_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::condition_variable space_;
+    std::optional<Item> item_;
+    std::optional<JobRead> terminal_;
+    bool quit_{};
+    std::jthread worker_;
+};
+
 template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
 NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                           OfflineNeuralRenderer::ProgressCallback progress,
@@ -773,6 +938,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 }
             }
         };
+        // Joined on every exit from the attempt, so no thread is left holding
+        // the decoder when the caller closes or reopens it.
+        FramePrefetch<Source> prefetch(source, stop);
         bool prerollEvaluated = false;
         bool hasPrevious = false;
         int64_t previousTimestamp = 0;
@@ -786,8 +954,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
+            const auto frameStart = SteadyClock::now();
             JobFrame frame;
-            const JobRead read = source.Read(frame, stop);
+            const JobRead read = prefetch.Next(frame);
+            // What the loop still pays for the decode: the residual wait for a
+            // frame the decoder started while the previous one was on the GPU.
+            const double readMs = MillisecondsSince(frameStart);
             if (read == JobRead::EndOfStream) {
                 if (attempt.frames == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
@@ -814,6 +986,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 if (attempt.frames == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
+            const auto evalStart = SteadyClock::now();
             JobEvaluation evaluation;
             for (uint64_t capture = 1; ; ++capture) {
                 const HistoryReset reason = capture > 1 ? HistoryReset::None
@@ -833,12 +1006,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 }
                 if (capture >= 120) {abort(NeuralRenderFailure::Neural);return attempt;}
             }
+            const double evalMs = MillisecondsSince(evalStart);
             // A segmented job takes ownership of the captured pixels; the
             // single-file encoder still writes them on this thread.
             const uint64_t captured = evaluation.bgra.size();
+            const auto writeStart = SteadyClock::now();
             const EncodeError writeError = writer
                 ? writer->Write(frame, std::move(evaluation.bgra), stop)
                 : encoder.WriteFrame(evaluation.bgra, stop);
+            const double writeMs = MillisecondsSince(writeStart);
             if (writeError != EncodeError::None) {
                 attempt.failure = writeError == EncodeError::Cancelled
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
@@ -851,9 +1027,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             }
             attempt.lastTimestamp=frame.timestamp100ns;
             attempt.neuralGpuMs.push_back(evaluation.neuralGpuMs);
-            attempt.guideMsTotal+=evaluation.guideMs;attempt.captureMsTotal+=evaluation.captureMs;
             emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+            attempt.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
+                                MillisecondsSince(frameStart));
         }
+        LogStageTable(attempt.stages);
         const EncodeError finishError=writer?writer->Finish():encoder.Finish(stop);
         if(finishError!=EncodeError::None){
             attempt.failure=finishError==EncodeError::Cancelled
@@ -1000,11 +1178,6 @@ NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
         default:break;
     }
     return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
-}
-
-double MillisecondsSince(SteadyClock::time_point start)
-{
-    return std::chrono::duration<double,std::milli>(SteadyClock::now()-start).count();
 }
 
 struct ProductionEvaluatorAdapter {
