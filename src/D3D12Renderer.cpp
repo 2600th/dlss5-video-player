@@ -84,6 +84,10 @@ D3D12Renderer::~D3D12Renderer() {
         m_uploadMapped[i]=nullptr;
         m_guideMapped[i]=nullptr;
     }
+    if (m_cacheReadback && m_cacheReadbackMapped) {
+        m_cacheReadback->Unmap(0, nullptr);
+        m_cacheReadbackMapped = nullptr;
+    }
     m_dlss.Shutdown();
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
@@ -301,6 +305,9 @@ bool D3D12Renderer::CreateVideoResources(){
         D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback)),
         "Create cache readback"))return false;
     m_cacheReadback->SetName(L"Neural_Cache_Readback_RGBA8");
+    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(m_cacheReadbackBytes)};
+    if(!HR(m_cacheReadback->Map(0,&readRange,reinterpret_cast<void**>(&m_cacheReadbackMapped)),
+        "Map persistent cache readback buffer"))return false;
     LOG("DLSS resource contract ready: Color=R16G16B16A16_FLOAT " << m_renderW << "x" << m_renderH
         << ", MV=R16G16_FLOAT " << m_renderW << "x" << m_renderH
         << ", Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV " << m_renderW << "x" << m_renderH
@@ -485,12 +492,9 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
     if(!SignalFrameSlot(slot)||!WaitGPUForContinuedUse())return false;
 
-    void*mapped=nullptr;
-    const D3D12_RANGE readRange{static_cast<SIZE_T>(m_cacheFootprint.Offset),
-        static_cast<SIZE_T>(m_cacheFootprint.Offset+m_cacheReadbackBytes)};
-    if(!HR(m_cacheReadback->Map(0,&readRange,&mapped),"Map cache readback"))return false;
+    if(!m_cacheReadbackMapped)return false;
     std::vector<uint8_t> bgra(tightBytes);
-    const auto*base=static_cast<const uint8_t*>(mapped)+m_cacheFootprint.Offset;
+    const auto*base=m_cacheReadbackMapped+m_cacheFootprint.Offset;
     const unsigned int threadCount = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
     if (threadCount <= 1 || m_outputH < threadCount * 4) {
         for (uint32_t y = 0; y < m_outputH; ++y) {
@@ -515,7 +519,6 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
             });
         }
     }
-    const D3D12_RANGE writtenRange{0,0};m_cacheReadback->Unmap(0,&writtenRange);
     capture.bgra=std::move(bgra);capture.width=m_outputW;capture.height=m_outputH;
     return true;
 }
