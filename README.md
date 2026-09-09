@@ -14,15 +14,17 @@ Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
 intentionally silent.
 [Capture details and edit source](docs/media/README.md).
 
-**v0.16.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.16.0)
-with neural rendering on every RTX generation, a keep-up forecast measured per
-GPU and source size, and a one-command runtime fetch. See the [changelog](CHANGELOG.md).
+**v0.17.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.0)
+with a pipelined neural export (2.3x the render rate, bit-identical output),
+parallel guide generation, neural rendering on every RTX generation and a
+keep-up forecast measured per GPU and source size. See the [changelog](CHANGELOG.md).
 
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.16.0 used an RTX 4080 SUPER and an
-> RTX 5090 on the universal runtime; Turing and Ampere are enabled but unverified.
+> components. Hardware verification for v0.17.0 used an RTX 4080 SUPER; v0.16.0
+> also used an RTX 5090. Both ran the universal runtime; Turing and Ampere are
+> enabled but unverified.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -158,7 +160,7 @@ than on these.
 
 - Neural rendering runs either as a cached render you play beside the original,
   or behind live playback from the playhead. Measured 1080p30 cost: 11.9
-  ms/frame on an RTX 5090, 15.3 on an RTX 4080 SUPER. Whether 4K30 keeps up
+  ms/frame on an RTX 5090 (v0.16.0), 10.3 on an RTX 4080 SUPER. Whether 4K30 keeps up
   depends on the source: the 5090 measured 1.165x real time on one 4K30 file
   and 0.78x on a 6.3 Mbit/s re-encode. The player measures its own GPU at each
   source size after the first session, warns with the predicted rate before a

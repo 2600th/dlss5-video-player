@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 - 2026-09-10
 
 - The neural export is pipelined, ported from ctype-lab's PR #5 with fixes.
   Capture readback rotates through four persistently mapped slots and signals
