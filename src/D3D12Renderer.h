@@ -67,11 +67,6 @@ public:
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
                      bool temporalReset, float frameTimeMs);
-    bool RenderFrameForCache(const uint8_t* bgra, size_t bytes,
-                             const float* guideGridRGBA32F, size_t guideBytes,
-                             uint32_t gridW, uint32_t gridH,
-                             bool temporalReset, float frameTimeMs,
-                             CapturedVideoFrame& capture);
     // Identity-checked entry points: the guide must have been generated for
     // exactly `frame` (same source sample, same job); otherwise the frame is
     // rejected and logged. The temporal reset comes from guide.id.reset or a
@@ -85,7 +80,6 @@ public:
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
-    bool DLSSRequested() const { return m_dlssEnabled; }
     bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
@@ -94,10 +88,8 @@ public:
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
-    uint64_t FramesPresented() const { return m_framesPresented; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
-    bool DLSSLastEvaluationUsedC() const { return m_dlss.LastEvaluationUsedC(); }
     NVSDK_NGX_Result DLSSLastResult() const { return m_dlss.LastResult(); }
     d3d12_renderer_detail::FenceWaitResult WaitGPU();
     bool PresentCurrent();

@@ -17,11 +17,14 @@ Extract the entire Windows package into a new writable folder, keep
 a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA driver. Hardware verification
 used an RTX 5090; other neural configurations require their own validation.
 
-Open a local photo, GIF or video, paste a public YouTube URL, or choose **File > Upcoming
-games**. Preparation finishes before synchronized playback begins. Press `D`
-to compare original and neural views. Recent history reuses valid downloads and
-renders. **File > Export processed media** saves PNG/JPEG photos, animated GIFs,
-or MP4/MKV videos. MKV preserves compatible source streams. The cache prefers
+Open a local photo, GIF or video, paste a public YouTube URL, or choose **File >
+Game trailers**. Rendering can also run behind playback: a session collects a
+four-second lead and then plays the rendered frames while the render continues
+ahead of the playhead. Press `D` to turn a session on, or to compare original
+and neural views once a render is cached. Recent history reuses valid downloads
+and renders. **DLSS > Convert & save > Save converted video** writes PNG/JPEG
+photos, animated GIFs, or MP4/MKV videos. MKV preserves compatible source
+streams. The cache prefers
 `cache/v1` beside the EXE and falls back to LocalAppData when unwritable.
 Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
@@ -47,8 +50,9 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
 1. **Acquire the source.** YouTube downloads use stable video/format IDs for
    cache identity. Video duration is checked against metadata so a short audio
    stream or interrupted download cannot publish an incomplete source.
-2. **Render in the helper.** Frames are decoded in order. Compact motion,
-   depth and uncertainty guides feed a native-resolution DLAA carrier. The
+2. **Render in the helper.** Frames are decoded in order. Compact motion and
+   depth guides feed a native-resolution DLAA carrier; motion is accepted only
+   where the match beats standing still by a margin. The
    experimental add-on observes NGX calls in a persistent feature-18 session.
 3. **Validate and cache.** Every source frame must have a captured native
    evaluation. Runtime receipts, dimensions, timing, final-frame decode and
@@ -79,7 +83,7 @@ diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-The nine CTest suites cover cache/history/settings, export, worker protocols,
+The twelve CTest suites cover cache/history/settings, export, worker protocols,
 runtime policy, playback and native UI regressions. Real-media GPU checks and
 their limits are recorded in the repository's
 [verification evidence](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).

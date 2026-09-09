@@ -481,17 +481,6 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     return SignalFrameSlot(slot);
 }
 
-bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,
-                                        const float*guideGridRGBA32F,size_t guideBytes,
-                                        uint32_t gridW,uint32_t gridH,
-                                        bool temporalReset,float frameTimeMs,
-                                        CapturedVideoFrame&capture){
-    capture.bgra.clear();capture.width=0;capture.height=0;capture.id={};
-    if(!RenderFrame(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,
-                    temporalReset,frameTimeMs))return false;
-    return CaptureEvaluatedFrame(capture);
-}
-
 bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,
                                         const GuideFrame&guide,float frameTimeMs,
                                         CapturedVideoFrame&capture){

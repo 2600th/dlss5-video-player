@@ -26,7 +26,7 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 | `run.py` | Profiles, ablation matrix, two-pass, preflight receipts, worker launches, NVML sampling |
 | `analyze.py` | Per-run metrics, medians per clip/profile, two-pass deltas, `report.md` |
 | `blind.py` | Randomized A/B stills + 3 s excerpts with a sealed `key.json`; `--score` tallies a ballot |
-| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v2 decoder |
+| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v3 decoder (progress, result, preflight, segment) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
 | `build-upscaling/benchmark-work/runtime-snapshot/` | Optional frozen copy of `Release/neural-runtime`; used in preference to `Release/` so a concurrent rebuild cannot change the worker mid-benchmark |
 | `build-upscaling/benchmark-work/profiles/<profile>/` | Isolated runtime clone, `ffmpeg.exe`/`ffprobe.exe` hard links, `profile.json`, `preflight.json` |

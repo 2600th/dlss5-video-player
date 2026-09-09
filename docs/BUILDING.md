@@ -48,8 +48,9 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The nine suites cover recent history, settings/cache integrity, real-media
-export, worker protocols, runtime policy, playback and native UI regressions.
+The twelve suites cover recent history, settings/cache integrity, real-media
+export, worker protocols, runtime policy, range selection, frame identity,
+prerender, playback and native UI regressions.
 CTest does not establish GPU compatibility or visual quality. For changes to
 rendering, timing or decoding, also run applicable GPU/media smoke checks from
 the [verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).

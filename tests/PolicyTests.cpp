@@ -772,13 +772,12 @@ void player_status_formats_exact_runtime_and_playback_states_test()
 
 void playback_timeline_follows_the_presented_frame_test()
 {
-    CHECK_EQ(12.0, playback_timing::TimelinePosition(
-        false, 0.0, false, 0.0, 12.0, 12.08));
-    CHECK_EQ(12.0, playback_timing::PausePosition(12.0, 12.08));
-    CHECK_EQ(18.0, playback_timing::TimelinePosition(
-        true, 18.0, false, 0.0, 12.0, 12.08));
-    CHECK_EQ(24.0, playback_timing::TimelinePosition(
-        false, 0.0, true, 24.0, 12.0, 12.08));
+    // A drag previews, a pending seek shows its target, and otherwise the
+    // timeline and a pause both report the frame that was last presented.
+    CHECK_EQ(12.0, playback_timing::TimelinePosition(false, 0.0, false, 0.0, 12.0));
+    CHECK_EQ(12.0, playback_timing::PausePosition(12.0));
+    CHECK_EQ(18.0, playback_timing::TimelinePosition(true, 18.0, false, 0.0, 12.0));
+    CHECK_EQ(24.0, playback_timing::TimelinePosition(false, 0.0, true, 24.0, 12.0));
 }
 
 void playback_lateness_is_bounded_to_one_and_a_half_frames_test()

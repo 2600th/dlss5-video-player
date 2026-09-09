@@ -74,7 +74,6 @@ public:
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
     bool SeekSeconds(double seconds);
-    bool SetDecodeSize(uint32_t width, uint32_t height);
     void Swap(VideoDecoder& other) noexcept;
 
     // Where a seek's latency actually goes. Published per seek because the seek
@@ -108,11 +107,11 @@ public:
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
     const wchar_t* BackendName() const;
+
+private:
     // ffprobe's codec/pixel format for the open source. Hardware decode support
     // is per codec, so the memo of dead paths is keyed by this, never global.
     std::string m_hardwareProfile;
-
-private:
     bool m_stillImage{false};
     bool m_gif{false};
     enum class Backend { None, FFmpeg, MediaFoundation };

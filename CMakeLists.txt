@@ -80,6 +80,10 @@ add_executable(DLSSVideoPlayer WIN32
     src/SynchronizedPlayback.h
     src/NeuralSegmentIndex.h
     src/LiveSessionPolicy.h
+    src/PlaybackTiming.h
+    src/UpscalingPolicy.h
+    src/NgxSession.h
+    src/RuntimeLifetime.h
     src/FrameIdentity.h
     src/GuideControls.h
     src/NeuralWorkerProtocol.h

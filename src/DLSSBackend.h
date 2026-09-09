@@ -43,10 +43,7 @@ public:
     bool Available() const { return m_available && m_initialized && m_params != nullptr; }
     uint32_t RenderWidth() const { return m_renderW; }
     uint32_t RenderHeight() const { return m_renderH; }
-    uint32_t OutputWidth() const { return m_outputW; }
-    uint32_t OutputHeight() const { return m_outputH; }
     NVSDK_NGX_Result LastResult() const { return m_lastResult; }
-    bool LastEvaluationUsedC() const { return m_lastEvaluationUsedC; }
 
 private:
     bool CreateFeature(ID3D12GraphicsCommandList* cmd);
@@ -75,5 +72,4 @@ private:
     bool m_available = false;
     ngx_session_detail::FeatureCreateGate m_featureCreateGate;
     uint64_t m_evaluations = 0;
-    bool m_lastEvaluationUsedC = true;
 };

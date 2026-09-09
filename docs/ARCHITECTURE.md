@@ -151,7 +151,7 @@ The settings snapshot is saved beside the video and its hash is checked on reuse
 Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,
 not expiring signed stream URLs. Staging entries become reusable only after
-independent probing and atomic promotion. Schema 3 requires
+independent probing and atomic promotion. Schema 4 requires
 `nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
 interception contract armed before frame capture, a feature-18 success
 checkpoint that advances after the captured sequence, and no feature-18
@@ -283,7 +283,7 @@ additional undocumented NGX/caller-shim lifetime beside the existing add-on.
 Brightness, contrast, saturation, gamma, temperature and tint are applied in the final presentation shader after DLSS. This has two useful properties:
 
 1. Changing display appearance does not invalidate temporal guides or require DLSS history resets.
-2. Diagnostic DLSS input/motion/depth/mask views remain unmodified.
+2. Diagnostic DLSS input/motion/depth views remain unmodified.
 
 When video is paused, adjustment changes re-present the existing DLSS output instead of decoding or reevaluating the movie frame.
 
@@ -299,9 +299,12 @@ The shipped cache/settings/history/export work is described in [Usage](USAGE.md)
 the prioritized plan is [the roadmap](DLSS5_VIDEO_ROADMAP.md). Its P0 items
 (runtime preflight, benchmark, guide ablation, frame identity, stall
 recovery, range preview, comparison controls) are implemented; the
-measured guide ablation lives in [Benchmark](BENCHMARK.md). Next are the P1
-items: source-color/HDR preservation, confidence-aware optical flow, stable
-protection masks, RTX Video modes and GPU-resident buffered viewing.
+measured guide ablation lives in [Benchmark](BENCHMARK.md). Of the P1 items,
+confidence-aware optical flow is implemented, buffered viewing shipped as the
+active session, and protection masks were measured and abandoned because the
+NGX mask inputs are inert on both features. The remaining P1 work is
+source-color/HDR preservation, RTX Video modes and the rest of GPU-resident
+processing.
 
 Durable mid-job resume is deliberately a from-zero relaunch: a validated
 segment checkpoint would have to carry the temporal neural state at the

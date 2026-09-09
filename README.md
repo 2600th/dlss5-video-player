@@ -71,7 +71,7 @@ layout. Build inputs and package contents are explained in [Building](docs/BUILD
 | Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
 | Compare original and neural views | **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
-| Seek / step a paused cached frame | Timeline or `Left` / `Right`; `.` to step |
+| Seek / step a paused cached frame | Timeline, or `Left` / `Right` for ten seconds; `.` to step one frame |
 | Mark In / Out, exact timecode | `I` / `O`, `Shift+I` to clear; `Ctrl+G` |
 | Turn neural rendering on while watching | `D` or the Neural Rendering button; it renders from the playhead and buffers |
 | Convert part or all of a video to a file | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked clip, **DLSS > Convert & save** |
@@ -79,6 +79,9 @@ layout. Build inputs and package contents are explained in [Building](docs/BUILD
 | Volume / mute | Volume control or mouse wheel; `M` to mute |
 | Fit or fill / fullscreen | `A` / `F11` |
 | Image adjustments | `Ctrl+E` |
+| Stop playback | `S` |
+| Debug views (final, DLSS input, motion vectors, depth) | `1` / `2` / `3` / `4`, or **Video** |
+| Re-hook the runtime | `F6` |
 | Replay / save | **File > Recent videos** / **DLSS > Convert & save** |
 
 Volume, mute, fit/fill, comparison view and mode, upscaling preference/output,
@@ -135,11 +138,11 @@ toggle, not a claim that every source gains visible detail.
 
 ## Limits to know
 
-- Neural rendering is offline: a render produces a cached video that plays back
-  beside the original. Opening media plays it right away, and you choose what to
-  render (a frame, a 4 s clip, a marked range, or the whole video). Processing
-  time and results vary by source and hardware; this is not real-time neural
-  rendering.
+- Neural rendering runs either as a cached render you play beside the original,
+  or behind live playback from the playhead. On an RTX 5090 it keeps up with
+  sources up to 4K30 (measured 1.165x real time in the player) and buffers when
+  it cannot; heavier sources are refused with the predicted rate. Processing
+  time and results vary by source and hardware.
 - Motion and depth guides are estimated from video. Artifacts are possible;
   RTX 40 neural compatibility has not been hardware-verified for this build.
 - Export copies the cached 8-bit video. Playback adjustments and runtime upscaling

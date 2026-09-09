@@ -875,34 +875,6 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
     return ReadNextFFmpegProcessAvailable(out,stop);
 }
 
-bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
-    if (m_backend != Backend::FFmpeg || !m_nativeWidth || !m_nativeHeight) return false;
-    width = std::max(2u, width & ~1u);
-    height = std::max(2u, height & ~1u);
-    width = std::min(width, m_nativeWidth & ~1u);
-    height = std::min(height, m_nativeHeight & ~1u);
-    if (!width || !height) return false;
-    if (width == m_width && height == m_height) return true;
-
-    const bool restartQueue=m_frameQueueEnabled;
-    if(restartQueue)StopFrameQueue();
-    const uint32_t oldW=m_width, oldH=m_height;
-    m_width=width; m_height=height; m_stride=static_cast<int32_t>(m_width*4u);
-    if (StartFFmpeg(0.0)) {
-        ++m_sourceGeneration;
-        if(restartQueue)StartFrameQueue();
-        LOG("FFmpeg realtime decode scale: " << m_nativeWidth << "x" << m_nativeHeight << " -> " << m_width << "x" << m_height);
-        return true;
-    }
-
-    LOG("FFmpeg decode downscale failed; restoring native decode size.");
-    m_width=oldW; m_height=oldH; m_stride=static_cast<int32_t>(m_width*4u);
-    const bool restored=StartFFmpeg(0.0);
-    if(restored)++m_sourceGeneration;
-    if(restartQueue&&restored)StartFrameQueue();
-    return restored;
-}
-
 bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
     m_reader.Reset();
 

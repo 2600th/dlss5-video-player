@@ -315,14 +315,12 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
     // explicitly looks for this symbol in several games, so make _C the primary path.
     // If an unusual/older runtime rejects it, retry the legacy non-_C export once.
     m_lastResult = NVSDK_NGX_D3D12_EvaluateFeature_C(cmd, m_handle, m_params, nullptr);
-    m_lastEvaluationUsedC = true;
     const char* evalPath = "EvaluateFeature_C";
     if (NVSDK_NGX_FAILED(m_lastResult)) {
         const NVSDK_NGX_Result cResult = m_lastResult;
         LOG("RAW NGX D3D12 EvaluateFeature_C failed result=0x" << std::hex << cResult
             << "; trying legacy EvaluateFeature fallback.");
         m_lastResult = NVSDK_NGX_D3D12_EvaluateFeature(cmd, m_handle, m_params, nullptr);
-        m_lastEvaluationUsedC = false;
         evalPath = "EvaluateFeature";
     }
     if (NVSDK_NGX_FAILED(m_lastResult)) {

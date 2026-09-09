@@ -33,7 +33,7 @@ run concurrently; the runner prefers the snapshot.
 | Group | Metric | Source |
 |---|---|---|
 | Runtime | preflight receipt: GPU, driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, Feature 18 creation/evaluation, RenoDX active settings | `--neural-preflight` probe, once per profile |
-| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v2) |
+| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v3) |
 | Memory | worker peak local VRAM (receipt) and NVML whole-GPU used/util/power/temperature at 2 Hz | `result.json`, `gpu.csv` |
 | Determinism | sha256 of the rgb24 per-frame MD5 sequence across repeats | `frames.md5` |
 | Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded | `analyze.py` |
@@ -44,7 +44,7 @@ run concurrently; the runner prefers the snapshot.
 | Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and 3 s excerpts | `report.md`, `blind/` |
 
 Ablation profiles (`run.py --ablation`) change one factor each: motion
-vectors, depth, temporal mask, RenoDX automatic mask, local structure, local
+vectors, depth, RenoDX automatic mask, local structure, local
 tone, intensity (control), presets 1-3, styles natural/cinematic, two-pass.
 Every profile uses the same corpus, the same worker priming/preroll and the same
 runtime files, so differences attribute to the changed factor.
@@ -67,8 +67,8 @@ runtime files, so differences attribute to the changed factor.
 
 ## Reference run (2026-09-08, RTX 5090, driver 32.0.16.1664 / 616.64, ReShade 6.8.0.2155, RenoDX 4.7, DLSS-NR 310.8.0, worker 0.14.1 protocol v2)
 
-Guide ablation on `text-subtitles` and `cuts-motion` (one repeat each, all
-four guide profiles), plus `faces`/`baseline` and the text clip through
+Guide ablation on `text-subtitles` and `cuts-motion` (one repeat each, the three
+guide profiles plus the since-removed `mask-off`), plus `faces`/`baseline` and the text clip through
 `two-pass`. `resets` is the worker's `historyResets` (first frame plus every
 detected cut); `digest` is the first 8 hex characters of the output framemd5
 sequence so byte-identical outputs are visible directly.

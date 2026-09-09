@@ -4,20 +4,22 @@
 
 namespace playback_timing {
 
+// Both of these deliberately ignore the playback clock: what the timeline and a
+// pause show is the frame the player last presented, never where the clock has
+// drifted to. The clock argument used to be passed and discarded, so callers
+// computed a position for nothing.
 inline double TimelinePosition(bool dragging,
                                double previewPosition,
                                bool seekPending,
                                double pendingPosition,
-                               double lastPresentedPosition,
-                               double /*playbackClockPosition*/)
+                               double lastPresentedPosition)
 {
     if (dragging) return previewPosition;
     if (seekPending) return pendingPosition;
     return lastPresentedPosition;
 }
 
-inline double PausePosition(double lastPresentedPosition,
-                            double /*playbackClockPosition*/)
+inline double PausePosition(double lastPresentedPosition)
 {
     return lastPresentedPosition;
 }

@@ -47,10 +47,34 @@ public:
         CHECK(!error);
     }
 
+    // Windows keeps a copied-and-launched image locked for a moment after the
+    // child exits, so a single remove_all leaked one directory holding a 1 MB
+    // fake ffmpeg.exe per run - 49 of them had accumulated. Retry briefly, and
+    // sweep whatever earlier runs left behind so it cannot pile up again.
     ~TempDirectory()
     {
         std::error_code error;
-        std::filesystem::remove_all(path_, error);
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            std::filesystem::remove_all(path_, error);
+            if (!std::filesystem::exists(path_)) break;
+            Sleep(25);
+        }
+        SweepAbandoned(path_.parent_path(), path_);
+    }
+
+    static void SweepAbandoned(const std::filesystem::path& parent,
+                               const std::filesystem::path& keep)
+    {
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(parent, error), end; !error && it != end;
+             it.increment(error)) {
+            const std::filesystem::path& candidate = it->path();
+            if (candidate == keep) continue;
+            const std::wstring name = candidate.filename().wstring();
+            if (name.rfind(L"DLSSVideoPlayer-NeuralCacheTests-", 0) != 0) continue;
+            std::error_code ignored;
+            std::filesystem::remove_all(candidate, ignored);
+        }
     }
 
     const std::filesystem::path& Path() const { return path_; }

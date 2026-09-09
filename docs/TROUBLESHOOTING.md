@@ -47,7 +47,7 @@ exist at their saved location. YouTube entries need a valid acquired source to
 skip downloading; otherwise they resolve the original public page again. An
 older untracked cache is not automatically imported into recent history.
 
-Selecting the same upcoming-game example or pasting the same URL checks recent
+Selecting the same game trailer or pasting the same URL checks recent
 history too. Keep the same source-quality setting to reuse its tracked download.
 The completeness and highest-bitrate selection policies replace older source
 caches once: earlier builds could accept a prematurely ended download or a
@@ -60,17 +60,17 @@ a slightly longer audio tail does not count as missing neural video.
 
 ## Export is unavailable or fails
 
-**File > Export processed media** becomes available after validated neural playback
+**DLSS > Convert & save > Save converted video** becomes available after validated neural playback
 opens. Select a new `.mkv` filename: existing destinations are never overwritten.
 Export needs the cached neural file, its original source and FFmpeg.
 
 Unsupported MKV subtitle codecs produce an error. The exporter does not silently
 drop tracks, transcode them, or burn subtitles into the image. Check the reported
-FFmpeg diagnostic and use compatible source tracks. **File > Cancel export**
-stops the job and removes its temporary output.
+FFmpeg diagnostic and use compatible source tracks. **DLSS > Convert & save >
+Cancel saving** stops the job and removes its temporary output.
 
 The export contains cached neural video, even if the original view is selected.
-Playback adjustments and runtime SR are not baked in. See [export details](USAGE.md#export-processed-media).
+Playback adjustments and runtime SR are not baked in. See [export details](USAGE.md#save-a-converted-video).
 
 ## YouTube playback fails or looks too low resolution
 

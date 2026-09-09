@@ -1,11 +1,11 @@
 # DLSS 5 Video Player — Updated Roadmap
 
-_Current as of September 8, 2026._
+_Current as of September 9, 2026._
 
 ## Quick reality check
 
 - DLSS 5 Neural Rendering is officially available on RTX 50-series GPUs, but NVIDIA's public DLSS repository still lists SDK 310.7. Video processing through Feature 18 remains an experimental community workflow. [NVIDIA announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/) · [DLSS 5 research](https://research.nvidia.com/labs/adlr/DLSS5/) · [Public SDK releases](https://github.com/NVIDIA/DLSS/releases)
-- Keep the player's currently tested stack pinned: **driver 616.64 + ReShade 6.8 + RenoDX 4.70 + NR/SR 310.8**. [Runtime lock](../packaging/runtime-lock.json) · [Measured report](../build-upscaling/runtime-comparison-20260907/REPORT.md)
+- Keep the player's currently tested stack pinned: **driver 616.64 + ReShade 6.8 + RenoDX 4.70 + NR/SR 310.8**. [Runtime lock](../packaging/runtime-lock.json) · [Measured report](measurements/runtime-comparison-20260907/REPORT.md)
 
 ## What “2× / 3×” can mean
 
@@ -58,7 +58,7 @@ Create a repeatable test set covering:
 
 Measure neural time, total FPS, VRAM, temporal flicker, OCR accuracy, face consistency, color shift and deterministic rerenders. Include blind **one-pass versus two-pass** comparisons.
 
-**Links:** [Benchmark script](../build-upscaling/runtime-comparison-20260907/benchmark.py) · [Face comparison](../build-upscaling/runtime-comparison-20260907/visuals/face-comparison.png) · [NVIDIA DLSS 5 research](https://research.nvidia.com/labs/adlr/DLSS5/)
+**Links:** [Benchmark script](measurements/runtime-comparison-20260907/benchmark.py) · [Face comparison](measurements/runtime-comparison-20260907/face-comparison.png) · [NVIDIA DLSS 5 research](https://research.nvidia.com/labs/adlr/DLSS5/)
 
 ### 3. Prove every guide and control
 
@@ -66,7 +66,7 @@ Ablate these independently:
 
 - Motion vectors
 - Depth
-- Automatic and custom masks
+- RenoDX automatic mask (the custom mask guide was ablated, proven inert and removed)
 - Structure intensity
 - Tone intensity
 - Render preset and style
@@ -132,6 +132,20 @@ The visual blend can be instant, but changing native model parameters may requir
 
 ## P1 — High-value quality and performance
 
+> **Status (September 9, 2026).** Item 9 is implemented: acceptance by evidence
+> margin, a banded reverse check and a confidence-weighted vector median cut
+> false motion on the cuts clip from 60.8 % to 3.7 % and made the guide pass
+> cheaper (6.66 → 3.09 ms). Item 10 was measured and abandoned on the NGX path —
+> the mask is inert for neural rendering and for DLSS-SR alike, and two of its
+> three parameter names belong to Ray Reconstruction ([Benchmark](BENCHMARK.md));
+> compositing outside NGX remains open. Item 12's render-ahead half shipped as
+> the active session, and its premise changed: the capture no longer swizzles on
+> the CPU, and the residual readback is the proportional term of the measured
+> 7.35 ms + 2.50 ms/megapixel cost rather than a dominant one. Item 13 was
+> measured and rejected (two-pass costs 2.8 dB PSNR and 11 OCR points). Items 8,
+> 11 and 14–18 are open; item 15's own precondition has now half-fired, since
+> depth measurably changes the output by less than 0.02 dB.
+
 ### 8. Source-color and HDR preservation
 
 Preserve:
@@ -159,6 +173,15 @@ Calculate forward/backward disagreement and flow cost. Reject unreliable motion 
 **Links:** [NVIDIA Optical Flow SDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) · [video2dlssnr NVOFA pipeline](https://github.com/DaniilSokolyuk/video2dlssnr) · [HECer ComfyUI-DLSS5](https://github.com/HECer/ComfyUI-DLSS5)
 
 ### 10. Stable protection masks
+
+**Measured September 8, 2026: the NGX mask inputs are inert.** A mask with
+5–24 % non-zero cells and a forced all-ones mask both produced pixel-identical
+output on feature 18, preset K and preset Default alike, and mask on versus off
+is 0 differing bytes on the DLSS-SR path while motion vectors change 6.85 % of
+bytes. `DLSS_Input_Bias_Current_Color_Mask`, `DLSS_DisocclusionMask` and
+`DLSS_ResponsivityMask` are Ray Reconstruction inputs. The mask guide was
+deleted; any future protection work must composite outside NGX rather than bind
+a mask to it.
 
 Support temporally tracked masks for:
 
