@@ -83,7 +83,7 @@ public:
 
     // Number of readback slots, and therefore the number of captures that may be in
     // flight before ResolveOldestCapture must be called.
-    static constexpr uint32_t CaptureSlots = 2;
+    static constexpr uint32_t CaptureSlots = 3;
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
     // readback copy for the frame just rendered and signals a per-slot fence WITHOUT
@@ -114,10 +114,21 @@ public:
     //    latency limit is reached, which caps the export at display rate no matter how
     //    fast everything else runs.
     uint64_t FenceWaitNanos() const { return m_fenceWaitNanos; }
+    uint64_t RenderSlotWaitNanos() const { return m_renderSlotWaitNanos; }
+    uint64_t CaptureSubmitSlotWaitNanos() const { return m_captureSubmitSlotWaitNanos; }
+    uint64_t CaptureResolveWaitNanos() const { return m_captureResolveWaitNanos; }
+    uint64_t PresentSlotWaitNanos() const { return m_presentSlotWaitNanos; }
     uint64_t PresentNanos() const { return m_presentNanos; }
     // Zeroed at the start of each export attempt so a libx264 retry after an NVENC
     // failure is measured on its own, not on the sum of both passes.
-    void ResetStageCounters() { m_fenceWaitNanos = 0; m_presentNanos = 0; }
+    void ResetStageCounters() {
+        m_fenceWaitNanos = 0;
+        m_renderSlotWaitNanos = 0;
+        m_captureSubmitSlotWaitNanos = 0;
+        m_captureResolveWaitNanos = 0;
+        m_presentSlotWaitNanos = 0;
+        m_presentNanos = 0;
+    }
 
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
@@ -158,7 +169,9 @@ public:
 private:
     friend struct D3D12RendererDeleter;
     ~D3D12Renderer();
-    static constexpr uint32_t FrameCount = 3;
+    // An export source frame records two command lists (evaluate, then capture). Six
+    // allocators keep three complete source frames in flight before CPU reuse waits.
+    static constexpr uint32_t FrameCount = 6;
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
     // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
@@ -186,10 +199,10 @@ private:
                                 const char* name);
     void CopyMappedRows(uint8_t* mapped, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp,
                         const void* src, size_t tightRowBytes, uint32_t rows);
-    bool WaitForFrameSlot(uint32_t slot);
+    bool WaitForFrameSlot(uint32_t slot, uint64_t* stageWaitNanos = nullptr);
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
-    bool WaitForFenceValue(uint64_t value);
+    bool WaitForFenceValue(uint64_t value, uint64_t* stageWaitNanos = nullptr);
     bool RenderFrameInternal(const uint8_t* bgra, size_t bytes,
                              const float* guideGridRGBA32F, size_t guideBytes,
                              uint32_t gridW, uint32_t gridH,
@@ -229,6 +242,10 @@ private:
     uint64_t m_fenceValue = 0;
     uint64_t m_frameFence[FrameCount]{};
     uint32_t m_frameSlot = 0;
+    uint64_t m_renderSlotWaitNanos = 0;
+    uint64_t m_captureSubmitSlotWaitNanos = 0;
+    uint64_t m_captureResolveWaitNanos = 0;
+    uint64_t m_presentSlotWaitNanos = 0;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;

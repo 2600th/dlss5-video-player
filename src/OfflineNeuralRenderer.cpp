@@ -210,8 +210,9 @@ double Quantile(std::vector<double> samples, double q)
 
 // One line per stage, once per attempt: mean/p50/p95 plus the total the stage
 // cost over the whole attempt. `frame` is the wall time of a full loop
-// iteration, so `unaccounted` is exactly what the named stages do not explain
-// (progress reporting, the receipt gate, retries, bookkeeping).
+// iteration. Captures are deliberately pipelined, so a frame's completion can
+// include work submitted for later source frames; this residual is latency in
+// that pipeline plus bookkeeping, not an independent throughput cost.
 void LogStageTable(const StageSamples& stages)
 {
     const auto row = [](const char* name, const std::vector<double>& samples) {
@@ -226,14 +227,14 @@ void LogStageTable(const StageSamples& stages)
     row("render+capture", stages.render);
     row("submit(guide+render+gate)", stages.eval);
     row("write", stages.write);
-    row("frame", stages.frame);
-    std::vector<double> unaccounted;
-    unaccounted.reserve(stages.frame.size());
+    row("frame latency", stages.frame);
+    std::vector<double> pipelineResidual;
+    pipelineResidual.reserve(stages.frame.size());
     for (size_t index = 0; index < stages.frame.size(); ++index) {
-        unaccounted.push_back(stages.frame[index] - stages.read[index] -
-                              stages.eval[index] - stages.write[index]);
+        pipelineResidual.push_back(stages.frame[index] - stages.read[index] -
+                                   stages.eval[index] - stages.write[index]);
     }
-    row("unaccounted", unaccounted);
+    row("pipeline residual", pipelineResidual);
 }
 
 NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVramMiB)
@@ -1474,7 +1475,15 @@ struct ProductionEvaluatorAdapter {
         std::ostringstream detail;
         detail<<std::fixed<<std::setprecision(2)
               <<" Of that: guides "<<MillisPerFrame(guideCost,frames)
-              <<" ms, GPU fence wait "<<NanosPerFrameMillis(renderer->FenceWaitNanos(),frames)
+              <<" ms, GPU waits render-slot "
+              <<NanosPerFrameMillis(renderer->RenderSlotWaitNanos(),frames)
+              <<" + capture-submit "
+              <<NanosPerFrameMillis(renderer->CaptureSubmitSlotWaitNanos(),frames)
+              <<" + capture-resolve "
+              <<NanosPerFrameMillis(renderer->CaptureResolveWaitNanos(),frames)
+              <<" + present-slot "
+              <<NanosPerFrameMillis(renderer->PresentSlotWaitNanos(),frames)
+              <<" = total "<<NanosPerFrameMillis(renderer->FenceWaitNanos(),frames)
               <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)<<" ms.";
         return detail.str();
     }

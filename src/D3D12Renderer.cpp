@@ -411,7 +411,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
     if(!bgra||bytes<videoRow*m_sourceH||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot)) return false;
+    if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
     SampleLocalVideoMemory();
     CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
@@ -615,7 +615,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     const uint32_t readbackSlot=m_captureWrite;
     if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot))return false;
+    if(!WaitForFrameSlot(slot, &m_captureSubmitSlotWaitNanos))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
     auto*cmd=m_cmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
@@ -671,7 +671,9 @@ bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
         capture.pixels.clear();return false;
     }
     const size_t tightBytes=static_cast<size_t>(tightBytes64);
-    if(!WaitForFenceValue(m_captureFence[readbackSlot])){capture.pixels.clear();return false;}
+    if(!WaitForFenceValue(m_captureFence[readbackSlot], &m_captureResolveWaitNanos)){
+        capture.pixels.clear();return false;
+    }
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
     if(!base){capture.pixels.clear();return false;}
     base+=m_cacheFootprint.Offset;
@@ -701,7 +703,7 @@ bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
 bool D3D12Renderer::PresentCurrent(){
     if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot))return false;
+    if(!WaitForFrameSlot(slot, &m_presentSlotWaitNanos))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
     auto* cmd=m_cmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset static-present command list"))return false;
@@ -780,7 +782,7 @@ void D3D12Renderer::SampleLocalVideoMemory(){
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
-bool D3D12Renderer::WaitForFenceValue(uint64_t value){
+bool D3D12Renderer::WaitForFenceValue(uint64_t value,uint64_t* stageWaitNanos){
     if(!value)return true;
     if(!m_fence||!m_fenceEvent)return false;
     const auto waited=std::chrono::steady_clock::now();
@@ -791,16 +793,18 @@ bool D3D12Renderer::WaitForFenceValue(uint64_t value){
         [&]{return m_fence->GetCompletedValue();},
         [&](uint64_t v){return m_fence->SetEventOnCompletion(v,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
-    m_fenceWaitNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+    const uint64_t elapsed=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now()-waited).count());
+    m_fenceWaitNanos+=elapsed;
+    if(stageWaitNanos)*stageWaitNanos+=elapsed;
     const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(
         waitResult,[&]{return m_device->GetDeviceRemovedReason();});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
     return result==d3d12_renderer_detail::FenceWaitResult::Completed;
 }
-bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
+bool D3D12Renderer::WaitForFrameSlot(uint32_t slot,uint64_t* stageWaitNanos){
     if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
-    return WaitForFenceValue(m_frameFence[slot]);
+    return WaitForFenceValue(m_frameFence[slot],stageWaitNanos);
 }
 bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     if(m_gpuUnusable||slot>=FrameCount)return false;
