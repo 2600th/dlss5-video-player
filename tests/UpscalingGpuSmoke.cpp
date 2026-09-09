@@ -107,7 +107,7 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
                 const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,count==0?HistoryReset::FirstFrame:HistoryReset::None);
                 ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
                    renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captured);
-                if(ok){out.write(reinterpret_cast<const char*>(captured.bgra.data()),std::streamsize(captured.bgra.size()));++count;}
+                if(ok){out.write(reinterpret_cast<const char*>(captured.pixels.data()),std::streamsize(captured.pixels.size()));++count;}
             }
             out.close();
             std::cout<<"guides="<<CanonicalGuideControls(controls)
