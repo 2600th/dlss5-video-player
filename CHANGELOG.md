@@ -31,6 +31,14 @@
   byte-identical output. Both keys stay in DLSSVideoPlayer.ini and in the render
   identity, so runtime-comparison work can still drive them and a runtime that
   does honour them cannot be served a stale cache entry.
+- Face comparisons from three more trailers - Hellblade II, Cyberpunk 2077
+  Phantom Liberty and Mafia: The Old Country - beside the existing Witcher IV
+  figure. Both halves of each are the identical source pixels of the identical
+  frame with no scaling or retouching, and the right half is a real render from
+  the shipping worker rather than a mock-up. The figure script now takes
+  `--frame`, `--neural-frame`, `--crop` and a wrapped `--caption`, and crops are
+  constrained to the picture area so a letterboxed trailer no longer contributes
+  black bars.
 - A session that cannot keep up says so before it starts. Rendering costs
   7.35 ms per frame plus 2.50 ms per megapixel on an RTX 5090 (fitted to 12.50,
   16.60 and 28.07 ms/frame measured at 1080p, 1440p and 4K), so the player can

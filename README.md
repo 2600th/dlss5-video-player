@@ -127,6 +127,22 @@ toggle, not a claim that every source gains visible detail.
 
 </details>
 
+### Faces from three more trailers
+
+Same source pixels either side, no scaling or retouching, neural settings at
+their defaults. The right half of each figure is a real render from the shipping
+worker, not a mock-up.
+
+![Hellblade II close-up, original beside the neural render](docs/screenshots/current/face-hellblade.png)
+
+![Cyberpunk 2077 Phantom Liberty close-up, original beside the neural render](docs/screenshots/current/face-cyberpunk.png)
+
+![Mafia The Old Country close-up, original beside the neural render](docs/screenshots/current/face-mafia.png)
+
+The differences are subtle and content-dependent: skin shading and fine texture
+move, silhouettes and framing do not. Judge a source on its own preview rather
+than on these.
+
 <details>
 <summary>Start screen</summary>
 
