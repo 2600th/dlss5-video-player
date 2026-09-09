@@ -158,11 +158,22 @@ source frame.
 
 Six of the eight model parameters and both guides reach the output. **Color
 strength and render preset do not**, on any of the four preset pairs tried and
-from two independent baselines. This is not a plumbing fault on our side: the
-runtime `ReShade.ini` written for the render carries `NRColorStrength` and
-`NRPreset` next to the six keys that do work, so the add-on or the model ignores
-them — the same shape of result as the deleted mask guide and the inert SR preset
-hints.
+from two independent baselines. This is not a plumbing fault on our side, and
+the add-on is not dropping the value either: driving the runtime `ReShade.ini`
+directly and rendering one frame per value through
+`NeuralWorkerTests --real-worker`, the add-on's own log reports back
+`preset=0`, `preset=1` and `preset=3` to match, and every pair still decodes to
+0 differing bytes. So the hint reaches NGX and the model ignores it — the same
+shape of result as the deleted mask guide and the inert SR preset hints.
+
+What the preset is meant to be: the dialog's `Default, 1, 2, 3` are passed as
+`NRPreset` in `[RenoDX.DLSS5]`, which the add-on maps to the NGX parameter
+`DLSSNR.Hint.Render.Preset` — the neural-rendering analogue of DLSS-SR's render
+presets, a request for a particular trained variant. NVIDIA publishes no meaning
+for the NR values, which is why the combo is labelled with bare numbers.
+`matiasLombo/neural-upstream` reports the same parameter "turned out to be
+inert", independently of this measurement. Note also that the add-on exposes a
+`DLSSNR.UICorrection` control this player does not, which has not been tested.
 
 The depth guide only matters while motion vectors are on: with `mv=0`, toggling
 depth changes nothing (0 %), which is what a temporal consumer with no
