@@ -6,8 +6,44 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <immintrin.h>
+#include <thread>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
+
+namespace {
+
+inline void ConvertRowRGBAtoBGRA(const uint8_t* sourceRow, uint8_t* targetRow, uint32_t width)
+{
+    uint32_t x = 0;
+#if defined(__AVX2__) || defined(_M_AMD64) || defined(_M_X64)
+    const __m128i mask128 = _mm_setr_epi8(
+        2, 1, 0, 3,  6, 5, 4, 7,  10, 9, 8, 11,  14, 13, 12, 15
+    );
+    for (; x + 8 <= width; x += 8) {
+        __m128i p0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4));
+        __m128i p1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4 + 16));
+        p0 = _mm_shuffle_epi8(p0, mask128);
+        p1 = _mm_shuffle_epi8(p1, mask128);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4), p0);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4 + 16), p1);
+    }
+    for (; x + 4 <= width; x += 4) {
+        __m128i p0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4));
+        p0 = _mm_shuffle_epi8(p0, mask128);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4), p0);
+    }
+#endif
+    for (; x < width; ++x) {
+        targetRow[x * 4u + 0] = sourceRow[x * 4u + 2];
+        targetRow[x * 4u + 1] = sourceRow[x * 4u + 1];
+        targetRow[x * 4u + 2] = sourceRow[x * 4u + 0];
+        targetRow[x * 4u + 3] = sourceRow[x * 4u + 3];
+    }
+}
+
+} // namespace
 
 static bool HR(HRESULT hr, const char* what) {
     if (FAILED(hr)) { LOG(what << " failed hr=0x" << std::hex << hr); return false; }
@@ -455,14 +491,28 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     if(!HR(m_cacheReadback->Map(0,&readRange,&mapped),"Map cache readback"))return false;
     std::vector<uint8_t> bgra(tightBytes);
     const auto*base=static_cast<const uint8_t*>(mapped)+m_cacheFootprint.Offset;
-    for(uint32_t y=0;y<m_outputH;++y){
-        const auto*sourceRow=base+size_t(m_cacheFootprint.Footprint.RowPitch)*y;
-        auto*targetRow=bgra.data()+size_t(m_outputW)*4u*y;
-        for(uint32_t x=0;x<m_outputW;++x){
-            targetRow[x*4u+0]=sourceRow[x*4u+2];
-            targetRow[x*4u+1]=sourceRow[x*4u+1];
-            targetRow[x*4u+2]=sourceRow[x*4u+0];
-            targetRow[x*4u+3]=sourceRow[x*4u+3];
+    const unsigned int threadCount = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
+    if (threadCount <= 1 || m_outputH < threadCount * 4) {
+        for (uint32_t y = 0; y < m_outputH; ++y) {
+            const auto* sourceRow = base + size_t(m_cacheFootprint.Footprint.RowPitch) * y;
+            auto* targetRow = bgra.data() + size_t(m_outputW) * 4u * y;
+            ConvertRowRGBAtoBGRA(sourceRow, targetRow, m_outputW);
+        }
+    } else {
+        std::vector<std::jthread> workers;
+        workers.reserve(threadCount);
+        const uint32_t rowsPerThread = (m_outputH + threadCount - 1) / threadCount;
+        for (unsigned int t = 0; t < threadCount; ++t) {
+            const uint32_t startY = t * rowsPerThread;
+            const uint32_t endY = std::min(m_outputH, startY + rowsPerThread);
+            if (startY >= endY) break;
+            workers.emplace_back([=, &bgra] {
+                for (uint32_t y = startY; y < endY; ++y) {
+                    const auto* sourceRow = base + size_t(m_cacheFootprint.Footprint.RowPitch) * y;
+                    auto* targetRow = bgra.data() + size_t(m_outputW) * 4u * y;
+                    ConvertRowRGBAtoBGRA(sourceRow, targetRow, m_outputW);
+                }
+            });
         }
     }
     const D3D12_RANGE writtenRange{0,0};m_cacheReadback->Unmap(0,&writtenRange);
