@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -17,11 +20,53 @@
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
+#include "Log.h"
 #endif
 
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+
+// The export loop is one thread, so the stages below are disjoint and together account
+// for all of its time. Whichever one dominates names the limiter, and the answer is
+// otherwise pure guesswork: every stage waits on a different process or device.
+//
+//  * source  - the decoder child process, through the prefetch queue.
+//  * submit  - CPU guide generation, the upload copies, and the D3D12 submission.
+//  * resolve - parked on the GPU fence for a finished frame, plus the readback copy.
+//  * write   - back pressure from the encoder child, i.e. ffmpeg cannot keep up.
+struct StageTimers {
+    SteadyClock::duration source{};
+    SteadyClock::duration submit{};
+    SteadyClock::duration resolve{};
+    SteadyClock::duration write{};
+};
+
+class StageClock {
+public:
+    explicit StageClock(SteadyClock::duration& sink)
+        : sink_(sink), start_(SteadyClock::now()) {}
+    ~StageClock() { sink_ += SteadyClock::now() - start_; }
+    StageClock(const StageClock&) = delete;
+    StageClock& operator=(const StageClock&) = delete;
+private:
+    SteadyClock::duration& sink_;
+    SteadyClock::time_point start_;
+};
+
+double MillisPerFrame(SteadyClock::duration total, uint64_t frames)
+{
+    if (!frames) return 0.0;
+    const double micros = double(
+        std::chrono::duration_cast<std::chrono::microseconds>(total).count());
+    return micros / 1000.0 / double(frames);
+}
+
+double NanosPerFrameMillis(uint64_t nanos, uint64_t frames)
+{
+    if (!frames) return 0.0;
+    return double(nanos) / 1.0e6 / double(frames);
+}
 
 enum class JobRead { FrameReady, EndOfStream, Error, Cancelled };
 
@@ -43,6 +88,43 @@ struct AttemptResult {
     int64_t firstTimestamp{};
     int64_t lastTimestamp{};
 };
+
+template <class F>
+struct ScopeExit {
+    F body;
+    ~ScopeExit() { body(); }
+};
+
+// Reports the breakdown once per attempt, on every exit path including the failures.
+// Adapters that can account for their own internals contribute a StageDetail suffix;
+// the test adapters have nothing to add and are compiled past by the requires check.
+template <class Evaluator>
+void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
+                        const AttemptResult& attempt, const Evaluator& evaluator)
+{
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+    const uint64_t frames = attempt.frames;
+    if (!frames) return;
+    std::string detail;
+    if constexpr (requires { evaluator.StageDetail(uint64_t{}); })
+        detail = evaluator.StageDetail(frames);
+    const SteadyClock::duration accounted =
+        stages.source + stages.submit + stages.resolve + stages.write;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2)
+         << "Neural export stage cost per frame ("
+         << (kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : "libx264") << ", "
+         << frames << " frames): total " << MillisPerFrame(accounted, frames)
+         << " ms = source " << MillisPerFrame(stages.source, frames)
+         << " + submit " << MillisPerFrame(stages.submit, frames)
+         << " + resolve " << MillisPerFrame(stages.resolve, frames)
+         << " + encoder back pressure " << MillisPerFrame(stages.write, frames)
+         << " ms." << detail;
+    LOG(line.str());
+#else
+    (void)kind;(void)stages;(void)attempt;(void)evaluator;
+#endif
+}
 
 std::string LowerAscii(std::string_view value)
 {
@@ -199,6 +281,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
             attempt.encoderError = startError;return attempt;
         }
+        StageTimers stages;
+        if constexpr (requires { evaluator.ResetStageDetail(); }) evaluator.ResetStageDetail();
+        const auto reportStages=[&]{ReportStageTimings(kind,stages,attempt,evaluator);};
+        ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
         bool temporalReset = true;
         // Submission runs ahead of encoding, so frame accounting has to be tracked
         // separately from what has actually been written out.
@@ -214,13 +300,20 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         auto drainOldest = [&]() -> bool {
             std::vector<uint8_t> pixels;
             if (!encoder.TakeRecycled(pixels)) pixels.clear();
-            if (!evaluator.ResolveOldest(pixels) || pixels.size() != expectedBytes) {
-                attempt.failure=AttemptFailure::Neural;encoder.Cancel();return false;
+            {
+                StageClock clock(stages.resolve);
+                if (!evaluator.ResolveOldest(pixels) || pixels.size() != expectedBytes) {
+                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return false;
+                }
             }
             const int64_t timestamp = inFlight.front();
             inFlight.pop_front();
             const size_t written = pixels.size();
-            const EncodeError writeError = encoder.WriteFrameAsync(std::move(pixels), stop);
+            EncodeError writeError;
+            {
+                StageClock clock(stages.write);
+                writeError = encoder.WriteFrameAsync(std::move(pixels), stop);
+            }
             if (writeError != EncodeError::None) {
                 attempt.failure = writeError == EncodeError::Cancelled
                     ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
@@ -242,7 +335,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 encoder.Cancel();return attempt;
             }
             JobFrame frame;
-            const JobRead read = source.Read(frame, stop);
+            JobRead read;
+            {
+                StageClock clock(stages.source);
+                read = source.Read(frame, stop);
+            }
             if (read == JobRead::EndOfStream) {
                 // Report the source failure directly. Falling through to Finish here used
                 // to overwrite it with the encoder error that cancelling produces.
@@ -275,8 +372,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     }
                     const uint64_t before = evaluator.EvaluationCount();
                     captured.clear();
-                    if (!evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured) ||
-                        evaluator.EvaluationCount() <= before || captured.size() != expectedBytes) {
+                    bool rendered;
+                    {
+                        StageClock clock(stages.submit);
+                        rendered = evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured);
+                    }
+                    if (!rendered || evaluator.EvaluationCount() <= before ||
+                        captured.size() != expectedBytes) {
                         attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
                     }
                     temporalReset = false;
@@ -292,7 +394,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     }
                 }
                 const size_t written = captured.size();
-                const EncodeError writeError = encoder.WriteFrameAsync(std::move(captured), stop);
+                EncodeError writeError;
+                {
+                    StageClock clock(stages.write);
+                    writeError = encoder.WriteFrameAsync(std::move(captured), stop);
+                }
                 if (writeError != EncodeError::None) {
                     attempt.failure = writeError == EncodeError::Cancelled
                         ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
@@ -309,9 +415,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             // Record the capture and move straight on to the next source frame. The GPU
             // keeps working while the previous frame is copied back and encoded.
             const uint64_t before = evaluator.EvaluationCount();
-            if (!evaluator.SubmitAsync(frame, temporalReset || frame.discontinuity) ||
-                evaluator.EvaluationCount() <= before) {
-                attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+            {
+                StageClock clock(stages.submit);
+                if (!evaluator.SubmitAsync(frame, temporalReset || frame.discontinuity) ||
+                    evaluator.EvaluationCount() <= before) {
+                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                }
             }
             temporalReset = false;
             inFlight.push_back(frame.timestamp100ns);
@@ -485,13 +594,32 @@ struct ProductionEvaluatorAdapter {
     CapturedVideoFrame captureScratch;
     // Guide generation plus the DLSS evaluation. Shared by the synchronous and the
     // pipelined submit paths, which differ only in how the capture is read back.
+    SteadyClock::duration guideCost{};
     bool Render(const JobFrame& frame,bool reset){
         GuideFrame guide;const bool temporalReset=forceReset||reset;forceReset=false;
-        if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,temporalReset,guide))return false;
+        {
+            StageClock clock(guideCost);
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,temporalReset,guide))return false;
+        }
         const float frameMs=static_cast<float>(1000.0/fps);
         return renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
             guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
             guide.gridW,guide.gridH,temporalReset,frameMs);
+    }
+
+    // Splits the submit and resolve stages further. Guide generation is pure CPU work,
+    // the fence wait is the GPU, and Present is DXGI pacing the hidden swapchain. Those
+    // three have completely different fixes, and the outer stage totals cannot tell them
+    // apart.
+    void ResetStageDetail(){guideCost={};if(renderer)renderer->ResetStageCounters();}
+    std::string StageDetail(uint64_t frames)const{
+        if(!renderer||!frames)return {};
+        std::ostringstream detail;
+        detail<<std::fixed<<std::setprecision(2)
+              <<" Of that: guides "<<MillisPerFrame(guideCost,frames)
+              <<" ms, GPU fence wait "<<NanosPerFrameMillis(renderer->FenceWaitNanos(),frames)
+              <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)<<" ms.";
+        return detail.str();
     }
     bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
         if(!Render(frame,reset))return false;

@@ -84,6 +84,22 @@ public:
     // receipt loop must read pixels back before deciding whether to resubmit.
     bool CaptureRenderedFrame(CapturedVideoFrame& capture) { return CaptureEvaluatedFrame(capture); }
 
+    // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
+    // apart from a swapchain that is pacing it. Both counters only ever move on the
+    // thread that drives the renderer, so they need no synchronisation.
+    //
+    //  * FenceWaitNanos is time the CPU spent parked waiting for the GPU. A large share
+    //    means the export is GPU bound and more CPU threads will not help.
+    //  * PresentNanos is time inside IDXGISwapChain::Present. The offline job renders to
+    //    a hidden window, but DXGI still queues presents and blocks once the frame
+    //    latency limit is reached, which caps the export at display rate no matter how
+    //    fast everything else runs.
+    uint64_t FenceWaitNanos() const { return m_fenceWaitNanos; }
+    uint64_t PresentNanos() const { return m_presentNanos; }
+    // Zeroed at the start of each export attempt so a libx264 retry after an NVENC
+    // failure is measured on its own, not on the sum of both passes.
+    void ResetStageCounters() { m_fenceWaitNanos = 0; m_presentNanos = 0; }
+
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -199,6 +215,8 @@ private:
     uint32_t m_captureWrite = 0;
     uint32_t m_captureRead = 0;
     uint32_t m_capturePending = 0;
+    uint64_t m_fenceWaitNanos = 0;
+    uint64_t m_presentNanos = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};

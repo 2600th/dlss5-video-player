@@ -3,6 +3,7 @@
 #include "Log.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -432,7 +433,10 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
+    const auto presented=std::chrono::steady_clock::now();
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-presented).count());
     if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
     return SignalFrameSlot(slot);
 }
@@ -603,7 +607,10 @@ bool D3D12Renderer::PresentCurrent(){
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
+    const auto presented=std::chrono::steady_clock::now();
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-presented).count());
     if(FAILED(phr)){LOG("Static Present failed hr=0x"<<std::hex<<phr);return false;}
     return SignalFrameSlot(slot);
 }
@@ -612,12 +619,15 @@ void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D
 bool D3D12Renderer::WaitForFenceValue(uint64_t value){
     if(!value)return true;
     if(!m_fence||!m_fenceEvent)return false;
+    const auto waited=std::chrono::steady_clock::now();
     const auto waitResult=d3d12_renderer_detail::WaitForGPUFenceCompletion(
         value,
         GetTickCount64(),
         [&]{return m_fence->GetCompletedValue();},
         [&](uint64_t v){return m_fence->SetEventOnCompletion(v,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
+    m_fenceWaitNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-waited).count());
     const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(
         waitResult,[&]{return m_device->GetDeviceRemovedReason();});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
