@@ -198,6 +198,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCacheCapture; // present shader into a BGRA8 target
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;

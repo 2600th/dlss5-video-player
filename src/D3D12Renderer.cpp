@@ -207,6 +207,10 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoConvert)),"Create convert PSO"))return false;
     p.PS={present->GetBufferPointer(),present->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresent)),"Create present PSO"))return false;
+    // Cache capture runs the same present shader into a BGRA8 target, so the
+    // readback rows already carry the caller's byte order and need no CPU swizzle.
+    p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCacheCapture)),"Create cache-capture PSO"))return false;
+    p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
     p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
     p.PS={depth->GetBufferPointer(),depth->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebug)),"Create depth debug PSO"))return false;
     p.PS={expand->GetBufferPointer(),expand->GetBufferSize()};p.NumRenderTargets=2;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.RTVFormats[1]=DXGI_FORMAT_R8_UNORM;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;
@@ -275,12 +279,12 @@ bool D3D12Renderer::CreateVideoResources(){
     m_dlssOutput->SetName(L"DLSS_Output_Linear_FP16_UAV");
     srv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;m_device->CreateShaderResourceView(m_dlssOutput.Get(),&srv,SRVCPU(1));
 
-    auto cache=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,m_outputW,m_outputH,
+    auto cache=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_outputW,m_outputH,
                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&cache,
         D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_cacheOutput)),
         "Create cache output"))return false;
-    m_cacheOutput->SetName(L"Neural_Cache_Output_RGBA8_sRGB");
+    m_cacheOutput->SetName(L"Neural_Cache_Output_BGRA8_sRGB");
     m_device->CreateRenderTargetView(m_cacheOutput.Get(),nullptr,RTV(FrameCount+3));
     m_device->GetCopyableFootprints(&cache,0,1,0,&m_cacheFootprint,&m_cacheRows,
                                     &m_cacheRowSize,&m_cacheReadbackBytes);
@@ -557,7 +561,7 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     }
 #endif
     if(m_gpuUnusable||!m_cacheOutput||!m_cacheReadback||!m_dlssOutput||
-       !m_queue||!m_rootSig||!m_psoPresent)return false;
+       !m_queue||!m_rootSig||!m_psoCacheCapture)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
@@ -571,7 +575,7 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
     auto target=RTV(FrameCount+3);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(target,black,0,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoPresent.Get());
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
     // Cache frames are always the bare neural output: no comparison, no color/zoom.
@@ -589,23 +593,27 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
             D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
-    if(!SignalFrameSlot(slot)||!WaitGPUForContinuedUse())return false;
+    // Wait for exactly this capture submission: SignalFrameSlot recorded its fence
+    // value in m_frameFence[slot], and the readback copy is the last work it guards.
+    // Draining the whole queue instead would also stall on unrelated in-flight work.
+    if(!SignalFrameSlot(slot)||!WaitForFrameSlot(slot))return false;
 
     void*mapped=nullptr;
     const D3D12_RANGE readRange{static_cast<SIZE_T>(m_cacheFootprint.Offset),
         static_cast<SIZE_T>(m_cacheFootprint.Offset+m_cacheReadbackBytes)};
     if(!HR(m_cacheReadback->Map(0,&readRange,&mapped),"Map cache readback"))return false;
-    std::vector<uint8_t> bgra(tightBytes);
+    // BGRA8 render target => the rows are already in the caller's order. assign()
+    // sizes the vector while copying, skipping the zero-fill of a buffer that the
+    // copy overwrites in full.
     const auto*base=static_cast<const uint8_t*>(mapped)+m_cacheFootprint.Offset;
-    for(uint32_t y=0;y<m_outputH;++y){
-        const auto*sourceRow=base+size_t(m_cacheFootprint.Footprint.RowPitch)*y;
-        auto*targetRow=bgra.data()+size_t(m_outputW)*4u*y;
-        for(uint32_t x=0;x<m_outputW;++x){
-            targetRow[x*4u+0]=sourceRow[x*4u+2];
-            targetRow[x*4u+1]=sourceRow[x*4u+1];
-            targetRow[x*4u+2]=sourceRow[x*4u+0];
-            targetRow[x*4u+3]=sourceRow[x*4u+3];
-        }
+    const size_t rowBytes=size_t(m_outputW)*4u;
+    const size_t rowPitch=size_t(m_cacheFootprint.Footprint.RowPitch);
+    std::vector<uint8_t> bgra;
+    if(rowPitch==rowBytes)bgra.assign(base,base+tightBytes);
+    else{
+        bgra.resize(tightBytes);
+        for(uint32_t y=0;y<m_outputH;++y)
+            memcpy(bgra.data()+rowBytes*y,base+rowPitch*y,rowBytes);
     }
     const D3D12_RANGE writtenRange{0,0};m_cacheReadback->Unmap(0,&writtenRange);
     capture.bgra=std::move(bgra);capture.width=m_outputW;capture.height=m_outputH;
