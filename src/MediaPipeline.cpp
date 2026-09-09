@@ -127,7 +127,10 @@ struct ChildProcess {
         HANDLE stdinRead = nullptr;
         if (pipeInput) {
             SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-            if (!CreatePipe(&stdinRead, &stdinWrite, &security, 64 * 1024 * 1024)) return false;
+            // The caller's frame queue provides the real buffering; a larger pipe just
+            // holds nonpaged pool.
+            if (!CreatePipe(&stdinRead, &stdinWrite, &security,
+                            static_cast<DWORD>(kChildStdinPipeBytes))) return false;
             if (!SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0)) {
                 CloseHandle(stdinRead); CloseHandle(stdinWrite); stdinWrite = nullptr; return false;
             }
@@ -399,7 +402,8 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
 {
     std::vector<std::wstring> arguments{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
-        L"-f", L"rawvideo", L"-pix_fmt", L"bgra",
+        L"-f", L"rawvideo",
+        L"-pix_fmt", spec.pixelFormat == EncoderPixelFormat::Rgba ? L"rgba" : L"bgra",
         L"-video_size", std::to_wstring(spec.width) + L"x" + std::to_wstring(spec.height),
         L"-framerate", FrameRateText(spec.fps), L"-i", L"pipe:0", L"-an",
     };

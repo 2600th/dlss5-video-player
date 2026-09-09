@@ -592,7 +592,12 @@ void encoder_blocked_write_is_interrupted_by_stop_test()
 {
     TempDirectory fixture;const auto helper=fixture.Path();
     std::filesystem::copy_file(CurrentExecutable(),helper/L"ffmpeg.exe");
-    RawVideoEncoder encoder(helper);EncoderSpec spec{1024,1024,30.0,EncoderKind::H264Software};
+    RawVideoEncoder encoder(helper);EncoderSpec spec{2048,3072,30.0,EncoderKind::H264Software};
+    // The write has to actually block before a stop has anything to interrupt, so the
+    // frame must be larger than the child's stdin pipe buffer. Deriving the requirement
+    // from the constant keeps this test honest if that buffer is ever retuned: it used to
+    // rely on the pipe defaulting to a few kilobytes.
+    CHECK(ExpectedBgraFrameBytes(spec) > kChildStdinPipeBytes);
     CHECK_EQ(EncodeError::None,encoder.Start(spec,fixture.Path()/L"hang-output.mkv"));
     std::vector<uint8_t> frame(ExpectedBgraFrameBytes(spec));std::stop_source stop;
     auto write=std::async(std::launch::async,[&]{return encoder.WriteFrame(frame,stop.get_token());});

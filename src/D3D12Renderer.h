@@ -25,7 +25,11 @@ using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
 D3D12RendererOwner MakeD3D12Renderer();
 
 struct CapturedVideoFrame {
-    std::vector<uint8_t> bgra;
+    // Tightly packed 8-bit RGBA, matching the R8G8B8A8_UNORM cache render target. The
+    // encoder is configured with EncoderPixelFormat::Rgba so no channel swizzle is
+    // needed on the CPU. Named for the payload, not a channel order, because the test
+    // hook may supply any layout.
+    std::vector<uint8_t> pixels;
     uint32_t width{};
     uint32_t height{};
 };
@@ -57,6 +61,29 @@ public:
                              uint32_t gridW, uint32_t gridH,
                              bool temporalReset, float frameTimeMs,
                              CapturedVideoFrame& capture);
+
+    // Number of readback slots, and therefore the number of captures that may be in
+    // flight before ResolveOldestCapture must be called.
+    static constexpr uint32_t CaptureSlots = 2;
+
+    // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
+    // readback copy for the frame just rendered and signals a per-slot fence WITHOUT
+    // draining the GPU. ResolveOldestCapture then waits on the oldest slot only. This
+    // lets the CPU-side copy and the encoder overlap with GPU work on the next frame,
+    // where the old synchronous path left the GPU idle for the whole CPU stage.
+    bool EnqueueEvaluatedFrameCapture();
+    uint32_t PendingCaptureCount() const { return m_capturePending; }
+    // On success every byte of capture.pixels is overwritten, and the buffer is only
+    // resized when it does not already hold exactly one frame. Hand back the same
+    // CapturedVideoFrame each time and the per-frame allocation and its full-frame
+    // zero-fill both disappear. On failure the capture is cleared.
+    bool ResolveOldestCapture(CapturedVideoFrame& capture);
+
+    // Synchronous capture of the frame just rendered by RenderFrame. Valid only while
+    // nothing is in flight. The offline job uses it for the first frame, whose evidence
+    // receipt loop must read pixels back before deciding whether to resubmit.
+    bool CaptureRenderedFrame(CapturedVideoFrame& capture) { return CaptureEvaluatedFrame(capture); }
+
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -109,6 +136,9 @@ private:
     bool WaitForFrameSlot(uint32_t slot);
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
+    bool WaitForFenceValue(uint64_t value);
+    // Synchronous enqueue + resolve. Kept for the first-frame evidence loop, which must
+    // read a capture back before it can decide whether to submit the same frame again.
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
@@ -160,11 +190,15 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheOutput;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
 
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
-    uint8_t* m_cacheReadbackMapped = nullptr;
+    uint8_t* m_cacheReadbackMapped[CaptureSlots]{};
+    uint64_t m_captureFence[CaptureSlots]{};
+    uint32_t m_captureWrite = 0;
+    uint32_t m_captureRead = 0;
+    uint32_t m_capturePending = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};

@@ -2089,9 +2089,9 @@ void renderer_cache_capture_requires_a_successful_neural_evaluation_test()
     auto renderer=MakeD3D12Renderer();int captures=0;
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,false,[&](std::vector<uint8_t>&){++captures;return true;});
-    CapturedVideoFrame frame;frame.bgra.assign(7,0x55);frame.width=9;frame.height=9;
+    CapturedVideoFrame frame;frame.pixels.assign(7,0x55);frame.width=9;frame.height=9;
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK_EQ(0,captures);CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);
+    CHECK_EQ(0,captures);CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);
     CHECK_EQ(uint32_t{0},frame.height);
 }
 
@@ -2105,12 +2105,12 @@ void renderer_cache_capture_returns_exact_tight_bgra_geometry_test()
     CapturedVideoFrame frame;
     CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
     CHECK_EQ(uint32_t{2},frame.width);CHECK_EQ(uint32_t{2},frame.height);
-    CHECK_EQ(size_t{16},frame.bgra.size());CHECK_EQ(uint8_t{15},frame.bgra.back());
+    CHECK_EQ(size_t{16},frame.pixels.size());CHECK_EQ(uint8_t{15},frame.pixels.back());
 
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(17,0);return true;});
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+    CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
 }
 
 void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
@@ -2118,9 +2118,9 @@ void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
     auto renderer=MakeD3D12Renderer();
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(8,0x44);return false;});
-    CapturedVideoFrame frame;frame.bgra.assign(16,0x22);frame.width=2;frame.height=2;
+    CapturedVideoFrame frame;frame.pixels.assign(16,0x22);frame.width=2;frame.height=2;
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+    CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
 }
 
 void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
@@ -2134,7 +2134,7 @@ void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
         *renderer,1,1,true,[&](std::vector<uint8_t>& bytes){bytes=neuralBytes;return true;});
     CapturedVideoFrame frame;
     CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK_EQ(neuralBytes,frame.bgra);
+    CHECK_EQ(neuralBytes,frame.pixels);
 }
 
 void gpu_classification_table_test()

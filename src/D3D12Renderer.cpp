@@ -6,42 +6,18 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
-#include <immintrin.h>
-#include <thread>
 #include <vector>
+
+#include "ParallelFor.h"
 
 using Microsoft::WRL::ComPtr;
 
 namespace {
 
-inline void ConvertRowRGBAtoBGRA(const uint8_t* sourceRow, uint8_t* targetRow, uint32_t width)
-{
-    uint32_t x = 0;
-#if defined(__AVX2__) || defined(_M_AMD64) || defined(_M_X64)
-    const __m128i mask128 = _mm_setr_epi8(
-        2, 1, 0, 3,  6, 5, 4, 7,  10, 9, 8, 11,  14, 13, 12, 15
-    );
-    for (; x + 8 <= width; x += 8) {
-        __m128i p0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4));
-        __m128i p1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4 + 16));
-        p0 = _mm_shuffle_epi8(p0, mask128);
-        p1 = _mm_shuffle_epi8(p1, mask128);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4), p0);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4 + 16), p1);
-    }
-    for (; x + 4 <= width; x += 4) {
-        __m128i p0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(sourceRow + x * 4));
-        p0 = _mm_shuffle_epi8(p0, mask128);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(targetRow + x * 4), p0);
-    }
-#endif
-    for (; x < width; ++x) {
-        targetRow[x * 4u + 0] = sourceRow[x * 4u + 2];
-        targetRow[x * 4u + 1] = sourceRow[x * 4u + 1];
-        targetRow[x * 4u + 2] = sourceRow[x * 4u + 0];
-        targetRow[x * 4u + 3] = sourceRow[x * 4u + 3];
-    }
-}
+// Full-frame memory passes are bandwidth bound, so they are split only once they are
+// large enough that the dispatch pays for itself. Roughly a quarter of a 1080p frame.
+constexpr size_t kParallelCopyGrain = 2u * 1024u * 1024u;
+constexpr size_t kParallelRowGrain = 64u;
 
 } // namespace
 
@@ -84,9 +60,9 @@ D3D12Renderer::~D3D12Renderer() {
         m_uploadMapped[i]=nullptr;
         m_guideMapped[i]=nullptr;
     }
-    if (m_cacheReadback && m_cacheReadbackMapped) {
-        m_cacheReadback->Unmap(0, nullptr);
-        m_cacheReadbackMapped = nullptr;
+    for (uint32_t i=0;i<CaptureSlots;++i) {
+        if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
+        m_cacheReadbackMapped[i]=nullptr;
     }
     m_dlss.Shutdown();
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
@@ -301,13 +277,24 @@ bool D3D12Renderer::CreateVideoResources(){
     D3D12_RESOURCE_DESC readback{};readback.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
     readback.Width=m_cacheReadbackBytes;readback.Height=1;readback.DepthOrArraySize=1;
     readback.MipLevels=1;readback.SampleDesc={1,0};readback.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
-        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback)),
-        "Create cache readback"))return false;
-    m_cacheReadback->SetName(L"Neural_Cache_Readback_RGBA8");
-    const D3D12_RANGE readRange{0, static_cast<SIZE_T>(m_cacheReadbackBytes)};
-    if(!HR(m_cacheReadback->Map(0,&readRange,reinterpret_cast<void**>(&m_cacheReadbackMapped)),
-        "Map persistent cache readback buffer"))return false;
+    // One readback buffer per capture slot so frame N's copy target is not the buffer the
+    // CPU is still reading for frame N-1. That is what lets the capture fence be waited on
+    // per slot instead of draining the whole queue after every frame.
+    //
+    // The buffers stay mapped for the renderer's lifetime, which declares the CPU read
+    // range exactly once. READBACK heap memory on a discrete PCIe adapter is write-back
+    // cached and coherent, so that is safe here and this player already requires an RTX
+    // GPU. A UMA or WARP adapter would need the range re-declared per read.
+    for(uint32_t i=0;i<CaptureSlots;++i){
+        if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback[i])),
+            "Create cache readback"))return false;
+        m_cacheReadback[i]->SetName(L"Neural_Cache_Readback_RGBA8");
+        const D3D12_RANGE readRange{0, static_cast<SIZE_T>(m_cacheReadbackBytes)};
+        if(!HR(m_cacheReadback[i]->Map(0,&readRange,
+            reinterpret_cast<void**>(&m_cacheReadbackMapped[i])),
+            "Map persistent cache readback buffer"))return false;
+    }
     LOG("DLSS resource contract ready: Color=R16G16B16A16_FLOAT " << m_renderW << "x" << m_renderH
         << ", MV=R16G16_FLOAT " << m_renderW << "x" << m_renderH
         << ", Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV " << m_renderW << "x" << m_renderH
@@ -317,7 +304,25 @@ bool D3D12Renderer::CreateVideoResources(){
     return true;
 }
 
-void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&fp,const void*src,size_t tight,uint32_t rows){const uint8_t*s=static_cast<const uint8_t*>(src);for(uint32_t y=0;y<rows;++y)memcpy(mapped+fp.Offset+size_t(fp.Footprint.RowPitch)*y,s+tight*y,tight);}
+void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&fp,const void*src,size_t tight,uint32_t rows){
+    const uint8_t*s=static_cast<const uint8_t*>(src);
+    uint8_t*destination=mapped+fp.Offset;
+    const size_t pitch=size_t(fp.Footprint.RowPitch);
+    // A full 4K BGRA frame is over 30 MB per call and used to be copied one row at a
+    // time on the calling thread. Row pitch is 256-aligned, which for the common widths
+    // (1920 and 3840 give 7680 and 15360) already equals the tight row, so the whole
+    // upload collapses to a single contiguous copy.
+    if(pitch==tight){
+        const size_t total=tight*size_t(rows);
+        ParallelForRanges(total,kParallelCopyGrain,[&](size_t begin,size_t end){
+            memcpy(destination+begin,s+begin,end-begin);
+        });
+        return;
+    }
+    ParallelForRanges(size_t(rows),kParallelRowGrain,[&](size_t begin,size_t end){
+        for(size_t y=begin;y<end;++y)memcpy(destination+pitch*y,s+tight*y,tight);
+    });
+}
 
 float D3D12Renderer::Halton(uint32_t index,uint32_t base){float f=1.0f,r=0.0f;while(index){f/=float(base);r+=f*float(index%base);index/=base;}return r;}
 
@@ -437,28 +442,41 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,
                                         uint32_t gridW,uint32_t gridH,
                                         bool temporalReset,float frameTimeMs,
                                         CapturedVideoFrame&capture){
-    capture.bgra.clear();capture.width=0;capture.height=0;
+    capture.pixels.clear();capture.width=0;capture.height=0;
     if(!RenderFrame(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,
                     temporalReset,frameTimeMs))return false;
     return CaptureEvaluatedFrame(capture);
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
-    capture.bgra.clear();capture.width=0;capture.height=0;
+    capture.pixels.clear();capture.width=0;capture.height=0;
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
     if(tightBytes64>std::numeric_limits<size_t>::max())return false;
-    const size_t tightBytes=static_cast<size_t>(tightBytes64);
 #if defined(D3D12_RENDERER_TESTING)
     if(m_testCacheCapture){
+        const size_t tightBytes=static_cast<size_t>(tightBytes64);
         std::vector<uint8_t> bytes;
         if(!m_testCacheCapture(bytes)||bytes.size()!=tightBytes)return false;
-        capture.bgra=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
+        capture.pixels=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
         return true;
     }
 #endif
-    if(m_gpuUnusable||!m_cacheOutput||!m_cacheReadback||!m_dlssOutput||
-       !m_queue||!m_rootSig||!m_psoPresent)return false;
+    // The synchronous form owns the whole ring, so it may only be used while nothing is
+    // in flight. The offline job uses it for the first frame, whose evidence receipt loop
+    // has to read a capture back before deciding whether to resubmit the same frame.
+    if(m_capturePending)return false;
+    if(!EnqueueEvaluatedFrameCapture())return false;
+    return ResolveOldestCapture(capture);
+}
+
+bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
+    if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
+    if(m_capturePending>=CaptureSlots)return false;
+    if(m_gpuUnusable||!m_cacheOutput||!m_dlssOutput||!m_queue||!m_rootSig||!m_psoPresent)
+        return false;
+    const uint32_t readbackSlot=m_captureWrite;
+    if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
@@ -480,7 +498,11 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     cmd->SetGraphicsRoot32BitConstants(1,12,params,0);cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,
             D3D12_RESOURCE_STATE_COPY_SOURCE);
-    D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=m_cacheReadback.Get();
+    // A single m_cacheOutput is enough even with several captures in flight: the next
+    // frame's draw into it and this frame's copy out of it are recorded on the same
+    // queue, so the GPU already runs them in order.
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource=m_cacheReadback[readbackSlot].Get();
     destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint=m_cacheFootprint;
     D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=m_cacheOutput.Get();
@@ -490,36 +512,52 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
             D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
-    if(!SignalFrameSlot(slot)||!WaitGPUForContinuedUse())return false;
+    // Signal only. The old code drained the entire queue here, which idled the GPU for
+    // the full CPU copy and encode stage of every frame.
+    if(!SignalFrameSlot(slot))return false;
+    m_captureFence[readbackSlot]=m_fenceValue;
+    m_captureWrite=(readbackSlot+1u)%CaptureSlots;
+    ++m_capturePending;
+    return true;
+}
 
-    if(!m_cacheReadbackMapped)return false;
-    std::vector<uint8_t> bgra(tightBytes);
-    const auto*base=m_cacheReadbackMapped+m_cacheFootprint.Offset;
-    const unsigned int threadCount = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
-    if (threadCount <= 1 || m_outputH < threadCount * 4) {
-        for (uint32_t y = 0; y < m_outputH; ++y) {
-            const auto* sourceRow = base + size_t(m_cacheFootprint.Footprint.RowPitch) * y;
-            auto* targetRow = bgra.data() + size_t(m_outputW) * 4u * y;
-            ConvertRowRGBAtoBGRA(sourceRow, targetRow, m_outputW);
-        }
-    } else {
-        std::vector<std::jthread> workers;
-        workers.reserve(threadCount);
-        const uint32_t rowsPerThread = (m_outputH + threadCount - 1) / threadCount;
-        for (unsigned int t = 0; t < threadCount; ++t) {
-            const uint32_t startY = t * rowsPerThread;
-            const uint32_t endY = std::min(m_outputH, startY + rowsPerThread);
-            if (startY >= endY) break;
-            workers.emplace_back([=, &bgra] {
-                for (uint32_t y = startY; y < endY; ++y) {
-                    const auto* sourceRow = base + size_t(m_cacheFootprint.Footprint.RowPitch) * y;
-                    auto* targetRow = bgra.data() + size_t(m_outputW) * 4u * y;
-                    ConvertRowRGBAtoBGRA(sourceRow, targetRow, m_outputW);
-                }
-            });
-        }
+bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
+    capture.width=0;capture.height=0;
+    if(!m_capturePending){capture.pixels.clear();return false;}
+    const uint32_t readbackSlot=m_captureRead;
+    // Retire the slot whatever happens, so a failure cannot wedge the ring.
+    m_captureRead=(readbackSlot+1u)%CaptureSlots;
+    --m_capturePending;
+
+    const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
+    if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
+        capture.pixels.clear();return false;
     }
-    capture.bgra=std::move(bgra);capture.width=m_outputW;capture.height=m_outputH;
+    const size_t tightBytes=static_cast<size_t>(tightBytes64);
+    if(!WaitForFenceValue(m_captureFence[readbackSlot])){capture.pixels.clear();return false;}
+    const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
+    if(!base){capture.pixels.clear();return false;}
+    base+=m_cacheFootprint.Offset;
+
+    // Only resize when the caller handed back a differently sized buffer. Constructing a
+    // fresh vector here value-initialised a whole frame, over 30 MB of pointless memset
+    // per frame at 4K, immediately before overwriting every byte of it.
+    if(capture.pixels.size()!=tightBytes)capture.pixels.resize(tightBytes);
+    uint8_t*out=capture.pixels.data();
+    const size_t pitch=size_t(m_cacheFootprint.Footprint.RowPitch);
+    const size_t tightRow=size_t(m_outputW)*4u;
+    // No channel swizzle: the cache target is R8G8B8A8 and the encoder is started with
+    // EncoderPixelFormat::Rgba, so ffmpeg consumes this layout directly.
+    if(pitch==tightRow){
+        ParallelForRanges(tightBytes,kParallelCopyGrain,[&](size_t begin,size_t end){
+            memcpy(out+begin,base+begin,end-begin);
+        });
+    }else{
+        ParallelForRanges(size_t(m_outputH),kParallelRowGrain,[&](size_t begin,size_t end){
+            for(size_t y=begin;y<end;++y)memcpy(out+tightRow*y,base+pitch*y,tightRow);
+        });
+    }
+    capture.width=m_outputW;capture.height=m_outputH;
     return true;
 }
 
@@ -571,20 +609,23 @@ bool D3D12Renderer::PresentCurrent(){
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
-bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
-    if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
-    const uint64_t v=m_frameFence[slot];
-    if(!v)return true;
+bool D3D12Renderer::WaitForFenceValue(uint64_t value){
+    if(!value)return true;
+    if(!m_fence||!m_fenceEvent)return false;
     const auto waitResult=d3d12_renderer_detail::WaitForGPUFenceCompletion(
-        v,
+        value,
         GetTickCount64(),
         [&]{return m_fence->GetCompletedValue();},
-        [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
+        [&](uint64_t v){return m_fence->SetEventOnCompletion(v,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
     const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(
         waitResult,[&]{return m_device->GetDeviceRemovedReason();});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
     return result==d3d12_renderer_detail::FenceWaitResult::Completed;
+}
+bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
+    if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
+    return WaitForFenceValue(m_frameFence[slot]);
 }
 bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     if(m_gpuUnusable||slot>=FrameCount)return false;

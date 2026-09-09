@@ -4,9 +4,13 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #ifndef OFFLINE_NEURAL_RENDERER_TESTING
 #include "D3D12Renderer.h"
@@ -187,7 +191,8 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     auto runAttempt = [&](EncoderKind kind) {
         AttemptResult attempt;
         const EncodeError startError = encoder.Start(
-            EncoderSpec{request.width, request.height, request.fps, kind},
+            EncoderSpec{request.width, request.height, request.fps, kind,
+                        evaluator.CapturePixelFormat()},
             request.stagingVideoPath);
         if (startError != EncodeError::None) {
             attempt.failure = startError == EncodeError::Cancelled
@@ -195,6 +200,42 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             attempt.encoderError = startError;return attempt;
         }
         bool temporalReset = true;
+        // Submission runs ahead of encoding, so frame accounting has to be tracked
+        // separately from what has actually been written out.
+        uint64_t submitted = 0;
+        bool haveSubmitTimestamp = false;
+        int64_t lastSubmitTimestamp = 0;
+        std::deque<int64_t> inFlight;
+        evaluator.DiscardPending();
+
+        // Waits on the oldest in-flight capture only, then hands its pixels to the
+        // encoder thread. The buffer is recycled from a finished write so the full-frame
+        // allocation and its zero-fill do not repeat every frame.
+        auto drainOldest = [&]() -> bool {
+            std::vector<uint8_t> pixels;
+            if (!encoder.TakeRecycled(pixels)) pixels.clear();
+            if (!evaluator.ResolveOldest(pixels) || pixels.size() != expectedBytes) {
+                attempt.failure=AttemptFailure::Neural;encoder.Cancel();return false;
+            }
+            const int64_t timestamp = inFlight.front();
+            inFlight.pop_front();
+            const size_t written = pixels.size();
+            const EncodeError writeError = encoder.WriteFrameAsync(std::move(pixels), stop);
+            if (writeError != EncodeError::None) {
+                attempt.failure = writeError == EncodeError::Cancelled
+                    ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
+                attempt.encoderError=writeError;encoder.Cancel();return false;
+            }
+            ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
+            if (!attempt.hasTimestamp) {
+                attempt.firstTimestamp=timestamp;
+                attempt.hasTimestamp=true;
+            }
+            attempt.lastTimestamp=timestamp;
+            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+            return true;
+        };
+
         for (;;) {
             if (stop.stop_requested()) {
                 attempt.failure = AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
@@ -203,7 +244,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             JobFrame frame;
             const JobRead read = source.Read(frame, stop);
             if (read == JobRead::EndOfStream) {
-                if(attempt.frames==0){attempt.failure=AttemptFailure::Source;encoder.Cancel();}
+                // Report the source failure directly. Falling through to Finish here used
+                // to overwrite it with the encoder error that cancelling produces.
+                if(submitted==0){attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;}
                 break;
             }
             if (read == JobRead::Cancelled) {
@@ -214,51 +257,73 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
             }
             if (frame.timestamp100ns < 0 ||
-                (attempt.hasTimestamp && frame.timestamp100ns <= attempt.lastTimestamp)) {
+                (haveSubmitTimestamp && frame.timestamp100ns <= lastSubmitTimestamp)) {
                 attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
             }
-            std::vector<uint8_t> captured;
-            for (uint64_t capture = 1; ; ++capture) {
-                if (stop.stop_requested()) {
-                    attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
-                    encoder.Cancel();return attempt;
-                }
-                const uint64_t before = evaluator.EvaluationCount();
-                captured.clear();
-                if (!evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured) ||
-                    evaluator.EvaluationCount() <= before || captured.size() != expectedBytes) {
-                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
-                }
-                temporalReset = false;
-                if (attempt.frames > 0) break;
-                // The runtime logs successful evaluations sparsely. Capture the
-                // first source frame until a fresh receipt exists, retaining
-                // only its latest pixels for encoding. Each retry has its own
-                // baseline, and these extra captures never extend the timeline.
-                if (capture == 1 || capture % 10 == 0) {
-                    const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
-                    if (!receipt.Valid()) {
+
+            if (submitted == 0) {
+                // The first frame stays synchronous: the runtime logs successful
+                // evaluations sparsely, so it is captured repeatedly until a fresh
+                // receipt exists, and that decision needs the pixels in hand. Each retry
+                // has its own baseline, and these extra captures never extend the
+                // timeline.
+                std::vector<uint8_t> captured;
+                for (uint64_t capture = 1; ; ++capture) {
+                    if (stop.stop_requested()) {
+                        attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
+                        encoder.Cancel();return attempt;
+                    }
+                    const uint64_t before = evaluator.EvaluationCount();
+                    captured.clear();
+                    if (!evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured) ||
+                        evaluator.EvaluationCount() <= before || captured.size() != expectedBytes) {
                         attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
                     }
-                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
+                    temporalReset = false;
+                    if (capture == 1 || capture % 10 == 0) {
+                        const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
+                        if (!receipt.Valid()) {
+                            attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                        }
+                        if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
+                    }
+                    if (capture >= 120) {
+                        attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                    }
                 }
-                if (capture >= 120) {
-                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
+                const size_t written = captured.size();
+                const EncodeError writeError = encoder.WriteFrameAsync(std::move(captured), stop);
+                if (writeError != EncodeError::None) {
+                    attempt.failure = writeError == EncodeError::Cancelled
+                        ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
+                    attempt.encoderError=writeError;encoder.Cancel();return attempt;
                 }
+                ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
+                attempt.firstTimestamp=frame.timestamp100ns;attempt.hasTimestamp=true;
+                attempt.lastTimestamp=frame.timestamp100ns;
+                emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+                ++submitted;haveSubmitTimestamp=true;lastSubmitTimestamp=frame.timestamp100ns;
+                continue;
             }
-            const EncodeError writeError = encoder.WriteFrame(captured, stop);
-            if (writeError != EncodeError::None) {
-                attempt.failure = writeError == EncodeError::Cancelled
-                    ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
-                attempt.encoderError=writeError;encoder.Cancel();return attempt;
+
+            // Record the capture and move straight on to the next source frame. The GPU
+            // keeps working while the previous frame is copied back and encoded.
+            const uint64_t before = evaluator.EvaluationCount();
+            if (!evaluator.SubmitAsync(frame, temporalReset || frame.discontinuity) ||
+                evaluator.EvaluationCount() <= before) {
+                attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
             }
-            ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured.size();
-            if (!attempt.hasTimestamp) {
-                attempt.firstTimestamp=frame.timestamp100ns;
-                attempt.hasTimestamp=true;
+            temporalReset = false;
+            inFlight.push_back(frame.timestamp100ns);
+            ++submitted;haveSubmitTimestamp=true;lastSubmitTimestamp=frame.timestamp100ns;
+            if (evaluator.Pending() >= evaluator.MaxPending() && !drainOldest()) return attempt;
+        }
+        while (!inFlight.empty()) {
+            if (stop.stop_requested()) {
+                attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
+                encoder.Cancel();return attempt;
             }
-            attempt.lastTimestamp=frame.timestamp100ns;
-            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+            if (!drainOldest()) return attempt;
         }
         const EncodeError finishError=encoder.Finish(stop);
         if(finishError!=EncodeError::None){
@@ -343,19 +408,49 @@ struct TestSourceAdapter {
 };
 struct TestEvaluatorAdapter {
     INeuralFrameEvaluator& evaluator;
+    // The test interface stays synchronous; these shims give RunJob the same async shape
+    // the production adapter has, so the pipelined control flow is what the tests run.
+    std::deque<std::vector<uint8_t>> captured{};
     bool Initialize(HWND window,uint32_t width,uint32_t height,double fps){return evaluator.Initialize(window,width,height,fps);}
     bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
         return evaluator.Submit(OfflineDecodedFrame{frame.bgra,frame.timestamp100ns,frame.discontinuity},
                                 reset,capture,output);
     }
+    bool SubmitAsync(const JobFrame& frame,bool reset){
+        std::vector<uint8_t> output;
+        if(!Submit(frame,reset,true,output))return false;
+        captured.push_back(std::move(output));
+        return true;
+    }
+    uint32_t Pending()const{return uint32_t(captured.size());}
+    static constexpr uint32_t MaxPending(){return 2u;}
+    bool ResolveOldest(std::vector<uint8_t>& pixels){
+        if(captured.empty())return false;
+        pixels=std::move(captured.front());captured.pop_front();return true;
+    }
+    void DiscardPending(){captured.clear();}
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool FeatureCreated()const{return evaluator.FeatureCreated();}
     uint64_t EvaluationCount()const{return evaluator.EvaluationCount();}
     void ResetTemporal(){evaluator.ResetTemporal();}
 };
 struct TestEncoderAdapter {
     IFrameEncoder& encoder;
-    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){return encoder.Start(spec,path);}
+    std::vector<std::vector<uint8_t>> recycled{};
+    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
+        recycled.clear();return encoder.Start(spec,path);
+    }
     EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
+    EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
+        const EncodeError error=encoder.WriteFrame(frame,stop);
+        if(recycled.size()<2)recycled.push_back(std::move(frame));
+        return error;
+    }
+    bool TakeRecycled(std::vector<uint8_t>& buffer){
+        if(recycled.empty())return false;
+        buffer=std::move(recycled.back());recycled.pop_back();return true;
+    }
+    EncodeError Flush(std::stop_token){return EncodeError::None;}
     EncodeError Finish(std::stop_token stop){return encoder.Finish(stop);}
     void Cancel(){encoder.Cancel();}
 };
@@ -387,30 +482,168 @@ struct ProductionEvaluatorAdapter {
         if(!renderer||!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
         renderer->SetDLSS(true);return true;
     }
-    bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
+    CapturedVideoFrame captureScratch;
+    // Guide generation plus the DLSS evaluation. Shared by the synchronous and the
+    // pipelined submit paths, which differ only in how the capture is read back.
+    bool Render(const JobFrame& frame,bool reset){
         GuideFrame guide;const bool temporalReset=forceReset||reset;forceReset=false;
         if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,temporalReset,guide))return false;
         const float frameMs=static_cast<float>(1000.0/fps);
-        if(!capture){const bool ok=renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
+        return renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
             guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-            guide.gridW,guide.gridH,temporalReset,frameMs);if(ok)++successfulEvaluations;return ok;}
-        CapturedVideoFrame captured;
-        if(!renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),
-            guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-            guide.gridW,guide.gridH,temporalReset,frameMs,captured))return false;
-        output=std::move(captured.bgra);++successfulEvaluations;return true;
+            guide.gridW,guide.gridH,temporalReset,frameMs);
     }
+    bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
+        if(!Render(frame,reset))return false;
+        if(!capture){++successfulEvaluations;return true;}
+        captureScratch.pixels=std::move(output);
+        const bool ok=renderer->CaptureRenderedFrame(captureScratch);
+        output=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+        if(!ok)return false;
+        ++successfulEvaluations;return true;
+    }
+    // Records the capture without waiting for the GPU. The pixels come back later from
+    // ResolveOldest, which waits only on that one frame's fence.
+    bool SubmitAsync(const JobFrame& frame,bool reset){
+        if(!Render(frame,reset))return false;
+        if(!renderer->EnqueueEvaluatedFrameCapture())return false;
+        ++successfulEvaluations;return true;
+    }
+    uint32_t Pending()const{return renderer?renderer->PendingCaptureCount():0u;}
+    static constexpr uint32_t MaxPending(){return D3D12Renderer::CaptureSlots;}
+    bool ResolveOldest(std::vector<uint8_t>& pixels){
+        if(!renderer)return false;
+        captureScratch.pixels=std::move(pixels);
+        const bool ok=renderer->ResolveOldestCapture(captureScratch);
+        pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+        return ok;
+    }
+    void DiscardPending(){
+        if(!renderer)return;
+        while(renderer->PendingCaptureCount()){
+            CapturedVideoFrame discarded;
+            if(!renderer->ResolveOldestCapture(discarded))break;
+        }
+    }
+    // The cache render target is R8G8B8A8, so ffmpeg is told to consume RGBA and the
+    // per-pixel channel swizzle that used to run on every readback disappears.
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Rgba;}
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
-    void ResetTemporal(){guides.Reset();forceReset=true;}
+    void ResetTemporal(){guides.Reset();forceReset=true;DiscardPending();}
 };
 
+// WriteFrame pushes a whole frame, over 30 MB at 4K, into ffmpeg's stdin and blocks
+// whenever the encoder falls behind. Running it on a feeder thread is the missing half of
+// the decoder's frame queue: decode, neural evaluation and encode now all overlap.
+//
+// The cost is that an encoder error surfaces up to QueueCapacity frames late. The NVENC
+// to libx264 retry path already cancels and re-reads the source from frame zero, so it
+// still recovers; it just wastes a couple more frames before noticing.
 struct ProductionEncoderAdapter {
     RawVideoEncoder encoder;
-    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){return encoder.Start(spec,path);}
-    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
-    EncodeError Finish(std::stop_token stop){return encoder.Finish(stop);}
-    void Cancel(){encoder.Cancel();}
+    static constexpr size_t QueueCapacity=2;
+
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::deque<std::vector<uint8_t>> queue;
+    std::vector<std::vector<uint8_t>> recycled;
+    EncodeError latched{EncodeError::None};
+    bool draining=false;
+    std::jthread worker;
+
+    ~ProductionEncoderAdapter(){StopWorker();}
+
+    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
+        StopWorker();
+        {
+            std::lock_guard lock(mutex);
+            queue.clear();recycled.clear();latched=EncodeError::None;draining=false;
+        }
+        const EncodeError started=encoder.Start(spec,path);
+        if(started!=EncodeError::None)return started;
+        worker=std::jthread([this](std::stop_token workerStop){WorkerLoop(workerStop);});
+        return EncodeError::None;
+    }
+
+    EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
+        std::unique_lock lock(mutex);
+        cv.wait(lock,stop,[this]{return queue.size()<QueueCapacity||latched!=EncodeError::None;});
+        if(latched!=EncodeError::None)return latched;
+        if(stop.stop_requested())return EncodeError::Cancelled;
+        if(!worker.joinable())return EncodeError::WriteFailed;
+        queue.push_back(std::move(frame));
+        lock.unlock();
+        cv.notify_all();
+        return EncodeError::None;
+    }
+
+    bool TakeRecycled(std::vector<uint8_t>& buffer){
+        std::lock_guard lock(mutex);
+        if(recycled.empty())return false;
+        buffer=std::move(recycled.back());recycled.pop_back();return true;
+    }
+
+    EncodeError Flush(std::stop_token){
+        {std::lock_guard lock(mutex);draining=true;}
+        cv.notify_all();
+        if(worker.joinable())worker.join();
+        std::lock_guard lock(mutex);
+        return latched;
+    }
+
+    EncodeError Finish(std::stop_token stop){
+        const EncodeError flushed=Flush(stop);
+        if(flushed!=EncodeError::None){encoder.Cancel();return flushed;}
+        return encoder.Finish(stop);
+    }
+
+    void Cancel(){
+        {
+            std::lock_guard lock(mutex);
+            draining=true;queue.clear();
+            if(latched==EncodeError::None)latched=EncodeError::Cancelled;
+        }
+        cv.notify_all();
+        // StopWorker first. It requests the worker's stop token, which is what unblocks a
+        // write that is stuck on a pipe a stalled ffmpeg is not draining. Only once the
+        // worker has been joined is it safe to tear the child down here.
+        StopWorker();
+        encoder.Cancel();
+    }
+
+private:
+    void StopWorker(){
+        {std::lock_guard lock(mutex);draining=true;}
+        cv.notify_all();
+        if(worker.joinable()){worker.request_stop();worker.join();}
+        worker={};
+    }
+
+    void WorkerLoop(std::stop_token workerStop){
+        for(;;){
+            std::vector<uint8_t> frame;
+            {
+                std::unique_lock lock(mutex);
+                if(!cv.wait(lock,workerStop,[this]{return !queue.empty()||draining;}))return;
+                if(queue.empty())return;
+                frame=std::move(queue.front());queue.pop_front();
+            }
+            cv.notify_all();
+            // Cancellation rides on the worker's own stop token. RawVideoEncoder::WriteFrame
+            // installs a stop_callback that terminates the ffmpeg job object, so requesting
+            // it releases a blocked WriteFile. Tearing the child down from another thread
+            // instead would pull the pipe handle out from under an in-flight write.
+            const EncodeError error=encoder.WriteFrame(frame,workerStop);
+            {
+                std::lock_guard lock(mutex);
+                if(error!=EncodeError::None&&latched==EncodeError::None)latched=error;
+                if(recycled.size()<QueueCapacity+1)recycled.push_back(std::move(frame));
+            }
+            cv.notify_all();
+            if(error!=EncodeError::None)return;
+        }
+    }
 };
 
 std::filesystem::path ModuleDirectory()

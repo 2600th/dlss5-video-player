@@ -46,11 +46,23 @@ struct CachedExportRequest {
     std::filesystem::path output;
 };
 
+// Capacity requested for a child process's stdin pipe. Large enough that the encoder
+// feeder is not woken for every partial frame, small enough that it does not hold tens of
+// megabytes of nonpaged pool. Exposed because a write only blocks, and therefore only
+// becomes cancellable, once it exceeds this.
+inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
+
+// Layout of the raw frames fed to RawVideoEncoder::WriteFrame. The neural capture path
+// reads back an R8G8B8A8 render target, so letting ffmpeg consume RGBA directly removes
+// a full-frame channel swizzle on the CPU. Everything else still supplies BGRA.
+enum class EncoderPixelFormat { Bgra, Rgba };
+
 struct EncoderSpec {
     uint32_t width{};
     uint32_t height{};
     double fps{};
     EncoderKind kind{EncoderKind::HevcNvenc};
+    EncoderPixelFormat pixelFormat{EncoderPixelFormat::Bgra};
 };
 
 struct MaterializeResult {

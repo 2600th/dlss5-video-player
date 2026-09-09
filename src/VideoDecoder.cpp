@@ -412,7 +412,10 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
     sa.bInheritHandle = TRUE;
 
     HANDLE readPipe = nullptr, writePipe = nullptr;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 64 * 1024 * 1024)) {
+    // The decoded-frame queue already buffers FrameQueueCapacity frames, so a larger
+    // pipe only duplicates that at nonpaged-pool cost. 16 MiB covers roughly half a 4K
+    // BGRA frame, which is enough to keep ffmpeg from stalling between reads.
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 16 * 1024 * 1024)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
         return false;
     }
