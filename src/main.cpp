@@ -1616,6 +1616,7 @@ private:
 
     void Unload() {
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession();}
+        DropRetainedLiveSegments();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -2295,6 +2296,16 @@ private:
     }
     // One render job from the playhead: to the Out marker when the playhead sits
     // inside a marked range, otherwise to the end of the source.
+    // What makes retained coverage reusable: same source, same neural settings,
+    // same guides. Anything else and the frames on disk are not the frames the
+    // user would get now.
+    std::string LiveRetentionKey()const{
+        return WideToUtf8(m_path)+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
+    }
+    void DropRetainedLiveSegments(){
+        m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
+        if(!m_retainedDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_retainedDirectory,ec);m_retainedDirectory.clear();}
+    }
     void StartLiveNeuralSession(){
         if(!LiveSessionAvailable()){LOG("Active neural session refused: loaded="<<m_loaded<<" cached="<<m_cachedPlayback<<" renderable="<<RangeRenderAvailable());return;}
         const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
@@ -2304,21 +2315,51 @@ private:
         if(const auto marked=RangeFromMarkers(m_markers,fps,duration);marked&&at>=marked->start100ns&&at<marked->end100ns)range.end100ns=marked->end100ns;
         if(range.end100ns<=range.start100ns)return;
         if(!ConfirmLiveSessionPace(fps))return;
-        m_liveDirectory=m_cacheRoot/L"live";
-        std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);std::filesystem::create_directories(m_liveDirectory,ec);
-        if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
-        m_liveSegments=std::make_shared<NeuralSegmentIndex>();m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        // Frames rendered before the last toggle-off are still on disk. Adopting
+        // them means the render resumes at the head instead of redoing work, and
+        // playback can start on them immediately instead of buffering a lead.
+        const std::string key=LiveRetentionKey();
+        const bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty()&&
+                         at>=m_retainedSegments->Start100ns()&&at<m_retainedSegments->Head100ns();
+        if(!adopt)DropRetainedLiveSegments();
+        if(adopt){
+            m_liveSegments=m_retainedSegments;m_liveDirectory=m_retainedDirectory;
+            range.start100ns=m_retainedSegments->Start100ns();
+            if(m_retainedRange.end100ns>range.end100ns)range.end100ns=m_retainedRange.end100ns;
+            m_retainedSegments.reset();m_retainedDirectory.clear();m_retainedKey.clear();m_retainedRange={};
+        }else{
+            m_liveDirectory=m_cacheRoot/L"live";
+            std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);std::filesystem::create_directories(m_liveDirectory,ec);
+            if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
+            m_liveSegments=std::make_shared<NeuralSegmentIndex>();
+        }
+        m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        const int64_t renderFrom=std::max(range.start100ns,m_liveSegments->Head100ns());
+        if(renderFrom<range.end100ns)m_liveSegments->Unfinish();
         EnterLiveBuffering();
-        if(!RenderRangeOfCurrentSource(range,NeuralJobKind::Live)){StopLiveNeuralSession(true);return;}
-        LOG("Active neural session started at "<<double(range.start100ns)*1e-7<<" s through "<<double(range.end100ns)*1e-7<<" s.");
+        if(renderFrom>=range.end100ns){
+            // The retained coverage already reaches the end of this range: there
+            // is nothing to render, so play it and stop waiting for a head.
+            m_liveSegments->Finish();
+            LOG("Active neural session replaying "<<m_liveSegments->Count()<<" retained segments through "<<double(range.end100ns)*1e-7<<" s; nothing left to render.");
+        }else if(!RenderRangeOfCurrentSource(NeuralRenderRange{renderFrom,range.end100ns},NeuralJobKind::Live)){StopLiveNeuralSession(true);return;}
+        else LOG("Active neural session started at "<<double(renderFrom)*1e-7<<" s through "<<double(range.end100ns)*1e-7<<" s"
+                 <<(renderFrom>range.start100ns?std::string("; resumed on ")+std::to_string(m_liveSegments->Count())+" retained segments from "+std::to_string(double(range.start100ns)*1e-7)+" s":std::string{})<<".");
         SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
     }
-    // Drops the session state and its segment files without touching playback;
-    // callers that keep playing detach the pair first.
-    void ReleaseLiveSession(){
+    // Drops the session state. Rendered segments are kept for the next toggle
+    // unless the caller says the frames can no longer be trusted.
+    void ReleaseLiveSession(bool retainSegments=false){
+        const bool retain=retainSegments&&m_liveSegments&&!m_liveSegments->Empty()&&!m_liveDirectory.empty();
+        if(retain){
+            m_retainedSegments=m_liveSegments;m_retainedDirectory=m_liveDirectory;m_retainedRange=m_liveRange;m_retainedKey=LiveRetentionKey();
+            LOG("Retained "<<m_retainedSegments->Count()<<" rendered segments covering "<<double(m_retainedSegments->Start100ns())*1e-7
+                <<"-"<<double(m_retainedSegments->Head100ns())*1e-7<<" s for the next toggle.");
+        }
         m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveStartTick=0;m_liveRange={};
         HideBufferOverlay();
-        if(m_liveSegments){m_liveSegments->Finish();m_liveSegments.reset();}
+        m_liveSegments.reset();
+        if(retain){m_liveDirectory.clear();return;}
         if(!m_liveDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);m_liveDirectory.clear();}
     }
     // Stops the render and, when playback already followed it, hands the same
@@ -2334,7 +2375,7 @@ private:
             m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
             if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         }
-        ReleaseLiveSession();
+        ReleaseLiveSession(true);
         m_neuralRequested=false;
         if(attached&&keepPlaying&&m_loaded)RequestSeek(at,wasPlaying);
         // Buffering paused the original; stopping before the session ever
@@ -2648,10 +2689,19 @@ private:
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
             // An active session renders into its own directory of segment files;
             // the cache entry is the concatenation published when the job ends.
+            // A resumed session keeps the earlier job's files, so every job gets
+            // its own subdirectory and its segments are appended after the ones
+            // already published.
             const std::shared_ptr<NeuralSegmentIndex> liveIndex=kind==NeuralJobKind::Live?m_liveSegments:nullptr;
-            const std::filesystem::path liveDirectory=kind==NeuralJobKind::Live?m_liveDirectory:std::filesystem::path{};
+            std::filesystem::path liveDirectory;
+            const size_t liveIndexBase=liveIndex?liveIndex->Count():0u;
+            if(liveIndex){
+                liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(++m_liveJobSerial));
+                std::error_code ec;std::filesystem::create_directories(liveDirectory,ec);
+                if(ec){LOG("Active neural session could not create the segment directory for this job.");return;}
+            }
             const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,segmentFrames](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -2742,11 +2792,14 @@ private:
                         // Every finalized segment is playable on arrival; the
                         // player reads them behind the render head.
                         sink.onSegment=[&](const NeuralRenderSegment& segment){
-                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.index=segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
-                            LOG("Neural segment "<<segment.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
+                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.index=liveIndexBase+segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
+                            LOG("Neural segment "<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
                             liveIndex->Append(std::move(entry));
                         };
-                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding published segments.");liveIndex->Restart();};
+                        // A relaunched worker republishes from its own index 0,
+                        // so only this job's segments are discarded; coverage a
+                        // previous job left behind stays valid.
+                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding this job's published segments.");liveIndex->TruncateTo(liveIndexBase);};
                     }
                     completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink);
                     if(liveIndex)liveIndex->Finish();
@@ -3382,11 +3435,18 @@ private:
     HANDLE m_neuralPauseEvent=nullptr;
     // Active neural rendering: the render job runs while playback continues and
     // the player consumes finalized segments as they land. m_liveDirectory holds
-    // those segments until the session ends; the promoted cache entry is a
-    // separate concatenated copy.
+    // those segments; the promoted cache entry is a separate concatenated copy.
+    // Turning the toggle off keeps them in the retained slot, so turning it back
+    // on resumes at the head instead of rendering the same frames again. Each
+    // job writes into its own subdirectory of m_liveDirectory.
     std::shared_ptr<NeuralSegmentIndex> m_liveSegments;
     bool m_liveSession=false,m_liveAttached=false,m_liveBuffering=false,m_liveResumePlaying=false;
     NeuralRenderRange m_liveRange{};
+    std::shared_ptr<NeuralSegmentIndex> m_retainedSegments;
+    std::filesystem::path m_retainedDirectory;
+    NeuralRenderRange m_retainedRange{};
+    std::string m_retainedKey;
+    uint32_t m_liveJobSerial=0;
     // Debounced re-render of the paused frame after a neural settings change.
     bool m_previewJob=false,m_previewShown=false,m_previewQueued=false;
     NeuralRenderRange m_previewRange{};

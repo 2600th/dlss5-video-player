@@ -9,6 +9,16 @@
   rendered frames, and it rebuffers if the playhead catches up. The timeline's
   teal lane grows with the head, seeks clamp to it, and a finished session is
   concatenated into the ordinary cache entry.
+- Turning a session off and on again resumes instead of re-rendering. Stopping
+  used to delete every segment it had produced, so the next toggle paid the job
+  startup again and re-rendered frames that had existed seconds earlier. The
+  segments are kept and adopted when the source, neural settings and guides
+  still match and the playhead is inside their coverage; the new job then starts
+  at the render head, and each job writes its own subdirectory so a relaunch
+  discards only its own output. Measured on a 64 s source after rendering 34 s
+  of coverage: the resumed session started at 39.47 s rather than the playhead,
+  re-rendered nothing (21 segments, no overlapping spans), and playback attached
+  0.74 s after the toggle with 34 s buffered, against 12.01 s on the first start.
 - A session that cannot keep up says so before it starts. Rendering costs
   7.35 ms per frame plus 2.50 ms per megapixel on an RTX 5090 (fitted to 12.50,
   16.60 and 28.07 ms/frame measured at 1080p, 1440p and 4K), so the player can

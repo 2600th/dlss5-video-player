@@ -39,6 +39,27 @@ public:
         finished_ = false;
     }
 
+    // Drops everything a later job appended, keeping the first `count`
+    // segments. A resumed session hands earlier coverage to the next job, so a
+    // relaunch of that job must undo only its own segments.
+    void TruncateTo(size_t count)
+    {
+        const std::lock_guard lock(mutex_);
+        if (count >= segments_.size()) return;
+        for (size_t i = count; i < segments_.size(); ++i) totalFrames_ -= segments_[i].frameCount;
+        segments_.resize(count);
+        finished_ = false;
+    }
+
+    // Adopted coverage from an earlier job is complete as far as that job went;
+    // a resumed session has more to publish, so playback must not treat the
+    // current head as the end of the stream.
+    void Unfinish()
+    {
+        const std::lock_guard lock(mutex_);
+        finished_ = false;
+    }
+
     void Finish()
     {
         const std::lock_guard lock(mutex_);

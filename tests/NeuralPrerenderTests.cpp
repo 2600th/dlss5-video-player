@@ -1837,6 +1837,50 @@ void neural_segment_index_orders_appends_and_locates_by_timestamp_test()
     CHECK_EQ(int64_t{24*kLiveFrame100ns},index.Head100ns());
 }
 
+// Turning the toggle off keeps rendered coverage so the next session resumes at
+// the head. The index therefore has to accept a second job's segments after the
+// first job's, and undo only that second job when its worker relaunches.
+void neural_segment_index_resumes_after_retained_coverage_test()
+{
+    NeuralSegmentIndex index;
+    index.Append(LiveSegmentRecord(L"job1/neural-00000.mkv",0,10,5));
+    index.Append(LiveSegmentRecord(L"job1/neural-00001.mkv",1,15,5));
+    index.Finish();
+    CHECK(index.Finished());
+
+    // The session was turned back on: there is more to render, so the coverage
+    // must stop looking like the end of the stream.
+    index.Unfinish();
+    CHECK(!index.Finished());
+    const size_t base=index.Count();
+    CHECK_EQ(size_t{2},base);
+
+    // The resumed job numbers from its own zero; the player offsets by the base.
+    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",base+0,20,5));
+    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",base+1,25,5));
+    CHECK_EQ(size_t{4},index.Count());
+    CHECK_EQ(uint64_t{20},index.TotalFrames());
+    CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
+    CHECK_EQ(int64_t{30*kLiveFrame100ns},index.Head100ns());
+    // Coverage is continuous across the seam between the two jobs.
+    if(const auto beforeSeam=index.Containing(20*kLiveFrame100ns-1))CHECK_EQ(uint64_t{1},beforeSeam->index);
+    if(const auto afterSeam=index.Containing(20*kLiveFrame100ns))CHECK_EQ(uint64_t{2},afterSeam->index);
+
+    // That job's worker crashed and relaunched: only its own segments go.
+    index.TruncateTo(base);
+    CHECK_EQ(size_t{2},index.Count());
+    CHECK_EQ(uint64_t{10},index.TotalFrames());
+    CHECK_EQ(int64_t{20*kLiveFrame100ns},index.Head100ns());
+    CHECK(!index.Finished());
+    CHECK(index.Containing(15*kLiveFrame100ns).has_value());
+    CHECK(!index.Containing(20*kLiveFrame100ns).has_value());
+    // Truncating to at or past the current size is a no-op, not a clear.
+    index.TruncateTo(9);
+    CHECK_EQ(size_t{2},index.Count());
+    index.TruncateTo(0);
+    CHECK(index.Empty());CHECK_EQ(uint64_t{0},index.TotalFrames());CHECK_EQ(int64_t{0},index.Head100ns());
+}
+
 void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
 {
     LiveFrameLibrary library;library.Add(L"original.mkv",40);library.Add(L"neural-00000.mkv",5);
@@ -2163,6 +2207,7 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
+    neural_segment_index_resumes_after_retained_coverage_test();
     live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();

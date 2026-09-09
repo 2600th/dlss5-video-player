@@ -48,7 +48,11 @@ current frame collects a lead of four seconds before playback resumes on the
 rendered frames. Rendering keeps running behind playback; if the playhead
 reaches the render head the panel returns until the buffer refills, and `Space`
 pauses playback rather than the render. Turning the button off stops the
-session and hands the same frame back to the original. On an RTX 5090 the
+session and hands the same frame back to the original, but keeps the frames it
+already rendered: turning it back on resumes at the render head instead of
+redoing that work, so playback starts again in well under a second. The frames
+are dropped when they can no longer apply - a different video, or changed
+neural settings or guides. On an RTX 5090 the
 render sustains about 80 frames per second at 1080p, 60 at 1440p and 36 at 4K,
 so the lead grows on any source up to 4K30; if the source is heavier than the
 GPU can follow (4K60, 8K) the player says so with the predicted rate and asks
