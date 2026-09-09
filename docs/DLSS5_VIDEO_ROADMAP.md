@@ -28,6 +28,15 @@ _Current as of September 9, 2026._
 > acquires and identifies the source, replays a validated cache entry when one
 > exists, and otherwise plays the original. Rendering is always an explicit
 > choice (frame, 4 s clip, marked range, whole video).
+>
+> Open gap in item 1 (found 2026-09-10 while porting PR #5): the evidence chain
+> accepts a run in which feature 18 was created and evaluated but the neural
+> pass did not execute. A worker that stopped presenting after the feature
+> recreate reported `frames=900/900 verified=900` for output that was DLAA
+> only (0.46 ms neural GPU time against 5.7 ms; 34.6 dB from the source
+> instead of 31.7). The receipt should carry the per-frame neural GPU time and
+> refuse a run whose median falls below a per-geometry floor, or compare a
+> captured frame against the DLAA-only path directly.
 
 ### 1. Runtime preflight and exact version locking
 

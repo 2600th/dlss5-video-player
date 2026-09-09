@@ -9,6 +9,7 @@
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
 #include "FrameIdentity.h"
+#include "NgxSession.h"
 
 #ifdef D3D12_RENDERER_TESTING
 #include <functional>
@@ -27,7 +28,11 @@ D3D12RendererOwner MakeD3D12Renderer();
 struct GuideFrame;
 
 struct CapturedVideoFrame {
-    std::vector<uint8_t> bgra;
+    // Tightly packed 8-bit BGRA, matching the B8G8R8A8_UNORM cache render target. The
+    // encoder is configured with EncoderPixelFormat::Bgra so no channel swizzle is
+    // needed on the CPU. Named for the payload, not a channel order, because the test
+    // hook may supply any layout.
+    std::vector<uint8_t> pixels;
     uint32_t width{};
     uint32_t height{};
     FrameIdentity id;
@@ -77,6 +82,76 @@ public:
                              const GuideFrame& guide, float frameTimeMs,
                              CapturedVideoFrame& capture);
 
+    // Number of readback slots, and therefore the number of captures that may be in
+    // flight before ResolveOldestCapture must be called. One of them is normally spoken
+    // for by a copy still running on another thread (see BeginResolveOldestCapture), so
+    // the count is one above the GPU pipeline depth it supports.
+    static constexpr uint32_t CaptureSlots = 4;
+
+    // Where an enqueued capture's bytes are sitting, handed out so the copy out of them
+    // can run somewhere other than the render loop. Valid only between the
+    // BeginResolveOldestCapture that produced it and the matching End.
+    struct CaptureReadbackView {
+        const uint8_t* base = nullptr;   // first byte of row 0, footprint offset applied
+        size_t rowPitch = 0;             // may exceed width*4; rows are padded
+        size_t bytes = 0;                // tightly packed size the copy produces
+        uint32_t width = 0, height = 0;
+    };
+
+    // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
+    // readback copy for the frame just rendered and signals a per-slot fence WITHOUT
+    // draining the GPU. ResolveOldestCapture then waits on the oldest slot only. This
+    // lets the CPU-side copy and the encoder overlap with GPU work on the next frame,
+    // where the old synchronous path left the GPU idle for the whole CPU stage.
+    bool EnqueueEvaluatedFrameCapture();
+    uint32_t PendingCaptureCount() const { return m_capturePending; }
+    // On success every byte of capture.pixels is overwritten, and the buffer is only
+    // resized when it does not already hold exactly one frame. Hand back the same
+    // CapturedVideoFrame each time and the per-frame allocation and its full-frame
+    // zero-fill both disappear. On failure the capture is cleared.
+    bool ResolveOldestCapture(CapturedVideoFrame& capture);
+
+    // ResolveOldestCapture split in two, so the copy does not have to run on the thread
+    // that owns the renderer. Begin waits on the oldest slot's fence and describes its
+    // memory; the slot stays reserved, and PendingCaptureCount keeps counting it, until
+    // End retires it. Nothing may enqueue over a slot whose copy is still running, and
+    // holding one is exactly what the extra CaptureSlots entry pays for. Begin retires
+    // the slot itself when it fails, so a failure cannot wedge the ring; the caller must
+    // then not call End. Only CopyCaptureView is safe to run off the renderer's thread.
+    bool BeginResolveOldestCapture(CaptureReadbackView& view);
+    void EndResolveOldestCapture();
+    // Unpacks a view into tightly packed BGRA. Touches no renderer state, so it may run
+    // on any thread while the renderer keeps working, and it fans out on its own worker
+    // pool rather than the default one for that reason.
+    static void CopyCaptureView(const CaptureReadbackView& view, std::vector<uint8_t>& pixels);
+
+    // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
+    // apart from a swapchain that is pacing it. Both counters only ever move on the
+    // thread that drives the renderer, so they need no synchronisation.
+    //
+    //  * FenceWaitNanos is time the CPU spent parked waiting for the GPU. A large share
+    //    means the export is GPU bound and more CPU threads will not help.
+    //  * PresentNanos is time inside IDXGISwapChain::Present, where DXGI blocks once the
+    //    frame latency limit is reached. Every frame presents, hidden window or not: the
+    //    RenoDX add-on runs its feature-18 pass per present, so an export that skipped
+    //    them produced DLAA-only frames the evidence chain still counted as verified.
+    uint64_t FenceWaitNanos() const { return m_fenceWaitNanos; }
+    uint64_t RenderSlotWaitNanos() const { return m_renderSlotWaitNanos; }
+    uint64_t CaptureSubmitSlotWaitNanos() const { return m_captureSubmitSlotWaitNanos; }
+    uint64_t CaptureResolveWaitNanos() const { return m_captureResolveWaitNanos; }
+    uint64_t PresentSlotWaitNanos() const { return m_presentSlotWaitNanos; }
+    uint64_t PresentNanos() const { return m_presentNanos; }
+    // Zeroed at the start of each export attempt so a libx264 retry after an NVENC
+    // failure is measured on its own, not on the sum of both passes.
+    void ResetStageCounters() {
+        m_fenceWaitNanos = 0;
+        m_renderSlotWaitNanos = 0;
+        m_captureSubmitSlotWaitNanos = 0;
+        m_captureResolveWaitNanos = 0;
+        m_presentSlotWaitNanos = 0;
+        m_presentNanos = 0;
+    }
+
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
@@ -115,7 +190,15 @@ public:
 private:
     friend struct D3D12RendererDeleter;
     ~D3D12Renderer();
-    static constexpr uint32_t FrameCount = 3;
+    // An export source frame records two command lists (evaluate, then capture). Six
+    // allocators keep three complete source frames in flight before CPU reuse waits.
+    // Upload staging follows the allocator count because each in-flight frame owns its
+    // upload until its fence completes (~+100 MB of upload heap at 4K over three).
+    static constexpr uint32_t FrameCount = 6;
+    // The swapchain does not: DXGI's default frame latency of 3 bounds queued presents,
+    // so more backbuffers would only spend VRAM in the visible player.
+    static constexpr uint32_t SwapchainBuffers = 3;
+    static_assert(SwapchainBuffers <= FrameCount);
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
     // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
@@ -143,14 +226,17 @@ private:
                                 const char* name);
     void CopyMappedRows(uint8_t* mapped, const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp,
                         const void* src, size_t tightRowBytes, uint32_t rows);
-    bool WaitForFrameSlot(uint32_t slot);
+    bool WaitForFrameSlot(uint32_t slot, uint64_t* stageWaitNanos = nullptr);
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
+    bool WaitForFenceValue(uint64_t value, uint64_t* stageWaitNanos = nullptr);
     bool RenderFrameInternal(const uint8_t* bgra, size_t bytes,
                              const float* guideGridRGBA32F, size_t guideBytes,
                              uint32_t gridW, uint32_t gridH,
                              bool temporalReset, float frameTimeMs,
                              const FrameIdentity* identity);
+    // Synchronous enqueue + resolve. Kept for the first-frame evidence loop, which must
+    // read a capture back before it can decide whether to submit the same frame again.
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
     void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     void SetPresentConstants(ID3D12GraphicsCommandList* cmd, const ColorSettings& colors,
@@ -183,12 +269,16 @@ private:
     uint64_t m_fenceValue = 0;
     uint64_t m_frameFence[FrameCount]{};
     uint32_t m_frameSlot = 0;
+    uint64_t m_renderSlotWaitNanos = 0;
+    uint64_t m_captureSubmitSlotWaitNanos = 0;
+    uint64_t m_captureResolveWaitNanos = 0;
+    uint64_t m_presentSlotWaitNanos = 0;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
     uint32_t m_rtvInc=0,m_srvInc=0,m_dsvInc=0;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_backbuffers[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_backbuffers[SwapchainBuffers];
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
@@ -208,7 +298,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheOutput;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
@@ -217,6 +307,13 @@ private:
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
     uint8_t* m_referenceMapped[FrameCount]{};
+    uint8_t* m_cacheReadbackMapped[CaptureSlots]{};
+    uint64_t m_captureFence[CaptureSlots]{};
+    uint32_t m_captureWrite = 0;
+    uint32_t m_captureRead = 0;
+    uint32_t m_capturePending = 0;
+    uint64_t m_fenceWaitNanos = 0;
+    uint64_t m_presentNanos = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};

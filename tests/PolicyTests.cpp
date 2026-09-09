@@ -2210,9 +2210,9 @@ void renderer_cache_capture_requires_a_successful_neural_evaluation_test()
     auto renderer=MakeD3D12Renderer();int captures=0;
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,false,[&](std::vector<uint8_t>&){++captures;return true;});
-    CapturedVideoFrame frame;frame.bgra.assign(7,0x55);frame.width=9;frame.height=9;
+    CapturedVideoFrame frame;frame.pixels.assign(7,0x55);frame.width=9;frame.height=9;
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK_EQ(0,captures);CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);
+    CHECK_EQ(0,captures);CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);
     CHECK_EQ(uint32_t{0},frame.height);
 }
 
@@ -2226,12 +2226,12 @@ void renderer_cache_capture_returns_exact_tight_bgra_geometry_test()
     CapturedVideoFrame frame;
     CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
     CHECK_EQ(uint32_t{2},frame.width);CHECK_EQ(uint32_t{2},frame.height);
-    CHECK_EQ(size_t{16},frame.bgra.size());CHECK_EQ(uint8_t{15},frame.bgra.back());
+    CHECK_EQ(size_t{16},frame.pixels.size());CHECK_EQ(uint8_t{15},frame.pixels.back());
 
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(17,0);return true;});
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+    CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
 }
 
 void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
@@ -2239,9 +2239,9 @@ void renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test()
     auto renderer=MakeD3D12Renderer();
     D3D12RendererTestAccess::ConfigureCacheCapture(
         *renderer,2,2,true,[](std::vector<uint8_t>& bytes){bytes.assign(8,0x44);return false;});
-    CapturedVideoFrame frame;frame.bgra.assign(16,0x22);frame.width=2;frame.height=2;
+    CapturedVideoFrame frame;frame.pixels.assign(16,0x22);frame.width=2;frame.height=2;
     CHECK(!D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK(frame.bgra.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
+    CHECK(frame.pixels.empty());CHECK_EQ(uint32_t{0},frame.width);CHECK_EQ(uint32_t{0},frame.height);
 }
 
 void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
@@ -2255,7 +2255,7 @@ void renderer_cache_capture_does_not_apply_playback_color_adjustments_test()
         *renderer,1,1,true,[&](std::vector<uint8_t>& bytes){bytes=neuralBytes;return true;});
     CapturedVideoFrame frame;
     CHECK(D3D12RendererTestAccess::CaptureEvaluatedFrame(*renderer,frame));
-    CHECK_EQ(neuralBytes,frame.bgra);
+    CHECK_EQ(neuralBytes,frame.pixels);
 }
 
 void gpu_classification_table_test()
@@ -3897,6 +3897,30 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::seconds{5});CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));CHECK(decoder->SeekSeconds(9.0));
         const auto started=std::chrono::steady_clock::now();std::jthread worker([&](std::stop_token stop){VideoFrame frame;while(decoder->ReadNextAvailable(frame,stop)==VideoReadResult::NotReady)Sleep(5);});Sleep(30);worker.request_stop();worker.join();decoder->Close();CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
     }
+}
+
+// Regression: StopFrameQueue used to reset m_frameTerminal back to NotReady after
+// joining the queue thread, and never notified. The queue thread exits on its own stop
+// token without publishing a terminal state, so a reader parked in ReadNextBlocking
+// waited forever on a predicate that could not become true again. ReadNext runs on the
+// UI message pump for local files, so that wedged the whole window.
+void video_decoder_close_releases_a_blocked_blocking_read_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::seconds{5});
+    // "/hold" never emits a frame, so the reader is guaranteed to park on the queue.
+    CHECK(decoder->Open(L"https://media.invalid/hold",MediaSourceKind::YouTube));
+    VideoFrame frameStorage;
+    VideoReadResult result=VideoReadResult::NotReady;
+    // A default-constructed stop token has no stop state, which is exactly how the UI
+    // path calls in: only the decoder shutdown can release this reader.
+    std::jthread reader([&]{result=decoder->ReadNextBlocking(frameStorage);});
+    Sleep(50);
+    const auto closeStarted=std::chrono::steady_clock::now();
+    decoder->Close();
+    reader.join();
+    CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
+    CHECK_EQ(VideoReadResult::Cancelled,result);
 }
 
 void video_decoder_hardware_failure_falls_back_to_software_test()
@@ -5576,6 +5600,7 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
     youtube_decoder_discards_only_expected_trailing_partial_frame_test();
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
+    video_decoder_close_releases_a_blocked_blocking_read_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
     video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();

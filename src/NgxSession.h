@@ -71,6 +71,11 @@ struct FeatureSetupResult {
     bool needsFlush = false;
 };
 
+// The two frame counts the feature lifetime is keyed on, named here so the renderer
+// and the receipt gate that reads them cannot drift apart.
+inline constexpr uint64_t FeatureCreateFrame = 2;
+inline constexpr uint64_t DelayedRecreateFrame = 60;
+
 template <typename EnsureFeature, typename RecreateFeature>
 FeatureSetupResult PrepareFeatureForFrame(
     bool enabled,
@@ -92,10 +97,10 @@ FeatureSetupResult PrepareFeatureForFrame(
         recreateRequested = false;
         return {true, needsFlush};
     }
-    if (!featureCreated && (immediateCreate || framesPresented >= 2)) {
+    if (!featureCreated && (immediateCreate || framesPresented >= FeatureCreateFrame)) {
         return {true, ensureFeature()};
     }
-    if (!delayedRecreateDone && framesPresented >= 60) {
+    if (!delayedRecreateDone && framesPresented >= DelayedRecreateFrame) {
         const bool needsFlush = recreateFeature();
         delayedRecreateDone = true;
         return {true, needsFlush};

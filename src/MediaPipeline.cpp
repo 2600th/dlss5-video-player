@@ -141,7 +141,10 @@ struct ChildProcess {
         HANDLE stdinRead = nullptr;
         if (pipeInput) {
             SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-            if (!CreatePipe(&stdinRead, &stdinWrite, &security, 0)) return false;
+            // The caller's frame queue provides the real buffering; a larger pipe just
+            // holds nonpaged pool.
+            if (!CreatePipe(&stdinRead, &stdinWrite, &security,
+                            static_cast<DWORD>(kChildStdinPipeBytes))) return false;
             if (!SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0)) {
                 CloseHandle(stdinRead); CloseHandle(stdinWrite); stdinWrite = nullptr; return false;
             }
@@ -675,10 +678,14 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
     std::stop_callback interrupt(stop,[job=interruptHandle.get()]{
         TerminateJobObject(job,ERROR_CANCELLED);
     });
+    // When the job is terminated under a blocked WriteFile, the kernel completes that
+    // write as a success for every byte it had accepted rather than failing it, so the
+    // stop has to be re-checked after each write, not only before. With a single
+    // remaining chunk the loop would otherwise report None for a frame nobody read.
     size_t offset = 0;
     while (offset < bgra.size()) {
         if (stop.stop_requested()) { Cancel(); return EncodeError::Cancelled; }
-        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(bgra.size() - offset, 1024 * 1024));
+        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(bgra.size() - offset, 16 * 1024 * 1024));
         DWORD written = 0;
         if (!WriteFile(impl_->process.stdinWrite, bgra.data() + offset, wanted, &written, nullptr) ||
             written == 0) {
@@ -687,6 +694,7 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
         }
         offset += written;
     }
+    if (stop.stop_requested()) { Cancel(); return EncodeError::Cancelled; }
     return EncodeError::None;
 }
 

@@ -129,16 +129,19 @@ void VideoDecoder::Close() {
 }
 
 bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
-    return OpenImpl(path,sourceKind,stop,true);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda);
 }
 
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
                                   std::stop_token stop) {
-    return OpenImpl(path,sourceKind,stop,false);
+    // Sequential offline decoding uses software decode to avoid competing with
+    // D3D12/NVENC, but enables the background frame queue so decode overlaps with GPU rendering.
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Software);
 }
 
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
-                            std::stop_token stop, bool queueFrames) {
+                            std::stop_token stop, bool queueFrames,
+                            FFmpegAcceleration acceleration) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -156,10 +159,9 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
 
     // FFmpeg is intentionally preferred. It makes playback independent from
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
-    if (OpenFFmpeg(path, stop,queueFrames?FFmpegAcceleration::Cuda:
-                                      FFmpegAcceleration::Software)) {
+    if (OpenFFmpeg(path, stop, acceleration)) {
         m_backend = Backend::FFmpeg;
-        if(queueFrames)StartFrameQueue();
+        if (queueFrames) StartFrameQueue();
         LOG("Video decoder selected: FFmpeg");
         return true;
     }
@@ -694,12 +696,7 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
 }
 
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
-    for(;;){
-        const VideoReadResult result=ReadNextFFmpegAvailable(out,{});
-        if(result==VideoReadResult::FrameReady)return true;
-        if(result!=VideoReadResult::NotReady)return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    return ReadNextBlocking(out, {}) == VideoReadResult::FrameReady;
 }
 
 VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
@@ -741,7 +738,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
             available=0;
         }
         if(!available||m_pendingFrameBytes>=frameBytes)break;
-        const DWORD want=static_cast<DWORD>(std::min<size_t>(frameBytes-m_pendingFrameBytes,static_cast<size_t>(available)));
+        const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{16u<<20}}));
         DWORD got=0;
         if(!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
         if(!got)break;
@@ -814,17 +811,31 @@ void VideoDecoder::StartFrameQueue(QueueBuffer buffered) {
 }
 
 void VideoDecoder::StopFrameQueue(QueueBuffer buffered) {
+    // Publish the shutdown and wake blocked readers BEFORE the queue thread goes away.
+    // FrameQueueLoop exits on its own stop token without setting a terminal state, so a
+    // reader parked in ReadNextBlocking (the UI message pump, for local files) needs
+    // this to learn that the answer is Cancelled rather than wait on a predicate that
+    // can never become true again. A seek (QueueBuffer::Keep) starts a replacement
+    // thread right away and judges child reuse against the terminal state, so only a
+    // permanent stop marks Cancelled here.
+    {
+        std::lock_guard lock(m_frameMutex);
+        m_frameQueueEnabled = false;
+        if (buffered == QueueBuffer::Discard) m_frameTerminal = VideoReadResult::Cancelled;
+    }
+    m_frameCv.notify_all();
     if (m_frameThread.joinable()) {
         m_frameThread.request_stop();
         m_frameCv.notify_all();
         m_frameThread.join();
     }
     std::lock_guard lock(m_frameMutex);
-    if(buffered==QueueBuffer::Discard){
+    if (buffered == QueueBuffer::Discard) {
         m_frameQueue.clear();
-        m_frameTerminal = VideoReadResult::NotReady;
+        // m_frameTerminal deliberately keeps the Cancelled state. StartFrameQueue resets it.
+        // Clearing it back to NotReady here would re-arm the wedge for a reader that has not
+        // observed the shutdown yet.
     }
-    m_frameQueueEnabled = false;
 }
 
 void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
@@ -1002,6 +1013,47 @@ bool VideoDecoder::ReadNext(VideoFrame& out) {
 VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token stop) {
     if(m_backend==Backend::FFmpeg)return ReadNextFFmpegAvailable(out,stop);
     if(m_backend==Backend::MediaFoundation)return ReadNextMediaFoundation(out)?VideoReadResult::FrameReady:VideoReadResult::EndOfStream;
+    return VideoReadResult::Error;
+}
+
+VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token stop) {
+    if (m_backend == Backend::FFmpeg) {
+        {
+            std::unique_lock lock(m_frameMutex);
+            // Wait in slices rather than indefinitely so a queue thread that disappears
+            // without publishing a terminal state cannot wedge the caller. The terminal
+            // state is consulted before the enabled flag: a shutdown publishes both
+            // together, and the answer to a reader parked across Close() is Cancelled,
+            // not whatever the raw pipe below happens to say mid-teardown.
+            for (;;) {
+                if (stop.stop_requested()) return VideoReadResult::Cancelled;
+                if (!m_frameQueue.empty()) {
+                    out = std::move(m_frameQueue.front());
+                    m_frameQueue.pop_front();
+                    m_frameCv.notify_all();
+                    return VideoReadResult::FrameReady;
+                }
+                if (m_frameTerminal != VideoReadResult::NotReady) return m_frameTerminal;
+                if (!m_frameQueueEnabled) break;
+                (void)m_frameCv.wait_for(lock, stop, std::chrono::milliseconds(50), [this] {
+                    return !m_frameQueue.empty() ||
+                           m_frameTerminal != VideoReadResult::NotReady ||
+                           !m_frameQueueEnabled;
+                });
+            }
+        }
+        for (;;) {
+            const VideoReadResult result = ReadNextFFmpegProcessAvailable(out, stop);
+            if (result != VideoReadResult::NotReady) return result;
+            if (stop.stop_requested()) return VideoReadResult::Cancelled;
+            // A yield() spin here pegs a core. This fallback only runs when the queue
+            // thread could not be created, but it must still idle politely.
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+    if (m_backend == Backend::MediaFoundation) {
+        return ReadNextMediaFoundation(out) ? VideoReadResult::FrameReady : VideoReadResult::EndOfStream;
+    }
     return VideoReadResult::Error;
 }
 

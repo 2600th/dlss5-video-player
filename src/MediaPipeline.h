@@ -52,6 +52,14 @@ struct CachedExportRequest {
     double rangeDurationSeconds{};
 };
 
+// Capacity requested for a child process's stdin pipe. Large enough that the encoder
+// feeder is not woken for every partial frame, small enough that it does not hold tens of
+// megabytes of nonpaged pool. Exposed because a write only blocks, and therefore only
+// becomes cancellable, once it exceeds this.
+inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
+
+// Raw frames fed to RawVideoEncoder::WriteFrame are BGRA: the cache render target is
+// B8G8R8A8, so ffmpeg consumes what the GPU wrote and no CPU swizzle exists.
 struct EncoderSpec {
     uint32_t width{};
     uint32_t height{};

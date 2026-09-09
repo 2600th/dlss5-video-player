@@ -5,25 +5,79 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <thread>
+#include <vector>
 
 #ifndef OFFLINE_NEURAL_RENDERER_TESTING
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
+#include "Log.h"
 #endif
 
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+
+// The export loop is one thread, so the stages below are disjoint and together account
+// for all of its time. Whichever one dominates names the limiter, and the answer is
+// otherwise pure guesswork: every stage waits on a different process or device.
+//
+//  * source  - the decoder child process, through the prefetch queue.
+//  * submit  - CPU guide generation, the upload copies, and the D3D12 submission.
+//  * resolve - parked on the GPU fence for a finished frame, plus the readback copy.
+//  * write   - back pressure from the encoder child, i.e. ffmpeg cannot keep up.
+struct StageTimers {
+    SteadyClock::duration source{};
+    SteadyClock::duration submit{};
+    SteadyClock::duration resolve{};
+    SteadyClock::duration write{};
+};
+
+class StageClock {
+public:
+    explicit StageClock(SteadyClock::duration& sink)
+        : sink_(sink), start_(SteadyClock::now()) {}
+    ~StageClock() { sink_ += SteadyClock::now() - start_; }
+    StageClock(const StageClock&) = delete;
+    StageClock& operator=(const StageClock&) = delete;
+private:
+    SteadyClock::duration& sink_;
+    SteadyClock::time_point start_;
+};
+
+double MillisPerFrame(SteadyClock::duration total, uint64_t frames)
+{
+    if (!frames) return 0.0;
+    const double micros = double(
+        std::chrono::duration_cast<std::chrono::microseconds>(total).count());
+    return micros / 1000.0 / double(frames);
+}
+
+double NanosPerFrameMillis(uint64_t nanos, uint64_t frames)
+{
+    if (!frames) return 0.0;
+    return double(nanos) / 1.0e6 / double(frames);
+}
+
+double Mean(const std::vector<double>& samples)
+{
+    if (samples.empty()) return 0.0;
+    double total = 0.0;
+    for (const double sample : samples) total += sample;
+    return total / double(samples.size());
+}
 
 enum class JobRead { FrameReady, EndOfStream, Error, Cancelled };
 
@@ -51,14 +105,31 @@ struct JobEvaluation {
 // the 33.3 ms live budget actually goes to, so the collection stays in and the
 // summary is logged once per attempt.
 struct StageSamples {
-    std::vector<double> read,guide,render,write,eval,frame;
-    // All six series advance together, which is what makes the per-frame
-    // residual (frame - read - eval - write) well defined.
+    // Per source frame. read/guide/eval are measured in the iteration that submitted the
+    // frame; render/write in the later iteration that drained its capture. Their sum is
+    // what one frame costs, but no single iteration ever pays all of it.
+    std::vector<double> read,guide,render,write,eval;
+    // Per source frame: reading it off the source through to handing its pixels to the
+    // encoder. That spans the whole pipeline, so it is roughly depth x loop time. It is a
+    // latency and must never be read as a rate.
+    std::vector<double> latency;
     void Push(double readMs, double guideMs, double renderMs, double evalMs, double writeMs,
-              double frameMs)
+              double latencyMs)
     {
         read.push_back(readMs);guide.push_back(guideMs);render.push_back(renderMs);
-        eval.push_back(evalMs);write.push_back(writeMs);frame.push_back(frameMs);
+        eval.push_back(evalMs);write.push_back(writeMs);latency.push_back(latencyMs);
+    }
+
+    // Per render-loop iteration, and the only series that answers how fast the export
+    // runs. These three advance together and are self-contained: `loop` is the
+    // iteration's wall time, `loopDrain` is what draining an older frame's capture cost
+    // inside it, and the residual is loop - read - eval - drain, which is genuinely
+    // unaccounted work rather than the pipeline latency the per-frame series carries.
+    std::vector<double> loop,loopDrain,loopResidual;
+    void PushLoop(double loopMs, double readMs, double evalMs, double drainMs)
+    {
+        loop.push_back(loopMs);loopDrain.push_back(drainMs);
+        loopResidual.push_back(loopMs - readMs - evalMs - drainMs);
     }
 };
 
@@ -75,6 +146,46 @@ struct AttemptResult {
     std::vector<double> neuralGpuMs;
     StageSamples stages;
 };
+
+template <class F>
+struct ScopeExit {
+    F body;
+    ~ScopeExit() { body(); }
+};
+
+// Reports the breakdown once per attempt, on every exit path including the failures.
+// Adapters that can account for their own internals contribute a StageDetail suffix;
+// the test adapters have nothing to add and are compiled past by the requires check.
+template <class Evaluator>
+void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
+                        const AttemptResult& attempt, const Evaluator& evaluator)
+{
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+    const uint64_t frames = attempt.frames;
+    if (!frames) return;
+    std::string detail;
+    if constexpr (requires { evaluator.StageDetail(uint64_t{}); })
+        detail = evaluator.StageDetail(frames);
+    const SteadyClock::duration accounted =
+        stages.source + stages.submit + stages.resolve + stages.write;
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(2)
+         << "Neural export stage cost per frame ("
+         << (kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : "libx264") << ", "
+         << frames << " frames): total " << MillisPerFrame(accounted, frames)
+         << " ms = source " << MillisPerFrame(stages.source, frames)
+         << " + submit " << MillisPerFrame(stages.submit, frames)
+         << " + resolve wait " << MillisPerFrame(stages.resolve, frames)
+         << " + encoder back pressure " << MillisPerFrame(stages.write, frames)
+         // The stage accumulators and the loop clock are independent measurements of the
+         // same rate. They should agree; a gap is work no stage is counting.
+         << " ms, measured loop " << Mean(attempt.stages.loop)
+         << " ms." << detail;
+    LOG(line.str());
+#else
+    (void)kind;(void)stages;(void)attempt;(void)evaluator;
+#endif
+}
 
 std::string LowerAscii(std::string_view value)
 {
@@ -109,14 +220,6 @@ double MillisecondsSince(SteadyClock::time_point start)
     return std::chrono::duration<double,std::milli>(SteadyClock::now()-start).count();
 }
 
-double Mean(const std::vector<double>& samples)
-{
-    if (samples.empty()) return 0.0;
-    double total = 0.0;
-    for (const double sample : samples) total += sample;
-    return total / double(samples.size());
-}
-
 double Quantile(std::vector<double> samples, double q)
 {
     if (samples.empty()) return 0.0;
@@ -125,10 +228,13 @@ double Quantile(std::vector<double> samples, double q)
     return samples[std::min(index, samples.size() - 1)];
 }
 
-// One line per stage, once per attempt: mean/p50/p95 plus the total the stage
-// cost over the whole attempt. `frame` is the wall time of a full loop
-// iteration, so `unaccounted` is exactly what the named stages do not explain
-// (progress reporting, the receipt gate, retries, bookkeeping).
+// One line per stage, once per attempt: mean/p50/p95 plus the total the stage cost over
+// the whole attempt. The table is in two halves, and mixing them is the mistake it is
+// laid out to prevent. The per-frame rows say what a frame costs; `source frame latency`
+// is how long one frame takes to cross a deliberately pipelined renderer, so it grows
+// with pipeline depth and says nothing about throughput. The per-iteration rows below it
+// are the throughput: `render-loop throughput` is the wall time of one loop iteration,
+// and only its residual means work nothing else measured.
 void LogStageTable(const StageSamples& stages)
 {
     const auto row = [](const char* name, const std::vector<double>& samples) {
@@ -140,17 +246,15 @@ void LogStageTable(const StageSamples& stages)
     };
     row("read", stages.read);
     row("guide", stages.guide);
-    row("render+capture", stages.render);
+    // The readback copy runs on the resolve worker, so this is not the copy's cost: it is
+    // only the part of it that the decode, guide and submit it overlapped did not hide.
+    row("resolve wait(copy not hidden)", stages.render);
     row("submit(guide+render+gate)", stages.eval);
     row("write", stages.write);
-    row("frame", stages.frame);
-    std::vector<double> unaccounted;
-    unaccounted.reserve(stages.frame.size());
-    for (size_t index = 0; index < stages.frame.size(); ++index) {
-        unaccounted.push_back(stages.frame[index] - stages.read[index] -
-                              stages.eval[index] - stages.write[index]);
-    }
-    row("unaccounted", unaccounted);
+    row("source frame latency", stages.latency);
+    row("render-loop throughput", stages.loop);
+    row("loop drain(resolve+write)", stages.loopDrain);
+    row("loop unaccounted", stages.loopResidual);
 }
 
 NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVramMiB)
@@ -900,7 +1004,81 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 attempt.encoderError = startError;return attempt;
             }
         }
+        StageTimers stages;
+        if constexpr (requires { evaluator.ResetStageDetail(); }) evaluator.ResetStageDetail();
+        const auto reportStages=[&]{ReportStageTimings(kind,stages,attempt,evaluator);};
+        ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
+        // Submission runs ahead of encoding, so frame accounting has to be tracked
+        // separately from what has actually been written out.
+        struct InFlightCapture {
+            uint64_t frameNumber{};
+            int64_t timestamp100ns{};
+            double readMs{},guideMs{},evalMs{},neuralGpuMs{};
+            SteadyClock::time_point frameStart{};
+        };
+        std::deque<InFlightCapture> inFlight;
+        uint64_t submitted = 0;
+        evaluator.DiscardPending();
+        // What draining an older frame's capture cost inside the current iteration. The
+        // drain belongs to the iteration that runs it, not to the frame it drains, and
+        // keeping the two apart is what stops pipeline latency leaking into the
+        // throughput numbers. Reset at the top of every iteration.
+        double iterationDrainMs = 0.0;
+
+        // Waits on the oldest in-flight capture only, then hands its pixels to the
+        // segment writer or the encoder's feeder thread. The buffer is recycled from a
+        // finished write so the full-frame allocation and its zero-fill do not repeat
+        // every frame.
+        auto drainOldest = [&]() -> NeuralRenderFailure {
+            const InFlightCapture queued = inFlight.front();
+            std::vector<uint8_t> pixels;
+            if (!encoder.TakeRecycled(pixels)) pixels.clear();
+            double captureMs = 0.0;
+            {
+                StageClock clock(stages.resolve);
+                if (!evaluator.ResolveOldest(pixels, captureMs) || pixels.size() != expectedBytes) {
+                    return evaluatorFailure();
+                }
+            }
+            inFlight.pop_front();
+            const size_t written = pixels.size();
+            double writeMs = 0.0;
+            EncodeError writeError;
+            {
+                StageClock clock(stages.write);
+                const auto writeStart = SteadyClock::now();
+                JobFrame frameMeta;
+                frameMeta.frameNumber = queued.frameNumber;
+                frameMeta.timestamp100ns = queued.timestamp100ns;
+                writeError = writer ? writer->Write(frameMeta, std::move(pixels), stop)
+                                    : encoder.WriteFrameAsync(std::move(pixels), stop);
+                writeMs = MillisecondsSince(writeStart);
+            }
+            if (writeError != EncodeError::None) {
+                attempt.encoderError=writeError;
+                return writeError == EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
+            }
+            ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
+            if (!attempt.hasTimestamp) {
+                attempt.firstTimestamp=queued.timestamp100ns;
+                attempt.hasTimestamp=true;
+            }
+            attempt.lastTimestamp=queued.timestamp100ns;
+            attempt.neuralGpuMs.push_back(queued.neuralGpuMs);
+            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+            attempt.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
+                                MillisecondsSince(queued.frameStart));
+            return NeuralRenderFailure::None;
+        };
         auto abort = [&](NeuralRenderFailure failure) {
+            // Frames already captured but not yet read back are valid output: write
+            // them out so a failed attempt never omits a frame it successfully
+            // evaluated. A cancelled job discards them instead, which keeps
+            // cancellation prompt.
+            if (failure != NeuralRenderFailure::Cancelled) {
+                while (!inFlight.empty() && drainOldest() == NeuralRenderFailure::None) {}
+            }
             attempt.failure = failure;
             if (failure == NeuralRenderFailure::Cancelled) attempt.encoderError = EncodeError::Cancelled;
             cancelOutput();
@@ -908,16 +1086,30 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         // Submits one frame, retrying the exact same frame on neural/GPU-stall
         // failures. The last permitted retry resets history; a frame that still
         // fails ends the attempt (never skipped). Device loss is not retried.
+        // `pipelined` records the capture without waiting for the GPU: the pixels
+        // come back from drainOldest, which waits only on that frame's fence.
         auto evaluate = [&](const JobFrame& frame, HistoryReset reason, bool capture,
-                            JobEvaluation& out) {
+                            bool pipelined, JobEvaluation& out) {
             FrameIdentity id = identity(frame, reason);
             for (uint32_t retry = 0;; ++retry) {
                 if (stop.stop_requested()) return NeuralRenderFailure::Cancelled;
                 const uint64_t before = evaluator.EvaluationCount();
+                // Keep the pixel buffer's capacity across retries: the receipt gate
+                // resubmits the same frame up to 120 times, and re-growing a full
+                // frame each time dominates the retry cost.
+                std::vector<uint8_t> recycledPixels = std::move(out.bgra);
                 out = JobEvaluation{};
-                const bool ok = evaluator.Submit(frame, id, capture, out) &&
-                    evaluator.EvaluationCount() > before &&
-                    (!capture || out.bgra.size() == expectedBytes);
+                out.bgra = std::move(recycledPixels);
+                bool ok;
+                {
+                    StageClock clock(stages.submit);
+                    ok = pipelined
+                        ? evaluator.SubmitAsync(frame, id, out) &&
+                              evaluator.EvaluationCount() > before
+                        : evaluator.Submit(frame, id, capture, out) &&
+                              evaluator.EvaluationCount() > before &&
+                              (!capture || out.bgra.size() == expectedBytes);
+                }
                 if (ok) {
                     if (!out.id.SameSource(id)) return NeuralRenderFailure::Identity;
                     if (out.id.reset != HistoryReset::None) ++attempt.historyResets;
@@ -955,13 +1147,20 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 }
             }
             const auto frameStart = SteadyClock::now();
+            iterationDrainMs = 0.0;
             JobFrame frame;
-            const JobRead read = prefetch.Next(frame);
+            JobRead read;
+            {
+                StageClock clock(stages.source);
+                read = prefetch.Next(frame);
+            }
             // What the loop still pays for the decode: the residual wait for a
             // frame the decoder started while the previous one was on the GPU.
             const double readMs = MillisecondsSince(frameStart);
             if (read == JobRead::EndOfStream) {
-                if (attempt.frames == 0) {abort(NeuralRenderFailure::Source);return attempt;}
+                // Report the source failure directly. Falling through to Finish here used
+                // to overwrite it with the encoder error that cancelling produces.
+                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
             if (read == JobRead::Cancelled) {abort(NeuralRenderFailure::Cancelled);return attempt;}
@@ -977,24 +1176,25 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 JobEvaluation ignored;
                 const HistoryReset reason = !prerollEvaluated ? HistoryReset::Preroll
                     : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                const NeuralRenderFailure failure = evaluate(frame, reason, false, ignored);
+                const NeuralRenderFailure failure = evaluate(frame, reason, false, false, ignored);
                 if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
                 prerollEvaluated = true;
                 continue;
             }
             if (boundedEnd && frame.timestamp100ns >= rangeEnd) {
-                if (attempt.frames == 0) {abort(NeuralRenderFailure::Source);return attempt;}
+                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
             const auto evalStart = SteadyClock::now();
             JobEvaluation evaluation;
+            const bool pipelined = submitted > 0;
             for (uint64_t capture = 1; ; ++capture) {
                 const HistoryReset reason = capture > 1 ? HistoryReset::None
                     : (attempt.frames == 0 && !prerollEvaluated) ? HistoryReset::FirstFrame
                     : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                const NeuralRenderFailure failure = evaluate(frame, reason, true, evaluation);
+                const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
                 if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
-                if (attempt.frames > 0) break;
+                if (pipelined) break;
                 // The runtime logs successful evaluations sparsely. Capture the
                 // first source frame until a fresh receipt exists, retaining
                 // only its latest pixels for encoding. Each retry has its own
@@ -1007,18 +1207,46 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 if (capture >= 120) {abort(NeuralRenderFailure::Neural);return attempt;}
             }
             const double evalMs = MillisecondsSince(evalStart);
-            // A segmented job takes ownership of the captured pixels; the
-            // single-file encoder still writes them on this thread.
+            if (pipelined) {
+                // Record the capture and move straight on to the next source frame. The GPU
+                // keeps working while the previous frame is copied back and encoded.
+                InFlightCapture queued;
+                queued.frameNumber = frame.frameNumber;
+                queued.timestamp100ns = frame.timestamp100ns;
+                queued.readMs = readMs;queued.guideMs = evaluation.guideMs;
+                queued.evalMs = evalMs;queued.neuralGpuMs = evaluation.neuralGpuMs;
+                queued.frameStart = frameStart;
+                inFlight.push_back(std::move(queued));
+                ++submitted;
+                if (evaluator.Pending() >= evaluator.MaxPending()) {
+                    const auto drainStart = SteadyClock::now();
+                    const NeuralRenderFailure failure = drainOldest();
+                    iterationDrainMs += MillisecondsSince(drainStart);
+                    if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                }
+                attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs,
+                                        iterationDrainMs);
+                continue;
+            }
+            // The first captured frame stays synchronous: the receipt gate above needs
+            // the pixels in hand, and they are written here once the gate opens. A
+            // segmented job takes ownership of them; the single-file encoder hands
+            // them to its feeder thread.
             const uint64_t captured = evaluation.bgra.size();
-            const auto writeStart = SteadyClock::now();
-            const EncodeError writeError = writer
-                ? writer->Write(frame, std::move(evaluation.bgra), stop)
-                : encoder.WriteFrame(evaluation.bgra, stop);
-            const double writeMs = MillisecondsSince(writeStart);
+            double writeMs = 0.0;
+            EncodeError writeError;
+            {
+                StageClock clock(stages.write);
+                const auto writeStart = SteadyClock::now();
+                writeError = writer ? writer->Write(frame, std::move(evaluation.bgra), stop)
+                                    : encoder.WriteFrameAsync(std::move(evaluation.bgra), stop);
+                writeMs = MillisecondsSince(writeStart);
+            }
             if (writeError != EncodeError::None) {
-                attempt.failure = writeError == EncodeError::Cancelled
-                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
-                attempt.encoderError=writeError;cancelOutput();return attempt;
+                attempt.encoderError=writeError;
+                abort(writeError == EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder);
+                return attempt;
             }
             ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured;
             if (!attempt.hasTimestamp) {
@@ -1030,6 +1258,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
             attempt.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
                                 MillisecondsSince(frameStart));
+            // Nothing is pipelined yet on this frame: it captured synchronously inside
+            // evalMs, so only the write is left to count as this iteration's drain.
+            attempt.stages.PushLoop(MillisecondsSince(frameStart), readMs, evalMs, writeMs);
+            ++submitted;
+        }
+        while (!inFlight.empty()) {
+            if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+            const NeuralRenderFailure failure = drainOldest();
+            if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
         }
         LogStageTable(attempt.stages);
         const EncodeError finishError=writer?writer->Finish():encoder.Finish(stop);
@@ -1114,6 +1351,9 @@ struct TestSourceAdapter {
 };
 struct TestEvaluatorAdapter {
     INeuralFrameEvaluator& evaluator;
+    // The test interface stays synchronous; these shims give RunJob the same async shape
+    // the production adapter has, so the pipelined control flow is what the tests run.
+    std::deque<JobEvaluation> captured{};
     bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides){
         return evaluator.Initialize(window,width,height,fps,guides);
     }
@@ -1125,6 +1365,19 @@ struct TestEvaluatorAdapter {
         out.bgra=std::move(evaluation.bgra);out.id=evaluation.id;
         out.neuralGpuMs=evaluator.LastNeuralGpuMs();return true;
     }
+    bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
+        if(!Submit(frame,id,true,out))return false;
+        captured.push_back(std::move(out));
+        return true;
+    }
+    uint32_t Pending()const{return uint32_t(captured.size());}
+    static constexpr uint32_t MaxPending(){return 2u;}
+    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
+        if(captured.empty())return false;
+        pixels=std::move(captured.front().bgra);captured.pop_front();
+        captureMs=0.0;return true;
+    }
+    void DiscardPending(){captured.clear();}
     bool FeatureCreated()const{return evaluator.FeatureCreated();}
     uint64_t EvaluationCount()const{return evaluator.EvaluationCount();}
     void ResetTemporal(){evaluator.ResetTemporal();}
@@ -1135,8 +1388,23 @@ struct TestEncoderAdapter {
     IFrameEncoder* encoder{};
     std::unique_ptr<IFrameEncoder> owned;
     std::function<std::unique_ptr<IFrameEncoder>()> factory;
-    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){return encoder->Start(spec,path);}
+    std::vector<std::vector<uint8_t>> recycled{};
+    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
+        recycled.clear();return encoder->Start(spec,path);
+    }
     EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder->WriteFrame(frame,stop);}
+    // The single-file write path feeds the real encoder from a worker thread; the
+    // test shim writes synchronously and recycles the buffer exactly like production.
+    EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
+        const EncodeError error=encoder->WriteFrame(frame,stop);
+        if(recycled.size()<2)recycled.push_back(std::move(frame));
+        return error;
+    }
+    bool TakeRecycled(std::vector<uint8_t>& buffer){
+        if(recycled.empty())return false;
+        buffer=std::move(recycled.back());recycled.pop_back();return true;
+    }
+    EncodeError Flush(std::stop_token){return EncodeError::None;}
     EncodeError Finish(std::stop_token stop){return encoder->Finish(stop);}
     void Cancel(){encoder->Cancel();}
     std::unique_ptr<TestEncoderAdapter> Create(){
@@ -1156,16 +1424,14 @@ struct ProductionSourceAdapter {
     }
     void Close(){decoder.Close();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
-        for(;;){
-            VideoFrame decoded;const auto read=decoder.ReadNextAvailable(decoded,stop);
-            if(read==VideoReadResult::NotReady){std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
-            frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
-                   decoded.frameNumber,decoded.sourceGeneration};
-            if(read==VideoReadResult::FrameReady)return JobRead::FrameReady;
-            if(read==VideoReadResult::EndOfStream)return JobRead::EndOfStream;
-            if(read==VideoReadResult::Cancelled)return JobRead::Cancelled;
-            return JobRead::Error;
-        }
+        VideoFrame decoded;
+        const auto read = decoder.ReadNextBlocking(decoded, stop);
+        frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity,
+                 decoded.frameNumber, decoded.sourceGeneration};
+        if (read == VideoReadResult::FrameReady) return JobRead::FrameReady;
+        if (read == VideoReadResult::EndOfStream) return JobRead::EndOfStream;
+        if (read == VideoReadResult::Cancelled) return JobRead::Cancelled;
+        return JobRead::Error;
     }
 };
 
@@ -1180,6 +1446,83 @@ NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
     return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
 }
 
+// Runs a capture's readback copy off the render loop.
+//
+// The copy is around 10 MiB of memcpy per frame and, taken inline, it was the largest
+// single item in the loop. It depends on nothing the loop does next, so it happens here
+// while the loop decodes, builds guides and submits the following frame. The readback slot
+// the view points into stays reserved by the renderer until Join returns, so the GPU
+// cannot land the next capture on top of the memory being copied.
+//
+// The worker thread is created on first use and lives for the job. Spawning one per frame
+// was never an option: Windows thread creation costs tens of microseconds, which is the
+// same reason the parallel passes share a pool rather than spawning.
+class DeferredCapture {
+public:
+    DeferredCapture()=default;
+    DeferredCapture(const DeferredCapture&)=delete;
+    DeferredCapture& operator=(const DeferredCapture&)=delete;
+    ~DeferredCapture(){Shutdown();}
+
+    // True while a posted copy has not been joined, and therefore while a readback slot
+    // is still spoken for.
+    bool Posted()const{std::scoped_lock lock(m_mutex);return m_posted;}
+
+    // Hands the copy to the worker. `scratch` is recycled as the destination buffer, so
+    // the full-frame allocation does not repeat every frame.
+    void Post(const D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>&& scratch){
+        if(!m_worker.joinable())m_worker=std::thread([this]{Loop();});
+        {
+            std::scoped_lock lock(m_mutex);
+            m_view=view;m_pixels=std::move(scratch);m_posted=true;m_busy=true;
+        }
+        m_wake.notify_one();
+    }
+
+    // Blocks until the posted copy has finished and moves its bytes into `pixels`.
+    // False when nothing was posted, which leaves `pixels` alone.
+    bool Join(std::vector<uint8_t>& pixels){
+        std::unique_lock lock(m_mutex);
+        if(!m_posted)return false;
+        m_idle.wait(lock,[this]{return !m_busy;});
+        pixels=std::move(m_pixels);m_pixels.clear();m_posted=false;
+        return true;
+    }
+
+    void Shutdown(){
+        if(!m_worker.joinable())return;
+        {std::scoped_lock lock(m_mutex);m_quit=true;}
+        m_wake.notify_one();
+        m_worker.join();
+    }
+
+private:
+    void Loop(){
+        for(;;){
+            std::unique_lock lock(m_mutex);
+            m_wake.wait(lock,[this]{return m_busy||m_quit;});
+            // A copy already posted is finished before quitting, so a Join racing the
+            // shutdown still gets its bytes rather than blocking forever.
+            if(!m_busy)return;
+            const D3D12Renderer::CaptureReadbackView view=m_view;
+            std::vector<uint8_t> pixels=std::move(m_pixels);
+            lock.unlock();
+            D3D12Renderer::CopyCaptureView(view,pixels);
+            lock.lock();
+            m_pixels=std::move(pixels);m_busy=false;
+            lock.unlock();
+            m_idle.notify_one();
+        }
+    }
+
+    mutable std::mutex m_mutex;
+    std::condition_variable m_wake,m_idle;
+    D3D12Renderer::CaptureReadbackView m_view{};
+    std::vector<uint8_t> m_pixels;
+    bool m_posted=false,m_busy=false,m_quit=false;
+    std::thread m_worker;
+};
+
 struct ProductionEvaluatorAdapter {
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
@@ -1189,15 +1532,32 @@ struct ProductionEvaluatorAdapter {
         width=w;height=h;fps=rate;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer||!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
+        // Nobody looks at this renderer's swapchain - the encoder is fed from the cache
+        // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
+        // still presents: the RenoDX add-on performs its feature-18 pass per present.
         guides.SetControls(controls);renderer->SetDLSS(true);return true;
     }
+    CapturedVideoFrame captureScratch;
+    // Declared after `renderer` so the worker is joined before the renderer, and with it
+    // the mapped readback memory a running copy is reading, goes away.
+    DeferredCapture deferred;
+    // Set when a readback slot could not be opened. The slot is gone by then, so every
+    // later capture would answer for the wrong frame; the drain has to stop instead.
+    bool resolveBroken=false;
+    // Guide generation cost, split out of the submit stage for the stage log.
+    // Shared by the synchronous and the pipelined submit paths, which differ
+    // only in how the capture is read back.
+    SteadyClock::duration guideCost{};
     // The renderer resets NGX history when guide.id.reset != None (requested
     // reset or a cut detected by the guide generator) and stamps guide.id on
     // the capture, so the job can verify it received the frame it submitted.
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
         GuideFrame guide;const auto guideStart=SteadyClock::now();
-        if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
-            lastFailure=NeuralRenderFailure::Neural;return false;
+        {
+            StageClock clock(guideCost);
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+                lastFailure=NeuralRenderFailure::Neural;return false;
+            }
         }
         out.guideMs=MillisecondsSince(guideStart);
         const float frameMs=static_cast<float>(1000.0/fps);
@@ -1207,30 +1567,263 @@ struct ProductionEvaluatorAdapter {
             }
             out.id=guide.id;
         }else{
-            CapturedVideoFrame captured;const auto captureStart=SteadyClock::now();
-            if(!renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captured)){
+            // The receipt gate for the first frame needs the pixels in hand before it
+            // can decide whether to resubmit. Handing out.bgra's buffer to the capture
+            // and taking it back keeps its capacity across the resubmits.
+            const auto captureStart=SteadyClock::now();
+            captureScratch.pixels=std::move(out.bgra);
+            if(!renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captureScratch)){
                 lastFailure=ClassifyRendererFailure(*renderer);return false;
             }
             out.captureMs=MillisecondsSince(captureStart);
-            out.bgra=std::move(captured.bgra);out.id=captured.id;
+            out.bgra=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+            out.id=captureScratch.id;
         }
         out.neuralGpuMs=renderer->LastNeuralGpuMs();++successfulEvaluations;return true;
     }
+
+    // Splits the submit and resolve stages further. Guide generation is pure CPU work,
+    // the fence wait is the GPU, and Present is DXGI pacing the hidden swapchain. Those
+    // three have completely different fixes, and the outer stage totals cannot tell them
+    // apart.
+    void ResetStageDetail(){guideCost={};if(renderer)renderer->ResetStageCounters();}
+    std::string StageDetail(uint64_t frames)const{
+        if(!renderer||!frames)return {};
+        std::ostringstream detail;
+        detail<<std::fixed<<std::setprecision(2)
+              <<" Of that: guides "<<MillisPerFrame(guideCost,frames)
+              <<" ms, GPU waits render-slot "
+              <<NanosPerFrameMillis(renderer->RenderSlotWaitNanos(),frames)
+              <<" + capture-submit "
+              <<NanosPerFrameMillis(renderer->CaptureSubmitSlotWaitNanos(),frames)
+              <<" + capture-resolve "
+              <<NanosPerFrameMillis(renderer->CaptureResolveWaitNanos(),frames)
+              <<" + present-slot "
+              <<NanosPerFrameMillis(renderer->PresentSlotWaitNanos(),frames)
+              <<" = total "<<NanosPerFrameMillis(renderer->FenceWaitNanos(),frames)
+              <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)<<" ms.";
+        return detail.str();
+    }
+    // Records the capture without waiting for the GPU. The pixels come back later from
+    // ResolveOldest, which waits only on that one frame's fence.
+    bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
+        GuideFrame guide;const auto guideStart=SteadyClock::now();
+        {
+            StageClock clock(guideCost);
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+                lastFailure=NeuralRenderFailure::Neural;return false;
+            }
+        }
+        out.guideMs=MillisecondsSince(guideStart);
+        const float frameMs=static_cast<float>(1000.0/fps);
+        if(!renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)){
+            lastFailure=ClassifyRendererFailure(*renderer);return false;
+        }
+        if(!renderer->EnqueueEvaluatedFrameCapture()){
+            lastFailure=ClassifyRendererFailure(*renderer);return false;
+        }
+        out.id=guide.id;out.neuralGpuMs=renderer->LastNeuralGpuMs();++successfulEvaluations;return true;
+    }
+    uint32_t Pending()const{return renderer?renderer->PendingCaptureCount():0u;}
+    static constexpr uint32_t MaxPending(){return D3D12Renderer::CaptureSlots;}
+    // On success every byte of pixels is overwritten, and the buffer is only resized
+    // when it does not already hold exactly one frame, so handing back the previous
+    // frame's buffer recycles it for this readback.
+    //
+    // The bytes are normally already there: the copy was posted at the end of the previous
+    // drain and ran while the loop decoded, guided and submitted a frame. What the caller
+    // times here is only the part of the copy that did not fit under that work. Before
+    // returning, the next oldest capture is posted so the same overlap covers the drain
+    // after this one, which is why the returned frame is still the oldest one: the posted
+    // copy and the deque the job drains advance together.
+    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
+        if(!renderer||resolveBroken)return false;
+        std::vector<uint8_t> spare=std::move(pixels);pixels.clear();
+        const auto captureStart=SteadyClock::now();
+        bool ok;
+        if(deferred.Posted()){
+            ok=deferred.Join(pixels);
+            renderer->EndResolveOldestCapture();
+        }else{
+            // The job's first drain, and the tail flush once the ring has run dry: with
+            // nothing posted there is nothing to overlap, so this one is copied inline.
+            captureScratch.pixels=std::move(spare);spare.clear();
+            ok=renderer->ResolveOldestCapture(captureScratch);
+            pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+        }
+        captureMs=MillisecondsSince(captureStart);
+        if(!ok){
+            // A device removal or fence timeout in the readback must be reported as such,
+            // not as whatever failure the previous frame left behind.
+            lastFailure=ClassifyRendererFailure(*renderer);
+            return false;
+        }
+        PostNextResolve(std::move(spare));
+        return true;
+    }
+    // Reserves the oldest remaining capture's readback slot and starts its copy on the
+    // worker. A slot that cannot be opened has already been retired by the renderer, which
+    // would slide every later frame's pixels one place against the job's deque, so the
+    // failure is latched and the next drain reports it instead.
+    void PostNextResolve(std::vector<uint8_t>&& scratch){
+        if(!renderer||!renderer->PendingCaptureCount())return;
+        D3D12Renderer::CaptureReadbackView view;
+        if(!renderer->BeginResolveOldestCapture(view)){
+            resolveBroken=true;
+            lastFailure=ClassifyRendererFailure(*renderer);
+            return;
+        }
+        deferred.Post(view,std::move(scratch));
+    }
+    void DiscardPending(){
+        if(!renderer)return;
+        // The posted copy holds a slot, so it has to be joined before the ring can drain.
+        std::vector<uint8_t> dropped;
+        if(deferred.Join(dropped))renderer->EndResolveOldestCapture();
+        resolveBroken=false;
+        while(renderer->PendingCaptureCount()){
+            CapturedVideoFrame discarded;
+            if(!renderer->ResolveOldestCapture(discarded))break;
+        }
+    }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
-    void ResetTemporal(){guides.Reset();}
+    void ResetTemporal(){guides.Reset();DiscardPending();}
     NeuralRenderFailure LastFailure()const{return lastFailure;}
     uint64_t PeakLocalVideoMemoryMiB()const{return renderer?renderer->PeakLocalVideoMemoryMiB():0;}
 };
 
+// WriteFrame pushes a whole frame, over 30 MB at 4K, into ffmpeg's stdin and blocks
+// whenever the encoder falls behind. Running it on a feeder thread is the missing half of
+// the decoder's frame queue: decode, neural evaluation and encode now all overlap.
+//
+// The cost is that an encoder error surfaces up to QueueCapacity frames late. The NVENC
+// to libx264 retry path already cancels and re-reads the source from frame zero, so it
+// still recovers; it just wastes a couple more frames before noticing.
+//
+// The queue absorbs the encoder's jitter, so its depth is a time budget, not a count. At
+// two frames it held ~13 ms and the render loop wore the difference: the write stage sat
+// at a p50 of 0.002 ms with a mean of 1.57, i.e. almost every frame handed over free
+// while a thin tail blocked for tens of milliseconds. Eight frames is ~50 ms at the rate
+// the loop actually runs. The memory is QueueCapacity plus the two buffers in
+// circulation, so it scales with frame size: ~106 MiB at 2578x1080, ~330 MiB at 4K.
 struct ProductionEncoderAdapter {
     RawVideoEncoder encoder;
-    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){return encoder.Start(spec,path);}
+    static constexpr size_t QueueCapacity=8;
+
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::deque<std::vector<uint8_t>> queue;
+    std::vector<std::vector<uint8_t>> recycled;
+    EncodeError latched{EncodeError::None};
+    bool draining=false;
+    std::jthread worker;
+
+    ~ProductionEncoderAdapter(){StopWorker();}
+
+    EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
+        StopWorker();
+        {
+            std::lock_guard lock(mutex);
+            queue.clear();recycled.clear();latched=EncodeError::None;draining=false;
+        }
+        const EncodeError started=encoder.Start(spec,path);
+        if(started!=EncodeError::None)return started;
+        worker=std::jthread([this](std::stop_token workerStop){WorkerLoop(workerStop);});
+        return EncodeError::None;
+    }
+
     EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
-    EncodeError Finish(std::stop_token stop){return encoder.Finish(stop);}
-    void Cancel(){encoder.Cancel();}
+
+    EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
+        std::unique_lock lock(mutex);
+        cv.wait(lock,stop,[this]{return queue.size()<QueueCapacity||latched!=EncodeError::None;});
+        if(latched!=EncodeError::None)return latched;
+        if(stop.stop_requested())return EncodeError::Cancelled;
+        if(!worker.joinable())return EncodeError::WriteFailed;
+        queue.push_back(std::move(frame));
+        lock.unlock();
+        cv.notify_all();
+        return EncodeError::None;
+    }
+
+    bool TakeRecycled(std::vector<uint8_t>& buffer){
+        std::lock_guard lock(mutex);
+        if(recycled.empty())return false;
+        buffer=std::move(recycled.back());recycled.pop_back();return true;
+    }
+
+    // Drains the queue through the worker. A job stop arriving mid-drain (up to eight
+    // 4K frames, or forever if ffmpeg has wedged) requests the worker's own token,
+    // which is the only thing that releases a blocked WriteFile; the caller then takes
+    // the Cancel path exactly as an inline WriteFrame(stop) used to.
+    EncodeError Flush(std::stop_token stop){
+        {std::lock_guard lock(mutex);draining=true;}
+        cv.notify_all();
+        if(worker.joinable()){
+            std::stop_callback release(stop,[this]{worker.request_stop();});
+            worker.join();
+        }
+        std::lock_guard lock(mutex);
+        if(latched==EncodeError::None&&stop.stop_requested())latched=EncodeError::Cancelled;
+        return latched;
+    }
+
+    EncodeError Finish(std::stop_token stop){
+        const EncodeError flushed=Flush(stop);
+        if(flushed!=EncodeError::None){encoder.Cancel();return flushed;}
+        return encoder.Finish(stop);
+    }
+
+    void Cancel(){
+        {
+            std::lock_guard lock(mutex);
+            draining=true;queue.clear();
+            if(latched==EncodeError::None)latched=EncodeError::Cancelled;
+        }
+        cv.notify_all();
+        // StopWorker first. It requests the worker's stop token, which is what unblocks a
+        // write that is stuck on a pipe a stalled ffmpeg is not draining. Only once the
+        // worker has been joined is it safe to tear the child down here.
+        StopWorker();
+        encoder.Cancel();
+    }
+
     // One fresh ffmpeg pipe per segment; a single-file job never calls this.
     std::unique_ptr<ProductionEncoderAdapter> Create(){return std::make_unique<ProductionEncoderAdapter>();}
+
+private:
+    void StopWorker(){
+        {std::lock_guard lock(mutex);draining=true;}
+        cv.notify_all();
+        if(worker.joinable()){worker.request_stop();worker.join();}
+        worker={};
+    }
+
+    void WorkerLoop(std::stop_token workerStop){
+        for(;;){
+            std::vector<uint8_t> frame;
+            {
+                std::unique_lock lock(mutex);
+                if(!cv.wait(lock,workerStop,[this]{return !queue.empty()||draining;}))return;
+                if(queue.empty())return;
+                frame=std::move(queue.front());queue.pop_front();
+            }
+            cv.notify_all();
+            // Cancellation rides on the worker's own stop token. RawVideoEncoder::WriteFrame
+            // installs a stop_callback that terminates the ffmpeg job object, so requesting
+            // it releases a blocked WriteFile. Tearing the child down from another thread
+            // instead would pull the pipe handle out from under an in-flight write.
+            const EncodeError error=encoder.WriteFrame(frame,workerStop);
+            {
+                std::lock_guard lock(mutex);
+                if(error!=EncodeError::None&&latched==EncodeError::None)latched=error;
+                if(recycled.size()<QueueCapacity+1)recycled.push_back(std::move(frame));
+            }
+            cv.notify_all();
+            if(error!=EncodeError::None)return;
+        }
+    }
 };
 
 std::filesystem::path ModuleDirectory()

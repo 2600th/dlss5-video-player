@@ -4,11 +4,45 @@
 #include "Log.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <vector>
+
+#include "ParallelFor.h"
 
 using Microsoft::WRL::ComPtr;
+
+namespace {
+
+// Full-frame memory passes are bandwidth bound, so they are split only once they are
+// large enough that the dispatch pays for itself. Roughly a quarter of a 1080p frame.
+constexpr size_t kParallelCopyGrain = 2u * 1024u * 1024u;
+constexpr size_t kParallelRowGrain = 64u;
+
+// The readback copy runs on the offline export's resolve worker while the render loop is
+// still building the next frame's guides, and both fan out. A pool carries one task slot,
+// so sharing the default one would let the two dispatches overwrite each other. The
+// workers park on semaphores, so the second pool costs its stacks and nothing else.
+//
+// Its width is deliberately a fraction of the machine. The copy no longer has to finish
+// inside the loop, only before the next drain, so spare width buys nothing; meanwhile the
+// export's real competition for cores is the ffmpeg children, which both decode the source
+// in software and run the encoder. Taking every core for a copy that has a whole iteration
+// to finish in starves them, and their back pressure lands on the render loop anyway.
+// Whether that trade is real is visible in the stage table: the resolve wait row measures
+// the copy failing to keep up, and the write row measures the encoder failing to.
+constexpr size_t kCaptureCopyWidthDivisor = 4;
+
+parallel_detail::WorkerPool& CaptureCopyPool()
+{
+    static parallel_detail::WorkerPool pool(
+        std::max<size_t>(2u, parallel_detail::WorkerPool::DefaultWidth() / kCaptureCopyWidthDivisor));
+    return pool;
+}
+
+} // namespace
 
 static bool HR(HRESULT hr, const char* what) {
     if (FAILED(hr)) { LOG(what << " failed hr=0x" << std::hex << hr); return false; }
@@ -50,6 +84,10 @@ D3D12Renderer::~D3D12Renderer() {
         m_uploadMapped[i]=nullptr;
         m_guideMapped[i]=nullptr;
         m_referenceMapped[i]=nullptr;
+    }
+    for (uint32_t i=0;i<CaptureSlots;++i) {
+        if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
+        m_cacheReadbackMapped[i]=nullptr;
     }
     m_dlss.Shutdown();
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
@@ -101,7 +139,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     }
     BOOL tearing=FALSE;if(SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount=FrameCount;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
+    sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
     if(m_swapchain) m_swapchain->SetMaximumFrameLatency(2);
@@ -112,7 +150,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
+    for(uint32_t i=0;i<SwapchainBuffers;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
     D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -289,10 +327,24 @@ bool D3D12Renderer::CreateVideoResources(){
     D3D12_RESOURCE_DESC readback{};readback.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
     readback.Width=m_cacheReadbackBytes;readback.Height=1;readback.DepthOrArraySize=1;
     readback.MipLevels=1;readback.SampleDesc={1,0};readback.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
-        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback)),
-        "Create cache readback"))return false;
-    m_cacheReadback->SetName(L"Neural_Cache_Readback_RGBA8");
+    // One readback buffer per capture slot so frame N's copy target is not the buffer the
+    // CPU is still reading for frame N-1. That is what lets the capture fence be waited on
+    // per slot instead of draining the whole queue after every frame.
+    //
+    // The buffers stay mapped for the renderer's lifetime, which declares the CPU read
+    // range exactly once. READBACK heap memory on a discrete PCIe adapter is write-back
+    // cached and coherent, so that is safe here and this player already requires an RTX
+    // GPU. A UMA or WARP adapter would need the range re-declared per read.
+    for(uint32_t i=0;i<CaptureSlots;++i){
+        if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback[i])),
+            "Create cache readback"))return false;
+        m_cacheReadback[i]->SetName(L"Neural_Cache_Readback_RGBA8");
+        const D3D12_RANGE readRange{0, static_cast<SIZE_T>(m_cacheReadbackBytes)};
+        if(!HR(m_cacheReadback[i]->Map(0,&readRange,
+            reinterpret_cast<void**>(&m_cacheReadbackMapped[i])),
+            "Map persistent cache readback buffer"))return false;
+    }
 
     // Comparison reference: the original member of the current pair at source size.
     // Same layout as the decoded texture, so the decoded upload footprint applies.
@@ -337,7 +389,25 @@ bool D3D12Renderer::CreateVideoResources(){
     return true;
 }
 
-void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&fp,const void*src,size_t tight,uint32_t rows){const uint8_t*s=static_cast<const uint8_t*>(src);for(uint32_t y=0;y<rows;++y)memcpy(mapped+fp.Offset+size_t(fp.Footprint.RowPitch)*y,s+tight*y,tight);}
+void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&fp,const void*src,size_t tight,uint32_t rows){
+    const uint8_t*s=static_cast<const uint8_t*>(src);
+    uint8_t*destination=mapped+fp.Offset;
+    const size_t pitch=size_t(fp.Footprint.RowPitch);
+    // A full 4K BGRA frame is over 30 MB per call and used to be copied one row at a
+    // time on the calling thread. Row pitch is 256-aligned, which for the common widths
+    // (1920 and 3840 give 7680 and 15360) already equals the tight row, so the whole
+    // upload collapses to a single contiguous copy.
+    if(pitch==tight){
+        const size_t total=tight*size_t(rows);
+        ParallelForRanges(total,kParallelCopyGrain,[&](size_t begin,size_t end){
+            memcpy(destination+begin,s+begin,end-begin);
+        });
+        return;
+    }
+    ParallelForRanges(size_t(rows),kParallelRowGrain,[&](size_t begin,size_t end){
+        for(size_t y=begin;y<end;++y)memcpy(destination+pitch*y,s+tight*y,tight);
+    });
+}
 
 float D3D12Renderer::Halton(uint32_t index,uint32_t base){float f=1.0f,r=0.0f;while(index){f/=float(base);r+=f*float(index%base);index/=base;}return r;}
 
@@ -362,7 +432,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
     if(!bgra||bytes<videoRow*m_sourceH||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot)) return false;
+    if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
     SampleLocalVideoMemory();
     CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
@@ -462,34 +532,45 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }
 
     m_lastDLSSUsed=used;
-    uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const bool finalView=(m_debugView==DebugView::Final);
-    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
-    // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
-    // debug/fallback presentation pass is temporarily made pixel-shader readable.
-    ID3D12Resource* debugPixelResource=nullptr;
-    D3D12_RESOURCE_STATES debugBefore=GuideReadState;
-    switch(m_debugView){
-        case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
-        case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-        case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
-        default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+    // The backbuffer pass and Present are not optional even for a window nobody sees:
+    // the RenoDX add-on performs its feature-18 evaluation per present. An export that
+    // skipped presents past the feature recreate rendered 900/900 "verified" frames with
+    // DLAA only (0.46 ms neural GPU time against 5.7 ms), bit-for-bit non-neural.
+    {
+        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const bool finalView=(m_debugView==DebugView::Final);
+        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
+        // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
+        // debug/fallback presentation pass is temporarily made pixel-shader readable.
+        ID3D12Resource* debugPixelResource=nullptr;
+        D3D12_RESOURCE_STATES debugBefore=GuideReadState;
+        switch(m_debugView){
+            case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
+            case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
+            case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
+            default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+        }
+        if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd->DrawInstanced(3,1,0,0);
+        if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
+        Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     }
-    if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    cmd->DrawInstanced(3,1,0,0);
-    if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
-    Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
-    if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
+    {
+        const auto presented=std::chrono::steady_clock::now();
+        HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+        m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now()-presented).count());
+        if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
+    }
     return SignalFrameSlot(slot);
 }
 
 bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,
                                         const GuideFrame&guide,float frameTimeMs,
                                         CapturedVideoFrame&capture){
-    capture.bgra.clear();capture.width=0;capture.height=0;capture.id=guide.id;
+    capture.pixels.clear();capture.width=0;capture.height=0;capture.id=guide.id;
     if(!RenderFrame(bgra,bytes,frame,guide,frameTimeMs))return false;
     return CaptureEvaluatedFrame(capture);
 }
@@ -534,23 +615,36 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
 }
 
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
-    capture.bgra.clear();capture.width=0;capture.height=0;
+    capture.pixels.clear();capture.width=0;capture.height=0;
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
     if(tightBytes64>std::numeric_limits<size_t>::max())return false;
-    const size_t tightBytes=static_cast<size_t>(tightBytes64);
 #if defined(D3D12_RENDERER_TESTING)
     if(m_testCacheCapture){
+        const size_t tightBytes=static_cast<size_t>(tightBytes64);
         std::vector<uint8_t> bytes;
         if(!m_testCacheCapture(bytes)||bytes.size()!=tightBytes)return false;
-        capture.bgra=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
+        capture.pixels=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
         return true;
     }
 #endif
-    if(m_gpuUnusable||!m_cacheOutput||!m_cacheReadback||!m_dlssOutput||
-       !m_queue||!m_rootSig||!m_psoCacheCapture)return false;
+    // The synchronous form owns the whole ring, so it may only be used while nothing is
+    // in flight. The offline job uses it for the first frame, whose evidence receipt loop
+    // has to read a capture back before deciding whether to resubmit the same frame.
+    if(m_capturePending)return false;
+    if(!EnqueueEvaluatedFrameCapture())return false;
+    return ResolveOldestCapture(capture);
+}
+
+bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
+    if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
+    if(m_capturePending>=CaptureSlots)return false;
+    if(m_gpuUnusable||!m_cacheOutput||!m_dlssOutput||!m_queue||!m_rootSig||!m_psoCacheCapture)
+        return false;
+    const uint32_t readbackSlot=m_captureWrite;
+    if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot))return false;
+    if(!WaitForFrameSlot(slot, &m_captureSubmitSlotWaitNanos))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
     auto*cmd=m_cmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
@@ -570,7 +664,11 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,
             D3D12_RESOURCE_STATE_COPY_SOURCE);
-    D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=m_cacheReadback.Get();
+    // A single m_cacheOutput is enough even with several captures in flight: the next
+    // frame's draw into it and this frame's copy out of it are recorded on the same
+    // queue, so the GPU already runs them in order.
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource=m_cacheReadback[readbackSlot].Get();
     destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     destination.PlacedFootprint=m_cacheFootprint;
     D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=m_cacheOutput.Get();
@@ -580,37 +678,77 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
             D3D12_RESOURCE_STATE_RENDER_TARGET);
     if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
-    // Wait for exactly this capture submission: SignalFrameSlot recorded its fence
-    // value in m_frameFence[slot], and the readback copy is the last work it guards.
-    // Draining the whole queue instead would also stall on unrelated in-flight work.
-    if(!SignalFrameSlot(slot)||!WaitForFrameSlot(slot))return false;
+    // Signal only. The old code drained the entire queue here, which idled the GPU for
+    // the full CPU copy and encode stage of every frame.
+    if(!SignalFrameSlot(slot))return false;
+    m_captureFence[readbackSlot]=m_fenceValue;
+    m_captureWrite=(readbackSlot+1u)%CaptureSlots;
+    ++m_capturePending;
+    return true;
+}
 
-    void*mapped=nullptr;
-    const D3D12_RANGE readRange{static_cast<SIZE_T>(m_cacheFootprint.Offset),
-        static_cast<SIZE_T>(m_cacheFootprint.Offset+m_cacheReadbackBytes)};
-    if(!HR(m_cacheReadback->Map(0,&readRange,&mapped),"Map cache readback"))return false;
-    // BGRA8 render target => the rows are already in the caller's order. assign()
-    // sizes the vector while copying, skipping the zero-fill of a buffer that the
-    // copy overwrites in full.
-    const auto*base=static_cast<const uint8_t*>(mapped)+m_cacheFootprint.Offset;
-    const size_t rowBytes=size_t(m_outputW)*4u;
-    const size_t rowPitch=size_t(m_cacheFootprint.Footprint.RowPitch);
-    std::vector<uint8_t> bgra;
-    if(rowPitch==rowBytes)bgra.assign(base,base+tightBytes);
-    else{
-        bgra.resize(tightBytes);
-        for(uint32_t y=0;y<m_outputH;++y)
-            memcpy(bgra.data()+rowBytes*y,base+rowPitch*y,rowBytes);
+bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
+    view=CaptureReadbackView{};
+    if(!m_capturePending)return false;
+    const uint32_t readbackSlot=m_captureRead;
+    const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
+    if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
+        EndResolveOldestCapture();return false;
     }
-    const D3D12_RANGE writtenRange{0,0};m_cacheReadback->Unmap(0,&writtenRange);
-    capture.bgra=std::move(bgra);capture.width=m_outputW;capture.height=m_outputH;
+    if(!WaitForFenceValue(m_captureFence[readbackSlot], &m_captureResolveWaitNanos)){
+        EndResolveOldestCapture();return false;
+    }
+    const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
+    if(!base){EndResolveOldestCapture();return false;}
+    view.base=base+m_cacheFootprint.Offset;
+    view.rowPitch=size_t(m_cacheFootprint.Footprint.RowPitch);
+    view.bytes=static_cast<size_t>(tightBytes64);
+    view.width=m_outputW;view.height=m_outputH;
+    return true;
+}
+
+void D3D12Renderer::EndResolveOldestCapture(){
+    if(!m_capturePending)return;
+    m_captureRead=(m_captureRead+1u)%CaptureSlots;
+    --m_capturePending;
+}
+
+// static
+void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<uint8_t>&pixels){
+    // Only resize when the caller handed back a differently sized buffer. Constructing a
+    // fresh vector here value-initialised a whole frame, over 30 MB of pointless memset
+    // per frame at 4K, immediately before overwriting every byte of it.
+    if(pixels.size()!=view.bytes)pixels.resize(view.bytes);
+    uint8_t*out=pixels.data();
+    const size_t tightRow=size_t(view.width)*4u;
+    auto&pool=CaptureCopyPool();
+    // No channel swizzle: the cache target is B8G8R8A8 and the encoder is started with
+    // EncoderPixelFormat::Bgra, so ffmpeg consumes this layout directly.
+    if(view.rowPitch==tightRow){
+        ParallelForRangesIn(pool,view.bytes,kParallelCopyGrain,[&](size_t begin,size_t end){
+            memcpy(out+begin,view.base+begin,end-begin);
+        });
+    }else{
+        ParallelForRangesIn(pool,size_t(view.height),kParallelRowGrain,[&](size_t begin,size_t end){
+            for(size_t y=begin;y<end;++y)memcpy(out+tightRow*y,view.base+view.rowPitch*y,tightRow);
+        });
+    }
+}
+
+bool D3D12Renderer::ResolveOldestCapture(CapturedVideoFrame&capture){
+    capture.width=0;capture.height=0;
+    CaptureReadbackView view;
+    if(!BeginResolveOldestCapture(view)){capture.pixels.clear();return false;}
+    CopyCaptureView(view,capture.pixels);
+    EndResolveOldestCapture();
+    capture.width=view.width;capture.height=view.height;
     return true;
 }
 
 bool D3D12Renderer::PresentCurrent(){
     if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot))return false;
+    if(!WaitForFrameSlot(slot, &m_presentSlotWaitNanos))return false;
     if(!HR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
     auto* cmd=m_cmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset static-present command list"))return false;
@@ -648,7 +786,10 @@ bool D3D12Renderer::PresentCurrent(){
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
+    const auto presented=std::chrono::steady_clock::now();
     HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-presented).count());
     if(FAILED(phr)){LOG("Static Present failed hr=0x"<<std::hex<<phr);return false;}
     return SignalFrameSlot(slot);
 }
@@ -686,21 +827,29 @@ void D3D12Renderer::SampleLocalVideoMemory(){
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
-bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
-    if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
-    const uint64_t v=m_frameFence[slot];
-    if(!v)return true;
+bool D3D12Renderer::WaitForFenceValue(uint64_t value,uint64_t* stageWaitNanos){
+    if(!value)return true;
+    if(!m_fence||!m_fenceEvent)return false;
+    const auto waited=std::chrono::steady_clock::now();
     const auto waitResult=d3d12_renderer_detail::WaitForGPUFenceCompletion(
-        v,
+        value,
         GetTickCount64(),
         d3d12_renderer_detail::RenderFenceWaitMilliseconds,
         [&]{return m_fence->GetCompletedValue();},
-        [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
+        [&](uint64_t v){return m_fence->SetEventOnCompletion(v,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
+    const uint64_t elapsed=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-waited).count());
+    m_fenceWaitNanos+=elapsed;
+    if(stageWaitNanos)*stageWaitNanos+=elapsed;
     const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(
         waitResult,[&]{return m_device->GetDeviceRemovedReason();});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
     return result==d3d12_renderer_detail::FenceWaitResult::Completed;
+}
+bool D3D12Renderer::WaitForFrameSlot(uint32_t slot,uint64_t* stageWaitNanos){
+    if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
+    return WaitForFenceValue(m_frameFence[slot],stageWaitNanos);
 }
 bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     if(m_gpuUnusable||slot>=FrameCount)return false;

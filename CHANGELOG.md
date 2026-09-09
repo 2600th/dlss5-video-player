@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+- The neural export is pipelined, ported from ctype-lab's PR #5 with fixes.
+  Capture readback rotates through four persistently mapped slots and signals
+  a per-slot fence instead of draining the queue; the copy out of the mapped
+  slot runs on a worker while the loop decodes, guides and submits the next
+  frame; and ffmpeg's stdin is fed from its own thread through an eight-frame
+  queue so a 4K frame into a busy encoder no longer stalls the loop. The
+  export decoder gains the same four-frame queue thread the player uses.
+  Measured on the RTX 4080 SUPER with the 30 s 1080p30 demo, 900 frames:
+  render rate 48.6 -> 109.4 frames/s (1.6x -> 3.6x real time), wall 25.8 ->
+  15.9 s, capture 11.8 -> 0.02 ms/frame on the loop, guides 4.6 -> 1.5 ms.
+  The output is bit-identical to 0.16.0's (PSNR infinite over all 900
+  frames), which is the proof that the parallel guides and the pipelined
+  capture change nothing but time.
+- Not ported: the PR's headless mode, which skipped the backbuffer pass and
+  Present once the NGX feature's delayed recreate had gone out. The RenoDX
+  add-on performs its feature-18 pass per present, so with it on the export
+  ran at the same 109 frames/s but produced DLAA-only frames - 0.46 ms of
+  neural GPU time per frame against 5.7 ms, 34.6 dB from the source instead
+  of 31.7 - while the receipt still said `frames=900/900 verified=900`. The
+  presents cost nothing measurable on this machine. The evidence chain not
+  catching a runtime that evaluates DLAA without NR is a gap in its own
+  right and is recorded in the roadmap.
+- Temporal guide generation fans out over a process-wide worker pool: luma
+  downsample, the global translation search, the 2x2-lattice block match,
+  the median flow, the depth proxy and the guide-grid pack. Each worker owns a
+  semaphore so a two-range split wakes one thread, and the subpixel refine and
+  reverse search prune with an exact per-row bound. The PR measured 7.0 -> 1.4
+  ms/frame at 1080p, memcmp-identical to the serial reference over 24-frame
+  sequences with temporal history. The pool refuses to be entered from two
+  threads at once: a second dispatcher runs serially on its own thread rather
+  than overwriting the single task slot under running helpers.
+- Every stage of the export loop is timed (`Neural export stage cost per
+  frame`), source-frame latency and render-loop throughput are separate
+  series, and the residual between the stage sum and the loop clock is
+  printed, so a slow decoder child, a slow GPU and a swapchain pacing the
+  presents no longer look identical from outside.
+- Fixed against the PR as submitted: a reader blocked in
+  `ReadNextBlocking` now returns `Cancelled` when the decoder closes, instead
+  of falling into the raw-pipe poll while the child is being torn down and
+  reporting `EndOfStream` (the PR's own regression test failed on this);
+  cancelling an export while the encoder feeder is draining its queue - or
+  wedged on a pipe ffmpeg is not reading - now releases the blocked write
+  (an existing test failed on this); a readback failure during the inline
+  drain is classified as the device removal or stall it was, not as the
+  previous frame's failure; the swapchain keeps three backbuffers while the
+  allocator count goes to six, so the visible player does not spend ~+100 MB
+  of VRAM at 4K on presents DXGI's latency limit would never queue;
+  `RawVideoEncoder::WriteFrame` re-checks the stop after every write, because
+  terminating the child under a blocked `WriteFile` completes that write as a
+  success and a single remaining chunk reported `None` for a frame nobody
+  read; and the unused `EncoderPixelFormat::Rgba` and `CaptureRenderedFrame`
+  were deleted. The PR's "shutdown deadlock fix" repaired a regression from
+  its own first commit; `main` never had it.
+
 ## 0.16.0 - 2026-09-09
 
 - NGX's own diagnostics reach `DLSSVideoPlayer.log`. `DLSSBackend::Initialize`
