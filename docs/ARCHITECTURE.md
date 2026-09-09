@@ -60,9 +60,11 @@ Audio is the preferred master clock. The video side checks decoded timestamps ag
 
 A normal movie does not contain engine motion vectors or depth. `TemporalGuideGenerator` reconstructs approximate guides from image history:
 
-- block/optical-flow-style temporal matching for current-to-previous motion;
+- block/optical-flow-style temporal matching for current-to-previous motion,
+  gated on how much the winning displacement beats standing still and verified
+  by a reverse search where that margin is ambiguous, so cells whose match is
+  not trustworthy carry no motion at all;
 - image/motion cues for a stabilized depth proxy;
-- correspondence uncertainty for the temporal mask;
 - scene-cut detection for history resets.
 
 CPU analysis is performed on a compact grid. D3D12 expands the result to the exact DLSS render dimensions.
@@ -75,8 +77,11 @@ renderer refuses a guide built for a different source frame, derives the NGX
 reset from the guide's reason and logs it; the offline job rejects captured
 output whose identity does not match the submitted frame. A cut requires both
 a high post-alignment residual and a low luma-histogram overlap, so fast pans
-keep history and real cuts never do. Guide controls (motion, depth, mask) can
-each be neutralized for ablation; the choice is part of the cache identity.
+keep history and real cuts never do. Guide controls (motion, depth) can each be
+neutralized for ablation; the choice is part of the cache identity. There was a
+third guide, a correspondence-failure mask bound to NGX's bias/disocclusion
+parameters; it was deleted after measurement showed neural rendering and the
+upscaler both ignore it (see `docs/BENCHMARK.md`).
 
 ## D3D12 renderer
 
@@ -87,7 +92,7 @@ each be neutralized for ablation; the choice is part of the cache identity.
 - per-frame video/guide upload resources;
 - linear FP16 DLSS color input;
 - typeless depth resource with DSV/SRV views;
-- motion-vector and mask resources;
+- motion-vector resource;
 - DLSS output UAV;
 - final presentation/debug pipelines.
 
@@ -213,20 +218,27 @@ before the current one runs out. Reading past the render head returns
 job ends the segments are concatenated (`ConcatenateMedia`) into the single
 `neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
 
-Sizing follows measurement rather than preference. Timing three range renders
-of the same clip (75, 150 and 225 frames: 9.64 s, 11.43 s, 14.00 s) and fitting
-a line gives **29.1 ms per frame (34.4 fps) plus 7.3 s of fixed cost** per job —
-the preflight process, ReShade stabilization, up to 120 priming frames, the
-reopen and seek, and 60 preroll frames. A fresh job per chunk therefore only
-breaks even with realtime 30 fps playback at a 57 s chunk, which is why the
-session is one long job with a 4 s lead-in and a 2 s resume threshold.
+Sizing follows measurement rather than preference, and the measurements moved a
+long way during the work described below. Steady-state cost is now **12.50 ms
+per 1080p frame, 16.60 ms at 1440p and 28.07 ms at 4K**, measured from the
+spacing of segment arrivals so job startup is excluded. Fitting those three
+points gives **7.35 ms of fixed cost per frame plus 2.50 ms per megapixel**,
+reproducing each to within 0.06 ms: the fixed part is the guide pass, the DLSS
+evaluate and the capture's fence wait, the proportional part is the readback and
+the pixel work. `playback_timing::ForecastLiveRender` is exactly that fit.
 
-Inside a live session the effective rate is lower: encoder rotation every 2 s
-and the player decoding and presenting on the same GPU bring it to 0.99 s of
-1080p30 video per second of wall time (measured over 50 s of segments). That
-holds a constant lead rather than growing one, so a heavier source (4K, 60 fps)
-will rebuffer, and the buffering path is not an edge case but the release
-valve.
+Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
+stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll
+frames — which is why a session is one long job rather than a chunk per few
+seconds, with a 4 s lead-in and a 2 s resume threshold.
+
+Inside a live session the rate holds up: on a 40 s 4K30 source the median over
+nine segment intervals was **1.165x real time** against the forecast's 1.188x,
+so the player's own decoding and presenting costs about 2%. A session therefore
+grows its lead on everything up to 4K30; 4K60 and 8K30 are where the forecast
+says no and the player asks before starting. Buffering remains the release
+valve, not an edge case, because a busy GPU or a slower disk can still push a
+marginal source under the line.
 
 A settings change while the player is paused runs the same machinery for one
 frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented

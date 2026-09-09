@@ -86,35 +86,49 @@ sequence so byte-identical outputs are visible directly.
 | text-subtitles | mask-off | 1 | 4d412db9 | 13.4 | 15.69 | 31.24 | 3.26 / 3.80 | 6.4 | 6.7 | 1041 | +0.078 | 2.44 | 29.49 | 0.9875 |
 | text-subtitles | two-pass | 0 | 8b82158f | 27.4 | 15.35 | 31.37 | – | – | – | – | +0.172 | 3.07 | 26.73 | 0.9772 |
 
-Observations (P0-3 guide proof):
+Observations (P0-3 guide proof). **The table above predates the guide, capture,
+segment, decode and mask work described below; its rates and its `mv-off`
+comparison are historical.** Rerun it before quoting a number from it.
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
-- `mask-off` is byte-identical to `baseline` on both clips. The mask is not
-  missing: running the shipping `TemporalGuideGenerator` over decoded frames of
-  `cuts-motion` produces a disocclusion mask in [0,1] with 5–24 % of grid cells
-  non-zero (0 % on the static text clip, which is correct), and that A channel
-  becomes the R8 texture bound to `DLSS_Input_Bias_Current_Color_Mask`,
-  `DLSS_DisocclusionMask` and `DLSS_ResponsivityMask` at evaluate time. The
-  consumer simply does not change its output for it. Motion vectors from the
-  same measurement are real as well — mean |mv| 47 px with the global estimate
-  tracking each pan on the motion clip, 0.8 px and global (0,0) on the static
-  clip — and `mv-off` does change the output. They are also coarse: the flow is
-  estimated on a 160×90 grid, so pan magnitudes land on 12 px steps, and the
-  static clip still shows 12–36 px outliers on ~19 % of cells where flat or
-  repetitive regions confuse block matching. That is the likely reason `mv-off`
-  slightly *improves* PSNR below. Do not spend on better masks until a clip
-  shows a difference; motion vectors are worth improving before masks are.
-- `mv-off` and `depth-off` change the output. On these synthetic clips the
-  estimated motion vectors slightly *hurt* (mv-off: +0.30 dB PSNR, +0.018
-  SSIM and −0.9 flicker on the cuts clip; +0.10 dB and −0.07 flicker on the
-  text clip), which is the expected signature of block-matching vectors on
-  drifting text and hard pans. Depth changes are within 0.02 dB.
+- The mask guide is gone, and the `mask-off` rows are why. `mask-off` was
+  byte-identical to `baseline` on both clips, and the mask was not missing: the
+  generator produced a mask with 5–24 % of cells non-zero on `cuts-motion` (0 %
+  on the static text clip, which is correct), reaching NGX as the R8 texture
+  bound to `DLSS_Input_Bias_Current_Color_Mask`, `DLSS_DisocclusionMask` and
+  `DLSS_ResponsivityMask`. Three later experiments closed the question: forcing
+  the mask to **all ones** is also pixel-identical; **render preset Default
+  versus preset K** is pixel-identical too, so the preset hints are inert for
+  this feature as well; and on the **DLSS-SR upscaling path** — a different NGX
+  feature — mask on versus off is 0 differing bytes over 24 frames at 1440p
+  while motion vectors on versus off differ in 6.85 % of bytes at 43.1 dB. Two
+  of the three parameter names were never SuperSampling inputs at all: they
+  belong to Ray Reconstruction. The guide was deleted.
+- `mv-off` beating `baseline` in this table was real, and it was the motivation
+  for rewriting the flow estimator. The vectors were coarse (160×90 grid, 12 px
+  steps) and 60.8 % of cells on `cuts-motion` carried a vector that did not
+  reduce the warp residual. With acceptance by evidence margin, a banded reverse
+  check and a confidence-weighted vector median, that false-motion rate is 3.7 %,
+  temporal stability on the static text clip is 0.3292 against `mv-off`'s 0.3342
+  and the old 0.4101, and PSNR-Y recovers +0.297 dB on `cuts-motion`. Motion
+  vectors now help; re-measure this table to see it.
+- Depth changes the output but only within 0.02 dB, and an incidental finding
+  during the flow work is that changing the flow field does not change the
+  render at all through the depth channel — the proxy is dominated by its
+  vertical ramp. Depth is the next guide worth questioning.
 - The cut detector fires exactly on the clip's hard cuts (`resets` = 1 first
   frame + 5 cuts on `cuts-motion`, 1 on the cut-free text clip).
-- The neural pass itself is ~3.3 ms GPU per 1080p frame at p50 (3.8 ms p95);
-  wall time is dominated by CPU guide generation (~6.4 ms), readback
-  (~6.7 ms) and NVENC, so processing sits at ~31 fps.
+- Per-frame cost has changed substantially since these runs: the neural pass is
+  still ~3.3 ms GPU per 1080p frame, but guide generation is 3.1 ms (was 6.4),
+  capture is 5.7 ms (was 6.7), and steady-state throughput is 12.50 ms/frame at
+  1080p, 16.60 at 1440p and 28.07 at 4K. See `docs/ARCHITECTURE.md`.
 - The second pass at `NRIntensity=0.75` adds flicker (+0.094), ΔE (+0.63)
   and costs 2.8 dB PSNR and 11 OCR points on small text; face crops keep a
   0.952 mean cosine to the source with frame-to-frame drift equal to the
   source's own (0.137 vs 0.133). Two-pass is not a default candidate.
+
+To A/B a guide against the **upscaling** feature rather than neural rendering,
+`UpscalingGpuSmoke` takes a probe form:
+`UpscalingGpuSmoke.exe <clip> <targetHeight> <out.raw> mv=1,depth=1 <frames>`
+writes every captured output frame as raw BGRA, so two runs can be compared byte
+for byte. That is how the mask question was settled for DLSS-SR.

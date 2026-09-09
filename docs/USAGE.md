@@ -49,8 +49,11 @@ rendered frames. Rendering keeps running behind playback; if the playhead
 reaches the render head the panel returns until the buffer refills, and `Space`
 pauses playback rather than the render. Turning the button off stops the
 session and hands the same frame back to the original. On an RTX 5090 the
-render sustains about 0.99 s of 1080p30 video per second of playback, so the
-lead holds; heavier sources (4K, 60 fps) rebuffer.
+render sustains about 80 frames per second at 1080p, 60 at 1440p and 36 at 4K,
+so the lead grows on any source up to 4K30; if the source is heavier than the
+GPU can follow (4K60, 8K) the player says so with the predicted rate and asks
+before starting. Once a session has been running for a few seconds the status
+line reports the rate it is actually achieving whenever that falls behind.
 
 **Convert to a file** with the DLSS menu's **Convert & save** submenu:
 `Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
@@ -97,10 +100,11 @@ view or outside cached playback and are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, color strength, preset, style and
-automatic mask, plus the motion-vector, depth and mask guide switches. These
-change the render identity: **Apply & re-render** saves them and re-renders the
-current range (or the whole source), while playback image adjustments remain
-instant. The guide switches also drive the live debug views immediately.
+automatic mask, plus the motion-vector and depth guide switches. These change
+the render identity: **Apply** restarts an active session at the playhead, or
+re-previews the paused frame, while playback image adjustments remain instant.
+Writing a file is a separate action under **Convert & save**. The guide
+switches also drive the live debug views immediately.
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding

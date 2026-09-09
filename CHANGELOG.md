@@ -8,9 +8,48 @@
   panel over the current frame collects a 4 s lead, playback resumes on the
   rendered frames, and it rebuffers if the playhead catches up. The timeline's
   teal lane grows with the head, seeks clamp to it, and a finished session is
-  concatenated into the ordinary cache entry. Measured on an RTX 5090: the
-  render sustains 0.99 s of 1080p30 video per second of playback, so the lead
-  holds; 4K or 60 fps sources will rebuffer.
+  concatenated into the ordinary cache entry.
+- A session that cannot keep up says so before it starts. Rendering costs
+  7.35 ms per frame plus 2.50 ms per megapixel on an RTX 5090 (fitted to 12.50,
+  16.60 and 28.07 ms/frame measured at 1080p, 1440p and 4K), so the player can
+  predict the rate from the source's geometry and frame rate: it warns with the
+  numbers and asks before starting a session on 4K60 or 8K, and reports the rate
+  a running session is actually achieving when that falls behind. Everything up
+  to 4K30 keeps up - measured 1.165x real time in the player on a 40 s 4K30
+  source, with no rebuffering.
+- Decoding no longer answers every 4 MiB of a frame with a sleep. The read loop
+  drains the decoder pipe, which cuts steady-state cost from 15.57 to 12.50
+  ms/frame at 1080p, 46.83 to 16.60 at 1440p and 109.3 to 28.07 at 4K. ffmpeg
+  alone decodes those files in 2.5 to 8.2 ms/frame, so the transport had been
+  costing six to thirteen times the decode.
+- Short forward seeks keep the running decoder instead of restarting it. Frame
+  stepping and scrubbing under 0.15 s go from 265 ms to 0.3-1.0 ms, every
+  restart seek is ~30 ms cheaper because the old child is killed after the new
+  one is spawned, and SeekSeconds itself returns in 1.4-8.2 ms instead of 44.8,
+  which matters because the player calls it from the UI thread. Seeks are now
+  snapped to the frame grid, which also removes an ambiguity where an unaligned
+  target could decode either of two neighbouring frames.
+- Motion vectors now help instead of hurting. Acceptance is by how much the
+  winning displacement beats standing still, ambiguous cells are verified by a
+  reverse search, and the median filter is a confidence-weighted vector median
+  over accepted cells only. False motion on the cuts clip falls from 60.8% to
+  3.7% of cells, temporal stability on static text beats even the mv-off
+  ablation (0.3292 against 0.3342 and the old 0.4101), PSNR-Y recovers 0.297 dB,
+  and the guide pass costs 3.09 ms instead of 6.66.
+- The mask guide is gone. Neural rendering ignores it even when forced to all
+  ones, the preset hints make no difference either, and on the upscaling path
+  mask on versus off is byte-identical while motion vectors change 6.85% of
+  bytes. Two of its three NGX parameter names were Ray Reconstruction inputs
+  that SuperSampling never reads. The checkbox, the debug view, the R8 texture
+  and the bindings are removed; the cache key schema is bumped accordingly.
+- Rendering behind playback no longer stalls on its own encoder. Segment
+  rotation cost 141 ms of render time each, mostly because a freshly spawned
+  ffmpeg does not drain stdin for ~110 ms; rotation and the writes now happen off
+  the render thread, and segmented rendering is slightly faster than single-file.
+- Capturing a frame no longer swizzles on the CPU or drains the whole GPU queue:
+  6.85 to 5.73 ms, bit-identical output. The render loop also decodes the next
+  frame while the current one is on the GPU, which cuts frame p95 from 25.99 to
+  17.57 ms.
 - Preview neural settings on the paused frame. Moving a slider re-renders the
   frame the player is paused on 700 ms after the sliders settle and shows the
   result in its place; the toggle reads "Settings preview" while that frame is
