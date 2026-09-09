@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0 - 2026-09-09
 
 - Turn neural rendering on while watching. The toggle starts a render at the
   playhead (to the Out marker when the playhead is inside a marked range, else
