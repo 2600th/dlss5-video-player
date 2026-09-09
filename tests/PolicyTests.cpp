@@ -1149,7 +1149,7 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
 {
     const HMENU menu = app_menu::CreateDebugViewMenu(app_menu::IDM_VIEW_DEPTH);
     CHECK(menu != nullptr);
-    CHECK_EQ(5, menu ? GetMenuItemCount(menu) : 0);
+    CHECK_EQ(4, menu ? GetMenuItemCount(menu) : 0);
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, L"Final output\t1", app_menu::IDM_VIEW_FINAL));
@@ -3945,7 +3945,89 @@ void video_decoder_background_queue_is_bounded_to_four_frames_test()
     }
     Sleep(75);
     std::error_code error;produced=std::filesystem::file_size(marker,error);if(error)produced=0;
-    CHECK(produced>=4);CHECK(produced<=6);
+    // Four queued frames plus the two the stdout pipe is sized to hold, so the
+    // child can decode one frame while the reader copies the previous one out.
+    CHECK(produced>=4);CHECK(produced<=7);
+}
+
+// The fake child stamps every frame with its absolute source index, so a seek
+// that keeps the running child can be held to the exact frame a restarting seek
+// hands out - the property the whole optimisation rests on.
+uint32_t stamped_frame_index(const VideoFrame& frame)
+{
+    CHECK_EQ(size_t{16},frame.bgra.size());
+    uint32_t index=0;
+    for(int byte=0;byte<4;++byte)index|=static_cast<uint32_t>(frame.bgra[static_cast<size_t>(byte)])<<(8*byte);
+    return index;
+}
+
+VideoFrame read_one_frame(VideoDecoder& decoder)
+{
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+        std::chrono::steady_clock::now()<deadline;){
+        result=decoder.ReadNextAvailable(frame);
+        if(result!=VideoReadResult::NotReady)break;
+        Sleep(1);
+    }
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    return frame;
+}
+
+void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
+{
+    MediaFixture fixture;
+    const auto expectedTimestamp=[](int64_t frameIndex){
+        return static_cast<int64_t>((static_cast<double>(frameIndex)/30.0)*10000000.0);
+    };
+    // A short forward hop: the child stays, and the frames before the target
+    // are dropped without the caller ever seeing them.
+    auto reused=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(reused->Open(L"seekreuse",MediaSourceKind::LocalFile));
+    CHECK_EQ(uint32_t{0},stamped_frame_index(read_one_frame(*reused)));
+    CHECK(reused->SeekSeconds(0.1));
+    CHECK(reused->LastSeekTiming().reusedChild);
+    const VideoFrame afterReuse=read_one_frame(*reused);
+
+    // The same target reached by rewinding, which can only be served by a
+    // restarted child.
+    auto restarted=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(restarted->Open(L"seekreuse",MediaSourceKind::LocalFile));
+    CHECK(restarted->SeekSeconds(2.0));
+    CHECK(restarted->SeekSeconds(0.1));
+    CHECK(!restarted->LastSeekTiming().reusedChild);
+    const VideoFrame afterRestart=read_one_frame(*restarted);
+
+    CHECK_EQ(uint32_t{3},stamped_frame_index(afterRestart));
+    CHECK(afterReuse.bgra==afterRestart.bgra);
+    CHECK_EQ(afterRestart.timestamp100ns,afterReuse.timestamp100ns);
+    CHECK_EQ(expectedTimestamp(3),afterReuse.timestamp100ns);
+    CHECK_EQ(afterRestart.frameNumber,afterReuse.frameNumber);
+    CHECK_EQ(uint64_t{3},afterReuse.frameNumber);
+    CHECK_EQ(afterRestart.discontinuity,afterReuse.discontinuity);
+
+    // Frame stepping is the smallest forward seek there is: every step keeps the
+    // child and walks exactly one frame.
+    for(int64_t step=4;step<9;++step){
+        CHECK(reused->SeekSeconds(static_cast<double>(step)/30.0));
+        CHECK(reused->LastSeekTiming().reusedChild);
+        const VideoFrame stepped=read_one_frame(*reused);
+        CHECK_EQ(static_cast<uint32_t>(step),stamped_frame_index(stepped));
+        CHECK_EQ(expectedTimestamp(step),stepped.timestamp100ns);
+        CHECK_EQ(static_cast<uint64_t>(step),stepped.frameNumber);
+    }
+
+    // Rewinding cannot be served by a running child.
+    CHECK(reused->SeekSeconds(0.1));
+    CHECK(!reused->LastSeekTiming().reusedChild);
+    CHECK_EQ(uint32_t{3},stamped_frame_index(read_one_frame(*reused)));
+
+    // A hop far enough that decoding to it costs more than a fresh child does.
+    CHECK(reused->SeekSeconds(20.0));
+    CHECK(!reused->LastSeekTiming().reusedChild);
+    const VideoFrame afterLongSeek=read_one_frame(*reused);
+    CHECK_EQ(uint32_t{600},stamped_frame_index(afterLongSeek));
+    CHECK_EQ(expectedTimestamp(600),afterLongSeek.timestamp100ns);
 }
 
 void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test()
@@ -4649,6 +4731,24 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");}
         if(cuda||d3d11){if(delayedExit){CloseHandle(GetStdHandle(STD_OUTPUT_HANDLE));Sleep(75);}return 7;}
         std::cout.write("1234567890abcdef",16);std::cout.flush();return 0;
+    }
+    if(all.find(L"seekreuse")!=std::wstring::npos){
+        // 2x2 BGRA at 30fps, every frame stamped with its absolute source index
+        // so a caller can tell exactly which frame it was handed. Writes go
+        // through the handle: the CRT's text mode would rewrite 0x0A bytes.
+        double seekSeconds=0.0;
+        const size_t at=all.find(L"-ss ");
+        if(at!=std::wstring::npos)try{seekSeconds=std::stod(all.substr(at+4));}catch(...){}
+        uint32_t index=static_cast<uint32_t>(std::llround(seekSeconds*30.0));
+        const HANDLE out=GetStdHandle(STD_OUTPUT_HANDLE);
+        for(int emitted=0;emitted<3000;++emitted,++index){
+            unsigned char frame[16];
+            for(int byte=0;byte<4;++byte)frame[byte]=static_cast<unsigned char>((index>>(8*byte))&0xFFu);
+            for(int byte=4;byte<16;++byte)frame[byte]=static_cast<unsigned char>(index&0xFFu);
+            DWORD written=0;
+            if(!WriteFile(out,frame,sizeof(frame),&written,nullptr)||written!=sizeof(frame))return 0;
+        }
+        Sleep(INFINITE);return 0;
     }
     if(all.find(L"largeburst")!=std::wstring::npos){
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_FRAME_MARKER");
@@ -5443,6 +5543,7 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
+    video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
     youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();

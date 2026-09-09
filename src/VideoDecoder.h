@@ -77,6 +77,25 @@ public:
     bool SetDecodeSize(uint32_t width, uint32_t height);
     void Swap(VideoDecoder& other) noexcept;
 
+    // Where a seek's latency actually goes. Published per seek because the seek
+    // path is the only place the player blocks on a decoder restart, and the
+    // reuse-versus-restart trade below is only defensible while it stays
+    // measurable from tests and benchmarks, not just from the log line.
+    struct SeekTiming {
+        double teardownMs = 0.0;     // terminating the previous ffmpeg child
+        double spawnMs = 0.0;        // CreateProcessW + job assignment + resume
+        double firstByteMs = -1.0;   // seek entry -> first raw byte on the pipe
+        double firstFrameMs = -1.0;  // seek entry -> first complete frame decoded
+        double callMs = 0.0;         // SeekSeconds() itself
+        // Frames the kept child still had to produce before the target.
+        uint64_t drainedFrames = 0;
+        // Frames between the position the caller would read next and the
+        // target: negative means the seek had to rewind.
+        int64_t forwardFrames = 0;
+        bool reusedChild = false;
+    };
+    SeekTiming LastSeekTiming() const;
+
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
     uint32_t NativeWidth() const { return m_nativeWidth ? m_nativeWidth : m_width; }
@@ -98,6 +117,11 @@ private:
     bool m_gif{false};
     enum class Backend { None, FFmpeg, MediaFoundation };
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
+    // A restart clears every decoded frame; a seek that keeps its child must
+    // keep them, because frames already pulled out of the pipe cannot be read
+    // a second time.
+    enum class QueueBuffer { Discard, Keep };
+    enum class SeekReuse { Reused, Restart };
 
     bool OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                   std::stop_token stop, bool queueFrames);
@@ -122,8 +146,12 @@ private:
     VideoReadResult ClassifyFFmpegEnd(DWORD exitCode);
     bool TryNextFFmpegAcceleration(DWORD exitCode);
     void StopFFmpeg(DWORD waitTimeout = 500);
-    void StartFrameQueue();
-    void StopFrameQueue();
+    // Forward seeks shorter than a restart are served by the running child.
+    SeekReuse ReuseRunningChildForSeek(double seconds);
+    double FFmpegHeadSeconds() const;
+    void PublishSeekTiming(bool frameDelivered);
+    void StartFrameQueue(QueueBuffer buffered = QueueBuffer::Discard);
+    void StopFrameQueue(QueueBuffer buffered = QueueBuffer::Discard);
     void FrameQueueLoop(std::stop_token stop);
 
     bool OpenMediaFoundation(const std::wstring& path);
@@ -152,8 +180,29 @@ private:
     HANDLE m_ffmpegProcess = nullptr;
     HANDLE m_ffmpegStdout = nullptr;
     HANDLE m_ffmpegJob = nullptr;
-    uint64_t m_ffmpegFrameIndex = 0;
+    // Frames this child has emitted, and the true CFR index of its first one.
+    // The child emits headerless rawvideo, so the pair is the only position the
+    // decoder has - and a forward seek that keeps the child running has to know
+    // exactly it to hand out the frame a restart would have produced.
+    uint64_t m_ffmpegEmittedFrames = 0;
+    int64_t m_ffmpegSpawnFirstFrame = 0;
     int64_t m_ffmpegSeekBase100ns = 0;
+    // Source frame that maps to m_ffmpegSeekBase100ns: the timeline origin. A
+    // reused seek moves it forward, and the read path drops everything below.
+    int64_t m_ffmpegFirstSourceFrame = 0;
+    // Seeded from measured 1080p30 CUDA numbers (a restart reaches its first
+    // frame in ~230ms, a frame walked past costs ~16ms) and then tracked per
+    // decoder: whether skipping beats a restart depends on the file's own
+    // decode cost, so a fixed frame threshold would be wrong for half the
+    // sources.
+    double m_restartFirstFrameMs = 230.0;
+    double m_drainMsPerFrame = 16.0;
+    SeekTiming m_seekTiming{};
+    std::chrono::steady_clock::time_point m_seekStart{};
+    double m_seekTargetSeconds = 0.0;
+    bool m_seekTimingPending = false;
+    bool m_seekReusedBuffered = false;
+    mutable std::mutex m_seekTimingMutex;
     FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
