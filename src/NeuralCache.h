@@ -1,5 +1,7 @@
 #pragma once
 
+#include "OfflineNeuralRenderer.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -29,10 +31,14 @@ struct NeuralCacheIdentity {
     std::string quality;
     bool upscaling{};
     std::string settingsDigest;
+    // Half-open [start,end) render window; a whole-source render keeps the
+    // legacy key. Non-default guide controls append their canonical form.
+    NeuralRenderRange range{};
+    std::string guides;
 };
 
 struct NeuralCacheManifest {
-    uint32_t schema{3};
+    uint32_t schema{4};
     NeuralCacheEntryKind kind{NeuralCacheEntryKind::Render};
     NeuralCacheState state{NeuralCacheState::Staging};
     std::string sourceDigest;
@@ -52,6 +58,15 @@ struct NeuralCacheManifest {
     // Empty for legacy schema-3 entries; present renders also authenticate
     // neural-settings.ini alongside the encoded payload.
     std::string settingsDigest;
+    // Schema 4. Parsed schema-3 entries keep these defaults: whole-source
+    // range, default guides, no job identity and no receipt.
+    int64_t rangeStart100ns{};
+    int64_t rangeEnd100ns{};
+    std::string guides;
+    uint64_t jobId{};
+    uint32_t historyResets{};
+    // Non-empty renders also authenticate receipt.json beside the payload.
+    std::string receiptDigest;
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;
 };

@@ -29,6 +29,11 @@ inline constexpr COLORREF Hover = RGB(62, 65, 70);
 inline constexpr COLORREF PrimaryBlue = RGB(55, 139, 226);
 inline constexpr COLORREF PrimaryText = RGB(240, 240, 242);
 inline constexpr COLORREF SecondaryText = RGB(160, 164, 172);
+// The user's In/Out selection, and the part of a source that already has cached
+// neural frames. The selection wins the loud colour: it is what gets acted on.
+inline constexpr COLORREF MarkedRange = RGB(158, 112, 240);
+inline constexpr COLORREF MarkedRangeEdge = RGB(206, 178, 255);
+inline constexpr COLORREF NeuralCoverage = RGB(72, 196, 178);
 
 } // namespace ui_palette
 

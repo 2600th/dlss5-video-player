@@ -26,6 +26,20 @@ std::wstring FrameRateText(double fps)
     return value;
 }
 
+struct ExportFormat {
+    bool mkv{}, mp4{}, gif{}, png{}, jpeg{};
+    bool Valid() const { return mkv || mp4 || gif || png || jpeg; }
+};
+
+ExportFormat ExportFormatFor(const std::filesystem::path& output)
+{
+    const auto extension = output.extension().wstring();
+    const auto is = [&](const wchar_t* candidate) { return _wcsicmp(extension.c_str(), candidate) == 0; };
+    return {is(L".mkv"), is(L".mp4"), is(L".gif"), is(L".png"), is(L".jpg") || is(L".jpeg")};
+}
+
+bool ValidRangeSeconds(double value) { return std::isfinite(value) && value >= 0.0; }
+
 std::filesystem::path ModuleDirectory()
 {
     std::wstring value(32768, L'\0');
@@ -421,6 +435,55 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     return arguments;
 }
 
+std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
+                                                     const std::filesystem::path& staging,
+                                                     bool oddDimensions)
+{
+    const ExportFormat format = ExportFormatFor(request.output);
+    std::vector<std::wstring> arguments{
+        // -y applies only to the exclusively reserved staging file we own.
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
+        L"-i", request.neuralVideo.wstring()};
+    if (format.mkv || format.mp4) {
+        // The neural video already covers only the rendered range, so the
+        // source is trimmed to line its audio, subtitles and chapters up with it.
+        // Input -ss seeks near the start and rebases the source to zero, but a
+        // stream copy keeps the pre-roll between the container seek point and
+        // the target as negative timestamps, which the muxer would then shift
+        // onto the video. Output -ss 0 discards that pre-roll exactly for both
+        // copied and re-encoded streams; the neural video begins at zero and
+        // loses nothing. Output -t bounds the source to the rendered duration.
+        const bool seek = request.rangeStartSeconds > 0.0;
+        if (seek) arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+        arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(),
+            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
+            L"-map_metadata", L"1", L"-map_chapters", L"1"});
+        if (seek) arguments.insert(arguments.end(), {L"-ss", L"0"});
+        if (request.rangeDurationSeconds > 0.0)
+            arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
+        if (format.mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
+        else {
+            arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-crf", L"18"});
+            if (oddDimensions) arguments.insert(arguments.end(), {L"-pix_fmt", L"yuv444p"});
+            else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
+            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
+        }
+    } else if (format.gif) {
+        arguments.insert(arguments.end(), {L"-filter_complex",
+            // Two-centisecond frames avoid the short-delay clamping performed
+            // by common GIF viewers. fps retains holds through the final delay.
+            L"[0:v:0]fps=50,split[a][b];[a]palettegen[p];[b][p]paletteuse=dither=sierra2_4a[v]",
+            L"-map", L"[v]", L"-an", L"-loop", L"0", L"-fps_mode", L"passthrough", L"-f", L"gif"});
+    } else {
+        arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-frames:v", L"1", L"-an",
+            L"-c:v", format.png ? L"png" : L"mjpeg", L"-pix_fmt", format.png ? L"rgb24" : L"yuvj444p"});
+        if (format.jpeg) arguments.insert(arguments.end(), {L"-q:v", L"2"});
+        arguments.insert(arguments.end(), {L"-f", L"image2", L"-update", L"1"});
+    }
+    arguments.push_back(staging.wstring());
+    return arguments;
+}
+
 size_t ExpectedBgraFrameBytes(const EncoderSpec& spec)
 {
     if (spec.width == 0 || spec.height == 0 || !std::isfinite(spec.fps) || spec.fps <= 0.0)
@@ -486,15 +549,11 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return MaterializeResult{false, MaterializeError::Cancelled, L"Cached video export was cancelled."};
     };
     if (stop.stop_requested()) return cancelled();
-    const auto extension = request.output.extension().wstring();
-    const bool mkv = _wcsicmp(extension.c_str(), L".mkv") == 0;
-    const bool mp4 = _wcsicmp(extension.c_str(), L".mp4") == 0;
-    const bool gif = _wcsicmp(extension.c_str(), L".gif") == 0;
-    const bool png = _wcsicmp(extension.c_str(), L".png") == 0;
-    const bool jpeg = _wcsicmp(extension.c_str(), L".jpg") == 0 || _wcsicmp(extension.c_str(), L".jpeg") == 0;
-    if (request.neuralVideo.empty() || request.sourceMedia.empty() || request.output.empty() ||
-        !(mkv || mp4 || gif || png || jpeg))
+    const ExportFormat format = ExportFormatFor(request.output);
+    if (request.neuralVideo.empty() || request.sourceMedia.empty() || request.output.empty() || !format.Valid())
         return {false, MaterializeError::InvalidRequest, L"Choose a new MKV, MP4, GIF, PNG or JPEG file."};
+    if (!ValidRangeSeconds(request.rangeStartSeconds) || !ValidRangeSeconds(request.rangeDurationSeconds))
+        return {false, MaterializeError::InvalidRequest, L"The export range is invalid."};
     std::error_code error;
     const auto neuralVideo = std::filesystem::absolute(request.neuralVideo, error);
     if (error)
@@ -516,7 +575,7 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
     if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
     bool oddDimensions = false;
-    if (mp4) {
+    if (format.mp4) {
         const ProbeResult neuralMetadata = ProbeMedia(helperDirectory_, neuralVideo, stop,
                                                        MediaProbeMode::CachedMetadata);
         if (!neuralMetadata.ok)
@@ -545,34 +604,10 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     if (staging.path.empty())
         return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
     if (stop.stop_requested()) return cancelled();
-    std::vector<std::wstring> arguments{
-        // -y applies only to the exclusively reserved staging file we own.
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
-        L"-i", neuralVideo.wstring()};
-    if (mkv || mp4) {
-        arguments.insert(arguments.end(), {L"-i", sourceMedia.wstring(),
-            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
-            L"-map_metadata", L"1", L"-map_chapters", L"1"});
-        if (mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
-        else {
-            arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-crf", L"18"});
-            if (oddDimensions) arguments.insert(arguments.end(), {L"-pix_fmt", L"yuv444p"});
-            else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
-            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
-        }
-    } else if (gif) {
-        arguments.insert(arguments.end(), {L"-filter_complex",
-            // Two-centisecond frames avoid the short-delay clamping performed
-            // by common GIF viewers. fps retains holds through the final delay.
-            L"[0:v:0]fps=50,split[a][b];[a]palettegen[p];[b][p]paletteuse=dither=sierra2_4a[v]",
-            L"-map", L"[v]", L"-an", L"-loop", L"0", L"-fps_mode", L"passthrough", L"-f", L"gif"});
-    } else {
-        arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-frames:v", L"1", L"-an",
-            L"-c:v", png ? L"png" : L"mjpeg", L"-pix_fmt", png ? L"rgb24" : L"yuvj444p"});
-        if (jpeg) arguments.insert(arguments.end(), {L"-q:v", L"2"});
-        arguments.insert(arguments.end(), {L"-f", L"image2", L"-update", L"1"});
-    }
-    arguments.push_back(staging.path.wstring());
+    CachedExportRequest resolved = request;
+    resolved.neuralVideo = neuralVideo;
+    resolved.sourceMedia = sourceMedia;
+    const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions);
     // Attachments (such as subtitle fonts) travel with the source subtitles.
     // Unsupported codecs fail the entire export; no subtitle is burned in.
     const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
@@ -681,6 +716,94 @@ void RawVideoEncoder::Cancel()
     if (!impl_) return;
     impl_->process.Stop();
     impl_->active = false;
+}
+
+namespace {
+
+std::string NarrowUtf8(std::wstring_view value)
+{
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string text(static_cast<size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), text.data(),
+                        size, nullptr, nullptr);
+    return text;
+}
+
+// One `file` directive per part. FFmpeg reads the list as UTF-8 and treats the
+// quoted value literally, so only the quote itself needs escaping; forward
+// slashes avoid any backslash-escape ambiguity.
+std::string ConcatListText(std::span<const std::filesystem::path> parts)
+{
+    std::string text;
+    for (const auto& part : parts) {
+        std::error_code error;
+        std::wstring absolute = std::filesystem::absolute(part, error).wstring();
+        if (error || absolute.empty()) return {};
+        for (wchar_t& character : absolute) if (character == L'\\') character = L'/';
+        const std::string narrow = NarrowUtf8(absolute);
+        if (narrow.empty()) return {};
+        text += "file '";
+        for (const char character : narrow) {
+            if (character == '\'') text += "'\\''";
+            else text.push_back(character);
+        }
+        text += "'\n";
+    }
+    return text;
+}
+
+bool WriteWholeFile(const std::filesystem::path& path, std::string_view text)
+{
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    size_t offset = 0;
+    bool ok = true;
+    while (ok && offset < text.size()) {
+        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(text.size() - offset, 1024 * 1024));
+        DWORD written = 0;
+        ok = WriteFile(file, text.data() + offset, wanted, &written, nullptr) && written != 0;
+        offset += written;
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+} // namespace
+
+EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
+                             std::span<const std::filesystem::path> parts,
+                             const std::filesystem::path& output,
+                             std::stop_token stop)
+{
+    if (parts.empty() || output.empty()) return EncodeError::InvalidSpecification;
+    std::error_code error;
+    for (const auto& part : parts) {
+        if (part.empty() || !std::filesystem::is_regular_file(part, error) || error)
+            return EncodeError::InvalidSpecification;
+    }
+    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return EncodeError::HelperMissing;
+    if (stop.stop_requested()) return EncodeError::Cancelled;
+    const std::string text = ConcatListText(parts);
+    if (text.empty()) return EncodeError::InvalidSpecification;
+    // Beside the output: the staging directory is ours and stays writable.
+    const std::filesystem::path list = output.parent_path() / (output.filename().wstring() + L".concat.txt");
+    if (!WriteWholeFile(list, text)) return EncodeError::StartFailed;
+    const std::vector<std::wstring> arguments{
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
+        L"-f", L"concat", L"-safe", L"0", L"-i", list.wstring(),
+        L"-c", L"copy", L"-f", L"matroska", output.wstring()};
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
+    std::filesystem::remove(list, error);
+    if (!capture.started) return EncodeError::StartFailed;
+    if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
+    if (capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
+        return EncodeError::FinishFailed;
+    return EncodeError::None;
 }
 
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,

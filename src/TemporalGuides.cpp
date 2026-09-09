@@ -22,9 +22,52 @@ constexpr size_t kGuideLatticeGrain = 2;     // block-match lattice rows per ran
 
 void TemporalGuideGenerator::Reset() {
     m_prevLuma.clear();
+    m_lastLuma.clear();
     m_prevDepth.clear();
     m_gridW = m_gridH = 0;
     m_havePrev = false;
+    m_firstFrame = true;
+}
+
+void TemporalGuideGenerator::SetControls(const GuideControls& controls) {
+    if (controls.depth != m_controls.depth) m_prevDepth.clear();
+    m_controls = controls;
+}
+
+bool TemporalGuideGenerator::IsRepeat(const FrameIdentity& frame) const {
+    return !m_firstFrame && m_havePrev && frame.reset == HistoryReset::None &&
+           frame.frameNumber == m_lastFrameNumber && frame.pts100ns == m_lastPts &&
+           frame.sourceGeneration == m_lastSourceGeneration;
+}
+
+HistoryReset TemporalGuideGenerator::ClassifyReset(const FrameIdentity& frame, uint32_t gw, uint32_t gh) const {
+    if (m_firstFrame || !m_havePrev) return HistoryReset::FirstFrame;
+    if (frame.reset != HistoryReset::None) return frame.reset;
+    if (frame.sourceGeneration != m_lastSourceGeneration) return HistoryReset::SourceChange;
+    if (gw != m_gridW || gh != m_gridH) return HistoryReset::SourceChange;
+    if (frame.frameNumber == m_lastFrameNumber + 1 || IsRepeat(frame)) return HistoryReset::None;
+    // A forward gap means frames were dropped between us and the previous
+    // guide; a backwards step means the timeline was re-positioned.
+    return frame.frameNumber > m_lastFrameNumber ? HistoryReset::Drop : HistoryReset::Seek;
+}
+
+float TemporalGuideGenerator::LumaHistogramIntersection(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.empty() || a.size() != b.size()) return 0.0f;
+    constexpr int bins = 32;
+    std::array<float, bins> ha{}, hb{};
+    for (const float v : a) ++ha[size_t(std::clamp(int(v * bins), 0, bins - 1))];
+    for (const float v : b) ++hb[size_t(std::clamp(int(v * bins), 0, bins - 1))];
+    float overlap = 0.0f;
+    for (int i = 0; i < bins; ++i) overlap += std::min(ha[size_t(i)], hb[size_t(i)]);
+    return overlap / float(a.size());
+}
+
+bool TemporalGuideGenerator::IsSceneCut(float globalMatchCost, float histogramIntersection) {
+    // Measured on the benchmark corpus: fast pans reach residual 0.10-0.13
+    // with histogram overlap >= 0.91; real cuts show residual 0.24-0.40 with
+    // overlap <= 0.47, and the softest real cut observed was 0.108 / 0.78.
+    if (globalMatchCost > 0.30f) return true;
+    return globalMatchCost > 0.10f && histogramIntersection < 0.85f;
 }
 
 std::pair<uint32_t,uint32_t> TemporalGuideGenerator::AnalysisGrid(uint32_t sourceW, uint32_t sourceH, double targetFps) {
@@ -143,10 +186,35 @@ static float PatchSadSubpixelCost(const std::vector<float>& cur, const std::vect
     return (count ? sad / float(count) : 10.0f) + penalty;
 }
 
+// Rejection thresholds, in mean-absolute-luma units of the 3x3 patch cost. Picked from a sweep
+// over the benchmark corpus (5 clips, 92 frame pairs) where every emitted vector was scored by
+// warping the previous frame's FULL-RESOLUTION pixels, so the score is independent of the cost
+// function being thresholded. Mean per-cell warp residual, old algorithm -> this one (with the
+// residual of emitting nothing at all in brackets): cuts-motion 0.0666 -> 0.0548 [0.1029],
+// text-subtitles 0.0020 -> 0.0015 [0.0015], faces 0.0049 -> 0.0048 [0.0049], fine-detail
+// 0.0480 -> 0.0423 [0.0370], highlights-gradients 0.0051 -> 0.0064 [0.0077].
+//
+// A winner that beats standing still by less than kMotionEvidence does not reduce the residual
+// on any clip - on text-subtitles and faces such vectors made it WORSE than not moving, which
+// is the whole reason mv-on used to lose to mv-off. Sweeping the threshold, 0.02/0.03/0.04 give
+// cuts-motion 0.0556/0.0548/0.0549 and highlights-gradients 0.0061/0.0064/0.0067, so 0.03 is
+// the knee: it keeps the low-contrast real motion that a stricter gate drops.
+constexpr float kMotionEvidence = 0.03f;
+// Between kMotionEvidence and kDecisiveEvidence the evidence exists but is not decisive, and
+// only there does a reverse (previous -> current) search pay for itself: gating that band on the
+// round trip moved fine-detail 0.0482 -> 0.0440 and cuts-motion 0.0515 -> 0.0513, while running
+// it on every cell cost 0.0515 -> 0.0546 because it starts rejecting vectors that were right.
+// Restricting it to the band is also what keeps it affordable: ~5% of the solved cells.
+constexpr float kDecisiveEvidence = 0.09f;
+// Tolerated round-trip disagreement, in analysis cells (one cell is 12 source pixels at 1080p).
+// 0.8 absorbs the subpixel refinement's own quarter-cell disagreement but rejects a full cell of
+// drift; loosening it to 1.1 halves the gain on fine-detail.
+constexpr float kRoundTripCells = 0.8f;
+
 void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const std::vector<float>& prev,
                                            uint32_t gw, uint32_t gh,
                                            std::vector<float>& flowX, std::vector<float>& flowY,
-                                           std::vector<float>& mismatch,
+                                           std::vector<float>& confidence,
                                            float& globalX, float& globalY, float& globalCost) const {
     const int w = int(gw), h = int(gh);
     // First find a coarse whole-frame translation. This is especially valuable for camera pans.
@@ -197,61 +265,135 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
     }
     globalX = float(bestGX); globalY = float(bestGY); globalCost = bestGlobal;
 
-    flowX.assign(size_t(gw) * gh, float(bestGX));
-    flowY.assign(size_t(gw) * gh, float(bestGY));
-    mismatch.assign(size_t(gw) * gh, bestGlobal);
+    // Cells that produce no evidence of motion stay at zero rather than inheriting the global
+    // vector: measured on the corpus, seeding them with the global translation is much worse
+    // (cuts-motion residual 0.0675 vs 0.0519), because a cell with no correspondence evidence
+    // is a cell whose content does not support ANY displacement.
+    flowX.assign(size_t(gw) * gh, 0.0f);
+    flowY.assign(size_t(gw) * gh, 0.0f);
+    confidence.assign(size_t(gw) * gh, 0.0f);
     constexpr int localRadius = 3;
+    constexpr int localSpan = 2 * localRadius + 1;
+    constexpr int reverseRadius = 2;
     // Solve local flow on a 2x2 lattice, then expand each result to the tiny block.
     // At a 160-wide analysis grid this retains useful object motion while making
     // 30/60 fps playback much less CPU-bound than matching every grid pixel.
     //
     // One body, run over a range of lattice rows. ParallelForRanges keeps it on the
     // calling thread when the grid is too small to be worth splitting, so there is no
-    // separate serial copy to keep in sync.
+    // separate serial copy to keep in sync. Lattice cells are independent: each reads
+    // only the two luma grids and writes its own disjoint 2x2 block of the output
+    // fields, so the per-cell state below is all the shared state there is.
     const int totalStepsY = (h + 1) / 2;
     ParallelForRanges(size_t(std::max(0, totalStepsY)), kGuideLatticeGrain, [&](size_t beginStep, size_t endStep) {
         for (size_t step = beginStep; step < endStep; ++step) {
             const int y = int(step) * 2;
             for (int x = 0; x < w; x += 2) {
+                std::array<float, size_t(localSpan) * localSpan> costs{};
                 float best = std::numeric_limits<float>::max();
-                int bx = bestGX, by = bestGY;
+                int bestIndex = 0;
                 for (int oy = -localRadius; oy <= localRadius; ++oy) {
                     for (int ox = -localRadius; ox <= localRadius; ++ox) {
+                        const int index = (oy + localRadius) * localSpan + (ox + localRadius);
                         const int dx = bestGX + ox, dy = bestGY + oy;
                         const float penalty = 0.002f * float(ox * ox + oy * oy);
-                        const float cost = PatchSadCost(cur, prev, x, y, dx, dy, w, h,
-                                                        penalty, best);
-                        if (cost < best) { best = cost; bx = dx; by = dy; }
+                        // The whole window's costs are kept: the zero-cost null hypothesis and
+                        // the peakedness term below read the true cost of every rival, so this
+                        // scan must not prune. An infinite bound disables PatchSadCost's
+                        // early-out and returns every candidate's exact full cost.
+                        const float cost = PatchSadCost(cur, prev, x, y, dx, dy, w, h, penalty,
+                                                        std::numeric_limits<float>::infinity());
+                        costs[size_t(index)] = cost;
+                        if (cost < best) { best = cost; bestIndex = index; }
                     }
                 }
-                float fbx = float(bx), fby = float(by);
-                // Integer block matching on a compact grid is too quantized after scaling to
-                // 1440p/4K. Refine the winning vector at quarter-grid precision using bilinear
-                // samples of the previous frame. This keeps the CPU implementation
-                // self-contained while giving DLSS materially smoother per-pixel motion.
-                if (best <= 0.18f) {
+                const int bestOX = bestIndex % localSpan - localRadius;
+                const int bestOY = bestIndex / localSpan - localRadius;
+                const int bx = bestGX + bestOX, by = bestGY + bestOY;
+
+                // Zero motion is the null hypothesis this cell has to beat. It is usually already
+                // in the search window (the window is centred on the global vector).
+                const bool zeroInWindow = std::abs(bestGX) <= localRadius && std::abs(bestGY) <= localRadius;
+                const float zeroCost = zeroInWindow
+                    ? costs[size_t((-bestGY + localRadius) * localSpan + (-bestGX + localRadius))]
+                    : PatchSadCost(cur, prev, x, y, 0, 0, w, h, 0.0f,
+                                   std::numeric_limits<float>::infinity());
+                const float evidence = zeroCost - best;
+
+                float fbx = 0.0f, fby = 0.0f, conf = 0.0f;
+                if (evidence >= kMotionEvidence) {
+                    fbx = float(bx); fby = float(by);
+                    // Integer block matching on a compact grid is too quantized after scaling to
+                    // 1440p/4K. Refine the winning vector at quarter-grid precision using bilinear
+                    // samples of the previous frame. This keeps the CPU implementation self-contained
+                    // while giving DLSS materially smoother per-pixel motion. Only accepted cells are
+                    // refined, so static content no longer pays for 25 subpixel probes per cell.
                     static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
                     float refined = best;
                     for (float sy : sub) {
                         for (float sx : sub) {
                             const float dx = float(bx) + sx, dy = float(by) + sy;
-                            const float penalty = 0.0015f * (sx * sx + sy * sy);
                             const float cost = PatchSadSubpixelCost(cur, prev, x, y, dx, dy, w, h,
-                                                                    penalty, refined);
+                                                                    0.0015f * (sx * sx + sy * sy),
+                                                                    refined);
                             if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
                         }
                     }
                     best = refined;
+
+                    bool consistent = true;
+                    if (evidence < kDecisiveEvidence) {
+                        // Forward/backward consistency: from where this cell claims to have come,
+                        // search back for where it goes. A winner produced by aliasing or by a
+                        // repeating pattern does not survive, because the reverse landscape has its
+                        // minimum somewhere else. The reverse seed is the negated forward vector and
+                        // the window only +-2 cells: this is a confirmation, not a fresh estimate.
+                        const int qx = std::clamp(x + int(std::lround(fbx)), 0, w - 1);
+                        const int qy = std::clamp(y + int(std::lround(fby)), 0, h - 1);
+                        const int seedX = -int(std::lround(fbx)), seedY = -int(std::lround(fby));
+                        float reverseBest = std::numeric_limits<float>::max();
+                        int rx = seedX, ry = seedY;
+                        for (int oy = -reverseRadius; oy <= reverseRadius; ++oy) {
+                            for (int ox = -reverseRadius; ox <= reverseRadius; ++ox) {
+                                // The tiny penalty only breaks ties towards the seed; without it a
+                                // flat reverse landscape hands back the first candidate scanned.
+                                // PatchSadCost's early-out only skips candidates that would fail
+                                // this strict comparison anyway, so the winner is unchanged.
+                                const float cost = PatchSadCost(prev, cur, qx, qy, seedX + ox, seedY + oy,
+                                                                w, h, 0.0005f * float(ox * ox + oy * oy),
+                                                                reverseBest);
+                                if (cost < reverseBest) { reverseBest = cost; rx = seedX + ox; ry = seedY + oy; }
+                            }
+                        }
+                        const float rtx = fbx + float(rx), rty = fby + float(ry);
+                        consistent = std::sqrt(rtx * rtx + rty * rty) <= kRoundTripCells;
+                    }
+
+                    if (consistent) {
+                        // Confidence from the SAD landscape: how much the winner beats standing still
+                        // (absolute evidence) tempered by how much it beats the best *distinct* rival
+                        // (peakedness - a periodic or textureless cell has many equally good minima).
+                        float second = std::numeric_limits<float>::max();
+                        for (int oy = -localRadius; oy <= localRadius; ++oy) {
+                            for (int ox = -localRadius; ox <= localRadius; ++ox) {
+                                if (std::max(std::abs(ox - bestOX), std::abs(oy - bestOY)) <= 1) continue;
+                                second = std::min(second, costs[size_t((oy + localRadius) * localSpan + (ox + localRadius))]);
+                            }
+                        }
+                        const float distinct = second > 1e-4f && std::isfinite(second)
+                            ? std::clamp((second - best) / second, 0.0f, 1.0f) : 0.0f;
+                        conf = std::clamp(evidence / kDecisiveEvidence, 0.0f, 1.0f) * (0.25f + 0.75f * distinct);
+                    } else {
+                        fbx = fby = 0.0f;
+                    }
                 }
 
-                // High mismatch means a cut/disocclusion/no reliable correspondence.
-                if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
                 for (int yy = y; yy < std::min(y + 2, h); ++yy) {
                     for (int xx = x; xx < std::min(x + 2, w); ++xx) {
                         const size_t oi = size_t(yy) * gw + xx;
                         flowX[oi] = fbx;
                         flowY[oi] = fby;
-                        mismatch[oi] = best;
+                        confidence[oi] = conf;
                     }
                 }
             }
@@ -260,22 +402,61 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
 }
 
 void TemporalGuideGenerator::MedianFlow(std::vector<float>& x, std::vector<float>& y,
+                                         const std::vector<float>& confidence,
                                          uint32_t gw, uint32_t gh) const {
-    std::vector<float> ox = x, oy = y;
-    if (gh < 3) return;
-    // Reads come from the untouched copies, so rows are independent.
-    ParallelForRanges(size_t(gh - 2), kGuideRowGrain, [&](size_t beginRow, size_t endRow) {
-        for (uint32_t py = uint32_t(beginRow) + 1; py < uint32_t(endRow) + 1; ++py) {
-            for (uint32_t px = 1; px + 1 < gw; ++px) {
-                std::array<float, 9> xs{}, ys{}; size_t k = 0;
-                for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
-                    const size_t idx = size_t(int(py) + j) * gw + size_t(int(px) + i);
-                    xs[k] = ox[idx]; ys[k] = oy[idx]; ++k;
+    // The field is piecewise constant over the 2x2 solver lattice, so filter one vector per
+    // lattice cell over its 3x3 lattice neighbourhood. Two properties matter:
+    //  - only cells that passed rejection vote, so a rejected cell can neither vote nor be
+    //    resurrected (letting confident neighbours fill rejected cells is the "global fallback"
+    //    that measured worse), and
+    //  - the output is a confidence-weighted VECTOR median, i.e. always one of the neighbouring
+    //    vectors. A per-axis median can return a combination that no cell ever reported.
+    const int w = int(gw), h = int(gh);
+    const int lw = (w + 1) / 2, lh = (h + 1) / 2;
+    std::vector<float> lx(size_t(lw) * lh), ly(size_t(lw) * lh), lc(size_t(lw) * lh);
+    for (int ly0 = 0; ly0 < lh; ++ly0) {
+        for (int lx0 = 0; lx0 < lw; ++lx0) {
+            const size_t src = size_t(ly0 * 2) * gw + size_t(lx0 * 2);
+            const size_t dst = size_t(ly0) * lw + size_t(lx0);
+            lx[dst] = x[src]; ly[dst] = y[src]; lc[dst] = confidence[src];
+        }
+    }
+    // Every cell reads only the snapshot above and writes its own disjoint 2x2 block, so
+    // lattice rows are independent. ParallelForRanges keeps it on the calling thread when
+    // the lattice is too small to be worth splitting, so there is no separate serial copy
+    // to keep in sync.
+    ParallelForRanges(size_t(std::max(0, lh)), kGuideLatticeGrain, [&](size_t beginRow, size_t endRow) {
+        for (int ly0 = int(beginRow); ly0 < int(endRow); ++ly0) {
+            std::array<float, 9> cx{}, cy{}, cw{};
+            for (int lx0 = 0; lx0 < lw; ++lx0) {
+                const size_t centre = size_t(ly0) * lw + size_t(lx0);
+                if (lc[centre] <= 0.0f) continue;
+                size_t k = 0;
+                for (int j = -1; j <= 1; ++j) {
+                    const int ny = ly0 + j; if (ny < 0 || ny >= lh) continue;
+                    for (int i = -1; i <= 1; ++i) {
+                        const int nx = lx0 + i; if (nx < 0 || nx >= lw) continue;
+                        const size_t n = size_t(ny) * lw + size_t(nx);
+                        if (lc[n] <= 0.0f) continue;
+                        cx[k] = lx[n]; cy[k] = ly[n]; cw[k] = lc[n]; ++k;
+                    }
                 }
-                std::nth_element(xs.begin(), xs.begin() + 4, xs.end());
-                std::nth_element(ys.begin(), ys.begin() + 4, ys.end());
-                const size_t idx = size_t(py) * gw + px;
-                x[idx] = xs[4]; y[idx] = ys[4];
+                if (k < 3) continue;   // too little support to filter; keep the measured vector
+                float bestScore = std::numeric_limits<float>::max();
+                size_t bestK = 0;
+                for (size_t a = 0; a < k; ++a) {
+                    float score = 0.0f;
+                    for (size_t b = 0; b < k; ++b)
+                        score += cw[b] * (std::abs(cx[a] - cx[b]) + std::abs(cy[a] - cy[b]));
+                    if (score < bestScore) { bestScore = score; bestK = a; }
+                }
+                const float mx = cx[bestK], my = cy[bestK];
+                for (int yy = ly0 * 2; yy < std::min(ly0 * 2 + 2, h); ++yy) {
+                    for (int xx = lx0 * 2; xx < std::min(lx0 * 2 + 2, w); ++xx) {
+                        const size_t oi = size_t(yy) * gw + size_t(xx);
+                        x[oi] = mx; y[oi] = my;
+                    }
+                }
             }
         }
     });
@@ -286,7 +467,6 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
                                               uint32_t gw, uint32_t gh,
                                               std::vector<float>& depth) {
     depth.assign(size_t(gw) * gh, 0.75f);
-    if (m_depthMode == DepthMode::Flat) return;
 
     // Left serial on purpose: a grid of this size finishes well inside the cost of
     // waking helper threads.
@@ -317,43 +497,53 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
 }
 
 bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
-                                       uint32_t renderW, uint32_t renderH, double targetFps, bool reset,
-                                       GuideFrame& out) {
+                                       uint32_t renderW, uint32_t renderH, double targetFps,
+                                       const FrameIdentity& frame, GuideFrame& out) {
     if (!bgra || !sourceW || !sourceH || !renderW || !renderH) return false;
-    if (reset) Reset();
 
     const auto [gw, gh] = AnalysisGrid(sourceW, sourceH, targetFps);
     if (!gw || !gh) return false;
-    if (gw != m_gridW || gh != m_gridH) Reset();
+    const bool repeat = IsRepeat(frame) && gw == m_gridW && gh == m_gridH;
+    HistoryReset reset = ClassifyReset(frame, gw, gh);
+    if (reset != HistoryReset::None) Reset();
     m_gridW = gw; m_gridH = gh;
 
     std::vector<float> cur;
     DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur);
 
-    std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f), mismatch(size_t(gw) * gh, 1.0f);
+    std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f);
+    std::vector<float> confidence(size_t(gw) * gh, 0.0f);
     float globalX = 0.0f, globalY = 0.0f;
-    bool history = m_havePrev && m_prevLuma.size() == cur.size();
+    // A repeat re-evaluates against the same previous distinct frame; a new
+    // frame's reference is whatever was evaluated last.
+    const std::vector<float>& reference = repeat ? m_prevLuma : m_lastLuma;
+    bool history = reset == HistoryReset::None && m_havePrev && reference.size() == cur.size();
     float globalCost = 0.0f;
     if (history) {
-        EstimateFlow(cur, m_prevLuma, gw, gh, fx, fy, mismatch, globalX, globalY, globalCost);
-        // Use correspondence quality, not raw frame difference, so fast camera pans are not mistaken for cuts.
-        if (globalCost > 0.10f) {
+        EstimateFlow(cur, reference, gw, gh, fx, fy, confidence, globalX, globalY, globalCost);
+        // Judge cuts on correspondence quality plus histogram overlap, so fast
+        // camera pans are not mistaken for cuts and real cuts never keep history.
+        if (IsSceneCut(globalCost, LumaHistogramIntersection(cur, reference))) {
             history = false;
+            reset = HistoryReset::Cut;
             std::fill(fx.begin(), fx.end(), 0.0f);
             std::fill(fy.begin(), fy.end(), 0.0f);
-            std::fill(mismatch.begin(), mismatch.end(), 1.0f);
             globalX = globalY = 0.0f;
             m_prevDepth.clear();
         } else {
-            MedianFlow(fx, fy, gw, gh);
+            MedianFlow(fx, fy, confidence, gw, gh);
         }
     }
+    if (reset != HistoryReset::None) ++m_historyGeneration;
 
     std::vector<float> depthGrid;
-    BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
+    if (m_controls.depth) BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
+    else depthGrid.assign(size_t(gw) * gh, 0.75f);
+    const bool emitMotion = history && m_controls.motionVectors;
 
     // Keep CPU output compact. A D3D12 MRT pass bilinearly expands this grid to
-    // full render-resolution R16G16 motion + R32 depth + R8 bias textures.
+    // full render-resolution R16G16 motion, and a depth pass writes B into the
+    // NGX depth resource.
     out.gridW = gw;
     out.gridH = gh;
     out.guideGridRGBA32F.assign(size_t(gw) * gh * 4u, 0.0f);
@@ -364,21 +554,12 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     for (uint32_t y = uint32_t(beginRow); y < uint32_t(endRow); ++y) {
         for (uint32_t x = 0; x < gw; ++x) {
             const size_t i = size_t(y) * gw + x;
-            float mask = 0.0f;
-            if (history) {
-                const uint32_t xl = x ? x - 1 : x;
-                const uint32_t xr = std::min(gw - 1, x + 1);
-                const uint32_t yt = y ? y - 1 : y;
-                const uint32_t yb = std::min(gh - 1, y + 1);
-                const float dx = fx[size_t(y) * gw + xr] - fx[size_t(y) * gw + xl];
-                const float dy = fy[size_t(yb) * gw + x] - fy[size_t(yt) * gw + x];
-                if (mismatch[i] > 0.115f || std::abs(dx) + std::abs(dy) > 2.5f) mask = 1.0f;
-            }
             const size_t o = i * 4u;
-            out.guideGridRGBA32F[o + 0] = history ? fx[i] * gridToRenderX : 0.0f;
-            out.guideGridRGBA32F[o + 1] = history ? fy[i] * gridToRenderY : 0.0f;
+            out.guideGridRGBA32F[o + 0] = emitMotion ? fx[i] * gridToRenderX : 0.0f;
+            out.guideGridRGBA32F[o + 1] = emitMotion ? fy[i] * gridToRenderY : 0.0f;
             out.guideGridRGBA32F[o + 2] = depthGrid[i];
-            out.guideGridRGBA32F[o + 3] = mask;
+            // A stays 0: the RGBA32F layout is kept because a 96-bit RGB32F
+            // texture has no guaranteed bilinear filtering, which this grid needs.
         }
     }
     });
@@ -387,8 +568,16 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     out.globalMotionX = globalX * gridToRenderX;
     out.globalMotionY = globalY * gridToRenderY;
     out.globalMatchCost = globalCost;
-    m_prevLuma = std::move(cur);
+    out.id = frame;
+    out.id.historyGeneration = m_historyGeneration;
+    out.id.reset = reset;
+    if (!repeat) m_prevLuma = std::move(m_lastLuma);
+    m_lastLuma = std::move(cur);
     m_havePrev = true;
+    m_firstFrame = false;
+    m_lastFrameNumber = frame.frameNumber;
+    m_lastPts = frame.pts100ns;
+    m_lastSourceGeneration = frame.sourceGeneration;
     return true;
 }
 

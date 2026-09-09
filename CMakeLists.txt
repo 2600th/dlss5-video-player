@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.14.1 LANGUAGES CXX RC)
+project(DLSSVideoPlayer VERSION 0.15.0 LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -26,6 +26,13 @@ endif()
 set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
+
+# The packaging lock is embedded so the player and helper verify the exact
+# runtime files at run time, not only at packaging time.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
+file(READ "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json" RUNTIME_LOCK_JSON)
+configure_file(src/RuntimeLockData.h.in "${CMAKE_BINARY_DIR}/generated/RuntimeLockData.h" @ONLY)
+set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
@@ -72,6 +79,25 @@ add_executable(DLSSVideoPlayer WIN32
     src/NeuralWorker.h
     src/SynchronizedPlayback.cpp
     src/SynchronizedPlayback.h
+    src/NeuralSegmentIndex.h
+    src/LiveSessionPolicy.h
+    src/PlaybackTiming.h
+    src/UpscalingPolicy.h
+    src/NgxSession.h
+    src/RuntimeLifetime.h
+    src/FrameIdentity.h
+    src/GuideControls.h
+    src/NeuralWorkerProtocol.h
+    src/NeuralPreflight.cpp
+    src/NeuralPreflight.h
+    src/RuntimeLock.cpp
+    src/RuntimeLock.h
+    src/NeuralReceipt.cpp
+    src/NeuralReceipt.h
+    src/NeuralSettings.cpp
+    src/NeuralSettings.h
+    src/RangeSelection.cpp
+    src/RangeSelection.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -79,7 +105,7 @@ target_compile_definitions(DLSSVideoPlayer PRIVATE
     DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
 )
 target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-target_include_directories(DLSSVideoPlayer PRIVATE "${DLSS_SDK}/include")
+target_include_directories(DLSSVideoPlayer PRIVATE "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
 target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
 target_link_libraries(DLSSVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
@@ -91,11 +117,13 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
 add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
+    src/NeuralPreflight.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
     src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
     src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
     src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
-target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include")
+target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+    DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
 target_compile_options(NeuralWorker PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
 target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
 get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
@@ -143,19 +171,34 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(RecentMediaTests tests/RecentMediaTests.cpp src/RecentMedia.cpp)
-    add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp)
+    add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp
+        src/NeuralSettings.cpp)
     add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/UiLayout.cpp)
-    foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests)
-        target_include_directories(${test_target} PRIVATE src)
+    add_executable(RuntimeLockTests tests/RuntimeLockTests.cpp src/RuntimeLock.cpp src/NeuralReceipt.cpp
+        src/NeuralPreflight.cpp src/NeuralCache.cpp)
+    add_executable(RangeSelectionTests tests/RangeSelectionTests.cpp src/RangeSelection.cpp)
+    add_executable(FrameIdentityTests tests/FrameIdentityTests.cpp src/TemporalGuides.cpp
+        src/SynchronizedPlayback.cpp)
+    foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests RuntimeLockTests
+            RangeSelectionTests FrameIdentityTests)
+        target_include_directories(${test_target} PRIVATE src "${GENERATED_INCLUDE_DIR}")
         target_compile_definitions(${test_target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         target_compile_options(${test_target} PRIVATE /W4 /permissive- /EHsc)
     endforeach()
+    target_compile_definitions(RuntimeLockTests PRIVATE OFFLINE_NEURAL_RENDERER_TESTING
+        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+    target_compile_definitions(FrameIdentityTests PRIVATE SYNCHRONIZED_PLAYBACK_TESTING)
     target_link_libraries(RecentMediaTests PRIVATE user32)
     target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
     target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)
+    target_link_libraries(RuntimeLockTests PRIVATE bcrypt shell32 ole32 version)
+    target_link_libraries(FrameIdentityTests PRIVATE mfplat mfreadwrite mfuuid ole32 shell32)
     add_test(NAME RecentMediaTests COMMAND RecentMediaTests)
     add_test(NAME RenderSettingsTests COMMAND RenderSettingsTests)
     add_test(NAME CachedExportTests COMMAND CachedExportTests "${FFMPEG_STAGED_DIR}")
+    add_test(NAME RuntimeLockTests COMMAND RuntimeLockTests)
+    add_test(NAME RangeSelectionTests COMMAND RangeSelectionTests)
+    add_test(NAME FrameIdentityTests COMMAND FrameIdentityTests)
     add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
         src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
         src/VideoDecoder.cpp src/RuntimePolicy.cpp src/UiLayout.cpp)
@@ -209,7 +252,7 @@ if(BUILD_TESTING)
         src/DLSSBackend.cpp
         src/DLSSBackend.h
     )
-    target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include")
+    target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(PolicyTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING VIDEO_DECODER_TESTING AUDIO_PLAYER_TESTING D3D12_RENDERER_TESTING
     )
@@ -232,6 +275,8 @@ if(BUILD_TESTING)
         tests/TestSupport.h
         src/NeuralCache.cpp
         src/NeuralCache.h
+        src/NeuralPreflight.cpp
+        src/NeuralPreflight.h
         src/MediaPipeline.cpp
         src/MediaPipeline.h
         src/OfflineNeuralRenderer.cpp
@@ -239,7 +284,7 @@ if(BUILD_TESTING)
         src/SynchronizedPlayback.cpp
         src/SynchronizedPlayback.h
     )
-    target_include_directories(NeuralPrerenderTests PRIVATE src)
+    target_include_directories(NeuralPrerenderTests PRIVATE src "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         OFFLINE_NEURAL_RENDERER_TESTING
@@ -254,7 +299,7 @@ if(BUILD_TESTING)
     get_target_property(player_ui_sources DLSSVideoPlayer SOURCES)
     list(REMOVE_ITEM player_ui_sources src/main.cpp)
     add_executable(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
-    target_include_directories(PlayerUiRegressionTests PRIVATE src "${DLSS_SDK}/include")
+    target_include_directories(PlayerUiRegressionTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(PlayerUiRegressionTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX PLAYER_APP_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")

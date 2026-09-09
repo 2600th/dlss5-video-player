@@ -15,7 +15,7 @@ and the canonical `build-upscaling` commands.
 
 ## Before opening a pull request
 
-For code changes, build Release x64 and run the nine CTest suites. FFmpeg and
+For code changes, build Release x64 and run the twelve CTest suites. FFmpeg and
 FFprobe must be staged so the real-media export suite runs. Keep automated
 results separate from GPU and visual-quality claims.
 

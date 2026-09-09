@@ -1,5 +1,7 @@
 #pragma once
 
+#include "OfflineNeuralRenderer.h"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -16,6 +18,12 @@ enum class GpuGeneration {
 struct DetectedGpu {
     GpuGeneration generation{GpuGeneration::Unsupported};
     std::wstring description;
+    uint32_t vendorId{};
+    uint32_t deviceId{};
+    uint64_t dedicatedVideoMemoryBytes{};
+    // User-mode driver version reported by DXGI ("32.0.15.6164"); empty when
+    // the adapter does not report one.
+    std::wstring driverVersion;
 };
 
 struct NeuralRenderDefaults {
@@ -58,7 +66,26 @@ enum class NeuralPlaybackState {
     OriginalOnly,
     Cancelling,
     Failed,
+    // Render job suspended by the user; resumes to Rendering.
+    Paused,
+    // Job retrying the same frame / relaunching the worker; resolves to
+    // Rendering, Failed, RetryExhausted or Cancelling.
+    Recovering,
+    // Bounded retries spent. Terminal like Failed.
+    RetryExhausted,
 };
+
+const wchar_t* NeuralPlaybackStateName(NeuralPlaybackState state) noexcept;
+
+// Lifecycle state a job failure lands in: RetryExhausted stays distinct so
+// the UI can say the retries were spent, Cancelled is the user's choice and
+// offers the original, every other failure is Failed.
+NeuralPlaybackState StateForFailure(NeuralRenderFailure failure) noexcept;
+
+// Lifecycle state a worker progress phase drives the job into. Phases that
+// carry no state of their own (CheckingCache, Ready) keep `current`; the
+// decode/render/encode phases return to Rendering from Paused or Recovering.
+NeuralPlaybackState StateForProgressPhase(NeuralRenderPhase phase, NeuralPlaybackState current) noexcept;
 
 struct NeuralPlaybackLifecycle {
     NeuralPlaybackState state{NeuralPlaybackState::Idle};

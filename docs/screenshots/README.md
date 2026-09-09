@@ -50,6 +50,40 @@ The [30-second demonstration](../media/README.md) uses the same Witcher IV
 source and actual application recordings. The toggle compares original and
 prepared cached neural video; it does not execute live neural rendering.
 
+## September 9, 2026: faces from three more trailers
+
+`current/face-hellblade.png`, `current/face-cyberpunk.png` and
+`current/face-mafia.png` were produced the same way as the Witcher IV figure and
+under the same rules: both halves are the identical source pixels of the identical
+frame, with no scaling, retouching or tonal adjustment, and the labels sit outside
+the image. The right half of each is a real render from the shipping worker
+(`NeuralWorkerTests --real-worker`, `mv=1,depth=1`, neural settings at their
+defaults), not a mock-up or a re-encode of the original.
+
+Each source is the official 1080p video-only format fetched with the bundled
+yt-dlp. Two seconds around the chosen moment were rendered, so the captured frame
+carries a full temporal history rather than being the first frame of a job. The
+crop is centred on the face and constrained to the picture area, which is why the
+Hellblade crop is 804 px tall: that trailer is letterboxed to 1920x804 and a taller
+crop would have included the black bars.
+
+| File | Trailer | Source | Frame | Crop | Source SHA-256 |
+| --- | --- | --- | --- | --- | --- |
+| `current/face-hellblade.png` | Hellblade II - Launch Trailer (XBOX) | https://www.youtube.com/watch?v=PRbOmIcVXak | 1665 (55.50 s) | 700x804 at x=821, y=138 | `63e3f42d89294071c254472a4ddf6213…` |
+| `current/face-cyberpunk.png` | Cyberpunk 2077: Phantom Liberty - Launch Trailer (Cyberpunk 2077) | https://www.youtube.com/watch?v=kfX9n_G0N2Y | 2516 (83.87 s) | 700x880 at x=523, y=0 | `916b29df704c4065d2c818279c2605d6…` |
+| `current/face-mafia.png` | Mafia: The Old Country - Family Takes Sacrifice (Mafia Game) | https://www.youtube.com/watch?v=EAEYZDgHNv8 | 1506 (50.20 s) | 700x880 at x=1104, y=200 | `86525500732b579e79e46f000a4aaae1…` |
+
+Frames were chosen by inspecting contact sheets for a large, lit, unoccluded face
+with open eyes; the selected scenes contain fully clothed characters and no sexual
+content. Death Stranding 2's accolades trailer was checked and dropped - it has no
+usable face close-up. All three are reproducible with
+[the same script](../../tools/demo-video/make-face-comparison.py), which now takes
+`--frame`, `--neural-frame`, `--crop` and `--caption`.
+
+Footage is credited to Ninja Theory/Xbox Game Studios, CD PROJEKT RED and Hangar
+13/2K respectively. Including it here documents a feature; it is not an
+endorsement, and the source-code license does not relicense it.
+
 These images document feature states, not an image-quality benchmark or an
 official NVIDIA integration. A fixed five-game selection is not a popularity
 ranking. See [example provenance](../EXAMPLE_VIDEOS.md) and

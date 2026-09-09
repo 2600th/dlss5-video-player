@@ -1,5 +1,7 @@
 #include "OfflineNeuralRenderer.h"
 
+#include "Log.h"
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -11,6 +13,7 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -74,19 +77,49 @@ struct JobFrame {
     std::vector<uint8_t> bgra;
     int64_t timestamp100ns{};
     bool discontinuity{};
+    uint64_t frameNumber{};
+    uint32_t sourceGeneration{};
 };
 
-enum class AttemptFailure { None, Encoder, Neural, Source, Cancelled };
+// Outputs of one evaluator submission. `id` is the identity the evaluator
+// stamped on its guide/capture; `id.reset` != None means temporal history was
+// actually reset for this frame (requested by the job or a detected cut).
+struct JobEvaluation {
+    std::vector<uint8_t> bgra;
+    FrameIdentity id{};
+    double guideMs{};
+    double captureMs{};
+    double neuralGpuMs{};
+};
+
+// Wall time of each render-loop stage, one sample per captured frame. Six
+// clock reads per frame (~150 ns) is the only evidence that says which stage
+// the 33.3 ms live budget actually goes to, so the collection stays in and the
+// summary is logged once per attempt.
+struct StageSamples {
+    std::vector<double> read,guide,render,write,eval,frame;
+    // All six series advance together, which is what makes the per-frame
+    // residual (frame - read - eval - write) well defined.
+    void Push(double readMs, double guideMs, double renderMs, double evalMs, double writeMs,
+              double frameMs)
+    {
+        read.push_back(readMs);guide.push_back(guideMs);render.push_back(renderMs);
+        eval.push_back(evalMs);write.push_back(writeMs);frame.push_back(frameMs);
+    }
+};
 
 struct AttemptResult {
-    AttemptFailure failure{AttemptFailure::None};
+    NeuralRenderFailure failure{NeuralRenderFailure::None};
     EncodeError encoderError{EncodeError::None};
     uint64_t frames{};
     uint64_t bytes{};
     uint64_t evaluations{};
+    uint32_t historyResets{};
     bool hasTimestamp{};
     int64_t firstTimestamp{};
     int64_t lastTimestamp{};
+    std::vector<double> neuralGpuMs;
+    StageSamples stages;
 };
 
 template <class F>
@@ -154,34 +187,667 @@ uint64_t HighestEvaluationCount(std::string_view lower)
     return highest;
 }
 
-template<class Source, class Evaluator, class Encoder, class Evidence, class Clock>
+double MillisecondsSince(SteadyClock::time_point start)
+{
+    return std::chrono::duration<double,std::milli>(SteadyClock::now()-start).count();
+}
+
+double Mean(const std::vector<double>& samples)
+{
+    if (samples.empty()) return 0.0;
+    double total = 0.0;
+    for (const double sample : samples) total += sample;
+    return total / double(samples.size());
+}
+
+double Quantile(std::vector<double> samples, double q)
+{
+    if (samples.empty()) return 0.0;
+    std::sort(samples.begin(), samples.end());
+    const size_t index = static_cast<size_t>(std::ceil(q * double(samples.size() - 1)));
+    return samples[std::min(index, samples.size() - 1)];
+}
+
+// One line per stage, once per attempt: mean/p50/p95 plus the total the stage
+// cost over the whole attempt. `frame` is the wall time of a full loop
+// iteration, so `unaccounted` is exactly what the named stages do not explain
+// (progress reporting, the receipt gate, retries, bookkeeping).
+void LogStageTable(const StageSamples& stages)
+{
+    const auto row = [](const char* name, const std::vector<double>& samples) {
+        double total = 0.0;
+        for (const double sample : samples) total += sample;
+        LOG("Render stage " << name << " n=" << samples.size()
+            << " mean=" << Mean(samples) << " p50=" << Quantile(samples, 0.5)
+            << " p95=" << Quantile(samples, 0.95) << " totalMs=" << total);
+    };
+    row("read", stages.read);
+    row("guide", stages.guide);
+    row("render+capture", stages.render);
+    row("submit(guide+render+gate)", stages.eval);
+    row("write", stages.write);
+    row("frame", stages.frame);
+    std::vector<double> unaccounted;
+    unaccounted.reserve(stages.frame.size());
+    for (size_t index = 0; index < stages.frame.size(); ++index) {
+        unaccounted.push_back(stages.frame[index] - stages.read[index] -
+                              stages.eval[index] - stages.write[index]);
+    }
+    row("unaccounted", unaccounted);
+}
+
+NeuralRenderTiming SummarizeTiming(AttemptResult& attempt, uint64_t peakLocalVramMiB)
+{
+    NeuralRenderTiming timing;
+    timing.peakLocalVramMiB = peakLocalVramMiB;
+    timing.samples = attempt.neuralGpuMs.size();
+    if (timing.samples == 0) return timing;
+    auto& samples = attempt.neuralGpuMs;
+    std::sort(samples.begin(), samples.end());
+    const auto quantile = [&](double q) {
+        const size_t index = static_cast<size_t>(std::ceil(q * double(samples.size() - 1)));
+        return samples[std::min(index, samples.size() - 1)];
+    };
+    timing.neuralGpuMsP50 = quantile(0.5);
+    timing.neuralGpuMsP95 = quantile(0.95);
+    timing.neuralGpuMsMax = samples.back();
+    timing.guideMsMean = Mean(attempt.stages.guide);
+    timing.captureMsMean = Mean(attempt.stages.render);
+    return timing;
+}
+
+const wchar_t* AttemptFailureDetail(NeuralRenderFailure failure)
+{
+    switch (failure) {
+        case NeuralRenderFailure::GpuStall:
+            return L"The GPU stalled while evaluating a frame.";
+        case NeuralRenderFailure::DeviceRemoved:
+            return L"The GPU device was removed during neural rendering.";
+        case NeuralRenderFailure::RetryExhausted:
+            return L"A frame failed every retry; the render was not continued past it.";
+        case NeuralRenderFailure::Identity:
+            return L"The neural output did not match the submitted source frame.";
+        case NeuralRenderFailure::Source:
+            return L"The source decoder failed during neural rendering.";
+        case NeuralRenderFailure::Encoder:
+            return L"The neural video encoder failed.";
+        default:
+            return L"A frame was not produced by feature 18.";
+    }
+}
+
+// Segment files sit beside the staging video and are named from its stem:
+// <staging>/neural-00000.mkv, neural-00001.mkv, ...
+std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoPath, uint64_t index)
+{
+    std::wstring digits = std::to_wstring(index);
+    if (digits.size() < 5) digits.insert(0, 5 - digits.size(), L'0');
+    return stagingVideoPath.parent_path() /
+           (stagingVideoPath.stem().wstring() + L"-" + digits + stagingVideoPath.extension().wstring());
+}
+
+// Captured frames queued for the writer thread. Deep enough to cover a freshly
+// spawned ffmpeg bringing up its encoder (~110 ms of not draining its stdin)
+// without stalling the render loop, and bounded in bytes so a large frame size
+// cannot balloon the queue.
+inline constexpr size_t kQueuedFrameBytes = size_t{64} << 20;
+
+// Rotating encoder used only when request.segmentFrames > 0. The render loop
+// only hands frames over: a private writer thread owns the file being written,
+// rotates to the next one and pushes each full file to a private finalize
+// thread, which muxes it, reaps its ffmpeg, publishes it through the sink in
+// index order, and starts the following file's encoder ahead of time. So the
+// render loop pays neither the process spawn (~140 ms), nor the stall a fresh
+// ffmpeg takes before it drains its pipe (~110 ms per file), nor the per-frame
+// pipe write. An encoder failure surfaces to the render loop on a later
+// Write() or at Finish(), which fails the attempt exactly as a synchronous
+// write error did.
+template<class Encoder>
+class SegmentWriter {
+public:
+    SegmentWriter(std::function<std::unique_ptr<Encoder>()> factory,
+                  const std::filesystem::path& stagingVideoPath, uint32_t segmentFrames,
+                  int64_t frameDuration100ns, NeuralSegmentSink sink, std::stop_token stop)
+        : factory_(std::move(factory)), staging_(stagingVideoPath), segmentFrames_(segmentFrames),
+          frameDuration_(frameDuration100ns), sink_(std::move(sink)), stop_(std::move(stop)) {}
+    ~SegmentWriter() { Cancel(); }
+    SegmentWriter(const SegmentWriter&) = delete;
+    SegmentWriter& operator=(const SegmentWriter&) = delete;
+
+    // Starts a fresh sequence at index 0. A software-encoder retry deletes every
+    // file the previous attempt wrote and reuses its names, so a consumer that
+    // sees index 0 again knows the earlier segments are gone.
+    void BeginAttempt(const EncoderSpec& spec)
+    {
+        Cancel();
+        const uint64_t previous = started_;
+        for (uint64_t index = 0; index < previous; ++index) Remove(index);
+        started_ = 0;written_ = 0;spec_ = spec;
+        {
+            std::lock_guard lock(mutex_);
+            failure_ = EncodeError::None;quit_ = false;closing_ = false;writing_ = true;
+        }
+        if (previous && sink_.onRestart) sink_.onRestart();
+        finalizer_ = std::jthread([this] { Finalize(); });
+        writer_ = std::jthread([this] { WriteQueuedFrames(); });
+        // Segment 0's encoder starts while the attempt prerolls, so the first
+        // captured frame never waits for a spawn either.
+        RequestWarm(0);
+    }
+
+    // Hands one captured frame to the writer thread. This blocks only when the
+    // encoder has fallen kQueuedFrameBytes behind, which no longer happens for
+    // an ffmpeg start-up stall.
+    EncodeError Write(const JobFrame& frame, std::vector<uint8_t>&& bgra, std::stop_token stop)
+    {
+        const size_t bytes = bgra.size();
+        std::unique_lock lock(mutex_);
+        if (failure_ != EncodeError::None) return failure_;
+        // One frame is always allowed through, however large it is.
+        if (queuedBytes_ && queuedBytes_ + bytes > kQueuedFrameBytes) {
+            space_.wait(lock, stop, [&] {
+                return quit_ || failure_ != EncodeError::None ||
+                       queuedBytes_ + bytes <= kQueuedFrameBytes;
+            });
+            if (stop.stop_requested() || quit_) return EncodeError::Cancelled;
+            if (failure_ != EncodeError::None) return failure_;
+        }
+        frames_.push_back(Frame{std::move(bgra), frame.frameNumber, frame.timestamp100ns});
+        queuedBytes_ += bytes;
+        lock.unlock();
+        work_.notify_all();
+        return EncodeError::None;
+    }
+
+    // Writes every queued frame, finalizes the last partial segment and waits
+    // for every pending file, so no segment can ever be published after the
+    // job's result.
+    EncodeError Finish()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            closing_ = true;
+        }
+        work_.notify_all();ready_.notify_all();
+        if (writer_.joinable()) writer_.join();
+        ready_.notify_all();
+        if (finalizer_.joinable()) finalizer_.join();
+        DropWarm();
+        std::lock_guard lock(mutex_);
+        if (failure_ != EncodeError::None) return failure_;
+        return frames_.empty() && queue_.empty() ? EncodeError::None : EncodeError::FinishFailed;
+    }
+
+    void Cancel()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            quit_ = true;
+        }
+        work_.notify_all();ready_.notify_all();space_.notify_all();
+        if (writer_.joinable()) writer_.join();
+        if (finalizer_.joinable()) finalizer_.join();
+        std::deque<Pending> abandoned;
+        {
+            std::lock_guard lock(mutex_);
+            abandoned.swap(queue_);
+            frames_.clear();queuedBytes_ = 0;
+        }
+        // Published files stay; only the unfinished ones are removed.
+        for (auto& pending : abandoned) {
+            pending.encoder->Cancel();
+            Remove(pending.segment.index);
+        }
+        DropWarm();
+        if (current_) DropCurrent();
+    }
+
+private:
+    struct Frame {
+        std::vector<uint8_t> bgra;
+        uint64_t frameNumber{};
+        int64_t timestamp100ns{};
+    };
+    struct Pending {
+        std::unique_ptr<Encoder> encoder;
+        NeuralRenderSegment segment;
+    };
+
+    // Writer thread: owns current_, written_ and the current segment's tally.
+    void WriteQueuedFrames()
+    {
+        for (;;) {
+            Frame frame;
+            {
+                std::unique_lock lock(mutex_);
+                work_.wait(lock, [this] {
+                    return quit_ || closing_ || !frames_.empty() ||
+                           failure_ != EncodeError::None;
+                });
+                // Cancel() and the failure path clean up behind this thread.
+                if (quit_ || failure_ != EncodeError::None) break;
+                if (frames_.empty()) {
+                    if (!closing_) continue;
+                    lock.unlock();
+                    if (current_) {
+                        if (currentFrames_) Handoff();
+                        else DropCurrent();
+                    }
+                    break;
+                }
+                frame = std::move(frames_.front());
+                frames_.pop_front();
+                queuedBytes_ -= frame.bgra.size();
+            }
+            space_.notify_all();
+            const EncodeError error = WriteFrame(frame);
+            if (error != EncodeError::None) {
+                Fail(error);
+                return;
+            }
+        }
+        {
+            std::lock_guard lock(mutex_);
+            writing_ = false;
+        }
+        ready_.notify_all();
+    }
+
+    EncodeError WriteFrame(const Frame& frame)
+    {
+        const uint64_t index = written_ / segmentFrames_;
+        if (!current_ || index != currentIndex_) {
+            const EncodeError rotated = Rotate(index, frame);
+            if (rotated != EncodeError::None) return rotated;
+        }
+        const EncodeError error = current_->WriteFrame(frame.bgra, stop_);
+        if (error != EncodeError::None) return error;
+        ++written_;++currentFrames_;currentLast_ = frame.timestamp100ns;
+        return EncodeError::None;
+    }
+
+    // Pointer swaps in the steady state: the encoder for `index` was started by
+    // the finalize thread a whole segment ago. Only a job without a factory or
+    // a start the finalize thread never reached pays a spawn here.
+    EncodeError Rotate(uint64_t index, const Frame& frame)
+    {
+        std::unique_ptr<Encoder> next;
+        const EncodeError warmError = ClaimWarm(index, next);
+        if (warmError != EncodeError::None) return warmError;
+        if (!next) {
+            next = factory_ ? factory_() : nullptr;
+            if (!next) return EncodeError::InvalidSpecification;
+            NoteStarted(index);
+            const EncodeError startError = next->Start(spec_, SegmentFilePath(staging_, index));
+            if (startError != EncodeError::None) {
+                next->Cancel();
+                Remove(index);
+                return startError;
+            }
+        }
+        if (current_ && currentFrames_) Handoff();
+        current_ = std::move(next);
+        currentIndex_ = index;currentFrames_ = 0;
+        currentFirstFrameNumber_ = frame.frameNumber;
+        currentFirstTimestamp_ = frame.timestamp100ns;currentLast_ = frame.timestamp100ns;
+        RequestWarm(index + 1);
+        return EncodeError::None;
+    }
+
+    // Arms the encoder for `index` on the finalize thread. Rotate() always
+    // claims exactly the index armed by the previous rotation, so an armed
+    // encoder is never overwritten.
+    void RequestWarm(uint64_t index)
+    {
+        if (!factory_) return;
+        {
+            std::lock_guard lock(mutex_);
+            if (quit_ || failure_ != EncodeError::None) return;
+            warmIndex_ = index;warmPending_ = true;warmError_ = EncodeError::None;
+        }
+        NoteStarted(index);
+        ready_.notify_all();
+    }
+
+    // Takes the encoder armed for `index`. It waits only in the pathological
+    // case where the finalize thread has not performed the start yet (a segment
+    // shorter than one spawn, or a long mux queued ahead of it); `next` stays
+    // empty when nothing was armed for this index and the caller must spawn it.
+    EncodeError ClaimWarm(uint64_t index, std::unique_ptr<Encoder>& next)
+    {
+        std::unique_lock lock(mutex_);
+        if (warmIndex_ == index && (warmPending_ || warm_ || warmError_ != EncodeError::None)) {
+            warmDone_.wait(lock, [this] { return !warmPending_; });
+            const EncodeError error = warmError_;
+            warmError_ = EncodeError::None;
+            next = std::move(warm_);
+            if (error != EncodeError::None) return error;
+        }
+        if (!quit_) return EncodeError::None;
+        // Cancelled while this file was armed: hand nothing back, and leave
+        // neither a process nor a file behind for the cancel to trip over.
+        lock.unlock();
+        if (next) {
+            next->Cancel();next.reset();
+            Remove(index);
+        }
+        return EncodeError::Cancelled;
+    }
+
+    // Discards an armed encoder nobody will write to: kills its ffmpeg and
+    // removes the file it opened, so neither an orphan process nor a stray
+    // neural-NNNNN.mkv survives a finished or cancelled job. Both threads must
+    // already be joined, so no start can land after this.
+    void DropWarm()
+    {
+        std::unique_ptr<Encoder> warm;
+        uint64_t index = 0;
+        {
+            std::lock_guard lock(mutex_);
+            warm = std::move(warm_);index = warmIndex_;
+            warmPending_ = false;warmError_ = EncodeError::None;
+        }
+        if (!warm) return;
+        warm->Cancel();
+        Remove(index);
+    }
+
+    // Every file the attempt may have opened, so a restart or a cancel deletes
+    // it even if it was only armed.
+    void NoteStarted(uint64_t index)
+    {
+        std::lock_guard lock(mutex_);
+        started_ = std::max(started_, index + 1);
+    }
+
+    void Handoff()
+    {
+        NeuralRenderSegment segment;
+        segment.index = currentIndex_;
+        segment.firstFrameNumber = currentFirstFrameNumber_;
+        segment.firstTimestamp100ns = currentFirstTimestamp_;
+        segment.end100ns = currentLast_ + frameDuration_;
+        segment.frameCount = currentFrames_;
+        segment.fileName = SegmentFilePath(staging_, currentIndex_).filename().wstring();
+        {
+            std::lock_guard lock(mutex_);
+            queue_.push_back(Pending{std::move(current_), std::move(segment)});
+        }
+        ready_.notify_all();
+        current_.reset();currentFrames_ = 0;
+    }
+
+    void DropCurrent()
+    {
+        current_->Cancel();
+        Remove(currentIndex_);
+        current_.reset();currentFrames_ = 0;
+    }
+
+    // A half-written file is not a segment: the render loop learns of the error
+    // on its next Write() or at Finish(), and nothing is published.
+    void Fail(EncodeError error)
+    {
+        std::deque<Frame> dropped;
+        {
+            std::lock_guard lock(mutex_);
+            failure_ = error;writing_ = false;
+            dropped.swap(frames_);queuedBytes_ = 0;
+        }
+        space_.notify_all();ready_.notify_all();
+        if (current_) DropCurrent();
+    }
+
+    void Finalize()
+    {
+        for (;;) {
+            Pending pending;
+            uint64_t warmIndex = 0;
+            bool startWarm = false;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [this] {
+                    return quit_ || !queue_.empty() || warmPending_ || (closing_ && !writing_);
+                });
+                // A finished file wins over arming the next one: a consumer is
+                // waiting on the file, nobody waits on the spawn. Arming keeps
+                // working while closing, because draining the queued frames can
+                // still cross a segment boundary.
+                if (!quit_ && !queue_.empty()) {
+                    pending = std::move(queue_.front());
+                    queue_.pop_front();
+                } else if (!quit_ && warmPending_) {
+                    startWarm = true;warmIndex = warmIndex_;
+                } else {
+                    // Leaving an armed request outstanding would block a
+                    // Rotate() waiting on it; an empty slot only means the
+                    // writer thread spawns that encoder itself.
+                    warmPending_ = false;
+                    lock.unlock();
+                    warmDone_.notify_all();
+                    return;
+                }
+            }
+            if (startWarm) {
+                std::unique_ptr<Encoder> warm = factory_();
+                const EncodeError error = warm
+                    ? warm->Start(spec_, SegmentFilePath(staging_, warmIndex))
+                    : EncodeError::InvalidSpecification;
+                if (error != EncodeError::None) {
+                    if (warm) warm->Cancel();
+                    warm.reset();
+                    Remove(warmIndex);
+                }
+                {
+                    std::lock_guard lock(mutex_);
+                    warm_ = std::move(warm);warmError_ = error;warmPending_ = false;
+                }
+                warmDone_.notify_all();
+                continue;
+            }
+            // The mux and process exit happen here, off the render loop.
+            const EncodeError error = pending.encoder->Finish(stop_);
+            if (error != EncodeError::None) {
+                pending.encoder->Cancel();
+                Remove(pending.segment.index);
+                {
+                    std::lock_guard lock(mutex_);
+                    failure_ = error;
+                    // A Rotate() blocked on an armed start must see the failure
+                    // rather than wait for a thread that is exiting.
+                    if (warmPending_) {warmPending_ = false;warmError_ = error;}
+                }
+                space_.notify_all();warmDone_.notify_all();work_.notify_all();
+                return;
+            }
+            if (sink_.onSegment) sink_.onSegment(pending.segment);
+        }
+    }
+
+    void Remove(uint64_t index) const
+    {
+        std::error_code error;
+        std::filesystem::remove(SegmentFilePath(staging_, index), error);
+    }
+
+    std::function<std::unique_ptr<Encoder>()> factory_;
+    std::filesystem::path staging_;
+    uint32_t segmentFrames_{};
+    int64_t frameDuration_{};
+    NeuralSegmentSink sink_;
+    std::stop_token stop_;
+    EncoderSpec spec_{};
+    std::unique_ptr<Encoder> current_;
+    uint64_t currentIndex_{},currentFrames_{},currentFirstFrameNumber_{};
+    int64_t currentFirstTimestamp_{},currentLast_{};
+    uint64_t written_{};
+    std::mutex mutex_;
+    std::condition_variable work_;
+    std::condition_variable ready_;
+    std::condition_variable warmDone_;
+    // The render loop waits here, and only here, when the encoder falls behind.
+    std::condition_variable_any space_;
+    std::deque<Frame> frames_;
+    size_t queuedBytes_{};
+    std::deque<Pending> queue_;
+    std::jthread finalizer_;
+    std::jthread writer_;
+    // The encoder for the next file, started ahead of time by the finalizer.
+    std::unique_ptr<Encoder> warm_;
+    uint64_t warmIndex_{},started_{};
+    EncodeError warmError_{EncodeError::None};
+    EncodeError failure_{EncodeError::None};
+    bool warmPending_{},quit_{},closing_{},writing_{};
+};
+
+// One-frame lookahead over the source. A private thread runs the decoder while
+// the render thread has the previous frame on the GPU, which is the only
+// overlap the loop can take without changing what it does: the thread hands
+// over exactly what source.Read() produced, in the order it produced it, and
+// the render loop still classifies every status, validates every timestamp and
+// checks every identity itself.
+//
+// Depth is one frame, so at most three BGRA frames are alive (~25 MiB at
+// 1080p) and a cancel stays prompt: the decoder is never more than one read
+// ahead of the loop, and that read observes the job's stop token exactly as
+// the loop's own read did.
+template<class Source>
+class FramePrefetch {
+public:
+    FramePrefetch(Source& source, std::stop_token stop)
+        : source_(source), stop_(std::move(stop))
+    {
+        try {
+            worker_ = std::jthread([this] { Decode(); });
+        } catch (const std::system_error& error) {
+            // No thread: read on the render thread, exactly as before.
+            LOG("Source prefetch thread could not start; decoding synchronously. error="
+                << error.code().value());
+        }
+    }
+    ~FramePrefetch() { Stop(); }
+    FramePrefetch(const FramePrefetch&) = delete;
+    FramePrefetch& operator=(const FramePrefetch&) = delete;
+
+    JobRead Next(JobFrame& frame)
+    {
+        if (!worker_.joinable()) return source_.Read(frame, stop_);
+        std::unique_lock lock(mutex_);
+        ready_.wait(lock, [this] { return item_.has_value() || terminal_.has_value(); });
+        if (!item_) return *terminal_;  // the decoder has nothing left to give
+        const JobRead read = item_->read;
+        frame = std::move(item_->frame);
+        item_.reset();
+        lock.unlock();
+        space_.notify_one();
+        return read;
+    }
+
+private:
+    struct Item {
+        JobRead read{};
+        JobFrame frame;
+    };
+
+    void Decode()
+    {
+        for (;;) {
+            {
+                std::unique_lock lock(mutex_);
+                space_.wait(lock, [this] { return !item_ || quit_; });
+                if (quit_) return;
+            }
+            Item item;
+            // A throwing read is the loop's failure to classify, not this
+            // thread's to swallow: it becomes the Error the loop would have
+            // seen, and the decoder is not touched again.
+            try {
+                item.read = source_.Read(item.frame, stop_);
+            } catch (...) {
+                item.read = JobRead::Error;
+            }
+            const JobRead read = item.read;
+            {
+                std::lock_guard lock(mutex_);
+                if (quit_) return;
+                if (read != JobRead::FrameReady) terminal_ = read;
+                item_ = std::move(item);
+            }
+            ready_.notify_one();
+            if (read != JobRead::FrameReady) return;
+        }
+    }
+
+    void Stop()
+    {
+        {
+            std::lock_guard lock(mutex_);
+            quit_ = true;
+        }
+        space_.notify_all();ready_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    Source& source_;
+    std::stop_token stop_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::condition_variable space_;
+    std::optional<Item> item_;
+    std::optional<JobRead> terminal_;
+    bool quit_{};
+    std::jthread worker_;
+};
+
+template<class Source, class Evaluator, class Encoder, class Evidence, class Clock, class Paused>
 NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                           OfflineNeuralRenderer::ProgressCallback progress,
                           std::stop_token stop, Source& source, Evaluator& evaluator,
-                          Encoder& encoder, Evidence evidenceProvider, Clock clock)
+                          Encoder& encoder, Evidence evidenceProvider, Clock clock, Paused paused,
+                          const NeuralSegmentSink& segments)
 {
     NeuralRenderResult result;
+    result.jobId = request.jobId;
+    auto fail = [&](NeuralRenderFailure failure, std::wstring detail) {
+        result.failure = failure;result.detail = std::move(detail);return result;
+    };
     if (request.sourcePath.empty() || request.stagingVideoPath.empty() ||
         !request.width || !request.height || !std::isfinite(request.fps) || request.fps <= 0.0 ||
         !std::isfinite(request.durationSeconds) || request.durationSeconds <= 0.0) {
-        result.detail = L"Invalid neural render request.";
-        return result;
+        return fail(NeuralRenderFailure::Source, L"Invalid neural render request.");
     }
-    const uint64_t totalFrames = std::max<uint64_t>(
-        1, static_cast<uint64_t>(std::llround(request.durationSeconds * request.fps)));
+    const int64_t frameDuration = static_cast<int64_t>(std::llround(10000000.0 / request.fps));
+    const int64_t sourceDuration = static_cast<int64_t>(std::llround(request.durationSeconds * 10000000.0));
+    const int64_t rangeStart = request.range.start100ns;
+    const bool boundedEnd = request.range.end100ns != 0;
+    const int64_t rangeEnd = boundedEnd ? request.range.end100ns : sourceDuration;
+    if (rangeStart < 0 || rangeStart >= rangeEnd || rangeEnd > sourceDuration + frameDuration) {
+        return fail(NeuralRenderFailure::Source,
+                    L"The neural render range is outside the source timeline.");
+    }
+    const uint64_t totalFrames = std::max<uint64_t>(1, static_cast<uint64_t>(
+        std::llround(double(rangeEnd - rangeStart) / 10000000.0 * request.fps)));
     const uint64_t expectedBytes64 = uint64_t{request.width} * request.height * 4u;
     if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
-        result.detail = L"Neural render dimensions are too large.";
-        return result;
+        return fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
     }
     const size_t expectedBytes = static_cast<size_t>(expectedBytes64);
+    // A segmented job publishes finalized files while it renders; segmentFrames
+    // == 0 keeps the single staging file and never starts a finalize thread.
+    std::optional<SegmentWriter<Encoder>> writer;
+    if (request.segmentFrames) {
+        writer.emplace([&encoder] { return encoder.Create(); }, request.stagingVideoPath,
+                       request.segmentFrames, frameDuration, segments, stop);
+    }
+    auto cancelOutput = [&] { if (writer) writer->Cancel(); else encoder.Cancel(); };
     const auto started = clock();
     auto lastProgressTime = started;
     uint64_t reportedCompleted = 0;
     uint64_t reportedBytes = 0;
     double smoothedFramesPerMs = 0.0;
     NeuralRenderProgress previous{};
-    auto emit = [&](NeuralRenderPhase phase, uint64_t completed, uint64_t bytes, bool frameTick) {
+    auto emitProgress = [&](NeuralRenderPhase phase, uint64_t completed, uint64_t bytes,
+                            bool frameTick, NeuralRenderFailure recovering) {
         const auto now = clock();
         reportedCompleted = std::max(reportedCompleted, completed);
         reportedBytes = std::max(reportedBytes, bytes);
@@ -205,23 +871,43 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 std::ceil(double(snapshot.totalFrames - snapshot.completedFrames) /
                           smoothedFramesPerMs)));
         }
+        snapshot.recovering = recovering;
+        snapshot.retries = result.frameRetries;
         if (progress) progress(snapshot);
         previous = snapshot;
     };
+    auto emit = [&](NeuralRenderPhase phase, uint64_t completed, uint64_t bytes, bool frameTick) {
+        emitProgress(phase, completed, bytes, frameTick, NeuralRenderFailure::None);
+    };
     auto cancelled = [&](std::wstring detail) {
-        encoder.Cancel();source.Close();result.cancelled = true;result.detail = std::move(detail);
-        return result;
+        cancelOutput();source.Close();result.cancelled = true;
+        return fail(NeuralRenderFailure::Cancelled, std::move(detail));
+    };
+    auto evaluatorFailure = [&] {
+        const NeuralRenderFailure failure = evaluator.LastFailure();
+        return failure == NeuralRenderFailure::None ? NeuralRenderFailure::Neural : failure;
+    };
+    // The job's own history generation: bumped for every reset it requests.
+    // The evaluator stamps its own generation on its outputs; SameSource
+    // comparisons ignore both.
+    uint32_t historyGeneration = 0;
+    auto identity = [&](const JobFrame& frame, HistoryReset reset) {
+        if (reset != HistoryReset::None) ++historyGeneration;
+        return FrameIdentity{frame.frameNumber, frame.timestamp100ns, frame.sourceGeneration,
+                             historyGeneration, request.jobId, reset};
     };
 
     emit(NeuralRenderPhase::Acquiring, 0, 0, false);
     if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-    if (!source.Open(request.sourcePath, stop)) {
+    if (!source.Open(request.sourcePath, stop, double(rangeStart) / 10000000.0)) {
         if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        result.detail = L"The source video could not be opened.";return result;
+        return fail(NeuralRenderFailure::Source, L"The source video could not be opened.");
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
-    if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps)) {
-        source.Close();result.detail = L"The neural renderer could not be initialized.";return result;
+    if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps,
+                              request.guides)) {
+        source.Close();
+        return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
 
     const bool singleFrameSource = totalFrames == 1;
@@ -234,210 +920,326 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             const JobRead read = source.Read(primingFrame, stop);
             if (read == JobRead::Cancelled) return cancelled(L"Neural render was cancelled.");
             if (read != JobRead::FrameReady) {
-                source.Close();result.detail = L"Feature 18 could not be primed from the source.";return result;
+                source.Close();
+                return fail(NeuralRenderFailure::Source,
+                            L"Feature 18 could not be primed from the source.");
             }
         } else {
             // A photo may need several presents to create feature 18. Reuse it
             // only for warm-up; capture below still reopens and reads it once.
             primingFrame.discontinuity = false;
         }
-        std::vector<uint8_t> ignored;
-        if (!evaluator.Submit(primingFrame, primed == 0 || primingFrame.discontinuity, false, ignored)) {
-            source.Close();result.detail = L"Feature 18 priming failed.";return result;
+        const HistoryReset reason = primed == 0 ? HistoryReset::FirstFrame
+            : primingFrame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+        JobEvaluation ignored;
+        if (!evaluator.Submit(primingFrame, identity(primingFrame, reason), false, ignored)) {
+            source.Close();
+            return fail(evaluatorFailure(), L"Feature 18 priming failed.");
         }
     }
     if (!evaluator.FeatureCreated()) {
-        source.Close();result.detail = L"Feature 18 was not created.";return result;
+        source.Close();
+        return fail(NeuralRenderFailure::Neural, L"Feature 18 was not created.");
     }
     const NeuralRuntimeEvidence armedEvidence=
         ParseNeuralRuntimeEvidence(evidenceProvider());
     if(!armedEvidence.Valid()){
         source.Close();
-        result.detail=L"Feature 18 inline interception was not armed before frame capture.";
-        return result;
+        return fail(NeuralRenderFailure::Neural,
+                    L"Feature 18 inline interception was not armed before frame capture.");
     }
     result.feature18ArmedBeforeCapture=true;
     uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
 
-    auto reopenFromZero = [&] {
+    // Capture restarts from the preroll position: frames before the range are
+    // evaluated without capture so the history at range.start matches a
+    // continuous render. A whole-source render has no preroll.
+    const int64_t prerollStart = rangeStart > 0
+        ? std::max<int64_t>(0, rangeStart - int64_t{request.prerollFrames} * frameDuration) : 0;
+    auto reopenAtPreroll = [&] {
         source.Close();
-        if (!source.Open(request.sourcePath, stop)) return false;
+        if (!source.Open(request.sourcePath, stop, double(prerollStart) / 10000000.0)) return false;
         evaluator.ResetTemporal();
         return true;
     };
-    if (!reopenFromZero()) {
+    if (!reopenAtPreroll()) {
         if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-        result.detail = L"The source could not be restarted from frame zero.";return result;
+        return fail(NeuralRenderFailure::Source,
+                    L"The source could not be restarted at the capture start.");
     }
 
     auto runAttempt = [&](EncoderKind kind) {
         AttemptResult attempt;
-        const EncodeError startError = encoder.Start(
-            EncoderSpec{request.width, request.height, request.fps, kind,
-                        evaluator.CapturePixelFormat()},
-            request.stagingVideoPath);
-        if (startError != EncodeError::None) {
-            attempt.failure = startError == EncodeError::Cancelled
-                ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
-            attempt.encoderError = startError;return attempt;
+        const EncoderSpec spec{request.width, request.height, request.fps, kind,
+                               evaluator.CapturePixelFormat()};
+        if (writer) {
+            // Segment 0's encoder is armed here and starts while this attempt
+            // prerolls, so the first captured frame never waits for a spawn.
+            writer->BeginAttempt(spec);
+        } else {
+            const EncodeError startError = encoder.Start(spec, request.stagingVideoPath);
+            if (startError != EncodeError::None) {
+                attempt.failure = startError == EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
+                attempt.encoderError = startError;return attempt;
+            }
         }
         StageTimers stages;
         if constexpr (requires { evaluator.ResetStageDetail(); }) evaluator.ResetStageDetail();
         const auto reportStages=[&]{ReportStageTimings(kind,stages,attempt,evaluator);};
         ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
-        bool temporalReset = true;
         // Submission runs ahead of encoding, so frame accounting has to be tracked
         // separately from what has actually been written out.
+        struct InFlightCapture {
+            uint64_t frameNumber{};
+            int64_t timestamp100ns{};
+            double readMs{},guideMs{},evalMs{},neuralGpuMs{};
+            SteadyClock::time_point frameStart{};
+        };
+        std::deque<InFlightCapture> inFlight;
         uint64_t submitted = 0;
-        bool haveSubmitTimestamp = false;
-        int64_t lastSubmitTimestamp = 0;
-        std::deque<int64_t> inFlight;
         evaluator.DiscardPending();
 
         // Waits on the oldest in-flight capture only, then hands its pixels to the
-        // encoder thread. The buffer is recycled from a finished write so the full-frame
-        // allocation and its zero-fill do not repeat every frame.
-        auto drainOldest = [&]() -> bool {
+        // segment writer or the encoder's feeder thread. The buffer is recycled from a
+        // finished write so the full-frame allocation and its zero-fill do not repeat
+        // every frame.
+        auto drainOldest = [&]() -> NeuralRenderFailure {
+            const InFlightCapture queued = inFlight.front();
             std::vector<uint8_t> pixels;
             if (!encoder.TakeRecycled(pixels)) pixels.clear();
+            double captureMs = 0.0;
             {
                 StageClock clock(stages.resolve);
-                if (!evaluator.ResolveOldest(pixels) || pixels.size() != expectedBytes) {
-                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return false;
+                if (!evaluator.ResolveOldest(pixels, captureMs) || pixels.size() != expectedBytes) {
+                    return evaluatorFailure();
                 }
             }
-            const int64_t timestamp = inFlight.front();
             inFlight.pop_front();
             const size_t written = pixels.size();
+            double writeMs = 0.0;
             EncodeError writeError;
             {
                 StageClock clock(stages.write);
-                writeError = encoder.WriteFrameAsync(std::move(pixels), stop);
+                const auto writeStart = SteadyClock::now();
+                JobFrame frameMeta;
+                frameMeta.frameNumber = queued.frameNumber;
+                frameMeta.timestamp100ns = queued.timestamp100ns;
+                writeError = writer ? writer->Write(frameMeta, std::move(pixels), stop)
+                                    : encoder.WriteFrameAsync(std::move(pixels), stop);
+                writeMs = MillisecondsSince(writeStart);
             }
             if (writeError != EncodeError::None) {
-                attempt.failure = writeError == EncodeError::Cancelled
-                    ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
-                attempt.encoderError=writeError;encoder.Cancel();return false;
+                attempt.encoderError=writeError;
+                return writeError == EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
             }
             ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
             if (!attempt.hasTimestamp) {
-                attempt.firstTimestamp=timestamp;
+                attempt.firstTimestamp=queued.timestamp100ns;
                 attempt.hasTimestamp=true;
             }
-            attempt.lastTimestamp=timestamp;
+            attempt.lastTimestamp=queued.timestamp100ns;
+            attempt.neuralGpuMs.push_back(queued.neuralGpuMs);
             emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
-            return true;
+            attempt.stages.Push(queued.readMs, queued.guideMs, captureMs, queued.evalMs, writeMs,
+                                MillisecondsSince(queued.frameStart));
+            return NeuralRenderFailure::None;
         };
-
-        for (;;) {
-            if (stop.stop_requested()) {
-                attempt.failure = AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
-                encoder.Cancel();return attempt;
+        auto abort = [&](NeuralRenderFailure failure) {
+            // Frames already captured but not yet read back are valid output: write
+            // them out so a failed attempt never omits a frame it successfully
+            // evaluated. A cancelled job discards them instead, which keeps
+            // cancellation prompt.
+            if (failure != NeuralRenderFailure::Cancelled) {
+                while (!inFlight.empty() && drainOldest() == NeuralRenderFailure::None) {}
             }
+            attempt.failure = failure;
+            if (failure == NeuralRenderFailure::Cancelled) attempt.encoderError = EncodeError::Cancelled;
+            cancelOutput();
+        };
+        // Submits one frame, retrying the exact same frame on neural/GPU-stall
+        // failures. The last permitted retry resets history; a frame that still
+        // fails ends the attempt (never skipped). Device loss is not retried.
+        // `pipelined` records the capture without waiting for the GPU: the pixels
+        // come back from drainOldest, which waits only on that frame's fence.
+        auto evaluate = [&](const JobFrame& frame, HistoryReset reason, bool capture,
+                            bool pipelined, JobEvaluation& out) {
+            FrameIdentity id = identity(frame, reason);
+            for (uint32_t retry = 0;; ++retry) {
+                if (stop.stop_requested()) return NeuralRenderFailure::Cancelled;
+                const uint64_t before = evaluator.EvaluationCount();
+                // Keep the pixel buffer's capacity across retries: the receipt gate
+                // resubmits the same frame up to 120 times, and re-growing a full
+                // frame each time dominates the retry cost.
+                std::vector<uint8_t> recycledPixels = std::move(out.bgra);
+                out = JobEvaluation{};
+                out.bgra = std::move(recycledPixels);
+                bool ok;
+                {
+                    StageClock clock(stages.submit);
+                    ok = pipelined
+                        ? evaluator.SubmitAsync(frame, id, out) &&
+                              evaluator.EvaluationCount() > before
+                        : evaluator.Submit(frame, id, capture, out) &&
+                              evaluator.EvaluationCount() > before &&
+                              (!capture || out.bgra.size() == expectedBytes);
+                }
+                if (ok) {
+                    if (!out.id.SameSource(id)) return NeuralRenderFailure::Identity;
+                    if (out.id.reset != HistoryReset::None) ++attempt.historyResets;
+                    return NeuralRenderFailure::None;
+                }
+                NeuralRenderFailure failure = evaluatorFailure();
+                if (failure == NeuralRenderFailure::DeviceRemoved) return failure;
+                if (failure != NeuralRenderFailure::GpuStall) failure = NeuralRenderFailure::Neural;
+                if (request.frameRetryLimit == 0) return failure;
+                if (retry >= request.frameRetryLimit) return NeuralRenderFailure::RetryExhausted;
+                ++result.frameRetries;
+                emitProgress(NeuralRenderPhase::Recovering, attempt.frames, attempt.bytes, false, failure);
+                // Earlier retries resubmit the identical identity; only the
+                // final one discards history so a poisoned state cannot fail
+                // the same frame forever.
+                if (retry + 1 == request.frameRetryLimit) {
+                    id.reset = HistoryReset::Retry;id.historyGeneration = ++historyGeneration;
+                }
+            }
+        };
+        // Joined on every exit from the attempt, so no thread is left holding
+        // the decoder when the caller closes or reopens it.
+        FramePrefetch<Source> prefetch(source, stop);
+        bool prerollEvaluated = false;
+        bool hasPrevious = false;
+        int64_t previousTimestamp = 0;
+        uint64_t previousFrameNumber = 0;
+        for (;;) {
+            if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+            if (paused()) {
+                emit(NeuralRenderPhase::Paused, attempt.frames, attempt.bytes, false);
+                while (paused()) {
+                    if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            const auto frameStart = SteadyClock::now();
             JobFrame frame;
             JobRead read;
             {
                 StageClock clock(stages.source);
-                read = source.Read(frame, stop);
+                read = prefetch.Next(frame);
             }
+            // What the loop still pays for the decode: the residual wait for a
+            // frame the decoder started while the previous one was on the GPU.
+            const double readMs = MillisecondsSince(frameStart);
             if (read == JobRead::EndOfStream) {
                 // Report the source failure directly. Falling through to Finish here used
                 // to overwrite it with the encoder error that cancelling produces.
-                if(submitted==0){attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;}
+                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
-            if (read == JobRead::Cancelled) {
-                attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
-                encoder.Cancel();return attempt;
-            }
-            if (read != JobRead::FrameReady) {
-                attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
-            }
+            if (read == JobRead::Cancelled) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+            if (read != JobRead::FrameReady) {abort(NeuralRenderFailure::Source);return attempt;}
             if (frame.timestamp100ns < 0 ||
-                (haveSubmitTimestamp && frame.timestamp100ns <= lastSubmitTimestamp)) {
-                attempt.failure=AttemptFailure::Source;encoder.Cancel();return attempt;
+                (hasPrevious && (frame.timestamp100ns <= previousTimestamp ||
+                                 frame.frameNumber != previousFrameNumber + 1))) {
+                abort(NeuralRenderFailure::Source);return attempt;
             }
-
-            if (submitted == 0) {
-                // The first frame stays synchronous: the runtime logs successful
-                // evaluations sparsely, so it is captured repeatedly until a fresh
-                // receipt exists, and that decision needs the pixels in hand. Each retry
-                // has its own baseline, and these extra captures never extend the
-                // timeline.
-                std::vector<uint8_t> captured;
-                for (uint64_t capture = 1; ; ++capture) {
-                    if (stop.stop_requested()) {
-                        attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
-                        encoder.Cancel();return attempt;
-                    }
-                    const uint64_t before = evaluator.EvaluationCount();
-                    captured.clear();
-                    bool rendered;
-                    {
-                        StageClock clock(stages.submit);
-                        rendered = evaluator.Submit(frame, temporalReset || (capture == 1 && frame.discontinuity), true, captured);
-                    }
-                    if (!rendered || evaluator.EvaluationCount() <= before ||
-                        captured.size() != expectedBytes) {
-                        attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
-                    }
-                    temporalReset = false;
-                    if (capture == 1 || capture % 10 == 0) {
-                        const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
-                        if (!receipt.Valid()) {
-                            attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
-                        }
-                        if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
-                    }
-                    if (capture >= 120) {
-                        attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
-                    }
-                }
-                const size_t written = captured.size();
-                EncodeError writeError;
-                {
-                    StageClock clock(stages.write);
-                    writeError = encoder.WriteFrameAsync(std::move(captured), stop);
-                }
-                if (writeError != EncodeError::None) {
-                    attempt.failure = writeError == EncodeError::Cancelled
-                        ? AttemptFailure::Cancelled : AttemptFailure::Encoder;
-                    attempt.encoderError=writeError;encoder.Cancel();return attempt;
-                }
-                ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
-                attempt.firstTimestamp=frame.timestamp100ns;attempt.hasTimestamp=true;
-                attempt.lastTimestamp=frame.timestamp100ns;
-                emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
-                ++submitted;haveSubmitTimestamp=true;lastSubmitTimestamp=frame.timestamp100ns;
+            hasPrevious = true;previousTimestamp = frame.timestamp100ns;
+            previousFrameNumber = frame.frameNumber;
+            if (frame.timestamp100ns < rangeStart) {
+                JobEvaluation ignored;
+                const HistoryReset reason = !prerollEvaluated ? HistoryReset::Preroll
+                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+                const NeuralRenderFailure failure = evaluate(frame, reason, false, false, ignored);
+                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                prerollEvaluated = true;
                 continue;
             }
-
-            // Record the capture and move straight on to the next source frame. The GPU
-            // keeps working while the previous frame is copied back and encoded.
-            const uint64_t before = evaluator.EvaluationCount();
-            {
-                StageClock clock(stages.submit);
-                if (!evaluator.SubmitAsync(frame, temporalReset || frame.discontinuity) ||
-                    evaluator.EvaluationCount() <= before) {
-                    attempt.failure=AttemptFailure::Neural;encoder.Cancel();return attempt;
-                }
+            if (boundedEnd && frame.timestamp100ns >= rangeEnd) {
+                if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
+                break;
             }
-            temporalReset = false;
-            inFlight.push_back(frame.timestamp100ns);
-            ++submitted;haveSubmitTimestamp=true;lastSubmitTimestamp=frame.timestamp100ns;
-            if (evaluator.Pending() >= evaluator.MaxPending() && !drainOldest()) return attempt;
+            const auto evalStart = SteadyClock::now();
+            JobEvaluation evaluation;
+            const bool pipelined = submitted > 0;
+            for (uint64_t capture = 1; ; ++capture) {
+                const HistoryReset reason = capture > 1 ? HistoryReset::None
+                    : (attempt.frames == 0 && !prerollEvaluated) ? HistoryReset::FirstFrame
+                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+                const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
+                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                if (pipelined) break;
+                // The runtime logs successful evaluations sparsely. Capture the
+                // first source frame until a fresh receipt exists, retaining
+                // only its latest pixels for encoding. Each retry has its own
+                // baseline, and these extra captures never extend the timeline.
+                if (capture == 1 || capture % 10 == 0) {
+                    const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
+                    if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
+                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
+                }
+                if (capture >= 120) {abort(NeuralRenderFailure::Neural);return attempt;}
+            }
+            const double evalMs = MillisecondsSince(evalStart);
+            if (pipelined) {
+                // Record the capture and move straight on to the next source frame. The GPU
+                // keeps working while the previous frame is copied back and encoded.
+                InFlightCapture queued;
+                queued.frameNumber = frame.frameNumber;
+                queued.timestamp100ns = frame.timestamp100ns;
+                queued.readMs = readMs;queued.guideMs = evaluation.guideMs;
+                queued.evalMs = evalMs;queued.neuralGpuMs = evaluation.neuralGpuMs;
+                queued.frameStart = frameStart;
+                inFlight.push_back(std::move(queued));
+                ++submitted;
+                if (evaluator.Pending() >= evaluator.MaxPending()) {
+                    const NeuralRenderFailure failure = drainOldest();
+                    if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                }
+                continue;
+            }
+            // The first captured frame stays synchronous: the receipt gate above needs
+            // the pixels in hand, and they are written here once the gate opens. A
+            // segmented job takes ownership of them; the single-file encoder hands
+            // them to its feeder thread.
+            const uint64_t captured = evaluation.bgra.size();
+            double writeMs = 0.0;
+            EncodeError writeError;
+            {
+                StageClock clock(stages.write);
+                const auto writeStart = SteadyClock::now();
+                writeError = writer ? writer->Write(frame, std::move(evaluation.bgra), stop)
+                                    : encoder.WriteFrameAsync(std::move(evaluation.bgra), stop);
+                writeMs = MillisecondsSince(writeStart);
+            }
+            if (writeError != EncodeError::None) {
+                attempt.encoderError=writeError;
+                abort(writeError == EncodeError::Cancelled
+                    ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder);
+                return attempt;
+            }
+            ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured;
+            if (!attempt.hasTimestamp) {
+                attempt.firstTimestamp=frame.timestamp100ns;
+                attempt.hasTimestamp=true;
+            }
+            attempt.lastTimestamp=frame.timestamp100ns;
+            attempt.neuralGpuMs.push_back(evaluation.neuralGpuMs);
+            emit(NeuralRenderPhase::NeuralRendering,attempt.frames,attempt.bytes,true);
+            attempt.stages.Push(readMs, evaluation.guideMs, evaluation.captureMs, evalMs, writeMs,
+                                MillisecondsSince(frameStart));
+            ++submitted;
         }
         while (!inFlight.empty()) {
-            if (stop.stop_requested()) {
-                attempt.failure=AttemptFailure::Cancelled;attempt.encoderError=EncodeError::Cancelled;
-                encoder.Cancel();return attempt;
-            }
-            if (!drainOldest()) return attempt;
+            if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+            const NeuralRenderFailure failure = drainOldest();
+            if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
         }
-        const EncodeError finishError=encoder.Finish(stop);
+        LogStageTable(attempt.stages);
+        const EncodeError finishError=writer?writer->Finish():encoder.Finish(stop);
         if(finishError!=EncodeError::None){
             attempt.failure=finishError==EncodeError::Cancelled
-                ? AttemptFailure::Cancelled:AttemptFailure::Encoder;
+                ? NeuralRenderFailure::Cancelled:NeuralRenderFailure::Encoder;
             attempt.encoderError=finishError;return attempt;
         }
         return attempt;
@@ -449,52 +1251,50 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     EncoderKind selected = (request.width % 2 || request.height % 2)
         ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
     AttemptResult attempt = runAttempt(selected);
-    if (attempt.failure == AttemptFailure::Cancelled)
+    if (attempt.failure == NeuralRenderFailure::Cancelled)
         return cancelled(L"Neural render was cancelled.");
-    if (attempt.failure == AttemptFailure::Encoder &&
+    if (attempt.failure == NeuralRenderFailure::Encoder &&
         ShouldRetryWithSoftware(selected, attempt.encoderError)) {
-        encoder.Cancel();
+        cancelOutput();
         std::error_code removeError;std::filesystem::remove(request.stagingVideoPath, removeError);
-        if (!reopenFromZero()) {
+        if (!reopenAtPreroll()) {
             if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
-            result.detail=L"The source could not be restarted for software encoding.";return result;
+            return fail(NeuralRenderFailure::Source,
+                        L"The source could not be restarted for software encoding.");
         }
         const NeuralRuntimeEvidence retryEvidence=
             ParseNeuralRuntimeEvidence(evidenceProvider());
         if(!retryEvidence.Valid()){
-            result.detail=L"Feature 18 evidence was not valid before the software retry.";
-            return result;
+            return fail(NeuralRenderFailure::Neural,
+                        L"Feature 18 evidence was not valid before the software retry.");
         }
         successfulAttemptBaseline=retryEvidence.highestObservedEvaluation;
         selected=EncoderKind::H264Software;
         attempt=runAttempt(selected);
     }
-    if (attempt.failure == AttemptFailure::Cancelled)
+    if (attempt.failure == NeuralRenderFailure::Cancelled)
         return cancelled(L"Neural render was cancelled.");
-    if (attempt.failure != AttemptFailure::None) {
-        encoder.Cancel();source.Close();
-        result.detail = attempt.failure == AttemptFailure::Neural
-            ? L"A frame was not produced by feature 18."
-            : attempt.failure == AttemptFailure::Source
-                ? L"The source decoder failed during neural rendering."
-                : L"The neural video encoder failed.";
-        return result;
+    if (attempt.failure != NeuralRenderFailure::None) {
+        cancelOutput();source.Close();
+        result.historyResets=attempt.historyResets;
+        return fail(attempt.failure, AttemptFailureDetail(attempt.failure));
     }
     source.Close();
     emit(NeuralRenderPhase::Encoding,attempt.frames,attempt.bytes,false);
     emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
     result.evidence=ParseNeuralRuntimeEvidence(evidenceProvider());
+    result.historyResets=attempt.historyResets;
     if(!result.evidence.Valid()||
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
-        result.detail=L"Feature 18 runtime evidence did not advance after captured rendering or contained a later failure.";
-        return result;
+        return fail(NeuralRenderFailure::Neural,
+                    L"Feature 18 runtime evidence did not advance after captured rendering or contained a later failure.");
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
     result.nativeEvaluations=attempt.evaluations;
     result.verifiedNeuralFrames=attempt.frames;
-    const int64_t nominalFrameDuration=static_cast<int64_t>(
-        std::llround(10000000.0/request.fps));
-    result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+nominalFrameDuration;
+    result.firstTimestamp100ns=attempt.firstTimestamp;
+    result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration;
+    result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
     emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
     return result;
 }
@@ -502,11 +1302,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 struct TestSourceAdapter {
     IFrameSource& source;
-    bool Open(const std::filesystem::path& path,std::stop_token stop){return source.Open(path,stop);}
+    bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         OfflineDecodedFrame decoded;const auto read=source.Read(decoded,stop);
-        frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity};
+        frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
+               decoded.frameNumber,decoded.sourceGeneration};
         switch(read){
             case OfflineFrameRead::FrameReady:return JobRead::FrameReady;
             case OfflineFrameRead::EndOfStream:return JobRead::EndOfStream;
@@ -519,39 +1320,51 @@ struct TestEvaluatorAdapter {
     INeuralFrameEvaluator& evaluator;
     // The test interface stays synchronous; these shims give RunJob the same async shape
     // the production adapter has, so the pipelined control flow is what the tests run.
-    std::deque<std::vector<uint8_t>> captured{};
-    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps){return evaluator.Initialize(window,width,height,fps);}
-    bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
-        return evaluator.Submit(OfflineDecodedFrame{frame.bgra,frame.timestamp100ns,frame.discontinuity},
-                                reset,capture,output);
+    std::deque<JobEvaluation> captured{};
+    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides){
+        return evaluator.Initialize(window,width,height,fps,guides);
     }
-    bool SubmitAsync(const JobFrame& frame,bool reset){
-        std::vector<uint8_t> output;
-        if(!Submit(frame,reset,true,output))return false;
-        captured.push_back(std::move(output));
+    bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
+        OfflineEvaluation evaluation;
+        if(!evaluator.Submit(OfflineDecodedFrame{frame.bgra,frame.timestamp100ns,frame.discontinuity,
+                                                 frame.frameNumber,frame.sourceGeneration},
+                             id,capture,evaluation))return false;
+        out.bgra=std::move(evaluation.bgra);out.id=evaluation.id;
+        out.neuralGpuMs=evaluator.LastNeuralGpuMs();return true;
+    }
+    bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
+        if(!Submit(frame,id,true,out))return false;
+        captured.push_back(std::move(out));
         return true;
     }
     uint32_t Pending()const{return uint32_t(captured.size());}
     static constexpr uint32_t MaxPending(){return 2u;}
-    bool ResolveOldest(std::vector<uint8_t>& pixels){
+    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
         if(captured.empty())return false;
-        pixels=std::move(captured.front());captured.pop_front();return true;
+        pixels=std::move(captured.front().bgra);captured.pop_front();
+        captureMs=0.0;return true;
     }
     void DiscardPending(){captured.clear();}
     static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool FeatureCreated()const{return evaluator.FeatureCreated();}
     uint64_t EvaluationCount()const{return evaluator.EvaluationCount();}
     void ResetTemporal(){evaluator.ResetTemporal();}
+    NeuralRenderFailure LastFailure()const{return evaluator.LastFailure();}
+    uint64_t PeakLocalVideoMemoryMiB()const{return evaluator.PeakLocalVideoMemoryMiB();}
 };
 struct TestEncoderAdapter {
-    IFrameEncoder& encoder;
+    IFrameEncoder* encoder{};
+    std::unique_ptr<IFrameEncoder> owned;
+    std::function<std::unique_ptr<IFrameEncoder>()> factory;
     std::vector<std::vector<uint8_t>> recycled{};
     EncodeError Start(const EncoderSpec& spec,const std::filesystem::path& path){
-        recycled.clear();return encoder.Start(spec,path);
+        recycled.clear();return encoder->Start(spec,path);
     }
-    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
+    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder->WriteFrame(frame,stop);}
+    // The single-file write path feeds the real encoder from a worker thread; the
+    // test shim writes synchronously and recycles the buffer exactly like production.
     EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
-        const EncodeError error=encoder.WriteFrame(frame,stop);
+        const EncodeError error=encoder->WriteFrame(frame,stop);
         if(recycled.size()<2)recycled.push_back(std::move(frame));
         return error;
     }
@@ -560,20 +1373,29 @@ struct TestEncoderAdapter {
         buffer=std::move(recycled.back());recycled.pop_back();return true;
     }
     EncodeError Flush(std::stop_token){return EncodeError::None;}
-    EncodeError Finish(std::stop_token stop){return encoder.Finish(stop);}
-    void Cancel(){encoder.Cancel();}
+    EncodeError Finish(std::stop_token stop){return encoder->Finish(stop);}
+    void Cancel(){encoder->Cancel();}
+    std::unique_ptr<TestEncoderAdapter> Create(){
+        std::unique_ptr<IFrameEncoder> made=factory?factory():nullptr;
+        if(!made)return {};
+        auto adapter=std::make_unique<TestEncoderAdapter>();
+        adapter->encoder=made.get();adapter->owned=std::move(made);adapter->factory=factory;
+        return adapter;
+    }
 };
 #else
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
-    bool Open(const std::filesystem::path& path,std::stop_token stop){
-        return decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop);
+    bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){
+        if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop))return false;
+        return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
     }
     void Close(){decoder.Close();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         VideoFrame decoded;
         const auto read = decoder.ReadNextBlocking(decoded, stop);
-        frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity};
+        frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity,
+                 decoded.frameNumber, decoded.sourceGeneration};
         if (read == VideoReadResult::FrameReady) return JobRead::FrameReady;
         if (read == VideoReadResult::EndOfStream) return JobRead::EndOfStream;
         if (read == VideoReadResult::Cancelled) return JobRead::Cancelled;
@@ -581,30 +1403,65 @@ struct ProductionSourceAdapter {
     }
 };
 
+NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
+{
+    using FenceWait=d3d12_renderer_detail::FenceWaitResult;
+    switch(renderer.LastFenceWaitResult()){
+        case FenceWait::TimedOut:return NeuralRenderFailure::GpuStall;
+        case FenceWait::DeviceRemoved:return NeuralRenderFailure::DeviceRemoved;
+        default:break;
+    }
+    return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
+}
+
 struct ProductionEvaluatorAdapter {
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
-    uint32_t width{},height{};double fps{};bool forceReset{true};
-    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate){
+    uint32_t width{},height{};double fps{};
+    NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
+    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls){
         width=w;height=h;fps=rate;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer||!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
-        renderer->SetDLSS(true);return true;
+        guides.SetControls(controls);renderer->SetDLSS(true);return true;
     }
     CapturedVideoFrame captureScratch;
-    // Guide generation plus the DLSS evaluation. Shared by the synchronous and the
-    // pipelined submit paths, which differ only in how the capture is read back.
+    // Guide generation cost, split out of the submit stage for the stage log.
+    // Shared by the synchronous and the pipelined submit paths, which differ
+    // only in how the capture is read back.
     SteadyClock::duration guideCost{};
-    bool Render(const JobFrame& frame,bool reset){
-        GuideFrame guide;const bool temporalReset=forceReset||reset;forceReset=false;
+    // The renderer resets NGX history when guide.id.reset != None (requested
+    // reset or a cut detected by the guide generator) and stamps guide.id on
+    // the capture, so the job can verify it received the frame it submitted.
+    bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
+        GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,temporalReset,guide))return false;
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+                lastFailure=NeuralRenderFailure::Neural;return false;
+            }
         }
+        out.guideMs=MillisecondsSince(guideStart);
         const float frameMs=static_cast<float>(1000.0/fps);
-        return renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),
-            guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-            guide.gridW,guide.gridH,temporalReset,frameMs);
+        if(!capture){
+            if(!renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)){
+                lastFailure=ClassifyRendererFailure(*renderer);return false;
+            }
+            out.id=guide.id;
+        }else{
+            // The receipt gate for the first frame needs the pixels in hand before it
+            // can decide whether to resubmit. Handing out.bgra's buffer to the capture
+            // and taking it back keeps its capacity across the resubmits.
+            const auto captureStart=SteadyClock::now();
+            captureScratch.pixels=std::move(out.bgra);
+            if(!renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captureScratch)){
+                lastFailure=ClassifyRendererFailure(*renderer);return false;
+            }
+            out.captureMs=MillisecondsSince(captureStart);
+            out.bgra=std::move(captureScratch.pixels);captureScratch.pixels.clear();
+            out.id=captureScratch.id;
+        }
+        out.neuralGpuMs=renderer->LastNeuralGpuMs();++successfulEvaluations;return true;
     }
 
     // Splits the submit and resolve stages further. Guide generation is pure CPU work,
@@ -621,28 +1478,37 @@ struct ProductionEvaluatorAdapter {
               <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)<<" ms.";
         return detail.str();
     }
-    bool Submit(const JobFrame& frame,bool reset,bool capture,std::vector<uint8_t>& output){
-        if(!Render(frame,reset))return false;
-        if(!capture){++successfulEvaluations;return true;}
-        captureScratch.pixels=std::move(output);
-        const bool ok=renderer->CaptureRenderedFrame(captureScratch);
-        output=std::move(captureScratch.pixels);captureScratch.pixels.clear();
-        if(!ok)return false;
-        ++successfulEvaluations;return true;
-    }
     // Records the capture without waiting for the GPU. The pixels come back later from
     // ResolveOldest, which waits only on that one frame's fence.
-    bool SubmitAsync(const JobFrame& frame,bool reset){
-        if(!Render(frame,reset))return false;
-        if(!renderer->EnqueueEvaluatedFrameCapture())return false;
-        ++successfulEvaluations;return true;
+    bool SubmitAsync(const JobFrame& frame,const FrameIdentity& id,JobEvaluation& out){
+        GuideFrame guide;const auto guideStart=SteadyClock::now();
+        {
+            StageClock clock(guideCost);
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+                lastFailure=NeuralRenderFailure::Neural;return false;
+            }
+        }
+        out.guideMs=MillisecondsSince(guideStart);
+        const float frameMs=static_cast<float>(1000.0/fps);
+        if(!renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)){
+            lastFailure=ClassifyRendererFailure(*renderer);return false;
+        }
+        if(!renderer->EnqueueEvaluatedFrameCapture()){
+            lastFailure=ClassifyRendererFailure(*renderer);return false;
+        }
+        out.id=guide.id;out.neuralGpuMs=renderer->LastNeuralGpuMs();++successfulEvaluations;return true;
     }
     uint32_t Pending()const{return renderer?renderer->PendingCaptureCount():0u;}
     static constexpr uint32_t MaxPending(){return D3D12Renderer::CaptureSlots;}
-    bool ResolveOldest(std::vector<uint8_t>& pixels){
+    // On success every byte of pixels is overwritten, and the buffer is only resized
+    // when it does not already hold exactly one frame, so handing back the previous
+    // frame's buffer recycles it for this readback.
+    bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
         if(!renderer)return false;
         captureScratch.pixels=std::move(pixels);
+        const auto captureStart=SteadyClock::now();
         const bool ok=renderer->ResolveOldestCapture(captureScratch);
+        captureMs=MillisecondsSince(captureStart);
         pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
         return ok;
     }
@@ -658,7 +1524,9 @@ struct ProductionEvaluatorAdapter {
     static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Rgba;}
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
-    void ResetTemporal(){guides.Reset();forceReset=true;DiscardPending();}
+    void ResetTemporal(){guides.Reset();DiscardPending();}
+    NeuralRenderFailure LastFailure()const{return lastFailure;}
+    uint64_t PeakLocalVideoMemoryMiB()const{return renderer?renderer->PeakLocalVideoMemoryMiB():0;}
 };
 
 // WriteFrame pushes a whole frame, over 30 MB at 4K, into ffmpeg's stdin and blocks
@@ -693,6 +1561,8 @@ struct ProductionEncoderAdapter {
         worker=std::jthread([this](std::stop_token workerStop){WorkerLoop(workerStop);});
         return EncodeError::None;
     }
+
+    EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder.WriteFrame(frame,stop);}
 
     EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
         std::unique_lock lock(mutex);
@@ -740,6 +1610,9 @@ struct ProductionEncoderAdapter {
         encoder.Cancel();
     }
 
+    // One fresh ffmpeg pipe per segment; a single-file job never calls this.
+    std::unique_ptr<ProductionEncoderAdapter> Create(){return std::make_unique<ProductionEncoderAdapter>();}
+
 private:
     void StopWorker(){
         {std::lock_guard lock(mutex);draining=true;}
@@ -780,21 +1653,68 @@ std::filesystem::path ModuleDirectory()
     if(!length||length>=path.size())return {};path.resize(length);return std::filesystem::path(path).parent_path();
 }
 
-std::string ReadLogSegment(const std::filesystem::path& path,uintmax_t offset)
+#endif
+
+} // namespace
+
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+namespace {
+
+uint64_t FileTimeValue(const FILETIME& time)
+{
+    ULARGE_INTEGER value{};value.LowPart=time.dwLowDateTime;value.HighPart=time.dwHighDateTime;
+    return value.QuadPart;
+}
+
+uint64_t ProcessStartFileTime()
+{
+    FILETIME creation{},exit{},kernel{},user{};
+    if(!GetProcessTimes(GetCurrentProcess(),&creation,&exit,&kernel,&user))return 0;
+    return FileTimeValue(creation);
+}
+
+std::optional<uint64_t> LastWriteFileTime(const std::filesystem::path& path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA attributes{};
+    if(!GetFileAttributesExW(path.c_str(),GetFileExInfoStandard,&attributes))return std::nullopt;
+    return FileTimeValue(attributes.ftLastWriteTime);
+}
+
+} // namespace
+
+std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& runtimeDirectory)
+{
+    // ReShade truncates its log when the proxy loads, and rotates to
+    // ReShade.log1 when ReShade.log is still held. A file last written before
+    // this process started belongs to an earlier session and must never be
+    // read as evidence.
+    static const uint64_t started=ProcessStartFileTime();
+    std::filesystem::path best;uint64_t newest=0;
+    for(const wchar_t* name:{L"ReShade.log",L"ReShade.log1"}){
+        const std::filesystem::path candidate=runtimeDirectory/name;
+        const auto written=LastWriteFileTime(candidate);
+        if(!written||*written<started)continue;
+        if(best.empty()||*written>newest){best=candidate;newest=*written;}
+    }
+    return best;
+}
+
+std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
-    uintmax_t lastSegmentSize=std::numeric_limits<uintmax_t>::max();
+    uintmax_t lastSize=std::numeric_limits<uintmax_t>::max();
     int stableSamples=0;
     for(int attempt=0;attempt<20;++attempt){
-        std::error_code error;const auto size=std::filesystem::file_size(path,error);
-        if(!error&&size>=offset&&size-offset<=Limit){
-            const uintmax_t segmentSize=size-offset;
+        const std::filesystem::path path=ResolveNeuralRuntimeLogPath(runtimeDirectory);
+        std::error_code error;
+        const auto size=path.empty()?uintmax_t{0}:std::filesystem::file_size(path,error);
+        if(!path.empty()&&!error&&size<=Limit){
             std::ifstream input(path,std::ios::binary);
-            if(input){input.seekg(static_cast<std::streamoff>(offset));
+            if(input){
                 latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
                 const auto evidence=ParseNeuralRuntimeEvidence(latest);
-                stableSamples=segmentSize==lastSegmentSize?stableSamples+1:1;
-                lastSegmentSize=segmentSize;
+                stableSamples=size==lastSize?stableSamples+1:1;
+                lastSize=size;
                 if((evidence.Valid()||evidence.laterFailure)&&stableSamples>=3)return latest;
             }
         }
@@ -804,7 +1724,6 @@ std::string ReadLogSegment(const std::filesystem::path& path,uintmax_t offset)
 }
 #endif
 
-} // namespace
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment)
 {
@@ -832,28 +1751,35 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 OfflineNeuralRenderer::OfflineNeuralRenderer(
     IFrameSource& source,INeuralFrameEvaluator& evaluator,IFrameEncoder& encoder,
-    std::function<std::string()> evidenceProvider,Clock clock)
+    std::function<std::string()> evidenceProvider,Clock clock,std::function<bool()> paused,
+    std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory)
     : testSource_(&source),testEvaluator_(&evaluator),testEncoder_(&encoder),
-      testEvidenceProvider_(std::move(evidenceProvider)),testClock_(std::move(clock)) {}
+      testEvidenceProvider_(std::move(evidenceProvider)),testClock_(std::move(clock)),
+      testPaused_(std::move(paused)),testEncoderFactory_(std::move(encoderFactory)) {}
 #endif
 
 NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request,
-                                               ProgressCallback progress,std::stop_token stop)
+                                               ProgressCallback progress,std::stop_token stop,
+                                               const NeuralSegmentSink& segments)
 {
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     if(!testSource_||!testEvaluator_||!testEncoder_||!testEvidenceProvider_)
-        return NeuralRenderResult{.detail=L"Offline renderer test dependencies are incomplete."};
+        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+                                  .detail=L"Offline renderer test dependencies are incomplete."};
     TestSourceAdapter source{*testSource_};TestEvaluatorAdapter evaluator{*testEvaluator_};
-    TestEncoderAdapter encoder{*testEncoder_};
+    TestEncoderAdapter encoder{testEncoder_,{},testEncoderFactory_};
     const Clock clock=testClock_?testClock_:[]{return SteadyClock::now();};
+    const std::function<bool()> paused=testPaused_?testPaused_:[]{return false;};
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-                  testEvidenceProvider_,clock);
+                  testEvidenceProvider_,clock,paused,segments);
 #else
-    const auto logPath=ModuleDirectory()/L"ReShade.log";std::error_code error;
-    uintmax_t logOffset=std::filesystem::file_size(logPath,error);if(error)logOffset=0;
+    const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-        [logPath,logOffset]{return ReadLogSegment(logPath,logOffset);},
-        []{return SteadyClock::now();});
+        [runtimeDirectory]{return ReadNeuralRuntimeSessionLog(runtimeDirectory);},
+        []{return SteadyClock::now();},
+        [pauseEvent=request.pauseEvent]{
+            return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
+        },segments);
 #endif
 }

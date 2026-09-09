@@ -14,14 +14,14 @@ Off and On, then watch uninterrupted playback with it left On. 1080p H.264 MP4;
 intentionally silent.
 [Capture details and edit source](docs/media/README.md).
 
-**v0.14.1 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.14.1)
+**v0.15.0 experimental release.** [Download the Windows build](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.15.0)
 with recent-video caching, settings snapshots, MKV export and highest-bitrate
 YouTube selection. See the [changelog](CHANGELOG.md).
 
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.14.1 used an RTX 5090.
+> components. Hardware verification for v0.15.0 used an RTX 5090.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -31,7 +31,8 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 - **Replay recent videos.** The last five distinct videos persist across
   launches. Acquired YouTube sources and neural renders are reused after validation.
 - **Keep experiments consistent.** Neural settings are saved with each render
-  and included in its cache identity. A settings change triggers a new render.
+  and included in its cache identity. With playback paused, a settings change
+  re-renders that frame so the choice is made on the picture itself.
 - **Take the result with you.** Export processed photos as PNG/JPEG, animations
   as GIF, or videos as MP4/MKV. MKV preserves available source audio, compatible
   subtitles and chapters without re-encoding.
@@ -48,16 +49,17 @@ YouTube selection. See the [changelog](CHANGELOG.md).
    driver. The experimental neural layout requires the separately supplied
    runtime described in [setup](docs/DLSS5_SETUP.md).
 2. [Build the current source](docs/BUILDING.md), or download the
-   [v0.14.1 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.14.1)
+   [v0.15.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.15.0)
    if you have repository access. GitHub's source ZIP is not a runnable package.
 3. Extract a packaged build into a **new folder** and keep all helpers and
    `neural-runtime/` intact. Launch `DLSSVideoPlayer.exe`.
 4. Open a local file (`Ctrl+O`), paste a public YouTube URL (`Ctrl+L`), or choose
    **File > Game trailers**.
-5. Let preparation finish. Press `D` to compare neural and original views;
-   enable **DLSS Upscaling** separately if desired.
-6. Reopen through **File > Recent videos**, or choose **File > Export processed
-   media** to save the prepared result.
+5. Press `D` to turn neural rendering on from the playhead: the picture waits a
+   few seconds for its buffer, then plays rendered. Use **Video > Compare** for
+   blend, split or wipe; enable **DLSS Upscaling** separately if desired.
+6. Reopen through **File > Recent videos**, or use **DLSS > Convert & save** to
+   convert a clip or the whole video and write it to a file.
 
 The publishable core package has fewer capabilities than the complete experimental
 layout. Build inputs and package contents are explained in [Building](docs/BUILDING.md).
@@ -68,15 +70,23 @@ layout. Build inputs and package contents are explained in [Building](docs/BUILD
 | --- | --- |
 | Open a local file / YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
-| Compare original and neural views | `D` |
-| Seek / step a paused cached frame | Timeline or `Left` / `Right`; `.` to step |
+| Compare original and neural views | **Video > Compare** for blend, split, wipe (`[` / `]`, drag) and `Z` zoom |
+| Seek / step a paused cached frame | Timeline, or `Left` / `Right` for ten seconds; `.` to step one frame |
+| Mark In / Out, exact timecode | `I` / `O`, `Shift+I` to clear; `Ctrl+G` |
+| Turn neural rendering on while watching | `D` or the Neural Rendering button; it renders from the playhead and buffers |
+| Convert part or all of a video to a file | `F` one frame, `Shift+F` four seconds, `Ctrl+R` the marked clip, **DLSS > Convert & save** |
+| Neural model and guide settings | `Ctrl+N` |
 | Volume / mute | Volume control or mouse wheel; `M` to mute |
 | Fit or fill / fullscreen | `A` / `F11` |
 | Image adjustments | `Ctrl+E` |
-| Replay / export | **File > Recent videos / Export cached video** |
+| Stop playback | `S` |
+| Debug views (final, DLSS input, motion vectors, depth) | `1` / `2` / `3` / `4`, or **Video** |
+| Re-hook the runtime | `F6` |
+| Replay / save | **File > Recent videos** / **DLSS > Convert & save** |
 
-Volume, mute, fit/fill, comparison view, upscaling preference/output, YouTube
-quality and image adjustments are saved across launches.
+Volume, mute, fit/fill, comparison view and mode, upscaling preference/output,
+YouTube quality, image adjustments, neural settings and guide switches are saved
+across launches.
 
 | Setting | Fresh-install default |
 | --- | --- |
@@ -117,6 +127,22 @@ toggle, not a claim that every source gains visible detail.
 
 </details>
 
+### Faces from three more trailers
+
+Same source pixels either side, no scaling or retouching, neural settings at
+their defaults. The right half of each figure is a real render from the shipping
+worker, not a mock-up.
+
+![Hellblade II close-up, original beside the neural render](docs/screenshots/current/face-hellblade.png)
+
+![Cyberpunk 2077 Phantom Liberty close-up, original beside the neural render](docs/screenshots/current/face-cyberpunk.png)
+
+![Mafia The Old Country close-up, original beside the neural render](docs/screenshots/current/face-mafia.png)
+
+The differences are subtle and content-dependent: skin shading and fine texture
+move, silhouettes and framing do not. Judge a source on its own preview rather
+than on these.
+
 <details>
 <summary>Start screen</summary>
 
@@ -128,8 +154,11 @@ toggle, not a claim that every source gains visible detail.
 
 ## Limits to know
 
-- Neural rendering prepares the complete video before playback. Processing time
-  and results vary by source and hardware; this is not real-time neural rendering.
+- Neural rendering runs either as a cached render you play beside the original,
+  or behind live playback from the playhead. On an RTX 5090 it keeps up with
+  sources up to 4K30 (measured 1.165x real time in the player) and buffers when
+  it cannot; heavier sources are refused with the predicted rate. Processing
+  time and results vary by source and hardware.
 - Motion and depth guides are estimated from video. Artifacts are possible;
   RTX 40 neural compatibility has not been hardware-verified for this build.
 - Export copies the cached 8-bit video. Playback adjustments and runtime upscaling

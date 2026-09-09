@@ -61,8 +61,12 @@ struct VideoDecoderTestAccess {
         const std::filesystem::path& helperDirectory,
         std::chrono::milliseconds probeTimeout = std::chrono::milliseconds{250},
         std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120},
-        VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None)
+        VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None,
+        bool resetAcceleration = true)
     {
+        // Dead hardware paths are remembered process-wide; a test decoder starts
+        // from a clean slate unless it is checking exactly that memory.
+        if(resetAcceleration)VideoDecoder::ResetAccelerationAvailabilityForTesting();
         VideoDecoder::Settings settings;
         settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
         return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
@@ -768,13 +772,12 @@ void player_status_formats_exact_runtime_and_playback_states_test()
 
 void playback_timeline_follows_the_presented_frame_test()
 {
-    CHECK_EQ(12.0, playback_timing::TimelinePosition(
-        false, 0.0, false, 0.0, 12.0, 12.08));
-    CHECK_EQ(12.0, playback_timing::PausePosition(12.0, 12.08));
-    CHECK_EQ(18.0, playback_timing::TimelinePosition(
-        true, 18.0, false, 0.0, 12.0, 12.08));
-    CHECK_EQ(24.0, playback_timing::TimelinePosition(
-        false, 0.0, true, 24.0, 12.0, 12.08));
+    // A drag previews, a pending seek shows its target, and otherwise the
+    // timeline and a pause both report the frame that was last presented.
+    CHECK_EQ(12.0, playback_timing::TimelinePosition(false, 0.0, false, 0.0, 12.0));
+    CHECK_EQ(12.0, playback_timing::PausePosition(12.0));
+    CHECK_EQ(18.0, playback_timing::TimelinePosition(true, 18.0, false, 0.0, 12.0));
+    CHECK_EQ(24.0, playback_timing::TimelinePosition(false, 0.0, true, 24.0, 12.0));
 }
 
 void playback_lateness_is_bounded_to_one_and_a_half_frames_test()
@@ -1145,18 +1148,110 @@ void debug_view_popup_contains_all_existing_views_and_selection_test()
 {
     const HMENU menu = app_menu::CreateDebugViewMenu(app_menu::IDM_VIEW_DEPTH);
     CHECK(menu != nullptr);
-    CHECK_EQ(5, menu ? GetMenuItemCount(menu) : 0);
+    CHECK_EQ(4, menu ? GetMenuItemCount(menu) : 0);
     std::vector<MenuEntry> entries;
     if (menu) collect_menu_entries(menu, entries);
     CHECK(has_menu_entry(entries, L"Final output\t1", app_menu::IDM_VIEW_FINAL));
     CHECK(has_menu_entry(entries, L"DLSS input\t2", app_menu::IDM_VIEW_INPUT));
     CHECK(has_menu_entry(entries, L"Motion vectors\t3", app_menu::IDM_VIEW_MV));
     CHECK(has_menu_entry(entries, L"Depth\t4", app_menu::IDM_VIEW_DEPTH));
-    CHECK(has_menu_entry(entries, L"Bias mask\t5", app_menu::IDM_VIEW_MASK));
     for (const auto& entry : entries) {
         if (entry.command == app_menu::IDM_VIEW_DEPTH) CHECK((entry.state & MFS_CHECKED) != 0);
         else CHECK((entry.state & MFS_CHECKED) == 0);
     }
+    if (menu) DestroyMenu(menu);
+}
+
+void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    std::vector<MenuEntry> entries;
+    if (menu) collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Mark In\tI", app_menu::IDM_MARK_IN));
+    CHECK(has_menu_entry(entries, L"Mark Out\tO", app_menu::IDM_MARK_OUT));
+    CHECK(has_menu_entry(entries, L"Clear Marks\tShift+I / Shift+O", app_menu::IDM_CLEAR_MARKS));
+    CHECK(has_menu_entry(entries, L"Go to timecode...\tCtrl+G", app_menu::IDM_GOTO_TIMECODE));
+    CHECK(has_menu_entry(entries, L"Pause neural render\tSpace", app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(has_menu_entry(entries, L"Preview this frame (neural)\tF", app_menu::IDM_PREVIEW_FRAME));
+    CHECK(has_menu_entry(entries, L"Preview 4 s clip (neural)\tShift+F", app_menu::IDM_PREVIEW_CLIP));
+    // Conversion writes a file; it lives in its own submenu beside saving.
+    CHECK(has_menu_entry(entries, L"Convert marked clip to neural video\tCtrl+R", app_menu::IDM_RENDER_RANGE));
+    CHECK(has_menu_entry(entries, L"Convert whole video to neural video", app_menu::IDM_RENDER_WHOLE));
+    CHECK(has_menu_entry(entries, L"Save converted video...", app_menu::IDM_EXPORT_CACHED_VIDEO));
+    CHECK(has_menu_entry(entries, L"Cancel saving", app_menu::IDM_CANCEL_EXPORT));
+    CHECK(has_menu_entry(entries, L"Neural settings...\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
+    CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
+    CHECK(has_menu_entry(entries, L"Zoom 2x\tZ", app_menu::IDM_COMPARE_ZOOM));
+    // Depth is a persisted guide switch in the neural settings dialog now.
+    CHECK(!has_menu_text(entries, L"Estimated / flat depth proxy\tG"));
+    HMENU video = find_top_level_submenu(menu, L"Video");
+    HMENU compare = find_top_level_submenu(video, L"Compare");
+    CHECK(compare != nullptr);
+    std::vector<MenuEntry> compareEntries;
+    if (compare) collect_menu_entries(compare, compareEntries);
+    CHECK(has_menu_entry(compareEntries, L"Neural", app_menu::IDM_COMPARE_NEURAL));
+    CHECK(has_menu_entry(compareEntries, L"Blend", app_menu::IDM_COMPARE_BLEND));
+    CHECK(has_menu_entry(compareEntries, L"Split", app_menu::IDM_COMPARE_SPLIT));
+    CHECK(has_menu_entry(compareEntries, L"Wipe", app_menu::IDM_COMPARE_WIPE));
+    CHECK(has_menu_entry(compareEntries, L"Blend less\t[", app_menu::IDM_COMPARE_BLEND_LESS));
+    CHECK(has_menu_entry(compareEntries, L"Blend more\t]", app_menu::IDM_COMPARE_BLEND_MORE));
+
+    // A fresh bar has nothing loaded: every range, render and compare item is grayed.
+    const auto grayed = [&](UINT command) {
+        return (GetMenuState(menu, command, MF_BYCOMMAND) & (MF_DISABLED | MF_GRAYED)) != 0;
+    };
+    const auto checked = [&](UINT command) {
+        return (GetMenuState(menu, command, MF_BYCOMMAND) & MF_CHECKED) != 0;
+    };
+    for (const UINT command : {app_menu::IDM_MARK_IN, app_menu::IDM_GOTO_TIMECODE, app_menu::IDM_PREVIEW_FRAME,
+                               app_menu::IDM_RENDER_WHOLE, app_menu::IDM_PAUSE_NEURAL_RENDER, app_menu::IDM_OPEN_RENDER_RECEIPT,
+                               app_menu::IDM_COMPARE_BLEND, app_menu::IDM_COMPARE_ZOOM})
+        CHECK(grayed(command));
+    CHECK(checked(app_menu::IDM_COMPARE_NEURAL));
+
+    CHECK(app_menu::UpdateRenderActionAvailability(menu, true, false, true, true, true));
+    CHECK(!grayed(app_menu::IDM_MARK_OUT));
+    CHECK(grayed(app_menu::IDM_PREVIEW_CLIP));
+    CHECK(!grayed(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(checked(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(!grayed(app_menu::IDM_OPEN_RENDER_RECEIPT));
+    CHECK(app_menu::UpdateRenderActionAvailability(menu, true, true, false, true, false));
+    CHECK(!grayed(app_menu::IDM_RENDER_RANGE));
+    CHECK(grayed(app_menu::IDM_PAUSE_NEURAL_RENDER));
+    CHECK(!checked(app_menu::IDM_PAUSE_NEURAL_RENDER)); // No job: a stale pause flag never shows.
+
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_SPLIT, true));
+    CHECK(!grayed(app_menu::IDM_COMPARE_WIPE));
+    CHECK(checked(app_menu::IDM_COMPARE_SPLIT));
+    CHECK(!checked(app_menu::IDM_COMPARE_NEURAL));
+    CHECK(checked(app_menu::IDM_COMPARE_ZOOM));
+    CHECK(app_menu::UpdateComparisonMenu(menu, false, true, 999u, false));
+    CHECK(grayed(app_menu::IDM_COMPARE_SPLIT));
+    CHECK(!grayed(app_menu::IDM_COMPARE_ZOOM)); // Zoom is view-independent.
+    CHECK(checked(app_menu::IDM_COMPARE_NEURAL)); // Unknown selection falls back to Neural.
+    CHECK(!checked(app_menu::IDM_COMPARE_ZOOM));
+
+    using app_menu::CommandForPlayerKey;
+    CHECK(CommandForPlayerKey('I', false, false) == app_menu::IDM_MARK_IN);
+    CHECK(CommandForPlayerKey('O', false, false) == app_menu::IDM_MARK_OUT);
+    CHECK(CommandForPlayerKey('I', false, true) == app_menu::IDM_CLEAR_MARKS);
+    CHECK(CommandForPlayerKey('O', false, true) == app_menu::IDM_CLEAR_MARKS);
+    CHECK(CommandForPlayerKey('G', true, false) == app_menu::IDM_GOTO_TIMECODE);
+    CHECK(CommandForPlayerKey('F', false, false) == app_menu::IDM_PREVIEW_FRAME);
+    CHECK(CommandForPlayerKey('F', false, true) == app_menu::IDM_PREVIEW_CLIP);
+    CHECK(CommandForPlayerKey('R', true, false) == app_menu::IDM_RENDER_RANGE);
+    CHECK(CommandForPlayerKey('N', true, false) == app_menu::IDM_NEURAL_SETTINGS);
+    CHECK(CommandForPlayerKey('Z', false, false) == app_menu::IDM_COMPARE_ZOOM);
+    CHECK(CommandForPlayerKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
+    CHECK(CommandForPlayerKey(VK_OEM_6, false, false) == app_menu::IDM_COMPARE_BLEND_MORE);
+    // Existing single-letter and Ctrl accelerators keep their owners.
+    for (const UINT key : {UINT('D'), UINT('S'), UINT('A'), UINT('M'), UINT('G'), UINT('R'), UINT('N'), UINT(VK_SPACE), UINT(VK_F6)})
+        CHECK(!CommandForPlayerKey(key, false, false).has_value());
+    for (const UINT key : {'O', 'E', 'L', 'I', 'F', 'Z'})
+        CHECK(!CommandForPlayerKey(key, true, false).has_value());
+    CHECK(!CommandForPlayerKey('G', true, true).has_value());
     if (menu) DestroyMenu(menu);
 }
 
@@ -2226,6 +2321,95 @@ void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
     lifecycle.Invalidate();CHECK(!lifecycle.Accept(generation));
     lifecycle.Begin();CHECK(lifecycle.Transition(NeuralPlaybackState::Failed));
     CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+}
+
+void neural_pause_suspends_rendering_and_resumes_without_advancing_test()
+{
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Ready));
+    CHECK_EQ(NeuralPlaybackState::Paused,lifecycle.state);
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+}
+
+void neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test()
+{
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Ready));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Paused));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Validating));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::RetryExhausted));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::OriginalOnly));
+    lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Failed));
+    lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Cancelling));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Idle));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::RetryExhausted));
+    CHECK(!lifecycle.Transition(NeuralPlaybackState::Recovering));
+}
+
+void neural_failure_kind_selects_the_lifecycle_state_test()
+{
+    CHECK_EQ(NeuralPlaybackState::RetryExhausted,StateForFailure(NeuralRenderFailure::RetryExhausted));
+    CHECK_EQ(NeuralPlaybackState::OriginalOnly,StateForFailure(NeuralRenderFailure::Cancelled));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::DeviceRemoved));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::Preflight));
+    CHECK_EQ(NeuralPlaybackState::Failed,StateForFailure(NeuralRenderFailure::WorkerCrashed));
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
+    CHECK(lifecycle.Transition(StateForFailure(NeuralRenderFailure::RetryExhausted)));
+    CHECK_EQ(std::wstring(L"RetryExhausted"),std::wstring(NeuralPlaybackStateName(lifecycle.state)));
+    CHECK_EQ(std::wstring(L"Paused"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Paused)));
+    CHECK_EQ(std::wstring(L"Recovering"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Recovering)));
+}
+
+void neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test()
+{
+    // Phases without a state of their own never move the job.
+    CHECK_EQ(NeuralPlaybackState::Acquiring,StateForProgressPhase(NeuralRenderPhase::CheckingCache,NeuralPlaybackState::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Validating,StateForProgressPhase(NeuralRenderPhase::Ready,NeuralPlaybackState::Validating));
+    CHECK_EQ(NeuralPlaybackState::Acquiring,StateForProgressPhase(NeuralRenderPhase::Preflight,NeuralPlaybackState::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Validating,StateForProgressPhase(NeuralRenderPhase::Validating,NeuralPlaybackState::Rendering));
+    // A worker walking through preflight, decode, pause, resume, a frame retry and
+    // encode lands in exactly the states the UI presents.
+    NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
+    const auto advance=[&](NeuralRenderPhase phase){return lifecycle.Transition(StateForProgressPhase(phase,lifecycle.state));};
+    CHECK(!advance(NeuralRenderPhase::Preflight));
+    CHECK_EQ(NeuralPlaybackState::Acquiring,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Decoding));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Paused));
+    CHECK_EQ(NeuralPlaybackState::Paused,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::NeuralRendering));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Recovering));
+    CHECK_EQ(NeuralPlaybackState::Recovering,lifecycle.state);
+    // A relaunched helper re-acquires while the job is still recovering.
+    CHECK(!advance(NeuralRenderPhase::Acquiring));
+    CHECK_EQ(NeuralPlaybackState::Recovering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Encoding));
+    CHECK_EQ(NeuralPlaybackState::Rendering,lifecycle.state);
+    CHECK(advance(NeuralRenderPhase::Validating));
+    CHECK(!advance(NeuralRenderPhase::Ready));
+    CHECK_EQ(NeuralPlaybackState::Validating,lifecycle.state);
+    CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
 }
 
 void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test()
@@ -3721,6 +3905,37 @@ void video_decoder_hardware_failure_falls_back_to_software_test()
     CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),accelerationOrder);
 }
 
+// A failed hardware path stays failed: the next decoder in the same process
+// launches software directly, which is what keeps a seek to one process start.
+void video_decoder_remembers_dead_hardware_paths_test()
+{
+    MediaFixture fixture;
+    {
+        const auto first=fixture.directory/L"first-order.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",first.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2});
+        CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
+        VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+        for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+            result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline;)
+            {result=decoder->ReadNextAvailable(frame);Sleep(5);}
+        CHECK_EQ(VideoReadResult::FrameReady,result);
+        CHECK_EQ(std::string("cuda\nd3d11va\nsoftware\n"),read_binary_file(first));
+    }
+    // Same process, new decoder, no reset: the two dead paths are skipped.
+    const auto second=fixture.directory/L"second-order.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ACCEL_MARKER",second.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::seconds{2},std::chrono::seconds{2},
+                                                VideoDecoder::FailureStage::None,false);
+    CHECK(decoder->Open(L"https://media.invalid/hardwarefallbackdelayedexit",MediaSourceKind::YouTube));
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+        result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline;)
+        {result=decoder->ReadNextAvailable(frame);Sleep(5);}
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    CHECK_EQ(std::string("software\n"),read_binary_file(second));
+}
+
 void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
 {
     MediaFixture fixture;
@@ -3752,7 +3967,89 @@ void video_decoder_background_queue_is_bounded_to_four_frames_test()
     }
     Sleep(75);
     std::error_code error;produced=std::filesystem::file_size(marker,error);if(error)produced=0;
-    CHECK(produced>=4);CHECK(produced<=6);
+    // Four queued frames plus the two the stdout pipe is sized to hold, so the
+    // child can decode one frame while the reader copies the previous one out.
+    CHECK(produced>=4);CHECK(produced<=7);
+}
+
+// The fake child stamps every frame with its absolute source index, so a seek
+// that keeps the running child can be held to the exact frame a restarting seek
+// hands out - the property the whole optimisation rests on.
+uint32_t stamped_frame_index(const VideoFrame& frame)
+{
+    CHECK_EQ(size_t{16},frame.bgra.size());
+    uint32_t index=0;
+    for(int byte=0;byte<4;++byte)index|=static_cast<uint32_t>(frame.bgra[static_cast<size_t>(byte)])<<(8*byte);
+    return index;
+}
+
+VideoFrame read_one_frame(VideoDecoder& decoder)
+{
+    VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
+    for(const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{5};
+        std::chrono::steady_clock::now()<deadline;){
+        result=decoder.ReadNextAvailable(frame);
+        if(result!=VideoReadResult::NotReady)break;
+        Sleep(1);
+    }
+    CHECK_EQ(VideoReadResult::FrameReady,result);
+    return frame;
+}
+
+void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
+{
+    MediaFixture fixture;
+    const auto expectedTimestamp=[](int64_t frameIndex){
+        return static_cast<int64_t>((static_cast<double>(frameIndex)/30.0)*10000000.0);
+    };
+    // A short forward hop: the child stays, and the frames before the target
+    // are dropped without the caller ever seeing them.
+    auto reused=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(reused->Open(L"seekreuse",MediaSourceKind::LocalFile));
+    CHECK_EQ(uint32_t{0},stamped_frame_index(read_one_frame(*reused)));
+    CHECK(reused->SeekSeconds(0.1));
+    CHECK(reused->LastSeekTiming().reusedChild);
+    const VideoFrame afterReuse=read_one_frame(*reused);
+
+    // The same target reached by rewinding, which can only be served by a
+    // restarted child.
+    auto restarted=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(restarted->Open(L"seekreuse",MediaSourceKind::LocalFile));
+    CHECK(restarted->SeekSeconds(2.0));
+    CHECK(restarted->SeekSeconds(0.1));
+    CHECK(!restarted->LastSeekTiming().reusedChild);
+    const VideoFrame afterRestart=read_one_frame(*restarted);
+
+    CHECK_EQ(uint32_t{3},stamped_frame_index(afterRestart));
+    CHECK(afterReuse.bgra==afterRestart.bgra);
+    CHECK_EQ(afterRestart.timestamp100ns,afterReuse.timestamp100ns);
+    CHECK_EQ(expectedTimestamp(3),afterReuse.timestamp100ns);
+    CHECK_EQ(afterRestart.frameNumber,afterReuse.frameNumber);
+    CHECK_EQ(uint64_t{3},afterReuse.frameNumber);
+    CHECK_EQ(afterRestart.discontinuity,afterReuse.discontinuity);
+
+    // Frame stepping is the smallest forward seek there is: every step keeps the
+    // child and walks exactly one frame.
+    for(int64_t step=4;step<9;++step){
+        CHECK(reused->SeekSeconds(static_cast<double>(step)/30.0));
+        CHECK(reused->LastSeekTiming().reusedChild);
+        const VideoFrame stepped=read_one_frame(*reused);
+        CHECK_EQ(static_cast<uint32_t>(step),stamped_frame_index(stepped));
+        CHECK_EQ(expectedTimestamp(step),stepped.timestamp100ns);
+        CHECK_EQ(static_cast<uint64_t>(step),stepped.frameNumber);
+    }
+
+    // Rewinding cannot be served by a running child.
+    CHECK(reused->SeekSeconds(0.1));
+    CHECK(!reused->LastSeekTiming().reusedChild);
+    CHECK_EQ(uint32_t{3},stamped_frame_index(read_one_frame(*reused)));
+
+    // A hop far enough that decoding to it costs more than a fresh child does.
+    CHECK(reused->SeekSeconds(20.0));
+    CHECK(!reused->LastSeekTiming().reusedChild);
+    const VideoFrame afterLongSeek=read_one_frame(*reused);
+    CHECK_EQ(uint32_t{600},stamped_frame_index(afterLongSeek));
+    CHECK_EQ(expectedTimestamp(600),afterLongSeek.timestamp100ns);
 }
 
 void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test()
@@ -4456,6 +4753,24 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");}
         if(cuda||d3d11){if(delayedExit){CloseHandle(GetStdHandle(STD_OUTPUT_HANDLE));Sleep(75);}return 7;}
         std::cout.write("1234567890abcdef",16);std::cout.flush();return 0;
+    }
+    if(all.find(L"seekreuse")!=std::wstring::npos){
+        // 2x2 BGRA at 30fps, every frame stamped with its absolute source index
+        // so a caller can tell exactly which frame it was handed. Writes go
+        // through the handle: the CRT's text mode would rewrite 0x0A bytes.
+        double seekSeconds=0.0;
+        const size_t at=all.find(L"-ss ");
+        if(at!=std::wstring::npos)try{seekSeconds=std::stod(all.substr(at+4));}catch(...){}
+        uint32_t index=static_cast<uint32_t>(std::llround(seekSeconds*30.0));
+        const HANDLE out=GetStdHandle(STD_OUTPUT_HANDLE);
+        for(int emitted=0;emitted<3000;++emitted,++index){
+            unsigned char frame[16];
+            for(int byte=0;byte<4;++byte)frame[byte]=static_cast<unsigned char>((index>>(8*byte))&0xFFu);
+            for(int byte=4;byte<16;++byte)frame[byte]=static_cast<unsigned char>(index&0xFFu);
+            DWORD written=0;
+            if(!WriteFile(out,frame,sizeof(frame),&written,nullptr)||written!=sizeof(frame))return 0;
+        }
+        Sleep(INFINITE);return 0;
     }
     if(all.find(L"largeburst")!=std::wstring::npos){
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_FRAME_MARKER");
@@ -5221,6 +5536,7 @@ int wmain(int argc, wchar_t* argv[])
     advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
     feature_menu_uses_distinct_controls_and_honest_availability_test();
     debug_view_popup_contains_all_existing_views_and_selection_test();
+    range_preview_and_comparison_menus_route_keys_and_gate_availability_test();
     player_menu_is_english_only_and_retains_advanced_commands_test();
     youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();
     youtube_availability_drives_real_menu_and_idle_action_consistently_test();
@@ -5247,8 +5563,10 @@ int wmain(int argc, wchar_t* argv[])
     youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
     video_decoder_close_releases_a_blocked_blocking_read_test();
     video_decoder_hardware_failure_falls_back_to_software_test();
+    video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
+    video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
     youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();
@@ -5286,6 +5604,10 @@ int wmain(int argc, wchar_t* argv[])
     neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test();
     neural_completion_publishes_only_after_probe_and_manifest_validation_test();
     neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
+    neural_pause_suspends_rendering_and_resumes_without_advancing_test();
+    neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();
+    neural_failure_kind_selects_the_lifecycle_state_test();
+    neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test();
     dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
     source_change_cancels_and_joins_the_owned_job_before_replacement_test();
     youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();

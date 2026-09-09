@@ -48,8 +48,9 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The nine suites cover recent history, settings/cache integrity, real-media
-export, worker protocols, runtime policy, playback and native UI regressions.
+The twelve suites cover recent history, settings/cache integrity, real-media
+export, worker protocols, runtime policy, range selection, frame identity,
+prerender, playback and native UI regressions.
 CTest does not establish GPU compatibility or visual quality. For changes to
 rendering, timing or decoding, also run applicable GPU/media smoke checks from
 the [verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).
@@ -84,13 +85,13 @@ fresh clean build and verifies an explicit file allowlist and manifest:
 
 ```powershell
 ./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix ''
-./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.14.1-win64.zip -PackageSuffix ''
+./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.15.0-win64.zip -PackageSuffix ''
 ```
 
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
-`dlss5-video-player-v0.14.1-win64.zip` name.
+`dlss5-video-player-v0.15.0-win64.zip` name.
 
 `package_release.bat` wraps the complete package with the default `-upscaling`
 suffix. `package_public_release.bat` creates the smaller core package:

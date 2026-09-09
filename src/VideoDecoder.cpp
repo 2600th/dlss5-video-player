@@ -15,6 +15,8 @@
 #include <utility>
 #include <system_error>
 #include <string_view>
+#include <map>
+#include <mutex>
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
@@ -23,6 +25,25 @@ static std::wstring Quote(const std::wstring& s) {
     // Windows filenames cannot contain a literal quote character, so this is
     // sufficient for the executable and video paths used by this player.
     return L"\"" + s + L"\"";
+}
+
+static double ElapsedMs(std::chrono::steady_clock::time_point since) {
+    return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-since).count();
+}
+
+// Index of the first CFR frame at or after a position: exactly the frame
+// ffmpeg's accurate input seek keeps. A position within a thousandth of a
+// frame period of a boundary is that boundary, so the arithmetic agrees with
+// the child for the frame-aligned seeks the player actually issues.
+static int64_t FirstFrameAtOrAfter(double seconds,double fps) {
+    const double index=std::max(0.0,seconds)*std::max(1.0,fps);
+    const double nearest=std::round(index);
+    if(std::abs(index-nearest)<1e-3)return static_cast<int64_t>(nearest);
+    return static_cast<int64_t>(std::ceil(index));
+}
+
+static double SnapToFrameGrid(double seconds,double fps) {
+    return static_cast<double>(FirstFrameAtOrAfter(seconds,fps))/std::max(1.0,fps);
 }
 
 static bool ParseRate(const std::string& text, double& out) {
@@ -78,7 +99,11 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_fps,other.m_fps);swap(m_durationSec,other.m_durationSec);swap(m_displayAspect,other.m_displayAspect);
     swap(m_stillImage,other.m_stillImage);swap(m_gif,other.m_gif);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
-    swap(m_ffmpegFrameIndex,other.m_ffmpegFrameIndex);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
+    swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
+    swap(m_seekTiming,other.m_seekTiming);swap(m_seekStart,other.m_seekStart);swap(m_seekTargetSeconds,other.m_seekTargetSeconds);swap(m_seekTimingPending,other.m_seekTimingPending);
+    swap(m_sourceGeneration,other.m_sourceGeneration);swap(m_restartDiscontinuity,other.m_restartDiscontinuity);
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
 #ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
@@ -128,6 +153,7 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     m_gif = false;
     m_displayAspect = 0.0;
     m_sourceKind = sourceKind;
+    ++m_sourceGeneration;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
 
@@ -303,9 +329,10 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 }
 
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
+    m_hardwareProfile.clear();
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
+        L"-show_entries stream=width,height,codec_name,pix_fmt,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -319,7 +346,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     uint32_t width = 0, height = 0;
     double avgRate = 0.0, rawRate = 0.0, duration = 0.0;
     double videoDuration = 0.0;
-    std::string format;
+    std::string format,codecName,pixelFormat;
     double displayAspect = 0.0, sampleAspect = 1.0;
     std::istringstream in(text);
     std::string line;
@@ -332,6 +359,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         try {
             if (key == "width") width = static_cast<uint32_t>(std::stoul(value));
             else if (key == "format_name") format = value;
+            else if (key == "codec_name" && value != "N/A") codecName = value;
+            else if (key == "pix_fmt" && value != "N/A") pixelFormat = value;
             else if (key == "height") height = static_cast<uint32_t>(std::stoul(value));
             else if (key == "display_aspect_ratio" && value != "N/A") {
                 const size_t c=value.find(':'); if(c!=std::string::npos){ double a=std::stod(value.substr(0,c)), b=std::stod(value.substr(c+1)); if(b>0) displayAspect=a/b; }
@@ -345,6 +374,9 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             else if (key == "duration" && value != "N/A" && duration <= 0.0) duration = std::stod(value);
         } catch (...) {}
     }
+    // ffprobe prints stream entries in its own order, so the key is composed
+    // once both fields are in hand.
+    m_hardwareProfile = codecName.empty() ? pixelFormat : (pixelFormat.empty() ? codecName : codecName + "/" + pixelFormat);
 
     if (!width || !height) {
         LOG("ffprobe returned no usable video dimensions.");
@@ -401,9 +433,92 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     return true;
 }
 
-bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration acceleration) {
-    StopFFmpeg();
+// A hardware path that cannot even start is a property of the codec plus this
+// build's ffmpeg, not of the file: remembering it per codec keeps every later
+// open and every seek from paying for the same dead process launches, while an
+// unsupported codec never downgrades the ones the GPU does handle.
+namespace {
+constexpr unsigned kCudaUnavailable=1u,kD3d11Unavailable=2u;
+std::mutex g_accelerationMemoMutex;
+std::map<std::string,unsigned> g_accelerationMemo;
+
+unsigned UnavailableAccelerations(const std::string& profile)
+{
+    std::scoped_lock lock(g_accelerationMemoMutex);
+    const auto found=g_accelerationMemo.find(profile.empty()?std::string("unknown"):profile);
+    return found==g_accelerationMemo.end()?0u:found->second;
+}
+
+void RememberUnavailableAcceleration(const std::string& profile,unsigned path)
+{
+    const std::string key=profile.empty()?std::string("unknown"):profile;
+    bool added=false;
+    {
+        std::scoped_lock lock(g_accelerationMemoMutex);
+        unsigned& paths=g_accelerationMemo[key];
+        added=(paths&path)==0;
+        paths|=path;
+    }
+    if(added)
+        LOG("Hardware decode path " << (path==kCudaUnavailable?"cuda":"d3d11va")
+            << " is unavailable for " << key << "; later opens and seeks skip it.");
+}
+} // namespace
+
+#ifdef VIDEO_DECODER_TESTING
+void VideoDecoder::ResetAccelerationAvailabilityForTesting()
+{
+    std::scoped_lock lock(g_accelerationMemoMutex);
+    g_accelerationMemo.clear();
+}
+#endif
+
+// The job object carries KILL_ON_JOB_CLOSE, so closing it is what makes the
+// child die; waiting only makes that death observable to the caller.
+static void StopFFmpegChild(HANDLE process,HANDLE job,HANDLE stdoutRead,DWORD waitTimeout) {
+    if (process) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(process, &code) && code == STILL_ACTIVE) {
+            if(job)TerminateJobObject(job,0);else TerminateProcess(process, 0);
+            WaitForSingleObject(process, waitTimeout);
+        }
+        CloseHandle(process);
+    }
+    if(job)CloseHandle(job);
+    if(stdoutRead)CloseHandle(stdoutRead);
+}
+
+bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
+    FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
+    const unsigned unavailable=UnavailableAccelerations(m_hardwareProfile);
+    if(acceleration==FFmpegAcceleration::Cuda&&(unavailable&kCudaUnavailable))
+        acceleration=FFmpegAcceleration::D3D11Va;
+    if(acceleration==FFmpegAcceleration::D3D11Va&&(unavailable&kD3d11Unavailable))
+        acceleration=FFmpegAcceleration::Software;
+    // Teardown is 38ms of a measured 265ms restart seek and the replacement
+    // child does not need the old one gone: hand the old child to a guard that
+    // kills it once the new one is spawned, so its death overlaps the new
+    // child's container reopen instead of delaying it.
+    struct HandedOverChild {
+        VideoDecoder* owner;HANDLE process,job,stdoutRead;
+        ~HandedOverChild(){
+            const auto started=std::chrono::steady_clock::now();
+            StopFFmpegChild(process,job,stdoutRead,0);
+            if(owner->m_seekTimingPending){
+                std::scoped_lock timingLock(owner->m_seekTimingMutex);
+                owner->m_seekTiming.teardownMs=ElapsedMs(started);
+            }
+        }
+    } handedOver{this,m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout};
+    m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
+    m_pendingFrame.clear();m_pendingFrameBytes=0;
     seekSeconds = std::max(0.0, seekSeconds);
+    // Snap to the constant-frame-rate grid the child is forced to emit. An
+    // unaligned -ss leaves ffmpeg's resampler choosing between two neighbouring
+    // source frames for its first output frame and duplicating one soon after,
+    // which both offsets the reconstructed timeline by up to half a frame and
+    // makes the first frame of a seek ambiguous.
+    if(!m_stillImage)seekSeconds=SnapToFrameGrid(seekSeconds,m_fps);
     if (m_stillImage || m_gif) acceleration = FFmpegAcceleration::Software;
     if (m_stillImage) seekSeconds = 0.0;
 
@@ -411,11 +526,17 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
 
+    // A pipe smaller than one frame forces the child to block halfway through
+    // every frame and wait for our copy before it can decode the next one, at a
+    // measured 31ms per 1080p frame against 16ms of decode. Two frames of slack
+    // let decode and copy overlap, which is what makes walking past frames a
+    // cheaper answer than a restart. The read-ahead stays bounded: this is the
+    // only buffer the child gets, plus the four frame queue.
     HANDLE readPipe = nullptr, writePipe = nullptr;
-    // The decoded-frame queue already buffers FrameQueueCapacity frames, so a larger
-    // pipe only duplicates that at nonpaged-pool cost. 16 MiB covers roughly half a 4K
-    // BGRA frame, which is enough to keep ffmpeg from stalling between reads.
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 16 * 1024 * 1024)) {
+    const DWORD pipeBytes=static_cast<DWORD>(std::clamp<size_t>(
+        2u*static_cast<size_t>(m_width)*static_cast<size_t>(m_height)*4u,
+        4u<<20,16u<<20));
+    if (!CreatePipe(&readPipe, &writePipe, &sa, pipeBytes)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
         return false;
     }
@@ -466,6 +587,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
     HANDLE job=CreateJobObjectW(nullptr,nullptr);
     if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
+    const auto spawnStarted=std::chrono::steady_clock::now();
     const BOOL ok = job&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
@@ -498,14 +620,21 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
         return false;
     }
 
+    const double spawnMs=ElapsedMs(spawnStarted);
     CloseHandle(pi.hThread);
     m_ffmpegProcess = pi.hProcess;
     m_ffmpegStdout = readPipe;
     m_ffmpegJob = job;
-    m_ffmpegFrameIndex = 0;
+    m_ffmpegEmittedFrames = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
+    m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_fps);
     m_ffmpegAcceleration = acceleration;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
+    m_restartDiscontinuity = false;
+    if(m_seekTimingPending){
+        std::scoped_lock timingLock(m_seekTimingMutex);
+        m_seekTiming.spawnMs=spawnMs;
+    }
     const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
         acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
     LOG("FFmpeg raw BGRA process started with " << accelerationName << ".");
@@ -513,17 +642,8 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, FFmpegAcceleration accelerati
 }
 
 void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
-    if (m_ffmpegProcess) {
-        DWORD code = 0;
-        if (GetExitCodeProcess(m_ffmpegProcess, &code) && code == STILL_ACTIVE) {
-            if(m_ffmpegJob)TerminateJobObject(m_ffmpegJob,0);else TerminateProcess(m_ffmpegProcess, 0);
-            WaitForSingleObject(m_ffmpegProcess, waitTimeout);
-        }
-        CloseHandle(m_ffmpegProcess);
-        m_ffmpegProcess = nullptr;
-    }
-    if(m_ffmpegJob){CloseHandle(m_ffmpegJob);m_ffmpegJob=nullptr;}
-    if (m_ffmpegStdout) {CloseHandle(m_ffmpegStdout);m_ffmpegStdout = nullptr;}
+    StopFFmpegChild(m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout,waitTimeout);
+    m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
     m_pendingFrame.clear();m_pendingFrameBytes=0;
 }
 
@@ -542,16 +662,37 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     return StartFFmpeg(0.0,initialAcceleration);
 }
 
+// Position on the current timeline of the next frame the child will emit. The
+// child emits headerless rawvideo, so this arithmetic is the only position the
+// decoder has, and it has to survive a seek that keeps the child running.
+double VideoDecoder::FFmpegHeadSeconds() const {
+    const int64_t timelineFrame=m_ffmpegSpawnFirstFrame+
+        static_cast<int64_t>(m_ffmpegEmittedFrames)-m_ffmpegFirstSourceFrame;
+    return static_cast<double>(m_ffmpegSeekBase100ns)*1e-7+
+        static_cast<double>(timelineFrame)/std::max(1.0,m_fps);
+}
+
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     if (exitCode == 0 || exitCode == STILL_ACTIVE || m_ffmpegAcceleration == FFmpegAcceleration::Software)
         return false;
+    // A path that dies before its first frame cannot decode this codec here, so
+    // later opens skip it. One that fails after delivering frames is a stream or
+    // position problem and must not disqualify the hardware for everything else.
+    if(m_ffmpegEmittedFrames==0)
+        RememberUnavailableAcceleration(m_hardwareProfile,
+            m_ffmpegAcceleration==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
-    const double resumeSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
-        static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
+    const double resumeSeconds = FFmpegHeadSeconds();
     LOG("FFmpeg hardware path exited with code " << exitCode << "; trying " <<
         (next == FFmpegAcceleration::D3D11Va ? "D3D11VA" : "software") << " fallback.");
-    return StartFFmpeg(resumeSeconds, next);
+    if (!StartFFmpeg(resumeSeconds, next)) return false;
+    // The resumed process starts a fresh timeline segment: frames already
+    // handed out belong to the previous decoder session and must not pair or
+    // share temporal history with the first resumed frame.
+    ++m_sourceGeneration;
+    m_restartDiscontinuity = true;
+    return true;
 }
 
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
@@ -560,8 +701,7 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
 
 VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
     if (!m_pendingFrameBytes) return VideoReadResult::EndOfStream;
-    const double completedSeconds = static_cast<double>(m_ffmpegSeekBase100ns) * 1e-7 +
-        static_cast<double>(m_ffmpegFrameIndex) / std::max(1.0, m_fps);
+    const double completedSeconds = FFmpegHeadSeconds();
     const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_fps));
     if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_durationSec > 0.0 &&
         completedSeconds + endTolerance >= m_durationSec) {
@@ -570,7 +710,7 @@ VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
         return VideoReadResult::EndOfStream;
     }
     LOG("FFmpeg ended in the middle of a raw video frame. exitCode="<<exitCode
-        <<" frameIndex="<<m_ffmpegFrameIndex<<" pendingBytes="<<m_pendingFrameBytes);
+        <<" emittedFrames="<<m_ffmpegEmittedFrames<<" pendingBytes="<<m_pendingFrameBytes);
     return VideoReadResult::Error;
 }
 
@@ -578,28 +718,43 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
     const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
     if (!frameBytes) return VideoReadResult::Error;
+  for(;;){
     if(stop.stop_requested())return VideoReadResult::Cancelled;
     if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();}
 
+    // Drain whatever the child has produced, rather than one chunk per call.
+    // Returning after a single 4 MiB read made the caller sleep once per chunk:
+    // an 8.3 MB 1080p frame cost three polls and two sleeps, which measured as
+    // 12.7 ms of the 15.2 ms per frame, and a 33 MB 4K frame cost eight. The
+    // loop never blocks - it stops as soon as the pipe is empty - so the stall,
+    // cancellation and child-exit paths below are reached exactly as before.
     DWORD available=0;
-    if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
-        if(GetLastError()!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
-        // A child can close stdout just before its process handle becomes signaled.
-        // Treat that short interval as an empty pipe so the existing nonblocking
-        // exit/fallback path below observes the eventual exit code.
-        available=0;
-    }
-    DWORD got=0;
-    if(available>0){
+    for(;;){
+        if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
+            if(GetLastError()!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+            // A child can close stdout just before its process handle becomes signaled.
+            // Treat that short interval as an empty pipe so the existing nonblocking
+            // exit/fallback path below observes the eventual exit code.
+            available=0;
+        }
+        if(!available||m_pendingFrameBytes>=frameBytes)break;
         const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{16u<<20}}));
-        if(want&&!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
-        if(got){m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();}
+        DWORD got=0;
+        if(!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
+        if(!got)break;
+        m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();
+        if(m_seekTimingPending){
+            std::scoped_lock timingLock(m_seekTimingMutex);
+            if(m_seekTiming.firstByteMs<0.0)m_seekTiming.firstByteMs=ElapsedMs(m_seekStart);
+        }
+        if(stop.stop_requested())return VideoReadResult::Cancelled;
     }
 
     if(m_pendingFrameBytes<frameBytes){
         if(stop.stop_requested())return VideoReadResult::Cancelled;
         if(m_sourceKind==MediaSourceKind::YouTube&&std::chrono::steady_clock::now()-m_lastFrameByte>=m_networkStallTimeout){
-            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);return VideoReadResult::Stalled;
+            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);
+            PublishSeekTiming(false);return VideoReadResult::Stalled;
         }
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
             DWORD remaining=0;
@@ -607,26 +762,43 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
                 return VideoReadResult::NotReady;
             DWORD exitCode=1;GetExitCodeProcess(m_ffmpegProcess,&exitCode);
             if(TryNextFFmpegAcceleration(exitCode))return VideoReadResult::NotReady;
-            return ClassifyFFmpegEnd(exitCode);
+            const VideoReadResult end=ClassifyFFmpegEnd(exitCode);
+            PublishSeekTiming(false);
+            return end;
         }
         return VideoReadResult::NotReady;
     }
 
-    out.bgra.swap(m_pendingFrame);m_pendingFrame.clear();m_pendingFrameBytes=0;
+    const int64_t sourceFrame=m_ffmpegSpawnFirstFrame+static_cast<int64_t>(m_ffmpegEmittedFrames);
+    ++m_ffmpegEmittedFrames;
+    m_pendingFrameBytes=0;
+    // A forward seek that kept this child walks past the frames before its
+    // target right here, on whichever thread is already reading the pipe: the
+    // seek call itself never waits for them and the caller never sees them.
+    // The buffer stays put, so skipping costs nothing but the pipe read.
+    if(sourceFrame<m_ffmpegFirstSourceFrame)continue;
 
+    out.bgra.swap(m_pendingFrame);m_pendingFrame.clear();
+    const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
     out.timestamp100ns = m_ffmpegSeekBase100ns +
-        static_cast<int64_t>((static_cast<double>(m_ffmpegFrameIndex) / m_fps) * 10000000.0);
-    out.discontinuity = (m_ffmpegFrameIndex == 0 && m_ffmpegSeekBase100ns != 0);
-    ++m_ffmpegFrameIndex;
+        static_cast<int64_t>((static_cast<double>(timelineFrame) / m_fps) * 10000000.0);
+    out.discontinuity = (timelineFrame == 0 && (m_ffmpegSeekBase100ns != 0 || m_restartDiscontinuity));
+    out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(out.timestamp100ns) * m_fps * 1e-7));
+    out.sourceGeneration = m_sourceGeneration;
+    m_restartDiscontinuity = false;
+    PublishSeekTiming(true);
     return VideoReadResult::FrameReady;
+  }
 }
 
-void VideoDecoder::StartFrameQueue() {
+void VideoDecoder::StartFrameQueue(QueueBuffer buffered) {
     if (m_backend != Backend::FFmpeg || m_frameThread.joinable()) return;
     {
         std::lock_guard lock(m_frameMutex);
-        m_frameQueue.clear();
-        m_frameTerminal = VideoReadResult::NotReady;
+        if(buffered==QueueBuffer::Discard){
+            m_frameQueue.clear();
+            m_frameTerminal = VideoReadResult::NotReady;
+        }
         m_frameQueueEnabled = true;
     }
     try {
@@ -638,15 +810,17 @@ void VideoDecoder::StartFrameQueue() {
     }
 }
 
-void VideoDecoder::StopFrameQueue() {
+void VideoDecoder::StopFrameQueue(QueueBuffer buffered) {
     // Publish the shutdown and wake blocked readers BEFORE the queue thread goes away.
     // FrameQueueLoop exits on its own stop token without setting a terminal state, so a
     // reader parked in ReadNextBlocking would otherwise keep waiting on a predicate that
     // can never become true again. ReadNext runs on the UI message pump for local files.
+    // A seek (QueueBuffer::Keep) starts a replacement thread right away and judges child
+    // reuse against the terminal state, so only a permanent stop marks Cancelled here.
     {
         std::lock_guard lock(m_frameMutex);
         m_frameQueueEnabled = false;
-        m_frameTerminal = VideoReadResult::Cancelled;
+        if (buffered == QueueBuffer::Discard) m_frameTerminal = VideoReadResult::Cancelled;
     }
     m_frameCv.notify_all();
     if (m_frameThread.joinable()) {
@@ -655,10 +829,12 @@ void VideoDecoder::StopFrameQueue() {
         m_frameThread.join();
     }
     std::lock_guard lock(m_frameMutex);
-    m_frameQueue.clear();
-    // m_frameTerminal deliberately keeps the Cancelled state. StartFrameQueue resets it.
-    // Clearing it back to NotReady here would re-arm the wedge for a reader that has not
-    // observed the shutdown yet.
+    if (buffered == QueueBuffer::Discard) {
+        m_frameQueue.clear();
+        // m_frameTerminal deliberately keeps the Cancelled state. StartFrameQueue resets it.
+        // Clearing it back to NotReady here would re-arm the wedge for a reader that has not
+        // observed the shutdown yet.
+    }
 }
 
 void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
@@ -673,9 +849,14 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
         const VideoReadResult result = ReadNextFFmpegProcessAvailable(frame, stop);
         if (result == VideoReadResult::FrameReady) {
             std::lock_guard lock(m_frameMutex);
-            if (stop.stop_requested()) break;
+            // Keep the frame even when a stop lands between reading and
+            // queueing it: it has already been taken out of the pipe and
+            // counted, so dropping it would leave the position bookkeeping
+            // claiming a frame the caller never got, and a seek that reuses
+            // this child would then hand out the frame before its target.
             m_frameQueue.push_back(std::move(frame));
             m_frameCv.notify_all();
+            if (stop.stop_requested()) break;
         } else if (result == VideoReadResult::NotReady) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } else if (result != VideoReadResult::Cancelled) {
@@ -702,32 +883,6 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
         }
     }
     return ReadNextFFmpegProcessAvailable(out,stop);
-}
-
-bool VideoDecoder::SetDecodeSize(uint32_t width, uint32_t height) {
-    if (m_backend != Backend::FFmpeg || !m_nativeWidth || !m_nativeHeight) return false;
-    width = std::max(2u, width & ~1u);
-    height = std::max(2u, height & ~1u);
-    width = std::min(width, m_nativeWidth & ~1u);
-    height = std::min(height, m_nativeHeight & ~1u);
-    if (!width || !height) return false;
-    if (width == m_width && height == m_height) return true;
-
-    const bool restartQueue=m_frameQueueEnabled;
-    if(restartQueue)StopFrameQueue();
-    const uint32_t oldW=m_width, oldH=m_height;
-    m_width=width; m_height=height; m_stride=static_cast<int32_t>(m_width*4u);
-    if (StartFFmpeg(0.0)) {
-        if(restartQueue)StartFrameQueue();
-        LOG("FFmpeg realtime decode scale: " << m_nativeWidth << "x" << m_nativeHeight << " -> " << m_width << "x" << m_height);
-        return true;
-    }
-
-    LOG("FFmpeg decode downscale failed; restoring native decode size.");
-    m_width=oldW; m_height=oldH; m_stride=static_cast<int32_t>(m_width*4u);
-    const bool restored=StartFFmpeg(0.0);
-    if(restartQueue&&restored)StartFrameQueue();
-    return restored;
 }
 
 bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
@@ -842,6 +997,8 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
 
         out.timestamp100ns = timestamp;
         out.discontinuity = (flags & MF_SOURCE_READERF_STREAMTICK) != 0;
+        out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_fps * 1e-7));
+        out.sourceGeneration = m_sourceGeneration;
         return true;
     }
 }
@@ -895,14 +1052,149 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
     return VideoReadResult::Error;
 }
 
+VideoDecoder::SeekTiming VideoDecoder::LastSeekTiming() const {
+    std::scoped_lock timingLock(m_seekTimingMutex);
+    return m_seekTiming;
+}
+
+// One line per seek, emitted once the seek's outcome is known: the four parts a
+// seek can spend time in are the only way to tell a slow container reopen from
+// a slow process launch, and the reuse decision below is judged against them.
+void VideoDecoder::PublishSeekTiming(bool frameDelivered) {
+    if(!m_seekTimingPending)return;
+    m_seekTimingPending=false;
+    SeekTiming timing;
+    {
+        std::scoped_lock timingLock(m_seekTimingMutex);
+        if(frameDelivered&&m_seekTiming.firstFrameMs<0.0)
+            m_seekTiming.firstFrameMs=ElapsedMs(m_seekStart);
+        timing=m_seekTiming;
+    }
+    // A restart's real cost is the budget every later forward seek is judged
+    // against, so learn it from the restarts this source actually pays for
+    // instead of assuming one number for every codec and resolution. Cheap
+    // restarts have to count quickly and expensive ones slowly: keeping a child
+    // suppresses the very restarts that would correct an overestimate, and an
+    // overestimate is what makes an all-intra source walk past frames it should
+    // have restarted for.
+    if(!timing.reusedChild&&timing.firstFrameMs>0.0)
+        m_restartFirstFrameMs=timing.firstFrameMs<m_restartFirstFrameMs
+            ?0.3*m_restartFirstFrameMs+0.7*timing.firstFrameMs
+            :0.8*m_restartFirstFrameMs+0.2*timing.firstFrameMs;
+    // Likewise the price of walking past a frame: a reused seek that had to
+    // wait for the child measures exactly that.
+    if(timing.reusedChild&&timing.drainedFrames&&timing.firstFrameMs>0.0)
+        m_drainMsPerFrame=0.7*m_drainMsPerFrame+
+            0.3*timing.firstFrameMs/static_cast<double>(timing.drainedFrames);
+    LOG("Seek timing: target="<<std::fixed<<std::setprecision(3)<<m_seekTargetSeconds
+        <<"s mode="<<(timing.reusedChild?"reuse":"restart")
+        <<" teardownMs="<<timing.teardownMs<<" spawnMs="<<timing.spawnMs
+        <<" firstByteMs="<<timing.firstByteMs<<" firstFrameMs="<<timing.firstFrameMs
+        <<" callMs="<<timing.callMs<<" forwardFrames="<<timing.forwardFrames
+        <<" drainedFrames="<<timing.drainedFrames);
+}
+
+// A forward seek only costs the running child the frames it has to walk past.
+// Keeping it skips the expensive parts of a restart - process teardown, the
+// container reopen, hwaccel init and the redecode from the preceding keyframe -
+// so any target the child reaches for less than a restart's measured cost is
+// served here. The frames walked past must never reach the caller, and the
+// frame the caller does get must be the one a restart would have handed out.
+VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
+{
+    if(!m_ffmpegProcess||!m_ffmpegStdout||m_stillImage||m_gif)return SeekReuse::Restart;
+    size_t buffered=0;
+    {
+        std::lock_guard lock(m_frameMutex);
+        // A child that already ended cannot walk anywhere.
+        if(m_frameTerminal!=VideoReadResult::NotReady)return SeekReuse::Restart;
+        buffered=m_frameQueue.size();
+    }
+    const int64_t target=FirstFrameAtOrAfter(seconds,m_fps);
+    // Everything the child has emitted was either handed out or is still
+    // buffered, so this is the next frame the caller can be given.
+    const int64_t nextDeliverable=m_ffmpegSpawnFirstFrame+
+        static_cast<int64_t>(m_ffmpegEmittedFrames)-static_cast<int64_t>(buffered);
+    const int64_t skip=target-nextDeliverable;
+    {
+        std::scoped_lock timingLock(m_seekTimingMutex);
+        m_seekTiming.forwardFrames=skip;
+    }
+    // Rewinding is what keyframes are for: only a restart can go backwards.
+    if(skip<0)return SeekReuse::Restart;
+
+    // Frames already decoded cost nothing to throw away, so only the ones the
+    // child still has to produce are weighed against a restart - plus the
+    // target frame itself, which is normally not decoded yet either.
+    const size_t fromQueue=static_cast<size_t>(std::min<int64_t>(skip,static_cast<int64_t>(buffered)));
+    const int64_t pipeFrames=skip-static_cast<int64_t>(fromQueue);
+    if(static_cast<double>(pipeFrames+1)*m_drainMsPerFrame>=m_restartFirstFrameMs)
+        return SeekReuse::Restart;
+    ++m_sourceGeneration;
+    m_ffmpegSeekBase100ns=static_cast<int64_t>(seconds*10000000.0);
+    // The read path hands out nothing below this and labels everything relative
+    // to it, so the remaining frames before the target are walked past there,
+    // asynchronously, instead of on the seeking thread.
+    m_ffmpegFirstSourceFrame=target;
+    m_restartDiscontinuity=false;
+    size_t relabeled=0;
+    {
+        std::lock_guard lock(m_frameMutex);
+        // Buffered frames were already labelled on the old timeline. Those
+        // before the target go, and the rest are exactly the frames a restart
+        // would have emitted first: relabel them, because everything downstream
+        // pairs and paces on these numbers and must not be able to tell a
+        // reused seek from a restarted one.
+        m_frameQueue.erase(m_frameQueue.begin(),m_frameQueue.begin()+static_cast<std::ptrdiff_t>(fromQueue));
+        for(VideoFrame& frame:m_frameQueue){
+            const int64_t timelineFrame=static_cast<int64_t>(relabeled);
+            frame.timestamp100ns=m_ffmpegSeekBase100ns+
+                static_cast<int64_t>((static_cast<double>(timelineFrame)/m_fps)*10000000.0);
+            frame.discontinuity=(timelineFrame==0&&m_ffmpegSeekBase100ns!=0);
+            frame.frameNumber=static_cast<uint64_t>(std::llround(static_cast<double>(frame.timestamp100ns)*m_fps*1e-7));
+            frame.sourceGeneration=m_sourceGeneration;
+            ++relabeled;
+        }
+    }
+    {
+        std::scoped_lock timingLock(m_seekTimingMutex);
+        m_seekTiming.reusedChild=true;
+        m_seekTiming.drainedFrames=static_cast<uint64_t>(pipeFrames);
+    }
+    m_seekReusedBuffered=relabeled!=0;
+    return SeekReuse::Reused;
+}
+
 bool VideoDecoder::SeekSeconds(double seconds) {
     seconds = std::clamp(seconds, 0.0, std::max(0.0, m_durationSec));
     if (m_backend == Backend::FFmpeg) {
+        const auto seekStarted=std::chrono::steady_clock::now();
         const bool restartQueue=m_frameQueueEnabled;
-        if(restartQueue)StopFrameQueue();
-        const bool started=StartFFmpeg(seconds);
-        if(restartQueue&&started)StartFrameQueue();
-        return started;
+        // The queue thread is the other reader of the pipe and of the position
+        // bookkeeping, so join it before deciding how to serve this seek.
+        if(restartQueue)StopFrameQueue(QueueBuffer::Keep);
+        // Every child is started on the frame grid, so the target is that grid
+        // position: a reused seek then rebases onto exactly the timeline a
+        // restarted one would have produced.
+        const double aligned=m_stillImage?seconds:SnapToFrameGrid(seconds,m_fps);
+        m_seekStart=seekStarted;m_seekTargetSeconds=aligned;
+        {std::scoped_lock timingLock(m_seekTimingMutex);m_seekTiming=SeekTiming{};}
+        m_seekTimingPending=true;
+        const SeekReuse reuse=ReuseRunningChildForSeek(aligned);
+        bool started=true;
+        if(reuse==SeekReuse::Restart){
+            {std::lock_guard lock(m_frameMutex);m_frameQueue.clear();m_frameTerminal=VideoReadResult::NotReady;}
+            started=StartFFmpeg(aligned);
+            if(started)++m_sourceGeneration;
+        }
+        {std::scoped_lock timingLock(m_seekTimingMutex);m_seekTiming.callMs=ElapsedMs(seekStarted);}
+        if(!started){m_seekTimingPending=false;return false;}
+        // A reused child whose target frame was already decoded has finished the
+        // seek right here: no later read will complete the timing line. Publish
+        // before the queue thread exists again, so nothing races for it.
+        if(reuse==SeekReuse::Reused&&m_seekReusedBuffered)PublishSeekTiming(true);
+        if(restartQueue)StartFrameQueue(QueueBuffer::Keep);
+        return true;
     }
     if (m_backend != Backend::MediaFoundation || !m_reader) return false;
 
@@ -916,5 +1208,6 @@ bool VideoDecoder::SeekSeconds(double seconds) {
         LOG("Media Foundation seek failed hr=0x" << std::hex << hr);
         return false;
     }
+    ++m_sourceGeneration;
     return true;
 }

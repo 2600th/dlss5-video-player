@@ -30,6 +30,8 @@ struct ToolbarAvailability {
     bool youtubeAvailable{false};
     bool resolvingYouTube{false};
     bool neuralRenderingAvailable{false};
+    // A render can be started from the playhead even though nothing is cached.
+    bool neuralSessionAvailable{false};
     bool upscalingAvailable{false};
     bool frameGenerationAvailable{false};
 };

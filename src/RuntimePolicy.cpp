@@ -151,13 +151,25 @@ DetectedGpu DetectHighPerformanceGpu()
 
         DXGI_ADAPTER_DESC3 adapterDescription{};
         const HRESULT descriptionResult = adapter->GetDesc3(&adapterDescription);
-        adapter->Release();
         if (FAILED(descriptionResult) || (adapterDescription.Flags & DXGI_ADAPTER_FLAG3_SOFTWARE) != 0) {
+            adapter->Release();
             continue;
         }
-
+        DetectedGpu detected{ClassifyGpu(adapterDescription.VendorId, adapterDescription.Description),
+                             adapterDescription.Description};
+        detected.vendorId = adapterDescription.VendorId;
+        detected.deviceId = adapterDescription.DeviceId;
+        detected.dedicatedVideoMemoryBytes = adapterDescription.DedicatedVideoMemory;
+        LARGE_INTEGER driver{};
+        if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver))) {
+            detected.driverVersion = std::to_wstring(driver.HighPart >> 16) + L'.' +
+                                     std::to_wstring(driver.HighPart & 0xFFFF) + L'.' +
+                                     std::to_wstring(driver.LowPart >> 16) + L'.' +
+                                     std::to_wstring(driver.LowPart & 0xFFFF);
+        }
+        adapter->Release();
         factory->Release();
-        return {ClassifyGpu(adapterDescription.VendorId, adapterDescription.Description), adapterDescription.Description};
+        return detected;
     }
 
     factory->Release();
@@ -289,11 +301,20 @@ bool NeuralPlaybackLifecycle::Transition(NeuralPlaybackState next)
     case NeuralPlaybackState::Acquiring:
         allowed = next == NeuralPlaybackState::Rendering || next == NeuralPlaybackState::Ready ||
                   next == NeuralPlaybackState::OriginalOnly || next == NeuralPlaybackState::Cancelling ||
-                  next == NeuralPlaybackState::Failed;
+                  next == NeuralPlaybackState::Failed || next == NeuralPlaybackState::Recovering;
         break;
     case NeuralPlaybackState::Rendering:
         allowed = next == NeuralPlaybackState::Validating || next == NeuralPlaybackState::Cancelling ||
+                  next == NeuralPlaybackState::Failed || next == NeuralPlaybackState::Paused ||
+                  next == NeuralPlaybackState::Recovering;
+        break;
+    case NeuralPlaybackState::Paused:
+        allowed = next == NeuralPlaybackState::Rendering || next == NeuralPlaybackState::Cancelling ||
                   next == NeuralPlaybackState::Failed;
+        break;
+    case NeuralPlaybackState::Recovering:
+        allowed = next == NeuralPlaybackState::Rendering || next == NeuralPlaybackState::Failed ||
+                  next == NeuralPlaybackState::RetryExhausted || next == NeuralPlaybackState::Cancelling;
         break;
     case NeuralPlaybackState::Validating:
         allowed = next == NeuralPlaybackState::Ready || next == NeuralPlaybackState::OriginalOnly ||
@@ -311,12 +332,57 @@ bool NeuralPlaybackLifecycle::Transition(NeuralPlaybackState next)
                   next == NeuralPlaybackState::Failed;
         break;
     case NeuralPlaybackState::Failed:
+    case NeuralPlaybackState::RetryExhausted:
         allowed = next == NeuralPlaybackState::OriginalOnly || next == NeuralPlaybackState::Acquiring ||
                   next == NeuralPlaybackState::Idle;
         break;
     }
     if (allowed) state = next;
     return allowed;
+}
+
+const wchar_t* NeuralPlaybackStateName(NeuralPlaybackState state) noexcept
+{
+    switch (state) {
+    case NeuralPlaybackState::Idle: return L"Idle";
+    case NeuralPlaybackState::Acquiring: return L"Acquiring";
+    case NeuralPlaybackState::Rendering: return L"Rendering";
+    case NeuralPlaybackState::Validating: return L"Validating";
+    case NeuralPlaybackState::Ready: return L"Ready";
+    case NeuralPlaybackState::OriginalOnly: return L"OriginalOnly";
+    case NeuralPlaybackState::Cancelling: return L"Cancelling";
+    case NeuralPlaybackState::Failed: return L"Failed";
+    case NeuralPlaybackState::Paused: return L"Paused";
+    case NeuralPlaybackState::Recovering: return L"Recovering";
+    case NeuralPlaybackState::RetryExhausted: return L"RetryExhausted";
+    }
+    return L"Unknown";
+}
+
+NeuralPlaybackState StateForFailure(NeuralRenderFailure failure) noexcept
+{
+    switch (failure) {
+    case NeuralRenderFailure::RetryExhausted: return NeuralPlaybackState::RetryExhausted;
+    case NeuralRenderFailure::Cancelled: return NeuralPlaybackState::OriginalOnly;
+    default: return NeuralPlaybackState::Failed;
+    }
+}
+
+NeuralPlaybackState StateForProgressPhase(NeuralRenderPhase phase, NeuralPlaybackState current) noexcept
+{
+    switch (phase) {
+    case NeuralRenderPhase::Acquiring:
+    case NeuralRenderPhase::Preflight: return NeuralPlaybackState::Acquiring;
+    case NeuralRenderPhase::Decoding:
+    case NeuralRenderPhase::NeuralRendering:
+    case NeuralRenderPhase::Encoding: return NeuralPlaybackState::Rendering;
+    case NeuralRenderPhase::Validating: return NeuralPlaybackState::Validating;
+    case NeuralRenderPhase::Paused: return NeuralPlaybackState::Paused;
+    case NeuralRenderPhase::Recovering: return NeuralPlaybackState::Recovering;
+    case NeuralRenderPhase::CheckingCache:
+    case NeuralRenderPhase::Ready: return current;
+    }
+    return current;
 }
 
 void NeuralPlaybackLifecycle::Invalidate()

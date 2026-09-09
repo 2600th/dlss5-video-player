@@ -2,8 +2,10 @@
 
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 struct ConfigUpdate {
     bool ok{false};
@@ -21,13 +23,22 @@ std::string UpdateDisabledAddonsIni(
     std::string_view addonName,
     bool disabled);
 
+// Exact-case [RenoDX.DLSS5] key/value written after the managed contract keys.
+// Keys must be non-empty, trimmed, not start a section or comment, and contain
+// no '='; neither side may contain NUL or line breaks. UpdateNeuralAddonIni
+// throws std::invalid_argument otherwise.
+using NeuralAddonOverride = std::pair<std::string, std::string>;
+
 // Applies the complete RenoDX neural-rendering contract used by this player.
 // Enabling turns hooks and neural uplift on while explicitly keeping RenoDX's
-// own upscaling path off. Disabling only disables the add-on, preserving the
-// user's neural tuning for a later normal launch.
+// own upscaling path off, then writes each override into [RenoDX.DLSS5],
+// replacing an existing exact-case key or appending at the section end.
+// Disabling only disables the add-on, preserving the user's neural tuning for a
+// later normal launch; overrides are not applied while disabling.
 std::string UpdateNeuralAddonIni(
     std::string_view ini,
-    bool enable);
+    bool enable,
+    std::span<const NeuralAddonOverride> overrides = {});
 
 ConfigUpdate EvaluateNeuralAddonConfigUpdate(
     std::string_view previousIni,
@@ -37,7 +48,8 @@ ConfigUpdate EvaluateNeuralAddonConfigUpdate(
 
 ConfigUpdate ConfigureNeuralAddon(
     const std::filesystem::path& iniPath,
-    bool enable);
+    bool enable,
+    std::span<const NeuralAddonOverride> overrides = {});
 
 // Canonical capture settings: neural add-on enable state and all exact-case
 // [RenoDX.DLSS5] entries. Call after ConfigureNeuralAddon(..., true), then again

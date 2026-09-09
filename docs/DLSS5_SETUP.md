@@ -57,7 +57,7 @@ quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
-When the complete experimental layout is active, v0.14.1 defaults to
+When the complete experimental layout is active, v0.15.0 defaults to
 exact 1080p for YouTube Auto and native-resolution DLAA. If exact 1080p is not
 available, Auto uses the highest compatible source up to 4K. Manual source
 choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.
@@ -65,10 +65,12 @@ Within the selected resolution, acquisition prefers the highest advertised
 video bitrate across codecs. Offline DLSS upscaling and RenoDX neural upscaling
 remain off; playback SR follows the separately saved player preference.
 
-Neural rendering finishes before playback. The player materializes a private
+Neural rendering either completes into a cache entry before playback or runs
+behind live playback, publishing finalized segments that playback follows once
+a four-second lead exists. The player materializes a private
 local source when needed, evaluates every frame in timestamp order, reads the
 neural output back from D3D12, encodes with NVENC (or restarts from frame zero
-with software H.264), and probes the completed video. Only a complete schema-3
+with software H.264), and probes the completed video. Only a complete schema-4
 manifest with matching hashes, dimensions, frame count, monotonic source
 timing, video duration, final-frame decode, runtime digest, one captured native
 submission per source frame, the NGX-only inline interception contract armed
@@ -91,8 +93,9 @@ approach documented by [Merserk's visual
 enhancer](https://github.com/Merserk/dlss5-visual-enhancer). It does not import
 or redistribute runtime binaries from those repositories.
 
-The cache is stored under
-`%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`. **Advanced > Clear Neural
+The cache prefers `cache\v1` beside `DLSSVideoPlayer.exe` and falls back to
+`%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1` when that folder cannot be
+written. **Advanced > Clear Neural
 Cache** reports its current size and requires confirmation. Clearing is blocked
 while acquisition, a neural job or export is active. Confirmed clearing closes
 playback first. Windows package virtualization may redirect the physical cache

@@ -33,17 +33,16 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
     AppendMenuW(menu, MF_STRING, IDM_VIEW_INPUT, L"DLSS input\t2");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_MV, L"Motion vectors\t3");
     AppendMenuW(menu, MF_STRING, IDM_VIEW_DEPTH, L"Depth\t4");
-    AppendMenuW(menu, MF_STRING, IDM_VIEW_MASK, L"Bias mask\t5");
-    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_MASK) {
+    if (selectedCommand < IDM_VIEW_FINAL || selectedCommand > IDM_VIEW_DEPTH) {
         selectedCommand = IDM_VIEW_FINAL;
     }
-    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_MASK, selectedCommand, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, IDM_VIEW_FINAL, IDM_VIEW_DEPTH, selectedCommand, MF_BYCOMMAND);
     return menu;
 }
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), dlss = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), convert = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -59,29 +58,42 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Game trailers");
     AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
-    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, L"Export processed media...");
-    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, L"Cancel export");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
-    add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute");
+    add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
+    add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out"); add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr); add(play, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
     add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
     const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); add(video, IDM_VIEW_MASK, L"menu.mask"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
+    add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+    add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_BLEND, L"menu.compare_blend"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
+    add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr); add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom");
+    const std::wstring compareName = localizer.Get(L"menu.compare"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
+    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
     add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
     add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
     HMENU upscaleOutput=CreatePopupMenu();
     AppendMenuW(upscaleOutput,MF_STRING|MF_CHECKED,IDM_UPSCALE_1440,L"1440p (default)");
     AppendMenuW(upscaleOutput,MF_STRING,IDM_UPSCALE_2160,L"2160p (4K)");
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),L"Upscaling output");
-    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable");
+    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    // Conversion writes a neural video to disk with the settings in the neural
+    // settings dialog; it is deliberately separate from watching with the
+    // rendering turned on.
+    add(convert, IDM_RENDER_RANGE, L"menu.render_range"); add(convert, IDM_RENDER_WHOLE, L"menu.render_whole"); AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, localizer.Get(L"menu.export_cached").c_str());
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, localizer.Get(L"menu.cancel_export").c_str());
+    const std::wstring convertName = localizer.Get(L"menu.convert");
+    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
+    add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
     AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
-    add(advanced, IDM_DEPTH_MODE, L"menu.depthmode");
     add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode"); AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_REHOOK, L"menu.rehook");
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
+    UpdateRenderActionAvailability(bar, false, false, false, false, false);
+    UpdateComparisonMenu(bar, false, false, IDM_COMPARE_NEURAL, false);
     return bar;
 }
 
@@ -193,6 +205,58 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
            update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
            update(IDM_FRAME_GENERATION, frameGenerationAvailable, frameGenerationActive);
+}
+
+bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool rangeRenderAvailable,
+                                    bool jobActive, bool jobPaused, bool receiptAvailable)
+{
+    const auto enable = [&](UINT command, bool available) {
+        const HMENU menu = find_menu_containing_command(menuBar, command);
+        return menu && EnableMenuItem(menu, command, MF_BYCOMMAND | (available ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1);
+    };
+    bool ok = true;
+    for (const UINT command : {IDM_MARK_IN, IDM_MARK_OUT, IDM_CLEAR_MARKS, IDM_GOTO_TIMECODE}) ok = enable(command, markersAvailable) && ok;
+    for (const UINT command : {IDM_PREVIEW_FRAME, IDM_PREVIEW_CLIP, IDM_RENDER_RANGE, IDM_RENDER_WHOLE}) ok = enable(command, rangeRenderAvailable) && ok;
+    ok = enable(IDM_PAUSE_NEURAL_RENDER, jobActive) && ok;
+    const HMENU pauseMenu = find_menu_containing_command(menuBar, IDM_PAUSE_NEURAL_RENDER);
+    ok = pauseMenu && CheckMenuItem(pauseMenu, IDM_PAUSE_NEURAL_RENDER, MF_BYCOMMAND | (jobActive && jobPaused ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+    return enable(IDM_OPEN_RENDER_RECEIPT, receiptAvailable) && ok;
+}
+
+bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
+                          UINT selectedMode, bool zoomed)
+{
+    const HMENU menu = find_menu_containing_command(menuBar, IDM_COMPARE_NEURAL);
+    if (!menu) return false;
+    if (selectedMode < IDM_COMPARE_NEURAL || selectedMode > IDM_COMPARE_WIPE) selectedMode = IDM_COMPARE_NEURAL;
+    bool ok = true;
+    for (const UINT command : {IDM_COMPARE_NEURAL, IDM_COMPARE_BLEND, IDM_COMPARE_SPLIT, IDM_COMPARE_WIPE, IDM_COMPARE_BLEND_LESS, IDM_COMPARE_BLEND_MORE})
+        ok = EnableMenuItem(menu, command, MF_BYCOMMAND | (modesAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    ok = CheckMenuRadioItem(menu, IDM_COMPARE_NEURAL, IDM_COMPARE_WIPE, selectedMode, MF_BYCOMMAND) && ok;
+    ok = EnableMenuItem(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND | (zoomAvailable ? MF_ENABLED : MF_GRAYED)) != static_cast<UINT>(-1) && ok;
+    return CheckMenuItem(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND | (zoomed ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+}
+
+std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown)
+{
+    if (controlDown) {
+        if (shiftDown) return std::nullopt;
+        switch (key) {
+        case 'G': return IDM_GOTO_TIMECODE;
+        case 'R': return IDM_RENDER_RANGE;
+        case 'N': return IDM_NEURAL_SETTINGS;
+        default: return std::nullopt;
+        }
+    }
+    switch (key) {
+    case 'I': return shiftDown ? IDM_CLEAR_MARKS : IDM_MARK_IN;
+    case 'O': return shiftDown ? IDM_CLEAR_MARKS : IDM_MARK_OUT;
+    case 'F': return shiftDown ? IDM_PREVIEW_CLIP : IDM_PREVIEW_FRAME;
+    case 'Z': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_ZOOM);
+    case VK_OEM_4: return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_BLEND_LESS);
+    case VK_OEM_6: return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_BLEND_MORE);
+    default: return std::nullopt;
+    }
 }
 
 } // namespace app_menu

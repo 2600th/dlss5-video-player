@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.14.1, including recent history, settings-aware cache identity,
+This guide covers v0.15.0, including recent history, settings-aware cache identity,
 media export and highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;
@@ -9,14 +9,116 @@ legacy language settings in the INI are ignored.
 ## Open, render and compare
 
 Open a local photo, GIF or video with `Ctrl+O`, paste a public YouTube URL with `Ctrl+L`, or
-select a trailer under **File > Game trailers**. With the experimental runtime
-available, the player acquires the source, checks its cache, renders on a miss,
-and validates the complete result before opening synchronized playback.
+select a trailer under **File > Game trailers**. Opening media never starts a
+whole-video render. A YouTube URL plays from its stream as soon as it resolves;
+a local file is identified against the cache first, and a validated entry opens
+straight away as synchronized neural playback. Otherwise the **original starts
+playing** and the status line leads with
+`Mark I/O, then Ctrl+R renders the marked range`.
+
+A streamed source is downloaded into the cache once, and that starts as soon as
+you mark a range rather than when you open the video, so the render begins on a
+local file. Later renders and reopens of the same source and quality reuse that
+copy, and a source played from the cache seeks locally instead of re-opening the
+network stream.
 
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
-Pause with `Space` and press `.` to step a cached frame. Timeline seeking and
-mouse-wheel volume are already supported. Cancellation can fall back to the
-original when a local source has been acquired; an incomplete render is never reused.
+Pause with `Space` and press `.` to step a cached frame. Dragging the timeline
+shows the frame under the cursor while you drag and keeps playing afterwards if
+it was playing; mouse-wheel volume works anywhere in the window. An incomplete
+render is never reused.
+
+### Preview first: markers, timecodes and ranges
+
+Press `I` and `O` to mark In and Out at the current frame; `Shift+I` or
+`Shift+O` clears both. Markers snap to the source frame grid, draw as green and
+orange ticks on the timeline, and the status line names them as `hh:mm:ss:ff`.
+`Ctrl+G` opens **Playback > Go to timecode**, which accepts `hh:mm:ss:ff`,
+`h:mm:ss.mmm` or `f<frame>` and can seek or set either marker.
+
+Both markers stay inside the source. In always names a frame that exists, and
+Out is the exclusive end, so marking Out on the last frame means "to the end"
+and renders it. A range that names no frame is refused before a render starts.
+
+Neural rendering has two shapes. **Turn it on while watching** with the
+toolbar's Neural Rendering button, the DLSS menu entry or `D`: the render
+starts at the playhead — to the Out marker when the playhead sits inside a
+marked range, otherwise to the end of the source — and a panel over the
+current frame collects a lead of four seconds before playback resumes on the
+rendered frames. Rendering keeps running behind playback; if the playhead
+reaches the render head the panel returns until the buffer refills, and `Space`
+pauses playback rather than the render. Turning the button off stops the
+session and hands the same frame back to the original, but keeps the frames it
+already rendered: turning it back on resumes at the render head instead of
+redoing that work, so playback starts again in well under a second. The frames
+are dropped when they can no longer apply - a different video, or changed
+neural settings or guides. On an RTX 5090 the
+render sustains about 80 frames per second at 1080p, 60 at 1440p and 36 at 4K,
+so the lead grows on any source up to 4K30; if the source is heavier than the
+GPU can follow (4K60, 8K) the player says so with the predicted rate and asks
+before starting. Once a session has been running for a few seconds the status
+line reports the rate it is actually achieving whenever that falls behind.
+
+**Convert to a file** with the DLSS menu's **Convert & save** submenu:
+`Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
+and **Save converted video** writes the result out. `F` and `Shift+F` still
+render just the current frame or a four-second clip as a quick look. Each
+result opens as cached playback of that range, seeking stays inside it and the
+status line shows `Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short
+`NR intensity/struct/tone` summary of the settings it was rendered with.
+**Advanced > Open render receipt** opens the entry's `receipt.json` with the
+full record. The recent-video history keeps one render per source, so a new
+preview or range render for the same file displaces the previous entry.
+
+Neural settings preview themselves. With playback paused, changing a slider in
+**Neural settings** re-renders that one frame 700 ms after the sliders settle
+and shows the result in place of it, so settings can be compared on the actual
+picture; the toggle reads `Neural Rendering · Settings preview` while such a
+frame is displayed. **Apply** applies the settings to what is on screen — it
+restarts an active session at the playhead or re-previews the paused frame —
+and never starts a whole-video render. Saving a converted video refuses an
+entry that was rendered with settings you have since changed, and offers to
+convert that range again.
+
+The timeline shows both states at once: the marked range is a solid violet block
+between a green In tick and an orange Out tick, played progress is blue, and a
+teal stripe along the bottom names the part of the source that already has
+neural frames — during an active session it grows with the render head, which
+is also how far ahead you can seek.
+
+Marking a range on a YouTube stream starts downloading that source in the
+background, because a render always works from a local copy. Playback continues
+while it runs and the status line says so; the render then starts on the file
+instead of waiting for the whole download, and later renders of the same source
+and quality reuse it.
+
+### Compare the neural result
+
+**Video > Compare** works during cached playback on the neural view. **Blend**
+mixes the original into the neural frame (`[` and `]` step the amount by 0.1);
+**Split** and **Wipe** show the original left of a divider you drag in the
+image, Wipe adding a white line. `Z` zooms 2x around the mouse position in the
+image. Pause and step with `.` to judge a single frame; `D` still switches the
+whole view between original and neural. The modes gray out on the original
+view or outside cached playback and are remembered in `[Comparison]`.
+
+**DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
+local structure, local tone, skin structure, style and automatic mask, plus the
+motion-vector and depth guide switches. These change
+the render identity: **Apply** restarts an active session at the playhead, or
+re-previews the paused frame, while playback image adjustments remain instant.
+Writing a file is a separate action under **Convert & save**. The guide
+switches also drive the live debug views immediately. Hovering any control shows
+what it does, including which effects were measured on this runtime and what a
+change costs.
+
+Color strength and the render preset are deliberately not in that dialog. Each
+was measured against the pinned runtime and changes nothing - the add-on echoes
+the value back and the output is byte-identical - while a change still costs a
+full re-render. They remain in `DLSSVideoPlayer.ini` as `[NeuralSettings]
+ColorStrength` and `Preset` so runtime-comparison work can still drive them, and
+they remain part of the render identity so a runtime that does honour them
+cannot be served a stale cache entry. See [Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding
@@ -94,8 +196,9 @@ export. This is a count-based retention policy, not a byte quota or a backup.
 ## Saved settings and reproducibility
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
-original/neural view, upscaling preference and output size, YouTube quality and
-image adjustments. Keep the player in a writable folder to persist preferences.
+original/neural view, upscaling preference and output size, YouTube quality,
+image adjustments, comparison mode, neural settings and guide switches. Keep
+the player in a writable folder to persist preferences.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,
@@ -110,12 +213,13 @@ not affect the offline render. This adds no unverified sliders or presets.
 Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
 in the player; the old quality arguments and 4K launch scripts are retired.
 
-## Export processed media
+## Save a converted video
 
-1. Open a photo, GIF or video and wait for validated cached playback.
-2. Choose **File > Export processed media**.
+1. Open a photo, GIF or video and wait for validated cached playback, or
+   convert a clip or the whole video first.
+2. Choose **DLSS > Convert & save > Save converted video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
-4. Continue playback while export runs, or use **File > Cancel export**.
+4. Continue playback while saving runs, or use **Cancel saving**.
 
 PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated
