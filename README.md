@@ -22,7 +22,7 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
 > components. Hardware verification for v0.15.0 used an RTX 5090; the current
-> source was verified on an RTX 4080 SUPER with the universal runtime.
+> source and universal runtime were verified on an RTX 4080 SUPER and an RTX 5090.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -157,16 +157,16 @@ than on these.
 ## Limits to know
 
 - Neural rendering runs either as a cached render you play beside the original,
-  or behind live playback from the playhead. On an RTX 5090 it keeps up with
-  sources up to 4K30 (measured 1.165x real time in the player); an RTX 4080
-  SUPER renders 1080p at 15.3 ms/frame, 1.22x the 5090's cost, and is forecast
-  to fall just short at 4K30. The player measures its own GPU after the first
-  session and forecasts from that; it buffers when it cannot keep up, and
-  heavier sources are refused with the predicted rate.
+  or behind live playback from the playhead. Measured 1080p30 cost: 11.9
+  ms/frame on an RTX 5090, 15.3 on an RTX 4080 SUPER. Whether 4K30 keeps up
+  depends on the source: the 5090 measured 1.165x real time on one 4K30 file
+  and 0.78x on a 6.3 Mbit/s re-encode. The player measures its own GPU at each
+  source size after the first session, warns with the predicted rate before a
+  session it expects to fall behind, and buffers when a running one does.
 - Motion and depth guides are estimated from video. Artifacts are possible.
   Turing (RTX 20) and Ampere (RTX 30) run the universal runtime without native
   FP8 and are several times slower; they have not been hardware-verified in
-  this project, and Blackwell has not been re-verified on the universal runtime.
+  this project.
 - Export copies the cached 8-bit video. Playback adjustments and runtime upscaling
   are not baked in; export does not restore HDR or lost source precision.
 - Compatible source subtitles remain separate in export. In-player subtitle
@@ -184,7 +184,7 @@ hosts the experimental neural runtime; playback upscaling runs in the player.
 - [Build and test](docs/BUILDING.md)
 - [Architecture](docs/ARCHITECTURE.md) and [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- [Verification results](docs/VERIFICATION-2026-09-02.md) and the [RTX 4080 SUPER record](docs/VERIFICATION-2026-09-09-RTX4080.md)
+- [Verification results](docs/VERIFICATION-2026-09-02.md), the [RTX 4080 SUPER record](docs/VERIFICATION-2026-09-09-RTX4080.md) and the [RTX 5090 record](docs/VERIFICATION-2026-09-09-RTX5090.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md) and [report an issue](https://github.com/2600th/dlss5-video-player/issues)
 - [Example video sources](docs/EXAMPLE_VIDEOS.md)
 

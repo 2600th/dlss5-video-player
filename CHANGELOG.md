@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- `tools/fetch_neural_runtime.ps1` fetches the whole locked neural runtime.
+  Every file in `packaging/runtime-lock.json` comes from a public release, so
+  the script downloads the five source archives, checks each archive's
+  SHA-256, extracts the locked members (bsdtar for the ReShade installer,
+  whose ZIP directory .NET rejects), checks each against the lock, stages
+  them in `external/runtime` and runs the full validator. Already-matching
+  files are not downloaded again. `build_windows.bat` now runs it, so a fresh
+  checkout builds the complete experimental layout with one command; a fresh
+  directory fetched and verified all 12 files in 10.8 s. Fetching for a local
+  build does not change the redistribution status of the combined set.
+- Verified on an RTX 5090 with the universal runtime: strict smoke `PASS`,
+  the previously failing 1080p live session at 869/869 verified frames and
+  11.89 ms/frame, and full renders at 1440p (17.15 ms/frame) and 4K
+  (42.87 ms/frame). See `docs/VERIFICATION-2026-09-09-RTX5090.md`.
+- The keep-up forecast now predicts from what this GPU measured at each
+  geometry, not one scalar. The 5090 run showed the scalar assumption wrong:
+  0.95x the reference at 1080p, 1.04x at 1440p, 1.53x at 4K, so a 1080p-only
+  scalar predicted 26.6 ms for 4K30, started the session without warning and
+  dropped 848 of 869 frames while the real cost was 42.9 ms. The player keeps
+  one measured pace per source geometry (`[NeuralPace] Samples=WxH:ms;...`),
+  uses an exact match as is, fits its own fixed + per-megapixel line from two
+  or more geometries, and extrapolates from a single sample by the larger of
+  the reference shape and a purely proportional cost. With only its 1080p
+  sample the RTX 4080 SUPER now warns before 4K30: "17.2 frames per second,
+  0.57x real time".
 - Neural rendering on every RTX generation. The locked neural runtime is now
   ShortFuse's universal `310.8.SF-v2` build (`nvngx_dlssnr.dll`, SHA-256
   `6EB209E7…3927`), which extends the leaked 310.8 runtime to Turing, Ampere,
@@ -14,7 +39,7 @@
   RTX 4080 SUPER (driver 610.47): the strict GPU smoke passes on photo, GIF and
   video with both the old and the new runtime at the same per-frame cost, and a
   30 s 1080p30 live session rendered 798/798 verified frames with zero dropped
-  presents. Blackwell was verified on the previous runtime only; Turing and
+  presents. An RTX 5090 then confirmed the same runtime (below); Turing and
   Ampere have no hardware verification in this project yet.
 - Fixed the render wedging right after preroll on an RTX 4080. The automatic
   NGX feature recreate that arms the add-on's capture fired on the first
@@ -33,11 +58,10 @@
   2.50 ms/megapixel model was measured on an RTX 5090 and was applied to every
   GPU as if it were one. The player now measures the steady-state pace of each
   session from segment arrivals - the method the reference numbers used - and
-  saves it per GPU in `DLSSVideoPlayer.ini` (`[NeuralPace]`); the next forecast
-  scales the reference cost by it. Until a machine has measured itself, Ada
-  assumes 1.22x (the RTX 4080 SUPER measured 15.31 ms/frame at 1080p over 738
-  frames), Blackwell 1.0x, and other generations make no forecast at all rather
-  than a wrong one. At 1.22x, 4K30 lands at 0.97x real time and is warned about.
+  saves it per GPU in `DLSSVideoPlayer.ini` (`[NeuralPace]`). Until a machine
+  has measured itself, Ada assumes 1.22x the reference cost (the RTX 4080
+  SUPER measured 15.31 ms/frame at 1080p over 738 frames), Blackwell 1.0x,
+  and other generations make no forecast at all rather than a wrong one.
 - The runtime staging script compares file versions numerically, like the
   player does, because the universal runtime's version string (`310.8.SF.0`)
   is not what its numeric version block (`310.8.2.0`) says.
