@@ -1091,7 +1091,13 @@ private:
         // instead of ending playback.
         if(read==SynchronizedReadResult::WaitingForRender){EnterLiveBuffering();return false;}
         m_haveNext=false;m_playing=false;Audio().Pause(true);if(read==SynchronizedReadResult::EndOfStream)LOG("Cached playback completed: presented="<<m_cachedPresentedFrames<<" dropped="<<m_droppedFrames);
-        if(read==SynchronizedReadResult::OutOfSync||read==SynchronizedReadResult::Error){const std::wstring message=T(read==SynchronizedReadResult::OutOfSync?L"neural.sync.warning":L"error.decode"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);}
+        if(read==SynchronizedReadResult::OutOfSync||read==SynchronizedReadResult::Error){
+            LOG((read==SynchronizedReadResult::OutOfSync?"Neural playback out of sync: ":"Neural playback decode error: ")
+                <<m_synchronizedPlayback.LastFault()<<"; position="<<Position()<<" presented="<<m_cachedPresentedFrames
+                <<" dropped="<<m_droppedFrames);
+            const std::wstring message=T(read==SynchronizedReadResult::OutOfSync?L"neural.sync.warning":L"error.decode"),caption=T(L"app.title");
+            MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|MB_ICONERROR);
+        }
         InvalidateControls();InvalidatePlaybackProgress();return false;
     }
     void RememberRenderedCachedPair(){if(!m_cachedPlayback)return;if(const auto* pair=m_synchronizedPlayback.CurrentPair()){m_lastOriginalFrame=pair->original;m_lastNeuralFrame=pair->neural;m_havePresentedPair=true;}}

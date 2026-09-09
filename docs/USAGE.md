@@ -52,11 +52,11 @@ session and hands the same frame back to the original, but keeps the frames it
 already rendered: turning it back on resumes at the render head instead of
 redoing that work, so playback starts again in well under a second. The frames
 are dropped when they can no longer apply - a different video, or changed
-neural settings or guides. On an RTX 5090 the
-render sustains about 80 frames per second at 1080p, 60 at 1440p and 36 at 4K,
-so the lead grows on any source up to 4K30; if the source is heavier than the
-GPU can follow (4K60, 8K) the player says so with the predicted rate and asks
-before starting. Once a session has been running for a few seconds the status
+neural settings or guides. On an RTX 5090 the render sustains about 120 frames
+per second at 1080p and 65 at 1440p, so the lead grows on those; a 6.3 Mbit/s
+4K30 re-encode measured 24 and could not keep up. If the source is heavier than
+the GPU can follow the player says so with the predicted rate and asks before
+starting. Once a session has been running for a few seconds the status
 line reports the rate it is actually achieving whenever that falls behind.
 
 **Convert to a file** with the DLSS menu's **Convert & save** submenu:

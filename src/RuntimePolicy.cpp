@@ -12,7 +12,10 @@ constexpr std::wstring_view kSafeModeArgument = L"--safe-mode";
 constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-restarted";
 // RTX 4080 SUPER, driver 610.47: 15.31 ms/frame over 738 frames of a 1080p30
 // live session, 1.22x the reference cost. Measured by segment arrivals, the
-// same method as the reference numbers in PlaybackTiming.h.
+// same method as the reference numbers in PlaybackTiming.h. That session ran on
+// 0.16.0; no Ada machine has measured the pipelined loop, which took 29% off
+// 1080p on Blackwell, so the prior is high until one does. It only decides the
+// first session's forecast.
 constexpr double kAdaRenderPacePrior = 1.22;
 
 bool ContainsCaseInsensitive(std::wstring_view text, std::wstring_view needle)

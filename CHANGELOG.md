@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+- Fixed live playback stopping at a segment seam with the modal "out of sync"
+  warning. A segment's exclusive end is rebuilt from an integer frame duration,
+  so at 30 fps it lands 20 ticks below the next segment's own first pts and the
+  shortfall grows by a seam. A playhead inside that sub-frame hole matched no
+  segment, and an uncovered timestamp between the render start and the render
+  head is read as a producer contract break, so playback stopped about two
+  seconds in while the render carried on and finished every frame. It hit two of
+  five 1080p30 sessions on an RTX 5090 - the ones whose playback attached
+  mid-segment, where the seek leaves the original's timestamps a few ticks below
+  the CFR grid. `NeuralSegmentIndex::Append` now closes a hole narrower than one
+  frame, and the lookup that picks a segment runs on frame numbers like the
+  coverage test beside it already did; a real gap from a rebased relaunch stays
+  uncovered. Two tests replay the protocol's own rounding and fail on the old
+  code. Four sessions after the fix played to the end of the clip.
+- An out-of-sync or decode stop says why in the log: the reason, both frame
+  numbers and timestamps, the open segment, the render head and whether the job
+  finished. Before this there was nothing but the dialog.
+- Re-measured the live-session pace on the RTX 5090 (driver 616.64) after
+  0.17.0's pipelined capture and parallel guides: 1080p30 8.36 ms/frame against
+  11.89 on 0.16.0, 1440p30 15.44 against 17.15, 4K30 42.0 against 42.87, over
+  eight, three and two 30 s sessions of the same clips. 4K did not move because
+  that clip is a 6315 kbit/s re-encode whose decode and encode set its pace. The
+  4K30 keep-up prompt now appears before the session ("23.5 frames per second,
+  0.78x real time"), which the 0.16.0 record could not confirm. 12/12 CTest
+  suites and `overall=PASS` from the strict media smoke on that machine. See
+  `docs/VERIFICATION-2026-09-10-RTX5090.md`.
+- Corrected the speed claims. The README quoted 1080p30 at 10.3 ms/frame on an
+  RTX 4080 SUPER and 11.9 on an RTX 5090, which put the slower GPU ahead and
+  cited a figure no record supports; the 4080's own measurement is 15.31 ms on
+  0.16.0. Every quoted pace now names the build and the machine it came from,
+  the docs that said a 5090 keeps up with any source to 4K30 say what the file
+  costs instead, and the reference constants in `src/PlaybackTiming.h` say that
+  they are a seed for an unmeasured machine rather than current numbers.
+
 ## 0.17.0 - 2026-09-10
 
 - The neural export is pipelined, ported from ctype-lab's PR #5 with fixes.

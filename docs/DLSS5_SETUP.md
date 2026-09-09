@@ -102,6 +102,9 @@ at 15.31 ms/frame; see the
 An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
 (11.89 ms/frame), 1440p and 4K; see the
 [RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX5090.md).
+The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
+42.0 ms/frame; see the
+[0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
 Turing and Ampere have no hardware verification in this project yet.
 
 The architecture follows lessons from [Zonnery's offline

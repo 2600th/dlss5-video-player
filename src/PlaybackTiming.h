@@ -41,17 +41,28 @@ inline double LateFrameThreshold(double frameDuration)
 // fence wait; the proportional part is the readback and the pixel work.
 //
 // A session can only follow live playback while that cost fits inside one frame
-// interval. At these rates 4K30 keeps up with about 19% to spare and 4K60 does
-// not, which is a very different conclusion from the same measurement before the
-// decoder stopped answering every 4 MiB chunk with a sleep.
+// interval. At these rates 4K30 has about 19% of the interval to spare and 4K60
+// does not fit at all.
+//
+// These constants are the seed for a machine that has not measured itself yet,
+// and 0.17.0 left them behind: the same GPU and the same clips now cost 8.4
+// ms/frame at 1080p, 15.4 at 1440p and 42.0 at 4K (docs/VERIFICATION-2026-09-10
+// -RTX5090.md), so the seed reads ~1.5x high below 1440p. They are kept because
+// those three points no longer fit one line - the 4K clip is a 6.3 Mbit/s
+// re-encode whose decode and encode set its pace, and a fit through it puts the
+// fixed term below zero - and because a seed that overstates cost asks before a
+// marginal session instead of dropping frames in it. One session replaces the
+// seed with this machine's own pace at that geometry.
 inline constexpr double kNeuralFrameFixedMs = 7.35;
 inline constexpr double kNeuralMillisecondsPerMegapixel = 2.50;
 
 // Other GPUs run the same pipeline at a different speed, but not at a
-// different speed uniformly: an RTX 5090 measured 0.95x the reference cost at
-// 1080p, 1.04x at 1440p and 1.53x at 4K, so one scalar taken at 1080p let a
-// 4K30 session start and drop 848 of 869 frames. The player therefore keeps
-// one measured pace per source geometry and predicts from them:
+// different speed uniformly: a 0.16.0 session measured 0.95x the reference cost
+// at 1080p, 1.04x at 1440p and 1.53x at 4K on the reference GPU itself, so one
+// scalar taken at 1080p let a 4K30 session start and drop 848 of 869 frames.
+// On 0.17.0 the same three geometries measure 0.67x, 0.93x and 1.48x, which is
+// the same lesson with wider spread. The player therefore keeps one measured
+// pace per source geometry and predicts from them:
 //   - a sample at the requested geometry is used as is;
 //   - two or more geometries fit their own fixed + per-megapixel line;
 //   - one sample extrapolates conservatively: the larger of the reference

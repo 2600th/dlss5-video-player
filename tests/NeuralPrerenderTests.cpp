@@ -1796,6 +1796,20 @@ NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64
     return segment;
 }
 
+// Mirrors DecodeSegment: the start is the file's own first pts on the exact CFR
+// grid, while the exclusive end is rebuilt from the integer frame duration, so
+// a fractional frame rate leaves a sub-frame hole before the next segment.
+NeuralSegment RoundedSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
+                                   uint64_t frameCount)
+{
+    NeuralSegment segment;
+    segment.path=std::move(path);segment.index=index;segment.firstFrameNumber=firstFrame;
+    segment.firstTimestamp100ns=std::llround(double(firstFrame)*10000000.0/30.0);
+    segment.end100ns=segment.firstTimestamp100ns+int64_t(frameCount)*kLiveFrame100ns;
+    segment.frameCount=frameCount;
+    return segment;
+}
+
 SynchronizedPlayback::SegmentSourceFactory LiveSegmentFactory(LiveFrameLibrary& library)
 {
     return [&library]{return std::make_unique<LiveLibrarySource>(library);};
@@ -1986,6 +2000,52 @@ void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
     CHECK_EQ(1,library.streams[L"neural-00000.mkv"].closes);
     // The original runs on past the last finalized segment.
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+}
+
+// The seam a 30000/1001-style frame duration leaves behind: segment 0 declares
+// an end a couple of ticks below segment 1's first pts, and the playhead of a
+// seeked original lands inside that hole. It cost a live 1080p session on an
+// RTX 5090 its playback with "out of sync" at the first boundary.
+void live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",20);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    segments->Append(RoundedSegmentRecord(L"neural-00001.mkv",1,5,5));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+    for(uint64_t expected=0;expected<10;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+    }
+    CHECK(playback.LastFault().empty());
+}
+
+void neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test()
+{
+    NeuralSegmentIndex index;
+    index.Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    index.Append(RoundedSegmentRecord(L"neural-00001.mkv",1,5,5));
+    const auto second=index.At(1);
+    CHECK(second.has_value());
+    if(!second)return;
+    // Every timestamp up to the next segment's first pts belongs to the first.
+    for(int64_t back=1;back<=3;++back)
+        if(const auto before=index.Containing(second->firstTimestamp100ns-back))
+            CHECK_EQ(uint64_t{0},before->index);
+    CHECK(index.Containing(second->firstTimestamp100ns-1).has_value());
+    if(const auto at=index.Containing(second->firstTimestamp100ns))CHECK_EQ(uint64_t{1},at->index);
+
+    // A rebased relaunch leaves a real gap, which stays uncovered.
+    NeuralSegmentIndex gapped;
+    gapped.Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    gapped.Append(RoundedSegmentRecord(L"job2/neural-00000.mkv",1,8,5));
+    CHECK(!gapped.Containing(6*kLiveFrame100ns).has_value());
 }
 
 void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
@@ -2314,8 +2374,10 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
+    neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test();
     live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
+    live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();

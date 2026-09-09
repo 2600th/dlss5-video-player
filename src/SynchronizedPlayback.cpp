@@ -112,6 +112,16 @@ struct SynchronizedPlayback::Impl {
     bool live{};
     // Set when the open segment file ended before its declared window.
     bool segmentExhausted{};
+    // Why the last read reported OutOfSync. A modal warning without a record
+    // of the frame numbers behind it cannot be diagnosed after the fact.
+    struct Fault {
+        const char* reason{};
+        uint64_t originalFrame{},neuralFrame{};
+        int64_t original100ns{},neural100ns{};
+        uint64_t segmentIndex{};
+        bool exhausted{},numbered{};
+    };
+    Fault fault{};
     int64_t prefetchLead100ns{10000000};
 
     void ResetPublished()
@@ -181,6 +191,10 @@ struct SynchronizedPlayback::Impl {
     // A mismatch drops the earlier member so the next read can resynchronize.
     Match MatchPending()
     {
+        fault=Fault{nullptr,pendingOriginal->frame.frameNumber,pendingNeural->frame.frameNumber,
+                    pendingOriginal->frame.timestamp100ns,pendingNeural->frame.timestamp100ns,
+                    segment.index,segmentExhausted,
+                    pendingOriginal->numbered&&pendingNeural->numbered};
         if(pendingOriginal->numbered&&pendingNeural->numbered){
             const uint64_t originalNumber=pendingOriginal->frame.frameNumber;
             const uint64_t neuralNumber=pendingNeural->frame.frameNumber;
@@ -195,6 +209,14 @@ struct SynchronizedPlayback::Impl {
         return Match::Skew;
     }
 
+    // Records why pairing gave up, then reports it.
+    SynchronizedReadResult Desync(const char* reason)
+    {
+        fault.reason=reason;
+        fault.segmentIndex=segment.index;fault.exhausted=segmentExhausted;
+        return SynchronizedReadResult::OutOfSync;
+    }
+
     SynchronizedReadResult BuildPair(SynchronizedFramePair& pair,std::stop_token stop)
     {
         if(!original)return SynchronizedReadResult::Error;
@@ -202,12 +224,12 @@ struct SynchronizedPlayback::Impl {
             const auto originalRead=ReadOne(*original,pendingOriginal,stop,false);
             if(originalRead!=SynchronizedReadResult::PairReady){
                 if(!neural||originalRead!=SynchronizedReadResult::EndOfStream)return originalRead;
-                if(pendingNeural)return SynchronizedReadResult::OutOfSync;
+                if(pendingNeural)return Desync("original-ended-with-neural-pending");
                 VideoFrame extra;const auto neuralRead=neural->Read(extra,stop);
                 if(neuralRead==VideoReadResult::EndOfStream)return SynchronizedReadResult::EndOfStream;
                 if(neuralRead==VideoReadResult::NotReady)return SynchronizedReadResult::NotReady;
                 if(neuralRead==VideoReadResult::Cancelled)return SynchronizedReadResult::Cancelled;
-                if(neuralRead==VideoReadResult::FrameReady)return SynchronizedReadResult::OutOfSync;
+                if(neuralRead==VideoReadResult::FrameReady)return Desync("original-ended-before-neural");
                 return SynchronizedReadResult::Error;
             }
             if(range.end100ns>0&&PastRangeEnd(*pendingOriginal)){
@@ -216,16 +238,16 @@ struct SynchronizedPlayback::Impl {
             if(!neural)return CommitPair(pair);
             const auto neuralRead=ReadOne(*neural,pendingNeural,stop,true);
             if(neuralRead!=SynchronizedReadResult::PairReady){
-                if(neuralRead==SynchronizedReadResult::EndOfStream)return SynchronizedReadResult::OutOfSync;
+                if(neuralRead==SynchronizedReadResult::EndOfStream)return Desync("neural-ended-first");
                 return neuralRead;
             }
             switch(MatchPending()){
                 case Match::Pair:return CommitPair(pair);
-                case Match::Mismatch:return SynchronizedReadResult::OutOfSync;
+                case Match::Mismatch:return Desync("frame-mismatch");
                 case Match::Skew:break;
             }
         }
-        return SynchronizedReadResult::OutOfSync;
+        return Desync("resync-guard");
     }
 
     // Indices start at zero and strictly increase, so a segment never sits past
@@ -252,16 +274,16 @@ struct SynchronizedPlayback::Impl {
     }
 
     // No finalized segment covers the playhead: waiting, ending or broken.
-    SynchronizedReadResult ClassifyUncovered(int64_t timestamp100ns)const
+    SynchronizedReadResult ClassifyUncovered(int64_t timestamp100ns)
     {
         const bool finished=segments->Finished();
         if(timestamp100ns>=segments->Head100ns())
             return finished?SynchronizedReadResult::EndOfStream:SynchronizedReadResult::WaitingForRender;
         // Behind the render start: only a relaunch from further back covers it.
         if(timestamp100ns<segments->Start100ns())
-            return finished?SynchronizedReadResult::OutOfSync:SynchronizedReadResult::WaitingForRender;
+            return finished?Desync("behind-render-start"):SynchronizedReadResult::WaitingForRender;
         // A hole between two finalized segments is a producer contract break.
-        return SynchronizedReadResult::OutOfSync;
+        return Desync("segment-hole");
     }
 
     SynchronizedReadResult AdoptSegment(NeuralSegment wanted,int64_t timestamp100ns,std::stop_token stop)
@@ -308,7 +330,12 @@ struct SynchronizedPlayback::Impl {
                                            :SynchronizedReadResult::WaitingForRender;
             return AdoptSegment(std::move(*following),timestamp100ns,stop);
         }
-        auto covering=segments->Containing(timestamp100ns);
+        // Coverage is decided on frame numbers, so the lookup is too; only a
+        // source that does not stamp identities falls back to timestamps.
+        auto covering=pendingOriginal->numbered
+                          ? segments->ContainingFrame(pendingOriginal->frame.frameNumber)
+                          : std::nullopt;
+        if(!covering)covering=segments->Containing(timestamp100ns);
         if(!covering)return ClassifyUncovered(timestamp100ns);
         return AdoptSegment(std::move(*covering),timestamp100ns,stop);
     }
@@ -358,11 +385,11 @@ struct SynchronizedPlayback::Impl {
                     PrefetchNextSegment(pair.timestamp100ns,stop);
                     return committed;
                 }
-                case Match::Mismatch:return SynchronizedReadResult::OutOfSync;
+                case Match::Mismatch:return Desync("live-frame-mismatch");
                 case Match::Skew:break;
             }
         }
-        return SynchronizedReadResult::OutOfSync;
+        return Desync("live-resync-guard");
     }
 };
 
@@ -599,3 +626,22 @@ bool SynchronizedPlayback::NeuralAvailable()const
 bool SynchronizedPlayback::Live()const{return impl_->opened&&impl_->live;}
 int64_t SynchronizedPlayback::LiveHead100ns()const
 {return impl_->live&&impl_->segments?impl_->segments->Head100ns():0;}
+
+std::string SynchronizedPlayback::LastFault()const
+{
+    const Impl::Fault& fault=impl_->fault;
+    if(!fault.reason)return {};
+    std::string text=fault.reason;
+    text+=" original="+std::to_string(fault.originalFrame)+"@"+std::to_string(fault.original100ns);
+    text+=" neural="+std::to_string(fault.neuralFrame)+"@"+std::to_string(fault.neural100ns);
+    text+=fault.numbered?" numbered=1":" numbered=0";
+    if(impl_->live){
+        text+=" segment="+std::to_string(fault.segmentIndex);
+        text+=fault.exhausted?" exhausted=1":" exhausted=0";
+        if(impl_->segments)
+            text+=" head="+std::to_string(impl_->segments->Head100ns())+
+                  " segments="+std::to_string(impl_->segments->Count())+
+                  (impl_->segments->Finished()?" finished=1":" finished=0");
+    }
+    return text;
+}

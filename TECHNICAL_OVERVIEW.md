@@ -15,7 +15,8 @@ evaluation alone does not prove correct neural output.
 Extract the entire Windows package into a new writable folder, keep
 `neural-runtime/` intact, and launch `DLSSVideoPlayer.exe`. Use Windows x64,
 a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA driver. Hardware verification
-used an RTX 5090; other neural configurations require their own validation.
+used an RTX 5090 and an RTX 4080 SUPER; other neural configurations require
+their own validation.
 
 Open a local photo, GIF or video, paste a public YouTube URL, or choose **File >
 Game trailers**. Rendering can also run behind playback: a session collects a

@@ -39,6 +39,19 @@ public:
         const std::lock_guard lock(mutex_);
         // A relaunched or confused producer must never reorder the timeline.
         if (!segments_.empty() && segment.index <= segments_.back().index) return;
+        // A segment's exclusive end is rebuilt from an integer frame duration,
+        // so a fractional frame rate declares it a few ticks below the next
+        // segment's own first pts. Close that sub-frame hole: a playhead inside
+        // it belongs to the earlier file, and reporting it as uncovered reads
+        // as a producer contract break. A real gap - a relaunch rebased further
+        // ahead - is a frame or more wide and stays uncovered.
+        if (!segments_.empty() && segment.frameCount) {
+            NeuralSegment& previous = segments_.back();
+            const int64_t frameDuration =
+                (segment.end100ns - segment.firstTimestamp100ns) / int64_t(segment.frameCount);
+            const int64_t hole = segment.firstTimestamp100ns - previous.end100ns;
+            if (hole > 0 && hole < frameDuration) previous.end100ns = segment.firstTimestamp100ns;
+        }
         totalFrames_ += segment.frameCount;
         segments_.push_back(std::move(segment));
         const auto now = std::chrono::steady_clock::now();
@@ -133,6 +146,21 @@ public:
         if (above == segments_.begin()) return std::nullopt;
         const NeuralSegment& candidate = *std::prev(above);
         if (timestamp100ns >= candidate.end100ns) return std::nullopt;
+        return candidate;
+    }
+
+    // Frame numbers are exact where a seeked source's pts is not, so a numbered
+    // playhead picks its segment by number.
+    std::optional<NeuralSegment> ContainingFrame(uint64_t frameNumber) const
+    {
+        const std::lock_guard lock(mutex_);
+        const auto above = std::upper_bound(
+            segments_.begin(), segments_.end(), frameNumber,
+            [](uint64_t value, const NeuralSegment& segment) { return value < segment.firstFrameNumber; });
+        if (above == segments_.begin()) return std::nullopt;
+        const NeuralSegment& candidate = *std::prev(above);
+        if (!candidate.frameCount ||
+            frameNumber >= candidate.firstFrameNumber + candidate.frameCount) return std::nullopt;
         return candidate;
     }
 

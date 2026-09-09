@@ -14,9 +14,9 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
 > This is a community project, not an NVIDIA product. The neural runtime is a
-> modified, unsigned community build. v0.17.0 was checked on an RTX 4080 SUPER;
-> v0.16.0 also on an RTX 5090. RTX 20 and 30 are enabled but nobody has run
-> them yet. Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+> modified, unsigned community build. v0.17.0 was checked on an RTX 4080 SUPER
+> and an RTX 5090; RTX 20 and 30 are enabled but nobody has run them yet.
+> Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
@@ -65,6 +65,11 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**Unreleased**. Live playback no longer stops at a segment seam with an "out of
+sync" warning, and a stop of any kind now says why in the log. Re-measured on an
+RTX 5090: a 1080p30 session costs 8.4 ms per frame, down from 11.9 before the
+export loop was pipelined.
 
 **0.17.0** (2026-09-10). The export got 2.3x faster and the pixels did not change.
 1080p30 on an RTX 4080 SUPER: 48.6 to 110.7 frames per second, and the output
@@ -175,10 +180,14 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
 
 ## Limits
 
-- Speed. 1080p30 costs about 10.3 ms per frame on an RTX 4080 SUPER and 11.9 on
-  an RTX 5090. 4K30 depends on the file: the 5090 ran one at 1.165x real time
-  and a heavy re-encode at 0.78x. The player measures your GPU after the first
-  session and warns before one it expects to fall behind.
+- Speed. A live 1080p30 session costs about 8.4 ms per frame on an RTX 5090
+  (driver 616.64, median of eight 30 s sessions; the same clip cost 11.9 ms
+  before the export loop was pipelined in 0.17.0), and 15.4 ms at 1440p30. An
+  RTX 4080 SUPER measured 15.3 ms at 1080p30 on 0.16.0 and has not been
+  re-measured since. 4K30 depends on the file: a native 40 s 4K30 source ran at
+  1.165x real time, while a 6.3 Mbit/s 4K re-encode costs 42 ms per frame, or
+  0.78x, and drops nearly every present. The player measures your GPU after the
+  first session and warns before one it expects to fall behind.
 - RTX 20 and 30 run the universal runtime without native FP8. Expect them to be
   several times slower. Nobody has verified them in this project yet.
 - Motion and depth guides are estimated from the video. Artifacts happen.
@@ -198,7 +207,7 @@ separate helper process; playback upscaling runs in the player.
 - [Build and test](docs/BUILDING.md)
 - [Architecture](docs/ARCHITECTURE.md), [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md)
+- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md), [RTX 5090 on 0.17.0](docs/VERIFICATION-2026-09-10-RTX5090.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md), [issues](https://github.com/2600th/dlss5-video-player/issues)
 
 Bug report: build or commit, GPU, driver, source size and frame rate, steps,
