@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <thread>
+#include <vector>
 
 void TemporalGuideGenerator::Reset() {
     m_prevLuma.clear();
@@ -147,47 +149,96 @@ void TemporalGuideGenerator::EstimateFlow(const std::vector<float>& cur, const s
     // Solve local flow on a 2x2 lattice, then expand each result to the tiny block.
     // At a 160-wide analysis grid this retains useful object motion while making
     // 30/60 fps playback much less CPU-bound than matching every grid pixel.
-    for (int y = 0; y < h; y += 2) {
-        for (int x = 0; x < w; x += 2) {
-            float best = std::numeric_limits<float>::max();
-            int bx = bestGX, by = bestGY;
-            for (int oy = -localRadius; oy <= localRadius; ++oy) {
-                for (int ox = -localRadius; ox <= localRadius; ++ox) {
-                    const int dx = bestGX + ox, dy = bestGY + oy;
-                    float cost = PatchSad(cur, prev, x, y, dx, dy, w, h);
-                    cost += 0.002f * float(ox * ox + oy * oy);
-                    if (cost < best) { best = cost; bx = dx; by = dy; }
-                }
-            }
-            float fbx = float(bx), fby = float(by);
-            // Integer block matching on a compact grid is too quantized after scaling to
-            // 1440p/4K. Refine the winning vector at quarter-grid precision using bilinear
-            // samples of the previous frame. This keeps the CPU implementation self-contained
-            // while giving DLSS materially smoother per-pixel motion.
-            if (best <= 0.18f) {
-                static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
-                float refined = best;
-                for (float sy : sub) {
-                    for (float sx : sub) {
-                        const float dx = float(bx) + sx, dy = float(by) + sy;
-                        float cost = PatchSadSubpixel(cur, prev, x, y, dx, dy, w, h);
-                        cost += 0.0015f * (sx * sx + sy * sy);
-                        if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
+    const unsigned int hwThreads = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
+    const int totalStepsY = (h + 1) / 2;
+    if (hwThreads <= 1 || totalStepsY < int(hwThreads * 2)) {
+        for (int y = 0; y < h; y += 2) {
+            for (int x = 0; x < w; x += 2) {
+                float best = std::numeric_limits<float>::max();
+                int bx = bestGX, by = bestGY;
+                for (int oy = -localRadius; oy <= localRadius; ++oy) {
+                    for (int ox = -localRadius; ox <= localRadius; ++ox) {
+                        const int dx = bestGX + ox, dy = bestGY + oy;
+                        float cost = PatchSad(cur, prev, x, y, dx, dy, w, h);
+                        cost += 0.002f * float(ox * ox + oy * oy);
+                        if (cost < best) { best = cost; bx = dx; by = dy; }
                     }
                 }
-                best = refined;
-            }
+                float fbx = float(bx), fby = float(by);
+                if (best <= 0.18f) {
+                    static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
+                    float refined = best;
+                    for (float sy : sub) {
+                        for (float sx : sub) {
+                            const float dx = float(bx) + sx, dy = float(by) + sy;
+                            float cost = PatchSadSubpixel(cur, prev, x, y, dx, dy, w, h);
+                            cost += 0.0015f * (sx * sx + sy * sy);
+                            if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
+                        }
+                    }
+                    best = refined;
+                }
 
-            // High mismatch means a cut/disocclusion/no reliable correspondence.
-            if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
-            for (int yy = y; yy < std::min(y + 2, h); ++yy) {
-                for (int xx = x; xx < std::min(x + 2, w); ++xx) {
-                    const size_t oi = size_t(yy) * gw + xx;
-                    flowX[oi] = fbx;
-                    flowY[oi] = fby;
-                    mismatch[oi] = best;
+                if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
+                for (int yy = y; yy < std::min(y + 2, h); ++yy) {
+                    for (int xx = x; xx < std::min(x + 2, w); ++xx) {
+                        const size_t oi = size_t(yy) * gw + xx;
+                        flowX[oi] = fbx;
+                        flowY[oi] = fby;
+                        mismatch[oi] = best;
+                    }
                 }
             }
+        }
+    } else {
+        std::vector<std::jthread> workers;
+        workers.reserve(hwThreads);
+        const int stepsPerThread = (totalStepsY + int(hwThreads) - 1) / int(hwThreads);
+        for (unsigned int t = 0; t < hwThreads; ++t) {
+            const int startStep = t * stepsPerThread;
+            const int endStep = std::min(totalStepsY, startStep + stepsPerThread);
+            if (startStep >= endStep) break;
+            workers.emplace_back([=, &cur, &prev, &flowX, &flowY, &mismatch] {
+                for (int step = startStep; step < endStep; ++step) {
+                    const int y = step * 2;
+                    for (int x = 0; x < w; x += 2) {
+                        float best = std::numeric_limits<float>::max();
+                        int bx = bestGX, by = bestGY;
+                        for (int oy = -localRadius; oy <= localRadius; ++oy) {
+                            for (int ox = -localRadius; ox <= localRadius; ++ox) {
+                                const int dx = bestGX + ox, dy = bestGY + oy;
+                                float cost = PatchSad(cur, prev, x, y, dx, dy, w, h);
+                                cost += 0.002f * float(ox * ox + oy * oy);
+                                if (cost < best) { best = cost; bx = dx; by = dy; }
+                            }
+                        }
+                        float fbx = float(bx), fby = float(by);
+                        if (best <= 0.18f) {
+                            static constexpr float sub[] = {-0.50f, -0.25f, 0.0f, 0.25f, 0.50f};
+                            float refined = best;
+                            for (float sy : sub) {
+                                for (float sx : sub) {
+                                    const float dx = float(bx) + sx, dy = float(by) + sy;
+                                    float cost = PatchSadSubpixel(cur, prev, x, y, dx, dy, w, h);
+                                    cost += 0.0015f * (sx * sx + sy * sy);
+                                    if (cost < refined) { refined = cost; fbx = dx; fby = dy; }
+                                }
+                            }
+                            best = refined;
+                        }
+
+                        if (best > 0.18f) { fbx = 0.0f; fby = 0.0f; }
+                        for (int yy = y; yy < std::min(y + 2, h); ++yy) {
+                            for (int xx = x; xx < std::min(x + 2, w); ++xx) {
+                                const size_t oi = size_t(yy) * gw + xx;
+                                flowX[oi] = fbx;
+                                flowY[oi] = fby;
+                                mismatch[oi] = best;
+                            }
+                        }
+                    }
+                }
+            });
         }
     }
 }
