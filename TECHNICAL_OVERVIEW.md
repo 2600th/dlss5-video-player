@@ -92,8 +92,9 @@ every RTX GPU.
 
 ## Runtime notices
 
-The optional neural DLL reports Authenticode `HashMismatch`; ReShade/RenoDX
-components are unsigned. Runtime locks verify expected bytes and signature
+The optional neural DLL is a community modification with its NVIDIA signature
+removed; ReShade/RenoDX components are unsigned. Runtime locks verify expected
+bytes and signature
 states, not trust or redistribution permission. Keep the full notices supplied
 with a package and review [security](SECURITY.md) and
 [third-party terms](THIRD_PARTY.md) before distributing it.

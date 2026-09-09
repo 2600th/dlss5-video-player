@@ -197,8 +197,12 @@ export. This is a count-based retention policy, not a byte quota or a backup.
 
 `DLSSVideoPlayer.ini` beside the executable stores volume, mute, fit/fill,
 original/neural view, upscaling preference and output size, YouTube quality,
-image adjustments, comparison mode, neural settings and guide switches. Keep
-the player in a writable folder to persist preferences.
+image adjustments, comparison mode, neural settings and guide switches. It
+also keeps `[NeuralPace]`: the steady-state render pace (ms per frame at a
+given source size) the last live session measured on the detected GPU, which
+the next session's keep-up forecast is scaled by. Delete the section to fall
+back to the generation's prior. Keep the player in a writable folder to
+persist preferences.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

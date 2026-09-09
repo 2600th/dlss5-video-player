@@ -21,7 +21,8 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 > [!IMPORTANT]
 > This is an experimental community project, not an official NVIDIA DLSS 5
 > integration. The optional neural runtime uses modified/unsigned third-party
-> components. Hardware verification for v0.15.0 used an RTX 5090.
+> components. Hardware verification for v0.15.0 used an RTX 5090; the current
+> source was verified on an RTX 4080 SUPER with the universal runtime.
 > See [runtime details and notices](THIRD_PARTY.md).
 
 ## Why use it?
@@ -45,9 +46,10 @@ YouTube selection. See the [changelog](CHANGELOG.md).
 
 ## Get started
 
-1. Use Windows x64 with a D3D12-capable NVIDIA RTX GPU and a suitable NVIDIA
-   driver. The experimental neural layout requires the separately supplied
-   runtime described in [setup](docs/DLSS5_SETUP.md).
+1. Use Windows x64 with an NVIDIA RTX GPU (GeForce RTX 20 through 50, or an
+   RTX-branded workstation/laptop part) and a suitable NVIDIA driver. The
+   experimental neural layout requires the separately supplied runtime
+   described in [setup](docs/DLSS5_SETUP.md).
 2. [Build the current source](docs/BUILDING.md), or download the
    [v0.15.0 package](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.15.0)
    if you have repository access. GitHub's source ZIP is not a runnable package.
@@ -156,11 +158,15 @@ than on these.
 
 - Neural rendering runs either as a cached render you play beside the original,
   or behind live playback from the playhead. On an RTX 5090 it keeps up with
-  sources up to 4K30 (measured 1.165x real time in the player) and buffers when
-  it cannot; heavier sources are refused with the predicted rate. Processing
-  time and results vary by source and hardware.
-- Motion and depth guides are estimated from video. Artifacts are possible;
-  RTX 40 neural compatibility has not been hardware-verified for this build.
+  sources up to 4K30 (measured 1.165x real time in the player); an RTX 4080
+  SUPER renders 1080p at 15.3 ms/frame, 1.22x the 5090's cost, and is forecast
+  to fall just short at 4K30. The player measures its own GPU after the first
+  session and forecasts from that; it buffers when it cannot keep up, and
+  heavier sources are refused with the predicted rate.
+- Motion and depth guides are estimated from video. Artifacts are possible.
+  Turing (RTX 20) and Ampere (RTX 30) run the universal runtime without native
+  FP8 and are several times slower; they have not been hardware-verified in
+  this project, and Blackwell has not been re-verified on the universal runtime.
 - Export copies the cached 8-bit video. Playback adjustments and runtime upscaling
   are not baked in; export does not restore HDR or lost source precision.
 - Compatible source subtitles remain separate in export. In-player subtitle
@@ -178,7 +184,7 @@ hosts the experimental neural runtime; playback upscaling runs in the player.
 - [Build and test](docs/BUILDING.md)
 - [Architecture](docs/ARCHITECTURE.md) and [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- [Verification results](docs/VERIFICATION-2026-09-02.md)
+- [Verification results](docs/VERIFICATION-2026-09-02.md) and the [RTX 4080 SUPER record](docs/VERIFICATION-2026-09-09-RTX4080.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md) and [report an issue](https://github.com/2600th/dlss5-video-player/issues)
 - [Example video sources](docs/EXAMPLE_VIDEOS.md)
 

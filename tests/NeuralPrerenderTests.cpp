@@ -1881,6 +1881,40 @@ void neural_segment_index_resumes_after_retained_coverage_test()
     CHECK(index.Empty());CHECK_EQ(uint64_t{0},index.TotalFrames());CHECK_EQ(int64_t{0},index.Head100ns());
 }
 
+// The pace a session reports is steady-state: it starts at the first segment
+// this job published (which absorbs helper startup) and counts only the frames
+// that arrived after it. Adopted coverage and relaunches start a new run.
+void neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test()
+{
+    NeuralSegmentIndex index;
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    CHECK_EQ(0.0,index.Pace().MsPerFrame());
+    index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,60));
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,70,60));
+    index.Append(LiveSegmentRecord(L"neural-00002.mkv",2,130,18));
+    CHECK_EQ(uint64_t{78},index.Pace().frames);
+    CHECK(index.Pace().wallMs>=0.0);
+
+    // A relaunch drops the second job's segments and its pace with them.
+    index.TruncateTo(1);
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,70,60));
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    index.Append(LiveSegmentRecord(L"neural-00002.mkv",2,130,60));
+    CHECK_EQ(uint64_t{60},index.Pace().frames);
+
+    // Resuming on retained coverage: the next job's first segment is startup again.
+    index.Finish();index.Unfinish();
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",3,190,60));
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",4,250,60));
+    CHECK_EQ(uint64_t{60},index.Pace().frames);
+    index.Restart();
+    CHECK_EQ(uint64_t{0},index.Pace().frames);
+}
+
 void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
 {
     LiveFrameLibrary library;library.Add(L"original.mkv",40);library.Add(L"neural-00000.mkv",5);
@@ -2071,6 +2105,31 @@ void live_render_forecast_matches_the_measured_rate_and_flags_sources_that_canno
     CHECK(playback_timing::ForecastLiveRender(1920,1080,0.0).keepsUp);
 }
 
+// The reference numbers belong to one GPU. Another GPU is the same pipeline at
+// a different speed, so its measured pace scales the whole cost, and an
+// unknown pace stays silent rather than promising anything.
+void live_render_forecast_scales_with_the_measured_pace_of_this_gpu_test()
+{
+    // 15.31 ms/frame at 1080p is what an RTX 4080 SUPER measured: 1.22x the reference.
+    const double ada=playback_timing::RenderPaceScale(15.31,1920,1080);
+    CHECK(ada>1.21&&ada<1.23);
+    CHECK_EQ(0.0,playback_timing::RenderPaceScale(0.0,1920,1080));
+    CHECK_EQ(0.0,playback_timing::RenderPaceScale(15.31,0,1080));
+
+    // 4K30 keeps up on the reference GPU with 19% to spare; at 1.22x it just misses.
+    const auto uhd=playback_timing::ForecastLiveRender(3840,2160,30.0,ada);
+    CHECK(!uhd.keepsUp);
+    CHECK(uhd.realtimeRatio>0.95&&uhd.realtimeRatio<0.99);
+    CHECK(uhd.msPerFrame>34.0&&uhd.msPerFrame<34.6);
+    // 1080p60 still fits at that pace; a GPU three times slower does not.
+    CHECK(playback_timing::ForecastLiveRender(1920,1080,60.0,ada).keepsUp);
+    CHECK(!playback_timing::ForecastLiveRender(1920,1080,60.0,3.0).keepsUp);
+    // Unknown pace: no forecast, never a block.
+    const auto unknown=playback_timing::ForecastLiveRender(3840,2160,60.0,0.0);
+    CHECK(unknown.keepsUp);
+    CHECK_EQ(0.0,unknown.msPerFrame);
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -2215,6 +2274,8 @@ int wmain(int argc, wchar_t* argv[])
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
+    live_render_forecast_scales_with_the_measured_pace_of_this_gpu_test();
+    neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;

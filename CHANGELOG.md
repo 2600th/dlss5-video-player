@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+- Neural rendering on every RTX generation. The locked neural runtime is now
+  ShortFuse's universal `310.8.SF-v2` build (`nvngx_dlssnr.dll`, SHA-256
+  `6EB209E7…3927`), which extends the leaked 310.8 runtime to Turing, Ampere,
+  Ada and Blackwell; the previous lock was the RTX 40-targeted `310.8.0-RTX40`
+  build, which had no Turing or Ampere code. The GPU policy enables the add-on
+  for GeForce RTX 20/30/40/50 and for RTX-branded workstation and laptop parts,
+  and stops fail-closing on the product name: feature 18's own creation and the
+  strict evidence chain still refuse a GPU that cannot run it. The generation
+  label in the cache identity gains `rtx20`, `rtx30` and `rtx`. Verified on an
+  RTX 4080 SUPER (driver 610.47): the strict GPU smoke passes on photo, GIF and
+  video with both the old and the new runtime at the same per-frame cost, and a
+  30 s 1080p30 live session rendered 798/798 verified frames with zero dropped
+  presents. Blackwell was verified on the previous runtime only; Turing and
+  Ampere have no hardware verification in this project yet.
+- Fixed the render wedging right after preroll on an RTX 4080. The automatic
+  NGX feature recreate that arms the add-on's capture fired on the first
+  captured frame, sixty frames in, and released the DLSS feature while up to
+  two earlier frames' evaluations were still on the GPU. The add-on hooks that
+  release and tears down its NR worksets, and the queue never came back; every
+  1080p live session on the 4080 failed with `retry-exhausted frames=0/0`
+  after exactly 2 s, twice in two attempts. The renderer now drains the queue
+  before releasing a feature. The same session then completed end to end.
+- Frame waits during rendering get their own 20 s budget instead of sharing
+  the 2 s teardown budget. The short budget classified any GPU that needs more
+  than 2 s for three pipelined frames as a stall, which is exactly where a
+  Turing or Ampere part lands at 1080p. Teardown keeps 2 s, and device removal
+  still surfaces immediately through the fence's `UINT64_MAX` sentinel.
+- The live-session forecast speaks for this machine's GPU. The 7.35 ms +
+  2.50 ms/megapixel model was measured on an RTX 5090 and was applied to every
+  GPU as if it were one. The player now measures the steady-state pace of each
+  session from segment arrivals - the method the reference numbers used - and
+  saves it per GPU in `DLSSVideoPlayer.ini` (`[NeuralPace]`); the next forecast
+  scales the reference cost by it. Until a machine has measured itself, Ada
+  assumes 1.22x (the RTX 4080 SUPER measured 15.31 ms/frame at 1080p over 738
+  frames), Blackwell 1.0x, and other generations make no forecast at all rather
+  than a wrong one. At 1.22x, 4K30 lands at 0.97x real time and is warned about.
+- The runtime staging script compares file versions numerically, like the
+  player does, because the universal runtime's version string (`310.8.SF.0`)
+  is not what its numeric version block (`310.8.2.0`) says.
+
 ## 0.15.0 - 2026-09-09
 
 - Turn neural rendering on while watching. The toggle starts a render at the

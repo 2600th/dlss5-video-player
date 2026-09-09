@@ -20,9 +20,29 @@ else {
     [IO.Path]::GetFullPath((Join-Path (Get-Location) $Destination))
 }
 
-function Get-NormalizedVersion {
+# The player compares the numeric VS_FIXEDFILEINFO block (RuntimeLock.cpp
+# VersionsMatch), not the free-form FileVersion string, so a runtime whose
+# string reads "310.8.SF.0" locks as its numeric "310.8.2.0". Do the same here.
+function Get-NumericVersion {
     param([Parameter(Mandatory = $true)][string]$Path)
-    return ([Diagnostics.FileVersionInfo]::GetVersionInfo($Path).FileVersion -replace ',', '.').Trim()
+    $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    return "$($info.FileMajorPart).$($info.FileMinorPart).$($info.FileBuildPart).$($info.FilePrivatePart)"
+}
+
+function Test-VersionMatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Expected,
+        [Parameter(Mandatory = $true)][string]$Actual
+    )
+    if ($Expected -ceq $Actual) { return $true }
+    $lhs = $Expected -split '\.'
+    $rhs = $Actual -split '\.'
+    if ($lhs.Count -ne 4 -or $rhs.Count -ne 4) { return $false }
+    for ($i = 0; $i -lt 4; $i++) {
+        if (-not ($lhs[$i] -match '^\d{1,10}$') -or -not ($rhs[$i] -match '^\d{1,10}$')) { return $false }
+        if ([uint64]$lhs[$i] -ne [uint64]$rhs[$i]) { return $false }
+    }
+    return $true
 }
 
 function Get-Sha256 {
@@ -52,8 +72,8 @@ function Assert-LockedFile {
         throw "SHA-256 mismatch for '$($Entry.sourceName)': expected $($Entry.sha256), received $hash."
     }
 
-    $version = Get-NormalizedVersion -Path $Path
-    if ($version -cne [string]$Entry.fileVersion) {
+    $version = Get-NumericVersion -Path $Path
+    if (-not (Test-VersionMatch -Expected ([string]$Entry.fileVersion) -Actual $version)) {
         throw "Version mismatch for '$($Entry.sourceName)': expected $($Entry.fileVersion), received $version."
     }
 

@@ -9,10 +9,12 @@ claimed. Exact packaged binaries are pinned in `packaging/runtime-lock.json` and
 
 Source and terms: https://github.com/NVIDIA/DLSS
 
-The package uses NVIDIA-signed DLSS SR 310.8 together with a community-modified
-RTX 40-targeted neural-rendering DLL. The latter reports Authenticode
-`HashMismatch`; its embedded NVIDIA signature is invalid and must not be
-represented as authentic. NVIDIA files are not relicensed by this project.
+The package uses NVIDIA-signed DLSS SR 310.8 together with ShortFuse's
+community-modified universal neural-rendering DLL (`310.8.SF-v2`, from the
+`RankFTW/rhi-repo` release mirror), which extends the leaked 310.8.0 runtime to
+Turing, Ampere, Ada and Blackwell. The modification removed the embedded NVIDIA
+signature, so the file is unsigned and must not be represented as authentic.
+NVIDIA files are not relicensed by this project.
 
 ## NVIDIA Streamline
 
@@ -32,9 +34,9 @@ The packaged `dxgi.dll` is ReShade 6.8.0 and is unsigned.
 Source and license information: https://github.com/clshortfuse/renodx
 
 The selected `renodx-dlss5.addon64` 4.70 asset comes from the
-`RankFTW/rhi-repo` release mirror. It is unsigned and enabled by default on RTX
-40/50 policy targets. Redistribution permission for the combined experimental
-runtime set remains unresolved.
+`RankFTW/rhi-repo` release mirror. It is unsigned and enabled by default on
+every detected NVIDIA RTX GPU. Redistribution permission for the combined
+experimental runtime set remains unresolved.
 
 The player's `[RenoDX.DLSS5]` configuration contract was adapted from the
 MIT-licensed `jlrouzies-fr/DLSS5-Feeder` project. Its copyright and license are

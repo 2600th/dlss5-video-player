@@ -60,8 +60,20 @@ paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
 
 ## Add the experimental runtime
 
-With the complete locked input set already in `external/runtime`, stage it
-only in the worker's subdirectory:
+Every file in `packaging/runtime-lock.json` is reproducible byte-for-byte from
+public releases; the lock's `provenance` names each source. Collect them into
+`external/runtime` (any layout; the staging script searches by name):
+
+| Locked file | Public source |
+| --- | --- |
+| `nvngx_dlssnr.dll` | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2`, `nvngx_dlssnr_310.8.SF-v2.zip` (keep the source name `nvngx_dlssnr_310.8.SF-v2.dll` or stage it as `nvngx_dlssnr.dll`) |
+| `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.8.0` |
+| `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-4.70` |
+| `sl.*.dll` (8 files) | `RankFTW/rhi-repo` release `streamline-2.13.0.0` |
+| `dxgi.dll` | `ReShade64.dll` inside `ReShade_Setup_6.8.0_Addon.exe` from reshade.me; the installer is a ZIP container, so any archive tool extracts it |
+
+With the complete locked input set in `external/runtime`, stage it only in
+the worker's subdirectory:
 
 ```powershell
 ./tools/stage_runtime.ps1 -InputDirectory external/runtime -Destination build-upscaling/Release/neural-runtime

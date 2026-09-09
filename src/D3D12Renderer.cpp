@@ -418,11 +418,16 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // Intentionally allow one complete Present before the first NGX CreateFeature.
     // ReShade add-ons finish their swapchain/runtime initialization on that first frame;
     // creating on frame 2 makes the raw CreateFeature much harder for RenoDX to miss.
+    // Releasing an NGX feature while a previous frame's evaluate is still
+    // executing is outside the NGX contract, and the add-on that hooks the
+    // release tears down its inline NR worksets on the spot. With three frames
+    // in flight that reliably wedged the queue on an RTX 4080 at 1080p right
+    // after the 60-frame preroll. Drain before the release, never during it.
     const auto featureSetup = ngx_session_detail::PrepareFeatureForFrame(
         DLSSEnabled(), m_dlss.FeatureCreated(), m_framesPresented,
         m_delayedRecreateDone, m_recreateRequested,
         [&] { return m_dlss.EnsureFeature(cmd); },
-        [&] { return m_dlss.RecreateFeature(cmd); },m_preserveSource);
+        [&] { return WaitGPUForContinuedUse() && m_dlss.RecreateFeature(cmd); },m_preserveSource);
     const bool needFeatureFlush = featureSetup.needsFlush;
     if (featureSetup.selected) temporalReset = true;
     if (temporalReset && identity) {
@@ -688,6 +693,7 @@ bool D3D12Renderer::WaitForFrameSlot(uint32_t slot){
     const auto waitResult=d3d12_renderer_detail::WaitForGPUFenceCompletion(
         v,
         GetTickCount64(),
+        d3d12_renderer_detail::RenderFenceWaitMilliseconds,
         [&]{return m_fence->GetCompletedValue();},
         [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
@@ -726,7 +732,7 @@ bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     m_frameSlot=(slot+1u)%FrameCount;
     return true;
 }
-d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(){
+d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(DWORD budgetMilliseconds){
 #if defined(D3D12_RENDERER_TESTING)
     if(m_testWaitGPU){
         const auto result=m_testWaitGPU();m_lastFenceWaitResult=result;
@@ -736,27 +742,28 @@ d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(){
 #endif
     if(!m_queue||!m_fence||!m_fenceEvent)return d3d12_renderer_detail::FenceWaitResult::Completed;
     const uint64_t v=++m_fenceValue;
-    const auto result=d3d12_renderer_detail::WaitForGPUFenceTeardown(
+    const auto result=d3d12_renderer_detail::WaitForGPUFenceDrain(
         v,
+        budgetMilliseconds,
         [&](uint64_t value){return m_queue->Signal(m_fence.Get(),value);},
         [&]{return m_fence->GetCompletedValue();},
         [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
         [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);},
         [&]{return m_device->GetDeviceRemovedReason();});
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)
-        LOG("GPU fence wait failed.");
+        LOG("GPU fence wait failed after "<<budgetMilliseconds<<" ms.");
     m_lastFenceWaitResult=result;
     if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)m_gpuUnusable=true;
     return result;
 }
 bool D3D12Renderer::WaitGPUForContinuedUse(){
-    const bool completed=WaitGPU()==d3d12_renderer_detail::FenceWaitResult::Completed;
+    const bool completed=WaitGPU(d3d12_renderer_detail::RenderFenceWaitMilliseconds)==d3d12_renderer_detail::FenceWaitResult::Completed;
     if(!completed)m_gpuUnusable=true;
     return completed;
 }
 d3d12_renderer_detail::FenceWaitResult D3D12Renderer::DrainForRetirement(){
     if(m_gpuUnusable)return m_lastFenceWaitResult;
-    return WaitGPU();
+    return WaitGPU(d3d12_renderer_detail::TeardownFenceWaitMilliseconds);
 }
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::RTV(uint32_t i)const{auto h=m_rtvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*m_rtvInc;return h;}
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::DSV()const{return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();}

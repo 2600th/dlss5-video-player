@@ -1986,6 +1986,32 @@ void gpu_teardown_fence_timeout_is_bounded_and_reported_test()
     CHECK(observedTimeout!=INFINITE);CHECK(observedTimeout<=DWORD{2000});
 }
 
+// Frame waits during rendering carry their own budget: long enough for the
+// slowest supported GPU to finish three pipelined NR frames, still finite, and
+// distinct from the short teardown budget. Device loss is not subject to it.
+void gpu_render_fence_wait_uses_the_render_budget_and_reports_device_loss_first_test()
+{
+    DWORD observedTimeout=INFINITE;
+    const auto timedOut=d3d12_renderer_detail::WaitForGPUFenceCompletion(
+        uint64_t{48},GetTickCount64(),d3d12_renderer_detail::RenderFenceWaitMilliseconds,
+        []{return uint64_t{0};},
+        [](uint64_t){return S_OK;},
+        [&](DWORD timeout){observedTimeout=timeout;return DWORD{WAIT_TIMEOUT};});
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::TimedOut,timedOut);
+    CHECK(observedTimeout>d3d12_renderer_detail::TeardownFenceWaitMilliseconds);
+    CHECK(observedTimeout<=d3d12_renderer_detail::RenderFenceWaitMilliseconds);
+
+    int waits=0;
+    const auto removed=d3d12_renderer_detail::WaitForGPUFenceDrain(
+        uint64_t{49},d3d12_renderer_detail::RenderFenceWaitMilliseconds,
+        [](uint64_t){return S_OK;},
+        [&]{return waits?UINT64_MAX:uint64_t{0};},
+        [](uint64_t){return S_OK;},
+        [&](DWORD){++waits;return DWORD{WAIT_OBJECT_0};});
+    CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::DeviceRemoved,removed);
+    CHECK_EQ(1,waits);
+}
+
 void gpu_teardown_fence_ignores_old_event_wake_until_new_target_completes_test()
 {
     int completionQueries=0,waits=0;
@@ -2241,10 +2267,15 @@ void gpu_classification_table_test()
     };
 
     constexpr Case cases[] = {
+        {0x10DE, L"NVIDIA GeForce RTX 2080 Ti", GpuGeneration::Rtx20Turing},
+        {0x10DE, L"NVIDIA GeForce RTX 3060 Laptop GPU", GpuGeneration::Rtx30Ampere},
         {0x10DE, L"NVIDIA GeForce RTX 4090", GpuGeneration::Rtx40Ada},
+        {0x10DE, L"NVIDIA GeForce RTX 4080 SUPER", GpuGeneration::Rtx40Ada},
         {0x10DE, L"NVIDIA GeForce RTX 4090 Laptop GPU", GpuGeneration::Rtx40Ada},
         {0x10DE, L"nViDiA gEfOrCe rTx 5090", GpuGeneration::Rtx50Blackwell},
-        {0x10DE, L"NVIDIA GeForce RTX 3090", GpuGeneration::OtherNvidia},
+        {0x10DE, L"NVIDIA RTX A4000", GpuGeneration::OtherRtx},
+        {0x10DE, L"NVIDIA RTX 6000 Ada Generation", GpuGeneration::OtherRtx},
+        {0x10DE, L"NVIDIA GeForce GTX 1660 SUPER", GpuGeneration::OtherNvidia},
         {0x1002, L"AMD Radeon RX 7900 XTX", GpuGeneration::Unsupported},
         {0x8086, L"Intel(R) Arc(TM) A770 Graphics", GpuGeneration::Unsupported},
         {0x10DE, L"", GpuGeneration::OtherNvidia},
@@ -2259,12 +2290,20 @@ void gpu_classification_table_test()
 
 void neural_addon_policy_test()
 {
-    CHECK(NeuralAddonDesired(GpuGeneration::Rtx40Ada, false));
-    CHECK(NeuralAddonDesired(GpuGeneration::Rtx50Blackwell, false));
-    CHECK(!NeuralAddonDesired(GpuGeneration::Rtx40Ada, true));
-    CHECK(!NeuralAddonDesired(GpuGeneration::Rtx50Blackwell, true));
+    for (const GpuGeneration rtx : {GpuGeneration::Rtx20Turing, GpuGeneration::Rtx30Ampere,
+                                    GpuGeneration::Rtx40Ada, GpuGeneration::Rtx50Blackwell,
+                                    GpuGeneration::OtherRtx}) {
+        CHECK(NeuralAddonDesired(rtx, false));
+        CHECK(!NeuralAddonDesired(rtx, true));
+    }
     CHECK(!NeuralAddonDesired(GpuGeneration::OtherNvidia, false));
     CHECK(!NeuralAddonDesired(GpuGeneration::Unsupported, false));
+    CHECK_EQ(std::string_view("rtx20"), GpuGenerationPathName(GpuGeneration::Rtx20Turing));
+    CHECK_EQ(std::string_view("rtx30"), GpuGenerationPathName(GpuGeneration::Rtx30Ampere));
+    CHECK_EQ(std::string_view("rtx40"), GpuGenerationPathName(GpuGeneration::Rtx40Ada));
+    CHECK_EQ(std::string_view("rtx50"), GpuGenerationPathName(GpuGeneration::Rtx50Blackwell));
+    CHECK_EQ(std::string_view("rtx"), GpuGenerationPathName(GpuGeneration::OtherRtx));
+    CHECK_EQ(std::string_view("unsupported"), GpuGenerationPathName(GpuGeneration::OtherNvidia));
 }
 
 void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
@@ -5557,6 +5596,7 @@ int wmain(int argc, wchar_t* argv[])
     gpu_teardown_fence_event_registration_failure_stops_before_wait_test();
     gpu_teardown_fence_wait_failure_is_bounded_and_reported_test();
     gpu_teardown_fence_timeout_is_bounded_and_reported_test();
+    gpu_render_fence_wait_uses_the_render_budget_and_reports_device_loss_first_test();
     gpu_teardown_fence_ignores_old_event_wake_until_new_target_completes_test();
     gpu_teardown_fence_consecutive_timeout_does_not_let_old_registration_complete_new_target_test();
     gpu_teardown_fence_device_removed_sentinel_is_not_completion_test();
