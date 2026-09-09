@@ -50,7 +50,7 @@ public:
     // Windows keeps a copied-and-launched image locked for a moment after the
     // child exits, so a single remove_all leaked one directory holding a 1 MB
     // fake ffmpeg.exe per run - 49 of them had accumulated. Retry briefly, and
-    // sweep whatever earlier runs left behind so it cannot pile up again.
+    // sweep what earlier runs left behind so it cannot pile up again.
     ~TempDirectory()
     {
         std::error_code error;
@@ -59,21 +59,24 @@ public:
             if (!std::filesystem::exists(path_)) break;
             Sleep(25);
         }
-        SweepAbandoned(path_.parent_path(), path_);
+        SweepAbandoned(path_.parent_path());
     }
 
-    static void SweepAbandoned(const std::filesystem::path& parent,
-                               const std::filesystem::path& keep)
+    // Only directories from OTHER processes: several TempDirectory objects are
+    // alive at once inside one test run, and deleting a live sibling here made
+    // the suite flaky.
+    static void SweepAbandoned(const std::filesystem::path& parent)
     {
+        const std::wstring mine = L"DLSSVideoPlayer-NeuralCacheTests-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-";
         std::error_code error;
         for (std::filesystem::directory_iterator it(parent, error), end; !error && it != end;
              it.increment(error)) {
-            const std::filesystem::path& candidate = it->path();
-            if (candidate == keep) continue;
-            const std::wstring name = candidate.filename().wstring();
+            const std::wstring name = it->path().filename().wstring();
             if (name.rfind(L"DLSSVideoPlayer-NeuralCacheTests-", 0) != 0) continue;
+            if (name.rfind(mine, 0) == 0) continue;
             std::error_code ignored;
-            std::filesystem::remove_all(candidate, ignored);
+            std::filesystem::remove_all(it->path(), ignored);
         }
     }
 
