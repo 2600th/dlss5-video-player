@@ -103,12 +103,20 @@ whole view between original and neural. The modes gray out on the original
 view or outside cached playback and are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
-local structure, local tone, skin structure, color strength, preset, style and
-automatic mask, plus the motion-vector and depth guide switches. These change
+local structure, local tone, skin structure, style and automatic mask, plus the
+motion-vector and depth guide switches. These change
 the render identity: **Apply** restarts an active session at the playhead, or
 re-previews the paused frame, while playback image adjustments remain instant.
 Writing a file is a separate action under **Convert & save**. The guide
 switches also drive the live debug views immediately.
+
+Color strength and the render preset are deliberately not in that dialog. Each
+was measured against the pinned runtime and changes nothing - the add-on echoes
+the value back and the output is byte-identical - while a change still costs a
+full re-render. They remain in `DLSSVideoPlayer.ini` as `[NeuralSettings]
+ColorStrength` and `Preset` so runtime-comparison work can still drive them, and
+they remain part of the render identity so a runtime that does honour them
+cannot be served a stale cache entry. See [Benchmark](BENCHMARK.md).
 
 Photos support PNG, JPEG, BMP, TIFF and static WebP. They remain paused on the
 single processed frame; the cache uses a one-second carrier without adding

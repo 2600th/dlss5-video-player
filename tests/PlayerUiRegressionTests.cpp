@@ -503,15 +503,15 @@ private:
         if (!app.m_neuralWnd) return;
         const HWND dialog = app.m_neuralWnd;
         const auto setTrack = [&](int id, int pos) { SendMessageW(GetDlgItem(dialog, id), TBM_SETPOS, TRUE, pos); };
-        setTrack(IDC_NS_INTENSITY, 150); setTrack(IDC_NS_SKIN, 25); setTrack(IDC_NS_COLOR, 40);
+        setTrack(IDC_NS_INTENSITY, 150); setTrack(IDC_NS_SKIN, 25);
         app.NeuralWndProc(dialog, WM_HSCROLL, 0, 0);
         CHECK(std::abs(app.m_neuralSettings.intensity - 1.5f) < 0.001f);
         CHECK(std::abs(app.m_neuralSettings.skinStructure + 0.75f) < 0.001f);
-        CHECK(std::abs(app.m_neuralSettings.colorStrength - 0.4f) < 0.001f);
         CHECK_EQ(std::wstring(L"1.50"), ReadText(GetDlgItem(dialog, IDC_NS_INTENSITY + 100)));
-        SendMessageW(GetDlgItem(dialog, IDC_NS_PRESET), CB_SETCURSEL, 3, 0);
-        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_PRESET, CBN_SELCHANGE), 0);
-        CHECK_EQ(app.m_neuralSettings.preset, 3);
+        // Colour strength and the render preset are not offered: the runtime
+        // ignores them, so the dialog must not present them as quality controls.
+        CHECK(GetDlgItem(dialog, 7305) == nullptr);
+        CHECK(GetDlgItem(dialog, 7306) == nullptr);
         SendMessageW(GetDlgItem(dialog, IDC_NS_STYLE), CB_SETCURSEL, 2, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_STYLE, CBN_SELCHANGE), 0);
         CHECK_EQ(app.m_neuralSettings.style, 2);

@@ -19,6 +19,18 @@
   of coverage: the resumed session started at 39.47 s rather than the playhead,
   re-rendered nothing (21 segments, no overlapping spans), and playback attached
   0.74 s after the toggle with 34 s buffered, against 12.01 s on the first start.
+- Color strength and the render preset are gone from the neural settings dialog.
+  Measured one control at a time against the pinned runtime, six of the eight
+  model parameters and both guides change the output - intensity moves 84.75% of
+  bytes, local tone 66.45%, local structure 53.41%, style 49.31%, the
+  motion-vector guide 39.79%, depth 37.92%, skin structure 36.50% and the
+  automatic mask 36.08% - while color strength and the preset move nothing, on
+  four preset pairs and two colour baselines. Driving the runtime INI directly
+  shows the add-on echoing `preset=1` and `preset=3` back, so the hint reaches
+  NGX and the model ignores it. Each change still cost a 10.6 s re-render for
+  byte-identical output. Both keys stay in DLSSVideoPlayer.ini and in the render
+  identity, so runtime-comparison work can still drive them and a runtime that
+  does honour them cannot be served a stale cache entry.
 - A session that cannot keep up says so before it starts. Rendering costs
   7.35 ms per frame plus 2.50 ms per megapixel on an RTX 5090 (fitted to 12.50,
   16.60 and 28.07 ms/frame measured at 1080p, 1440p and 4K), so the player can

@@ -155,8 +155,8 @@ static constexpr int IDC_NS_INTENSITY = 7301;
 static constexpr int IDC_NS_STRUCTURE = 7302;
 static constexpr int IDC_NS_TONE = 7303;
 static constexpr int IDC_NS_SKIN = 7304;
-static constexpr int IDC_NS_COLOR = 7305;
-static constexpr int IDC_NS_PRESET = 7306;
+// 7305 and 7306 were the colour-strength slider and the render-preset combo,
+// both removed after measurement showed the runtime ignores them.
 static constexpr int IDC_NS_STYLE = 7307;
 static constexpr int IDC_NS_AUTOMASK = 7308;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
@@ -1409,7 +1409,6 @@ private:
         SetAdjustmentValue(h,IDC_NS_STRUCTURE,PlainValue(m_neuralSettings.localStructure));
         SetAdjustmentValue(h,IDC_NS_TONE,PlainValue(m_neuralSettings.localTone));
         SetAdjustmentValue(h,IDC_NS_SKIN,SignedValue(m_neuralSettings.skinStructure));
-        SetAdjustmentValue(h,IDC_NS_COLOR,PlainValue(m_neuralSettings.colorStrength));
     }
 
     void SyncNeuralSettingControls(HWND h){
@@ -1417,9 +1416,8 @@ private:
         SetTrack(h,IDC_NS_STRUCTURE,0,200,int(std::lround(m_neuralSettings.localStructure*100.0f)));
         SetTrack(h,IDC_NS_TONE,0,200,int(std::lround(m_neuralSettings.localTone*100.0f)));
         SetTrack(h,IDC_NS_SKIN,0,200,int(std::lround((m_neuralSettings.skinStructure+1.0f)*100.0f)));
-        SetTrack(h,IDC_NS_COLOR,0,100,int(std::lround(m_neuralSettings.colorStrength*100.0f)));
         const auto select=[&](int id,int index){if(HWND combo=GetDlgItem(h,id))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
-        select(IDC_NS_PRESET,std::clamp(m_neuralSettings.preset,0,3));select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
+        select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         UpdateNeuralSettingValueLabels(h);
@@ -1433,8 +1431,6 @@ private:
         m_neuralSettings.localStructure=float(pos(IDC_NS_STRUCTURE))/100.0f;
         m_neuralSettings.localTone=float(pos(IDC_NS_TONE))/100.0f;
         m_neuralSettings.skinStructure=float(pos(IDC_NS_SKIN))/100.0f-1.0f;
-        m_neuralSettings.colorStrength=float(pos(IDC_NS_COLOR))/100.0f;
-        m_neuralSettings.preset=sel(IDC_NS_PRESET,m_neuralSettings.preset);
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
@@ -1461,23 +1457,27 @@ private:
         SendMessageW(box,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);return box;
     }
 
+    // Color strength and render preset are deliberately absent: measured on the
+    // pinned runtime they change nothing (0 differing bytes across four preset
+    // pairs and two colour baselines, with the add-on echoing the value back),
+    // while every change still costs a full re-render. They remain in
+    // NeuralSettings and in DLSSVideoPlayer.ini so runtime-comparison work can
+    // still drive them; see docs/BENCHMARK.md.
     void BuildNeuralSettingControls(HWND h){
         CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",28);
         CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",78);
         CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",128);
         CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",178);
-        CreateAdjustmentRow(h,IDC_NS_COLOR,L"neural.settings.color",228);
-        CreateNeuralCombo(h,IDC_NS_PRESET,L"neural.settings.preset",278,{L"Default",L"1",L"2",L"3"});
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",318,{L"Default",L"Natural",L"Cinematic"});
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,356,236);
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",228,{L"Default",L"Natural",L"Cinematic"});
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,266,236);
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,394,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,392,116);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,392,80);
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,428,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,474,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
-        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,474,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,474,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
+        HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,304,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,302,116);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80);
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,338,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,384,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
+        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,384,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,384,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         SyncNeuralSettingControls(h);
     }
@@ -1487,7 +1487,7 @@ private:
         static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV11";
         WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
-        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=558,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=468,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
         m_neuralWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"neural.settings.title").c_str(),
             WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
@@ -1522,7 +1522,7 @@ private:
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if(((id==IDC_NS_PRESET||id==IDC_NS_STYLE)&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
