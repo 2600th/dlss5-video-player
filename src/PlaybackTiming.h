@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace playback_timing {
 
@@ -45,10 +47,17 @@ inline double LateFrameThreshold(double frameDuration)
 inline constexpr double kNeuralFrameFixedMs = 7.35;
 inline constexpr double kNeuralMillisecondsPerMegapixel = 2.50;
 
-// Other GPUs run the same pipeline at a different speed. One scalar on the
-// reference cost is enough: every stage is GPU work on the same frame, so the
-// fixed/proportional split keeps its shape. `RenderPaceScale` derives the
-// scalar from a pace this machine measured; a scale of 0 means "unknown".
+// Other GPUs run the same pipeline at a different speed, but not at a
+// different speed uniformly: an RTX 5090 measured 0.95x the reference cost at
+// 1080p, 1.04x at 1440p and 1.53x at 4K, so one scalar taken at 1080p let a
+// 4K30 session start and drop 848 of 869 frames. The player therefore keeps
+// one measured pace per source geometry and predicts from them:
+//   - a sample at the requested geometry is used as is;
+//   - two or more geometries fit their own fixed + per-megapixel line;
+//   - one sample extrapolates conservatively: the larger of the reference
+//     shape scaled through the sample and a purely proportional cost;
+//   - no sample falls back to the generation's prior scale on the reference
+//     model, and a prior of 0 means "unknown".
 struct RenderPaceModel {
     double fixedMs = kNeuralFrameFixedMs;
     double msPerMegapixel = kNeuralMillisecondsPerMegapixel;
@@ -57,6 +66,11 @@ struct RenderPaceModel {
         return fixedMs + (double(width) * double(height)) / 1'000'000.0 * msPerMegapixel;
     }
 };
+
+inline double Megapixels(uint32_t width, uint32_t height)
+{
+    return (double(width) * double(height)) / 1'000'000.0;
+}
 
 // Ratio of a measured per-frame cost to what the reference model predicts for
 // that geometry. Returns 0 when nothing usable was measured.
@@ -68,6 +82,72 @@ inline double RenderPaceScale(double measuredMsPerFrame, uint32_t width, uint32_
     return measuredMsPerFrame / predicted;
 }
 
+struct RenderPaceSample {
+    uint32_t width{};
+    uint32_t height{};
+    double msPerFrame{};
+    friend bool operator==(const RenderPaceSample&, const RenderPaceSample&) = default;
+};
+
+// Measured paces of one GPU, at most one per geometry, newest replacing oldest.
+struct RenderPaceProfile {
+    static constexpr size_t kMaxSamples = 6;
+    std::vector<RenderPaceSample> samples;
+
+    void Record(RenderPaceSample sample)
+    {
+        if (sample.width == 0 || sample.height == 0 || !(sample.msPerFrame > 0.0)) return;
+        for (RenderPaceSample& existing : samples) {
+            if (existing.width == sample.width && existing.height == sample.height) {
+                existing.msPerFrame = sample.msPerFrame;
+                return;
+            }
+        }
+        if (samples.size() == kMaxSamples) samples.erase(samples.begin());
+        samples.push_back(sample);
+    }
+};
+
+// Predicted cost of one frame at `width` x `height`, or 0 when unknown.
+inline double PredictRenderMs(const RenderPaceProfile& profile, uint32_t width, uint32_t height,
+                              double priorScale, RenderPaceModel reference = {})
+{
+    const double megapixels = Megapixels(width, height);
+    if (!(megapixels > 0.0)) return 0.0;
+
+    // Least squares over distinct geometries; also finds an exact match.
+    double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumXY = 0.0;
+    size_t count = 0;
+    const RenderPaceSample* single = nullptr;
+    for (const RenderPaceSample& sample : profile.samples) {
+        if (!(sample.msPerFrame > 0.0)) continue;
+        if (sample.width == width && sample.height == height) return sample.msPerFrame;
+        const double x = Megapixels(sample.width, sample.height);
+        if (!(x > 0.0)) continue;
+        sumX += x; sumY += sample.msPerFrame; sumXX += x * x; sumXY += x * sample.msPerFrame;
+        ++count;
+        single = &sample;
+    }
+    if (count >= 2) {
+        const double denominator = double(count) * sumXX - sumX * sumX;
+        if (denominator > 0.0) {
+            const double slope = (double(count) * sumXY - sumX * sumY) / denominator;
+            const double intercept = (sumY - slope * sumX) / double(count);
+            // A line that goes down with resolution is measurement noise, not a
+            // model; fall through to the conservative single-sample rule.
+            if (slope > 0.0) return std::max(0.0, intercept) + slope * megapixels;
+        }
+    }
+    if (single) {
+        const double sampleMegapixels = Megapixels(single->width, single->height);
+        const double shaped = RenderPaceScale(single->msPerFrame, single->width, single->height, reference) *
+                              reference.MsPerFrame(width, height);
+        const double proportional = single->msPerFrame * megapixels / sampleMegapixels;
+        return std::max(shaped, proportional);
+    }
+    return priorScale > 0.0 ? priorScale * reference.MsPerFrame(width, height) : 0.0;
+}
+
 struct LiveRenderForecast {
     double msPerFrame;      // predicted render cost of one frame
     double renderFps;       // frames the renderer can produce per second
@@ -76,24 +156,24 @@ struct LiveRenderForecast {
     bool keepsUp;
 };
 
-// `paceScale` multiplies the reference cost: 1.0 is the reference GPU, 0 means
-// the pace of this GPU is unknown, and an unknown pace never blocks the user
-// on a guess.
+// `priorScale` multiplies the reference cost when the profile has nothing to
+// say: 1.0 is the reference GPU, 0 means the pace of this GPU is unknown, and
+// an unknown pace never blocks the user on a guess.
 inline LiveRenderForecast ForecastLiveRender(uint32_t width, uint32_t height, double sourceFps,
-                                             double paceScale = 1.0,
+                                             const RenderPaceProfile& profile = {},
+                                             double priorScale = 1.0,
                                              RenderPaceModel reference = {})
 {
     LiveRenderForecast forecast{};
     forecast.sourceFps = sourceFps;
-    const double megapixels = (double(width) * double(height)) / 1'000'000.0;
-    if (!(megapixels > 0.0) || !(sourceFps > 0.0) || !(paceScale > 0.0) ||
-        !(reference.msPerMegapixel > 0.0)) {
+    const double msPerFrame = sourceFps > 0.0 ? PredictRenderMs(profile, width, height, priorScale, reference) : 0.0;
+    if (!(msPerFrame > 0.0)) {
         // Nothing measurable to forecast: never block the user on a guess.
         forecast.keepsUp = true;
         return forecast;
     }
-    forecast.msPerFrame = paceScale * reference.MsPerFrame(width, height);
-    forecast.renderFps = 1000.0 / forecast.msPerFrame;
+    forecast.msPerFrame = msPerFrame;
+    forecast.renderFps = 1000.0 / msPerFrame;
     forecast.realtimeRatio = forecast.renderFps / sourceFps;
     // A couple of percent either way is inside run-to-run noise; only warn when
     // the shortfall is real.

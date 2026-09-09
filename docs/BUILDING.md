@@ -61,19 +61,35 @@ paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
 ## Add the experimental runtime
 
 Every file in `packaging/runtime-lock.json` is reproducible byte-for-byte from
-public releases; the lock's `provenance` names each source. Collect them into
-`external/runtime` (any layout; the staging script searches by name):
+public releases, and one script fetches them all:
+
+```powershell
+./tools/fetch_neural_runtime.ps1
+```
+
+It downloads each source archive, checks the archive's SHA-256, extracts the
+locked members, checks each against the lock's size and SHA-256, stages them
+in `external/runtime`, and finishes with the full `stage_runtime.ps1`
+validation (Authenticode state and numeric file version). Files that already
+match the lock are not downloaded again, so re-running it costs nothing. The
+largest download is the 111 MiB neural runtime archive. The lock's
+`provenance` names each source; for reference:
 
 | Locked file | Public source |
 | --- | --- |
-| `nvngx_dlssnr.dll` | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2`, `nvngx_dlssnr_310.8.SF-v2.zip` (keep the source name `nvngx_dlssnr_310.8.SF-v2.dll` or stage it as `nvngx_dlssnr.dll`) |
+| `nvngx_dlssnr.dll` | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2` |
 | `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.8.0` |
 | `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-4.70` |
 | `sl.*.dll` (8 files) | `RankFTW/rhi-repo` release `streamline-2.13.0.0` |
-| `dxgi.dll` | `ReShade64.dll` inside `ReShade_Setup_6.8.0_Addon.exe` from reshade.me; the installer is a ZIP container, so any archive tool extracts it |
+| `dxgi.dll` | `ReShade64.dll` inside `ReShade_Setup_6.8.0_Addon.exe` from reshade.me; the installer is a ZIP container |
 
-With the complete locked input set in `external/runtime`, stage it only in
-the worker's subdirectory:
+Fetching them for your own build is you obtaining the files from their
+publishers. It does not resolve the redistribution question for the combined
+set, which is why the public `v*` release excludes them; see
+[third-party notices](../THIRD_PARTY.md).
+
+With the locked input set in `external/runtime`, stage it only in the
+worker's subdirectory:
 
 ```powershell
 ./tools/stage_runtime.ps1 -InputDirectory external/runtime -Destination build-upscaling/Release/neural-runtime
@@ -84,11 +100,11 @@ The configuration copy is for initial setup; preserve existing neural settings
 before replacing it. Never place the neural `dxgi.dll` beside the main player.
 See [runtime setup](DLSS5_SETUP.md) for loading and validation contracts.
 
-`build_windows.bat` combines validation, build, tests and runtime staging for
-maintainers who already have the complete locked runtime and FFmpeg inputs.
-It also refreshes pinned UI/YouTube helpers. Set `DLSS_SDK_DIR` or `FFMPEG_BIN_DIR`
-before running it to override their paths. Use the manual CMake route above
-for a source build without the experimental runtime.
+`build_windows.bat` combines fetching and validating the locked runtime,
+build, tests and runtime staging for maintainers with the FFmpeg inputs in
+place. It also refreshes pinned UI/YouTube helpers. Set `DLSS_SDK_DIR` or
+`FFMPEG_BIN_DIR` before running it to override their paths. Use the manual
+CMake route above for a source build without the experimental runtime.
 
 ## Assemble a package
 

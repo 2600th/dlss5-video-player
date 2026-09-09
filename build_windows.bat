@@ -46,10 +46,10 @@ echo [2/5] Fetching pinned YouTube helpers...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\fetch_youtube_helpers.ps1
 if errorlevel 1 exit /b 1
 
-echo [3/5] Validating locked experimental runtime...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination external\runtime -ValidateOnly
+echo [3/5] Fetching and validating the locked experimental runtime...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\fetch_neural_runtime.ps1
 if errorlevel 1 (
-  echo [ERROR] Locked runtime is missing or has drifted. Stage it with tools\stage_runtime.ps1 first.
+  echo [ERROR] Locked runtime could not be fetched or has drifted. See docs\BUILDING.md.
   exit /b 1
 )
 

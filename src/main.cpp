@@ -1206,30 +1206,38 @@ private:
         LoadRenderPace();
     }
 
-    // The steady-state neural render pace this machine measured last time, so
-    // the live-session forecast speaks for this GPU rather than the reference.
+    // The steady-state neural render paces this machine measured, one per
+    // source geometry, so the live-session forecast speaks for this GPU rather
+    // than the reference. Stored as `Samples=WxH:ms;WxH:ms` for the named GPU;
+    // a different GPU starts from an empty profile.
     void LoadRenderPace(){
         std::wstring gpu(512,L'\0');
-        const DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
+        DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
         gpu.resize(length);
-        m_renderPace={std::move(gpu),double(ReadIniFloat(L"NeuralPace",L"MsPerFrame",0.0f)),
-                      static_cast<uint32_t>(std::max(0.0f,ReadIniFloat(L"NeuralPace",L"Width",0.0f))),
-                      static_cast<uint32_t>(std::max(0.0f,ReadIniFloat(L"NeuralPace",L"Height",0.0f)))};
+        std::wstring samples(1024,L'\0');
+        length=GetPrivateProfileStringW(L"NeuralPace",L"Samples",L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
+        samples.resize(length);
+        m_renderPace={};
+        if(gpu!=m_opt.detectedGpu.description)return;
+        for(size_t start=0;start<samples.size();){
+            size_t end=samples.find(L';',start);if(end==std::wstring::npos)end=samples.size();
+            unsigned width=0,height=0;double ms=0.0;
+            if(swscanf_s(samples.substr(start,end-start).c_str(),L"%ux%u:%lf",&width,&height,&ms)==3)
+                m_renderPace.Record({width,height,ms});
+            start=end+1;
+        }
     }
     void SaveRenderPace()const{
-        WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_renderPace.gpu.c_str(),SettingsPath().c_str());
-        WriteIniFloat(L"NeuralPace",L"MsPerFrame",static_cast<float>(m_renderPace.msPerFrame));
-        WriteIniFloat(L"NeuralPace",L"Width",static_cast<float>(m_renderPace.width));
-        WriteIniFloat(L"NeuralPace",L"Height",static_cast<float>(m_renderPace.height));
-    }
-    // Scale on the reference render cost for the detected GPU: this machine's
-    // own measurement when it has one, otherwise the generation's prior.
-    double LiveRenderPaceScale()const{
-        if(m_renderPace.gpu==m_opt.detectedGpu.description){
-            const double measured=playback_timing::RenderPaceScale(m_renderPace.msPerFrame,m_renderPace.width,m_renderPace.height);
-            if(measured>0.0)return measured;
+        std::wstring samples;
+        for(const auto& sample:m_renderPace.samples){
+            wchar_t text[64]{};swprintf_s(text,L"%ux%u:%.6f",sample.width,sample.height,sample.msPerFrame);
+            if(!samples.empty())samples+=L';';samples+=text;
         }
-        return RenderPacePrior(m_opt.detectedGpu.generation);
+        WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_opt.detectedGpu.description.c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"NeuralPace",L"Samples",samples.c_str(),SettingsPath().c_str());
+        // Keys from the single-sample layout that preceded `Samples`.
+        for(const wchar_t* stale:{L"MsPerFrame",L"Width",L"Height"})
+            WritePrivateProfileStringW(L"NeuralPace",stale,nullptr,SettingsPath().c_str());
     }
     // Enough segments after the first to average out encoder spawn jitter.
     static constexpr uint64_t kMinPaceFrames=120;
@@ -1237,11 +1245,11 @@ private:
         if(!m_liveSegments||!m_livePaceWidth||!m_livePaceHeight)return;
         const auto pace=m_liveSegments->Pace();
         if(pace.frames<kMinPaceFrames||!(pace.wallMs>0.0))return;
-        m_renderPace={m_opt.detectedGpu.description,pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight};
+        m_renderPace.Record({m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame()});
         SaveRenderPace();
         LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<pace.MsPerFrame()
             <<" ms/frame over "<<pace.frames<<" frames ("<<playback_timing::RenderPaceScale(pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight)
-            <<"x the reference GPU).");
+            <<"x the reference GPU); "<<m_renderPace.samples.size()<<" geometries known for this GPU.");
     }
 
     void SaveVideoSettings()const{
@@ -2350,7 +2358,7 @@ private:
     // be recognised before a single frame is rendered. Saying so beats letting the
     // user watch a loader that will never clear.
     bool ConfirmLiveSessionPace(double fps){
-        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps,LiveRenderPaceScale());
+        const auto forecast=playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),fps,m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation));
         if(forecast.keepsUp)return true;
         LOG("Active neural session forecast: "<<m_decoder.Width()<<"x"<<m_decoder.Height()<<" at "<<fps
             <<" fps renders at about "<<forecast.renderFps<<" fps ("<<forecast.realtimeRatio<<"x realtime).");
@@ -3530,8 +3538,7 @@ private:
     std::filesystem::path m_liveDirectory;
     int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
-    struct MeasuredRenderPace{std::wstring gpu;double msPerFrame=0.0;uint32_t width=0,height=0;};
-    MeasuredRenderPace m_renderPace;
+    playback_timing::RenderPaceProfile m_renderPace;
     HWND m_bufferWnd=nullptr;
     RECT m_bufferAnchor{};
 };

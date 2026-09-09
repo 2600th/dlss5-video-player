@@ -2105,29 +2105,71 @@ void live_render_forecast_matches_the_measured_rate_and_flags_sources_that_canno
     CHECK(playback_timing::ForecastLiveRender(1920,1080,0.0).keepsUp);
 }
 
-// The reference numbers belong to one GPU. Another GPU is the same pipeline at
-// a different speed, so its measured pace scales the whole cost, and an
+// The reference numbers belong to one GPU, and one scalar does not carry them
+// to another: an RTX 5090 measured 11.888 ms/frame at 1080p, 17.149 at 1440p
+// and 42.870 at 4K (0.95x, 1.04x and 1.53x the reference), and a 1080p-only
+// scalar let 4K30 start and drop 848 of 869 frames. The profile predicts from
+// what was measured, extrapolates conservatively from one point, and an
 // unknown pace stays silent rather than promising anything.
-void live_render_forecast_scales_with_the_measured_pace_of_this_gpu_test()
+void live_render_forecast_predicts_from_this_gpu_measured_geometries_test()
 {
-    // 15.31 ms/frame at 1080p is what an RTX 4080 SUPER measured: 1.22x the reference.
-    const double ada=playback_timing::RenderPaceScale(15.31,1920,1080);
-    CHECK(ada>1.21&&ada<1.23);
-    CHECK_EQ(0.0,playback_timing::RenderPaceScale(0.0,1920,1080));
-    CHECK_EQ(0.0,playback_timing::RenderPaceScale(15.31,0,1080));
+    using namespace playback_timing;
+    CHECK(RenderPaceScale(15.31,1920,1080)>1.21&&RenderPaceScale(15.31,1920,1080)<1.23);
+    CHECK_EQ(0.0,RenderPaceScale(0.0,1920,1080));
+    CHECK_EQ(0.0,RenderPaceScale(15.31,0,1080));
 
-    // 4K30 keeps up on the reference GPU with 19% to spare; at 1.22x it just misses.
-    const auto uhd=playback_timing::ForecastLiveRender(3840,2160,30.0,ada);
-    CHECK(!uhd.keepsUp);
-    CHECK(uhd.realtimeRatio>0.95&&uhd.realtimeRatio<0.99);
-    CHECK(uhd.msPerFrame>34.0&&uhd.msPerFrame<34.6);
-    // 1080p60 still fits at that pace; a GPU three times slower does not.
-    CHECK(playback_timing::ForecastLiveRender(1920,1080,60.0,ada).keepsUp);
-    CHECK(!playback_timing::ForecastLiveRender(1920,1080,60.0,3.0).keepsUp);
-    // Unknown pace: no forecast, never a block.
-    const auto unknown=playback_timing::ForecastLiveRender(3840,2160,60.0,0.0);
+    // Nothing measured: the generation prior scales the reference. Ada's 1.22x
+    // puts 4K30 just under the line; a GPU three times slower misses 1080p60.
+    const auto adaPrior=ForecastLiveRender(3840,2160,30.0,{},1.22);
+    CHECK(!adaPrior.keepsUp);
+    CHECK(adaPrior.realtimeRatio>0.95&&adaPrior.realtimeRatio<0.99);
+    CHECK(adaPrior.msPerFrame>34.0&&adaPrior.msPerFrame<34.6);
+    CHECK(ForecastLiveRender(1920,1080,60.0,{},1.22).keepsUp);
+    CHECK(!ForecastLiveRender(1920,1080,60.0,{},3.0).keepsUp);
+    const auto unknown=ForecastLiveRender(3840,2160,60.0,{},0.0);
     CHECK(unknown.keepsUp);
     CHECK_EQ(0.0,unknown.msPerFrame);
+
+    // One 1080p sample from the 5090. Scaling the reference shape would say
+    // 26.6 ms at 4K (and it really took 42.9); the proportional bound says
+    // 47.6, so 4K30 is warned about. 1440p30 still clears comfortably, and a
+    // smaller frame keeps the reference's fixed cost rather than shrinking to
+    // nothing.
+    RenderPaceProfile one;
+    one.Record({1920,1080,11.888});
+    CHECK_EQ(11.888,PredictRenderMs(one,1920,1080,1.0));
+    const auto uhdFromOne=ForecastLiveRender(3840,2160,30.0,one,1.0);
+    CHECK(!uhdFromOne.keepsUp);
+    CHECK(uhdFromOne.msPerFrame>47.0&&uhdFromOne.msPerFrame<48.0);
+    CHECK(ForecastLiveRender(2560,1440,30.0,one,1.0).keepsUp);
+    CHECK(PredictRenderMs(one,2560,1440,1.0)>21.0&&PredictRenderMs(one,2560,1440,1.0)<21.3);
+    CHECK(PredictRenderMs(one,1280,720,1.0)>9.0&&PredictRenderMs(one,1280,720,1.0)<9.3);
+    // The prior is irrelevant once anything was measured.
+    CHECK_EQ(PredictRenderMs(one,3840,2160,1.0),PredictRenderMs(one,3840,2160,0.0));
+
+    // All three geometries: exact matches are used as is, other geometries
+    // come from this GPU's own fitted line (0.015 ms + 5.113 ms/MP).
+    RenderPaceProfile three=one;
+    three.Record({2560,1440,17.149});
+    three.Record({3840,2160,42.870});
+    CHECK_EQ(size_t{3},three.samples.size());
+    const auto uhd=ForecastLiveRender(3840,2160,30.0,three,1.0);
+    CHECK_EQ(42.870,uhd.msPerFrame);
+    CHECK(!uhd.keepsUp);
+    CHECK(uhd.realtimeRatio>0.77&&uhd.realtimeRatio<0.79);
+    const double fitted=PredictRenderMs(three,3200,1800,1.0);
+    CHECK(fitted>29.2&&fitted<29.7);
+    CHECK(ForecastLiveRender(3200,1800,30.0,three,1.0).keepsUp);
+    CHECK(!ForecastLiveRender(3200,1800,60.0,three,1.0).keepsUp);
+
+    // Re-measuring a geometry replaces its sample; the profile is bounded.
+    three.Record({1920,1080,12.0});
+    CHECK_EQ(size_t{3},three.samples.size());
+    CHECK_EQ(12.0,PredictRenderMs(three,1920,1080,1.0));
+    three.Record({0,0,5.0});three.Record({640,360,0.0});
+    CHECK_EQ(size_t{3},three.samples.size());
+    for(uint32_t h=400;h<=1000;h+=100)three.Record({h*16/9,h,1.0+h*0.01});
+    CHECK_EQ(RenderPaceProfile::kMaxSamples,three.samples.size());
 }
 
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
@@ -2274,7 +2316,7 @@ int wmain(int argc, wchar_t* argv[])
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
-    live_render_forecast_scales_with_the_measured_pace_of_this_gpu_test();
+    live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
     neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;

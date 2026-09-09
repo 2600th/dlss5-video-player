@@ -99,8 +99,10 @@ for measurements and their limits. On an RTX 4080 SUPER (driver 610.47) the
 universal runtime passed the strict GPU smoke and a full 1080p30 live session
 at 15.31 ms/frame; see the
 [RTX 4080 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX4080.md).
-Blackwell has not been re-verified on the universal runtime, and Turing and
-Ampere have no hardware verification in this project yet.
+An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
+(11.89 ms/frame), 1440p and 4K; see the
+[RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX5090.md).
+Turing and Ampere have no hardware verification in this project yet.
 
 The architecture follows lessons from [Zonnery's offline
 converter](https://github.com/Zonnery/dlss5-nr-player) and the verification
