@@ -260,8 +260,8 @@ int RunRealPreflight(int argc, wchar_t** argv)
 
 int RunRealWorker(int argc, wchar_t** argv)
 {
-    if (argc != 9 && argc != 12) {
-        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds> [rangeStartSec rangeEndSec mv=1,depth=1,mask=1]\n";
+    if (argc != 9 && argc != 12 && argc != 13) {
+        std::wcerr << L"Usage: NeuralWorkerTests --real-worker <workerexe> <sourcevideo> <outputvideo> <width> <height> <fps> <seconds> [rangeStartSec rangeEndSec mv=1,depth=1,mask=1 [segmentFrames]]\n";
         return EXIT_FAILURE;
     }
     NeuralRenderRequest request;
@@ -274,7 +274,7 @@ int RunRealWorker(int argc, wchar_t** argv)
         std::wcerr << L"Invalid --real-worker dimensions, FPS, or duration.\n";
         return EXIT_FAILURE;
     }
-    if (argc == 12) {
+    if (argc >= 12) {
         double start = 0.0, end = 0.0;
         std::wstring copy(argv[9]);
         wchar_t* stop = nullptr;
@@ -296,8 +296,24 @@ int RunRealWorker(int argc, wchar_t** argv)
         }
         request.guides = *guides;
     }
+    if (argc == 13) {
+        uint32_t segmentFrames = 0;
+        if (!ParseUnsigned32(argv[12], segmentFrames)) {
+            std::wcerr << L"Invalid --real-worker segment frames.\n";
+            return EXIT_FAILURE;
+        }
+        request.segmentFrames = segmentFrames;
+    }
     NeuralRenderPhase lastPhase = NeuralRenderPhase::CheckingCache;
     uint64_t lastReportedFrames = 0;
+    std::vector<std::chrono::steady_clock::time_point> segmentTimes;
+    const auto jobStart = std::chrono::steady_clock::now();
+    NeuralSegmentSink segmentSink;
+    segmentSink.onSegment = [&](const NeuralRenderSegment& segment) {
+        segmentTimes.push_back(std::chrono::steady_clock::now());
+        std::wcout << L"segment index=" << segment.index << L" frames=" << segment.frameCount
+            << L" atMs=" << std::chrono::duration_cast<std::chrono::milliseconds>(segmentTimes.back() - jobStart).count() << L'\n';
+    };
     const NeuralRenderResult result = RunNeuralWorker(argv[2], request,
         [&](const NeuralRenderProgress& progress) {
             if (progress.phase != lastPhase || progress.completedFrames == progress.totalFrames ||
@@ -309,7 +325,7 @@ int RunRealWorker(int argc, wchar_t** argv)
                 lastPhase = progress.phase;
                 lastReportedFrames = progress.completedFrames;
             }
-        });
+        }, {}, segmentSink);
     std::wcout << L"result ok=" << result.ok << L" cancelled=" << result.cancelled
         << L" encoder=" << static_cast<unsigned>(result.encoder) << L" frames=" << result.frameCount
         << L" duration100ns=" << result.duration100ns << L" nativeEvaluations=" << result.nativeEvaluations
