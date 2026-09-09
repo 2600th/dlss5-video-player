@@ -108,7 +108,9 @@ motion-vector and depth guide switches. These change
 the render identity: **Apply** restarts an active session at the playhead, or
 re-previews the paused frame, while playback image adjustments remain instant.
 Writing a file is a separate action under **Convert & save**. The guide
-switches also drive the live debug views immediately.
+switches also drive the live debug views immediately. Hovering any control shows
+what it does, including which effects were measured on this runtime and what a
+change costs.
 
 Color strength and the render preset are deliberately not in that dialog. Each
 was measured against the pinned runtime and changes nothing - the add-on echoes

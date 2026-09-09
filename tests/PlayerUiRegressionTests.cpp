@@ -525,6 +525,25 @@ private:
         CHECK((app.m_renderGuides == GuideControls{true, false}));
         CHECK(!app.m_guides.Controls().depth);
         CHECK(app.m_guideReset && app.m_dlssReset);
+        // Every control the dialog offers carries help text, and the text is the
+        // localized tip rather than an empty tool.
+        CHECK(app.m_tipWnd != nullptr);
+        if (app.m_tipWnd) {
+            const int tools = int(SendMessageW(app.m_tipWnd, TTM_GETTOOLCOUNT, 0, 0));
+            CHECK(tools >= 12);
+            for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
+                                 IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
+                                 IDC_NS_APPLY, IDC_NS_RESET}) {
+                wchar_t text[512] = {};
+                TTTOOLINFOW info{};
+                info.cbSize = TTTOOLINFOW_V2_SIZE;
+                info.hwnd = dialog;
+                info.uId = reinterpret_cast<UINT_PTR>(GetDlgItem(dialog, id));
+                info.lpszText = text;
+                SendMessageW(app.m_tipWnd, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
+                CHECK(wcslen(text) > 20);
+            }
+        }
         // Apply saves the values even when nothing can be rendered right now.
         app.m_opt.neuralAddonConfigured = false;
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_APPLY, BN_CLICKED), 0);

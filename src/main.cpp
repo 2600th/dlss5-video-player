@@ -1360,12 +1360,36 @@ private:
         UpdateAdjustmentValueLabels(h);ApplyVideoAdjustments(true);
     }
 
-    void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y){
+    // A tooltip host lives for as long as its dialog. Tool text is kept in
+    // m_tipText because TTM_ADDTOOL stores the pointer it is given.
+    HWND EnsureTipHost(HWND dialog){
+        if(m_tipWnd&&IsWindow(m_tipWnd)&&GetParent(m_tipWnd)==dialog)return m_tipWnd;
+        m_tipText.clear();
+        m_tipWnd=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
+            CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,dialog,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(m_tipWnd){
+            SendMessageW(m_tipWnd,TTM_SETMAXTIPWIDTH,0,420);
+            SendMessageW(m_tipWnd,TTM_SETDELAYTIME,TTDT_AUTOPOP,MAKELPARAM(30000,0));
+        }
+        return m_tipWnd;
+    }
+    void AddTip(HWND dialog,HWND control,const wchar_t* tipKey){
+        if(!tipKey||!control)return;
+        HWND host=EnsureTipHost(dialog);if(!host)return;
+        m_tipText.push_back(std::make_unique<std::wstring>(T(tipKey)));
+        // The app runs on comctl32 v5 (no v6 manifest), which rejects the v6
+        // struct size, so ask for the version the classic control understands.
+        TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_IDISHWND|TTF_SUBCLASS;info.hwnd=dialog;
+        info.uId=reinterpret_cast<UINT_PTR>(control);info.lpszText=m_tipText.back()->data();
+        SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+    }
+    void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y,const wchar_t* tipKey=nullptr){
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND label=CreateWindowExW(0,L"STATIC",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,y,116,20,h,nullptr,nullptr,nullptr);
         HWND track=CreateWindowExW(0,TRACKBAR_CLASSW,L"",WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_NOTICKS,132,y-6,236,30,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
         HWND value=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_RIGHT,370,y,64,20,h,(HMENU)(INT_PTR)(id+100),nullptr,nullptr);
         SendMessageW(label,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(track,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(value,WM_SETFONT,(WPARAM)f,TRUE);
+        AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
     }
 
     void BuildAdjustmentControls(HWND h){
@@ -1444,17 +1468,18 @@ private:
     // generator so the debug views reflect them without a re-render.
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
-    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items){
+    void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr){
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND label=CreateWindowExW(0,L"STATIC",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,y,116,20,h,nullptr,nullptr,nullptr);
         HWND combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST,132,y-3,160,200,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
         SendMessageW(label,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(combo,WM_SETFONT,(WPARAM)f,TRUE);
+        AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
     }
 
-    HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width){
+    HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
         HWND box=CreateWindowExW(0,L"BUTTON",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,x,y,width,22,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
-        SendMessageW(box,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);return box;
+        SendMessageW(box,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);AddTip(h,box,tipKey);return box;
     }
 
     // Color strength and render preset are deliberately absent: measured on the
@@ -1464,21 +1489,22 @@ private:
     // NeuralSettings and in DLSSVideoPlayer.ini so runtime-comparison work can
     // still drive them; see docs/BENCHMARK.md.
     void BuildNeuralSettingControls(HWND h){
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",28);
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",78);
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",128);
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",178);
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",228,{L"Default",L"Natural",L"Cinematic"});
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,266,236);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",28,L"neural.tip.intensity");
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",78,L"neural.tip.structure");
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",128,L"neural.tip.tone");
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",178,L"neural.tip.skin");
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",228,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,266,236,L"neural.tip.automask");
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,304,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,302,116);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,302,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80,L"neural.tip.guide_depth");
         HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,338,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
         HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,384,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
         HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,384,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
         HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,384,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
     }
 
@@ -1526,7 +1552,7 @@ private:
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
-        case WM_DESTROY:SaveVideoSettings();if(h==m_neuralWnd)m_neuralWnd=nullptr;return 0;
+        case WM_DESTROY:SaveVideoSettings();if(h==m_neuralWnd){m_neuralWnd=nullptr;m_tipWnd=nullptr;m_tipText.clear();}return 0;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -3427,6 +3453,10 @@ private:
     static constexpr float kZoomScale=2.0f;
     ComparisonSettings m_comparison;
     HWND m_neuralWnd=nullptr;
+    // Tooltip host for whichever settings dialog is open, and the strings it
+    // points at: TTM_ADDTOOL keeps the pointer rather than copying the text.
+    HWND m_tipWnd=nullptr;
+    std::vector<std::unique_ptr<std::wstring>> m_tipText;
     POINT m_renderMouse{};
     bool m_renderMouseKnown=false,m_dragSplit=false;
     // Settings the playing cache entry was rendered with (its receipt has the full record).
