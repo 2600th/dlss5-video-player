@@ -497,6 +497,26 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK_EQ((std::vector<std::wstring>{L"nv12", L"yuv420p"}),
              value(BuildEncoderArguments(software, LR"(C:\Cache Root\neural.partial.mkv)"), L"-pix_fmt"));
 
+    // nvencPreset selects the NVENC "-preset" value, clamped to the p1..p7 range NVENC
+    // accepts; the software encoder ignores it entirely and always encodes at "slow".
+    CHECK_EQ((std::vector<std::wstring>{L"p7"}), value(arguments, L"-preset"));
+    EncoderSpec preset5 = encoder;
+    preset5.nvencPreset = 5;
+    CHECK_EQ((std::vector<std::wstring>{L"p5"}),
+             value(BuildEncoderArguments(preset5, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
+    EncoderSpec presetTooLow = encoder;
+    presetTooLow.nvencPreset = 0;
+    CHECK_EQ((std::vector<std::wstring>{L"p1"}),
+             value(BuildEncoderArguments(presetTooLow, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
+    EncoderSpec presetTooHigh = encoder;
+    presetTooHigh.nvencPreset = 9;
+    CHECK_EQ((std::vector<std::wstring>{L"p7"}),
+             value(BuildEncoderArguments(presetTooHigh, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
+    EncoderSpec softwarePreset = software;
+    softwarePreset.nvencPreset = 3;
+    CHECK_EQ((std::vector<std::wstring>{L"slow"}),
+             value(BuildEncoderArguments(softwarePreset, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
+
     // 1.5 bytes per pixel instead of 4, which is what the readback and the pipe carry.
     CHECK_EQ(uint64_t{1920 * 1080 * 3 / 2}, EncoderFrameBytes(EncoderPixelFormat::Nv12, 1920, 1080));
     CHECK_EQ(uint64_t{1920 * 1080 * 4}, EncoderFrameBytes(EncoderPixelFormat::Bgra, 1920, 1080));

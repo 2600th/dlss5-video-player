@@ -440,6 +440,32 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badConversionView = view(badConversion);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badConversionView).has_value());
+    // The NVENC preset is opt-in and travels as its own optional pair, so an older
+    // parent that never sends it still parses into the preset-7 default.
+    for (const auto& argument : normal) CHECK(argument != L"--nvenc-preset");
+    if (parsedNormal) CHECK(parsedNormal->request.nvencPreset == 7);
+    NeuralRenderRequest presetRequest = request;
+    presetRequest.nvencPreset = 5;
+    const auto presetArguments =
+        neural_worker_detail::BuildWorkerArguments(presetRequest, metadata, pause, false);
+    const auto presetView = view(presetArguments);
+    const auto parsedPreset = neural_worker_detail::ParseWorkerArguments(presetView);
+    CHECK(parsedPreset.has_value());
+    if (parsedPreset) {
+        CHECK(parsedPreset->request.nvencPreset == 5);
+    }
+    auto badPresetHigh = presetArguments;
+    for (size_t index = 0; index + 1 < badPresetHigh.size(); ++index) {
+        if (badPresetHigh[index] == L"--nvenc-preset") badPresetHigh[index + 1] = L"8";
+    }
+    const auto badPresetHighView = view(badPresetHigh);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badPresetHighView).has_value());
+    auto badPresetZero = presetArguments;
+    for (size_t index = 0; index + 1 < badPresetZero.size(); ++index) {
+        if (badPresetZero[index] == L"--nvenc-preset") badPresetZero[index + 1] = L"0";
+    }
+    const auto badPresetZeroView = view(badPresetZero);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badPresetZeroView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

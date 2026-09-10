@@ -163,6 +163,7 @@ static constexpr int IDC_NS_AUTOMASK = 7308;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
 static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 static constexpr int IDC_NS_GPU_CONVERT = 7313;
+static constexpr int IDC_NS_NVENC_PRESET = 7314;
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
@@ -1199,6 +1200,7 @@ private:
         m_renderGuides.motionVectors=GetPrivateProfileIntW(L"NeuralGuides",L"MotionVectors",1,SettingsPath().c_str())!=0;
         m_renderGuides.depth=GetPrivateProfileIntW(L"NeuralGuides",L"Depth",1,SettingsPath().c_str())!=0;
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",1,SettingsPath().c_str())!=0;
+        m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",7,SettingsPath().c_str())),1,7);
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const UINT mode=GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str());
         m_comparison={};
@@ -1274,6 +1276,7 @@ private:
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Encoding",L"NvencPreset",std::to_wstring(m_nvencPreset).c_str(),SettingsPath().c_str());
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Amount",m_comparison.amount);
@@ -1497,6 +1500,7 @@ private:
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
         check(IDC_NS_GPU_CONVERT,m_gpuColorConversion);
+        select(IDC_NS_NVENC_PRESET,int(m_nvencPreset)-1);
         UpdateNeuralSettingValueLabels(h);
     }
 
@@ -1512,6 +1516,8 @@ private:
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
         // Only the next conversion reads this, so there is nothing to re-render for it.
         m_gpuColorConversion=checked(IDC_NS_GPU_CONVERT);
+        // Only the next conversion reads this, so there is nothing to re-render for it.
+        m_nvencPreset=uint32_t(sel(IDC_NS_NVENC_PRESET,int(m_nvencPreset)-1))+1;
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
@@ -1556,10 +1562,11 @@ private:
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80,L"neural.tip.guide_depth");
         HWND encoding=CreateWindowExW(0,L"STATIC",T(L"neural.settings.encoding").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,336,116,20,h,nullptr,nullptr,nullptr);SendMessageW(encoding,WM_SETFONT,(WPARAM)f,TRUE);
         CreateNeuralCheck(h,IDC_NS_GPU_CONVERT,L"neural.settings.gpu_convert",132,334,236,L"neural.tip.gpu_convert");
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,370,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
-        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,416,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
+        CreateNeuralCombo(h,IDC_NS_NVENC_PRESET,L"neural.settings.nvenc_preset",366,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"neural.tip.nvenc_preset");
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,402,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,448,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
+        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,448,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,448,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
@@ -1567,10 +1574,10 @@ private:
 
     void ShowNeuralSettings(){
         if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
-        static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV11";
+        static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV12";
         WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
-        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=500,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=532,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
         m_neuralWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"neural.settings.title").c_str(),
             WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
@@ -1602,10 +1609,10 @@ private:
         case WM_HSCROLL:ReadNeuralSettingControls(h);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_gpuColorConversion=true;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_gpuColorConversion=true;m_nvencPreset=7;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GPU_CONVERT)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GPU_CONVERT)&&code==BN_CLICKED)||(id==IDC_NS_NVENC_PRESET&&code==CBN_SELCHANGE)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -2772,7 +2779,7 @@ private:
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const uint32_t nvencPreset=m_nvencPreset;
             // The background acquisition of this very source, when one is in
             // flight: the job waits for it rather than downloading again.
             const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
@@ -2791,7 +2798,7 @@ private:
                 if(ec){LOG("Active neural session could not create the segment directory for this job.");return;}
             }
             const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,gpuColorConversion](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,gpuColorConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -2875,7 +2882,7 @@ private:
                     if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;LOG("Neural preflight failed: "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.gpuColorConversion=gpuColorConversion;
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;
                     NeuralRenderReceiptInputs receipt{preflight.json,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
                     NeuralSegmentSink sink{};
                     if(liveIndex){
@@ -3509,6 +3516,7 @@ private:
     // ffmpeg on the CPU. Not part of NeuralSettings, because it changes how a frame is
     // encoded and not what the model is asked for, so it stays out of the cache key.
     bool m_gpuColorConversion=true;
+    uint32_t m_nvencPreset=7;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;

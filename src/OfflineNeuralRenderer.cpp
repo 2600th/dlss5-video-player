@@ -1031,8 +1031,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 
     auto runAttempt = [&](EncoderKind kind) {
         AttemptResult attempt;
-        const EncoderSpec spec{request.width, request.height, request.fps, kind,
-                               evaluator.CapturePixelFormat()};
+        EncoderSpec spec{request.width, request.height, request.fps, kind,
+                         evaluator.CapturePixelFormat()};
+        spec.nvencPreset = request.nvencPreset;
         if (writer) {
             // Segment 0's encoder is armed here and starts while this attempt
             // prerolls, so the first captured frame never waits for a spawn.

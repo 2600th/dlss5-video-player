@@ -154,6 +154,9 @@ struct NeuralRenderRequest {
     // letting it convert every frame on the CPU. Ignored when the output size is odd,
     // and by the test evaluator, which always captures BGRA.
     bool gpuColorConversion{false};
+    // hevc_nvenc preset p1..p7; 7 is slowest/highest quality. Only the NVENC
+    // attempt reads it.
+    uint32_t nvencPreset{7};
 };
 
 struct NeuralRenderProgress {

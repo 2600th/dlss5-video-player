@@ -83,6 +83,8 @@ struct EncoderSpec {
     double fps{};
     EncoderKind kind{EncoderKind::HevcNvenc};
     EncoderPixelFormat pixelFormat{EncoderPixelFormat::Bgra};
+    // NVENC preset p1..p7 (7 = slowest/highest quality, the default); ignored by the software encoder.
+    uint32_t nvencPreset{7};
 };
 
 struct MaterializeResult {
