@@ -24,8 +24,8 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.17.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 323 MB |
-| `DLSSVideoPlayer-v0.17.1-core-win64.zip` | Player only, no neural runtime. | 33 MB |
+| `dlss5-video-player-v0.17.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.17.1-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 SHA-256 for both is on the release page. GitHub's "Source code" zip does not
 run; it has no runtime in it.
