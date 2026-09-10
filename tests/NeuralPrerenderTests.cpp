@@ -450,7 +450,7 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         .audioUrl=L"https://r1.googlevideo.com/audio?id=abc&token=three",
         .output=LR"(C:\Cache Root\source.partial.mkv)"};
     const std::vector<std::wstring> expectedMaterialize{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-xerror",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-progress", L"pipe:1", L"-y", L"-xerror",
         L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
         L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
         L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
@@ -570,6 +570,87 @@ void materialization_discards_oversized_diagnostic_url_fragments_test()
     CHECK_EQ(MaterializeError::ProcessFailed, result.error);
     CHECK(result.detail.find(L"signed-secret") == std::wstring::npos);
     CHECK(result.detail.find(L"https://") == std::wstring::npos);
+}
+
+void media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test()
+{
+    using Reader = media_pipeline_detail::MediaProgressReader;
+    std::vector<MediaDownloadProgress> reports;
+    std::string diagnostic;
+    Reader reader([&](const MediaDownloadProgress& progress) { reports.push_back(progress); },
+                  [&](std::string_view line) { diagnostic.append(line); diagnostic.push_back('\n'); });
+    const Reader::Clock::time_point start{};
+
+    // FFmpeg reports "N/A" until the muxer has written something, and a block of
+    // nothing but unknowns must not wake the caller with an empty report.
+    reader.Consume("frame=12\nbitrate=N/A\ntotal_size=N/A\nout_time_us=N/A\nprogress=continue\r\n", start);
+    CHECK(reports.empty());
+    // The capture hands over whatever one ReadFile returned, so a key arrives
+    // cut in half often enough that losing it would lose the whole download.
+    reader.Consume("total_si", start);
+    reader.Consume("ze=2048\nout_time_us=1500000\nprogress=continue\n", start);
+    CHECK_EQ(size_t{1}, reports.size());
+    if (!reports.empty()) {
+        CHECK_EQ(uint64_t{2048}, reports.back().bytes);
+        CHECK_EQ(1.5, reports.back().seconds);
+    }
+    // A block inside the interval is withheld, and the next block past it
+    // carries the newest figures rather than replaying the withheld ones.
+    reader.Consume("total_size=4096\nout_time_ms=2000000\nprogress=continue\n", start + 100ms);
+    CHECK_EQ(size_t{1}, reports.size());
+    reader.Consume("total_size=8192\nout_time_us=3000000\nprogress=continue\n", start + 260ms);
+    CHECK_EQ(size_t{2}, reports.size());
+    if (reports.size() > 1) {
+        CHECK_EQ(uint64_t{8192}, reports[1].bytes);
+        CHECK_EQ(3.0, reports[1].seconds);
+    }
+    // Error text shares the pipe with the progress stream; it must reach the
+    // caller's diagnostic instead of being parsed away as an unknown key.
+    reader.Consume("[matroska @ 0000] Non-monotonic DTS\n", start + 300ms);
+    // The final block is reported even though the interval would withhold it.
+    reader.Consume("total_size=9216\nout_time_us=3500000\nprogress=end\n", start + 310ms);
+    CHECK_EQ(size_t{3}, reports.size());
+    if (reports.size() > 2) CHECK_EQ(uint64_t{9216}, reports[2].bytes);
+    reader.Finish(start + 320ms);
+    CHECK_EQ(size_t{3}, reports.size());
+    CHECK_EQ(std::string("[matroska @ 0000] Non-monotonic DTS\n"), diagnostic);
+
+    // A child that dies mid-block leaves values behind with no progress= line
+    // and a trailing fragment with no newline; both still reach the caller once.
+    std::vector<MediaDownloadProgress> interrupted;
+    Reader tail([&](const MediaDownloadProgress& progress) { interrupted.push_back(progress); }, {});
+    tail.Consume("total_size=4\nout_time_us=1000000\n", start);
+    CHECK(interrupted.empty());
+    tail.Consume("total_size=64", start + 300ms);
+    tail.Finish(start + 320ms);
+    CHECK_EQ(size_t{1}, interrupted.size());
+    if (!interrupted.empty()) {
+        CHECK_EQ(uint64_t{64}, interrupted.back().bytes);
+        CHECK_EQ(1.0, interrupted.back().seconds);
+    }
+}
+
+void materialization_reports_download_progress_while_the_source_is_copied_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    std::vector<MediaDownloadProgress> reports;
+    const auto output = fixture.Path() / L"output.mkv";
+    const auto result = MediaMaterializer(fixture.Path()).Run(
+        {L"https://media.invalid/progress-stream", {}, output}, {},
+        [&](const MediaDownloadProgress& progress) { reports.push_back(progress); });
+    CHECK(result.ok);
+    // The first block is all unknowns, the second reports, the third ends the
+    // stream and is therefore reported whatever the rate limit would have said.
+    CHECK_EQ(size_t{2}, reports.size());
+    if (reports.size() == 2) {
+        CHECK_EQ(uint64_t{1048576}, reports[0].bytes);
+        CHECK_EQ(2.5, reports[0].seconds);
+        CHECK_EQ(uint64_t{4194304}, reports[1].bytes);
+        CHECK_EQ(9.0, reports[1].seconds);
+    }
+    // The two-argument form stays a valid call and asks for no reports at all.
+    CHECK(MediaMaterializer(fixture.Path()).Run({L"https://media.invalid/video", {}, output}, {}).ok);
 }
 
 void owned_media_pipeline_materializes_encodes_probes_and_cancels_test()
@@ -1865,6 +1946,20 @@ NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64
     return segment;
 }
 
+// Mirrors DecodeSegment: the start is the file's own first pts on the exact CFR
+// grid, while the exclusive end is rebuilt from the integer frame duration, so
+// a fractional frame rate leaves a sub-frame hole before the next segment.
+NeuralSegment RoundedSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
+                                   uint64_t frameCount)
+{
+    NeuralSegment segment;
+    segment.path=std::move(path);segment.index=index;segment.firstFrameNumber=firstFrame;
+    segment.firstTimestamp100ns=std::llround(double(firstFrame)*10000000.0/30.0);
+    segment.end100ns=segment.firstTimestamp100ns+int64_t(frameCount)*kLiveFrame100ns;
+    segment.frameCount=frameCount;
+    return segment;
+}
+
 SynchronizedPlayback::SegmentSourceFactory LiveSegmentFactory(LiveFrameLibrary& library)
 {
     return [&library]{return std::make_unique<LiveLibrarySource>(library);};
@@ -2055,6 +2150,52 @@ void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
     CHECK_EQ(1,library.streams[L"neural-00000.mkv"].closes);
     // The original runs on past the last finalized segment.
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+}
+
+// The seam a 30000/1001-style frame duration leaves behind: segment 0 declares
+// an end a couple of ticks below segment 1's first pts, and the playhead of a
+// seeked original lands inside that hole. It cost a live 1080p session on an
+// RTX 5090 its playback with "out of sync" at the first boundary.
+void live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",20);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    segments->Append(RoundedSegmentRecord(L"neural-00001.mkv",1,5,5));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+    for(uint64_t expected=0;expected<10;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+    }
+    CHECK(playback.LastFault().empty());
+}
+
+void neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test()
+{
+    NeuralSegmentIndex index;
+    index.Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    index.Append(RoundedSegmentRecord(L"neural-00001.mkv",1,5,5));
+    const auto second=index.At(1);
+    CHECK(second.has_value());
+    if(!second)return;
+    // Every timestamp up to the next segment's first pts belongs to the first.
+    for(int64_t back=1;back<=3;++back)
+        if(const auto before=index.Containing(second->firstTimestamp100ns-back))
+            CHECK_EQ(uint64_t{0},before->index);
+    CHECK(index.Containing(second->firstTimestamp100ns-1).has_value());
+    if(const auto at=index.Containing(second->firstTimestamp100ns))CHECK_EQ(uint64_t{1},at->index);
+
+    // A rebased relaunch leaves a real gap, which stays uncovered.
+    NeuralSegmentIndex gapped;
+    gapped.Append(RoundedSegmentRecord(L"neural-00000.mkv",0,0,5));
+    gapped.Append(RoundedSegmentRecord(L"job2/neural-00000.mkv",1,8,5));
+    CHECK(!gapped.Containing(6*kLiveFrame100ns).has_value());
 }
 
 void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
@@ -2283,6 +2424,19 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
         std::cerr << "Connection reset while reading https://media.invalid/diagnostic-error?token=secret-value\n";
         return 7;
     }
+    if (std::ranges::any_of(arguments, [](std::wstring_view value) {
+            return value.find(L"/progress-stream") != std::wstring_view::npos;
+        })) {
+        // FFmpeg's -progress stream: one key per line, each block closed by
+        // progress=continue and the last by progress=end, with the values still
+        // unknown in the first block and an error line sharing the same pipe.
+        std::cout << "frame=1\nbitrate=N/A\ntotal_size=N/A\nout_time_us=N/A\nprogress=continue\n" << std::flush;
+        std::cerr << "Non-monotonic DTS in output stream\n" << std::flush;
+        std::cout << "frame=60\ntotal_size=1048576\nout_time_ms=2500000\nprogress=continue\n" << std::flush;
+        std::cout << "frame=240\ntotal_size=4194304\nout_time_us=9000000\nprogress=end\n" << std::flush;
+        WriteBytes(std::filesystem::path(arguments.back()), "materialized");
+        return 0;
+    }
     const bool raw = std::find(arguments.begin(), arguments.end(), L"rawvideo") != arguments.end();
     const bool finalProbe = std::find(arguments.begin(), arguments.end(), L"-sseof") != arguments.end();
     const bool hang = std::ranges::any_of(arguments, [](std::wstring_view value) {
@@ -2329,6 +2483,8 @@ int wmain(int argc, wchar_t* argv[])
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();
+    media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test();
+    materialization_reports_download_progress_while_the_source_is_copied_test();
     encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();
@@ -2383,8 +2539,10 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
+    neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test();
     live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test();
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
+    live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();

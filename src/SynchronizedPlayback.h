@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <stop_token>
+#include <string>
 #ifdef SYNCHRONIZED_PLAYBACK_TESTING
 #include <functional>
 #endif
@@ -100,6 +101,8 @@ public:
     bool NeuralAvailable() const;
     bool Live() const;
     int64_t LiveHead100ns() const;
+    // Why the last read reported OutOfSync, empty when nothing failed.
+    std::string LastFault() const;
 
 private:
     bool SeekLive(double seconds, std::stop_token stop);

@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <iomanip>
 #include <cmath>
+#include <cctype>
+#include <string>
+#include <string_view>
 
 DLSSBackend::~DLSSBackend() { Shutdown(); }
 
@@ -38,6 +41,26 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     m_sessionKey = deviceIdentity;
     deviceIdentity->Release();
 
+    // NGX and its feature DLLs report through this callback. The full stream
+    // goes to ngx_logs/ as before; only lines that name a problem are copied
+    // beside the player's own, so a refused feature explains itself in one
+    // file without the ~170 lines of startup chatter each worker emits.
+    static NVSDK_NGX_FeatureCommonInfo commonInfo{};
+    commonInfo.LoggingInfo.LoggingCallback = [](const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature component) {
+        std::string_view text = message ? message : "";
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+        if (text.empty()) return;
+        std::string lowered(text);
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        for (std::string_view needle : {"error", "fail", "warn", "unsupported"}) {
+            if (lowered.find(needle) != std::string::npos) {
+                LOG("[NGX feature " << int(component) << "] " << text);
+                return;
+            }
+        }
+    };
+    commonInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+
     const bool sessionAcquired = ngx_session_detail::ProcessRegistry().Acquire(
         m_sessionKey,
         [&] {
@@ -45,7 +68,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
                 "50f09991-2962-44db-bad7-4be06dbbd1d2",
                 NVSDK_NGX_ENGINE_TYPE_CUSTOM,
                 "DLSSVideoPlayer-10.0",
-                logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
+                logDir.c_str(), device, &commonInfo, NVSDK_NGX_Version_API);
             return !NVSDK_NGX_FAILED(m_lastResult);
         });
     if (!sessionAcquired) {
@@ -77,21 +100,50 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     if (preserveSource) {
         // Select a runtime-supported dynamic range; never resize the decoded input
         // to force a nominal Quality/Performance ratio.
+        //
+        // Which source sizes an output admits is the runtime's answer, not a
+        // ratio table's: NGX_DLSS_GET_OPTIMAL_SETTINGS returns an inclusive
+        // [min,max] render range per quality mode, that range collapses onto the
+        // optimal size wherever dynamic resolution is unsupported, and an
+        // out-of-range Evaluate fails outright with FAIL_InvalidParameter (DLSS
+        // Programming Guide 310.6.0, section 3.2.2). NVIDIA publishes no maximum
+        // upscaling ratio, no fixed fraction for that minimum and no guidance for
+        // a source that falls below it, so when the requested output is too large
+        // for this source, shrink it by exactly the shortfall the runtime reported
+        // and ask again rather than abandoning upscaling altogether. A 573-line
+        // photo asked to reach 1440 lines used to get no upscaling at all.
+        constexpr uint32_t kOutputRangeSearchLimit=3;
+        const auto adoptOutput=[&](uint32_t w,uint32_t h){outputW=w;outputH=h;m_outputW=w;m_outputH=h;};
         bool supported=false;
-        for (auto candidate : {NVSDK_NGX_PerfQuality_Value_MaxQuality,
-                               NVSDK_NGX_PerfQuality_Value_Balanced,
-                               NVSDK_NGX_PerfQuality_Value_MaxPerf,
-                               NVSDK_NGX_PerfQuality_Value_UltraPerformance}) {
-            m_lastResult=NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params,outputW,outputH,candidate,
-                &m_optimalW,&m_optimalH,&m_maxW,&m_maxH,&m_minW,&m_minH,&sharpness);
-            LOG("SR range query quality="<<candidate<<" result="<<std::hex<<m_lastResult<<std::dec
-                <<" optimal="<<m_optimalW<<"x"<<m_optimalH<<" min="<<m_minW<<"x"<<m_minH<<" max="<<m_maxW<<"x"<<m_maxH);
-            if (!NVSDK_NGX_FAILED(m_lastResult) && SourceFitsDLSSRange(sourceW,sourceH,
-                outputW,outputH,m_minW,m_minH,m_maxW,m_maxH)) {
-                m_quality=candidate; supported=true; break;
+        for (uint32_t search=0;search<kOutputRangeSearchLimit&&!supported;++search) {
+            uint32_t nearestMinW=0,nearestMinH=0;
+            for (auto candidate : {NVSDK_NGX_PerfQuality_Value_MaxQuality,
+                                   NVSDK_NGX_PerfQuality_Value_Balanced,
+                                   NVSDK_NGX_PerfQuality_Value_MaxPerf,
+                                   NVSDK_NGX_PerfQuality_Value_UltraPerformance}) {
+                m_lastResult=NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params,outputW,outputH,candidate,
+                    &m_optimalW,&m_optimalH,&m_maxW,&m_maxH,&m_minW,&m_minH,&sharpness);
+                LOG("SR range query quality="<<candidate<<" result="<<std::hex<<m_lastResult<<std::dec
+                    <<" optimal="<<m_optimalW<<"x"<<m_optimalH<<" min="<<m_minW<<"x"<<m_minH<<" max="<<m_maxW<<"x"<<m_maxH);
+                if (NVSDK_NGX_FAILED(m_lastResult)) continue;
+                if (SourceFitsDLSSRange(sourceW,sourceH,outputW,outputH,m_minW,m_minH,m_maxW,m_maxH)) {
+                    m_quality=candidate; supported=true; break;
+                }
+                // Only a source that sits below an advertised minimum can be
+                // helped by a smaller output, and the loosest such minimum is the
+                // one that costs the least output to reach.
+                if (m_minW&&m_minH&&(sourceW<m_minW||sourceH<m_minH)&&
+                    (!nearestMinW||m_minW<nearestMinW)) {nearestMinW=m_minW;nearestMinH=m_minH;}
             }
+            if (supported) break;
+            const auto reduced=AdmissibleDLSSOutput(sourceW,sourceH,outputW,outputH,nearestMinW,nearestMinH);
+            if (!reduced.grows) break;
+            LOG("DLSS SR output reduced from "<<outputW<<"x"<<outputH<<" to "<<reduced.width<<"x"<<reduced.height
+                <<" so the "<<sourceW<<"x"<<sourceH<<" source lands inside the runtime-supported input range.");
+            adoptOutput(reduced.width,reduced.height);
         }
         if (!supported) {
+            m_sourceOutsideRange=true;
             LOG("DLSS SR source dimensions are outside the runtime-supported input range.");
             return false;
         }

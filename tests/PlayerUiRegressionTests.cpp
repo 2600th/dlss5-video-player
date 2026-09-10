@@ -310,11 +310,29 @@ struct PlayerAppTestAccess {
         app.m_neuralSourceHeight = 1080;
         app.m_neuralProgress.totalFrames = 1800;
         app.m_neuralProgress.estimatedRemaining = std::chrono::seconds(5);
+        // Stated rather than inherited from the struct's default: the panel's
+        // encoder and download lines are per-phase answers.
+        app.m_neuralProgress.phase = NeuralRenderPhase::NeuralRendering;
         drawnText.clear();
         app.RenderUi(dc, RECT{0, 0, 800, 600});
         CHECK(Contains(L"1920 \u00d7 1080"));
         CHECK(Contains(L"Preparing encoder\u2026"));
         CHECK(Contains(L"Elapsed 00:00 \u00b7 ETA 00:05"));
+        // Acquisition has no frames and no encoder yet, so it reports the copy
+        // itself. Without this the panel sat still for the whole download and a
+        // reporter read a working acquisition as a hang.
+        app.m_neuralProgress.phase = NeuralRenderPhase::Acquiring;
+        app.m_neuralProgress.bytes = 42u * 1024u * 1024u;
+        app.m_neuralProgress.acquiredSeconds = 30.0;
+        app.m_neuralProgress.expectedSeconds = 120.0;
+        drawnText.clear();
+        app.RenderUi(dc, RECT{0, 0, 800, 600});
+        CHECK(Contains(L"Downloading the source \u00b7 42 MiB \u00b7 25%"));
+        CHECK(Contains(L"25% of the source copied"));
+        CHECK(!Contains(L"Preparing encoder\u2026"));
+        app.m_neuralProgress = {};
+        app.m_neuralProgress.phase = NeuralRenderPhase::NeuralRendering;
+        app.m_neuralProgress.totalFrames = 1800;
         app.m_neuralSourceWidth = 0;
         drawnText.clear();
         app.RenderUi(dc, RECT{0, 0, 800, 600});

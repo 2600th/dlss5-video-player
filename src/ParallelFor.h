@@ -95,11 +95,16 @@ public:
     size_t Width() const noexcept { return workers_.size() + 1u; }
 
     // Runs task(chunk) for chunk in [0, chunks) and returns once all have finished.
+    // A second thread dispatching while a fan-out is in flight runs its own task on the
+    // calling thread instead of sharing the single task slot: the slot's lambda lives on
+    // the first dispatcher's stack, and overwriting it would hand helpers a dangling
+    // pointer. Serial is the safe answer; the caller that wants real overlap builds its
+    // own pool (see the constructor).
     void Run(size_t chunks, const std::function<void(size_t)>& task)
     {
         if (chunks == 0) return;
-        if (chunks == 1 || workers_.empty()) {
-            RunChunks(task, chunks);
+        if (chunks == 1 || workers_.empty() || busy_.exchange(true, std::memory_order_acq_rel)) {
+            for (size_t chunk = 0; chunk < chunks; ++chunk) task(chunk);
             return;
         }
 
@@ -128,6 +133,7 @@ public:
         }
         task_ = nullptr;
         chunkCount_ = 0;
+        busy_.store(false, std::memory_order_release);
     }
 
 private:
@@ -182,6 +188,7 @@ private:
     alignas(kCacheLine) std::atomic<size_t> nextChunk_{0};
     alignas(kCacheLine) std::atomic<size_t> pending_{0};
     std::atomic<bool> stopping_{false};
+    std::atomic<bool> busy_{false};
     std::vector<std::unique_ptr<Worker>> workers_;
 };
 

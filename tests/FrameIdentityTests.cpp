@@ -15,15 +15,17 @@ constexpr uint32_t kWidth = 320;
 constexpr uint32_t kHeight = 180;
 constexpr double kFps = 30.0;
 
-// Smooth textured field so block matching has unambiguous correspondences.
-std::vector<uint8_t> TexturedFrame(int shiftX, int shiftY)
+// Smooth textured field so block matching has unambiguous correspondences. `lift` raises the
+// whole field, which is how a flash or an exposure step looks to the analysis grid: the
+// correspondences survive but the luma histogram moves off its bins.
+std::vector<uint8_t> TexturedFrame(int shiftX, int shiftY, double lift = 0.0)
 {
     std::vector<uint8_t> bgra(size_t(kWidth) * kHeight * 4u);
     for (uint32_t y = 0; y < kHeight; ++y) {
         for (uint32_t x = 0; x < kWidth; ++x) {
             const double sx = double(int(x) - shiftX), sy = double(int(y) - shiftY);
             const double v = 0.5 + 0.25 * std::sin(sx * 0.21) * std::cos(sy * 0.17) +
-                             0.2 * std::sin(sx * 0.05 + sy * 0.09);
+                             0.2 * std::sin(sx * 0.05 + sy * 0.09) + lift;
             const uint8_t luma = uint8_t(std::clamp(v, 0.0, 1.0) * 255.0);
             uint8_t* p = bgra.data() + (size_t(y) * kWidth + x) * 4u;
             p[0] = luma; p[1] = luma; p[2] = luma; p[3] = 255;
@@ -299,6 +301,134 @@ void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
     CHECK_EQ(1.0f, TemporalGuideGenerator::LumaHistogramIntersection(dark, dark));
     CHECK_EQ(0.0f, TemporalGuideGenerator::LumaHistogramIntersection(dark, bright));
     CHECK_EQ(0.5f, TemporalGuideGenerator::LumaHistogramIntersection(dark, mixed));
+}
+
+// The debounce is specified in seconds (PySceneDetect's 0.6 s min_scene_len default), so these
+// tests run at the frame rate where the derived interval is that project's other default: 0.6 s
+// at 25 fps is exactly 15 frames.
+constexpr double kCutFps = 25.0;
+constexpr uint32_t kCutWindowFrames = 15;
+// Lifting the whole field by this much lands squarely in the weak arm's band: measured
+// residual 0.216 with histogram overlap 0.594, i.e. a cut only the histogram test believes in.
+constexpr double kFlashLift = 0.22;
+
+bool GenerateAtCutFps(TemporalGuideGenerator& guides, const std::vector<uint8_t>& bgra, uint64_t number,
+                      GuideFrame& out, HistoryReset reset = HistoryReset::None)
+{
+    const FrameIdentity id{number, int64_t(double(number) / kCutFps * 1e7), 1, 0, 0, reset};
+    return guides.Generate(bgra.data(), kWidth, kHeight, kWidth, kHeight, kCutFps, id, out);
+}
+
+void weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test()
+{
+    CHECK_EQ(kCutWindowFrames, TemporalGuideGenerator::MinFramesBetweenCuts(kCutFps));
+    // The corpus values from the test above, now split by strength: only the softest cut is
+    // debounceable, the decisive one is not.
+    CHECK_EQ(SceneCutStrength::Histogram, TemporalGuideGenerator::ClassifySceneCut(0.108, 0.778));
+    CHECK_EQ(SceneCutStrength::Residual, TemporalGuideGenerator::ClassifySceneCut(0.374, 0.468));
+    CHECK_EQ(SceneCutStrength::None, TemporalGuideGenerator::ClassifySceneCut(0.125, 0.915));
+
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+    CHECK(out.hasHistory);
+    CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+
+    // Frame 2 flashes. Nothing has been accepted since the first frame, so the weak arm fires
+    // and takes the history with it.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 2, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    CHECK(out.sceneCutResidual > 0.10f && out.sceneCutHistogramOverlap < 0.85f);
+    const uint32_t generationAfterCut = guides.HistoryGeneration();
+
+    // Frames 3 and 4 stay in the flashed exposure and pan normally.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(9, 3, kFlashLift), 3, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(12, 4, kFlashLift), 4, out));
+    CHECK(out.hasHistory);
+    CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+
+    // Frame 5 ends the flash: the same weak evidence, three frames into the window. The
+    // decision is still reported, but the DLSS history must survive it - a second reset this
+    // soon is the flicker the guide warns about, not a second scene.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(15, 5), 5, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(out.sceneCutSuppressed);
+    CHECK(out.hasHistory);
+    CHECK_EQ(HistoryReset::None, out.id.reset);
+    CHECK_EQ(generationAfterCut, guides.HistoryGeneration());
+
+    // Frames 6..16 are an ordinary pan, so the window elapses without another accepted cut.
+    for (uint64_t number = 6; number <= 16; ++number) {
+        CHECK(GenerateAtCutFps(guides, TexturedFrame(int(number) * 3, int(number)), number, out));
+        CHECK(out.hasHistory);
+        CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+    }
+
+    // Frame 17 is exactly kCutWindowFrames frames after the accepted cut on frame 2, so the
+    // same weak evidence is trusted again.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(51, 17, kFlashLift), 17, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    CHECK_EQ(generationAfterCut + 1, guides.HistoryGeneration());
+}
+
+void a_strong_scene_cut_fires_inside_the_minimum_interval_test()
+{
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 2, out));
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(9, 3, kFlashLift), 3, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(12, 4, kFlashLift), 4, out));
+    CHECK(out.hasHistory);
+
+    // Frame 5 cuts to black three frames into the window. Correspondence fails outright, and a
+    // signal that strong is never withheld - x264/x265 let a decisive scenecut fire inside
+    // min-keyint too, and keeping history across a real cut is what NGX asks us to avoid.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(15, 5, -1.0), 5, out));
+    CHECK_EQ(SceneCutStrength::Residual, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    CHECK(out.sceneCutResidual > 0.30f);
+}
+
+void a_declared_reset_rearms_the_scene_cut_interval_test()
+{
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 2, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+
+    // A seek on frame 3 behaves as before: history gone, reset reported, nothing classified
+    // because there is nothing to compare against.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 3, out, HistoryReset::Seek));
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Seek, out.id.reset);
+    CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 4, out));
+    CHECK(out.hasHistory);
+
+    // Frame 5 is three frames after the accepted cut on frame 2, so the window would still be
+    // running - but the seek already discarded the history a suppression would have protected,
+    // so the weak arm is armed again and the cut is taken.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 5, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
 }
 
 
@@ -624,6 +754,9 @@ int main()
     generate_treats_nv12_limited_range_luma_like_bgra_test();
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
+    weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test();
+    a_strong_scene_cut_fires_inside_the_minimum_interval_test();
+    a_declared_reset_rearms_the_scene_cut_interval_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
     synchronized_range_ends_on_a_rebased_original_timestamp_test();
     synchronized_range_ending_on_the_last_source_frame_completes_test();

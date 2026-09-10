@@ -12,7 +12,7 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-if ($version -cne '0.15.0') { throw "This assembler is locked to release 0.15.0; VERSION is '$version'." }
+if ($version -cne '0.17.2') { throw "This assembler is locked to release 0.17.2; VERSION is '$version'." }
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -90,8 +90,8 @@ function Invoke-FreshReleaseBuild {
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
         ProductName = 'DLSS Video Player'
-        FileVersion = '0.15.0.0'
-        ProductVersion = '0.15.0.0'
+        FileVersion = '0.17.2.0'
+        ProductVersion = '0.17.2.0'
         OriginalFilename = 'DLSSVideoPlayer.exe'
     }
     foreach ($name in $expectedIdentity.Keys) {
@@ -111,16 +111,29 @@ function Invoke-FreshReleaseBuild {
         }
     }
 
-    Write-Host 'Fresh clean DLSSVideoPlayer 0.15.0.0 build verified.'
+    Write-Host 'Fresh clean DLSSVideoPlayer 0.17.2.0 build verified.'
+}
+
+$runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
+
+# fetch_neural_runtime.ps1 stages each file under the lock's sourceName (the
+# universal NR runtime is nvngx_dlssnr_310.8.SF-v2.dll in external/runtime); a
+# hand-staged tree may carry the destination name. Same rule as stage_runtime.ps1.
+function Resolve-LockedRuntimeInput {
+    param([string]$Destination)
+    $entry = @($runtimeLock.entries | Where-Object { [string]$_.destination -ceq $Destination })
+    if ($entry.Count -ne 1) { throw "runtime-lock.json has $($entry.Count) entries for '$Destination'." }
+    foreach ($name in @([string]$entry[0].sourceName, [string]$entry[0].destination)) {
+        $path = Join-Path $runtimeRoot $name
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    }
+    throw "Locked input is missing: $(Join-Path $runtimeRoot ([string]$entry[0].sourceName))"
 }
 
 function Assert-HashLock {
-    param([string]$Root, [string]$LockPath, [string]$NameProperty)
-    $lock = Get-Content -LiteralPath $LockPath -Raw | ConvertFrom-Json
-    foreach ($entry in $lock.entries) {
-        $name = [string]$entry.$NameProperty
-        $path = Join-Path $Root $name
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Locked input is missing: $path" }
+    foreach ($entry in $runtimeLock.entries) {
+        $name = [string]$entry.destination
+        $path = Resolve-LockedRuntimeInput -Destination $name
         $item = Get-Item -LiteralPath $path
         $hash = Get-Sha256 -Path $path
         if ($item.Length -ne [int64]$entry.size -or $hash -cne [string]$entry.sha256) {
@@ -160,7 +173,7 @@ if ($ValidateBuildOnly) { return }
 
 if (-not $PublicCore) {
     & (Join-Path $PSScriptRoot 'stage_runtime.ps1') -InputDirectory $runtimeRoot -Destination $runtimeRoot -ValidateOnly | Out-Host
-    Assert-HashLock -Root $runtimeRoot -LockPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -NameProperty 'destination'
+    Assert-HashLock
 
     $toolLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\tool-lock.json') -Raw | ConvertFrom-Json
     foreach ($entry in $toolLock.entries) {
@@ -211,22 +224,22 @@ else {
         @('ffprobe.exe', (Join-Path $ffmpegRoot 'ffprobe.exe')),
         @('yt-dlp.exe', (Join-Path $youtubeRoot 'yt-dlp.exe')),
         @('deno.exe', (Join-Path $youtubeRoot 'deno.exe')),
-        @('neural-runtime/dxgi.dll', (Join-Path $runtimeRoot 'dxgi.dll')),
+        @('neural-runtime/dxgi.dll', (Resolve-LockedRuntimeInput -Destination 'dxgi.dll')),
         @('neural-runtime/ReShade.ini', (Join-Path $repositoryRoot 'packaging\ReShade.ini')),
         @('neural-runtime/ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
-        @('neural-runtime/renodx-dlss5.addon64', (Join-Path $runtimeRoot 'renodx-dlss5.addon64')),
+        @('neural-runtime/renodx-dlss5.addon64', (Resolve-LockedRuntimeInput -Destination 'renodx-dlss5.addon64')),
         @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
-        @('neural-runtime/nvngx_dlss.dll', (Join-Path $runtimeRoot 'nvngx_dlss.dll')),
+        @('neural-runtime/nvngx_dlss.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlss.dll')),
         @('neural-runtime/NeuralWorker.exe', (Join-Path $buildRoot 'neural-runtime/NeuralWorker.exe')),
-        @('neural-runtime/nvngx_dlssnr.dll', (Join-Path $runtimeRoot 'nvngx_dlssnr.dll')),
-        @('neural-runtime/sl.common.dll', (Join-Path $runtimeRoot 'sl.common.dll')),
-        @('neural-runtime/sl.dlss.dll', (Join-Path $runtimeRoot 'sl.dlss.dll')),
-        @('neural-runtime/sl.dlss_g.dll', (Join-Path $runtimeRoot 'sl.dlss_g.dll')),
-        @('neural-runtime/sl.dlss_nr.dll', (Join-Path $runtimeRoot 'sl.dlss_nr.dll')),
-        @('neural-runtime/sl.interposer.dll', (Join-Path $runtimeRoot 'sl.interposer.dll')),
-        @('neural-runtime/sl.nis.dll', (Join-Path $runtimeRoot 'sl.nis.dll')),
-        @('neural-runtime/sl.pcl.dll', (Join-Path $runtimeRoot 'sl.pcl.dll')),
-        @('neural-runtime/sl.reflex.dll', (Join-Path $runtimeRoot 'sl.reflex.dll')),
+        @('neural-runtime/nvngx_dlssnr.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlssnr.dll')),
+        @('neural-runtime/sl.common.dll', (Resolve-LockedRuntimeInput -Destination 'sl.common.dll')),
+        @('neural-runtime/sl.dlss.dll', (Resolve-LockedRuntimeInput -Destination 'sl.dlss.dll')),
+        @('neural-runtime/sl.dlss_g.dll', (Resolve-LockedRuntimeInput -Destination 'sl.dlss_g.dll')),
+        @('neural-runtime/sl.dlss_nr.dll', (Resolve-LockedRuntimeInput -Destination 'sl.dlss_nr.dll')),
+        @('neural-runtime/sl.interposer.dll', (Resolve-LockedRuntimeInput -Destination 'sl.interposer.dll')),
+        @('neural-runtime/sl.nis.dll', (Resolve-LockedRuntimeInput -Destination 'sl.nis.dll')),
+        @('neural-runtime/sl.pcl.dll', (Resolve-LockedRuntimeInput -Destination 'sl.pcl.dll')),
+        @('neural-runtime/sl.reflex.dll', (Resolve-LockedRuntimeInput -Destination 'sl.reflex.dll')),
         @('README.md', (Join-Path $repositoryRoot 'TECHNICAL_OVERVIEW.md')),
         @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
         @('SECURITY.md', (Join-Path $repositoryRoot 'SECURITY.md')),

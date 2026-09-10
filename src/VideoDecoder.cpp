@@ -963,10 +963,11 @@ void VideoDecoder::StartFrameQueue(QueueBuffer buffered) {
 void VideoDecoder::StopFrameQueue(QueueBuffer buffered) {
     // Publish the shutdown and wake blocked readers BEFORE the queue thread goes away.
     // FrameQueueLoop exits on its own stop token without setting a terminal state, so a
-    // reader parked in ReadNextBlocking would otherwise keep waiting on a predicate that
-    // can never become true again. ReadNext runs on the UI message pump for local files.
-    // A seek (QueueBuffer::Keep) starts a replacement thread right away and judges child
-    // reuse against the terminal state, so only a permanent stop marks Cancelled here.
+    // reader parked in ReadNextBlocking (the UI message pump, for local files) needs
+    // this to learn that the answer is Cancelled rather than wait on a predicate that
+    // can never become true again. A seek (QueueBuffer::Keep) starts a replacement
+    // thread right away and judges child reuse against the terminal state, so only a
+    // permanent stop marks Cancelled here.
     {
         std::lock_guard lock(m_frameMutex);
         m_frameQueueEnabled = false;
@@ -1223,8 +1224,11 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
         {
             std::unique_lock lock(m_frameMutex);
             // Wait in slices rather than indefinitely so a queue thread that disappears
-            // without publishing a terminal state cannot wedge the caller.
-            while (m_frameQueueEnabled) {
+            // without publishing a terminal state cannot wedge the caller. The terminal
+            // state is consulted before the enabled flag: a shutdown publishes both
+            // together, and the answer to a reader parked across Close() is Cancelled,
+            // not whatever the raw pipe below happens to say mid-teardown.
+            for (;;) {
                 if (stop.stop_requested()) return VideoReadResult::Cancelled;
                 if (!m_frameQueue.empty()) {
                     out = std::move(m_frameQueue.front());
@@ -1233,6 +1237,7 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
                     return VideoReadResult::FrameReady;
                 }
                 if (m_frameTerminal != VideoReadResult::NotReady) return m_frameTerminal;
+                if (!m_frameQueueEnabled) break;
                 (void)m_frameCv.wait_for(lock, stop, std::chrono::milliseconds(50), [this] {
                     return !m_frameQueue.empty() ||
                            m_frameTerminal != VideoReadResult::NotReady ||

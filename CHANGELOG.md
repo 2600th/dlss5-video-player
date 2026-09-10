@@ -1,7 +1,194 @@
 # Changelog
 
-## Unreleased
+## 0.17.2 - 2026-09-10
 
+- Fixed the neural render wedging at the 60th present, reported on an RTX 4070
+  Ti (#4, still failing on 0.17.0) and an RTX PRO 6000 (#3). The renderer
+  released and re-created the raw NGX feature on a frame count
+  (`DelayedRecreateFrame = 60`), and the offline job's receipt gate re-presents
+  one source frame up to 120 times waiting for the add-on to publish a fresh
+  feature-18 evaluation. Those two collided: the release landed inside the gate
+  and tore down the inline neural worksets whose counter the gate was waiting
+  for, so the count never advanced and the job aborted with "A frame was not
+  produced by feature 18." The reporter's log shows the add-on's re-arm and its
+  `count=60` line in the same instant, then no add-on output at all until
+  teardown. Whether it survived was a race, which is why the same build worked
+  on an RTX 4080 SUPER. The feature is now created once and kept: NVIDIA's DLSS
+  Programming Guide 310.6.0 restricts re-creation to display-resolution, RTX and
+  buffer-format changes (S3.2) and requires that no command list referencing the
+  feature is in flight when it is released (S5.5), and both sibling projects
+  that drive the same add-on treat the warm-up re-create as a one-shot
+  workaround for older builds that latch standby on a create they missed,
+  disabled outright for the v4.5+ builds that adopt features lazily. A re-hook
+  is now only ever explicit, and the job makes that request before capture
+  starts - when its own evidence says interception was never armed - so nothing
+  releases a live feature while a receipt is outstanding. The evidence baseline
+  is read after any such re-hook. Verified on an RTX 4080 SUPER: a live session
+  rendered 313/313 frames, `verified=313 failure=none`, past evaluation #300 on
+  a single `CreateFeature` and with no re-create line in the worker log.
+- DLSS Super Resolution no longer refuses a source that cannot reach the
+  requested output. It asked the runtime for the admissible input range at one
+  fixed output and gave up when the source fell short, which is what left a
+  436x573 photo with no upscaling at all on the RTX 2060 in #2 - and answers #1,
+  which asked what resolution the dialog wants. The range is a runtime query,
+  not a ratio: the guide documents no maximum upscaling ratio and no fixed
+  fraction for the minimum (S3.2.2), so the output is now reduced by exactly the
+  shortfall the runtime reported and queried again, at the source's aspect ratio
+  as S3.2.2.1 requires, never below the source. Reproduced on an RTX 4080 SUPER,
+  where a 1098x1440 output advertises a 549x720 minimum: a 436x572 source used
+  to be rejected and now renders 50/50 evaluations at 872x1144. The status text
+  says the source is too small for the chosen target instead of reporting DLSS
+  as unavailable.
+- Source acquisition reports what it is doing. A YouTube neural session copies
+  the whole source locally first, and that copy emitted one phase event with no
+  counters, so the panel sat still for minutes; the RTX 2060 reporter in #2 read
+  it as a hang and cancelled four times, each attempt starting from byte zero.
+  ffmpeg is now asked for `-progress pipe:1` and its `total_size`/`out_time`
+  are parsed off the pipe it already shares, so the bar tracks the copy and the
+  panel names the megabytes and the percentage. The human-readable stderr
+  progress line is deliberately not parsed.
+- The neural job has a per-phase silence deadline. Acquisition, cache checks,
+  preflight, decoding and rendering must keep reporting - 60 s for acquisition,
+  120 s for the rest - and a phase that goes quiet for longer fails the job with
+  the helper-protocol reason instead of leaving a progress bar running forever.
+  Encoding and validation are not watched: ffmpeg's flush and hashing the output
+  are legitimately silent.
+- Still images can start a neural render from the toolbar. The Neural Rendering
+  button was permanently disabled on a photo, because a still cannot run a live
+  session and nothing was cached yet, so #2 concluded images were unsupported;
+  it now submits the same single-frame job the frame preview uses.
+- A live session no longer implies it checked whether the GPU can keep up when
+  it has nothing to check with. Only Blackwell and Ada carry a measured pace
+  prior, and an absent prior was silently treated as "keeps up", so the promise
+  made to #2 did not hold on a 2060. The forecast now reports whether it was
+  measured, the log says the pace is unmeasured, and the session status says so
+  while it runs.
+- Scene-cut detection is debounced. The detector was stateless, so one
+  transition fired it 6 times in 12 frames, and every fire wipes the DLSS
+  temporal history the reconstruction depends on. The decision is now classified
+  by strength; the weak arm (moderate residual plus a collapsed luma histogram)
+  is suppressed unless 0.6 s has passed since the last accepted cut, which is
+  PySceneDetect's `min_scene_len` default applied as the same hard
+  minimum-interval filter, while a strong residual still cuts immediately as
+  x264/x265 do inside `min-keyint`. Every frame carries its own verdict -
+  strength, suppressed flag, residual, histogram overlap - and playback logs it,
+  which it never did before.
+- The release workflow attaches a `.sha256` beside the core package it builds,
+  and the README's download table describes the assets a release actually
+  carries: v0.17.1 published only the 31 MB core zip, while the table promised
+  the 308 MB full package and hashes for both. CI cannot build the full package
+  because it never fetches the locked runtime, so that one is documented as the
+  hand-attached asset it has always been.
+
+## 0.17.1 - 2026-09-10
+
+- Fixed live playback stopping at a segment seam with the modal "out of sync"
+  warning. A segment's exclusive end is rebuilt from an integer frame duration,
+  so at 30 fps it lands 20 ticks below the next segment's own first pts and the
+  shortfall grows by a seam. A playhead inside that sub-frame hole matched no
+  segment, and an uncovered timestamp between the render start and the render
+  head is read as a producer contract break, so playback stopped about two
+  seconds in while the render carried on and finished every frame. It hit two of
+  five 1080p30 sessions on an RTX 5090 - the ones whose playback attached
+  mid-segment, where the seek leaves the original's timestamps a few ticks below
+  the CFR grid. `NeuralSegmentIndex::Append` now closes a hole narrower than one
+  frame, and the lookup that picks a segment runs on frame numbers like the
+  coverage test beside it already did; a real gap from a rebased relaunch stays
+  uncovered. Two tests replay the protocol's own rounding and fail on the old
+  code. Four sessions after the fix played to the end of the clip.
+- An out-of-sync or decode stop says why in the log: the reason, both frame
+  numbers and timestamps, the open segment, the render head and whether the job
+  finished. Before this there was nothing but the dialog.
+- Re-measured the live-session pace on the RTX 5090 (driver 616.64) after
+  0.17.0's pipelined capture and parallel guides: 1080p30 8.36 ms/frame against
+  11.89 on 0.16.0, 1440p30 15.44 against 17.15, 4K30 42.0 against 42.87, over
+  eight, three and two 30 s sessions of the same clips. 4K did not move because
+  that clip is a 6315 kbit/s re-encode whose decode and encode set its pace. The
+  4K30 keep-up prompt now appears before the session ("23.5 frames per second,
+  0.78x real time"), which the 0.16.0 record could not confirm. 12/12 CTest
+  suites and `overall=PASS` from the strict media smoke on that machine. See
+  `docs/VERIFICATION-2026-09-10-RTX5090.md`.
+- Corrected the speed claims. The README quoted 1080p30 at 10.3 ms/frame on an
+  RTX 4080 SUPER and 11.9 on an RTX 5090, which put the slower GPU ahead and
+  cited a figure no record supports; the 4080's own measurement is 15.31 ms on
+  0.16.0. Every quoted pace now names the build and the machine it came from,
+  the docs that said a 5090 keeps up with any source to 4K30 say what the file
+  costs instead, and the reference constants in `src/PlaybackTiming.h` say that
+  they are a seed for an unmeasured machine rather than current numbers.
+- The release workflow uploaded `dist/DLSSVideoPlayer-v0.14.1-core-win64.zip`,
+  a name the packager stopped producing three releases ago; it now takes the
+  versioned zip it actually builds and fails when there is none.
+
+## 0.17.0 - 2026-09-10
+
+- The neural export is pipelined, ported from ctype-lab's PR #5 with fixes.
+  Capture readback rotates through four persistently mapped slots and signals
+  a per-slot fence instead of draining the queue; the copy out of the mapped
+  slot runs on a worker while the loop decodes, guides and submits the next
+  frame; and ffmpeg's stdin is fed from its own thread through an eight-frame
+  queue so a 4K frame into a busy encoder no longer stalls the loop. The
+  export decoder gains the same four-frame queue thread the player uses.
+  Measured on the RTX 4080 SUPER with the 30 s 1080p30 demo, 900 frames:
+  render rate 48.6 -> 109.4 frames/s (1.6x -> 3.6x real time), wall 25.8 ->
+  15.9 s, capture 11.8 -> 0.02 ms/frame on the loop, guides 4.6 -> 1.5 ms.
+  The output is bit-identical to 0.16.0's (PSNR infinite over all 900
+  frames), which is the proof that the parallel guides and the pipelined
+  capture change nothing but time.
+- Not ported: the PR's headless mode, which skipped the backbuffer pass and
+  Present once the NGX feature's delayed recreate had gone out. The RenoDX
+  add-on performs its feature-18 pass per present, so with it on the export
+  ran at the same 109 frames/s but produced DLAA-only frames - 0.46 ms of
+  neural GPU time per frame against 5.7 ms, 34.6 dB from the source instead
+  of 31.7 - while the receipt still said `frames=900/900 verified=900`. The
+  presents cost nothing measurable on this machine. The evidence chain not
+  catching a runtime that evaluates DLAA without NR is a gap in its own
+  right and is recorded in the roadmap.
+- Temporal guide generation fans out over a process-wide worker pool: luma
+  downsample, the global translation search, the 2x2-lattice block match,
+  the median flow, the depth proxy and the guide-grid pack. Each worker owns a
+  semaphore so a two-range split wakes one thread, and the subpixel refine and
+  reverse search prune with an exact per-row bound. The PR measured 7.0 -> 1.4
+  ms/frame at 1080p, memcmp-identical to the serial reference over 24-frame
+  sequences with temporal history. The pool refuses to be entered from two
+  threads at once: a second dispatcher runs serially on its own thread rather
+  than overwriting the single task slot under running helpers.
+- Every stage of the export loop is timed (`Neural export stage cost per
+  frame`), source-frame latency and render-loop throughput are separate
+  series, and the residual between the stage sum and the loop clock is
+  printed, so a slow decoder child, a slow GPU and a swapchain pacing the
+  presents no longer look identical from outside.
+- Fixed against the PR as submitted: a reader blocked in
+  `ReadNextBlocking` now returns `Cancelled` when the decoder closes, instead
+  of falling into the raw-pipe poll while the child is being torn down and
+  reporting `EndOfStream` (the PR's own regression test failed on this);
+  cancelling an export while the encoder feeder is draining its queue - or
+  wedged on a pipe ffmpeg is not reading - now releases the blocked write
+  (an existing test failed on this); a readback failure during the inline
+  drain is classified as the device removal or stall it was, not as the
+  previous frame's failure; the swapchain keeps three backbuffers while the
+  allocator count goes to six, so the visible player does not spend ~+100 MB
+  of VRAM at 4K on presents DXGI's latency limit would never queue;
+  `RawVideoEncoder::WriteFrame` re-checks the stop after every write, because
+  terminating the child under a blocked `WriteFile` completes that write as a
+  success and a single remaining chunk reported `None` for a frame nobody
+  read; and the unused `EncoderPixelFormat::Rgba` and `CaptureRenderedFrame`
+  were deleted. The PR's "shutdown deadlock fix" repaired a regression from
+  its own first commit; `main` never had it.
+
+## 0.16.0 - 2026-09-09
+
+- NGX's own diagnostics reach `DLSSVideoPlayer.log`. `DLSSBackend::Initialize`
+  now hands NGX a `LoggingInfo` callback; lines that name an error, failure,
+  warning or unsupported condition are copied beside the player's own as
+  `[NGX feature N]`, so why a feature refused to create is read in one file at
+  the moment it happened. The complete stream still goes to `ngx_logs/`; the
+  ~170 startup lines each worker emits are not copied.
+- `tools/package_release.ps1` finds the locked runtime the fetch script staged.
+  The fetch stages each file under the lock's `sourceName`, so the universal
+  NR runtime sits in `external/runtime` as `nvngx_dlssnr_310.8.SF-v2.dll`;
+  the packager looked only for the `destination` name and refused with
+  "Locked input is missing" on a tree that `stage_runtime.ps1` had just
+  verified. It now resolves every locked input the way the stager does.
 - `tools/fetch_neural_runtime.ps1` fetches the whole locked neural runtime.
   Every file in `packaging/runtime-lock.json` comes from a public release, so
   the script downloads the five source archives, checks each archive's

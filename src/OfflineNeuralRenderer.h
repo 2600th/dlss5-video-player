@@ -164,6 +164,11 @@ struct NeuralRenderProgress {
     uint64_t completedFrames{};
     uint64_t totalFrames{};
     uint64_t bytes{};
+    // Source acquisition only: how much of the source has been copied locally
+    // and how much is expected. Frames do not exist yet at that point, so a bar
+    // driven by frame counts cannot move and the copy looks like a hang.
+    double acquiredSeconds{};
+    double expectedSeconds{};
     std::chrono::milliseconds elapsed{};
     std::chrono::milliseconds estimatedRemaining{};
     // Non-None only while phase == Recovering: the failure being retried.
@@ -247,6 +252,11 @@ public:
     virtual bool FeatureCreated() const = 0;
     virtual uint64_t EvaluationCount() const = 0;
     virtual void ResetTemporal() = 0;
+    // Asks for one hook-visible CreateFeature, for the case where the neural
+    // add-on missed the first one. Returns false when the evaluator cannot make
+    // that request. Never called once inline interception is known to be armed:
+    // releasing a live feature tears the add-on's neural worksets down.
+    virtual bool RequestFeatureRehook() { return false; }
     // Classification of the most recent failed Submit.
     virtual NeuralRenderFailure LastFailure() const = 0;
     virtual double LastNeuralGpuMs() const { return 0.0; }

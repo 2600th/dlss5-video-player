@@ -142,11 +142,6 @@ public:
     // pool rather than the default one for that reason.
     static void CopyCaptureView(const CaptureReadbackView& view, std::vector<uint8_t>& pixels);
 
-    // Synchronous capture of the frame just rendered by RenderFrame. Valid only while
-    // nothing is in flight. The offline job uses it for the first frame, whose evidence
-    // receipt loop must read pixels back before deciding whether to resubmit.
-    bool CaptureRenderedFrame(CapturedVideoFrame& capture) { return CaptureEvaluatedFrame(capture); }
-
     // Selects what the next Initialize builds its capture resources for. Ignored once
     // Initialize has run, and downgraded to Bgra when the output size is odd, so callers
     // must read ActiveCaptureFormat back rather than assume the request was honoured.
@@ -169,9 +164,9 @@ public:
     //  * FenceWaitNanos is time the CPU spent parked waiting for the GPU. A large share
     //    means the export is GPU bound and more CPU threads will not help.
     //  * PresentNanos is time inside IDXGISwapChain::Present, where DXGI blocks once the
-    //    frame latency limit is reached. A headless export only presents the first
-    //    DelayedRecreateFrame frames, so past the start of a job this stops growing; a
-    //    total that keeps climbing means SetHeadless never took.
+    //    frame latency limit is reached. Every frame presents, hidden window or not: the
+    //    RenoDX add-on runs its feature-18 pass per present, so an export that skipped
+    //    them produced DLAA-only frames the evidence chain still counted as verified.
     uint64_t FenceWaitNanos() const { return m_fenceWaitNanos; }
     uint64_t RenderSlotWaitNanos() const { return m_renderSlotWaitNanos; }
     uint64_t CaptureSubmitSlotWaitNanos() const { return m_captureSubmitSlotWaitNanos; }
@@ -189,21 +184,11 @@ public:
         m_presentNanos = 0;
     }
 
-
-    // The offline export encodes the cache render target that EnqueueEvaluatedFrameCapture
-    // draws for itself, and its window is never shown, so the backbuffer pass RenderFrame
-    // records is thrown away: a full-resolution clear and draw of GPU work per frame, the
-    // CPU time inside Present, and the DXGI frame-latency stall that paces the export at
-    // display rate. Headless drops that pass. The early presents still go out, because the
-    // NGX feature is created and re-created against those frame counts and the swapchain
-    // hooks that watch for it need real presents to initialize.
-    void SetHeadless(bool headless) { m_headless = headless; }
-    bool PresentsThisFrame() const {
-        return !m_headless || m_framesPresented <= ngx_session_detail::DelayedRecreateFrame;
-    }
-
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
+    // True when DLSS refused every output this source could reach, as opposed to
+    // being unavailable for a runtime or device reason.
+    bool DLSSSourceOutsideRange() const { return m_dlss.SourceOutsideSupportedRange(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
     bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
     uint32_t DLSSInputW() const { return m_renderW; }
@@ -242,7 +227,13 @@ private:
     ~D3D12Renderer();
     // An export source frame records two command lists (evaluate, then capture). Six
     // allocators keep three complete source frames in flight before CPU reuse waits.
+    // Upload staging follows the allocator count because each in-flight frame owns its
+    // upload until its fence completes (~+100 MB of upload heap at 4K over three).
     static constexpr uint32_t FrameCount = 6;
+    // The swapchain does not: DXGI's default frame latency of 3 bounds queued presents,
+    // so more backbuffers would only spend VRAM in the visible player.
+    static constexpr uint32_t SwapchainBuffers = 3;
+    static_assert(SwapchainBuffers <= FrameCount);
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
     // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
@@ -329,7 +320,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_dsvHeap;
     uint32_t m_rtvInc=0,m_srvInc=0,m_dsvInc=0;
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_backbuffers[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_backbuffers[SwapchainBuffers];
 
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
@@ -409,9 +400,7 @@ private:
     bool m_dlssEnabled = true;
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
-    bool m_delayedRecreateDone = false;
     bool m_preserveSource = false;
-    bool m_headless = false;
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};

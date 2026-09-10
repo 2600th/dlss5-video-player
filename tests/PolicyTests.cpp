@@ -5600,7 +5600,6 @@ void ngx_create_failure_is_not_retried_until_explicit_reset_test()
 void ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test()
 {
     ngx_session_detail::FeatureCreateGate gate;
-    bool delayedRecreateDone = false;
     bool recreateRequested = false;
     int createAttempts = 0;
     const auto ensureFeature = [&] {
@@ -5617,29 +5616,59 @@ void ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_t
     };
 
     const auto firstFailure = ngx_session_detail::PrepareFeatureForFrame(
-        true, false, 2, delayedRecreateDone, recreateRequested,
-        ensureFeature, recreateFeature);
+        true, false, 2, recreateRequested, ensureFeature, recreateFeature);
     CHECK(firstFailure.selected);
     CHECK_EQ(1, createAttempts);
 
     const auto automaticNextFrame = ngx_session_detail::PrepareFeatureForFrame(
-        true, false, 3, delayedRecreateDone, recreateRequested,
-        ensureFeature, recreateFeature);
+        true, false, 3, recreateRequested, ensureFeature, recreateFeature);
     CHECK(automaticNextFrame.selected);
     CHECK_EQ(1, createAttempts);
 
     recreateRequested = true;
     const auto explicitRehook = ngx_session_detail::PrepareFeatureForFrame(
-        true, false, 4, delayedRecreateDone, recreateRequested,
-        ensureFeature, recreateFeature);
+        true, false, 4, recreateRequested, ensureFeature, recreateFeature);
     CHECK(explicitRehook.selected);
     CHECK(!recreateRequested);
     CHECK_EQ(2, createAttempts);
 
     ngx_session_detail::PrepareFeatureForFrame(
-        true, false, 5, delayedRecreateDone, recreateRequested,
-        ensureFeature, recreateFeature);
+        true, false, 5, recreateRequested, ensureFeature, recreateFeature);
     CHECK_EQ(2, createAttempts);
+}
+
+// A live feature must never be released on a frame count. The offline job's
+// receipt gate re-presents one source frame until the neural add-on publishes a
+// fresh evaluation, so a timed release lands inside that gate and tears down
+// the worksets whose counter the gate is waiting for: that is the wedge issue 4
+// reported on an RTX 4070 Ti and issue 3 on an RTX PRO 6000. The old policy
+// released at present 60, which is exactly where a 120-present gate sits.
+void ngx_live_feature_is_never_released_on_a_frame_count_test()
+{
+    bool recreateRequested = false;
+    int creates = 0;
+    int releases = 0;
+    const auto ensureFeature = [&] { ++creates; return true; };
+    const auto recreateFeature = [&] { ++releases; return true; };
+
+    bool featureCreated = false;
+    for (uint64_t frame = 1; frame <= 400; ++frame) {
+        const auto setup = ngx_session_detail::PrepareFeatureForFrame(
+            true, featureCreated, frame, recreateRequested, ensureFeature, recreateFeature);
+        if (setup.selected) featureCreated = true;
+    }
+    CHECK_EQ(1, creates);
+    CHECK_EQ(0, releases);
+
+    // The explicit request is still the one way to obtain a hook-visible create,
+    // and it stays a single shot.
+    recreateRequested = true;
+    ngx_session_detail::PrepareFeatureForFrame(
+        true, featureCreated, 401, recreateRequested, ensureFeature, recreateFeature);
+    CHECK_EQ(1, releases);
+    ngx_session_detail::PrepareFeatureForFrame(
+        true, featureCreated, 402, recreateRequested, ensureFeature, recreateFeature);
+    CHECK_EQ(1, releases);
 }
 
 } // namespace
@@ -5846,6 +5875,7 @@ int wmain(int argc, wchar_t* argv[])
     ngx_distinct_devices_own_independent_sessions_test();
     ngx_create_failure_is_not_retried_until_explicit_reset_test();
     ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test();
+    ngx_live_feature_is_never_released_on_a_frame_count_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

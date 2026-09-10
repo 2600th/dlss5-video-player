@@ -975,7 +975,14 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     const uint64_t primeLimit = singleFrameSource
         ? 120 : std::max<uint64_t>(2, std::min<uint64_t>(totalFrames, 120));
     uint64_t primed = 0;
-    for (JobFrame primingFrame; !evaluator.FeatureCreated() && primed < primeLimit; ++primed) {
+    JobFrame primingFrame;
+    // Presents a priming frame that has already been decoded, without capturing
+    // it. Priming presents are what let the add-on observe the raw NGX calls.
+    auto presentPrimingFrame = [&](HistoryReset reason) {
+        JobEvaluation ignored;
+        return evaluator.Submit(primingFrame, identity(primingFrame, reason), false, ignored);
+    };
+    for (; !evaluator.FeatureCreated() && primed < primeLimit; ++primed) {
         if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
         if (!singleFrameSource || primed == 0) {
             const JobRead read = source.Read(primingFrame, stop);
@@ -992,8 +999,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         }
         const HistoryReset reason = primed == 0 ? HistoryReset::FirstFrame
             : primingFrame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-        JobEvaluation ignored;
-        if (!evaluator.Submit(primingFrame, identity(primingFrame, reason), false, ignored)) {
+        if (!presentPrimingFrame(reason)) {
             source.Close();
             return fail(evaluatorFailure(), L"Feature 18 priming failed.");
         }
@@ -1002,14 +1008,39 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"Feature 18 was not created.");
     }
-    const NeuralRuntimeEvidence armedEvidence=
-        ParseNeuralRuntimeEvidence(evidenceProvider());
-    if(!armedEvidence.Valid()){
+    NeuralRuntimeEvidence armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
+    if (!armedEvidence.Valid() && primed > 0 && evaluator.RequestFeatureRehook()) {
+        // The add-on arms its NGX detours asynchronously, and a build that
+        // missed the very first CreateFeature stays in a standby state until it
+        // sees another one. One hook-visible re-create clears that. It belongs
+        // here, before capture: the only evidence the job has that the neural
+        // pass ran is the add-on's own evaluation counter, so releasing the
+        // feature once capture is waiting on that counter destroys the state it
+        // is waiting for. Sixty presents is the same asynchronous-arming budget
+        // the sibling feeder projects hold a rebuild for, and the counter shows
+        // up on the add-on's first neural evaluation, well inside it.
+        constexpr uint64_t kRehookArmPresents = 60;
+        for (uint64_t rearm = 0; rearm < kRehookArmPresents; ++rearm) {
+            if (stop.stop_requested()) return cancelled(L"Neural render was cancelled.");
+            if (!presentPrimingFrame(HistoryReset::None)) {
+                source.Close();
+                return fail(evaluatorFailure(), L"Feature 18 priming failed.");
+            }
+            // The runtime logs sparsely; re-reading its log every present costs
+            // more than it learns.
+            if (rearm % 10 != 9) continue;
+            armedEvidence = ParseNeuralRuntimeEvidence(evidenceProvider());
+            if (armedEvidence.Valid()) break;
+        }
+    }
+    if (!armedEvidence.Valid()) {
         source.Close();
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 inline interception was not armed before frame capture.");
     }
     result.feature18ArmedBeforeCapture=true;
+    // Baseline read after any re-hook, so a create the add-on observed late
+    // cannot be mistaken for the captured sequence's own evaluation.
     uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
 
     // Capture restarts from the preroll position: frames before the range are
@@ -1251,7 +1282,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
                     if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
                 }
-                if (capture >= 120) {abort(NeuralRenderFailure::Neural);return attempt;}
+                // The observed add-on cadence is one log line every sixty
+                // evaluations, so twice that carries a full cadence of margin
+                // wherever the baseline happened to land. Nothing may release
+                // the NGX feature while this gate is running: the counter it
+                // waits for stops advancing when the add-on's worksets go.
+                constexpr uint64_t kReceiptGateResubmits = 120;
+                if (capture >= kReceiptGateResubmits) {abort(NeuralRenderFailure::Neural);return attempt;}
             }
             const double evalMs = MillisecondsSince(evalStart);
             if (pipelined) {
@@ -1421,16 +1458,18 @@ struct TestEvaluatorAdapter {
     }
     uint32_t Pending()const{return uint32_t(captured.size());}
     static constexpr uint32_t MaxPending(){return 2u;}
+    // The test evaluator always captures BGRA.
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
         if(captured.empty())return false;
         pixels=std::move(captured.front().bgra);captured.pop_front();
         captureMs=0.0;return true;
     }
     void DiscardPending(){captured.clear();}
-    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool FeatureCreated()const{return evaluator.FeatureCreated();}
     uint64_t EvaluationCount()const{return evaluator.EvaluationCount();}
     void ResetTemporal(){evaluator.ResetTemporal();}
+    bool RequestFeatureRehook(){return evaluator.RequestFeatureRehook();}
     NeuralRenderFailure LastFailure()const{return evaluator.LastFailure();}
     uint64_t PeakLocalVideoMemoryMiB()const{return evaluator.PeakLocalVideoMemoryMiB();}
 };
@@ -1601,9 +1640,10 @@ struct ProductionEvaluatorAdapter {
             LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");
             return false;
         }
-        // Nothing ever looks at this renderer's swapchain: the encoder is fed from the
-        // cache render target that EnqueueEvaluatedFrameCapture draws for itself.
-        guides.SetControls(controls);renderer->SetDLSS(true);renderer->SetHeadless(true);return true;
+        // Nobody looks at this renderer's swapchain - the encoder is fed from the cache
+        // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
+        // still presents: the RenoDX add-on performs its feature-18 pass per present.
+        guides.SetControls(controls);renderer->SetDLSS(true);return true;
     }
     CapturedVideoFrame captureScratch;
     // Declared after `renderer` so the worker is joined before the renderer, and with it
@@ -1720,7 +1760,12 @@ struct ProductionEvaluatorAdapter {
             pixels=std::move(captureScratch.pixels);captureScratch.pixels.clear();
         }
         captureMs=MillisecondsSince(captureStart);
-        if(!ok)return false;
+        if(!ok){
+            // A device removal or fence timeout in the readback must be reported as such,
+            // not as whatever failure the previous frame left behind.
+            lastFailure=ClassifyRendererFailure(*renderer);
+            return false;
+        }
         PostNextResolve(std::move(spare));
         return true;
     }
@@ -1749,8 +1794,6 @@ struct ProductionEvaluatorAdapter {
             if(!renderer->ResolveOldestCapture(discarded))break;
         }
     }
-    // The cache render target is B8G8R8A8, so ffmpeg is told to consume BGRA and the
-    // per-pixel channel swizzle that used to run on every readback disappears.
     // What Initialize settled on, which is BGRA unless the GPU conversion was both
     // asked for and possible at this size.
     EncoderPixelFormat CapturePixelFormat()const{
@@ -1760,6 +1803,10 @@ struct ProductionEvaluatorAdapter {
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
     void ResetTemporal(){guides.Reset();DiscardPending();}
+    bool RequestFeatureRehook(){
+        if(!renderer)return false;
+        renderer->RequestDLSSRecreate();return true;
+    }
     NeuralRenderFailure LastFailure()const{return lastFailure;}
     uint64_t PeakLocalVideoMemoryMiB()const{return renderer?renderer->PeakLocalVideoMemoryMiB():0;}
 };
@@ -1824,11 +1871,19 @@ struct ProductionEncoderAdapter {
         buffer=std::move(recycled.back());recycled.pop_back();return true;
     }
 
-    EncodeError Flush(std::stop_token){
+    // Drains the queue through the worker. A job stop arriving mid-drain (up to eight
+    // 4K frames, or forever if ffmpeg has wedged) requests the worker's own token,
+    // which is the only thing that releases a blocked WriteFile; the caller then takes
+    // the Cancel path exactly as an inline WriteFrame(stop) used to.
+    EncodeError Flush(std::stop_token stop){
         {std::lock_guard lock(mutex);draining=true;}
         cv.notify_all();
-        if(worker.joinable())worker.join();
+        if(worker.joinable()){
+            std::stop_callback release(stop,[this]{worker.request_stop();});
+            worker.join();
+        }
         std::lock_guard lock(mutex);
+        if(latched==EncodeError::None&&stop.stop_requested())latched=EncodeError::Cancelled;
         return latched;
     }
 

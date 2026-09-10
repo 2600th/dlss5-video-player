@@ -67,7 +67,7 @@ quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
-When the complete experimental layout is active, v0.15.0 defaults to
+When the complete experimental layout is active, v0.17.2 defaults to
 exact 1080p for YouTube Auto and native-resolution DLAA. If exact 1080p is not
 available, Auto uses the highest compatible source up to 4K. Manual source
 choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.
@@ -102,6 +102,9 @@ at 15.31 ms/frame; see the
 An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
 (11.89 ms/frame), 1440p and 4K; see the
 [RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-09-RTX5090.md).
+The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
+42.0 ms/frame; see the
+[0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
 Turing and Ampere have no hardware verification in this project yet.
 
 The architecture follows lessons from [Zonnery's offline

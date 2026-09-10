@@ -6,6 +6,20 @@
 #include "GuideControls.h"
 #include "PixelLayout.h"
 
+// Strength of the image evidence behind a scene-cut decision. The two arms are
+// kept apart because only the weak one is debounced: NVIDIA's DLSS Programming
+// Guide 310.6.0 S3.13 asks for InReset on the first frame after a major
+// transition and warns that improper use "can result in temporal flickering,
+// heavy aliasing or other visual artifacts", so a false positive is far more
+// expensive than a late true positive - but a strong signal must still cut
+// immediately, which is also what x264/x265 do (their distance-ramped scenecut
+// threshold never blocks a decisive cut).
+enum class SceneCutStrength {
+    None,       // the frames correspond; history continues
+    Histogram,  // weak arm: a moderate residual plus a collapsed luma histogram
+    Residual,   // strong arm: correspondence failed outright
+};
+
 struct GuideFrame {
     // Compact analysis grid consumed by a GPU expansion pass:
     // R = motion X, G = motion Y (current -> previous, already in DLSS input pixels)
@@ -18,6 +32,16 @@ struct GuideFrame {
     float globalMotionX = 0.0f;
     float globalMotionY = 0.0f;
     float globalMatchCost = 0.0f;
+    // What the scene-cut classifier saw for this frame, so a live-playback
+    // decision is inspectable instead of silent. `sceneCutSuppressed` is true
+    // when a weak cut was recognised but withheld by the minimum-interval
+    // debounce, in which case the history below continues. With no previous
+    // frame to compare against nothing is measured and the pair is reported as
+    // the neutral (residual 0, overlap 1) "no evidence" reading.
+    SceneCutStrength sceneCut = SceneCutStrength::None;
+    bool sceneCutSuppressed = false;
+    float sceneCutResidual = 0.0f;
+    float sceneCutHistogramOverlap = 1.0f;
     // Source identity of the frame these guides were built from, stamped with
     // the generator's history generation and the reset reason (None when the
     // guides continue the previous frame's history; hasHistory == !reset).
@@ -47,6 +71,9 @@ public:
     // that was evaluated last (same frameNumber/pts/sourceGeneration) is a
     // re-evaluation: guides are rebuilt against the same previous frame and no
     // reset is declared.
+    // A cut whose evidence is only Histogram-strength is withheld when fewer
+    // than MinFramesBetweenCuts(targetFps) frames have passed since the last
+    // accepted cut; `out.sceneCut*` reports every decision either way.
     bool Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                   uint32_t renderW, uint32_t renderH, double targetFps,
                   const FrameIdentity& frame, GuideFrame& out,
@@ -56,6 +83,13 @@ public:
     // histogram overlap of two analysis grids. Fast pans keep a high overlap
     // even when the residual is large; a cut loses both.
     static bool IsSceneCut(float globalMatchCost, float histogramIntersection);
+    // Same decision, split by how strong the evidence is. IsSceneCut() is
+    // exactly `ClassifySceneCut(...) != None`; Generate() needs the split
+    // because only the weak arm is debounced.
+    static SceneCutStrength ClassifySceneCut(double residual, double histogramOverlap);
+    // Minimum number of frames Generate() requires between two weak cuts at
+    // `fps`. 15 frames at 25 fps, 18 at 30, and never fewer than 2.
+    static uint32_t MinFramesBetweenCuts(double fps);
     static float LumaHistogramIntersection(const std::vector<float>& a, const std::vector<float>& b);
 
 private:
@@ -92,5 +126,12 @@ private:
     int64_t m_lastPts = 0;
     uint32_t m_lastSourceGeneration = 0;
     uint32_t m_historyGeneration = 0;
+    // Weak-arm debounce state. m_framesSinceCut counts distinct frames since the
+    // last cut this generator accepted from image evidence and saturates rather
+    // than wrapping; m_haveAcceptedCut is false until there is such a cut, and a
+    // declared reset clears it again because the history a suppression would
+    // have protected is already gone.
+    uint32_t m_framesSinceCut = 0;
+    bool m_haveAcceptedCut = false;
     GuideControls m_controls;
 };

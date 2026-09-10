@@ -95,7 +95,6 @@ D3D12Renderer::~D3D12Renderer() {
 
 bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource) {
     m_preserveSource=preserveSource;
-    m_delayedRecreateDone=preserveSource;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
@@ -139,7 +138,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     }
     BOOL tearing=FALSE;if(SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount=FrameCount;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
+    sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
     if(m_swapchain) m_swapchain->SetMaximumFrameLatency(2);
@@ -150,7 +149,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=RTVCount;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
+    for(uint32_t i=0;i<SwapchainBuffers;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
     D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=SRVCount;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -306,7 +305,14 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
 bool D3D12Renderer::InitializeDLSS(bool& gpuSynchronized){
     auto* cmd=m_cmds[0].Get();
     m_allocators[0]->Reset();cmd->Reset(m_allocators[0].Get(),nullptr);bool ok=m_dlss.Initialize(m_device.Get(),cmd,m_sourceW,m_sourceH,m_outputW,m_outputH,m_quality,m_preserveSource);
-    if(ok){m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();}
+    if(ok){
+        m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();
+        // The backend may have had to settle for a smaller output than the one
+        // requested, when this source could not reach it. Video resources are
+        // created after this point, so adopting it here keeps every consumer of
+        // OutputW/OutputH on the size DLSS actually writes.
+        m_outputW=m_dlss.OutputWidth();m_outputH=m_dlss.OutputHeight();
+    }
     cmd->Close();ID3D12CommandList*l[]={cmd};m_queue->ExecuteCommandLists(1,l);
     gpuSynchronized=WaitGPUForContinuedUse();
     return ok&&gpuSynchronized;
@@ -625,21 +631,24 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
 
     ++m_framesPresented;
 
-    // Create/recreate the NGX feature on an open command list, submit that list,
-    // and only then evaluate on a fresh list. This mirrors the robust game-style
-    // NGX lifetime instead of relying on CreateFeature and EvaluateFeature being
+    // Create the NGX feature on an open command list, submit that list, and only
+    // then evaluate on a fresh list. This mirrors the robust game-style NGX
+    // lifetime instead of relying on CreateFeature and EvaluateFeature being
     // accepted back-to-back before the creation commands have reached the GPU.
     // Intentionally allow one complete Present before the first NGX CreateFeature.
     // ReShade add-ons finish their swapchain/runtime initialization on that first frame;
     // creating on frame 2 makes the raw CreateFeature much harder for RenoDX to miss.
-    // Releasing an NGX feature while a previous frame's evaluate is still
-    // executing is outside the NGX contract, and the add-on that hooks the
-    // release tears down its inline NR worksets on the spot. With three frames
-    // in flight that reliably wedged the queue on an RTX 4080 at 1080p right
-    // after the 60-frame preroll. Drain before the release, never during it.
+    // Nothing here releases a live feature on a frame count any more: the
+    // add-on that hooks the release tears down its inline neural worksets on the
+    // spot, and the offline job's receipt gate re-presents one source frame for
+    // as long as it takes the add-on to publish a fresh evaluation, so a timed
+    // release landed inside that gate and killed the pass it was waiting for.
+    // A re-hook is now only ever requested explicitly, and the drain below still
+    // honours the NGX rule that no command list referencing the feature may be
+    // in flight when it is released.
     const auto featureSetup = ngx_session_detail::PrepareFeatureForFrame(
         DLSSEnabled(), m_dlss.FeatureCreated(), m_framesPresented,
-        m_delayedRecreateDone, m_recreateRequested,
+        m_recreateRequested,
         [&] { return m_dlss.EnsureFeature(cmd); },
         [&] { return WaitGPUForContinuedUse() && m_dlss.RecreateFeature(cmd); },m_preserveSource);
     const bool needFeatureFlush = featureSetup.needsFlush;
@@ -676,11 +685,11 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }
 
     m_lastDLSSUsed=used;
-    // Headless skips the whole backbuffer pass once the feature-lifetime presents are
-    // out. The offline capture redraws m_dlssOutput into m_cacheOutput on its own
-    // submission, so nothing downstream reads what this pass would have written.
-    const bool present=PresentsThisFrame();
-    if(present){
+    // The backbuffer pass and Present are not optional even for a window nobody sees:
+    // the RenoDX add-on performs its feature-18 evaluation per present. An export that
+    // skipped presents past the feature recreate rendered 900/900 "verified" frames with
+    // DLAA only (0.46 ms neural GPU time against 5.7 ms), bit-for-bit non-neural.
+    {
         uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
         SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
@@ -701,7 +710,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    if(present){
+    {
         const auto presented=std::chrono::steady_clock::now();
         HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
         m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(

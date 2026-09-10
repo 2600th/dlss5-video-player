@@ -72,7 +72,11 @@ int wmain(int argc,wchar_t** argv) {
                 if(ok)++presented;
             }
             renderer->SetComparison({});
-            std::cout<<"source="<<decoder.Width()<<"x"<<decoder.Height()<<" output="<<target.width<<"x"<<target.height
+            // The accepted output can be smaller than the requested one when the
+            // source could not reach it, so report both.
+            std::cout<<"source="<<decoder.Width()<<"x"<<decoder.Height()<<" output="<<renderer->OutputW()<<"x"<<renderer->OutputH()
+                <<((renderer->OutputW()!=target.width||renderer->OutputH()!=target.height)
+                    ?" requested="+std::to_string(target.width)+"x"+std::to_string(target.height):std::string{})
                 <<" frames="<<count<<" evaluations="<<renderer->DLSSEvaluations()<<" elapsed="<<seconds<<" throughput="<<count/seconds<<" fps"
                 <<" neuralGpuMs="<<renderer->LastNeuralGpuMs()<<" peakLocalVramMiB="<<renderer->PeakLocalVideoMemoryMiB()
                 <<" comparisonModes="<<presented<<" identityRejected="<<rejected<<" fenceWait="<<int(renderer->LastFenceWaitResult())<<"\n";

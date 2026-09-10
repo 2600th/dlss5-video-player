@@ -218,27 +218,45 @@ before the current one runs out. Reading past the render head returns
 job ends the segments are concatenated (`ConcatenateMedia`) into the single
 `neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
 
+Both the coverage test and the lookup that picks a segment run on frame numbers,
+which are exact on the CFR grid, because a seeked FFmpeg source stamps its
+timestamps a few ticks below it. The index also closes the sub-frame hole each
+seam would otherwise carry: a segment's exclusive end is rebuilt from an integer
+frame duration, so at 30000/1001-style rates it lands a couple of ticks under
+the next segment's own first pts, and a playhead inside that hole used to be
+reported as a producer contract break.
+
 Sizing follows measurement rather than preference, and the measurements moved a
-long way during the work described below. Steady-state cost is now **12.50 ms
-per 1080p frame, 16.60 ms at 1440p and 28.07 ms at 4K**, measured from the
-spacing of segment arrivals so job startup is excluded. Fitting those three
-points gives **7.35 ms of fixed cost per frame plus 2.50 ms per megapixel**,
-reproducing each to within 0.06 ms: the fixed part is the guide pass, the DLSS
-evaluate and the capture's fence wait, the proportional part is the readback and
-the pixel work. `playback_timing::ForecastLiveRender` is exactly that fit.
+long way during the work described below. `playback_timing::ForecastLiveRender`
+is seeded with **12.50 ms per 1080p frame, 16.60 ms at 1440p and 28.07 ms at
+4K**, measured on an RTX 5090 from the spacing of segment arrivals so job
+startup is excluded. Fitting those three points gives **7.35 ms of fixed cost
+per frame plus 2.50 ms per megapixel**, reproducing each to within 0.06 ms: the
+fixed part is the guide pass, the DLSS evaluate and the capture's fence wait,
+the proportional part is the readback and the pixel work.
+
+Those constants are only the seed for a machine that has never run a session.
+0.17.0's pipelined capture and parallel guides moved the same GPU and the same
+clips to **8.4 ms at 1080p, 15.4 at 1440p and 42.0 at 4K** (medians; see the
+[0.17.0 RTX 5090 record](VERIFICATION-2026-09-10-RTX5090.md)), which no longer
+fit one line: 1080p and 1440p came down 29% and 10% while the 4K figure did not
+move, because that clip is a 6.3 Mbit/s re-encode whose decode and encode, not
+the neural pass, set the pace. The player therefore keeps one measured pace per
+source geometry per GPU and predicts from those, falling back to the seed only
+until the first session has measured the machine itself.
 
 Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
 stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll
 frames — which is why a session is one long job rather than a chunk per few
 seconds, with a 4 s lead-in and a 2 s resume threshold.
 
-Inside a live session the rate holds up: on a 40 s 4K30 source the median over
-nine segment intervals was **1.165x real time** against the forecast's 1.188x,
-so the player's own decoding and presenting costs about 2%. A session therefore
-grows its lead on everything up to 4K30; 4K60 and 8K30 are where the forecast
-says no and the player asks before starting. Buffering remains the release
-valve, not an edge case, because a busy GPU or a slower disk can still push a
-marginal source under the line.
+Inside a live session the rate holds up: on a 40 s native 4K30 source the median
+over nine segment intervals was **1.165x real time** against the forecast's
+1.188x, so the player's own decoding and presenting costs about 2%. A heavier
+file at the same geometry is a different answer - the 4K re-encode above runs at
+0.78x and buffers continuously - so the forecast asks before starting whatever
+it expects to fall behind, and buffering remains the release valve rather than
+an edge case.
 
 A settings change while the player is paused runs the same machinery for one
 frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented

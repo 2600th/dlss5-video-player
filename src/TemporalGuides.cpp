@@ -27,6 +27,11 @@ void TemporalGuideGenerator::Reset() {
     m_gridW = m_gridH = 0;
     m_havePrev = false;
     m_firstFrame = true;
+    // A declared reset already wiped the DLSS history, so there is nothing left for a
+    // suppressed weak cut to protect: re-arm the weak arm instead of making the first
+    // real cut after a seek wait out the interval.
+    m_framesSinceCut = 0;
+    m_haveAcceptedCut = false;
 }
 
 void TemporalGuideGenerator::SetControls(const GuideControls& controls) {
@@ -62,12 +67,39 @@ float TemporalGuideGenerator::LumaHistogramIntersection(const std::vector<float>
     return overlap / float(a.size());
 }
 
+// Measured on the benchmark corpus: fast pans reach residual 0.10-0.13 with histogram
+// overlap >= 0.91; real cuts show residual 0.24-0.40 with overlap <= 0.47, and the softest
+// real cut observed was 0.108 / 0.78. Pairing a residual with a histogram distance under a
+// threshold band is x265's --hist-scenecut design; NVIDIA documents no threshold and no
+// detection method at all, so none of these numbers can be attributed to them.
+constexpr double kCutResidualStrong = 0.30;    // correspondence failed outright
+constexpr double kCutResidualWeak = 0.10;      // more than a pan, less than a certainty
+constexpr double kCutHistogramOverlap = 0.85;  // luma distribution no longer the same scene
+// PySceneDetect's min_scene_len, whose CLI default is 0.6 s (its API default of 15 frames is
+// the same thing at 25 fps), applied as the same kind of hard minimum-interval filter its
+// FlashFilter uses in SUPPRESS mode. This is the debounce the weak arm was missing: a
+// contributor measured 6 fires in 12 frames (#19119-19130) and 11 in 15 frames on another
+// clip, and per DLSS Programming Guide 310.6.0 S3.13 over-firing InReset is the documented
+// failure mode ("temporal flickering, heavy aliasing or other visual artifacts"), not a
+// missed reset. FFmpeg's scdet has no debounce; it also never has to protect an upscaler's
+// accumulated history.
+constexpr double kMinSecondsBetweenCuts = 0.6;
+
+SceneCutStrength TemporalGuideGenerator::ClassifySceneCut(double residual, double histogramOverlap) {
+    if (residual > kCutResidualStrong) return SceneCutStrength::Residual;
+    if (residual > kCutResidualWeak && histogramOverlap < kCutHistogramOverlap) return SceneCutStrength::Histogram;
+    return SceneCutStrength::None;
+}
+
 bool TemporalGuideGenerator::IsSceneCut(float globalMatchCost, float histogramIntersection) {
-    // Measured on the benchmark corpus: fast pans reach residual 0.10-0.13
-    // with histogram overlap >= 0.91; real cuts show residual 0.24-0.40 with
-    // overlap <= 0.47, and the softest real cut observed was 0.108 / 0.78.
-    if (globalMatchCost > 0.30f) return true;
-    return globalMatchCost > 0.10f && histogramIntersection < 0.85f;
+    return ClassifySceneCut(globalMatchCost, histogramIntersection) != SceneCutStrength::None;
+}
+
+uint32_t TemporalGuideGenerator::MinFramesBetweenCuts(double fps) {
+    // A non-finite or absurd frame rate still has to leave the weak arm usable, and two
+    // frames is the shortest interval that suppresses anything at all.
+    if (!std::isfinite(fps) || fps <= 0.0) return 2;
+    return std::max<uint32_t>(2, uint32_t(std::lround(kMinSecondsBetweenCuts * fps)));
 }
 
 std::pair<uint32_t,uint32_t> TemporalGuideGenerator::AnalysisGrid(uint32_t sourceW, uint32_t sourceH, double targetFps) {
@@ -523,6 +555,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     HistoryReset reset = ClassifyReset(frame, gw, gh);
     if (reset != HistoryReset::None) Reset();
     m_gridW = gw; m_gridH = gh;
+    // Advance the weak-arm interval once per distinct frame. A re-evaluation of the frame
+    // that was just evaluated is not a new frame, and a reset frame's interval starts at
+    // the reset itself, which Reset() has already done above.
+    if (reset == HistoryReset::None && !repeat && m_framesSinceCut != UINT32_MAX) ++m_framesSinceCut;
 
     std::vector<float> cur;
     DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur, layout);
@@ -535,17 +571,31 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     const std::vector<float>& reference = repeat ? m_prevLuma : m_lastLuma;
     bool history = reset == HistoryReset::None && m_havePrev && reference.size() == cur.size();
     float globalCost = 0.0f;
+    SceneCutStrength cutStrength = SceneCutStrength::None;
+    bool cutSuppressed = false;
+    float histogramOverlap = 1.0f;
     if (history) {
         EstimateFlow(cur, reference, gw, gh, fx, fy, confidence, globalX, globalY, globalCost);
         // Judge cuts on correspondence quality plus histogram overlap, so fast
         // camera pans are not mistaken for cuts and real cuts never keep history.
-        if (IsSceneCut(globalCost, LumaHistogramIntersection(cur, reference))) {
+        histogramOverlap = LumaHistogramIntersection(cur, reference);
+        cutStrength = ClassifySceneCut(globalCost, histogramOverlap);
+        // The weak arm alone is not worth a history wipe this soon after the last one: a
+        // burst of near-threshold frames inside one transition would otherwise reset DLSS
+        // repeatedly, which is exactly the artifact S3.13 warns about. A Residual-strength
+        // cut is never suppressed, matching x264/x265, where a decisive scenecut still
+        // fires inside min-keyint.
+        cutSuppressed = cutStrength == SceneCutStrength::Histogram && m_haveAcceptedCut &&
+                        m_framesSinceCut < MinFramesBetweenCuts(targetFps);
+        if (cutStrength != SceneCutStrength::None && !cutSuppressed) {
             history = false;
             reset = HistoryReset::Cut;
             std::fill(fx.begin(), fx.end(), 0.0f);
             std::fill(fy.begin(), fy.end(), 0.0f);
             globalX = globalY = 0.0f;
             m_prevDepth.clear();
+            m_framesSinceCut = 0;
+            m_haveAcceptedCut = true;
         } else {
             MedianFlow(fx, fy, confidence, gw, gh);
         }
@@ -584,6 +634,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     out.globalMotionX = globalX * gridToRenderX;
     out.globalMotionY = globalY * gridToRenderY;
     out.globalMatchCost = globalCost;
+    out.sceneCut = cutStrength;
+    out.sceneCutSuppressed = cutSuppressed;
+    out.sceneCutResidual = globalCost;
+    out.sceneCutHistogramOverlap = histogramOverlap;
     out.id = frame;
     out.id.historyGeneration = m_historyGeneration;
     out.id.reset = reset;

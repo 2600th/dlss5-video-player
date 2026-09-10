@@ -1,11 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 enum class EncoderKind {
@@ -67,7 +70,7 @@ inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
 // with limited range. It exists because BGRA leaves ffmpeg converting every frame on
 // the CPU, which measured as the export's slowest stage, and it also cuts the readback
 // and the pipe write from four bytes per pixel to one and a half.
-enum class EncoderPixelFormat { Bgra, Rgba, Nv12 };
+enum class EncoderPixelFormat { Bgra, Nv12 };
 
 // Bytes one frame of `format` occupies at this size. NV12 needs even dimensions; the
 // caller is responsible for not selecting it otherwise.
@@ -91,6 +94,16 @@ struct MaterializeResult {
     bool ok{};
     MaterializeError error{MaterializeError::None};
     std::wstring detail;
+};
+
+// Reported while a remote source is copied to the cache. FFmpeg only knows what
+// it has already muxed, so both fields describe written output, not the yet
+// unknown total: `bytes` is the container size so far and `seconds` the source
+// position reached. A caller with an expected duration turns the latter into a
+// percentage; nothing here does, because a request may carry no duration.
+struct MediaDownloadProgress {
+    uint64_t bytes{};     // total_size, 0 until FFmpeg reports one
+    double seconds{};     // out_time, the source position already written
 };
 
 struct ProbeResult {
@@ -124,7 +137,11 @@ bool ShouldRetryWithSoftware(EncoderKind attempted, EncodeError error);
 class MediaMaterializer {
 public:
     explicit MediaMaterializer(std::filesystem::path helperDirectory = {});
-    MaterializeResult Run(const MaterializeRequest& request, std::stop_token stop);
+    // The progress callback is optional and runs on the calling thread inside
+    // Run, at most once every 250 ms plus a final report; two-argument callers
+    // that only need the result stay unchanged.
+    MaterializeResult Run(const MaterializeRequest& request, std::stop_token stop,
+                          std::function<void(const MediaDownloadProgress&)> onProgress = {});
 
 private:
     std::filesystem::path helperDirectory_;
@@ -170,3 +187,46 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
                        const std::filesystem::path& media,
                        std::stop_token stop,
                        MediaProbeMode mode = MediaProbeMode::FullValidation);
+
+namespace media_pipeline_detail {
+
+// Incremental reader for the `-progress pipe:1` key/value stream FFmpeg writes
+// while it materializes a source. It exists as a named type, rather than a
+// lambda inside MediaMaterializer::Run, so the awkward parts can be tested
+// without a child process: the capture callback hands over whatever one ReadFile
+// returned, so a key may be split across two chunks, and the stream is shared
+// with FFmpeg's stderr, so every line that is not a progress key must be handed
+// back untouched instead of being swallowed by the parser.
+class MediaProgressReader {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    MediaProgressReader(std::function<void(const MediaDownloadProgress&)> onProgress,
+                        std::function<void(std::string_view)> onDiagnostic);
+    // `now` is injected so the rate limit is testable; callers pass Clock::now().
+    void Consume(std::string_view chunk, Clock::time_point now);
+    // Flushes a trailing line without a newline and reports the last block even
+    // if the rate limit would have withheld it, so the final size is never lost.
+    void Finish(Clock::time_point now);
+
+private:
+    void EndLine(Clock::time_point now);
+    void ReadLine(std::string_view line, Clock::time_point now);
+    void Report(Clock::time_point now, bool force);
+
+    std::function<void(const MediaDownloadProgress&)> onProgress_;
+    std::function<void(std::string_view)> onDiagnostic_;
+    std::string partial_;
+    MediaDownloadProgress latest_{};
+    Clock::time_point lastReport_{};
+    bool oversizedLine_{};
+    bool reported_{};
+    bool pending_{};
+};
+
+// FFmpeg writes a progress block roughly twice a second; a local copy of an
+// already downloaded file finishes them far faster. One report per 250 ms keeps
+// the UI thread free while still looking live to the user who is watching it.
+inline constexpr std::chrono::milliseconds kMediaProgressInterval{250};
+
+} // namespace media_pipeline_detail
