@@ -187,7 +187,7 @@ void VideoDecoder::Close() {
 }
 
 bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false);
 }
 
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
@@ -198,12 +198,12 @@ bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sour
     // Cuda->D3D11Va->Software fallback in StartFFmpeg/TryNextFFmpegAcceleration
     // downgrade per codec as needed. The background frame queue still overlaps
     // decode with GPU rendering/encoding.
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, true);
 }
 
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                             std::stop_token stop, bool queueFrames,
-                            FFmpegAcceleration acceleration) {
+                            FFmpegAcceleration acceleration, bool sequential) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -215,6 +215,12 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     m_gif = false;
     m_displayAspect = 0.0;
     m_sourceKind = sourceKind;
+    // Set for the whole session here; OpenFFmpeg turns it into m_layout once the
+    // probe knows the geometry, and it is untouched by any acceleration
+    // fallback or seek restart afterwards - so a background export's frames
+    // stay NV12-or-Bgra for as long as this decoder instance is open.
+    m_sequentialOpen = sequential;
+    m_layout = VideoPixelLayout::Bgra;
     ++m_sourceGeneration;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
@@ -236,6 +242,10 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     LOG("FFmpeg backend unavailable or rejected the file; trying Media Foundation.");
     if (OpenMediaFoundation(path)) {
         m_backend = Backend::MediaFoundation;
+        // A failed OpenFFmpeg can leave m_layout at whatever its probe decided
+        // before StartFFmpeg itself failed; Media Foundation's reader always
+        // hands out BGRA, so the layout is pinned back here regardless.
+        m_layout = VideoPixelLayout::Bgra;
         LOG("Video decoder selected: Windows Media Foundation");
         return true;
     }
@@ -597,7 +607,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // only buffer the child gets, plus the four frame queue.
     HANDLE readPipe = nullptr, writePipe = nullptr;
     const DWORD pipeBytes=static_cast<DWORD>(std::clamp<size_t>(
-        2u*static_cast<size_t>(m_width)*static_cast<size_t>(m_height)*4u,
+        2u*FrameBytes(m_layout,m_width,m_height),
         4u<<20,16u<<20));
     if (!CreatePipe(&readPipe, &writePipe, &sa, pipeBytes)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
@@ -628,18 +638,27 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if (m_gif) args << L"-ignore_loop 1 ";
     args << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
-    if (acceleration == FFmpegAcceleration::Cuda)
+    // NV12 (the export's session layout, chosen in OpenFFmpeg) is already the
+    // decoder's working format up to hwdownload, so it only takes dropping the
+    // trailing `format=bgra` conversion and asking for `-pix_fmt nv12` below -
+    // 11.1 MB BGRA -> 4.2 MB NV12 per 2578x1080 frame over the pipe.
+    const bool nv12 = m_layout == VideoPixelLayout::Nv12;
+    if (acceleration == FFmpegAcceleration::Cuda) {
         args << L"-vf scale_cuda=" << m_width << L":" << m_height
-             << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12,format=bgra ";
-    else if (acceleration == FFmpegAcceleration::D3D11Va)
+             << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
+        if (!nv12) args << L",format=bgra";
+        args << L" ";
+    } else if (acceleration == FFmpegAcceleration::D3D11Va) {
         args << L"-vf hwdownload,format=nv12,scale=" << m_width << L":" << m_height
-             << L":flags=bicubic,format=bgra ";
-    else if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
+             << L":flags=bicubic";
+        if (!nv12) args << L",format=bgra";
+        args << L" ";
+    } else if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
         args << L"-vf scale=" << m_width << L":" << m_height << L":flags=bicubic ";
     if (m_stillImage) args << L"-frames:v 1 ";
     if (m_gif && m_durationSec > seekSeconds)
         args << L"-t " << std::fixed << std::setprecision(6) << (m_durationSec - seekSeconds) << L" ";
-    args << L"-pix_fmt bgra -fps_mode cfr -r "
+    args << L"-pix_fmt " << (nv12 ? L"nv12" : L"bgra") << L" -fps_mode cfr -r "
          << std::fixed << std::setprecision(6) << m_fps
          << L" -f rawvideo pipe:1";
 
@@ -701,7 +720,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     }
     const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
         acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
-    LOG("FFmpeg raw BGRA process started with " << accelerationName << ".");
+    LOG("FFmpeg raw " << (nv12 ? "NV12" : "BGRA") << " process started with " << accelerationName << ".");
     return true;
 }
 
@@ -723,6 +742,12 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
 
     LOG("FFmpeg executable detected.");
     if (!ProbeFFmpeg(path,stop)||stop.stop_requested()) return false;
+    // NV12 needs even plane dimensions (the UV plane is half-resolution in
+    // both axes); odd geometry stays BGRA even for a sequential/export open.
+    // Decided once here, from the probed geometry, and left alone by every
+    // later StartFFmpeg call (acceleration fallback, seek restart) this session.
+    m_layout = (m_sequentialOpen && m_width % 2 == 0 && m_height % 2 == 0)
+        ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     return StartFFmpeg(0.0,initialAcceleration);
 }
 
@@ -799,7 +824,7 @@ VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
 
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop,bool block) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
-    const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
+    const size_t frameBytes = FrameBytes(m_layout, m_width, m_height);
     if (!frameBytes) return VideoReadResult::Error;
   for(;;){
     if(stop.stop_requested())return VideoReadResult::Cancelled;
@@ -901,6 +926,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if(sourceFrame<m_ffmpegFirstSourceFrame)continue;
 
     out.bgra.swap(m_pendingFrame);
+    out.layout = m_layout;
     RecycleFrameBuffer(std::move(m_pendingFrame));
     m_pendingFrame.clear();
     const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
@@ -1175,6 +1201,7 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         out.discontinuity = (flags & MF_SOURCE_READERF_STREAMTICK) != 0;
         out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_fps * 1e-7));
         out.sourceGeneration = m_sourceGeneration;
+        out.layout = VideoPixelLayout::Bgra; // Media Foundation's reader only ever hands out BGRA.
         return true;
     }
 }

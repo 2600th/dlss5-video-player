@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "PixelLayout.h"
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -22,7 +23,17 @@
 struct VideoDecoderTestAccess;
 #endif
 
+// PixelLayout.h: BGRA is 4 bytes/pixel; NV12 is 3/2 - 11.1 MB BGRA -> 4.2 MB NV12 per
+// 2578x1080 frame. OpenSequential (the neural export's source) selects Nv12 when the
+// geometry allows it; Open (normal playback) always stays Bgra.
+using VideoPixelLayout = PixelLayout;
+inline size_t FrameBytes(VideoPixelLayout layout, uint32_t w, uint32_t h) {
+    return PixelLayoutFrameBytes(layout, w, h);
+}
+
 struct VideoFrame {
+    // Holds the frame in `layout` - BGRA (w*h*4 bytes) or NV12 (w*h*3/2
+    // bytes: Y plane then interleaved UV), per FrameBytes(layout, w, h).
     std::vector<uint8_t> bgra;
     int64_t timestamp100ns = 0;
     bool discontinuity = false;
@@ -33,6 +44,9 @@ struct VideoFrame {
     // Bumped by Open/OpenSequential, SeekSeconds and any internal decoder
     // restart, so frames from different decoder sessions never pair.
     uint32_t sourceGeneration = 0;
+    // Trailing (not after bgra) so existing positional-brace VideoFrame{...}
+    // initializers that predate NV12 support keep compiling unchanged.
+    VideoPixelLayout layout = VideoPixelLayout::Bgra;
 };
 
 inline FrameIdentity IdentityOf(const VideoFrame& frame, uint32_t historyGeneration,
@@ -113,6 +127,11 @@ public:
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
     const wchar_t* BackendName() const;
+    // Bgra for Open (always) and for OpenSequential when the geometry can't
+    // take NV12 (odd width/height); Nv12 for OpenSequential otherwise. Fixed
+    // once OpenFFmpeg's probe completes and unchanged by acceleration
+    // fallbacks or seek restarts for the rest of the session.
+    VideoPixelLayout PixelLayout() const { return m_layout; }
 
 private:
     // ffprobe's codec/pixel format for the open source. Hardware decode support
@@ -130,7 +149,8 @@ private:
 
     bool OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                   std::stop_token stop, bool queueFrames,
-                  FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda);
+                  FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda,
+                  bool sequential = false);
 
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
                     FFmpegAcceleration initialAcceleration);
@@ -216,6 +236,11 @@ private:
     bool m_seekReusedBuffered = false;
     mutable std::mutex m_seekTimingMutex;
     FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
+    // OpenSequential(true) vs Open(false); decides m_layout once the probe
+    // knows the geometry. Fixed for the session: neither TryNextFFmpegAcceleration
+    // nor a seek restart re-probes, so they never revisit it.
+    bool m_sequentialOpen = false;
+    VideoPixelLayout m_layout = VideoPixelLayout::Bgra;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;

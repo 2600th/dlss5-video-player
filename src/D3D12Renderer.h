@@ -8,6 +8,7 @@
 #include <vector>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
+#include "PixelLayout.h"
 #include "FrameIdentity.h"
 #include "NgxSession.h"
 
@@ -152,6 +153,15 @@ public:
     void SetCaptureFormat(CaptureFormat format) { m_requestedCaptureFormat = format; }
     CaptureFormat ActiveCaptureFormat() const { return m_captureFormat; }
 
+    // Layout of the bytes RenderFrame/RenderFrameForCache receive. Selected before
+    // Initialize like the capture format, and likewise downgraded to Bgra when the source
+    // size is odd, so callers read ActiveSourceLayout back. NV12 is converted on the GPU
+    // into the same 8-bit sRGB BGRA texture the BGRA path uploads, so nothing after the
+    // upload changes. UploadReferenceFrame (playback comparison) stays BGRA-only.
+    void SetSourceLayout(PixelLayout layout) { m_requestedSourceLayout = layout; }
+    PixelLayout ActiveSourceLayout() const { return m_sourceLayout; }
+    size_t SourceFrameBytes() const { return PixelLayoutFrameBytes(m_sourceLayout, m_sourceW, m_sourceH); }
+
     // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
     // apart from a swapchain that is pacing it. Both counters only ever move on the
     // thread that drives the renderer, so they need no synchronisation.
@@ -239,6 +249,12 @@ private:
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
     static constexpr uint32_t ReferenceSRV = 6;
+    // NV12 source planes, bound at t0/t1 for the one conversion draw.
+    static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
+    static constexpr uint32_t SRVCount = 9;
+    // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
+    // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source).
+    static constexpr uint32_t DecodedRTV = FrameCount + 5, RTVCount = FrameCount + 6;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -321,6 +337,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCacheCapture; // present shader into a BGRA8 target
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureLuma;   // present shader into an R8 Y plane
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureChroma; // ...and a half-size R8G8 UV plane
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoSourceNv12;    // NV12 planes -> decoded BGRA8
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;
@@ -328,6 +345,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upload[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_sourceLuma;    // NV12 source only, R8
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_sourceChroma;  // NV12 source only, R8G8 half size
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssColor;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_depth;      // R32_TYPELESS: D32 DSV + R32 SRV, same resource passed to NGX
     Microsoft::WRL::ComPtr<ID3D12Resource> m_motion;
@@ -361,6 +380,13 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_chromaFootprint{};
     CaptureFormat m_requestedCaptureFormat = CaptureFormat::Bgra;
     CaptureFormat m_captureFormat = CaptureFormat::Bgra;
+    // NV12 source: both planes in one upload buffer per slot, chroma at an aligned offset.
+    // m_uploadFootprint keeps describing the BGRA layout, which the reference upload shares.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceLumaFootprint{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceChromaFootprint{};
+    PixelLayout m_requestedSourceLayout = PixelLayout::Bgra;
+    PixelLayout m_sourceLayout = PixelLayout::Bgra;
+    bool m_sourcePlanesInCopyDest = true;
     uint32_t m_numRows=0,m_guideRows=0;
     uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0;
     uint32_t m_cacheRows=0;

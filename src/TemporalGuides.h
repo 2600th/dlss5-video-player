@@ -4,6 +4,7 @@
 #include <utility>
 #include "FrameIdentity.h"
 #include "GuideControls.h"
+#include "PixelLayout.h"
 
 struct GuideFrame {
     // Compact analysis grid consumed by a GPU expansion pass:
@@ -22,6 +23,11 @@ struct GuideFrame {
     // guides continue the previous frame's history; hasHistory == !reset).
     FrameIdentity id;
 };
+
+// Pixel layout of the buffer handed to Generate/DownsampleLuma (see PixelLayout.h). Bgra
+// is the live-playback path; Nv12 is the export decoder's frame shape, of which only the
+// Y plane is read here.
+using SourcePixelLayout = PixelLayout;
 
 class TemporalGuideGenerator {
 public:
@@ -43,7 +49,8 @@ public:
     // reset is declared.
     bool Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                   uint32_t renderW, uint32_t renderH, double targetFps,
-                  const FrameIdentity& frame, GuideFrame& out);
+                  const FrameIdentity& frame, GuideFrame& out,
+                  SourcePixelLayout layout = SourcePixelLayout::Bgra);
 
     // Scene-cut decision from the post-alignment residual and the luma
     // histogram overlap of two analysis grids. Fast pans keep a high overlap
@@ -53,8 +60,10 @@ public:
 
 private:
     static float Luma(const uint8_t* p);
+    static float LumaFromNv12Y(uint8_t y);
     void DownsampleLuma(const uint8_t* bgra, uint32_t w, uint32_t h,
-                        uint32_t gw, uint32_t gh, std::vector<float>& out) const;
+                        uint32_t gw, uint32_t gh, std::vector<float>& out,
+                        SourcePixelLayout layout = SourcePixelLayout::Bgra) const;
     // Confidence is per grid cell in [0,1]: 0 means the cell was rejected and carries no
     // motion, higher values mean the winning displacement both beat standing still by a
     // margin and was a distinct minimum of the SAD landscape.

@@ -148,10 +148,10 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 }
 
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
-    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+5;
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=RTVCount;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
-    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=SRVCount;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_DESCRIPTOR_HEAP_DESC dh{};dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=1;
@@ -237,6 +237,16 @@ float2 PSCaptureChroma(V i):SV_Target{
     c+=CaptureChromaOf(CaptureRGB(i.uv+float2(o.x,o.y)));
     return c*0.25;
 }
+// The exact inverse of the capture conversion above, for a source that arrives as BT.709
+// limited-range NV12 (Y at t0, interleaved UV at t1, sampled bilinearly at half size).
+// It writes the same 8-bit sRGB-encoded BGRA the decoder used to upload, so every pass
+// after the decoded texture is unchanged.
+float4 PSSourceNv12(V i):SV_Target{
+    float y=(T.SampleLevel(S,i.uv,0).r*255.0-16.0)/219.0;
+    float2 c=(Ref.SampleLevel(S,i.uv,0).rg*255.0-128.0)/224.0;
+    float3 rgb=float3(y+1.5748*c.y,y-0.187324*c.x-0.468124*c.y,y+1.8556*c.x);
+    return float4(saturate(rgb),1);
+}
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
 float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(c,1);}
 float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
@@ -246,10 +256,11 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv+JitterUV,0).xy;}
 )";
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
-    ComPtr<ID3DBlob>captureLuma,captureChroma;
+    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
-       !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
+       !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma)||
+       !C("PSSourceNv12","ps_5_1",sourceNv12))return false;
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     for(uint32_t r=0;r<2;++r){ranges[r].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[r].NumDescriptors=1;ranges[r].BaseShaderRegister=r;}
     // [0] t0 current view, [1] t1 comparison reference, [2] PresentConstantCount root
@@ -275,6 +286,8 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
     p.PS={captureChroma->GetBufferPointer(),captureChroma->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8G8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureChroma)),"Create NV12 chroma PSO"))return false;
+    p.PS={sourceNv12->GetBufferPointer(),sourceNv12->GetBufferSize()};
+    p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoSourceNv12)),"Create NV12 source PSO"))return false;
     // The debug views draw into the backbuffer, so they take its format. They used to
     // inherit the cache target's B8G8R8A8 from the PSO created just above, which does
     // not match the R8G8B8A8 swapchain the present pass actually binds them to.
@@ -306,15 +319,52 @@ bool D3D12Renderer::CreateUploadForTexture(const D3D12_RESOURCE_DESC&desc,ComPtr
 
 bool D3D12Renderer::CreateVideoResources(){
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    auto src=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_decodedTexture)),"Create decoded texture"))return false;
+    // Same rule as the capture side: NV12 planes need even dimensions, so an odd source
+    // keeps the BGRA upload rather than losing a row or a column.
+    m_sourceLayout=(m_requestedSourceLayout==PixelLayout::Nv12&&!(m_sourceW%2)&&!(m_sourceH%2))
+        ?PixelLayout::Nv12:PixelLayout::Bgra;
+    if(m_requestedSourceLayout==PixelLayout::Nv12&&m_sourceLayout==PixelLayout::Bgra)
+        LOG("NV12 source needs even dimensions; taking BGRA at "<<m_sourceW<<"x"<<m_sourceH<<".");
+    const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
+    // The decoded texture is a render target only when the NV12 conversion draws into it.
+    auto src=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_sourceW,m_sourceH,nv12Source?D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET:D3D12_RESOURCE_FLAG_NONE);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_decodedTexture)),"Create decoded texture"))return false;
     m_decodedTexture->SetName(L"Video_Decoded_BGRA_sRGB");
-    for(uint32_t i=0;i<FrameCount;++i) {
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
-        if(!CreateUploadForTexture(src,m_upload[i],m_uploadMapped[i],fp,rows,rowBytes,total,"Create video upload"))return false;
-        if(i==0){m_uploadFootprint=fp;m_numRows=rows;m_rowSize=rowBytes;m_uploadBytes=total;}
-    }
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
     srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(m_decodedTexture.Get(),&srv,SRVCPU(0));
+    // The BGRA footprint is computed even for an NV12 source: the comparison reference
+    // upload is BGRA and shares it.
+    {uint32_t rows=0;uint64_t rowBytes=0,total=0;m_device->GetCopyableFootprints(&src,0,1,0,&m_uploadFootprint,&rows,&rowBytes,&total);m_numRows=rows;m_rowSize=rowBytes;m_uploadBytes=total;}
+    if(nv12Source){
+        m_device->CreateRenderTargetView(m_decodedTexture.Get(),nullptr,RTV(DecodedRTV));
+        auto luma=Tex2D(DXGI_FORMAT_R8_UNORM,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&luma,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_sourceLuma)),"Create NV12 source luma"))return false;
+        m_sourceLuma->SetName(L"Video_Source_Luma_R8");
+        auto chroma=Tex2D(DXGI_FORMAT_R8G8_UNORM,m_sourceW/2u,m_sourceH/2u,D3D12_RESOURCE_FLAG_NONE);
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&chroma,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_sourceChroma)),"Create NV12 source chroma"))return false;
+        m_sourceChroma->SetName(L"Video_Source_Chroma_R8G8");
+        srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(m_sourceLuma.Get(),&srv,SRVCPU(SourceLumaSRV));
+        srv.Format=DXGI_FORMAT_R8G8_UNORM;m_device->CreateShaderResourceView(m_sourceChroma.Get(),&srv,SRVCPU(SourceChromaSRV));
+        // Both planes of a frame share one upload buffer, mirroring the NV12 capture
+        // readback: the chroma footprint sits at the placement alignment past the luma.
+        uint32_t lumaRows=0,chromaRows=0;uint64_t lumaRowSize=0,chromaRowSize=0,lumaTotal=0,chromaTotal=0;
+        m_device->GetCopyableFootprints(&luma,0,1,0,&m_sourceLumaFootprint,&lumaRows,&lumaRowSize,&lumaTotal);
+        const uint64_t alignment=D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        const uint64_t chromaOffset=(lumaTotal+alignment-1u)&~(alignment-1u);
+        m_device->GetCopyableFootprints(&chroma,0,1,chromaOffset,&m_sourceChromaFootprint,&chromaRows,&chromaRowSize,&chromaTotal);
+        if(lumaRows!=m_sourceH||chromaRows!=m_sourceH/2u||lumaRowSize!=uint64_t{m_sourceW}||chromaRowSize!=uint64_t{m_sourceW})return false;
+        const uint64_t total=chromaOffset+uint64_t{m_sourceChromaFootprint.Footprint.RowPitch}*chromaRows;
+        D3D12_RESOURCE_DESC b{};b.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;b.Width=total;b.Height=1;b.DepthOrArraySize=1;b.MipLevels=1;b.SampleDesc={1,0};b.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        auto up=HeapProps(D3D12_HEAP_TYPE_UPLOAD);
+        for(uint32_t i=0;i<FrameCount;++i){
+            if(!HR(m_device->CreateCommittedResource(&up,D3D12_HEAP_FLAG_NONE,&b,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&m_upload[i])),"Create NV12 video upload"))return false;
+            D3D12_RANGE r{0,0};if(!HR(m_upload[i]->Map(0,&r,reinterpret_cast<void**>(&m_uploadMapped[i])),"Map NV12 video upload"))return false;
+        }
+    }else{
+        for(uint32_t i=0;i<FrameCount;++i){
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
+            if(!CreateUploadForTexture(src,m_upload[i],m_uploadMapped[i],fp,rows,rowBytes,total,"Create video upload"))return false;
+        }
+    }
 
     D3D12_CLEAR_VALUE cv{};cv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;auto col=Tex2D(cv.Format,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&col,D3D12_RESOURCE_STATE_RENDER_TARGET,&cv,IID_PPV_ARGS(&m_dlssColor)),"Create DLSS color"))return false;m_dlssColor->SetName(L"DLSS_Color_Input_Linear_FP16");m_device->CreateRenderTargetView(m_dlssColor.Get(),nullptr,RTV(FrameCount));
@@ -455,6 +505,7 @@ bool D3D12Renderer::CreateVideoResources(){
         << ", Output=R16G16B16A16_FLOAT UAV " << m_outputW << "x" << m_outputH
         << ", CompactGrid=R32G32B32A32_FLOAT " << m_gridW << "x" << m_gridH << " -> GPU MV expansion + direct SV_Depth write"
         << ", Reference=B8G8R8A8_UNORM " << m_sourceW << "x" << m_sourceH
+        << ", Source=" << (nv12Source ? "NV12 -> GPU BT.709 conversion" : "BGRA upload")
         << ", NeuralTimestamps=" << FrameCount*2 << " @" << m_timestampFrequency << "Hz");
     return true;
 }
@@ -499,13 +550,19 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
 
 bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs,const FrameIdentity*identity){
     if(m_gpuUnusable)return false;
+    const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
-    if(!bgra||bytes<videoRow*m_sourceH||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
+    if(!bgra||bytes<SourceFrameBytes()||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
     SampleLocalVideoMemory();
-    CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
+    if(nv12Source){
+        // Y plane, then the interleaved UV plane straight behind it; both rows are
+        // m_sourceW bytes wide, the chroma plane has half the rows.
+        CopyMappedRows(m_uploadMapped[slot],m_sourceLumaFootprint,bgra,size_t(m_sourceW),m_sourceH);
+        CopyMappedRows(m_uploadMapped[slot],m_sourceChromaFootprint,bgra+size_t(m_sourceW)*m_sourceH,size_t(m_sourceW),m_sourceH/2u);
+    }else CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
     if(!HR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
@@ -513,8 +570,25 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     RecordReferenceUpload(cmd,slot);
 
-    if(!m_sourceInCopyDest)Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-    D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=m_decodedTexture.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_upload[slot].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_uploadFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+    D3D12_TEXTURE_COPY_LOCATION d{};d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_upload[slot].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    if(nv12Source){
+        // Copy both planes, then one full-resolution draw converts them into the decoded
+        // texture. The draw replaces the BGRA copy below; everything after it is shared.
+        if(!m_sourcePlanesInCopyDest){Barrier(cmd,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);Barrier(cmd,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);}
+        d.pResource=m_sourceLuma.Get();s.PlacedFootprint=m_sourceLumaFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        d.pResource=m_sourceChroma.Get();s.PlacedFootprint=m_sourceChromaFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        Barrier(cmd,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);Barrier(cmd,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourcePlanesInCopyDest=false;
+        Barrier(cmd,m_decodedTexture.Get(),m_sourceInCopyDest?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        D3D12_VIEWPORT svp{0,0,float(m_sourceW),float(m_sourceH),0,1};D3D12_RECT ssc{0,0,LONG(m_sourceW),LONG(m_sourceH)};cmd->RSSetViewports(1,&svp);cmd->RSSetScissorRects(1,&ssc);
+        auto srt=RTV(DecodedRTV);cmd->OMSetRenderTargets(1,&srt,FALSE,nullptr);
+        cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoSourceNv12.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(SourceLumaSRV));cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(SourceChromaSRV));
+        const float none[4]={0,0,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,none,0);cmd->DrawInstanced(3,1,0,0);
+        Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+    }else{
+        if(!m_sourceInCopyDest)Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+    }
 
     if(!m_gridInCopyDest)Barrier(cmd,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);

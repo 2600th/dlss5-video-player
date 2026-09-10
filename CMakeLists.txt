@@ -53,6 +53,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/D3D12FenceWait.h
     src/TemporalGuides.cpp
     src/TemporalGuides.h
+    src/PixelLayout.h
     src/ParallelFor.h
     src/ChildProcess.h
     src/AudioPlayer.cpp
@@ -249,6 +250,7 @@ if(BUILD_TESTING)
         src/ParallelFor.h
         src/D3D12Renderer.cpp
         src/D3D12Renderer.h
+        src/PixelLayout.h
         src/ReleasePackagePolicy.h
         src/DLSSBackend.cpp
         src/DLSSBackend.h

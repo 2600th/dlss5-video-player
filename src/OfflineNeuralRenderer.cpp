@@ -1,6 +1,7 @@
 #include "OfflineNeuralRenderer.h"
 
 #include "Log.h"
+#include "PixelLayout.h"
 
 #include <algorithm>
 #include <array>
@@ -963,7 +964,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
     if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps,
-                              request.guides)) {
+                              request.guides, source.Layout())) {
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
@@ -1382,6 +1383,8 @@ struct TestSourceAdapter {
     IFrameSource& source;
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
+    // The test source hands out BGRA; only the production decoder can choose NV12.
+    PixelLayout Layout()const{return PixelLayout::Bgra;}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         OfflineDecodedFrame decoded;const auto read=source.Read(decoded,stop);
         frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
@@ -1399,7 +1402,7 @@ struct TestEvaluatorAdapter {
     // The test interface stays synchronous; these shims give RunJob the same async shape
     // the production adapter has, so the pipelined control flow is what the tests run.
     std::deque<JobEvaluation> captured{};
-    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides){
+    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,PixelLayout){
         return evaluator.Initialize(window,width,height,fps,guides);
     }
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
@@ -1469,6 +1472,9 @@ struct ProductionSourceAdapter {
         return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
     }
     void Close(){decoder.Close();}
+    // Fixed for the decoder session once Open has probed the geometry (NV12 for even
+    // sizes, BGRA otherwise), so the evaluator can be initialized for it.
+    PixelLayout Layout()const{return decoder.PixelLayout();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         VideoFrame decoded;
         // Whatever this frame still carries has already been rendered and written,
@@ -1580,12 +1586,20 @@ struct ProductionEvaluatorAdapter {
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
     // Requested before Initialize; the renderer decides what it can actually deliver.
     bool gpuColorConversion{false};
-    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls){
-        width=w;height=h;fps=rate;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
+    // Layout of the frames the source hands over, converted on the GPU when NV12.
+    PixelLayout sourceLayout{PixelLayout::Bgra};
+    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,PixelLayout layout){
+        width=w;height=h;fps=rate;sourceLayout=layout;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
+        renderer->SetSourceLayout(layout);
         if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
+        // Both sides apply the same even-size rule, so this only fires if that rule drifts.
+        if(renderer->ActiveSourceLayout()!=layout){
+            LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");
+            return false;
+        }
         // Nothing ever looks at this renderer's swapchain: the encoder is fed from the
         // cache render target that EnqueueEvaluatedFrameCapture draws for itself.
         guides.SetControls(controls);renderer->SetDLSS(true);renderer->SetHeadless(true);return true;
@@ -1608,7 +1622,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }
@@ -1663,7 +1677,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }

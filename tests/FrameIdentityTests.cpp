@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
@@ -192,6 +193,91 @@ void guide_generator_reevaluates_a_repeated_frame_without_reset_test()
     CHECK(!again.hasHistory);
     CHECK_EQ(HistoryReset::None, again.id.reset);
     CHECK_EQ(uint32_t{1}, photo.HistoryGeneration());
+}
+
+// Same gray gradient encoded two ways: straight BGRA (B=G=R=v) and NV12
+// limited-range Y (Y = 16 + round(v*219/255), UV = 128, irrelevant to luma).
+// Both must drive the analysis pipeline identically once DownsampleLuma maps
+// them onto the same [0,1] luma scale.
+// A shared gray value per pixel for both layouts. A smooth gradient would leave the block
+// matcher choosing between near-identical SAD minima, where one code of luma rounding
+// flips the winner; a hashed 8x8 block texture gives every cell a distinct minimum.
+uint8_t TexturedGray(uint32_t x, uint32_t y, int shiftX)
+{
+    const uint32_t sx = uint32_t((int(x) - shiftX + int(kWidth)) % int(kWidth));
+    uint32_t h = (sx / 8u) * 0x9E3779B1u ^ (y / 8u) * 0x85EBCA77u;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return uint8_t(32u + (h % 192u));
+}
+
+std::vector<uint8_t> TexturedBgra(int shiftX)
+{
+    std::vector<uint8_t> bgra(size_t(kWidth) * kHeight * 4u);
+    for (uint32_t y = 0; y < kHeight; ++y) {
+        for (uint32_t x = 0; x < kWidth; ++x) {
+            const uint8_t v = TexturedGray(x, y, shiftX);
+            uint8_t* p = bgra.data() + (size_t(y) * kWidth + x) * 4u;
+            p[0] = v; p[1] = v; p[2] = v; p[3] = 255;
+        }
+    }
+    return bgra;
+}
+
+// The same picture as limited-range NV12: Y = 16 + v * 219 / 255, neutral chroma.
+std::vector<uint8_t> TexturedNv12(int shiftX)
+{
+    std::vector<uint8_t> nv12(size_t(kWidth) * kHeight + size_t(kWidth) * kHeight / 2u, 128);
+    for (uint32_t y = 0; y < kHeight; ++y) {
+        for (uint32_t x = 0; x < kWidth; ++x) {
+            const uint8_t v = TexturedGray(x, y, shiftX);
+            nv12[size_t(y) * kWidth + x] = uint8_t(16 + int(std::lround(v * 219.0 / 255.0)));
+        }
+    }
+    return nv12;
+}
+
+void generate_treats_nv12_limited_range_luma_like_bgra_test()
+{
+    const auto bgra0 = TexturedBgra(0), bgra1 = TexturedBgra(5);
+    const auto nv120 = TexturedNv12(0), nv121 = TexturedNv12(5);
+
+    TemporalGuideGenerator bgraGuides, nv12Guides;
+    GuideFrame bgraOut0, bgraOut1, nv12Out0, nv12Out1;
+    CHECK(bgraGuides.Generate(bgra0.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), bgraOut0));
+    CHECK(bgraGuides.Generate(bgra1.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), bgraOut1));
+    CHECK(nv12Guides.Generate(nv120.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), nv12Out0,
+                               SourcePixelLayout::Nv12));
+    CHECK(nv12Guides.Generate(nv121.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), nv12Out1,
+                               SourcePixelLayout::Nv12));
+
+    CHECK_EQ(bgraOut0.hasHistory, nv12Out0.hasHistory);
+    CHECK_EQ(bgraOut1.hasHistory, nv12Out1.hasHistory);
+    CHECK_EQ(int(bgraOut0.id.reset), int(nv12Out0.id.reset));
+    CHECK_EQ(int(bgraOut1.id.reset), int(nv12Out1.id.reset));
+    CHECK_EQ(bgraOut1.gridW, nv12Out1.gridW);
+    CHECK_EQ(bgraOut1.gridH, nv12Out1.gridH);
+    CHECK_EQ(bgraOut1.guideGridRGBA32F.size(), nv12Out1.guideGridRGBA32F.size());
+
+    // The two inputs differ by at most one luma code (0.5/219) of rounding. That is
+    // enough to flip a cell sitting on the confidence threshold between "rejected" and a
+    // displacement, so per-cell motion is compared as a mismatch rate; the depth proxy and
+    // the global motion, which have no such threshold, must agree everywhere (the depth
+    // proxy is a normalised gradient, so one code of rounding is worth a few hundredths).
+    const size_t cells = bgraOut1.guideGridRGBA32F.size() / 4u;
+    size_t motionMismatches = 0; float worstDepth = 0.0f;
+    for (size_t cell = 0; cell < cells; ++cell) {
+        const float* a = bgraOut1.guideGridRGBA32F.data() + cell * 4u;
+        const float* b = nv12Out1.guideGridRGBA32F.data() + cell * 4u;
+        if (std::abs(a[0] - b[0]) > 0.02f || std::abs(a[1] - b[1]) > 0.02f) ++motionMismatches;
+        worstDepth = std::max(worstDepth, std::abs(a[2] - b[2]));
+    }
+    if (motionMismatches > cells / 50u || worstDepth > 0.05f)
+        std::cerr << "nv12 guide diagnostic: motionMismatches=" << motionMismatches << "/" << cells
+                  << " worstDepth=" << worstDepth << '\n';
+    CHECK(motionMismatches <= cells / 50u);
+    CHECK(worstDepth <= 0.05f);
+    CHECK(std::abs(bgraOut1.globalMotionX - nv12Out1.globalMotionX) <= 0.5f);
+    CHECK(std::abs(bgraOut1.globalMotionY - nv12Out1.globalMotionY) <= 0.5f);
 }
 
 void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
@@ -535,6 +621,7 @@ int main()
     guide_controls_neutralize_disabled_guides_test();
     guide_generator_reports_reset_reasons_test();
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();
+    generate_treats_nv12_limited_range_luma_like_bgra_test();
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
