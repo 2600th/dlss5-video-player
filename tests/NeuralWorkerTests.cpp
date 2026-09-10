@@ -466,6 +466,28 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badPresetZeroView = view(badPresetZero);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badPresetZeroView).has_value());
+    // GPU source conversion is opt-out and travels as its own optional pair, so an
+    // older parent that never sends it still parses into the GPU-conversion default.
+    for (const auto& argument : normal) CHECK(argument != L"--gpu-source-conversion");
+    if (parsedNormal) CHECK(parsedNormal->request.gpuSourceConversion);
+    NeuralRenderRequest cpuSource = request;
+    cpuSource.gpuSourceConversion = false;
+    const auto cpuSourceArguments =
+        neural_worker_detail::BuildWorkerArguments(cpuSource, metadata, pause, false);
+    const auto cpuSourceView = view(cpuSourceArguments);
+    const auto parsedCpuSource = neural_worker_detail::ParseWorkerArguments(cpuSourceView);
+    CHECK(parsedCpuSource.has_value());
+    if (parsedCpuSource) {
+        CHECK(!parsedCpuSource->request.gpuSourceConversion);
+        CHECK(parsedCpuSource->request.segmentFrames == 96);
+        CHECK(parsedCpuSource->request.pauseEvent == pause);
+    }
+    auto badSourceConversion = cpuSourceArguments;
+    for (size_t index = 0; index + 1 < badSourceConversion.size(); ++index) {
+        if (badSourceConversion[index] == L"--gpu-source-conversion") badSourceConversion[index + 1] = L"2";
+    }
+    const auto badSourceConversionView = view(badSourceConversion);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badSourceConversionView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

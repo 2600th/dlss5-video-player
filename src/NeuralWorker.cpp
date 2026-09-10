@@ -464,6 +464,12 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--nvenc-preset");
         arguments.emplace_back(std::to_wstring(request.nvencPreset));
     }
+    // Absent means GPU source conversion (NV12 decode + GPU convert to BGRA), so an
+    // older parent and a newer helper still agree.
+    if (!request.gpuSourceConversion) {
+        arguments.emplace_back(L"--gpu-source-conversion");
+        arguments.emplace_back(L"0");
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -494,11 +500,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     if (((end - 2) % 2) != 0) return std::nullopt;
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
-               RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset, KeyCount };
+               RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
+               GpuSourceConversion, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
-        L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset"};
+        L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
+        L"--gpu-source-conversion"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -555,6 +563,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t enabled = 0;
         if (!ParseUnsigned(*values[GpuColorConversion], enabled) || enabled > 1) return std::nullopt;
         request.gpuColorConversion = enabled != 0;
+    }
+    if (values[GpuSourceConversion]) {
+        uint64_t enabled = 0;
+        if (!ParseUnsigned(*values[GpuSourceConversion], enabled) || enabled > 1) return std::nullopt;
+        request.gpuSourceConversion = enabled != 0;
     }
     if (values[NvencPreset]) {
         uint64_t preset = 0;

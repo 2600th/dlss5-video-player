@@ -4123,6 +4123,21 @@ void video_decoder_open_sequential_selects_nv12_for_even_geometry_test()
     CHECK_EQ(FrameBytes(VideoPixelLayout::Nv12,4,2),frame.bgra.size());
 }
 
+// A caller can opt out of OpenSequential's NV12 preference (preferNv12=false) to
+// keep BGRA even for geometry that would otherwise qualify for NV12 - the neural
+// render uses this when the GPU is the scarce resource and ffmpeg's CPU-side
+// conversion is cheaper to spend than a GPU cycle.
+void video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile,{},/*preferNv12=*/false));
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK(frame.layout==VideoPixelLayout::Bgra);
+    CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,4,2),frame.bgra.size());
+}
+
 void video_decoder_open_sequential_stays_bgra_for_odd_geometry_test()
 {
     MediaFixture fixture;
@@ -5755,6 +5770,7 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_background_queue_is_bounded_to_four_frames_test();
     video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test();
     video_decoder_open_sequential_selects_nv12_for_even_geometry_test();
+    video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test();
     video_decoder_open_sequential_stays_bgra_for_odd_geometry_test();
     video_decoder_recycles_spent_frame_buffers_test();
     video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();

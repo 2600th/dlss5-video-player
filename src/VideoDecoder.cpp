@@ -191,19 +191,20 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, st
 }
 
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
-                                  std::stop_token stop) {
+                                  std::stop_token stop, bool preferNv12) {
     // NVDEC (this decode) and NVENC/D3D12 (the export encode and any render) are
     // separate engines and the GPU sits idle during export, so software decode was
     // only burning CPU time for nothing; request CUDA and let the existing
     // Cuda->D3D11Va->Software fallback in StartFFmpeg/TryNextFFmpegAcceleration
     // downgrade per codec as needed. The background frame queue still overlaps
     // decode with GPU rendering/encoding.
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, true);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, true, preferNv12);
 }
 
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                             std::stop_token stop, bool queueFrames,
-                            FFmpegAcceleration acceleration, bool sequential) {
+                            FFmpegAcceleration acceleration, bool sequential,
+                            bool sequentialNv12) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -220,6 +221,7 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     // fallback or seek restart afterwards - so a background export's frames
     // stay NV12-or-Bgra for as long as this decoder instance is open.
     m_sequentialOpen = sequential;
+    m_sequentialNv12 = sequentialNv12;
     m_layout = VideoPixelLayout::Bgra;
     ++m_sourceGeneration;
 
@@ -743,10 +745,11 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     LOG("FFmpeg executable detected.");
     if (!ProbeFFmpeg(path,stop)||stop.stop_requested()) return false;
     // NV12 needs even plane dimensions (the UV plane is half-resolution in
-    // both axes); odd geometry stays BGRA even for a sequential/export open.
+    // both axes); odd geometry stays BGRA even for a sequential/export open,
+    // and so does a caller that opted out of NV12 via preferNv12=false.
     // Decided once here, from the probed geometry, and left alone by every
     // later StartFFmpeg call (acceleration fallback, seek restart) this session.
-    m_layout = (m_sequentialOpen && m_width % 2 == 0 && m_height % 2 == 0)
+    m_layout = (m_sequentialOpen && m_sequentialNv12 && m_width % 2 == 0 && m_height % 2 == 0)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     return StartFFmpeg(0.0,initialAcceleration);
 }

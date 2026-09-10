@@ -157,6 +157,9 @@ struct NeuralRenderRequest {
     // hevc_nvenc preset p1..p7; 7 is slowest/highest quality. Only the NVENC
     // attempt reads it.
     uint32_t nvencPreset{7};
+    // Decode the source to NV12 and convert it to BGRA on the GPU (true) or let ffmpeg
+    // convert on the CPU (false). Default true keeps the current behaviour.
+    bool gpuSourceConversion{true};
 };
 
 struct NeuralRenderProgress {

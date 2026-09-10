@@ -1419,6 +1419,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 struct TestSourceAdapter {
     IFrameSource& source;
+    bool gpuConversion{true};
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
     // The test source hands out BGRA; only the production decoder can choose NV12.
@@ -1507,8 +1508,9 @@ struct TestEncoderAdapter {
 #else
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
+    bool gpuConversion{true};
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){
-        if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop))return false;
+        if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop,gpuConversion))return false;
         return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
     }
     void Close(){decoder.Close();}
@@ -2073,6 +2075,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
     evaluator.gpuColorConversion=request.gpuColorConversion;
+    source.gpuConversion=request.gpuSourceConversion;
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
         [runtimeDirectory]{return ReadNeuralRuntimeSessionLog(runtimeDirectory);},
         []{return SteadyClock::now();},
