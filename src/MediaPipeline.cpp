@@ -439,7 +439,8 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     const bool nv12 = spec.pixelFormat == EncoderPixelFormat::Nv12;
     if (spec.kind == EncoderKind::HevcNvenc) {
         arguments.insert(arguments.end(), {
-            L"-c:v", L"hevc_nvenc", L"-preset", L"p7", L"-tune", L"hq",
+            L"-c:v", L"hevc_nvenc", L"-preset",
+            L"p" + std::to_wstring(std::clamp<uint32_t>(spec.nvencPreset, 1u, 7u)), L"-tune", L"hq",
             L"-rc", L"vbr", L"-cq", L"16", L"-b:v", L"0",
             // The export loop measured 3.7 ms/frame of encoder back pressure at
             // 2578x1080 once decode moved to NVDEC: one NVENC session at p7 caps near
@@ -729,6 +730,12 @@ EncodeError RawVideoEncoder::WriteFrame(std::span<const uint8_t> bgra, std::stop
             return stop.stop_requested() ? EncodeError::Cancelled : EncodeError::WriteFailed;
         }
         offset += written;
+        // Killing the child to interrupt a blocked write does not fail that write: once
+        // the read end is gone the pipe completes the pending WriteFile with the full
+        // byte count (measured: a 8 MiB write blocked on a full 16 MiB pipe returned
+        // success the moment the job was terminated). Those bytes reached nobody, so a
+        // stop that fired while writing is reported as such, not as a delivered frame.
+        if (stop.stop_requested()) { Cancel(); return EncodeError::Cancelled; }
     }
     return EncodeError::None;
 }
