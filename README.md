@@ -14,18 +14,18 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
 > This is a community project, not an NVIDIA product. The neural runtime is a
-> modified, unsigned community build. v0.17.0 was checked on an RTX 4080 SUPER
-> and an RTX 5090; RTX 20 and 30 are enabled but nobody has run them yet.
-> Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+> modified, unsigned community build. v0.17.1 was checked on an RTX 5090 and
+> v0.17.0 on an RTX 4080 SUPER; RTX 20 and 30 are enabled but nobody has run
+> them yet. Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
-**v0.17.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.0)
+**v0.17.1** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.1)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.17.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 323 MB |
-| `DLSSVideoPlayer-v0.17.0-core-win64.zip` | Player only, no neural runtime. | 33 MB |
+| `dlss5-video-player-v0.17.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 323 MB |
+| `DLSSVideoPlayer-v0.17.1-core-win64.zip` | Player only, no neural runtime. | 33 MB |
 
 SHA-256 for both is on the release page. GitHub's "Source code" zip does not
 run; it has no runtime in it.
@@ -66,10 +66,10 @@ Next time, **File > Recent videos** reopens it with the render already done.
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
 
-**Unreleased**. Live playback no longer stops at a segment seam with an "out of
-sync" warning, and a stop of any kind now says why in the log. Re-measured on an
-RTX 5090: a 1080p30 session costs 8.4 ms per frame, down from 11.9 before the
-export loop was pipelined.
+**0.17.1** (2026-09-10). Live playback no longer stops at a segment seam with an
+"out of sync" warning, and a stop of any kind now says why in the log.
+Re-measured on an RTX 5090: a 1080p30 session costs 8.4 ms per frame, down from
+11.9 before the export loop was pipelined.
 
 **0.17.0** (2026-09-10). The export got 2.3x faster and the pixels did not change.
 1080p30 on an RTX 4080 SUPER: 48.6 to 110.7 frames per second, and the output

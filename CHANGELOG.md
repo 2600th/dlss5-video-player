@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.1 - 2026-09-10
 
 - Fixed live playback stopping at a segment seam with the modal "out of sync"
   warning. A segment's exclusive end is rebuilt from an integer frame duration,
