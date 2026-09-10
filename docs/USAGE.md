@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.18.0, including recent history, settings-aware cache identity,
+This guide covers v0.19.0, including recent history, settings-aware cache identity,
 media export and highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;
@@ -204,6 +204,21 @@ predicts from - exactly at a measured size, along this GPU's own fitted line
 between sizes, and conservatively beyond a single sample. Delete the section
 to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences.
+
+**DLSS > Encoder settings** holds the three `[Encoding]` keys, kept apart from
+the model settings because they apply to the next render and never invalidate a
+cache entry:
+
+- `NvencPreset` (1-7, default 7). p7 is the slowest and best; drop it if NVENC
+  is the bottleneck on your card.
+- `GpuColorConversion` (default off). Converts the rendered frame to NV12 on the
+  GPU instead of letting ffmpeg do it on the CPU. Off because with the neural
+  pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an
+  RTX 5070 Ti.
+- `GpuSourceConversion` (default off). Decodes the source to NV12 and converts
+  it on the GPU, which saves 2.6x on pipe traffic. Off because the conversion
+  assumes BT.709 limited range and nothing reads the source's tags yet, so an
+  SD or full-range clip would render with shifted colour.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

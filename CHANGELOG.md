@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 - 2026-09-10
 
 - The neural export moved its transport onto the GPU's own engines, from
   ctype-lab's `optimize-neural-pipeline` work (PR #6, squashed). NVDEC decodes

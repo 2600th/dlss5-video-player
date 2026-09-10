@@ -20,12 +20,12 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.18.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.18.0)
+**v0.19.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.19.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.18.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.18.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.19.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.19.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -59,12 +59,30 @@ Next time, **File > Recent videos** reopens it with the render already done.
 - Neural settings live at `Ctrl+N`. Change one while paused and that frame is
   re-rendered so you can judge on the picture. Settings are saved with each
   render and are part of its cache identity.
+- Encoder settings sit apart from the model settings. **DLSS > Encoder settings**
+  picks the NVENC preset and where colour conversion runs, and none of it
+  invalidates a cached render.
 - Six official game trailers under **File > Game trailers**, each under three
   minutes, for a quick first test.
 
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.19.0** (2026-09-10). The export decodes with NVDEC and sends NV12 down the
+pipe instead of BGRA, and NVENC gets its CUDA context at spawn: 7.8 to 4.2 ms
+per frame with presents off on an RTX 5070 Ti, and the first-frame stall on each
+live segment fell from 126 to 59 ms. New **DLSS > Encoder settings** window, and
+the settings windows resize. Most of this came from ctype-lab's PR #6; the GPU
+source-conversion default and the forced NVENC split mode were left off, and a
+tooltip use-after-free that the second settings window exposed is fixed.
+
+**0.18.0** (2026-09-10). Checks the driver before the neural path runs: below
+610.47 the render is refused up front, naming the version to install, instead of
+dying in a probe with `0xbad00002`. The render receipt stopped reporting the
+carrier session's result as feature 18's, a failed preflight is no longer retried
+on every play, and the menu bar shows `↑ Update <version>` when a newer release
+exists.
 
 **0.17.2** (2026-09-10). Fixes the render that died at "A frame was not produced
 by feature 18" on a 4070 Ti and an RTX PRO 6000: the player was releasing and
