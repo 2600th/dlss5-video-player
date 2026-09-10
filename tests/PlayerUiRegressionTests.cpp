@@ -225,6 +225,7 @@ struct PlayerAppTestAccess {
         CheckMarkersAndTimecode(app);
         CheckComparisonAvailability(app);
         CheckNeuralSettingsDialog(app);
+        CheckEncoderSettingsDialog(app);
 
         app.m_seeking = false;
         app.m_cachedPlayback = false;
@@ -580,6 +581,39 @@ private:
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_GETCHECK, 0, 0)), BST_CHECKED);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_neuralWnd == nullptr);
+        CHECK(!IsWindow(dialog));
+    }
+
+    static void CheckEncoderSettingsDialog(PlayerApp& app)
+    {
+        app.m_gpuColorConversion = false; app.m_gpuSourceConversion = true; app.m_nvencPreset = 7;
+        app.ShowEncoderSettings();
+        CHECK(app.m_encoderWnd != nullptr);
+        if (!app.m_encoderWnd) return;
+        const HWND dialog = app.m_encoderWnd;
+        CHECK(GetDlgItem(dialog, IDC_ES_GPU_CONVERT) != nullptr);
+        CHECK(GetDlgItem(dialog, IDC_ES_GPU_SOURCE) != nullptr);
+        CHECK(GetDlgItem(dialog, IDC_ES_NVENC_PRESET) != nullptr);
+        // Moving these controls out of the neural dialog must not leave them
+        // reachable by their old ids there.
+        CHECK(GetDlgItem(dialog, 7313) == nullptr);
+        CHECK(GetDlgItem(dialog, 7314) == nullptr);
+        CHECK(GetDlgItem(dialog, 7315) == nullptr);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_SETCHECK, BST_UNCHECKED, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_GPU_SOURCE, BN_CLICKED), 0);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_NVENC_PRESET), CB_SETCURSEL, 4, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_NVENC_PRESET, CBN_SELCHANGE), 0);
+        CHECK(!app.m_gpuSourceConversion);
+        CHECK_EQ(app.m_nvencPreset, uint32_t{5});
+        // Read saves via SaveVideoSettings(), since nothing needs re-rendering.
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"GpuSourceConversion", 1, app.SettingsPath().c_str()), UINT{0});
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_gpuColorConversion);
+        CHECK(app.m_gpuSourceConversion);
+        CHECK_EQ(app.m_nvencPreset, uint32_t{7});
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_GETCHECK, 0, 0)), BST_CHECKED);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_encoderWnd == nullptr);
         CHECK(!IsWindow(dialog));
     }
 

@@ -19,6 +19,7 @@
 #include <iterator>
 #include <cstdint>
 #include <vector>
+#include <map>
 #include <cwctype>
 #include <cstdlib>
 #include <optional>
@@ -162,12 +163,16 @@ static constexpr int IDC_NS_STYLE = 7307;
 static constexpr int IDC_NS_AUTOMASK = 7308;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
 static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
-static constexpr int IDC_NS_GPU_CONVERT = 7313;
-static constexpr int IDC_NS_NVENC_PRESET = 7314;
-static constexpr int IDC_NS_GPU_SOURCE = 7315;
+// 7313-7315 were the encoder controls, moved to their own dialog below.
 static constexpr int IDC_NS_RESET = 7320;
 static constexpr int IDC_NS_APPLY = 7321;
 static constexpr int IDC_NS_CLOSE = 7322;
+
+static constexpr int IDC_ES_GPU_CONVERT = 7401;
+static constexpr int IDC_ES_GPU_SOURCE = 7402;
+static constexpr int IDC_ES_NVENC_PRESET = 7403;
+static constexpr int IDC_ES_RESET = 7404;
+static constexpr int IDC_ES_CLOSE = 7405;
 
 static constexpr int IDC_TIMECODE_EDIT = 7501;
 static constexpr int IDC_TIMECODE_SET_IN = 7502;
@@ -857,7 +862,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
 
     bool Create(HINSTANCE hi) {
         m_loc.Initialize();
@@ -1457,6 +1462,60 @@ private:
         AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
     }
 
+    // Snapshots each child's position in client coordinates the moment a
+    // resizable settings dialog finishes building its controls, so later
+    // WM_SIZE handling has a stable baseline to reposition from instead of
+    // compounding drift onto whatever the previous resize left behind.
+    void CaptureSettingsDesignLayout(HWND h){
+        std::vector<std::pair<HWND,RECT>> items;
+        EnumChildWindows(h,[](HWND child,LPARAM lp)->BOOL{
+            RECT r{};GetWindowRect(child,&r);
+            POINT pts[2]={{r.left,r.top},{r.right,r.bottom}};
+            MapWindowPoints(nullptr,GetParent(child),pts,2);
+            reinterpret_cast<std::vector<std::pair<HWND,RECT>>*>(lp)->push_back({child,RECT{pts[0].x,pts[0].y,pts[1].x,pts[1].y}});
+            return TRUE;
+        },reinterpret_cast<LPARAM>(&items));
+        m_settingsDesignLayout[h]=std::move(items);
+    }
+
+    // Repositions the children of a resizable settings dialog for its current
+    // client size, working from the design-time layout captured above:
+    // trackbars and the note static stretch with the window, value labels and
+    // push/default-push buttons stay anchored to the right and bottom edges.
+    void ResizeSettingsChildren(HWND h,int designWidth,int designHeight){
+        const auto it=m_settingsDesignLayout.find(h);
+        if(it==m_settingsDesignLayout.end())return;
+        RECT cr{};GetClientRect(h,&cr);
+        const int W=int(cr.right-cr.left),H=int(cr.bottom-cr.top);
+        for(const auto&[child,design]:it->second){
+            if(!IsWindow(child))continue;
+            wchar_t cls[32]{};GetClassNameW(child,cls,32);
+            const int dx=int(design.left),dy=int(design.top),dw=int(design.right-design.left),dh=int(design.bottom-design.top);
+            if(_wcsicmp(cls,TRACKBAR_CLASSW)==0){
+                SetWindowPos(child,nullptr,0,0,std::max(20,W-132-16-70),dh,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOMOVE);
+            }else if(_wcsicmp(cls,L"static")==0&&dw==64&&dx>=370){
+                // Trackbar value label: fixed width, anchored to the right edge.
+                SetWindowPos(child,nullptr,W-16-64,dy,0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);
+            }else if(_wcsicmp(cls,L"static")==0&&dw==418){
+                // Note static: stretches with the window, left edge fixed.
+                SetWindowPos(child,nullptr,dx,dy,std::max(20,W-32),dh,SWP_NOZORDER|SWP_NOACTIVATE);
+            }else if(_wcsicmp(cls,L"button")==0){
+                const LONG_PTR style=GetWindowLongPtrW(child,GWL_STYLE);
+                const LONG_PTR type=style&BS_TYPEMASK;
+                if(type==BS_PUSHBUTTON||type==BS_DEFPUSHBUTTON)
+                    SetWindowPos(child,nullptr,dx+(W-designWidth),H-(designHeight-dy),0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);
+            }
+        }
+        InvalidateRect(h,nullptr,TRUE);
+    }
+
+    // Resizable settings dialogs share this style/rect math: the caller
+    // passes the design client size, and gets back a window rect sized so
+    // its client area equals that design size under the given styles.
+    static RECT SettingsWindowRect(int clientW,int clientH,DWORD style,DWORD exStyle){
+        RECT rc{0,0,clientW,clientH};AdjustWindowRectEx(&rc,style,FALSE,exStyle);return rc;
+    }
+
     void BuildAdjustmentControls(HWND h){
         CreateAdjustmentRow(h,IDC_ADJ_BRIGHTNESS,L"adjustments.brightness",28);
         CreateAdjustmentRow(h,IDC_ADJ_CONTRAST,L"adjustments.contrast",78);
@@ -1470,25 +1529,36 @@ private:
         HWND close=CreateWindowExW(0,L"BUTTON",T(L"adjustments.close").c_str(),WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,348,368,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         SyncAdjustmentControls(h);
+        CaptureSettingsDesignLayout(h);
     }
+
+    static constexpr int kAdjustDesignW=466,kAdjustDesignH=452;
 
     void ShowAdjustments(){
         if(m_adjustWnd&&IsWindow(m_adjustWnd)){ShowWindow(m_adjustWnd,SW_SHOWNORMAL);SetForegroundWindow(m_adjustWnd);return;}
-        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=452,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
-        m_adjustWnd=CreateWindowExW(WS_EX_TOOLWINDOW,L"DLSSVideoAdjustmentsClassV11",T(L"adjustments.title").c_str(),
-            WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+        constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
+        const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,style,WS_EX_TOOLWINDOW);
+        const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
+        m_adjustWnd=CreateWindowExW(WS_EX_TOOLWINDOW,L"DLSSVideoAdjustmentsClassV12",T(L"adjustments.title").c_str(),
+            style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
     LRESULT AdjustWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
         switch(m){
         case WM_CREATE:BuildAdjustmentControls(h);return 0;
         case WM_HSCROLL:ReadAdjustmentControls(h);return 0;
+        case WM_GETMINMAXINFO:{
+            const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)));
+            auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
+        }
+        case WM_SIZE:ResizeSettingsChildren(h,kAdjustDesignW,kAdjustDesignH);return 0;
         case WM_COMMAND:
             if(LOWORD(w)==IDC_ADJ_RESET){m_colorSettings={};SyncAdjustmentControls(h);ApplyVideoAdjustments(true);SaveVideoSettings();return 0;}
             if(LOWORD(w)==IDC_ADJ_CLOSE){DestroyWindow(h);return 0;}
             break;
         case WM_CLOSE:DestroyWindow(h);return 0;
-        case WM_DESTROY:SaveVideoSettings();if(h==m_adjustWnd)m_adjustWnd=nullptr;return 0;
+        case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);if(h==m_adjustWnd)m_adjustWnd=nullptr;return 0;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -1509,9 +1579,6 @@ private:
         select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
-        check(IDC_NS_GPU_CONVERT,m_gpuColorConversion);
-        check(IDC_NS_GPU_SOURCE,m_gpuSourceConversion);
-        select(IDC_NS_NVENC_PRESET,int(m_nvencPreset)-1);
         UpdateNeuralSettingValueLabels(h);
     }
 
@@ -1525,12 +1592,6 @@ private:
         m_neuralSettings.skinStructure=float(pos(IDC_NS_SKIN))/100.0f-1.0f;
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
-        // Only the next conversion reads this, so there is nothing to re-render for it.
-        m_gpuColorConversion=checked(IDC_NS_GPU_CONVERT);
-        // Only the next conversion reads this, so there is nothing to re-render for it.
-        m_gpuSourceConversion=checked(IDC_NS_GPU_SOURCE);
-        // Only the next conversion reads this, so there is nothing to re-render for it.
-        m_nvencPreset=uint32_t(sel(IDC_NS_NVENC_PRESET,int(m_nvencPreset)-1))+1;
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
@@ -1573,27 +1634,29 @@ private:
         HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,304,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,302,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80,L"neural.tip.guide_depth");
-        HWND encoding=CreateWindowExW(0,L"STATIC",T(L"neural.settings.encoding").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,336,116,20,h,nullptr,nullptr,nullptr);SendMessageW(encoding,WM_SETFONT,(WPARAM)f,TRUE);
-        CreateNeuralCheck(h,IDC_NS_GPU_CONVERT,L"neural.settings.gpu_convert",132,334,236,L"neural.tip.gpu_convert");
-        CreateNeuralCheck(h,IDC_NS_GPU_SOURCE,L"neural.settings.gpu_source",132,358,236,L"neural.tip.gpu_source");
-        CreateNeuralCombo(h,IDC_NS_NVENC_PRESET,L"neural.settings.nvenc_preset",390,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"neural.tip.nvenc_preset");
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,426,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,472,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
-        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,472,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,472,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,370,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
+        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,416,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
+        CaptureSettingsDesignLayout(h);
     }
+
+    static constexpr int kNeuralDesignW=466,kNeuralDesignH=500;
 
     void ShowNeuralSettings(){
         if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
-        static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV13";
+        static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV14";
         WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
-        RECT pr{};GetWindowRect(m_hwnd,&pr);const int w=466,h=556,pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
+        constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
+        const RECT wr=SettingsWindowRect(kNeuralDesignW,kNeuralDesignH,style,WS_EX_TOOLWINDOW);
+        const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
         m_neuralWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"neural.settings.title").c_str(),
-            WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_VISIBLE,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+            style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
     // Apply changes what the player is showing now: an active session restarts
@@ -1621,16 +1684,21 @@ private:
         switch(m){
         case WM_CREATE:BuildNeuralSettingControls(h);return 0;
         case WM_HSCROLL:ReadNeuralSettingControls(h);return 0;
+        case WM_GETMINMAXINFO:{
+            const RECT wr=SettingsWindowRect(kNeuralDesignW,kNeuralDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)));
+            auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
+        }
+        case WM_SIZE:ResizeSettingsChildren(h,kNeuralDesignW,kNeuralDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};m_gpuColorConversion=false;m_gpuSourceConversion=true;m_nvencPreset=7;ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
+            if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_GPU_CONVERT||id==IDC_NS_GPU_SOURCE)&&code==BN_CLICKED)||(id==IDC_NS_NVENC_PRESET&&code==CBN_SELCHANGE)){ReadNeuralSettingControls(h);return 0;}
+            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
-        case WM_DESTROY:SaveVideoSettings();if(h==m_neuralWnd){m_neuralWnd=nullptr;m_tipWnd=nullptr;m_tipText.clear();}return 0;
+        case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);if(m_tipWnd&&GetParent(m_tipWnd)==h){m_tipWnd=nullptr;m_tipText.clear();}if(h==m_neuralWnd)m_neuralWnd=nullptr;return 0;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -1640,6 +1708,79 @@ private:
         if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
         else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
         return a?a->NeuralWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
+    }
+
+    void SyncEncoderSettingControls(HWND h){
+        const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        check(IDC_ES_GPU_CONVERT,m_gpuColorConversion);
+        check(IDC_ES_GPU_SOURCE,m_gpuSourceConversion);
+        if(HWND combo=GetDlgItem(h,IDC_ES_NVENC_PRESET))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(int(m_nvencPreset)-1),0);
+    }
+
+    void ReadEncoderSettingControls(HWND h){
+        auto sel=[&](int id,int fallback)->int{HWND c=GetDlgItem(h,id);const int index=c?int(SendMessageW(c,CB_GETCURSEL,0,0)):CB_ERR;return index==CB_ERR?fallback:index;};
+        auto checked=[&](int id)->bool{HWND b=GetDlgItem(h,id);return b&&SendMessageW(b,BM_GETCHECK,0,0)==BST_CHECKED;};
+        // Only the next conversion reads these, so there is nothing to re-render for them.
+        m_gpuColorConversion=checked(IDC_ES_GPU_CONVERT);
+        m_gpuSourceConversion=checked(IDC_ES_GPU_SOURCE);
+        m_nvencPreset=uint32_t(sel(IDC_ES_NVENC_PRESET,int(m_nvencPreset)-1))+1;
+        SaveVideoSettings();
+    }
+
+    void BuildEncoderSettingControls(HWND h){
+        CreateNeuralCheck(h,IDC_ES_GPU_CONVERT,L"encoder.settings.gpu_convert",132,28,236,L"encoder.tip.gpu_convert");
+        CreateNeuralCheck(h,IDC_ES_GPU_SOURCE,L"encoder.settings.gpu_source",132,52,236,L"encoder.tip.gpu_source");
+        CreateNeuralCombo(h,IDC_ES_NVENC_PRESET,L"encoder.settings.nvenc_preset",84,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"encoder.tip.nvenc_preset");
+        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"encoder.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,120,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"encoder.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,252,166,86,30,h,(HMENU)(INT_PTR)IDC_ES_RESET,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"encoder.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,348,166,86,30,h,(HMENU)(INT_PTR)IDC_ES_CLOSE,nullptr,nullptr);
+        SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        SyncEncoderSettingControls(h);
+        CaptureSettingsDesignLayout(h);
+    }
+
+    static constexpr int kEncoderDesignW=466,kEncoderDesignH=232;
+
+    void ShowEncoderSettings(){
+        if(m_encoderWnd&&IsWindow(m_encoderWnd)){ShowWindow(m_encoderWnd,SW_SHOWNORMAL);SetForegroundWindow(m_encoderWnd);return;}
+        static constexpr const wchar_t* kClassName=L"DLSSVideoEncoderSettingsClassV1";
+        WNDCLASSW n{};n.lpfnWndProc=EncoderWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+        constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
+        const RECT wr=SettingsWindowRect(kEncoderDesignW,kEncoderDesignH,style,WS_EX_TOOLWINDOW);
+        const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
+        m_encoderWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"encoder.settings.title").c_str(),
+            style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+    }
+
+    LRESULT EncoderWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        switch(m){
+        case WM_CREATE:BuildEncoderSettingControls(h);return 0;
+        case WM_GETMINMAXINFO:{
+            const RECT wr=SettingsWindowRect(kEncoderDesignW,kEncoderDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)));
+            auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
+        }
+        case WM_SIZE:ResizeSettingsChildren(h,kEncoderDesignW,kEncoderDesignH);return 0;
+        case WM_COMMAND:{
+            const int id=LOWORD(w);const int code=HIWORD(w);
+            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=true;m_nvencPreset=7;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
+            if(id==IDC_ES_CLOSE){DestroyWindow(h);return 0;}
+            if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE)&&code==BN_CLICKED)||(id==IDC_ES_NVENC_PRESET&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
+            break;
+        }
+        case WM_CLOSE:DestroyWindow(h);return 0;
+        case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);if(m_tipWnd&&GetParent(m_tipWnd)==h){m_tipWnd=nullptr;m_tipText.clear();}if(h==m_encoderWnd)m_encoderWnd=nullptr;return 0;
+        }
+        return DefWindowProcW(h,m,w,l);
+    }
+
+    static LRESULT CALLBACK EncoderWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
+        PlayerApp* a=nullptr;
+        if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
+        else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        return a?a->EncoderWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
     }
 
     static LRESULT CALLBACK WndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
@@ -3488,7 +3629,7 @@ private:
         const bool interacting=m_dragSeek||m_dragVolume||m_pressedToolbarAction!=ToolbarAction::None||
             (capture&&(capture==m_hwnd||IsChild(m_hwnd,capture)))||m_fullscreenMenuLoop||
             m_fullscreenKeyboardFocus||!IsWindowEnabled(m_hwnd)||
-            (m_adjustWnd&&IsWindowVisible(m_adjustWnd))||(m_neuralWnd&&IsWindowVisible(m_neuralWnd));
+            (m_adjustWnd&&IsWindowVisible(m_adjustWnd))||(m_neuralWnd&&IsWindowVisible(m_neuralWnd))||(m_encoderWnd&&IsWindowVisible(m_encoderWnd));
         if(interacting){m_fullscreenLastInput=Clock::now();return;}
         if(Clock::now()-m_fullscreenLastInput<kFullscreenIdleDelay)return;
         m_fullscreenControlsHidden=true;m_focusedToolbarAction=ToolbarAction::None;
@@ -3592,7 +3733,7 @@ private:
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;
-        case IDM_NEURAL_SETTINGS:ShowNeuralSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
+        case IDM_NEURAL_SETTINGS:ShowNeuralSettings();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustBlendAmount(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustBlendAmount(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
         }
@@ -3654,10 +3795,15 @@ private:
     static constexpr float kZoomScale=2.0f;
     ComparisonSettings m_comparison;
     HWND m_neuralWnd=nullptr;
+    HWND m_encoderWnd=nullptr;
     // Tooltip host for whichever settings dialog is open, and the strings it
     // points at: TTM_ADDTOOL keeps the pointer rather than copying the text.
     HWND m_tipWnd=nullptr;
     std::vector<std::unique_ptr<std::wstring>> m_tipText;
+    // Design-time (unresized) child positions for each resizable settings
+    // dialog, captured once when its controls are built so WM_SIZE can
+    // recompute layout without drifting across repeated resizes.
+    std::map<HWND,std::vector<std::pair<HWND,RECT>>> m_settingsDesignLayout;
     POINT m_renderMouse{};
     bool m_renderMouseKnown=false,m_dragSplit=false;
     // Settings the playing cache entry was rendered with (its receipt has the full record).

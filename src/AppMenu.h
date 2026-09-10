@@ -44,6 +44,7 @@ inline constexpr UINT IDM_PREVIEW_CLIP = 311;
 inline constexpr UINT IDM_RENDER_RANGE = 312;
 inline constexpr UINT IDM_RENDER_WHOLE = 313;
 inline constexpr UINT IDM_NEURAL_SETTINGS = 314;
+inline constexpr UINT IDM_ENCODER_SETTINGS = 315;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
