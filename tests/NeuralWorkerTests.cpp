@@ -433,6 +433,77 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     malformed.back() = L"--unexpected";
     const auto malformedView = view(malformed);
     CHECK(!neural_worker_detail::ParseWorkerArguments(malformedView).has_value());
+    // The GPU colour conversion is opt-in and travels as its own optional pair, so an
+    // older parent that never sends it still parses into the CPU-conversion default.
+    for (const auto& argument : normal) CHECK(argument != L"--gpu-color-conversion");
+    if (parsedNormal) CHECK(!parsedNormal->request.gpuColorConversion);
+    NeuralRenderRequest converted = request;
+    converted.gpuColorConversion = true;
+    const auto convertedArguments =
+        neural_worker_detail::BuildWorkerArguments(converted, metadata, pause, false);
+    const auto convertedView = view(convertedArguments);
+    const auto parsedConverted = neural_worker_detail::ParseWorkerArguments(convertedView);
+    CHECK(parsedConverted.has_value());
+    if (parsedConverted) {
+        CHECK(parsedConverted->request.gpuColorConversion);
+        CHECK(parsedConverted->request.segmentFrames == 96);
+        CHECK(parsedConverted->request.pauseEvent == pause);
+    }
+    auto badConversion = convertedArguments;
+    for (size_t index = 0; index + 1 < badConversion.size(); ++index) {
+        if (badConversion[index] == L"--gpu-color-conversion") badConversion[index + 1] = L"2";
+    }
+    const auto badConversionView = view(badConversion);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badConversionView).has_value());
+    // The NVENC preset is opt-in and travels as its own optional pair, so an older
+    // parent that never sends it still parses into the preset-7 default.
+    for (const auto& argument : normal) CHECK(argument != L"--nvenc-preset");
+    if (parsedNormal) CHECK(parsedNormal->request.nvencPreset == 7);
+    NeuralRenderRequest presetRequest = request;
+    presetRequest.nvencPreset = 5;
+    const auto presetArguments =
+        neural_worker_detail::BuildWorkerArguments(presetRequest, metadata, pause, false);
+    const auto presetView = view(presetArguments);
+    const auto parsedPreset = neural_worker_detail::ParseWorkerArguments(presetView);
+    CHECK(parsedPreset.has_value());
+    if (parsedPreset) {
+        CHECK(parsedPreset->request.nvencPreset == 5);
+    }
+    auto badPresetHigh = presetArguments;
+    for (size_t index = 0; index + 1 < badPresetHigh.size(); ++index) {
+        if (badPresetHigh[index] == L"--nvenc-preset") badPresetHigh[index + 1] = L"8";
+    }
+    const auto badPresetHighView = view(badPresetHigh);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badPresetHighView).has_value());
+    auto badPresetZero = presetArguments;
+    for (size_t index = 0; index + 1 < badPresetZero.size(); ++index) {
+        if (badPresetZero[index] == L"--nvenc-preset") badPresetZero[index + 1] = L"0";
+    }
+    const auto badPresetZeroView = view(badPresetZero);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badPresetZeroView).has_value());
+    // GPU source conversion is opt-in and travels as its own optional pair, so an
+    // older parent that never sends it still parses into the CPU conversion every
+    // earlier helper performed - a missing flag can never switch the decode path.
+    for (const auto& argument : normal) CHECK(argument != L"--gpu-source-conversion");
+    if (parsedNormal) CHECK(!parsedNormal->request.gpuSourceConversion);
+    NeuralRenderRequest gpuSource = request;
+    gpuSource.gpuSourceConversion = true;
+    const auto gpuSourceArguments =
+        neural_worker_detail::BuildWorkerArguments(gpuSource, metadata, pause, false);
+    const auto gpuSourceView = view(gpuSourceArguments);
+    const auto parsedGpuSource = neural_worker_detail::ParseWorkerArguments(gpuSourceView);
+    CHECK(parsedGpuSource.has_value());
+    if (parsedGpuSource) {
+        CHECK(parsedGpuSource->request.gpuSourceConversion);
+        CHECK(parsedGpuSource->request.segmentFrames == 96);
+        CHECK(parsedGpuSource->request.pauseEvent == pause);
+    }
+    auto badSourceConversion = gpuSourceArguments;
+    for (size_t index = 0; index + 1 < badSourceConversion.size(); ++index) {
+        if (badSourceConversion[index] == L"--gpu-source-conversion") badSourceConversion[index + 1] = L"2";
+    }
+    const auto badSourceConversionView = view(badSourceConversion);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badSourceConversionView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

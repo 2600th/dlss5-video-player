@@ -85,6 +85,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     const std::wstring convertName = localizer.Get(L"menu.convert");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    add(dlss, IDM_ENCODER_SETTINGS, L"menu.encoder_settings");
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
     add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
     AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);

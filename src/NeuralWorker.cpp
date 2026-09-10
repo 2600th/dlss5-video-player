@@ -519,6 +519,26 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--segment-frames");
         arguments.emplace_back(std::to_wstring(request.segmentFrames));
     }
+    // Absent means the CPU conversion inside ffmpeg, which is what every earlier
+    // helper did, so an older parent and a newer helper still agree.
+    if (request.gpuColorConversion) {
+        arguments.emplace_back(L"--gpu-color-conversion");
+        arguments.emplace_back(L"1");
+    }
+    // Absent means preset 7 (slowest/highest quality), so an older parent and a
+    // newer helper still agree.
+    if (request.nvencPreset != 7) {
+        arguments.emplace_back(L"--nvenc-preset");
+        arguments.emplace_back(std::to_wstring(request.nvencPreset));
+    }
+    // Absent means the CPU conversion inside ffmpeg, the same polarity as the
+    // capture flag above: what every earlier helper did is what a missing flag
+    // selects, so an older parent driving a newer helper cannot be switched onto
+    // the NV12 source path behind its back.
+    if (request.gpuSourceConversion) {
+        arguments.emplace_back(L"--gpu-source-conversion");
+        arguments.emplace_back(L"1");
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -549,11 +569,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
     if (((end - 2) % 2) != 0) return std::nullopt;
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
-               RetryLimit, Guides, SegmentFrames, PauseEvent, KeyCount };
+               RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
+               GpuSourceConversion, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
-        L"--guides", L"--segment-frames", L"--pause-event"};
+        L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
+        L"--gpu-source-conversion"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -605,6 +627,21 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[SegmentFrames], segmentFrames) || segmentFrames > UINT32_MAX)
             return std::nullopt;
         request.segmentFrames = static_cast<uint32_t>(segmentFrames);
+    }
+    if (values[GpuColorConversion]) {
+        uint64_t enabled = 0;
+        if (!ParseUnsigned(*values[GpuColorConversion], enabled) || enabled > 1) return std::nullopt;
+        request.gpuColorConversion = enabled != 0;
+    }
+    if (values[GpuSourceConversion]) {
+        uint64_t enabled = 0;
+        if (!ParseUnsigned(*values[GpuSourceConversion], enabled) || enabled > 1) return std::nullopt;
+        request.gpuSourceConversion = enabled != 0;
+    }
+    if (values[NvencPreset]) {
+        uint64_t preset = 0;
+        if (!ParseUnsigned(*values[NvencPreset], preset) || !preset || preset > 7) return std::nullopt;
+        request.nvencPreset = static_cast<uint32_t>(preset);
     }
     if (values[PauseEvent]) {
         uint64_t rawPause = 0;

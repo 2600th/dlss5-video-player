@@ -1,5 +1,76 @@
 # Changelog
 
+## Unreleased
+
+- The neural export moved its transport onto the GPU's own engines, from
+  ctype-lab's `optimize-neural-pipeline` work (PR #6, squashed). NVDEC decodes
+  the source, the pipe carries NV12 instead of BGRA (4.2 MB rather than 11.1 MB
+  per 2578x1080 frame, `src/PixelLayout.h`), NVENC keeps its CUDA context from
+  the spawn rather than the first encoded frame, and the local-file queue thread
+  blocks in `ReadFile` instead of poll-sleeping. Measured by the author on an
+  RTX 5070 Ti / 616.64 at 2578x1080: 7.82 -> 4.16 ms/frame with presents off,
+  per-segment first-frame stall 126 -> 59 ms, 389 encoder write stalls of >=10 ms
+  -> 0. With presents restored the loop is the NGX evaluate itself at ~8.35 ms,
+  so the remaining pipeline overhead is ~0.4 ms/frame.
+- New DLSS > Encoder settings window (`[Encoding]` in the ini): NVENC preset
+  p1..p7, GPU capture conversion, GPU source conversion. It is its own window
+  because these apply to the next render, unlike the model settings whose Apply
+  restarts the session. The three settings dialogs are resizable.
+- GPU source conversion ships off, against the contributed default. The NV12
+  source shader applies a fixed BT.709 limited-range inverse while nothing
+  probes the source's matrix or range (ffprobe is not asked for `color_space`
+  or `color_range`), so a BT.601 or full-range clip would reach the model with
+  shifted colour - and the flag is deliberately not in the cache key, which
+  would make that unrecoverable without a manual cache purge. It stays opt-in
+  until the probe exists. `--gpu-source-conversion` was also inverted on the
+  wire for the same reason: absent now means the CPU conversion every earlier
+  helper performed, so an old parent driving a new helper cannot be switched
+  onto the new decode path behind its back.
+- `hevc_nvenc` asks for `-split_encode_mode auto`, not `forced`. FFmpeg hands
+  the value straight to `nvEncInitializeEncoder` with no capability gate, and
+  this player only sees a rejected encoder open as a broken pipe on the first
+  frame - which retries the whole render on libx264, silently turning an HEVC
+  export into H.264. Only a dual-NVENC Blackwell has been measured; `auto` lets
+  the encoder stripe where striping exists.
+- Fixed a use-after-free reachable on any GPU: tooltip text is handed to
+  `TTM_ADDTOOL` as a pointer, and the store was shared by all three settings
+  dialogs, so opening a second dialog freed the first one's strings while its
+  tooltips were still subclassed onto its controls. Hosts and text are now kept
+  per dialog.
+- Settings dialogs size themselves through `AdjustWindowRectExForDpi`. The
+  process is per-monitor-aware, so the 96-dpi frame metrics left the client area
+  short on a scaled monitor and the bottom-anchored buttons overlapped the note
+  text; on this 168-dpi machine the encoder dialog now reports its exact 466x232
+  design client, which `PlayerUiRegressionTests` asserts.
+- A cancelled decoder read keeps the bytes it already copied out of the pipe.
+  Frames there are delimited by byte count alone and `SeekSeconds` reuses the
+  running child, so discarding them would have shifted every later frame for
+  the rest of the session.
+- `PixelLayoutFrameBytes` returns the larger BGRA size for odd geometry instead
+  of an undersized NV12 answer, so a future caller that forgets the even-only
+  rule over-allocates rather than tearing frames.
+- `build_windows.bat` finds Visual Studio 2026, reuses the generator an existing
+  `build-upscaling` cache was created with, and falls back to `Visual Studio 17
+  2022` when only a PATH CMake is found rather than guessing the newest
+  generator. It runs `ctest` directly, with `--output-on-failure`.
+- The contributed `src/ChildProcess.h` was dropped rather than merged: its
+  `ChildProcessErrorModeScope` is the same fix as this project's
+  `ScopedHardErrorSuppression`, already wired into all seven spawn sites. Its
+  header argued the thread error mode alone cannot suppress the invalid-image
+  modal; measured here, the mode is consulted - a bad-image `CreateProcessW`
+  returns in 0.1-0.2 ms with it set against 6-14 ms without, for garbage files,
+  DOS stubs, truncated PEs and machine-type mismatches alike.
+- Helper-leak checks count only this process's own children. Counting every
+  `ffmpeg.exe` on the machine made them depend on what the rest of the suite was
+  doing, and the real ffmpeg other test binaries run moved the baseline
+  mid-test; fixture teardown also retries while a just-terminated child still
+  has its image mapped.
+- Dropped two tests that asserted implementation rather than behaviour: the
+  frame-buffer pool's pointer identity, and three ids queried on the wrong
+  window. The NV12 guide-equivalence test now uses coloured input, so the BT.709
+  weights and the 16/219 range mapping are actually pinned, and asserts that
+  motion was detected at all.
+
 ## 0.18.0 - 2026-09-10
 
 - The driver is now checked before the neural path runs. Feature 18 is created

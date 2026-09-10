@@ -1,6 +1,7 @@
 #include "OfflineNeuralRenderer.h"
 
 #include "Log.h"
+#include "PixelLayout.h"
 
 #include <algorithm>
 #include <array>
@@ -308,10 +309,13 @@ std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoP
 }
 
 // Captured frames queued for the writer thread. Deep enough to cover a freshly
-// spawned ffmpeg bringing up its encoder (~110 ms of not draining its stdin)
-// without stalling the render loop, and bounded in bytes so a large frame size
-// cannot balloon the queue.
-inline constexpr size_t kQueuedFrameBytes = size_t{64} << 20;
+// spawned ffmpeg bringing up its encoder (~60 ms of not draining its stdin once
+// its CUDA context is created at spawn, ~110 ms before) without stalling the
+// render loop, and bounded in bytes so a large frame size cannot balloon the
+// queue. 64 MiB held 15 NV12 frames at 2578x1080, ~73 ms of a 4.9 ms loop, and
+// the export measured one ~55 ms render-loop stall per 2 s segment on top of
+// it; 128 MiB covers the start-up at the ~3 ms loop the decoder can now feed.
+inline constexpr size_t kQueuedFrameBytes = size_t{128} << 20;
 
 // Rotating encoder used only when request.segmentFrames > 0. The render loop
 // only hands frames over: a private writer thread owns the file being written,
@@ -380,6 +384,15 @@ public:
         return EncodeError::None;
     }
 
+    bool TakeRecycled(std::vector<uint8_t>& buffer)
+    {
+        std::lock_guard lock(mutex_);
+        if (recycled_.empty()) return false;
+        buffer = std::move(recycled_.back());
+        recycled_.pop_back();
+        return true;
+    }
+
     // Writes every queued frame, finalizes the last partial segment and waits
     // for every pending file, so no segment can ever be published after the
     // job's result.
@@ -424,6 +437,10 @@ public:
     }
 
 private:
+    // Match the capture ring: more idle buffers would retain memory without allowing
+    // another readback to be in flight.
+    static constexpr size_t kRecycledFrameCapacity = 4;
+
     struct Frame {
         std::vector<uint8_t> bgra;
         uint64_t frameNumber{};
@@ -465,6 +482,11 @@ private:
             if (error != EncodeError::None) {
                 Fail(error);
                 return;
+            }
+            {
+                std::lock_guard lock(mutex_);
+                if (recycled_.size() < kRecycledFrameCapacity)
+                    recycled_.push_back(std::move(frame.bgra));
             }
         }
         {
@@ -709,6 +731,7 @@ private:
     // The render loop waits here, and only here, when the encoder falls behind.
     std::condition_variable_any space_;
     std::deque<Frame> frames_;
+    std::vector<std::vector<uint8_t>> recycled_;
     size_t queuedBytes_{};
     std::deque<Pending> queue_;
     std::jthread finalizer_;
@@ -728,10 +751,10 @@ private:
 // the render loop still classifies every status, validates every timestamp and
 // checks every identity itself.
 //
-// Depth is one frame, so at most three BGRA frames are alive (~25 MiB at
-// 1080p) and a cancel stays prompt: the decoder is never more than one read
-// ahead of the loop, and that read observes the job's stop token exactly as
-// the loop's own read did.
+// This layer adds one queued BGRA frame beyond the frame being rendered. The
+// production VideoDecoder has its own four-frame queue; those buffers are not
+// included here. A cancel stays prompt because this thread is never more than
+// one source.Read() ahead, and that read observes the job's stop token.
 template<class Source>
 class FramePrefetch {
 public:
@@ -750,6 +773,10 @@ public:
     FramePrefetch(const FramePrefetch&) = delete;
     FramePrefetch& operator=(const FramePrefetch&) = delete;
 
+    // The caller passes the same JobFrame every iteration, so the buffer it still
+    // owns is the one the loop has finished with. It travels back to the decode
+    // thread here and reaches the decoder's pool through the source adapter,
+    // which is what keeps the read path from allocating a frame per frame.
     JobRead Next(JobFrame& frame)
     {
         if (!worker_.joinable()) return source_.Read(frame, stop_);
@@ -757,8 +784,10 @@ public:
         ready_.wait(lock, [this] { return item_.has_value() || terminal_.has_value(); });
         if (!item_) return *terminal_;  // the decoder has nothing left to give
         const JobRead read = item_->read;
+        std::vector<uint8_t> spent = std::move(frame.bgra);
         frame = std::move(item_->frame);
         item_.reset();
+        spent_ = std::move(spent);
         lock.unlock();
         space_.notify_one();
         return read;
@@ -779,6 +808,11 @@ private:
                 if (quit_) return;
             }
             Item item;
+            {
+                std::lock_guard lock(mutex_);
+                item.frame.bgra = std::move(spent_);
+                spent_.clear();
+            }
             // A throwing read is the loop's failure to classify, not this
             // thread's to swallow: it becomes the Error the loop would have
             // seen, and the decoder is not touched again.
@@ -815,6 +849,8 @@ private:
     std::condition_variable ready_;
     std::condition_variable space_;
     std::optional<Item> item_;
+    // The single buffer in transit from the render loop back to the decoder.
+    std::vector<uint8_t> spent_;
     std::optional<JobRead> terminal_;
     bool quit_{};
     std::jthread worker_;
@@ -852,7 +888,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
         return fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
     }
-    const size_t expectedBytes = static_cast<size_t>(expectedBytes64);
+    // Replaced once the evaluator has settled on a capture format: a GPU-converted
+    // capture is NV12, which is 1.5 bytes per pixel rather than 4.
+    size_t expectedBytes = static_cast<size_t>(expectedBytes64);
     // A segmented job publishes finalized files while it renders; segmentFrames
     // == 0 keeps the single staging file and never starts a finalize thread.
     std::optional<SegmentWriter<Encoder>> writer;
@@ -926,10 +964,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
     if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps,
-                              request.guides)) {
+                              request.guides, source.Layout())) {
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
+    expectedBytes = static_cast<size_t>(
+        EncoderFrameBytes(evaluator.CapturePixelFormat(), request.width, request.height));
 
     const bool singleFrameSource = totalFrames == 1;
     const uint64_t primeLimit = singleFrameSource
@@ -1022,7 +1062,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 
     auto runAttempt = [&](EncoderKind kind) {
         AttemptResult attempt;
-        const EncoderSpec spec{request.width, request.height, request.fps, kind};
+        EncoderSpec spec{request.width, request.height, request.fps, kind,
+                         evaluator.CapturePixelFormat()};
+        spec.nvencPreset = request.nvencPreset;
         if (writer) {
             // Segment 0's encoder is armed here and starts while this attempt
             // prerolls, so the first captured frame never waits for a spawn.
@@ -1063,7 +1105,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         auto drainOldest = [&]() -> NeuralRenderFailure {
             const InFlightCapture queued = inFlight.front();
             std::vector<uint8_t> pixels;
-            if (!encoder.TakeRecycled(pixels)) pixels.clear();
+            const bool recycled = writer ? writer->TakeRecycled(pixels)
+                                         : encoder.TakeRecycled(pixels);
+            if (!recycled) pixels.clear();
             double captureMs = 0.0;
             {
                 StageClock clock(stages.resolve);
@@ -1164,6 +1208,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         // Joined on every exit from the attempt, so no thread is left holding
         // the decoder when the caller closes or reopens it.
         FramePrefetch<Source> prefetch(source, stop);
+        // Lives across iterations only so its BGRA buffer can be handed back to the
+        // decoder on the next read. Every read assigns the whole frame, so nothing
+        // from the previous iteration survives into this one.
+        JobFrame frame;
         bool prerollEvaluated = false;
         bool hasPrevious = false;
         int64_t previousTimestamp = 0;
@@ -1179,7 +1227,6 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             }
             const auto frameStart = SteadyClock::now();
             iterationDrainMs = 0.0;
-            JobFrame frame;
             JobRead read;
             {
                 StageClock clock(stages.source);
@@ -1372,8 +1419,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 struct TestSourceAdapter {
     IFrameSource& source;
+    bool gpuConversion{true};
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
+    // The test source hands out BGRA; only the production decoder can choose NV12.
+    PixelLayout Layout()const{return PixelLayout::Bgra;}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         OfflineDecodedFrame decoded;const auto read=source.Read(decoded,stop);
         frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
@@ -1391,7 +1441,7 @@ struct TestEvaluatorAdapter {
     // The test interface stays synchronous; these shims give RunJob the same async shape
     // the production adapter has, so the pipelined control flow is what the tests run.
     std::deque<JobEvaluation> captured{};
-    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides){
+    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,PixelLayout){
         return evaluator.Initialize(window,width,height,fps,guides);
     }
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
@@ -1409,6 +1459,8 @@ struct TestEvaluatorAdapter {
     }
     uint32_t Pending()const{return uint32_t(captured.size());}
     static constexpr uint32_t MaxPending(){return 2u;}
+    // The test evaluator always captures BGRA.
+    static constexpr EncoderPixelFormat CapturePixelFormat(){return EncoderPixelFormat::Bgra;}
     bool ResolveOldest(std::vector<uint8_t>& pixels,double& captureMs){
         if(captured.empty())return false;
         pixels=std::move(captured.front().bgra);captured.pop_front();
@@ -1456,13 +1508,21 @@ struct TestEncoderAdapter {
 #else
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
+    bool gpuConversion{true};
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){
-        if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop))return false;
+        if(!decoder.OpenSequential(path.wstring(),MediaSourceKind::LocalFile,stop,gpuConversion))return false;
         return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
     }
     void Close(){decoder.Close();}
+    // Fixed for the decoder session once Open has probed the geometry (NV12 for even
+    // sizes, BGRA otherwise), so the evaluator can be initialized for it.
+    PixelLayout Layout()const{return decoder.PixelLayout();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         VideoFrame decoded;
+        // Whatever this frame still carries has already been rendered and written,
+        // so it goes back to the decoder rather than being freed here and
+        // reallocated - and zero-filled - by the next pipe read.
+        decoder.RecycleFrameBuffer(std::move(frame.bgra));
         const auto read = decoder.ReadNextBlocking(decoded, stop);
         frame = {std::move(decoded.bgra), decoded.timestamp100ns, decoded.discontinuity,
                  decoded.frameNumber, decoded.sourceGeneration};
@@ -1566,10 +1626,22 @@ struct ProductionEvaluatorAdapter {
     TemporalGuideGenerator guides;
     uint32_t width{},height{};double fps{};
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
-    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls){
-        width=w;height=h;fps=rate;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
+    // Requested before Initialize; the renderer decides what it can actually deliver.
+    bool gpuColorConversion{false};
+    // Layout of the frames the source hands over, converted on the GPU when NV12.
+    PixelLayout sourceLayout{PixelLayout::Bgra};
+    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,PixelLayout layout){
+        width=w;height=h;fps=rate;sourceLayout=layout;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
-        if(!renderer||!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
+        if(!renderer)return false;
+        renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
+        renderer->SetSourceLayout(layout);
+        if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
+        // Both sides apply the same even-size rule, so this only fires if that rule drifts.
+        if(renderer->ActiveSourceLayout()!=layout){
+            LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");
+            return false;
+        }
         // Nobody looks at this renderer's swapchain - the encoder is fed from the cache
         // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
         // still presents: the RenoDX add-on performs its feature-18 pass per present.
@@ -1593,7 +1665,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }
@@ -1648,7 +1720,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide)){
+            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }
@@ -1723,6 +1795,12 @@ struct ProductionEvaluatorAdapter {
             CapturedVideoFrame discarded;
             if(!renderer->ResolveOldestCapture(discarded))break;
         }
+    }
+    // What Initialize settled on, which is BGRA unless the GPU conversion was both
+    // asked for and possible at this size.
+    EncoderPixelFormat CapturePixelFormat()const{
+        return renderer&&renderer->ActiveCaptureFormat()==CaptureFormat::Nv12
+            ?EncoderPixelFormat::Nv12:EncoderPixelFormat::Bgra;
     }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
@@ -1996,6 +2074,8 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
 #else
     const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
+    evaluator.gpuColorConversion=request.gpuColorConversion;
+    source.gpuConversion=request.gpuSourceConversion;
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
         [runtimeDirectory]{return ReadNeuralRuntimeSessionLog(runtimeDirectory);},
         []{return SteadyClock::now();},

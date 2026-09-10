@@ -121,8 +121,18 @@ float TemporalGuideGenerator::Luma(const uint8_t* p) {
     return (0.0722f * p[0] + 0.7152f * p[1] + 0.2126f * p[2]) * (1.0f / 255.0f);
 }
 
+float TemporalGuideGenerator::LumaFromNv12Y(uint8_t y) {
+    // NV12's Y plane is limited (studio) range: 16 = black, 235 = white, with
+    // headroom/footroom outside that reserved for sync. 219 = 235 - 16 is the
+    // full black-to-white span, so this maps Y back onto the same [0,1] scale
+    // the BGRA path's Rec.709 luma already produces, which keeps the scene-cut
+    // thresholds and depth proxy comparable across both source layouts.
+    return std::clamp((float(y) - 16.0f) / 219.0f, 0.0f, 1.0f);
+}
+
 void TemporalGuideGenerator::DownsampleLuma(const uint8_t* bgra, uint32_t w, uint32_t h,
-                                             uint32_t gw, uint32_t gh, std::vector<float>& out) const {
+                                             uint32_t gw, uint32_t gh, std::vector<float>& out,
+                                             SourcePixelLayout layout) const {
     out.assign(size_t(gw) * gh, 0.0f);
     // Each grid row samples a disjoint band of the source frame, so the rows are
     // independent. The reads stride a whole 4K frame, which makes this more
@@ -138,8 +148,13 @@ void TemporalGuideGenerator::DownsampleLuma(const uint8_t* bgra, uint32_t w, uin
                 const uint32_t xs[2] = { x0, std::min(w - 1, (x0 + x1) / 2) };
                 const uint32_t ys[2] = { y0, std::min(h - 1, (y0 + y1) / 2) };
                 float s = 0.0f;
-                for (uint32_t yy : ys) for (uint32_t xx : xs)
-                    s += Luma(bgra + (size_t(yy) * w + xx) * 4u);
+                if (layout == SourcePixelLayout::Nv12) {
+                    for (uint32_t yy : ys) for (uint32_t xx : xs)
+                        s += LumaFromNv12Y(bgra[size_t(yy) * w + xx]);
+                } else {
+                    for (uint32_t yy : ys) for (uint32_t xx : xs)
+                        s += Luma(bgra + (size_t(yy) * w + xx) * 4u);
+                }
                 out[size_t(gy) * gw + gx] = s * 0.25f;
             }
         }
@@ -530,7 +545,8 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
 
 bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                                        uint32_t renderW, uint32_t renderH, double targetFps,
-                                       const FrameIdentity& frame, GuideFrame& out) {
+                                       const FrameIdentity& frame, GuideFrame& out,
+                                       SourcePixelLayout layout) {
     if (!bgra || !sourceW || !sourceH || !renderW || !renderH) return false;
 
     const auto [gw, gh] = AnalysisGrid(sourceW, sourceH, targetFps);
@@ -545,7 +561,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     if (reset == HistoryReset::None && !repeat && m_framesSinceCut != UINT32_MAX) ++m_framesSinceCut;
 
     std::vector<float> cur;
-    DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur);
+    DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur, layout);
 
     std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f);
     std::vector<float> confidence(size_t(gw) * gh, 0.0f);

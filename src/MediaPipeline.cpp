@@ -1,5 +1,4 @@
 #include "MediaPipeline.h"
-
 #include "HardErrorSuppression.h"
 
 #include <windows.h>
@@ -510,20 +509,57 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
                                                 const std::filesystem::path& output)
 {
     std::vector<std::wstring> arguments{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
-        L"-f", L"rawvideo", L"-pix_fmt", L"bgra",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y"};
+    if (spec.kind == EncoderKind::HevcNvenc) {
+        // hevc_nvenc creates its CUDA context when the first frame reaches the encoder,
+        // not at spawn. A segmented job spawns one ffmpeg per 2 s segment, so that cost
+        // landed inside every segment's first frames: measured 126 ms of stdin not being
+        // drained, of which the render loop absorbed ~55 ms as a stall. Creating the
+        // device up front moves the context creation to the spawn, which the segment
+        // writer already does a whole segment ahead; the remaining ~59 ms is the NVENC
+        // session itself. The option fails only where hevc_nvenc would fail too.
+        arguments.insert(arguments.end(), {L"-init_hw_device", L"cuda=cu:0"});
+    }
+    arguments.insert(arguments.end(), {
+        L"-f", L"rawvideo",
+        L"-pix_fmt", spec.pixelFormat == EncoderPixelFormat::Nv12 ? L"nv12" : L"bgra",
         L"-video_size", std::to_wstring(spec.width) + L"x" + std::to_wstring(spec.height),
         L"-framerate", FrameRateText(spec.fps), L"-i", L"pipe:0", L"-an",
-    };
+    });
+    const bool nv12 = spec.pixelFormat == EncoderPixelFormat::Nv12;
     if (spec.kind == EncoderKind::HevcNvenc) {
         arguments.insert(arguments.end(), {
-            L"-c:v", L"hevc_nvenc", L"-preset", L"p7", L"-tune", L"hq",
+            L"-c:v", L"hevc_nvenc", L"-preset",
+            L"p" + std::to_wstring(std::clamp<uint32_t>(spec.nvencPreset, 1u, 7u)), L"-tune", L"hq",
             L"-rc", L"vbr", L"-cq", L"16", L"-b:v", L"0",
-            L"-pix_fmt", L"yuv420p"});
+            // The export loop measured 3.7 ms/frame of encoder back pressure at
+            // 2578x1080 once decode moved to NVDEC: one NVENC session at p7 caps near
+            // 150 fps. Split-frame encoding stripes each frame across every NVENC
+            // engine the GPU has. `auto` and not `forced`: ffmpeg hands the value
+            // straight to nvEncInitializeEncoder with no capability gate, so a driver
+            // or GPU that refuses forced split encode fails encoder open, which this
+            // player only sees as a broken pipe on the first frame - and that retries
+            // the whole render on libx264, silently turning an HEVC export into H.264.
+            // `auto` lets the encoder enable striping where it is supported and
+            // costs only the preset/tune pairs NVENC declines to stripe.
+            L"-split_encode_mode", L"auto",
+            // NVENC takes NV12 as it stands, so an already-converted capture reaches the
+            // encoder without ffmpeg touching a single pixel.
+            L"-pix_fmt", nv12 ? L"nv12" : L"yuv420p"});
     } else {
         arguments.insert(arguments.end(), {
             L"-c:v", L"libx264", L"-preset", L"slow", L"-crf", L"16",
-            L"-pix_fmt", (spec.width % 2 || spec.height % 2) ? L"yuv444p" : L"yuv420p"});
+            // x264 has no NV12 input, but deinterleaving one plane is far cheaper than
+            // converting a whole BGRA frame.
+            L"-pix_fmt", (!nv12 && (spec.width % 2 || spec.height % 2)) ? L"yuv444p" : L"yuv420p"});
+    }
+    // Only the GPU-converted path states its colorimetry, because only there does the
+    // player choose the matrix. The BGRA path leaves ffmpeg's own conversion, and its
+    // tagging, exactly as they were.
+    if (nv12) {
+        arguments.insert(arguments.end(), {
+            L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
+            L"-color_trc", L"bt709", L"-color_range", L"tv"});
     }
     arguments.insert(arguments.end(), {L"-f", L"matroska", output.wstring()});
     return arguments;
@@ -578,12 +614,16 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
     return arguments;
 }
 
-size_t ExpectedBgraFrameBytes(const EncoderSpec& spec)
+size_t ExpectedFrameBytes(const EncoderSpec& spec)
 {
     if (spec.width == 0 || spec.height == 0 || !std::isfinite(spec.fps) || spec.fps <= 0.0)
         return 0;
-    constexpr uint64_t bytesPerPixel = 4;
-    const uint64_t bytes = uint64_t{spec.width} * spec.height * bytesPerPixel;
+    // The size the frames actually arrive at, which is 1.5 bytes per pixel once the
+    // capture is converted on the GPU. Assuming BGRA here rejected every NV12 frame
+    // the capture handed over as the wrong size.
+    if (spec.pixelFormat == EncoderPixelFormat::Nv12 && (spec.width % 2 || spec.height % 2))
+        return 0;
+    const uint64_t bytes = EncoderFrameBytes(spec.pixelFormat, spec.width, spec.height);
     if (bytes > std::numeric_limits<size_t>::max()) return 0;
     return static_cast<size_t>(bytes);
 }
@@ -771,7 +811,7 @@ EncodeError RawVideoEncoder::Start(const EncoderSpec& spec,
                                    const std::filesystem::path& output)
 {
     Cancel();
-    const size_t bytes = ExpectedBgraFrameBytes(spec);
+    const size_t bytes = ExpectedFrameBytes(spec);
     if (bytes == 0 || output.empty()) return EncodeError::InvalidSpecification;
     const auto ffmpeg = FindHelper(impl_->helperDirectory, L"ffmpeg.exe");
     if (ffmpeg.empty()) return EncodeError::HelperMissing;

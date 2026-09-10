@@ -225,7 +225,9 @@ struct PlayerAppTestAccess {
         CheckMarkersAndTimecode(app);
         CheckComparisonAvailability(app);
         CheckNeuralSettingsDialog(app);
+        CheckEncoderSettingsDialog(app);
 
+        CheckSettingsDialogTipsSurviveASecondDialog(app);
         app.m_seeking = false;
         app.m_cachedPlayback = false;
         app.m_havePresentedPair = false;
@@ -545,9 +547,10 @@ private:
         CHECK(app.m_guideReset && app.m_dlssReset);
         // Every control the dialog offers carries help text, and the text is the
         // localized tip rather than an empty tool.
-        CHECK(app.m_tipWnd != nullptr);
-        if (app.m_tipWnd) {
-            const int tools = int(SendMessageW(app.m_tipWnd, TTM_GETTOOLCOUNT, 0, 0));
+        const auto tipHost = app.m_tipHosts.find(dialog);
+        CHECK(tipHost != app.m_tipHosts.end());
+        if (tipHost != app.m_tipHosts.end()) {
+            const int tools = int(SendMessageW(tipHost->second, TTM_GETTOOLCOUNT, 0, 0));
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
@@ -558,7 +561,7 @@ private:
                 info.hwnd = dialog;
                 info.uId = reinterpret_cast<UINT_PTR>(GetDlgItem(dialog, id));
                 info.lpszText = text;
-                SendMessageW(app.m_tipWnd, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
+                SendMessageW(tipHost->second, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
                 CHECK(wcslen(text) > 20);
             }
         }
@@ -581,6 +584,75 @@ private:
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_neuralWnd == nullptr);
         CHECK(!IsWindow(dialog));
+    }
+
+    static void CheckEncoderSettingsDialog(PlayerApp& app)
+    {
+        app.m_gpuColorConversion = false; app.m_gpuSourceConversion = false; app.m_nvencPreset = 7;
+        app.ShowEncoderSettings();
+        CHECK(app.m_encoderWnd != nullptr);
+        if (!app.m_encoderWnd) return;
+        const HWND dialog = app.m_encoderWnd;
+        CHECK(GetDlgItem(dialog, IDC_ES_GPU_CONVERT) != nullptr);
+        CHECK(GetDlgItem(dialog, IDC_ES_GPU_SOURCE) != nullptr);
+        // The window is sized from the design client size through the DPI-aware
+        // frame conversion, so the client area must come back exactly - on a scaled
+        // monitor the 96-dpi conversion left it ~30px short and the bottom-anchored
+        // buttons overlapped the note text.
+        RECT client{};
+        CHECK(GetClientRect(dialog, &client) != FALSE);
+        CHECK_EQ(int(client.right), PlayerApp::kEncoderDesignW);
+        CHECK_EQ(int(client.bottom), PlayerApp::kEncoderDesignH);
+        CHECK(GetDlgItem(dialog, IDC_ES_NVENC_PRESET) != nullptr);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_SETCHECK, BST_CHECKED, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_GPU_SOURCE, BN_CLICKED), 0);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_NVENC_PRESET), CB_SETCURSEL, 4, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_NVENC_PRESET, CBN_SELCHANGE), 0);
+        CHECK(app.m_gpuSourceConversion);
+        CHECK_EQ(app.m_nvencPreset, uint32_t{5});
+        // Read saves via SaveVideoSettings(), since nothing needs re-rendering.
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"GpuSourceConversion", 0, app.SettingsPath().c_str()), UINT{1});
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"NvencPreset", 7, app.SettingsPath().c_str()), UINT{5});
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(!app.m_gpuColorConversion);
+        CHECK(!app.m_gpuSourceConversion);
+        CHECK_EQ(app.m_nvencPreset, uint32_t{7});
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_GETCHECK, 0, 0)), BST_UNCHECKED);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_encoderWnd == nullptr);
+        CHECK(!IsWindow(dialog));
+    }
+
+    // Both settings dialogs are modeless and can be open together, and TTM_ADDTOOL
+    // keeps the pointer it is handed rather than copying the string: the dialog that
+    // opens second must not free the first dialog's tip text while the first
+    // dialog's tooltips are still subclassed onto its controls.
+    static void CheckSettingsDialogTipsSurviveASecondDialog(PlayerApp& app)
+    {
+        app.ShowNeuralSettings();
+        const HWND neural = app.m_neuralWnd;
+        CHECK(neural != nullptr);
+        if (!neural) return;
+        app.ShowEncoderSettings();
+        CHECK(app.m_encoderWnd != nullptr);
+        const auto host = app.m_tipHosts.find(neural);
+        CHECK(host != app.m_tipHosts.end());
+        if (host != app.m_tipHosts.end()) {
+            wchar_t text[512]{};
+            TTTOOLINFOW info{};
+            info.cbSize = TTTOOLINFOW_V2_SIZE;
+            info.hwnd = neural;
+            info.uId = reinterpret_cast<UINT_PTR>(GetDlgItem(neural, IDC_NS_RESET));
+            info.lpszText = text;
+            SendMessageW(host->second, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
+            // The string the first dialog registered must still read back verbatim
+            // after the second dialog built its own tools.
+            CHECK_EQ(std::wstring{text}, app.T(L"neural.tip.reset"));
+        }
+        if (app.m_encoderWnd) DestroyWindow(app.m_encoderWnd);
+        DestroyWindow(neural);
+        CHECK(app.m_neuralWnd == nullptr);
+        CHECK(app.m_encoderWnd == nullptr);
     }
 
     static std::wstring ReadText(HWND window)

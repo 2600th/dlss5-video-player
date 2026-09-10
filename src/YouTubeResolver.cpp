@@ -1,5 +1,4 @@
 #include "YouTubeResolver.h"
-
 #include "HardErrorSuppression.h"
 
 #include <winhttp.h>

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <cstdint>
 #include <cstdlib>
 #include <vector>
@@ -194,6 +195,100 @@ void guide_generator_reevaluates_a_repeated_frame_without_reset_test()
     CHECK(!again.hasHistory);
     CHECK_EQ(HistoryReset::None, again.id.reset);
     CHECK_EQ(uint32_t{1}, photo.HistoryGeneration());
+}
+
+// The same picture encoded two ways: BGRA, and limited-range NV12 whose Y plane is
+// the BT.709 luma of that BGRA. Both must drive the analysis pipeline identically
+// once DownsampleLuma maps them onto the same [0,1] luma scale.
+// The picture is deliberately coloured, not gray: on gray input the BGRA weights
+// sum to 1 and cancel, so any weight triple - or a missing 16/219 range mapping -
+// would pass. A hashed 8x8 block texture also gives every cell a distinct SAD
+// minimum, where a smooth gradient would let one code of rounding flip the winner.
+struct TexturedPixel { uint8_t b, g, r; };
+
+TexturedPixel TexturedColor(uint32_t x, uint32_t y, int shiftX)
+{
+    const uint32_t sx = uint32_t((int(x) - shiftX + int(kWidth)) % int(kWidth));
+    uint32_t h = (sx / 8u) * 0x9E3779B1u ^ (y / 8u) * 0x85EBCA77u;
+    h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12;
+    return {uint8_t(24u + (h % 200u)), uint8_t(24u + ((h >> 8) % 200u)), uint8_t(24u + ((h >> 16) % 200u))};
+}
+
+// BT.709 luma of the same pixel, in limited range: exactly what a correct NV12 Y
+// plane holds, so the two layouts describe one picture rather than two.
+uint8_t LimitedRangeLuma(TexturedPixel pixel)
+{
+    const double luma = 0.2126 * pixel.r + 0.7152 * pixel.g + 0.0722 * pixel.b;
+    return uint8_t(16 + int(std::lround(luma * 219.0 / 255.0)));
+}
+
+std::vector<uint8_t> TexturedBgra(int shiftX)
+{
+    std::vector<uint8_t> bgra(size_t(kWidth) * kHeight * 4u);
+    for (uint32_t y = 0; y < kHeight; ++y) {
+        for (uint32_t x = 0; x < kWidth; ++x) {
+            const TexturedPixel pixel = TexturedColor(x, y, shiftX);
+            uint8_t* p = bgra.data() + (size_t(y) * kWidth + x) * 4u;
+            p[0] = pixel.b; p[1] = pixel.g; p[2] = pixel.r; p[3] = 255;
+        }
+    }
+    return bgra;
+}
+
+std::vector<uint8_t> TexturedNv12(int shiftX)
+{
+    std::vector<uint8_t> nv12(size_t(kWidth) * kHeight + size_t(kWidth) * kHeight / 2u, 128);
+    for (uint32_t y = 0; y < kHeight; ++y) {
+        for (uint32_t x = 0; x < kWidth; ++x) {
+            nv12[size_t(y) * kWidth + x] = LimitedRangeLuma(TexturedColor(x, y, shiftX));
+        }
+    }
+    return nv12;
+}
+
+void generate_treats_nv12_limited_range_luma_like_bgra_test()
+{
+    const auto bgra0 = TexturedBgra(0), bgra1 = TexturedBgra(5);
+    const auto nv120 = TexturedNv12(0), nv121 = TexturedNv12(5);
+
+    TemporalGuideGenerator bgraGuides, nv12Guides;
+    GuideFrame bgraOut0, bgraOut1, nv12Out0, nv12Out1;
+    CHECK(bgraGuides.Generate(bgra0.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), bgraOut0));
+    CHECK(bgraGuides.Generate(bgra1.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), bgraOut1));
+    CHECK(nv12Guides.Generate(nv120.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), nv12Out0,
+                               SourcePixelLayout::Nv12));
+    CHECK(nv12Guides.Generate(nv121.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), nv12Out1,
+                               SourcePixelLayout::Nv12));
+
+    CHECK_EQ(bgraOut0.hasHistory, nv12Out0.hasHistory);
+    CHECK_EQ(bgraOut1.hasHistory, nv12Out1.hasHistory);
+    CHECK_EQ(int(bgraOut0.id.reset), int(nv12Out0.id.reset));
+    CHECK_EQ(int(bgraOut1.id.reset), int(nv12Out1.id.reset));
+    CHECK_EQ(bgraOut1.gridW, nv12Out1.gridW);
+    CHECK_EQ(bgraOut1.gridH, nv12Out1.gridH);
+    CHECK_EQ(bgraOut1.guideGridRGBA32F.size(), nv12Out1.guideGridRGBA32F.size());
+
+    // The two inputs differ by at most one luma code (0.5/219) of rounding. That is
+    // enough to flip a cell sitting on the confidence threshold between "rejected" and a
+    // displacement, so per-cell motion is compared as a mismatch rate; the depth proxy and
+    // the global motion, which have no such threshold, must agree everywhere (the depth
+    // proxy is a normalised gradient, so one code of rounding is worth a few hundredths).
+    const size_t cells = bgraOut1.guideGridRGBA32F.size() / 4u;
+    size_t motionMismatches = 0, movedCells = 0; float worstDepth = 0.0f;
+    for (size_t cell = 0; cell < cells; ++cell) {
+        const float* a = bgraOut1.guideGridRGBA32F.data() + cell * 4u;
+        const float* b = nv12Out1.guideGridRGBA32F.data() + cell * 4u;
+        if (std::abs(a[0] - b[0]) > 0.02f || std::abs(a[1] - b[1]) > 0.02f) ++motionMismatches;
+        if (std::abs(a[0]) > 0.001f) ++movedCells;
+        worstDepth = std::max(worstDepth, std::abs(a[2] - b[2]));
+    }
+    // Equivalence is only worth asserting if the frames moved at all: two generators
+    // that both reported no motion anywhere would otherwise agree perfectly.
+    CHECK(movedCells > cells / 10u);
+    CHECK(motionMismatches <= cells / 50u);
+    CHECK(worstDepth <= 0.05f);
+    CHECK(std::abs(bgraOut1.globalMotionX - nv12Out1.globalMotionX) <= 0.5f);
+    CHECK(std::abs(bgraOut1.globalMotionY - nv12Out1.globalMotionY) <= 0.5f);
 }
 
 void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
@@ -665,6 +760,7 @@ int main()
     guide_controls_neutralize_disabled_guides_test();
     guide_generator_reports_reset_reasons_test();
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();
+    generate_treats_nv12_limited_range_luma_like_bgra_test();
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test();

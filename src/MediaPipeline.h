@@ -61,13 +61,33 @@ struct CachedExportRequest {
 // becomes cancellable, once it exceeds this.
 inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
 
-// Raw frames fed to RawVideoEncoder::WriteFrame are BGRA: the cache render target is
-// B8G8R8A8, so ffmpeg consumes what the GPU wrote and no CPU swizzle exists.
+// Layout of the raw frames fed to RawVideoEncoder::WriteFrame. The neural capture path
+// reads back a B8G8R8A8 render target, so letting ffmpeg consume BGRA directly removes
+// a full-frame channel swizzle on the CPU. Everything else still supplies BGRA.
+//
+// Nv12 is the same capture with the colour conversion already done on the GPU: one
+// full-resolution Y plane followed by an interleaved half-resolution UV plane, BT.709
+// with limited range. It exists because BGRA leaves ffmpeg converting every frame on
+// the CPU, which measured as the export's slowest stage, and it also cuts the readback
+// and the pipe write from four bytes per pixel to one and a half.
+enum class EncoderPixelFormat { Bgra, Nv12 };
+
+// Bytes one frame of `format` occupies at this size. NV12 needs even dimensions; the
+// caller is responsible for not selecting it otherwise.
+constexpr uint64_t EncoderFrameBytes(EncoderPixelFormat format, uint32_t width, uint32_t height)
+{
+    const uint64_t pixels = uint64_t{width} * height;
+    return format == EncoderPixelFormat::Nv12 ? pixels + (pixels / 2u) : pixels * 4u;
+}
+
 struct EncoderSpec {
     uint32_t width{};
     uint32_t height{};
     double fps{};
     EncoderKind kind{EncoderKind::HevcNvenc};
+    EncoderPixelFormat pixelFormat{EncoderPixelFormat::Bgra};
+    // NVENC preset p1..p7 (7 = slowest/highest quality, the default); ignored by the software encoder.
+    uint32_t nvencPreset{7};
 };
 
 struct MaterializeResult {
@@ -108,7 +128,10 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,
                                                      bool oddDimensions);
-size_t ExpectedBgraFrameBytes(const EncoderSpec& spec);
+// Bytes RawVideoEncoder requires of one frame of `spec`, or 0 when the spec cannot be
+// encoded at all - which includes NV12 at an odd width or height, since that format has
+// no half-pixel chroma sample to describe it.
+size_t ExpectedFrameBytes(const EncoderSpec& spec);
 bool ShouldRetryWithSoftware(EncoderKind attempted, EncodeError error);
 
 class MediaMaterializer {

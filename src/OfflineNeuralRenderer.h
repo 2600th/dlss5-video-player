@@ -150,6 +150,18 @@ struct NeuralRenderRequest {
     // Manual-reset event owned by the caller. Signalled means "pause"; the
     // worker checks it between frames and reports NeuralRenderPhase::Paused.
     HANDLE pauseEvent{};
+    // Convert the captured frame to NV12 on the GPU instead of handing ffmpeg BGRA and
+    // letting it convert every frame on the CPU. Ignored when the output size is odd,
+    // and by the test evaluator, which always captures BGRA.
+    bool gpuColorConversion{false};
+    // hevc_nvenc preset p1..p7; 7 is slowest/highest quality. Only the NVENC
+    // attempt reads it.
+    uint32_t nvencPreset{7};
+    // Decode the source to NV12 and convert it to BGRA on the GPU (true) or let ffmpeg
+    // convert on the CPU (false). Default false: the GPU conversion applies a fixed
+    // BT.709 limited-range inverse and nothing probes the source's matrix or range,
+    // so a BT.601 or full-range source would reach the model with shifted colour.
+    bool gpuSourceConversion{false};
 };
 
 struct NeuralRenderProgress {

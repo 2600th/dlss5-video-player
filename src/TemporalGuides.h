@@ -4,6 +4,7 @@
 #include <utility>
 #include "FrameIdentity.h"
 #include "GuideControls.h"
+#include "PixelLayout.h"
 
 // Strength of the image evidence behind a scene-cut decision. The two arms are
 // kept apart because only the weak one is debounced: NVIDIA's DLSS Programming
@@ -47,6 +48,11 @@ struct GuideFrame {
     FrameIdentity id;
 };
 
+// Pixel layout of the buffer handed to Generate/DownsampleLuma (see PixelLayout.h). Bgra
+// is the live-playback path; Nv12 is the export decoder's frame shape, of which only the
+// Y plane is read here.
+using SourcePixelLayout = PixelLayout;
+
 class TemporalGuideGenerator {
 public:
     static std::pair<uint32_t,uint32_t> AnalysisGrid(uint32_t sourceW, uint32_t sourceH, double targetFps = 30.0);
@@ -70,7 +76,8 @@ public:
     // accepted cut; `out.sceneCut*` reports every decision either way.
     bool Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                   uint32_t renderW, uint32_t renderH, double targetFps,
-                  const FrameIdentity& frame, GuideFrame& out);
+                  const FrameIdentity& frame, GuideFrame& out,
+                  SourcePixelLayout layout = SourcePixelLayout::Bgra);
 
     // Scene-cut decision from the post-alignment residual and the luma
     // histogram overlap of two analysis grids. Fast pans keep a high overlap
@@ -87,8 +94,10 @@ public:
 
 private:
     static float Luma(const uint8_t* p);
+    static float LumaFromNv12Y(uint8_t y);
     void DownsampleLuma(const uint8_t* bgra, uint32_t w, uint32_t h,
-                        uint32_t gw, uint32_t gh, std::vector<float>& out) const;
+                        uint32_t gw, uint32_t gh, std::vector<float>& out,
+                        SourcePixelLayout layout = SourcePixelLayout::Bgra) const;
     // Confidence is per grid cell in [0,1]: 0 means the cell was rejected and carries no
     // motion, higher values mean the winning displacement both beat standing still by a
     // margin and was a distinct minimum of the SAD landscape.

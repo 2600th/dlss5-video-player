@@ -472,7 +472,9 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
         CHECK_EQ(decoder.DurationSeconds(), 1.0);
         VideoFrame frame;
         CHECK(decoder.ReadNext(frame));
-        CHECK_EQ(frame.bgra.size(), size_t{96 * 64 * 4});
+        // An even-sized sequential open decodes to NV12 (see PixelLayout.h).
+        CHECK(decoder.PixelLayout() == PixelLayout::Nv12);
+        CHECK_EQ(frame.bgra.size(), FrameBytes(decoder.PixelLayout(), 96, 64));
         CHECK(!decoder.ReadNext(frame));
         CHECK(decoder.SeekSeconds(0));
         CHECK(decoder.ReadNext(frame));
@@ -493,7 +495,7 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     CHECK(std::abs(rotatedDecoder.DisplayAspectRatio() - 2.0 / 3.0) < 0.001);
     VideoFrame rotatedFrame;
     CHECK(rotatedDecoder.ReadNext(rotatedFrame));
-    CHECK_EQ(rotatedFrame.bgra.size(), size_t{96 * 64 * 4});
+    CHECK_EQ(rotatedFrame.bgra.size(), FrameBytes(rotatedDecoder.PixelLayout(), 64, 96));
 
     // Photos may have odd dimensions; software fallback must preserve them.
     const auto oddPhoto = fixture.path / L"odd.png";
@@ -533,13 +535,23 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     CHECK(std::abs(decoder.DurationSeconds() - 1.0) < 0.011);
     const auto processed = fixture.path / L"processed.mkv";
     RawVideoEncoder encoder(helpers);
-    CHECK_EQ(encoder.Start({96, 64, decoder.FrameRate(), EncoderKind::H264Software}, processed), EncodeError::None);
+    const bool nv12 = decoder.PixelLayout() == PixelLayout::Nv12;
+    CHECK_EQ(encoder.Start({96, 64, decoder.FrameRate(), EncoderKind::H264Software,
+                            nv12 ? EncoderPixelFormat::Nv12 : EncoderPixelFormat::Bgra}, processed),
+             EncodeError::None);
     size_t frames = 0;
     VideoFrame frame;
     while (decoder.ReadNext(frame) && frames < 200) {
-        // A visibly different processed result, encoded through the real cache encoder.
-        for (size_t i = 0; i < frame.bgra.size(); i += 4) {
-            frame.bgra[i] = 255; frame.bgra[i + 1] = 0; frame.bgra[i + 2] = 0;
+        // A visibly different processed result (pure blue), encoded through the real cache
+        // encoder. In NV12 that is BT.709 limited-range Y=32, U=240, V=118.
+        if (nv12) {
+            const size_t luma = size_t{96} * 64;
+            std::fill(frame.bgra.begin(), frame.bgra.begin() + luma, uint8_t{32});
+            for (size_t i = luma; i + 1 < frame.bgra.size(); i += 2) { frame.bgra[i] = 240; frame.bgra[i + 1] = 118; }
+        } else {
+            for (size_t i = 0; i < frame.bgra.size(); i += 4) {
+                frame.bgra[i] = 255; frame.bgra[i + 1] = 0; frame.bgra[i + 2] = 0;
+            }
         }
         CHECK_EQ(encoder.WriteFrame(frame.bgra), EncodeError::None);
         ++frames;

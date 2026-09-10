@@ -3610,6 +3610,23 @@ std::filesystem::path current_test_executable()
     return std::filesystem::path(std::move(value));
 }
 
+// A child that has just been terminated keeps its image file mapped for a short
+// while after the process count drops, so deleting the directory it was copied
+// into fails with a sharing violation for a few milliseconds. Retry briefly
+// instead of failing the test that already proved what it set out to prove.
+void remove_fixture_directory(const std::filesystem::path& directory)
+{
+    std::error_code error;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    do {
+        error.clear();
+        std::filesystem::remove_all(directory, error);
+        if (!error) return;
+        Sleep(10);
+    } while (std::chrono::steady_clock::now() < deadline);
+    CHECK(!error);
+}
+
 struct ResolverFixture {
     std::filesystem::path directory;
 
@@ -3633,9 +3650,7 @@ struct ResolverFixture {
 
     ~ResolverFixture()
     {
-        std::error_code error;
-        std::filesystem::remove_all(directory, error);
-        CHECK(!error);
+        remove_fixture_directory(directory);
     }
 };
 
@@ -3751,7 +3766,7 @@ struct MediaFixture {
         CHECK(CopyFileW(current_test_executable().c_str(),(directory/L"ffprobe.exe").c_str(),FALSE)!=FALSE);
         CHECK(CopyFileW(current_test_executable().c_str(),(directory/L"ffmpeg.exe").c_str(),FALSE)!=FALSE);
     }
-    ~MediaFixture(){std::error_code error;std::filesystem::remove_all(directory,error);CHECK(!error);}
+    ~MediaFixture(){remove_fixture_directory(directory);}
 };
 
 void video_decoder_prefers_video_duration_tag_over_longer_container_test()
@@ -3947,8 +3962,15 @@ void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
         result=decoder->ReadNextAvailable(frame);Sleep(1);
     }
     CHECK_EQ(VideoReadResult::FrameReady,result);
-    CHECK_EQ(size_t{1920u*1080u*4u},frame.bgra.size());
-    CHECK_EQ(std::string("software\n"),read_binary_file(marker));
+    // 1920x1080 is even, so OpenSequential picks NV12 (w*h*3/2 bytes, not w*h*4):
+    // 11.1 MB BGRA -> 4.2 MB NV12 per 2578x1080 frame is the same saving at this size.
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+    CHECK(frame.layout==VideoPixelLayout::Nv12);
+    CHECK_EQ(size_t{1920u*1080u*3u/2u},frame.bgra.size());
+    // OpenSequential now requests CUDA decode (NVDEC is a separate engine from
+    // NVENC/D3D12 and the GPU is idle during export), so the fake ffmpeg child
+    // launches with -hwaccel cuda.
+    CHECK_EQ(std::string("cuda\n"),read_binary_file(marker));
 }
 
 void video_decoder_background_queue_is_bounded_to_four_frames_test()
@@ -3992,6 +4014,74 @@ VideoFrame read_one_frame(VideoDecoder& decoder)
     }
     CHECK_EQ(VideoReadResult::FrameReady,result);
     return frame;
+}
+
+// Regression guard for the LocalFile queue thread's blocking ReadFile: once the fake
+// child parks in Sleep(INFINITE) with the pipe empty, the queue thread has nothing left
+// to peek-sleep-poll for and sits inside the kernel read instead. StopFrameQueue has to
+// unpark it with CancelSynchronousIo (rather than wait on a child that never exits), so
+// Close must still return promptly.
+void video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"largeburst",MediaSourceKind::LocalFile));
+    // 1024x1024 is even, so this OpenSequential open picks NV12: the fake child
+    // writes exactly 20 frames of 1024x1024 NV12 (w*h*3/2 bytes) and then parks.
+    // Every one of them has to be consumed here: with any still unread the queue
+    // thread would be waiting for queue space, not inside the kernel read this
+    // test is about.
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+    for(int index=0;index<20;++index)CHECK_EQ(size_t{1024u*1024u*3u/2u},read_one_frame(*decoder).bgra.size());
+    // Give the queue thread a chance to settle into the blocking read for data that
+    // will never arrive.
+    Sleep(75);
+    const auto closeStarted=std::chrono::steady_clock::now();
+    decoder->Close();
+    const double elapsedMs=
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-closeStarted).count();
+    CHECK(elapsedMs<2000.0);
+}
+
+// NV12 needs even plane dimensions (the UV plane is half-resolution in both
+// axes), so OpenSequential's NV12 preference is conditional on the probed
+// geometry: even geometry gets NV12, odd geometry falls back to BGRA exactly
+// like normal playback.
+void video_decoder_open_sequential_selects_nv12_for_even_geometry_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile));
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK(frame.layout==VideoPixelLayout::Nv12);
+    CHECK_EQ(FrameBytes(VideoPixelLayout::Nv12,4,2),frame.bgra.size());
+}
+
+// A caller can opt out of OpenSequential's NV12 preference (preferNv12=false) to
+// keep BGRA even for geometry that would otherwise qualify for NV12 - the neural
+// render uses this when the GPU is the scarce resource and ffmpeg's CPU-side
+// conversion is cheaper to spend than a GPU cycle.
+void video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile,{},/*preferNv12=*/false));
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK(frame.layout==VideoPixelLayout::Bgra);
+    CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,4,2),frame.bgra.size());
+}
+
+void video_decoder_open_sequential_stays_bgra_for_odd_geometry_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"oddgeom",MediaSourceKind::LocalFile));
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK(frame.layout==VideoPixelLayout::Bgra);
+    CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,3,3),frame.bgra.size());
 }
 
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
@@ -4740,9 +4830,29 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
         if(all.find(L"drainexit")!=std::wstring::npos){std::cout<<"width=1920\nheight=1080\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.034\n"<<std::flush;return 0;}
         if(all.find(L"partialend")!=std::wstring::npos){std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.067\n"<<std::flush;return 0;}
+        // Even geometry: OpenSequential can pick NV12 here.
+        if(all.find(L"nv12geom")!=std::wstring::npos){std::cout<<"width=4\nheight=2\ndisplay_aspect_ratio=2:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        // Odd geometry: NV12's half-resolution UV plane needs even dimensions, so
+        // OpenSequential must stay BGRA here even though it prefers NV12.
+        if(all.find(L"oddgeom")!=std::wstring::npos){std::cout<<"width=3\nheight=3\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
+    // Mirrors FrameBytes(layout,w,h): OpenSequential's NV12 request shows up here as
+    // `-pix_fmt nv12` on the command line, and the raw frame this fake child writes
+    // has to match it exactly or the decoder's frameBytes-sized reads never complete.
+    const bool nv12Requested=all.find(L"-pix_fmt nv12")!=std::wstring::npos;
+    const auto rawFrameBytes=[nv12Requested](size_t w,size_t h){
+        return nv12Requested?w*h*3u/2u:w*h*4u;
+    };
+    if(all.find(L"nv12geom")!=std::wstring::npos){
+        const std::vector<char> frame(rawFrameBytes(4,2),'n');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
+    }
+    if(all.find(L"oddgeom")!=std::wstring::npos){
+        const std::vector<char> frame(rawFrameBytes(3,3),'o');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
+    }
     if(all.find(L"hardwarefallback")!=std::wstring::npos){
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_ACCEL_MARKER");
         const bool cuda=all.find(L"-hwaccel cuda")!=std::wstring::npos;
@@ -4772,7 +4882,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     }
     if(all.find(L"largeburst")!=std::wstring::npos){
         const std::wstring marker=read_environment_variable(L"DLSS_VIDEO_TEST_FRAME_MARKER");
-        const std::vector<char> frame(4u*1024u*1024u,'x');
+        const std::vector<char> frame(rawFrameBytes(1024,1024),'x');
         for(int index=0;index<20;++index){
             std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();
             if(!marker.empty()){std::ofstream out(marker,std::ios::binary|std::ios::app);out.put('x');}
@@ -4787,7 +4897,7 @@ int run_fake_media_child(int argc,wchar_t* argv[])
             std::ofstream out(marker,std::ios::binary|std::ios::app);
             out<<(cuda?"cuda\n":d3d11?"d3d11va\n":"software\n");
         }
-        const std::vector<char> frame(1920u*1080u*4u,'z');
+        const std::vector<char> frame(rawFrameBytes(1920,1080),'z');
         std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));
         std::cout.flush();return 0;
     }
@@ -4954,15 +5064,23 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     return 0;
 }
 
+// Only this process's own children count. Counting every ffmpeg.exe on the machine
+// made the leak checks depend on what the rest of the suite was doing: the real
+// ffmpeg that CachedExportTests and NeuralPrerenderTests run appears and exits
+// under a different test binary, moving the baseline mid-test and failing a
+// decoder that leaked nothing. Every helper these fixtures spawn is a direct
+// child, so the parent id is the exact scope the checks always meant.
 size_t count_named_processes(std::wstring_view executableName)
 {
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     CHECK(snapshot != INVALID_HANDLE_VALUE);
     if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    const DWORD self = GetCurrentProcessId();
     PROCESSENTRY32W entry{sizeof(entry)};
     size_t count = 0;
     if (Process32FirstW(snapshot, &entry)) {
         do {
+            if (entry.th32ParentProcessID != self) continue;
             if (CompareStringOrdinal(entry.szExeFile, -1, executableName.data(),
                                      static_cast<int>(executableName.size()), TRUE) == CSTR_EQUAL) {
                 ++count;
@@ -5638,6 +5756,10 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
+    video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test();
+    video_decoder_open_sequential_selects_nv12_for_even_geometry_test();
+    video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test();
+    video_decoder_open_sequential_stays_bgra_for_odd_geometry_test();
     video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
