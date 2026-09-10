@@ -56,13 +56,30 @@ jobs:
         shell: cmd
         run: package_public_release.bat
 
+      - name: Write core package checksum
+        shell: powershell
+        run: |
+          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'DLSSVideoPlayer-v*-core-win64.zip' -File)
+          if ($zip.Count -ne 1) {
+            throw "Expected exactly one core package in dist, found $($zip.Count)."
+          }
+          $hash = (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          # sha256sum -c only accepts '<hash>  <name>' with a bare LF, so the
+          # file is written directly instead of through Set-Content, which
+          # would append CRLF and make the line unreadable to coreutils.
+          [System.IO.File]::WriteAllText("$($zip[0].FullName).sha256", "$hash  $($zip[0].Name)`n")
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           prerelease: true
           # The packager names the zip after VERSION, which the tag gate above
-          # already pinned; a missing file fails the release instead of
-          # publishing an empty one.
+          # already pinned; a missing file or checksum fails the release
+          # instead of publishing an incomplete one. The full package with the
+          # neural runtime is attached by hand, since CI never fetches that
+          # runtime.
           fail_on_unmatched_files: true
-          files: dist/DLSSVideoPlayer-v*-core-win64.zip
+          files: |
+            dist/DLSSVideoPlayer-v*-core-win64.zip
+            dist/DLSSVideoPlayer-v*-core-win64.zip.sha256

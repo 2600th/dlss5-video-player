@@ -71,17 +71,28 @@ struct FeatureSetupResult {
     bool needsFlush = false;
 };
 
-// The two frame counts the feature lifetime is keyed on, named here so the renderer
-// and the receipt gate that reads them cannot drift apart.
+// The frame count the feature lifetime is keyed on, named here so the renderer
+// and the receipt gate that reads it cannot drift apart. There is deliberately
+// no second, automatic count that releases a live feature later in a job:
+// NVIDIA's DLSS Programming Guide 310.6.0 restricts recreation to display
+// resolution, RTX and buffer-format changes (S3.2 step 6) and requires that
+// every command list which referenced the feature in Evaluate has retired
+// before ReleaseFeature (S5.5). A release mid-job also makes the RenoDX add-on
+// tear down the inline neural worksets it had already armed, which wedged the
+// pass on an RTX 4070 Ti and an RTX PRO 6000 while it survived on an RTX 4080
+// SUPER. Both sibling projects that drive the same add-on reached the same
+// place: the warm-up re-create is a workaround for older builds that latch
+// STANDBY on a create they missed, it is one-shot, and it is disabled outright
+// for the v4.5+ builds that rescan every present and adopt features lazily.
+// So a re-create here is only ever an explicit request, made by a caller that
+// has evidence the add-on missed the first create, and never on a timer.
 inline constexpr uint64_t FeatureCreateFrame = 2;
-inline constexpr uint64_t DelayedRecreateFrame = 60;
 
 template <typename EnsureFeature, typename RecreateFeature>
 FeatureSetupResult PrepareFeatureForFrame(
     bool enabled,
     bool featureCreated,
     uint64_t framesPresented,
-    bool& delayedRecreateDone,
     bool& recreateRequested,
     EnsureFeature&& ensureFeature,
     RecreateFeature&& recreateFeature,
@@ -93,17 +104,11 @@ FeatureSetupResult PrepareFeatureForFrame(
     // the ordinary missing-feature path gets another chance to observe it.
     if (recreateRequested) {
         const bool needsFlush = recreateFeature();
-        delayedRecreateDone = true;
         recreateRequested = false;
         return {true, needsFlush};
     }
     if (!featureCreated && (immediateCreate || framesPresented >= FeatureCreateFrame)) {
         return {true, ensureFeature()};
-    }
-    if (!delayedRecreateDone && framesPresented >= DelayedRecreateFrame) {
-        const bool needsFlush = recreateFeature();
-        delayedRecreateDone = true;
-        return {true, needsFlush};
     }
     return {};
 }

@@ -23,12 +23,12 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "DLSS Video Player\0"
-            VALUE "FileVersion", "0.17.1.0\0"
+            VALUE "FileVersion", "0.17.2.0\0"
             VALUE "InternalName", "DLSSVideoPlayer\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 DLSS Video Player contributors\0"
             VALUE "OriginalFilename", "DLSSVideoPlayer.exe\0"
             VALUE "ProductName", "DLSS Video Player\0"
-            VALUE "ProductVersion", "0.17.1.0\0"
+            VALUE "ProductVersion", "0.17.2.0\0"
         END
     END
     BLOCK "VarFileInfo"

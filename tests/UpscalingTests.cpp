@@ -17,8 +17,18 @@ int main() {
     CHECK(!SourceFitsDLSSRange(1920,1080,2560,1440,1280,720,1706,960));
     CHECK(!SourceFitsDLSSRange(3840,2160,2560,1440,1,1,3840,2160));
     CHECK(!SourceFitsDLSSRange(1920,1080,2560,1440,0,0,0,0));
-    bool delayed=true,recreate=false,created=false;
-    const auto first=ngx_session_detail::PrepareFeatureForFrame(true,false,1,delayed,recreate,
+    // The RTX 2060 report: a 436x573 photo asked to reach 1440 lines. For a
+    // 1096x1440 output the runtime advertised a 548x720 minimum, so the source
+    // fell short and upscaling was refused outright instead of aiming lower.
+    const auto reduced=AdmissibleDLSSOutput(436,573,1096,1440,548,720);
+    CHECK(reduced.grows);CHECK_EQ(reduced.width,872u);CHECK_EQ(reduced.height,1146u);
+    CHECK(SourceFitsDLSSRange(436,573,reduced.width,reduced.height,436,573,872,1146));
+    // A source already inside the advertised range needs no reduction.
+    CHECK(!AdmissibleDLSSOutput(1920,1080,2560,1440,1280,720).grows);
+    // And a reduction that would land on the source is not an upscale.
+    CHECK(!AdmissibleDLSSOutput(600,400,1200,800,1199,799).grows);
+    bool recreate=false;bool created=false;
+    const auto first=ngx_session_detail::PrepareFeatureForFrame(true,false,1,recreate,
         [&]{created=true;return true;},[]{return false;},true);
     CHECK(created);CHECK(first.selected);CHECK(first.needsFlush);
     return test_support::failure_count==0?0:1;

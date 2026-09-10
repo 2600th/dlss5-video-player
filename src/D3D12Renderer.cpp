@@ -95,7 +95,6 @@ D3D12Renderer::~D3D12Renderer() {
 
 bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource) {
     m_preserveSource=preserveSource;
-    m_delayedRecreateDone=preserveSource;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
@@ -260,7 +259,14 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
 bool D3D12Renderer::InitializeDLSS(bool& gpuSynchronized){
     auto* cmd=m_cmds[0].Get();
     m_allocators[0]->Reset();cmd->Reset(m_allocators[0].Get(),nullptr);bool ok=m_dlss.Initialize(m_device.Get(),cmd,m_sourceW,m_sourceH,m_outputW,m_outputH,m_quality,m_preserveSource);
-    if(ok){m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();}
+    if(ok){
+        m_renderW=m_dlss.RenderWidth();m_renderH=m_dlss.RenderHeight();
+        // The backend may have had to settle for a smaller output than the one
+        // requested, when this source could not reach it. Video resources are
+        // created after this point, so adopting it here keeps every consumer of
+        // OutputW/OutputH on the size DLSS actually writes.
+        m_outputW=m_dlss.OutputWidth();m_outputH=m_dlss.OutputHeight();
+    }
     cmd->Close();ID3D12CommandList*l[]={cmd};m_queue->ExecuteCommandLists(1,l);
     gpuSynchronized=WaitGPUForContinuedUse();
     return ok&&gpuSynchronized;
@@ -481,21 +487,24 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
 
     ++m_framesPresented;
 
-    // Create/recreate the NGX feature on an open command list, submit that list,
-    // and only then evaluate on a fresh list. This mirrors the robust game-style
-    // NGX lifetime instead of relying on CreateFeature and EvaluateFeature being
+    // Create the NGX feature on an open command list, submit that list, and only
+    // then evaluate on a fresh list. This mirrors the robust game-style NGX
+    // lifetime instead of relying on CreateFeature and EvaluateFeature being
     // accepted back-to-back before the creation commands have reached the GPU.
     // Intentionally allow one complete Present before the first NGX CreateFeature.
     // ReShade add-ons finish their swapchain/runtime initialization on that first frame;
     // creating on frame 2 makes the raw CreateFeature much harder for RenoDX to miss.
-    // Releasing an NGX feature while a previous frame's evaluate is still
-    // executing is outside the NGX contract, and the add-on that hooks the
-    // release tears down its inline NR worksets on the spot. With three frames
-    // in flight that reliably wedged the queue on an RTX 4080 at 1080p right
-    // after the 60-frame preroll. Drain before the release, never during it.
+    // Nothing here releases a live feature on a frame count any more: the
+    // add-on that hooks the release tears down its inline neural worksets on the
+    // spot, and the offline job's receipt gate re-presents one source frame for
+    // as long as it takes the add-on to publish a fresh evaluation, so a timed
+    // release landed inside that gate and killed the pass it was waiting for.
+    // A re-hook is now only ever requested explicitly, and the drain below still
+    // honours the NGX rule that no command list referencing the feature may be
+    // in flight when it is released.
     const auto featureSetup = ngx_session_detail::PrepareFeatureForFrame(
         DLSSEnabled(), m_dlss.FeatureCreated(), m_framesPresented,
-        m_delayedRecreateDone, m_recreateRequested,
+        m_recreateRequested,
         [&] { return m_dlss.EnsureFeature(cmd); },
         [&] { return WaitGPUForContinuedUse() && m_dlss.RecreateFeature(cmd); },m_preserveSource);
     const bool needFeatureFlush = featureSetup.needsFlush;

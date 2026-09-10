@@ -450,7 +450,7 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         .audioUrl=L"https://r1.googlevideo.com/audio?id=abc&token=three",
         .output=LR"(C:\Cache Root\source.partial.mkv)"};
     const std::vector<std::wstring> expectedMaterialize{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-xerror",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-progress", L"pipe:1", L"-y", L"-xerror",
         L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
         L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
         L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
@@ -509,6 +509,87 @@ void materialization_discards_oversized_diagnostic_url_fragments_test()
     CHECK_EQ(MaterializeError::ProcessFailed, result.error);
     CHECK(result.detail.find(L"signed-secret") == std::wstring::npos);
     CHECK(result.detail.find(L"https://") == std::wstring::npos);
+}
+
+void media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test()
+{
+    using Reader = media_pipeline_detail::MediaProgressReader;
+    std::vector<MediaDownloadProgress> reports;
+    std::string diagnostic;
+    Reader reader([&](const MediaDownloadProgress& progress) { reports.push_back(progress); },
+                  [&](std::string_view line) { diagnostic.append(line); diagnostic.push_back('\n'); });
+    const Reader::Clock::time_point start{};
+
+    // FFmpeg reports "N/A" until the muxer has written something, and a block of
+    // nothing but unknowns must not wake the caller with an empty report.
+    reader.Consume("frame=12\nbitrate=N/A\ntotal_size=N/A\nout_time_us=N/A\nprogress=continue\r\n", start);
+    CHECK(reports.empty());
+    // The capture hands over whatever one ReadFile returned, so a key arrives
+    // cut in half often enough that losing it would lose the whole download.
+    reader.Consume("total_si", start);
+    reader.Consume("ze=2048\nout_time_us=1500000\nprogress=continue\n", start);
+    CHECK_EQ(size_t{1}, reports.size());
+    if (!reports.empty()) {
+        CHECK_EQ(uint64_t{2048}, reports.back().bytes);
+        CHECK_EQ(1.5, reports.back().seconds);
+    }
+    // A block inside the interval is withheld, and the next block past it
+    // carries the newest figures rather than replaying the withheld ones.
+    reader.Consume("total_size=4096\nout_time_ms=2000000\nprogress=continue\n", start + 100ms);
+    CHECK_EQ(size_t{1}, reports.size());
+    reader.Consume("total_size=8192\nout_time_us=3000000\nprogress=continue\n", start + 260ms);
+    CHECK_EQ(size_t{2}, reports.size());
+    if (reports.size() > 1) {
+        CHECK_EQ(uint64_t{8192}, reports[1].bytes);
+        CHECK_EQ(3.0, reports[1].seconds);
+    }
+    // Error text shares the pipe with the progress stream; it must reach the
+    // caller's diagnostic instead of being parsed away as an unknown key.
+    reader.Consume("[matroska @ 0000] Non-monotonic DTS\n", start + 300ms);
+    // The final block is reported even though the interval would withhold it.
+    reader.Consume("total_size=9216\nout_time_us=3500000\nprogress=end\n", start + 310ms);
+    CHECK_EQ(size_t{3}, reports.size());
+    if (reports.size() > 2) CHECK_EQ(uint64_t{9216}, reports[2].bytes);
+    reader.Finish(start + 320ms);
+    CHECK_EQ(size_t{3}, reports.size());
+    CHECK_EQ(std::string("[matroska @ 0000] Non-monotonic DTS\n"), diagnostic);
+
+    // A child that dies mid-block leaves values behind with no progress= line
+    // and a trailing fragment with no newline; both still reach the caller once.
+    std::vector<MediaDownloadProgress> interrupted;
+    Reader tail([&](const MediaDownloadProgress& progress) { interrupted.push_back(progress); }, {});
+    tail.Consume("total_size=4\nout_time_us=1000000\n", start);
+    CHECK(interrupted.empty());
+    tail.Consume("total_size=64", start + 300ms);
+    tail.Finish(start + 320ms);
+    CHECK_EQ(size_t{1}, interrupted.size());
+    if (!interrupted.empty()) {
+        CHECK_EQ(uint64_t{64}, interrupted.back().bytes);
+        CHECK_EQ(1.0, interrupted.back().seconds);
+    }
+}
+
+void materialization_reports_download_progress_while_the_source_is_copied_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    std::vector<MediaDownloadProgress> reports;
+    const auto output = fixture.Path() / L"output.mkv";
+    const auto result = MediaMaterializer(fixture.Path()).Run(
+        {L"https://media.invalid/progress-stream", {}, output}, {},
+        [&](const MediaDownloadProgress& progress) { reports.push_back(progress); });
+    CHECK(result.ok);
+    // The first block is all unknowns, the second reports, the third ends the
+    // stream and is therefore reported whatever the rate limit would have said.
+    CHECK_EQ(size_t{2}, reports.size());
+    if (reports.size() == 2) {
+        CHECK_EQ(uint64_t{1048576}, reports[0].bytes);
+        CHECK_EQ(2.5, reports[0].seconds);
+        CHECK_EQ(uint64_t{4194304}, reports[1].bytes);
+        CHECK_EQ(9.0, reports[1].seconds);
+    }
+    // The two-argument form stays a valid call and asks for no reports at all.
+    CHECK(MediaMaterializer(fixture.Path()).Run({L"https://media.invalid/video", {}, output}, {}).ok);
 }
 
 void owned_media_pipeline_materializes_encodes_probes_and_cancels_test()
@@ -2274,6 +2355,19 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
         std::cerr << "Connection reset while reading https://media.invalid/diagnostic-error?token=secret-value\n";
         return 7;
     }
+    if (std::ranges::any_of(arguments, [](std::wstring_view value) {
+            return value.find(L"/progress-stream") != std::wstring_view::npos;
+        })) {
+        // FFmpeg's -progress stream: one key per line, each block closed by
+        // progress=continue and the last by progress=end, with the values still
+        // unknown in the first block and an error line sharing the same pipe.
+        std::cout << "frame=1\nbitrate=N/A\ntotal_size=N/A\nout_time_us=N/A\nprogress=continue\n" << std::flush;
+        std::cerr << "Non-monotonic DTS in output stream\n" << std::flush;
+        std::cout << "frame=60\ntotal_size=1048576\nout_time_ms=2500000\nprogress=continue\n" << std::flush;
+        std::cout << "frame=240\ntotal_size=4194304\nout_time_us=9000000\nprogress=end\n" << std::flush;
+        WriteBytes(std::filesystem::path(arguments.back()), "materialized");
+        return 0;
+    }
     const bool raw = std::find(arguments.begin(), arguments.end(), L"rawvideo") != arguments.end();
     const bool finalProbe = std::find(arguments.begin(), arguments.end(), L"-sseof") != arguments.end();
     const bool hang = std::ranges::any_of(arguments, [](std::wstring_view value) {
@@ -2320,6 +2414,8 @@ int wmain(int argc, wchar_t* argv[])
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();
+    media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test();
+    materialization_reports_download_progress_while_the_source_is_copied_test();
     encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();

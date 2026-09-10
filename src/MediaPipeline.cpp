@@ -381,10 +381,101 @@ std::wstring MaterializeDiagnostic(std::string_view output, const MaterializeReq
 
 } // namespace
 
+namespace media_pipeline_detail {
+
+MediaProgressReader::MediaProgressReader(std::function<void(const MediaDownloadProgress&)> onProgress,
+                                         std::function<void(std::string_view)> onDiagnostic)
+    : onProgress_(std::move(onProgress)), onDiagnostic_(std::move(onDiagnostic)) {}
+
+void MediaProgressReader::Consume(std::string_view chunk, Clock::time_point now)
+{
+    for (const char character : chunk) {
+        if (character == '\n') EndLine(now);
+        // A progress line is a few dozen bytes at most. Bounding the buffer the
+        // way ProbeMedia bounds its own stops a newline-free error flood from
+        // growing it without limit, and dropping the remainder of such a line
+        // matches what the capture did with an oversized diagnostic before.
+        else if (partial_.size() < 64 * 1024) partial_.push_back(character);
+        else oversizedLine_ = true;
+    }
+}
+
+void MediaProgressReader::Finish(Clock::time_point now)
+{
+    if (!partial_.empty()) EndLine(now);
+    Report(now, true);
+}
+
+void MediaProgressReader::EndLine(Clock::time_point now)
+{
+    if (!oversizedLine_) {
+        std::string_view line(partial_);
+        // FFmpeg writes the stream in text mode, so the newline arrives as CRLF.
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        ReadLine(line, now);
+    }
+    partial_.clear();
+    oversizedLine_ = false;
+}
+
+void MediaProgressReader::ReadLine(std::string_view line, Clock::time_point now)
+{
+    const size_t equals = line.find('=');
+    const std::string_view key = equals == std::string_view::npos
+        ? std::string_view{} : line.substr(0, equals);
+    // Progress keys are lowercase identifiers. Anything else on this pipe is
+    // FFmpeg's own error text, which the caller still needs verbatim, so the
+    // parser hands it straight back instead of swallowing it.
+    const bool progressKey = !key.empty() && std::ranges::all_of(key, [](char character) {
+        return (character >= 'a' && character <= 'z') ||
+               (character >= '0' && character <= '9') || character == '_';
+    });
+    if (!progressKey) {
+        if (onDiagnostic_) onDiagnostic_(line);
+        return;
+    }
+    const std::string_view value = line.substr(equals + 1);
+    uint64_t integer = 0;
+    if (key == "total_size") {
+        // Every value may legitimately read "N/A" until the muxer has written
+        // something; an unparsable one leaves the last known figure standing.
+        if (ParseUnsigned(value, integer)) { latest_.bytes = integer; pending_ = true; }
+    } else if (key == "out_time_us" || key == "out_time_ms") {
+        // out_time_ms is the older spelling of the same field and also carries
+        // microseconds: a long-standing FFmpeg misnomer, not a different unit.
+        if (ParseUnsigned(value, integer)) {
+            latest_.seconds = static_cast<double>(integer) / 1000000.0;
+            pending_ = true;
+        }
+    } else if (key == "progress") {
+        // Each block is terminated by progress=continue, or progress=end for the
+        // last one, which is reported whatever the rate limit would have said.
+        Report(now, value == "end");
+    }
+}
+
+void MediaProgressReader::Report(Clock::time_point now, bool force)
+{
+    if (!pending_ || !onProgress_) return;
+    if (!force && reported_ && now - lastReport_ < kMediaProgressInterval) return;
+    pending_ = false;
+    reported_ = true;
+    lastReport_ = now;
+    onProgress_(latest_);
+}
+
+} // namespace media_pipeline_detail
+
 std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& request)
 {
+    // -progress makes FFmpeg write a machine-readable key/value block to stdout
+    // about twice a second, which is the only stable way to see a stream copy
+    // advance: the human-readable stderr line is carriage-return separated and
+    // reformatted between builds. It is a global option, so it belongs here with
+    // the others, ahead of the first input.
     std::vector<std::wstring> arguments{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y", L"-xerror",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-progress", L"pipe:1",
+        L"-y", L"-xerror",
     };
     const auto appendInput = [&](const std::wstring& input) {
         if (_wcsnicmp(input.c_str(), L"http://", 7) == 0 ||
@@ -503,7 +594,8 @@ bool ShouldRetryWithSoftware(EncoderKind attempted, EncodeError error)
 MediaMaterializer::MediaMaterializer(std::filesystem::path helperDirectory)
     : helperDirectory_(std::move(helperDirectory)) {}
 
-MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std::stop_token stop)
+MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std::stop_token stop,
+                                         std::function<void(const MediaDownloadProgress&)> onProgress)
 {
     if (stop.stop_requested())
         return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
@@ -512,15 +604,37 @@ MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std:
         return {false, MaterializeError::InvalidRequest, L"Invalid media materialization request."};
     const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
     if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
-    const CaptureResult capture = RunCapture(ffmpeg, BuildMaterializeArguments(request), stop, 64 * 1024);
+    // One pipe carries both the progress stream and FFmpeg's errors, so the
+    // reader feeds the caller's callback and hands every other line back here.
+    // The diagnostic keeps the capture's own limit semantics: once the collected
+    // text passes it the text is discarded rather than grown without bound.
+    constexpr size_t diagnosticLimit = 64 * 1024;
+    std::string diagnostic;
+    bool diagnosticOverflowed = false;
+    media_pipeline_detail::MediaProgressReader reader(std::move(onProgress),
+        [&](std::string_view line) {
+            if (diagnosticOverflowed) return;
+            if (diagnostic.size() + line.size() + 1 > diagnosticLimit) {
+                diagnosticOverflowed = true;
+                diagnostic.clear();
+                return;
+            }
+            diagnostic.append(line);
+            diagnostic.push_back('\n');
+        });
+    const CaptureResult capture = RunCapture(ffmpeg, BuildMaterializeArguments(request), stop,
+        diagnosticLimit, [&](std::string_view chunk) {
+            reader.Consume(chunk, std::chrono::steady_clock::now());
+        });
+    reader.Finish(std::chrono::steady_clock::now());
     if (!capture.started)
         return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
     if (capture.cancelled) return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
     std::error_code error;
     if (capture.exitCode != 0 || !std::filesystem::is_regular_file(request.output, error) || error) {
         std::wstring detail = L"FFmpeg could not prepare the source (exit " + std::to_wstring(capture.exitCode) + L").";
-        const auto diagnostic = MaterializeDiagnostic(capture.output, request);
-        if (!diagnostic.empty()) detail += L"\n" + diagnostic;
+        const auto diagnosticText = MaterializeDiagnostic(diagnostic, request);
+        if (!diagnosticText.empty()) detail += L"\n" + diagnosticText;
         return {false, MaterializeError::ProcessFailed, std::move(detail)};
     }
     if (request.expectedDurationSeconds > 0.0) {

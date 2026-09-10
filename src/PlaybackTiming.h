@@ -165,6 +165,10 @@ struct LiveRenderForecast {
     double sourceFps;       // frames playback consumes per second
     double realtimeRatio;   // renderFps / sourceFps; 1.0 means it exactly keeps up
     bool keepsUp;
+    // False when nothing measured or modelled applies to this GPU, so `keepsUp`
+    // is a default rather than a verdict. A caller that tells the user their card
+    // was checked has to know the difference.
+    bool measured;
 };
 
 // `priorScale` multiplies the reference cost when the profile has nothing to
@@ -183,6 +187,7 @@ inline LiveRenderForecast ForecastLiveRender(uint32_t width, uint32_t height, do
         forecast.keepsUp = true;
         return forecast;
     }
+    forecast.measured = true;
     forecast.msPerFrame = msPerFrame;
     forecast.renderFps = 1000.0 / msPerFrame;
     forecast.realtimeRatio = forecast.renderFps / sourceFps;

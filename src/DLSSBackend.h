@@ -43,6 +43,13 @@ public:
     bool Available() const { return m_available && m_initialized && m_params != nullptr; }
     uint32_t RenderWidth() const { return m_renderW; }
     uint32_t RenderHeight() const { return m_renderH; }
+    // The output the runtime accepted, which may be smaller than the one asked
+    // for when the source could not reach it.
+    uint32_t OutputWidth() const { return m_outputW; }
+    uint32_t OutputHeight() const { return m_outputH; }
+    // Set when no output this source can reach was found, so the caller can say
+    // that rather than reporting DLSS as simply unavailable.
+    bool SourceOutsideSupportedRange() const { return m_sourceOutsideRange; }
     NVSDK_NGX_Result LastResult() const { return m_lastResult; }
 
 private:
@@ -70,6 +77,7 @@ private:
     bool m_initialized = false;
     bool m_sessionLeaseAcquired = false;
     bool m_available = false;
+    bool m_sourceOutsideRange = false;
     ngx_session_detail::FeatureCreateGate m_featureCreateGate;
     uint64_t m_evaluations = 0;
 };

@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.17.1, including recent history, settings-aware cache identity,
+This guide covers v0.17.2, including recent history, settings-aware cache identity,
 media export and highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;

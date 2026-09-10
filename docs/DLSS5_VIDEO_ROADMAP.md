@@ -97,6 +97,26 @@ Reject mismatches. Reset every neural history after cuts, seeks, retries, source
 
 **Links:** [SynchronizedPlayback.cpp](../src/SynchronizedPlayback.cpp) · [TemporalGuides.cpp](../src/TemporalGuides.cpp) · [Neural Coprocessor](https://github.com/maohgad-web/Neural-coprocessor)
 
+> Scene-cut false positives (found 2026-09-10): the cut detector was stateless,
+> so a single transition fired it repeatedly — 6 fires in 12 frames
+> (#19119-19130) and 11 in 15 frames on a second clip. Every fire zeroes the
+> motion vectors, drops the depth-proxy EMA, bumps the history generation and
+> reaches NGX as `NVSDK_NGX_Parameter_Reset=1`, i.e. it throws away the
+> accumulated history the reconstruction is built on; the DLSS Programming
+> Guide 310.6.0 S3.13 asks for a reset only on the first frame after a major
+> transition and notes that "improper use of this can result in temporal
+> flickering, heavy aliasing or other visual artifacts". Shipped: the decision
+> is split by strength, and the weak arm (moderate residual plus collapsed luma
+> histogram) is now suppressed unless 0.6 s has passed since the last accepted
+> cut — PySceneDetect's `min_scene_len` default, applied as the same hard
+> minimum-interval filter. A strong residual still cuts immediately, which is
+> how x264/x265 treat a decisive scenecut inside `min-keyint`. Every frame now
+> carries its own verdict (strength, suppressed flag, residual, histogram
+> overlap) so a live-playback decision is no longer invisible. Still open: the
+> 0.30/0.10/0.85 thresholds are corpus-tuned, not validated against labelled
+> cuts, and the accepted/suppressed counts do not yet appear in the render
+> receipt next to the neural timings.
+
 ### 5. Stall recovery and resumable rendering
 
 Implement explicit states for:

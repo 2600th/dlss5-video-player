@@ -154,6 +154,9 @@ public:
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
+    // True when DLSS refused every output this source could reach, as opposed to
+    // being unavailable for a runtime or device reason.
+    bool DLSSSourceOutsideRange() const { return m_dlss.SourceOutsideSupportedRange(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
     bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
     uint32_t DLSSInputW() const { return m_renderW; }
@@ -339,7 +342,6 @@ private:
     bool m_dlssEnabled = true;
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
-    bool m_delayedRecreateDone = false;
     bool m_preserveSource = false;
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;

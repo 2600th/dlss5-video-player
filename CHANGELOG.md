@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.17.2 - 2026-09-10
+
+- Fixed the neural render wedging at the 60th present, reported on an RTX 4070
+  Ti (#4, still failing on 0.17.0) and an RTX PRO 6000 (#3). The renderer
+  released and re-created the raw NGX feature on a frame count
+  (`DelayedRecreateFrame = 60`), and the offline job's receipt gate re-presents
+  one source frame up to 120 times waiting for the add-on to publish a fresh
+  feature-18 evaluation. Those two collided: the release landed inside the gate
+  and tore down the inline neural worksets whose counter the gate was waiting
+  for, so the count never advanced and the job aborted with "A frame was not
+  produced by feature 18." The reporter's log shows the add-on's re-arm and its
+  `count=60` line in the same instant, then no add-on output at all until
+  teardown. Whether it survived was a race, which is why the same build worked
+  on an RTX 4080 SUPER. The feature is now created once and kept: NVIDIA's DLSS
+  Programming Guide 310.6.0 restricts re-creation to display-resolution, RTX and
+  buffer-format changes (S3.2) and requires that no command list referencing the
+  feature is in flight when it is released (S5.5), and both sibling projects
+  that drive the same add-on treat the warm-up re-create as a one-shot
+  workaround for older builds that latch standby on a create they missed,
+  disabled outright for the v4.5+ builds that adopt features lazily. A re-hook
+  is now only ever explicit, and the job makes that request before capture
+  starts - when its own evidence says interception was never armed - so nothing
+  releases a live feature while a receipt is outstanding. The evidence baseline
+  is read after any such re-hook. Verified on an RTX 4080 SUPER: a live session
+  rendered 313/313 frames, `verified=313 failure=none`, past evaluation #300 on
+  a single `CreateFeature` and with no re-create line in the worker log.
+- DLSS Super Resolution no longer refuses a source that cannot reach the
+  requested output. It asked the runtime for the admissible input range at one
+  fixed output and gave up when the source fell short, which is what left a
+  436x573 photo with no upscaling at all on the RTX 2060 in #2 - and answers #1,
+  which asked what resolution the dialog wants. The range is a runtime query,
+  not a ratio: the guide documents no maximum upscaling ratio and no fixed
+  fraction for the minimum (S3.2.2), so the output is now reduced by exactly the
+  shortfall the runtime reported and queried again, at the source's aspect ratio
+  as S3.2.2.1 requires, never below the source. Reproduced on an RTX 4080 SUPER,
+  where a 1098x1440 output advertises a 549x720 minimum: a 436x572 source used
+  to be rejected and now renders 50/50 evaluations at 872x1144. The status text
+  says the source is too small for the chosen target instead of reporting DLSS
+  as unavailable.
+- Source acquisition reports what it is doing. A YouTube neural session copies
+  the whole source locally first, and that copy emitted one phase event with no
+  counters, so the panel sat still for minutes; the RTX 2060 reporter in #2 read
+  it as a hang and cancelled four times, each attempt starting from byte zero.
+  ffmpeg is now asked for `-progress pipe:1` and its `total_size`/`out_time`
+  are parsed off the pipe it already shares, so the bar tracks the copy and the
+  panel names the megabytes and the percentage. The human-readable stderr
+  progress line is deliberately not parsed.
+- The neural job has a per-phase silence deadline. Acquisition, cache checks,
+  preflight, decoding and rendering must keep reporting - 60 s for acquisition,
+  120 s for the rest - and a phase that goes quiet for longer fails the job with
+  the helper-protocol reason instead of leaving a progress bar running forever.
+  Encoding and validation are not watched: ffmpeg's flush and hashing the output
+  are legitimately silent.
+- Still images can start a neural render from the toolbar. The Neural Rendering
+  button was permanently disabled on a photo, because a still cannot run a live
+  session and nothing was cached yet, so #2 concluded images were unsupported;
+  it now submits the same single-frame job the frame preview uses.
+- A live session no longer implies it checked whether the GPU can keep up when
+  it has nothing to check with. Only Blackwell and Ada carry a measured pace
+  prior, and an absent prior was silently treated as "keeps up", so the promise
+  made to #2 did not hold on a 2060. The forecast now reports whether it was
+  measured, the log says the pace is unmeasured, and the session status says so
+  while it runs.
+- Scene-cut detection is debounced. The detector was stateless, so one
+  transition fired it 6 times in 12 frames, and every fire wipes the DLSS
+  temporal history the reconstruction depends on. The decision is now classified
+  by strength; the weak arm (moderate residual plus a collapsed luma histogram)
+  is suppressed unless 0.6 s has passed since the last accepted cut, which is
+  PySceneDetect's `min_scene_len` default applied as the same hard
+  minimum-interval filter, while a strong residual still cuts immediately as
+  x264/x265 do inside `min-keyint`. Every frame carries its own verdict -
+  strength, suppressed flag, residual, histogram overlap - and playback logs it,
+  which it never did before.
+- The release workflow attaches a `.sha256` beside the core package it builds,
+  and the README's download table describes the assets a release actually
+  carries: v0.17.1 published only the 31 MB core zip, while the table promised
+  the 308 MB full package and hashes for both. CI cannot build the full package
+  because it never fetches the locked runtime, so that one is documented as the
+  hand-attached asset it has always been.
+
 ## 0.17.1 - 2026-09-10
 
 - Fixed live playback stopping at a segment seam with the modal "out of sync"

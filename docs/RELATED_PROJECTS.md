@@ -3,6 +3,10 @@
 These projects were reviewed on September 1, 2026 to avoid duplicating solved
 integration work and to compare real-time performance strategies.
 
+The full September 10, 2026 comparison — what to build, what to fix and what to
+refuse, with the licensing boundary for each source — is
+[ECOSYSTEM_REVIEW.md](ECOSYSTEM_REVIEW.md).
+
 ## Adopted ideas
 
 - [DLSS5-Feeder](https://github.com/jlrouzies-fr/DLSS5-Feeder) documents the
