@@ -12,7 +12,14 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
-if ($version -cne '0.17.2') { throw "This assembler is locked to release 0.17.2; VERSION is '$version'." }
+# The assembler used to be pinned to one literal release, which meant every
+# version bump failed the release workflow at the packaging step until someone
+# edited this line. VERSION is the single source now; the shape is still
+# checked, and the built executable's own version resource is compared against
+# it below, which is the property the pin was actually protecting.
+if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "VERSION must read major.minor.patch; received '$version'."
+}
 
 $distRoot = Join-Path $repositoryRoot 'dist'
 $stageName = if ($PublicCore) { "DLSSVideoPlayer-v$version-core-win64" } else { "DLSSVideoPlayer-v$version$PackageSuffix-win64" }
@@ -90,8 +97,8 @@ function Invoke-FreshReleaseBuild {
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
         ProductName = 'DLSS Video Player'
-        FileVersion = '0.17.2.0'
-        ProductVersion = '0.17.2.0'
+        FileVersion = "$version.0"
+        ProductVersion = "$version.0"
         OriginalFilename = 'DLSSVideoPlayer.exe'
     }
     foreach ($name in $expectedIdentity.Keys) {
@@ -111,7 +118,7 @@ function Invoke-FreshReleaseBuild {
         }
     }
 
-    Write-Host 'Fresh clean DLSSVideoPlayer 0.17.2.0 build verified.'
+    Write-Host "Fresh clean DLSSVideoPlayer $version.0 build verified."
 }
 
 $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
