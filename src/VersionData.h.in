@@ -1,0 +1,8 @@
+#pragma once
+
+// Generated from the VERSION file by CMake. Edit VERSION, never this file and
+// never the numbers in resources.rc: the release assembler compares the built
+// executable's own version resource against VERSION, and a resource that was
+// bumped by hand (or not bumped at all) fails the release at packaging time.
+#define DLSS_VIDEO_PLAYER_VERSION_COMMA @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+#define DLSS_VIDEO_PLAYER_VERSION_RESOURCE "@PROJECT_VERSION@.0\0"

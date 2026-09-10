@@ -1,5 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.18.0 LANGUAGES CXX RC)
+
+# VERSION is the single source of the release number: the release workflow gates
+# the tag against it, the assembler compares the built executable's version
+# resource against it, and resources.rc reads it through generated/VersionData.h.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" DLSS_VIDEO_PLAYER_VERSION_RAW)
+string(STRIP "${DLSS_VIDEO_PLAYER_VERSION_RAW}" DLSS_VIDEO_PLAYER_VERSION_FILE)
+if(NOT DLSS_VIDEO_PLAYER_VERSION_FILE MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "VERSION must read major.minor.patch; received '${DLSS_VIDEO_PLAYER_VERSION_FILE}'.")
+endif()
+project(DLSSVideoPlayer VERSION ${DLSS_VIDEO_PLAYER_VERSION_FILE} LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -32,12 +42,14 @@ set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
 file(READ "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json" RUNTIME_LOCK_JSON)
 configure_file(src/RuntimeLockData.h.in "${CMAKE_BINARY_DIR}/generated/RuntimeLockData.h" @ONLY)
+configure_file(src/VersionData.h.in "${CMAKE_BINARY_DIR}/generated/VersionData.h" @ONLY)
 set(GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated")
 
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/resources.h
     src/resources.rc
+    src/VersionData.h.in
     src/AppMenu.cpp
     src/AppMenu.h
     src/UiLayout.cpp
