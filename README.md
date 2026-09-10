@@ -13,12 +13,10 @@ frame with neural rendering off, then on, then playback with it left on. 1080p
 H.264, no sound. [How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
-> This is a community project, not an NVIDIA product. The neural runtime is a
-> modified, unsigned community build. v0.17.2 was checked on an RTX 4080 SUPER
-> and v0.17.1 on an RTX 5090. RTX 20 and 30 are enabled, and the first Ampere
-> run - an RTX 3060 Laptop - was refused by its **driver**, not by the runtime:
-> feature 18 needs driver 610.47 or newer, and 616.64 is the verified one.
-> Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+> Community project, not an NVIDIA product. The neural runtime is a modified,
+> unsigned community build. Checked on an RTX 4080 SUPER (v0.17.2) and an RTX
+> 5090 (v0.17.1). Neural rendering needs NVIDIA driver 610.47 or newer.
+> Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
@@ -29,10 +27,8 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 | `dlss5-video-player-v0.18.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
 | `DLSSVideoPlayer-v0.18.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
-Both have a `.sha256` beside them on the release page. The full package is
-attached by hand, because the automated build never fetches the runtime, so it
-appears a few minutes after the smaller one.
-GitHub's "Source code" zip does not run; it has no runtime in it.
+Both have a `.sha256` beside them on the release page. GitHub's "Source code"
+zip does not run: no runtime in it.
 
 ## First run
 
@@ -201,13 +197,14 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
   1.165x real time, while a 6.3 Mbit/s 4K re-encode costs 42 ms per frame, or
   0.78x, and drops nearly every present. The player measures your GPU after the
   first session and warns before one it expects to fall behind.
-- Driver. Neural rendering needs the driver's own NGX core to know feature 18:
-  below **610.47** the player refuses the render up front and names the version
-  to install (616.64 is the verified one). An older driver answers
-  `feature 18 create failed with 0xbad00002`, whatever the GPU is. See
+- Driver. Feature 18 lives in the driver's own NGX core, so an old driver
+  refuses the render whatever the card is, with `feature 18 create failed with
+  0xbad00002`. Below **610.47** the player says so up front instead of spending
+  five seconds in a probe that cannot pass; 616.64 is the driver this project
+  has rendered on. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
-- RTX 20 and 30 run the universal runtime without native FP8. Expect them to be
-  several times slower. Nobody has verified them in this project yet.
+- RTX 20 and 30 run the universal runtime without native FP8, so expect them to
+  be several times slower. Nobody has rendered on one here yet.
 - Motion and depth guides are estimated from the video. Artifacts happen.
 - Export copies the cached 8-bit render. Image adjustments and upscaling are not
   baked in, and HDR or lost source precision is not restored.
