@@ -35,6 +35,9 @@
   the docs that said a 5090 keeps up with any source to 4K30 say what the file
   costs instead, and the reference constants in `src/PlaybackTiming.h` say that
   they are a seed for an unmeasured machine rather than current numbers.
+- The release workflow uploaded `dist/DLSSVideoPlayer-v0.14.1-core-win64.zip`,
+  a name the packager stopped producing three releases ago; it now takes the
+  versioned zip it actually builds and fails when there is none.
 
 ## 0.17.0 - 2026-09-10
 
