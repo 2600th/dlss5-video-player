@@ -470,14 +470,55 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK(std::find(arguments.begin(), arguments.end(), L"pipe:0") != arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"cmd.exe") == arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"powershell.exe") == arguments.end());
+    // The CPU conversion inside ffmpeg is what the BGRA path pays for; the pixel format
+    // it is given must stay BGRA in, yuv420p out, and untagged.
+    const auto value = [](const std::vector<std::wstring>& list, const wchar_t* flag) {
+        std::vector<std::wstring> found;
+        for (size_t index = 0; index + 1 < list.size(); ++index)
+            if (list[index] == flag) found.push_back(list[index + 1]);
+        return found;
+    };
+    CHECK_EQ((std::vector<std::wstring>{L"bgra", L"yuv420p"}), value(arguments, L"-pix_fmt"));
+    CHECK(std::find(arguments.begin(), arguments.end(), L"-colorspace") == arguments.end());
+
+    // A GPU-converted capture arrives as NV12 and leaves as NV12: NVENC takes it as it
+    // stands, so no frame is converted on the CPU. Only this path states its
+    // colorimetry, because only here does the player pick the matrix.
+    EncoderSpec gpuConverted = encoder;
+    gpuConverted.pixelFormat = EncoderPixelFormat::Nv12;
+    const std::vector<std::wstring> nv12 = BuildEncoderArguments(
+        gpuConverted, LR"(C:\Cache Root\neural.partial.mkv)");
+    CHECK_EQ((std::vector<std::wstring>{L"nv12", L"nv12"}), value(nv12, L"-pix_fmt"));
+    CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(nv12, L"-colorspace"));
+    CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(nv12, L"-color_range"));
+    // x264 has no NV12 input, so that pairing converts one plane instead of a frame.
+    EncoderSpec software = gpuConverted;
+    software.kind = EncoderKind::H264Software;
+    CHECK_EQ((std::vector<std::wstring>{L"nv12", L"yuv420p"}),
+             value(BuildEncoderArguments(software, LR"(C:\Cache Root\neural.partial.mkv)"), L"-pix_fmt"));
+
+    // 1.5 bytes per pixel instead of 4, which is what the readback and the pipe carry.
+    CHECK_EQ(uint64_t{1920 * 1080 * 3 / 2}, EncoderFrameBytes(EncoderPixelFormat::Nv12, 1920, 1080));
+    CHECK_EQ(uint64_t{1920 * 1080 * 4}, EncoderFrameBytes(EncoderPixelFormat::Bgra, 1920, 1080));
 }
 
 void encoder_frame_contract_and_fallback_policy_are_fail_closed_test()
 {
     const EncoderSpec valid{2, 2, 30.0, EncoderKind::HevcNvenc};
-    CHECK_EQ(size_t{16}, ExpectedBgraFrameBytes(valid));
-    CHECK_EQ(size_t{0}, ExpectedBgraFrameBytes(EncoderSpec{0, 2, 30.0, EncoderKind::HevcNvenc}));
-    CHECK_EQ(size_t{0}, ExpectedBgraFrameBytes(EncoderSpec{2, 2, 0.0, EncoderKind::HevcNvenc}));
+    CHECK_EQ(size_t{16}, ExpectedFrameBytes(valid));
+    CHECK_EQ(size_t{0}, ExpectedFrameBytes(EncoderSpec{0, 2, 30.0, EncoderKind::HevcNvenc}));
+    CHECK_EQ(size_t{0}, ExpectedFrameBytes(EncoderSpec{2, 2, 0.0, EncoderKind::HevcNvenc}));
+    // The size the encoder demands has to follow the format the capture hands over, or
+    // a GPU-converted frame is rejected as the wrong size on every single write.
+    EncoderSpec converted = valid;
+    converted.pixelFormat = EncoderPixelFormat::Nv12;
+    CHECK_EQ(size_t{6}, ExpectedFrameBytes(converted));
+    // NV12 has no half-pixel chroma sample, so an odd size is refused rather than
+    // encoded at a size the capture does not produce.
+    EncoderSpec oddConverted = converted;
+    oddConverted.width = 3;
+    CHECK_EQ(size_t{0}, ExpectedFrameBytes(oddConverted));
+    CHECK_EQ(size_t{12}, ExpectedFrameBytes(EncoderSpec{3, 1, 30.0, EncoderKind::H264Software}));
     CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::StartFailed));
     CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::WriteFailed));
     CHECK(ShouldRetryWithSoftware(EncoderKind::HevcNvenc, EncodeError::FinishFailed));
@@ -630,13 +671,21 @@ void encoder_blocked_write_is_interrupted_by_stop_test()
     // frame must be larger than the child's stdin pipe buffer. Deriving the requirement
     // from the constant keeps this test honest if that buffer is ever retuned: it used to
     // rely on the pipe defaulting to a few kilobytes.
-    CHECK(ExpectedBgraFrameBytes(spec) > kChildStdinPipeBytes);
+    CHECK(ExpectedFrameBytes(spec) > kChildStdinPipeBytes);
     CHECK_EQ(EncodeError::None,encoder.Start(spec,fixture.Path()/L"hang-output.mkv"));
-    std::vector<uint8_t> frame(ExpectedBgraFrameBytes(spec));std::stop_source stop;
+    std::vector<uint8_t> frame(ExpectedFrameBytes(spec));std::stop_source stop;
     auto write=std::async(std::launch::async,[&]{return encoder.WriteFrame(frame,stop.get_token());});
     std::this_thread::sleep_for(100ms);stop.request_stop();
     CHECK_EQ(std::future_status::ready,write.wait_for(3s));
-    if(write.wait_for(0s)==std::future_status::ready)CHECK_EQ(EncodeError::Cancelled,write.get());
+    if(write.wait_for(0s)==std::future_status::ready){
+        // CHECK_EQ prints the expressions, not the values, and the future can only be
+        // read once - so name the outcome here or a failure says nothing about which
+        // error the write actually returned.
+        const EncodeError result=write.get();
+        if(result!=EncodeError::Cancelled)
+            std::cerr<<"blocked-write diagnostic: result="<<static_cast<int>(result)<<'\n';
+        CHECK_EQ(EncodeError::Cancelled,result);
+    }
 }
 
 std::vector<OfflineDecodedFrame> FiveOfflineFrames()

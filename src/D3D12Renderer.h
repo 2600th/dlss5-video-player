@@ -27,10 +27,21 @@ using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
 D3D12RendererOwner MakeD3D12Renderer();
 struct GuideFrame;
 
+// What the capture path reads back, and therefore what the encoder is fed.
+//
+//  * Bgra - the cache render target as it stands. ffmpeg converts every frame to
+//    yuv420p on the CPU, which measured as the export's slowest stage.
+//  * Nv12 - the same picture converted on the GPU: a full-resolution Y plane followed
+//    by an interleaved half-resolution UV plane, BT.709 limited range. NVENC takes it
+//    unchanged, and it is 1.5 bytes per pixel instead of 4 across PCIe and the pipe.
+//    Requires even output dimensions.
+enum class CaptureFormat { Bgra, Nv12 };
+
 struct CapturedVideoFrame {
-    // Tightly packed 8-bit BGRA, matching the B8G8R8A8_UNORM cache render target. The
-    // encoder is configured with EncoderPixelFormat::Bgra so no channel swizzle is
-    // needed on the CPU. Named for the payload, not a channel order, because the test
+    // Tightly packed pixels in the renderer's active CaptureFormat, which the encoder
+    // is started to match: 8-bit BGRA straight from the B8G8R8A8_UNORM cache render
+    // target, or the NV12 Y plane followed by its interleaved UV plane. Neither costs a
+    // CPU channel swizzle. Named for the payload, not a channel order, because the test
     // hook may supply any layout.
     std::vector<uint8_t> pixels;
     uint32_t width{};
@@ -93,9 +104,14 @@ public:
     // BeginResolveOldestCapture that produced it and the matching End.
     struct CaptureReadbackView {
         const uint8_t* base = nullptr;   // first byte of row 0, footprint offset applied
-        size_t rowPitch = 0;             // may exceed width*4; rows are padded
+        size_t rowPitch = 0;             // may exceed the tight row; rows are padded
         size_t bytes = 0;                // tightly packed size the copy produces
         uint32_t width = 0, height = 0;
+        CaptureFormat format = CaptureFormat::Bgra;
+        // NV12 only: the interleaved UV plane, half resolution in both axes, sitting in
+        // the same readback buffer at its own aligned offset.
+        const uint8_t* chromaBase = nullptr;
+        size_t chromaRowPitch = 0;
     };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
@@ -129,6 +145,12 @@ public:
     // nothing is in flight. The offline job uses it for the first frame, whose evidence
     // receipt loop must read pixels back before deciding whether to resubmit.
     bool CaptureRenderedFrame(CapturedVideoFrame& capture) { return CaptureEvaluatedFrame(capture); }
+
+    // Selects what the next Initialize builds its capture resources for. Ignored once
+    // Initialize has run, and downgraded to Bgra when the output size is odd, so callers
+    // must read ActiveCaptureFormat back rather than assume the request was honoured.
+    void SetCaptureFormat(CaptureFormat format) { m_requestedCaptureFormat = format; }
+    CaptureFormat ActiveCaptureFormat() const { return m_captureFormat; }
 
     // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
     // apart from a swapchain that is pacing it. Both counters only ever move on the
@@ -214,7 +236,8 @@ private:
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
     // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
-    static constexpr uint32_t PresentConstantCount = 16;
+    // 16 present parameters plus the capture pass's source texel size.
+    static constexpr uint32_t PresentConstantCount = 20;
     static constexpr uint32_t ReferenceSRV = 6;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
@@ -296,6 +319,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCacheCapture; // present shader into a BGRA8 target
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureLuma;   // present shader into an R8 Y plane
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureChroma; // ...and a half-size R8G8 UV plane
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;
@@ -310,6 +335,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheOutput;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_captureLuma;    // NV12 only
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_captureChroma;  // NV12 only
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[FrameCount];
@@ -329,6 +356,11 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_cacheFootprint{};
+    // Both planes share one readback buffer, chroma at an alignment-padded offset.
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_lumaFootprint{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_chromaFootprint{};
+    CaptureFormat m_requestedCaptureFormat = CaptureFormat::Bgra;
+    CaptureFormat m_captureFormat = CaptureFormat::Bgra;
     uint32_t m_numRows=0,m_guideRows=0;
     uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0;
     uint32_t m_cacheRows=0;

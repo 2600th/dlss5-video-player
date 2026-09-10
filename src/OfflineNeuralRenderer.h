@@ -150,6 +150,10 @@ struct NeuralRenderRequest {
     // Manual-reset event owned by the caller. Signalled means "pause"; the
     // worker checks it between frames and reports NeuralRenderPhase::Paused.
     HANDLE pauseEvent{};
+    // Convert the captured frame to NV12 on the GPU instead of handing ffmpeg BGRA and
+    // letting it convert every frame on the CPU. Ignored when the output size is odd,
+    // and by the test evaluator, which always captures BGRA.
+    bool gpuColorConversion{false};
 };
 
 struct NeuralRenderProgress {

@@ -80,6 +80,7 @@ private:
             {L"neural.settings.tone", L"Local tone"}, {L"neural.settings.skin", L"Skin structure"},
             {L"neural.settings.style", L"Style"}, {L"neural.settings.automask", L"Automatic mask"},
             {L"neural.settings.guides", L"Guides"}, {L"neural.settings.guide_mv", L"Motion vectors"}, {L"neural.settings.guide_depth", L"Depth"},
+            {L"neural.settings.encoding", L"Encoding"}, {L"neural.settings.gpu_convert", L"GPU color conversion"},
             {L"neural.settings.note", L"These change the neural model: they apply to the paused preview and to the next conversion; playback color adjustments are instant."},
             // Tooltips. They describe the control and, where it was measured,
             // what it demonstrably does; they never promise a direction that has
@@ -90,6 +91,7 @@ private:
             {L"neural.tip.skin", L"Separate structure term for skin, from -1.00 to +1.00 (default -1.00).\nChanges the frame; NVIDIA documents no scale, so compare faces in the preview."},
             {L"neural.tip.style", L"Which look the model is asked for. Changing it rebuilds the neural feature, so the next render starts a fresh temporal history."},
             {L"neural.tip.automask", L"Lets the model choose regions to leave untouched.\nTurning it off measurably changes the frame."},
+            {L"neural.tip.gpu_convert", L"Converts each rendered frame to NV12 on the GPU instead of sending the encoder full BGRA and letting it convert on the CPU.\nMeasured on the export loop, that CPU conversion was the slowest stage. Turn it off to go back to the previous path if a render looks wrong."},
             {L"neural.tip.guide_mv", L"Sends this player's estimated motion to the model so it can reuse the previous frame.\nVideo carries no real motion vectors, so these are estimated per frame and rejected where the estimate is not trustworthy."},
             {L"neural.tip.guide_depth", L"Sends this player's estimated depth proxy.\nMeasured: it only changes the image while Motion vectors is on - with motion off, depth makes no difference."},
             {L"neural.tip.apply", L"Applies these settings to what is on screen: an active session restarts at the playhead, a paused frame is rendered again.\nEvery distinct combination is rendered from scratch - about 10 s for one 1080p frame - and repeats come back from cache."},

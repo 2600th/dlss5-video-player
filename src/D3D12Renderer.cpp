@@ -148,7 +148,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
 }
 
 bool D3D12Renderer::CreateHeapsAndBackbuffers(){
-    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+5;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
     D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -169,6 +169,7 @@ cbuffer Params:register(b0){
     float4 ColorA; // brightness, contrast, saturation, gamma
     float4 ColorB; // temperature, tint, reserved, reserved
     float4 Compare; // mode (0 neural,1 original,2 blend,3 split,4 wipe), amount|splitX, zoomCenterX, zoomCenterY
+    float4 Capture; // xy = one chroma texel in UV, zw reserved
 }
 struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
 V VS(uint id:SV_VertexID){float2 uv=float2((id<<1)&2,id&2);V o;o.uv=uv;o.p=float4(uv.x*2-1,1-uv.y*2,0,1);return o;}
@@ -214,6 +215,28 @@ float4 PSPresent(V i):SV_Target{
     }
     return float4(LinearToSRGB(c),1);
 }
+// GPU colour conversion for the NV12 capture path. The picture is exactly what the
+// cache-capture pass produces; only the encoding differs, from 8-bit BGRA to BT.709
+// limited-range Y and interleaved UV, so ffmpeg never converts a frame on the CPU.
+float3 CaptureRGB(float2 uv){return LinearToSRGB(ApplyVideoAdjustments(T.SampleLevel(S,uv,0).rgb));}
+float CaptureY(float3 c){return (16.0+219.0*dot(c,float3(0.2126,0.7152,0.0722)))/255.0;}
+float2 CaptureChromaOf(float3 c){
+    float u=128.0+224.0*dot(c,float3(-0.114572,-0.385428,0.5));
+    float v=128.0+224.0*dot(c,float3(0.5,-0.454153,-0.045847));
+    return float2(u,v)/255.0;
+}
+float PSCaptureLuma(V i):SV_Target{return CaptureY(CaptureRGB(i.uv));}
+// One chroma sample covers a 2x2 luma block. The four samples are converted first and
+// averaged after, which is what a CPU 4:2:0 conversion does; averaging the colours
+// first would pull saturated edges towards grey.
+float2 PSCaptureChroma(V i):SV_Target{
+    float2 o=Capture.xy*0.25;
+    float2 c=CaptureChromaOf(CaptureRGB(i.uv+float2(-o.x,-o.y)));
+    c+=CaptureChromaOf(CaptureRGB(i.uv+float2(o.x,-o.y)));
+    c+=CaptureChromaOf(CaptureRGB(i.uv+float2(-o.x,o.y)));
+    c+=CaptureChromaOf(CaptureRGB(i.uv+float2(o.x,o.y)));
+    return c*0.25;
+}
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
 float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(c,1);}
 float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
@@ -223,11 +246,14 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv+JitterUV,0).xy;}
 )";
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
+    ComPtr<ID3DBlob>captureLuma,captureChroma;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
-    if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand))return false;
+    if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
+       !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     for(uint32_t r=0;r<2;++r){ranges[r].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[r].NumDescriptors=1;ranges[r].BaseShaderRegister=r;}
-    // [0] t0 current view, [1] t1 comparison reference, [2] 16 root constants (Params).
+    // [0] t0 current view, [1] t1 comparison reference, [2] PresentConstantCount root
+    // constants (Params).
     D3D12_ROOT_PARAMETER rp[3]{};
     for(uint32_t r=0;r<2;++r){rp[r].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[r].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[r].DescriptorTable.NumDescriptorRanges=1;rp[r].DescriptorTable.pDescriptorRanges=&ranges[r];}
     rp[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[2].Constants.Num32BitValues=PresentConstantCount;rp[2].Constants.ShaderRegister=0;
@@ -245,6 +271,13 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     // Cache capture runs the same present shader into a BGRA8 target, so the
     // readback rows already carry the caller's byte order and need no CPU swizzle.
     p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCacheCapture)),"Create cache-capture PSO"))return false;
+    p.PS={captureLuma->GetBufferPointer(),captureLuma->GetBufferSize()};
+    p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
+    p.PS={captureChroma->GetBufferPointer(),captureChroma->GetBufferSize()};
+    p.RTVFormats[0]=DXGI_FORMAT_R8G8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureChroma)),"Create NV12 chroma PSO"))return false;
+    // The debug views draw into the backbuffer, so they take its format. They used to
+    // inherit the cache target's B8G8R8A8 from the PSO created just above, which does
+    // not match the R8G8B8A8 swapchain the present pass actually binds them to.
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;
     p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
     p.PS={depth->GetBufferPointer(),depth->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebug)),"Create depth debug PSO"))return false;
@@ -323,6 +356,43 @@ bool D3D12Renderer::CreateVideoResources(){
                                     &m_cacheRowSize,&m_cacheReadbackBytes);
     if(!m_cacheReadbackBytes||m_cacheRows!=m_outputH||m_cacheRowSize!=uint64_t{m_outputW}*4u)
         return false;
+    // GPU colour conversion writes two planes instead of one BGRA target. NV12 is 4:2:0,
+    // so an odd output keeps the BGRA capture rather than losing a row or a column.
+    m_captureFormat=(m_requestedCaptureFormat==CaptureFormat::Nv12&&!(m_outputW%2)&&!(m_outputH%2))
+        ?CaptureFormat::Nv12:CaptureFormat::Bgra;
+    if(m_requestedCaptureFormat==CaptureFormat::Nv12&&m_captureFormat==CaptureFormat::Bgra)
+        LOG("GPU colour conversion needs even output dimensions; capturing BGRA at "
+            <<m_outputW<<"x"<<m_outputH<<".");
+    m_captureLuma.Reset();m_captureChroma.Reset();
+    m_lumaFootprint={};m_chromaFootprint={};
+    if(m_captureFormat==CaptureFormat::Nv12){
+        auto luma=Tex2D(DXGI_FORMAT_R8_UNORM,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&luma,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_captureLuma)),
+            "Create NV12 luma plane"))return false;
+        m_captureLuma->SetName(L"Neural_Capture_Luma_R8");
+        m_device->CreateRenderTargetView(m_captureLuma.Get(),nullptr,RTV(FrameCount+3));
+        auto chroma=Tex2D(DXGI_FORMAT_R8G8_UNORM,m_outputW/2u,m_outputH/2u,
+                          D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&chroma,
+            D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_captureChroma)),
+            "Create NV12 chroma plane"))return false;
+        m_captureChroma->SetName(L"Neural_Capture_Chroma_R8G8");
+        m_device->CreateRenderTargetView(m_captureChroma.Get(),nullptr,RTV(FrameCount+4));
+        // Both planes land in one readback buffer, the second at the offset D3D12
+        // requires for a placed copy, so a capture is still a single fence and a single
+        // mapped range.
+        uint32_t lumaRows=0,chromaRows=0;uint64_t lumaRowSize=0,chromaRowSize=0,lumaTotal=0,chromaTotal=0;
+        m_device->GetCopyableFootprints(&luma,0,1,0,&m_lumaFootprint,&lumaRows,&lumaRowSize,&lumaTotal);
+        const uint64_t alignment=D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        const uint64_t chromaOffset=(lumaTotal+alignment-1u)&~(alignment-1u);
+        m_device->GetCopyableFootprints(&chroma,0,1,chromaOffset,&m_chromaFootprint,&chromaRows,
+                                        &chromaRowSize,&chromaTotal);
+        if(lumaRows!=m_outputH||chromaRows!=m_outputH/2u||lumaRowSize!=uint64_t{m_outputW}||
+           chromaRowSize!=uint64_t{m_outputW})return false;
+        m_cacheReadbackBytes=chromaOffset+
+            uint64_t{m_chromaFootprint.Footprint.RowPitch}*chromaRows;
+    }
     auto readbackHeap=HeapProps(D3D12_HEAP_TYPE_READBACK);
     D3D12_RESOURCE_DESC readback{};readback.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
     readback.Width=m_cacheReadbackBytes;readback.Height=1;readback.DepthOrArraySize=1;
@@ -598,8 +668,9 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
     m_referenceInCopyDest=false;m_referencePending=false;m_hasReference=true;
 }
 
-// Root constants (16 floats): [0..1] JitterUV, [2] Misc.x = 1/outputW, [3] Misc.y = zoom,
-// [4..7] ColorA, [8..11] ColorB, [12..15] Compare{mode, amount|splitX, zoomCenterX, zoomCenterY}.
+// Root constants (PresentConstantCount floats): [0..1] JitterUV, [2] Misc.x = 1/outputW,
+// [3] Misc.y = zoom, [4..7] ColorA, [8..11] ColorB, [12..15] Compare{mode, amount|splitX,
+// zoomCenterX, zoomCenterY}, [16..17] Capture.xy = one chroma texel in UV.
 // Also binds the comparison reference at t1. Without an uploaded reference every
 // comparison mode degrades to Neural so the shader never selects the black texture.
 void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference){
@@ -609,7 +680,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         0,0,m_outputW?1.0f/float(m_outputW):0.0f,std::max(cmp.zoomScale,0.01f),
         cs.brightness,cs.contrast,cs.saturation,cs.gamma,
         cs.temperature,cs.tint,0,0,
-        float(static_cast<int>(mode)),select,cmp.zoomCenterX,cmp.zoomCenterY};
+        float(static_cast<int>(mode)),select,cmp.zoomCenterX,cmp.zoomCenterY,
+        m_outputW?2.0f/float(m_outputW):0.0f,m_outputH?2.0f/float(m_outputH):0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootConstants,PresentConstantCount,params,0);
     cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(ReferenceSRV));
 }
@@ -617,7 +689,11 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
 bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     capture.pixels.clear();capture.width=0;capture.height=0;
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
-    const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
+    // Whatever the active capture format produces, not four bytes per pixel: an NV12
+    // capture is 1.5, and the size is the contract the caller checks the frame against.
+    const uint64_t pixels64=uint64_t{m_outputW}*m_outputH;
+    const uint64_t tightBytes64=m_captureFormat==CaptureFormat::Nv12
+        ?pixels64+pixels64/2u:pixels64*4u;
     if(tightBytes64>std::numeric_limits<size_t>::max())return false;
 #if defined(D3D12_RENDERER_TESTING)
     if(m_testCacheCapture){
@@ -639,8 +715,10 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
 bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     if(m_capturePending>=CaptureSlots)return false;
+    const bool nv12=m_captureFormat==CaptureFormat::Nv12;
     if(m_gpuUnusable||!m_cacheOutput||!m_dlssOutput||!m_queue||!m_rootSig||!m_psoCacheCapture)
         return false;
+    if(nv12&&(!m_captureLuma||!m_captureChroma||!m_psoCaptureLuma||!m_psoCaptureChroma))return false;
     const uint32_t readbackSlot=m_captureWrite;
     if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
@@ -654,28 +732,44 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     D3D12_VIEWPORT viewport{0,0,float(m_outputW),float(m_outputH),0,1};
     D3D12_RECT scissor{0,0,LONG(m_outputW),LONG(m_outputH)};
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
-    auto target=RTV(FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
+    auto target=RTV(nv12?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(target,black,0,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoCacheCapture.Get());
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());
+    cmd->SetPipelineState(nv12?m_psoCaptureLuma.Get():m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
     // Cache frames are always the bare neural output: no comparison, no color/zoom.
     SetPresentConstants(cmd,ColorSettings{},ComparisonSettings{},false);
     cmd->DrawInstanced(3,1,0,0);
-    Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,
-            D3D12_RESOURCE_STATE_COPY_SOURCE);
-    // A single m_cacheOutput is enough even with several captures in flight: the next
-    // frame's draw into it and this frame's copy out of it are recorded on the same
-    // queue, so the GPU already runs them in order.
-    D3D12_TEXTURE_COPY_LOCATION destination{};
-    destination.pResource=m_cacheReadback[readbackSlot].Get();
-    destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    destination.PlacedFootprint=m_cacheFootprint;
-    D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=m_cacheOutput.Get();
-    source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
-    Barrier(cmd,m_cacheOutput.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,
-            D3D12_RESOURCE_STATE_RENDER_TARGET);
+    // A single set of capture targets is enough even with several captures in flight:
+    // the next frame's draw into them and this frame's copy out of them are recorded on
+    // the same queue, so the GPU already runs them in order.
+    auto copyPlane=[&](ID3D12Resource*plane,const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&footprint){
+        Barrier(cmd,plane,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource=m_cacheReadback[readbackSlot].Get();
+        destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint=footprint;
+        D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=plane;
+        source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+        Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+    };
+    if(nv12){
+        // The chroma pass reads the same neural output at half resolution, averaging each
+        // 2x2 block after conversion.
+        D3D12_VIEWPORT chromaViewport{0,0,float(m_outputW/2u),float(m_outputH/2u),0,1};
+        D3D12_RECT chromaScissor{0,0,LONG(m_outputW/2u),LONG(m_outputH/2u)};
+        cmd->RSSetViewports(1,&chromaViewport);cmd->RSSetScissorRects(1,&chromaScissor);
+        auto chromaTarget=RTV(FrameCount+4);cmd->OMSetRenderTargets(1,&chromaTarget,FALSE,nullptr);
+        cmd->ClearRenderTargetView(chromaTarget,black,0,nullptr);
+        cmd->SetPipelineState(m_psoCaptureChroma.Get());
+        cmd->DrawInstanced(3,1,0,0);
+        copyPlane(m_captureLuma.Get(),m_lumaFootprint);
+        copyPlane(m_captureChroma.Get(),m_chromaFootprint);
+    }else{
+        copyPlane(m_cacheOutput.Get(),m_cacheFootprint);
+    }
     if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
     // Signal only. The old code drained the entire queue here, which idled the GPU for
@@ -691,7 +785,9 @@ bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     view=CaptureReadbackView{};
     if(!m_capturePending)return false;
     const uint32_t readbackSlot=m_captureRead;
-    const uint64_t tightBytes64=uint64_t{m_outputW}*m_outputH*4u;
+    const bool nv12=m_captureFormat==CaptureFormat::Nv12;
+    const uint64_t pixels64=uint64_t{m_outputW}*m_outputH;
+    const uint64_t tightBytes64=nv12?pixels64+pixels64/2u:pixels64*4u;
     if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
         EndResolveOldestCapture();return false;
     }
@@ -700,10 +796,16 @@ bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     }
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
     if(!base){EndResolveOldestCapture();return false;}
-    view.base=base+m_cacheFootprint.Offset;
-    view.rowPitch=size_t(m_cacheFootprint.Footprint.RowPitch);
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=nv12?m_lumaFootprint:m_cacheFootprint;
+    view.base=base+plane.Offset;
+    view.rowPitch=size_t(plane.Footprint.RowPitch);
     view.bytes=static_cast<size_t>(tightBytes64);
     view.width=m_outputW;view.height=m_outputH;
+    view.format=m_captureFormat;
+    if(nv12){
+        view.chromaBase=base+m_chromaFootprint.Offset;
+        view.chromaRowPitch=size_t(m_chromaFootprint.Footprint.RowPitch);
+    }
     return true;
 }
 
@@ -720,8 +822,24 @@ void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<u
     // per frame at 4K, immediately before overwriting every byte of it.
     if(pixels.size()!=view.bytes)pixels.resize(view.bytes);
     uint8_t*out=pixels.data();
-    const size_t tightRow=size_t(view.width)*4u;
     auto&pool=CaptureCopyPool();
+    if(view.format==CaptureFormat::Nv12){
+        // Y rows, then the interleaved UV rows. Both planes are one byte per sample and
+        // the chroma plane is half as wide with two samples per texel, so the tight row
+        // is the frame width for each of them.
+        const size_t row=size_t(view.width);
+        const size_t lumaHeight=size_t(view.height);
+        uint8_t*const chromaOut=out+row*lumaHeight;
+        ParallelForRangesIn(pool,lumaHeight,kParallelRowGrain,[&](size_t begin,size_t end){
+            for(size_t y=begin;y<end;++y)memcpy(out+row*y,view.base+view.rowPitch*y,row);
+        });
+        ParallelForRangesIn(pool,lumaHeight/2u,kParallelRowGrain,[&](size_t begin,size_t end){
+            for(size_t y=begin;y<end;++y)
+                memcpy(chromaOut+row*y,view.chromaBase+view.chromaRowPitch*y,row);
+        });
+        return;
+    }
+    const size_t tightRow=size_t(view.width)*4u;
     // No channel swizzle: the cache target is B8G8R8A8 and the encoder is started with
     // EncoderPixelFormat::Bgra, so ffmpeg consumes this layout directly.
     if(view.rowPitch==tightRow){

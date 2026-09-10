@@ -1,5 +1,6 @@
 #include "VideoDecoder.h"
 #include "Log.h"
+#include "ChildProcess.h"
 #include <propvarutil.h>
 #include <algorithm>
 #include <cstdlib>
@@ -20,6 +21,52 @@
 
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
+
+namespace {
+// Windows SDK 10.0.17134 (Win10 1803) introduced the flag; older headers lack the
+// name but the kernel still honours (or ignores) the value, and the plain-timer
+// fallback below covers the rest.
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+// std::this_thread::sleep_for rounds up to the ~15.6ms default Windows
+// scheduler tick unless a high-resolution timer backs the wait; nothing in
+// this process calls the process-wide timeBeginPeriod, so a 1-2ms poll sleep
+// here was measuring p95 13.7ms instead. A waitable timer with the
+// high-resolution flag (Win10 1803+) gets sub-ms accuracy without touching
+// global timer resolution. One handle per thread via thread_local: creating
+// it is measurable, so it is paid once per decode thread, not once per poll.
+class PrecisionSleeper {
+public:
+    PrecisionSleeper() {
+        m_timer = CreateWaitableTimerExW(nullptr, nullptr,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!m_timer) m_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    }
+    ~PrecisionSleeper() { if (m_timer) CloseHandle(m_timer); }
+    PrecisionSleeper(const PrecisionSleeper&) = delete;
+    PrecisionSleeper& operator=(const PrecisionSleeper&) = delete;
+
+    void SleepMs(int ms) {
+        if (!m_timer) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); return; }
+        // Relative due time in 100ns units; negative means relative-to-now.
+        LARGE_INTEGER due; due.QuadPart = -(static_cast<LONGLONG>(ms) * 10000);
+        if (!SetWaitableTimer(m_timer, &due, 0, nullptr, nullptr, FALSE)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+            return;
+        }
+        WaitForSingleObject(m_timer, INFINITE);
+    }
+
+private:
+    HANDLE m_timer = nullptr;
+};
+
+void SleepPreciseMs(int ms) {
+    thread_local PrecisionSleeper sleeper;
+    sleeper.SleepMs(ms);
+}
+} // namespace
 
 static std::wstring Quote(const std::wstring& s) {
     // Windows filenames cannot contain a literal quote character, so this is
@@ -104,6 +151,13 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
     swap(m_seekTiming,other.m_seekTiming);swap(m_seekStart,other.m_seekStart);swap(m_seekTargetSeconds,other.m_seekTargetSeconds);swap(m_seekTimingPending,other.m_seekTimingPending);
     swap(m_sourceGeneration,other.m_sourceGeneration);swap(m_restartDiscontinuity,other.m_restartDiscontinuity);
+    // Stopping both queues silences each decoder's own reader, but an external
+    // consumer can still be returning a spent buffer to either side, and
+    // vector::swap moves the buffers themselves rather than their bytes.
+    if(this!=&other){
+        std::scoped_lock poolLock(m_bufferPoolMutex,other.m_bufferPoolMutex);
+        swap(m_bufferPool,other.m_bufferPool);
+    }
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
 #ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
@@ -124,6 +178,10 @@ const wchar_t* VideoDecoder::BackendName() const {
 void VideoDecoder::Close() {
     StopFrameQueue();
     StopFFmpeg();
+    {
+        std::lock_guard lock(m_bufferPoolMutex);
+        m_bufferPool.clear();
+    }
     m_reader.Reset();
     m_backend = Backend::None;
 }
@@ -134,9 +192,13 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, st
 
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
                                   std::stop_token stop) {
-    // Sequential offline decoding uses software decode to avoid competing with
-    // D3D12/NVENC, but enables the background frame queue so decode overlaps with GPU rendering.
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Software);
+    // NVDEC (this decode) and NVENC/D3D12 (the export encode and any render) are
+    // separate engines and the GPU sits idle during export, so software decode was
+    // only burning CPU time for nothing; request CUDA and let the existing
+    // Cuda->D3D11Va->Software fallback in StartFFmpeg/TryNextFFmpegAcceleration
+    // downgrade per codec as needed. The background frame queue still overlaps
+    // decode with GPU rendering/encoding.
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda);
 }
 
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
@@ -258,6 +320,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
             CloseHandle(job); job = nullptr;
         }
     }
+    const ChildProcessErrorModeScope quietLaunchFailures;
     const BOOL ok = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
@@ -588,6 +651,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
     const auto spawnStarted=std::chrono::steady_clock::now();
+    const ChildProcessErrorModeScope quietLaunchFailures;
     const BOOL ok = job&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
@@ -695,6 +759,25 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     return true;
 }
 
+void VideoDecoder::RecycleFrameBuffer(std::vector<uint8_t>&& buffer) {
+    if (buffer.empty()) return;
+    std::lock_guard lock(m_bufferPoolMutex);
+    if (m_bufferPool.size() >= FrameBufferPoolCapacity) return;
+    m_bufferPool.push_back(std::move(buffer));
+}
+
+std::vector<uint8_t> VideoDecoder::TakeRecycledBuffer(size_t frameBytes) {
+    std::lock_guard lock(m_bufferPoolMutex);
+    // A resolution change leaves buffers of the previous size behind; they are
+    // dropped as they are reached rather than searched for and kept.
+    while (!m_bufferPool.empty()) {
+        std::vector<uint8_t> buffer = std::move(m_bufferPool.back());
+        m_bufferPool.pop_back();
+        if (buffer.size() == frameBytes) return buffer;
+    }
+    return {};
+}
+
 bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
     return ReadNextBlocking(out, {}) == VideoReadResult::FrameReady;
 }
@@ -720,7 +803,11 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if (!frameBytes) return VideoReadResult::Error;
   for(;;){
     if(stop.stop_requested())return VideoReadResult::Cancelled;
-    if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();}
+    if(m_pendingFrame.size()!=frameBytes){
+        m_pendingFrame=TakeRecycledBuffer(frameBytes);
+        if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);++m_frameBufferFills;}
+        m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
+    }
 
     // Drain whatever the child has produced, rather than one chunk per call.
     // Returning after a single 4 MiB read made the caller sleep once per chunk:
@@ -778,7 +865,9 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     // The buffer stays put, so skipping costs nothing but the pipe read.
     if(sourceFrame<m_ffmpegFirstSourceFrame)continue;
 
-    out.bgra.swap(m_pendingFrame);m_pendingFrame.clear();
+    out.bgra.swap(m_pendingFrame);
+    RecycleFrameBuffer(std::move(m_pendingFrame));
+    m_pendingFrame.clear();
     const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
     out.timestamp100ns = m_ffmpegSeekBase100ns +
         static_cast<int64_t>((static_cast<double>(timelineFrame) / m_fps) * 10000000.0);
@@ -838,16 +927,33 @@ void VideoDecoder::StopFrameQueue(QueueBuffer buffered) {
 }
 
 void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
+    // Where this thread's time goes, reported once when it exits. The export loop
+    // measures only its own wait for a frame; splitting the producer side into
+    // pipe reads, empty-pipe polls and full-queue waits says whether the child,
+    // the copy out of the pipe, or the consumer is the one setting the pace.
+    using Clock = std::chrono::steady_clock;
+    Clock::duration readNanos{}, pollNanos{}, sleepNanos{}, spaceNanos{};
+    uint64_t frames = 0, polls = 0, spaceWaits = 0;
+    const auto loopStart = Clock::now();
+    m_frameBufferFills = 0;
     while (!stop.stop_requested()) {
         {
             std::unique_lock lock(m_frameMutex);
-            if (!m_frameCv.wait(lock, stop, [this] { return m_frameQueue.size() < FrameQueueCapacity; }))
-                break;
+            if (m_frameQueue.size() >= FrameQueueCapacity) {
+                ++spaceWaits;
+                const auto waited = Clock::now();
+                const bool ok = m_frameCv.wait(lock, stop, [this] { return m_frameQueue.size() < FrameQueueCapacity; });
+                spaceNanos += Clock::now() - waited;
+                if (!ok) break;
+            }
         }
 
         VideoFrame frame;
+        const auto readStart = Clock::now();
         const VideoReadResult result = ReadNextFFmpegProcessAvailable(frame, stop);
+        const auto readEnd = Clock::now();
         if (result == VideoReadResult::FrameReady) {
+            ++frames;readNanos += readEnd - readStart;
             std::lock_guard lock(m_frameMutex);
             // Keep the frame even when a stop lands between reading and
             // queueing it: it has already been taken out of the pipe and
@@ -858,13 +964,25 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
             m_frameCv.notify_all();
             if (stop.stop_requested()) break;
         } else if (result == VideoReadResult::NotReady) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ++polls;pollNanos += readEnd - readStart;
+            SleepPreciseMs(1);
+            sleepNanos += Clock::now() - readEnd;
         } else if (result != VideoReadResult::Cancelled) {
             std::lock_guard lock(m_frameMutex);
             m_frameTerminal = result;
             m_frameCv.notify_all();
             break;
         }
+    }
+    if (frames) {
+        const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+        const double wall = ms(Clock::now() - loopStart);
+        LOG("Decoder frame queue: frames=" << frames << " wallMs=" << std::fixed << std::setprecision(1) << wall
+            << " perFrameMs: pipeRead=" << std::setprecision(3) << ms(readNanos) / double(frames)
+            << " emptyPoll=" << ms(pollNanos) / double(frames) << " emptySleep=" << ms(sleepNanos) / double(frames)
+            << " queueFullWait=" << ms(spaceNanos) / double(frames)
+            << " other=" << (wall - ms(readNanos + pollNanos + sleepNanos + spaceNanos)) / double(frames)
+            << " polls=" << polls << " queueFullWaits=" << spaceWaits << " zeroFills=" << m_frameBufferFills);
     }
 }
 
@@ -874,6 +992,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegAvailable(VideoFrame& out,std::stop_
         if (m_frameQueueEnabled) {
             if (stop.stop_requested()) return VideoReadResult::Cancelled;
             if (!m_frameQueue.empty()) {
+                RecycleFrameBuffer(std::move(out.bgra));
                 out = std::move(m_frameQueue.front());
                 m_frameQueue.pop_front();
                 m_frameCv.notify_all();
@@ -1036,6 +1155,12 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
                            !m_frameQueueEnabled;
                 });
             }
+            // A permanent stop clears m_frameQueueEnabled and publishes the terminal
+            // state in the same critical section, so a reader that leaves the loop on
+            // the flag alone drops that state on the floor. It would then fall into the
+            // synchronous path below against a child that Close is already tearing down,
+            // and report the closed pipe as EndOfStream instead of Cancelled.
+            if (m_frameTerminal != VideoReadResult::NotReady) return m_frameTerminal;
         }
         for (;;) {
             const VideoReadResult result = ReadNextFFmpegProcessAvailable(out, stop);
@@ -1043,7 +1168,7 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
             if (stop.stop_requested()) return VideoReadResult::Cancelled;
             // A yield() spin here pegs a core. This fallback only runs when the queue
             // thread could not be created, but it must still idle politely.
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            SleepPreciseMs(2);
         }
     }
     if (m_backend == Backend::MediaFoundation) {

@@ -76,6 +76,11 @@ public:
     VideoReadResult ReadNextBlocking(VideoFrame& out, std::stop_token stop = {});
     bool SeekSeconds(double seconds);
     void Swap(VideoDecoder& other) noexcept;
+    // Hands a fully consumed BGRA buffer back for a later pipe read. Without it the
+    // read path allocates and zero-fills a frame per frame - 31.6 MiB at 4K, written
+    // twice because the pipe overwrites every byte of it immediately after.
+    // Buffers of the wrong size, and any past the pool's cap, are simply dropped.
+    void RecycleFrameBuffer(std::vector<uint8_t>&& buffer);
 
     // Where a seek's latency actually goes. Published per seek because the seek
     // path is the only place the player blocks on a decoder restart, and the
@@ -142,6 +147,8 @@ public:
 private:
 #endif
     bool ReadNextFFmpeg(VideoFrame& out);
+    // Empty when the pool holds nothing of this exact size.
+    std::vector<uint8_t> TakeRecycledBuffer(size_t frameBytes);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
     VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop);
     VideoReadResult ClassifyFFmpegEnd(DWORD exitCode);
@@ -214,6 +221,15 @@ private:
     std::chrono::milliseconds m_networkStallTimeout{15000};
     std::chrono::milliseconds m_probeTimeout{15000};
     static constexpr size_t FrameQueueCapacity = 4;
+    // Only one read fills a buffer at a time, so a spare and the one in flight are
+    // all the pool can use; more would just hold 31.6 MiB each at 4K.
+    static constexpr size_t FrameBufferPoolCapacity = 2;
+    // Held by the queue thread and by whichever thread returns a spent buffer, so it
+    // is deliberately not m_frameMutex: recycling never waits on the queue.
+    std::mutex m_bufferPoolMutex;
+    std::vector<std::vector<uint8_t>> m_bufferPool;
+    // Whole-frame allocations the pool did not cover; queue-thread only.
+    uint64_t m_frameBufferFills = 0;
     std::mutex m_frameMutex;
     std::condition_variable_any m_frameCv;
     std::deque<VideoFrame> m_frameQueue;

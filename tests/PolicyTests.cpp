@@ -71,6 +71,9 @@ struct VideoDecoderTestAccess {
         settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
         return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
     }
+    static std::vector<uint8_t> TakeRecycledBuffer(VideoDecoder& decoder,size_t frameBytes){
+        return decoder.TakeRecycledBuffer(frameBytes);
+    }
 };
 
 struct AudioPlayerTestAccess {
@@ -3989,7 +3992,46 @@ void video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test()
     }
     CHECK_EQ(VideoReadResult::FrameReady,result);
     CHECK_EQ(size_t{1920u*1080u*4u},frame.bgra.size());
-    CHECK_EQ(std::string("software\n"),read_binary_file(marker));
+    // OpenSequential now requests CUDA decode (NVDEC is a separate engine from
+    // NVENC/D3D12 and the GPU is idle during export), so the fake ffmpeg child
+    // launches with -hwaccel cuda.
+    CHECK_EQ(std::string("cuda\n"),read_binary_file(marker));
+}
+
+// The read path allocates and zero-fills a whole BGRA frame whenever it has no
+// buffer of the right size - 31.6 MiB per frame at 4K, immediately overwritten
+// by the pipe. Spent buffers come back here instead, so the steady state does
+// neither, and the pool stays small and never hands out a stale size.
+void video_decoder_recycles_spent_frame_buffers_test()
+{
+    auto decoder=VideoDecoderTestAccess::Create(std::filesystem::path{});
+    std::vector<uint8_t> spent(1024,7);
+    const uint8_t* const recycled=spent.data();
+    decoder->RecycleFrameBuffer(std::move(spent));
+    std::vector<uint8_t> taken=VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024);
+    CHECK_EQ(size_t{1024},taken.size());
+    CHECK(taken.data()==recycled);
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).empty());
+
+    // A resolution change leaves the previous size behind: it is dropped, not
+    // handed to a read that would then reallocate anyway.
+    decoder->RecycleFrameBuffer(std::move(taken));
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,2048).empty());
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).empty());
+
+    // Two buffers is the cap, so a consumer returning faster than the reader
+    // takes cannot grow the pool a frame at a time.
+    for(int i=0;i<4;++i)decoder->RecycleFrameBuffer(std::vector<uint8_t>(1024,0));
+    CHECK_EQ(size_t{1024},VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).size());
+    CHECK_EQ(size_t{1024},VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).size());
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).empty());
+
+    // An empty buffer is not worth a slot, and Close gives the pool back.
+    decoder->RecycleFrameBuffer(std::vector<uint8_t>{});
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,0).empty());
+    decoder->RecycleFrameBuffer(std::vector<uint8_t>(1024,0));
+    decoder->Close();
+    CHECK(VideoDecoderTestAccess::TakeRecycledBuffer(*decoder,1024).empty());
 }
 
 void video_decoder_background_queue_is_bounded_to_four_frames_test()
@@ -5605,6 +5647,7 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
+    video_decoder_recycles_spent_frame_buffers_test();
     video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();

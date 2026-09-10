@@ -1,4 +1,5 @@
 #include "YouTubeResolver.h"
+#include "ChildProcess.h"
 
 #include <winhttp.h>
 
@@ -1050,6 +1051,11 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     startup.StartupInfo.hStdError = writePipe.get();
     startup.lpAttributeList = attributeList;
     PROCESS_INFORMATION rawProcess{};
+    if (!ChildProcessImageIsLaunchable(verifiedHelpers.ytDlpPath.wstring())) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    const ChildProcessErrorModeScope quietLaunchFailures;
     const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
                                 EXTENDED_STARTUPINFO_PRESENT;
     if (!CreateProcessW(verifiedHelpers.ytDlpPath.c_str(), commandLine.data(), nullptr, nullptr,

@@ -54,6 +54,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/TemporalGuides.cpp
     src/TemporalGuides.h
     src/ParallelFor.h
+    src/ChildProcess.h
     src/AudioPlayer.cpp
     src/AudioPlayer.h
     src/Log.h

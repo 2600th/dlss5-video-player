@@ -418,6 +418,28 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     malformed.back() = L"--unexpected";
     const auto malformedView = view(malformed);
     CHECK(!neural_worker_detail::ParseWorkerArguments(malformedView).has_value());
+    // The GPU colour conversion is opt-in and travels as its own optional pair, so an
+    // older parent that never sends it still parses into the CPU-conversion default.
+    for (const auto& argument : normal) CHECK(argument != L"--gpu-color-conversion");
+    if (parsedNormal) CHECK(!parsedNormal->request.gpuColorConversion);
+    NeuralRenderRequest converted = request;
+    converted.gpuColorConversion = true;
+    const auto convertedArguments =
+        neural_worker_detail::BuildWorkerArguments(converted, metadata, pause, false);
+    const auto convertedView = view(convertedArguments);
+    const auto parsedConverted = neural_worker_detail::ParseWorkerArguments(convertedView);
+    CHECK(parsedConverted.has_value());
+    if (parsedConverted) {
+        CHECK(parsedConverted->request.gpuColorConversion);
+        CHECK(parsedConverted->request.segmentFrames == 96);
+        CHECK(parsedConverted->request.pauseEvent == pause);
+    }
+    auto badConversion = convertedArguments;
+    for (size_t index = 0; index + 1 < badConversion.size(); ++index) {
+        if (badConversion[index] == L"--gpu-color-conversion") badConversion[index + 1] = L"2";
+    }
+    const auto badConversionView = view(badConversion);
+    CHECK(!neural_worker_detail::ParseWorkerArguments(badConversionView).has_value());
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");

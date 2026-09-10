@@ -7,13 +7,31 @@ if not defined DLSS_SDK_DIR set "DLSS_SDK_DIR=%CD%\external\DLSS"
 if not defined FFMPEG_BIN_DIR set "FFMPEG_BIN_DIR=%CD%\external\ffmpeg\bin"
 
 set "CMAKE_EXE="
+set "VS_GENERATOR="
+for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles%\Microsoft Visual Studio\2026\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" (
+  set "CMAKE_EXE=%ProgramFiles%\Microsoft Visual Studio\2026\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+  set "VS_GENERATOR=Visual Studio 18 2026"
+)
+for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2026\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" (
+  set "CMAKE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\2026\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+  set "VS_GENERATOR=Visual Studio 18 2026"
+)
+for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" (
+  set "CMAKE_EXE=%ProgramFiles%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+  set "VS_GENERATOR=Visual Studio 17 2022"
+)
+for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" (
+  set "CMAKE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+  set "VS_GENERATOR=Visual Studio 17 2022"
+)
 for /f "delims=" %%I in ('where cmake.exe 2^>nul') do if not defined CMAKE_EXE set "CMAKE_EXE=%%I"
-for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" set "CMAKE_EXE=%ProgramFiles%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
-for %%E in (Community Professional Enterprise BuildTools) do if not defined CMAKE_EXE if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" set "CMAKE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\%%E\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 if not defined CMAKE_EXE (
-  echo [ERROR] CMake from Visual Studio 2022 was not found.
+  echo [ERROR] CMake from Visual Studio 2026 or 2022 was not found.
   exit /b 1
 )
+if not defined VS_GENERATOR set "VS_GENERATOR=Visual Studio 18 2026"
+for %%I in ("%CMAKE_EXE%") do set "CTEST_EXE=%%~dpIctest.exe"
+if not exist "%CTEST_EXE%" set "CTEST_EXE=ctest.exe"
 
 if not exist "%DLSS_SDK_DIR%\include\nvsdk_ngx.h" (
   echo [ERROR] Pinned NVIDIA DLSS SDK checkout is missing: "%DLSS_SDK_DIR%"
@@ -53,14 +71,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [4/5] Configuring Visual Studio 2022 x64...
-"%CMAKE_EXE%" -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
+echo [4/5] Configuring %VS_GENERATOR% x64...
+"%CMAKE_EXE%" -S . -B build-upscaling -G "%VS_GENERATOR%" -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
 if errorlevel 1 exit /b 1
 
 echo [5/5] Building and testing Release...
 "%CMAKE_EXE%" --build build-upscaling --config Release --parallel
 if errorlevel 1 exit /b 1
-"%CMAKE_EXE%" --build build-upscaling --config Release --target RUN_TESTS
+"%CTEST_EXE%" --test-dir build-upscaling -C Release --output-on-failure
 if errorlevel 1 exit /b 1
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\stage_runtime.ps1 -InputDirectory external\runtime -Destination build-upscaling\Release\neural-runtime
