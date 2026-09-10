@@ -418,13 +418,24 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
                                                 const std::filesystem::path& output)
 {
     std::vector<std::wstring> arguments{
-        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y"};
+    if (spec.kind == EncoderKind::HevcNvenc) {
+        // hevc_nvenc creates its CUDA context when the first frame reaches the encoder,
+        // not at spawn. A segmented job spawns one ffmpeg per 2 s segment, so that cost
+        // landed inside every segment's first frames: measured 126 ms of stdin not being
+        // drained, of which the render loop absorbed ~55 ms as a stall. Creating the
+        // device up front moves the context creation to the spawn, which the segment
+        // writer already does a whole segment ahead; the remaining ~59 ms is the NVENC
+        // session itself. The option fails only where hevc_nvenc would fail too.
+        arguments.insert(arguments.end(), {L"-init_hw_device", L"cuda=cu:0"});
+    }
+    arguments.insert(arguments.end(), {
         L"-f", L"rawvideo",
         L"-pix_fmt", spec.pixelFormat == EncoderPixelFormat::Rgba ? L"rgba" :
                      spec.pixelFormat == EncoderPixelFormat::Nv12 ? L"nv12" : L"bgra",
         L"-video_size", std::to_wstring(spec.width) + L"x" + std::to_wstring(spec.height),
         L"-framerate", FrameRateText(spec.fps), L"-i", L"pipe:0", L"-an",
-    };
+    });
     const bool nv12 = spec.pixelFormat == EncoderPixelFormat::Nv12;
     if (spec.kind == EncoderKind::HevcNvenc) {
         arguments.insert(arguments.end(), {

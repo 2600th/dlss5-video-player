@@ -308,10 +308,13 @@ std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoP
 }
 
 // Captured frames queued for the writer thread. Deep enough to cover a freshly
-// spawned ffmpeg bringing up its encoder (~110 ms of not draining its stdin)
-// without stalling the render loop, and bounded in bytes so a large frame size
-// cannot balloon the queue.
-inline constexpr size_t kQueuedFrameBytes = size_t{64} << 20;
+// spawned ffmpeg bringing up its encoder (~60 ms of not draining its stdin once
+// its CUDA context is created at spawn, ~110 ms before) without stalling the
+// render loop, and bounded in bytes so a large frame size cannot balloon the
+// queue. 64 MiB held 15 NV12 frames at 2578x1080, ~73 ms of a 4.9 ms loop, and
+// the export measured one ~55 ms render-loop stall per 2 s segment on top of
+// it; 128 MiB covers the start-up at the ~3 ms loop the decoder can now feed.
+inline constexpr size_t kQueuedFrameBytes = size_t{128} << 20;
 
 // Rotating encoder used only when request.segmentFrames > 0. The render loop
 // only hands frames over: a private writer thread owns the file being written,
