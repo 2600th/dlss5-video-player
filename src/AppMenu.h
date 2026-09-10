@@ -5,6 +5,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "ExampleVideos.h"
 #include "UiLayout.h"
@@ -64,6 +65,9 @@ inline constexpr UINT IDM_COMPARE_BLEND_MORE = 426;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 inline constexpr UINT IDM_OPEN_RENDER_RECEIPT = 452;
+inline constexpr UINT IDM_CHECK_FOR_UPDATES = 460;
+// Right-justified affordance appended to the menu bar itself, not a submenu.
+inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 
 enum class PlayerCommandRoute {
     KeyDown,
@@ -74,6 +78,9 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
+// Shows, relabels or removes the right-justified update item in the menu bar.
+// An empty label removes it; the caller redraws the bar.
+bool SetUpdateBadge(HMENU menuBar, std::wstring_view label);
 bool RoutesToOpenYouTube(PlayerCommandRoute route, UINT value, bool controlDown);
 const ExampleVideo* ExampleVideoForCommand(UINT command);
 bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,

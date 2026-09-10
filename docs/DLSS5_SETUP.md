@@ -67,7 +67,7 @@ quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
-When the complete experimental layout is active, v0.17.2 defaults to
+When the complete experimental layout is active, v0.18.0 defaults to
 exact 1080p for YouTube Auto and native-resolution DLAA. If exact 1080p is not
 available, Auto uses the highest compatible source up to 4K. Manual source
 choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.
@@ -106,6 +106,15 @@ The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
 42.0 ms/frame; see the
 [0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
 Turing and Ampere have no hardware verification in this project yet.
+
+Feature 18 is created by the driver's NGX core, so the driver is a hard
+requirement independent of the GPU: the player refuses a render below
+**610.47**, the lowest driver this project has rendered on, and names 616.64 -
+the driver both verification records used - in the message. The floor the wider
+community publishes for the same runtime is 616.56. An older driver answers
+`CreateFeature` with `0xbad00002`
+(`NVSDK_NGX_Result_FAIL_PlatformError`); an architecture the runtime itself
+refuses answers `0xbad00001` instead.
 
 The architecture follows lessons from [Zonnery's offline
 converter](https://github.com/Zonnery/dlss5-nr-player) and the verification

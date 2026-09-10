@@ -61,10 +61,11 @@ void AppendQuotedArgument(std::wstring& commandLine, std::wstring_view argument)
     commandLine.push_back(L'"');
 }
 
+// Safe-mode restart argument list: the marker left by the removed in-process
+// bootstrap relaunch is dropped, and --safe-mode appears exactly once.
 std::vector<std::wstring> SanitizeRestartArguments(
     const std::vector<std::wstring>& arguments,
-    bool requireSafeMode,
-    bool requireBootstrapMarker)
+    bool requireSafeMode)
 {
     std::vector<std::wstring> sanitized;
     bool hasSafeMode = false;
@@ -83,9 +84,6 @@ std::vector<std::wstring> SanitizeRestartArguments(
     }
     if (requireSafeMode && !hasSafeMode) {
         sanitized.emplace_back(kSafeModeArgument);
-    }
-    if (requireBootstrapMarker) {
-        sanitized.emplace_back(kBootstrapMarkerArgument);
     }
     return sanitized;
 }
@@ -234,34 +232,6 @@ DetectedGpu DetectHighPerformanceGpu()
     return {};
 }
 
-BootstrapAction DecideBootstrap(
-    bool desiredEnabled,
-    bool configEnabled,
-    bool alreadyRestarted,
-    bool updateSucceeded)
-{
-    if (!updateSucceeded) {
-        return BootstrapAction::Fail;
-    }
-    if (desiredEnabled == configEnabled) {
-        return BootstrapAction::Continue;
-    }
-    return alreadyRestarted ? BootstrapAction::Fail : BootstrapAction::Relaunch;
-}
-
-BootstrapAction DecideBootstrapFromObservedUpdate(
-    bool desiredEnabled,
-    bool previousEnabled,
-    bool currentEnabled,
-    bool alreadyRestarted,
-    bool updateSucceeded)
-{
-    if (!updateSucceeded || currentEnabled != desiredEnabled) {
-        return BootstrapAction::Fail;
-    }
-    return DecideBootstrap(desiredEnabled, previousEnabled, alreadyRestarted, true);
-}
-
 RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv)
 {
     RuntimeArguments result;
@@ -279,7 +249,8 @@ RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv)
         }
         const std::wstring argument(argv[index]);
         if (argument == kBootstrapMarkerArgument) {
-            result.addonBootstrapRestarted = true;
+            // Swallowed so a shortcut left over from the removed in-process
+            // bootstrap relaunch still starts the player.
             continue;
         }
         if (argument == kSafeModeArgument) {
@@ -295,16 +266,10 @@ RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv)
     return result;
 }
 
-std::vector<std::wstring> BuildBootstrapRelaunchArguments(
-    const std::vector<std::wstring>& userArguments)
-{
-    return SanitizeRestartArguments(userArguments, false, true);
-}
-
 std::vector<std::wstring> BuildSafeModeRestartArguments(
     const std::vector<std::wstring>& userArguments)
 {
-    return SanitizeRestartArguments(userArguments, true, false);
+    return SanitizeRestartArguments(userArguments, true);
 }
 
 SafeModeRestartOutcome ExecuteAdvancedSafeModeRestart(
@@ -449,22 +414,7 @@ void NeuralPlaybackLifecycle::Invalidate()
     state = NeuralPlaybackState::Idle;
 }
 
-NeuralOpenAction DecideNeuralOpen(bool runtimeComplete, bool safeMode, bool cacheValid)
-{
-    if (!runtimeComplete || safeMode) return NeuralOpenAction::OriginalOnly;
-    return cacheValid ? NeuralOpenAction::UseCache : NeuralOpenAction::StartJob;
-}
-
 bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid)
 {
     return renderOk && probeOk && manifestValid;
-}
-
-void ExecuteNeuralReplacementSequence(const std::function<void()>& requestStop,
-                                      const std::function<void()>& joinWorker,
-                                      const std::function<void()>& replace)
-{
-    if (requestStop) requestStop();
-    if (joinWorker) joinWorker();
-    if (replace) replace();
 }

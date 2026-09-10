@@ -89,12 +89,42 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
     AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
     add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode"); AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_REHOOK, L"menu.rehook");
+    AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
     UpdateRenderActionAvailability(bar, false, false, false, false, false);
     UpdateComparisonMenu(bar, false, false, IDM_COMPARE_NEURAL, false);
     return bar;
+}
+
+bool SetUpdateBadge(HMENU menuBar, std::wstring_view label)
+{
+    if (!menuBar) return false;
+    int existing = -1;
+    const int count = GetMenuItemCount(menuBar);
+    for (int index = 0; index < count; ++index) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_ID;
+        if (GetMenuItemInfoW(menuBar, static_cast<UINT>(index), TRUE, &item) && item.wID == IDM_UPDATE_AVAILABLE) {
+            existing = index;
+            break;
+        }
+    }
+    if (label.empty()) {
+        return existing < 0 || DeleteMenu(menuBar, static_cast<UINT>(existing), MF_BYPOSITION) != FALSE;
+    }
+    // A bare '&' would silently become a mnemonic underline in a version label.
+    std::wstring text;
+    for (const wchar_t character : label.substr(0, 64)) {
+        if (character == L'&') text.push_back(L'&');
+        text.push_back(character < L' ' ? L' ' : character);
+    }
+    const UINT flags = MF_STRING | MF_RIGHTJUSTIFY;
+    if (existing >= 0)
+        return ModifyMenuW(menuBar, static_cast<UINT>(existing), flags | MF_BYPOSITION, IDM_UPDATE_AVAILABLE,
+                           text.c_str()) != FALSE;
+    return AppendMenuW(menuBar, flags, IDM_UPDATE_AVAILABLE, text.c_str()) != FALSE;
 }
 
 void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled)

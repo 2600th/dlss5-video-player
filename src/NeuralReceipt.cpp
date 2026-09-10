@@ -241,6 +241,19 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
     line += OrDash(ScanString(preflight, "runtime", "dlssnr"));
     line += " feature18=";
     line += armed.empty() ? "unknown" : (armed == "true" ? "armed" : "not-armed");
+    // The feature's own NGX result, not the carrier's: a receipt that showed
+    // only the carrier's success once hid a 0xbad00002 refusal here.
+    const std::string_view createResult = ScanString(preflight, "feature18", "createResult");
+    if (!createResult.empty()) {
+        line += '(';
+        line += createResult;
+        line += ')';
+    }
+    const std::string_view cause = ScanString(preflight, "diagnosis", "cause");
+    if (!cause.empty() && cause != "none") {
+        line += " cause=";
+        line += cause;
+    }
     line += " lock=";
     if (RuntimeLockSatisfied(inputs.lockChecks)) {
         line += "ok";

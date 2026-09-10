@@ -8,9 +8,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -63,6 +63,29 @@ std::string LowerAscii(std::string_view value)
         if (character >= 'A' && character <= 'Z') character = char(character - 'A' + 'a');
     }
     return result;
+}
+
+// Lower-cased input only: every caller scans a LowerAscii copy of the log.
+int HexNibble(char character) noexcept
+{
+    if (character >= '0' && character <= '9') return character - '0';
+    if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+    return -1;
+}
+
+// NGX results are always written as eight lower-case hex digits ("0xbad00002")
+// so a receipt and a log line can be compared literally.
+std::string HexResultText(uint32_t value)
+{
+    std::string text = "0x";
+    for (int shift = 28; shift >= 0; shift -= 4) text.push_back("0123456789abcdef"[(value >> shift) & 0xFu]);
+    return text;
+}
+
+std::wstring HexResultTextWide(uint32_t value)
+{
+    const std::string text = HexResultText(value);
+    return std::wstring(text.begin(), text.end());
 }
 
 std::string Utf8(std::wstring_view text)
@@ -157,6 +180,99 @@ std::vector<Feature18Observation> CollectFeature18Observations(std::string_view 
     return observations;
 }
 
+std::optional<uint32_t> ParseFeature18CreateResult(std::span<const Feature18Observation> observations)
+{
+    constexpr std::string_view marker = "feature 18 create failed with 0x";
+    std::optional<uint32_t> result;
+    for (const Feature18Observation& observation : observations) {
+        const std::string line = LowerAscii(observation.line);
+        for (size_t at = line.find(marker); at != std::string::npos; at = line.find(marker, at + marker.size())) {
+            const size_t start = at + marker.size();
+            size_t end = start;
+            while (end < line.size() && HexNibble(line[end]) >= 0) ++end;
+            // A 32-bit result and nothing else: an empty or over-long run is
+            // some other number that happens to follow the marker.
+            if (end == start || end - start > 8) continue;
+            uint32_t value = 0;
+            for (size_t index = start; index < end; ++index) {
+                value = (value << 4) | static_cast<uint32_t>(HexNibble(line[index]));
+            }
+            result = value;
+        }
+    }
+    return result;
+}
+
+const char* NeuralPreflightCauseName(NeuralPreflightCause cause) noexcept
+{
+    const size_t index = static_cast<size_t>(cause);
+    // Every entry is a string literal, so data() is null-terminated.
+    return index < kNeuralPreflightCauseNames.size() ? kNeuralPreflightCauseNames[index].data() : "none";
+}
+
+NeuralPreflightDiagnosis DiagnoseNeuralPreflight(const DetectedGpu& gpu,
+                                                 std::span<const Feature18Observation> observations,
+                                                 bool created,
+                                                 bool evidenceValid,
+                                                 std::wstring_view probeFailure)
+{
+    constexpr uint32_t kFeatureNotSupported = 0xbad00001u;  // NVSDK_NGX_Result_FAIL_FeatureNotSupported
+    constexpr uint32_t kPlatformError = 0xbad00002u;        // NVSDK_NGX_Result_FAIL_PlatformError
+    constexpr uint32_t kOutOfGpuMemory = 0xbad0000du;       // NVSDK_NGX_Result_FAIL_OutOfGPUMemory
+
+    NeuralPreflightDiagnosis diagnosis;
+    diagnosis.ngxResult = ParseFeature18CreateResult(observations);
+    // Nothing refused the feature in the end: a code from a create the runtime
+    // went on to satisfy is history, not a verdict.
+    if (created && evidenceValid && probeFailure.empty()) return diagnosis;
+
+    // ClassifyNeuralDriver, with the parsed number kept for the message.
+    const std::optional<NvidiaDriverVersion> driver = ParseNvidiaDriverVersion(gpu.driverVersion);
+    const bool belowFloor = driver && *driver < kNeuralDriverFloor;
+    const std::wstring recommended = FormatNvidiaDriverVersion(kNeuralDriverRecommended);
+    const auto blameDriver = [&] {
+        diagnosis.cause = NeuralPreflightCause::DriverBelowFloor;
+        diagnosis.detail = L"NVIDIA driver " + FormatNvidiaDriverVersion(*driver) + L" is below the " +
+                           FormatNvidiaDriverVersion(kNeuralDriverFloor) +
+                           L" minimum for neural rendering. Update to " + recommended + L" or newer, then try again.";
+    };
+
+    if (diagnosis.ngxResult == kFeatureNotSupported) {
+        diagnosis.cause = NeuralPreflightCause::ArchitectureUnsupported;
+        diagnosis.detail = L"The neural runtime refused feature 18 with " + HexResultTextWide(kFeatureNotSupported) +
+                           L" (feature not supported): this GPU architecture is not served by the neural runtime, "
+                           L"so neural rendering is unavailable on it.";
+    } else if (diagnosis.ngxResult == kOutOfGpuMemory) {
+        diagnosis.cause = NeuralPreflightCause::OutOfVideoMemory;
+        diagnosis.detail = L"The neural runtime ran out of GPU memory creating feature 18 (" +
+                           HexResultTextWide(kOutOfGpuMemory) +
+                           L"). Choose a lower source resolution or close other GPU applications, then try again.";
+    } else if (diagnosis.ngxResult == kPlatformError) {
+        // The driver's NGX core, not the runtime, declined to service the
+        // feature. An out-of-date driver is the cause that can be acted on.
+        if (belowFloor) {
+            blameDriver();
+        } else {
+            diagnosis.cause = NeuralPreflightCause::PlatformRefusal;
+            diagnosis.detail = L"The neural runtime refused feature 18 with " + HexResultTextWide(kPlatformError) +
+                               L" (platform error). Update the NVIDIA driver to " + recommended +
+                               L" or newer and close other DLSS injectors or overlays, then try again.";
+        }
+    } else if (belowFloor) {
+        blameDriver();
+    } else if (!probeFailure.empty()) {
+        diagnosis.cause = NeuralPreflightCause::ProbeFailed;
+        diagnosis.detail = probeFailure;
+    } else {
+        // The early return above leaves only an incomplete evidence chain.
+        diagnosis.cause = NeuralPreflightCause::EvidenceIncomplete;
+        diagnosis.detail = L"The neural runtime did not arm the inline interception contract for feature 18. "
+                           L"Close other DLSS injectors or overlays and try again; if it repeats, reinstall the "
+                           L"neural runtime.";
+    }
+    return diagnosis;
+}
+
 std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::path& directory,
                                                          std::span<const std::wstring_view> names)
 {
@@ -211,7 +327,7 @@ std::string JsonEscapeWide(std::wstring_view text)
 
 std::string BuildPreflightFailureJson(std::wstring_view detail)
 {
-    return "{\"schema\":1,\"ok\":false,\"error\":\"" + JsonEscapeWide(detail) + "\"}";
+    return "{\"schema\":2,\"ok\":false,\"error\":\"" + JsonEscapeWide(detail) + "\"}";
 }
 
 #ifndef OFFLINE_NEURAL_RENDERER_TESTING
@@ -245,13 +361,6 @@ std::string ReadWholeFile(const std::filesystem::path& path)
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
-std::string HexResult(long value)
-{
-    char text[24];
-    std::snprintf(text, sizeof(text), "0x%08lx", static_cast<unsigned long>(value));
-    return text;
-}
-
 } // namespace
 
 neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
@@ -263,7 +372,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     // to ReShade.log1 when another process still holds ReShade.log, and a
     // previous session's file may still be present.
 
-    std::string failure;
+    std::wstring failure;
     uint32_t attempts = 0;
     bool created = false;
     NVSDK_NGX_Result ngxResult = NVSDK_NGX_Result_Fail;
@@ -272,7 +381,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
         D3D12RendererOwner renderer = MakeD3D12Renderer();
         if (!renderer || !renderer->Initialize(renderWindow, kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight,
                                                gridW, gridH, DefaultNeuralCarrierQuality())) {
-            failure = "The probe renderer could not be initialized.";
+            failure = L"The probe renderer could not be initialized.";
         } else {
             renderer->SetDLSS(true);
             TemporalGuideGenerator guides;
@@ -287,14 +396,14 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                     !renderer->RenderFrame(frame.data(), frame.size(), guide.guideGridRGBA32F.data(),
                                            guide.guideGridRGBA32F.size() * sizeof(float), guide.gridW, guide.gridH,
                                            attempts == 0, static_cast<float>(1000.0 / kProbeFps))) {
-                    failure = "The probe frame could not be evaluated.";
+                    failure = L"The probe frame could not be evaluated.";
                     ++attempts;
                     break;
                 }
             }
             created = renderer->DLSSFeatureCreated();
             ngxResult = renderer->DLSSLastResult();
-            if (!created && failure.empty()) failure = "Feature 18 was not created within the probe budget.";
+            if (!created && failure.empty()) failure = L"Feature 18 was not created within the probe budget.";
         }
     }
     const std::string segment = ReadNeuralRuntimeSessionLog(moduleDirectory);
@@ -304,10 +413,15 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const auto observations = CollectFeature18Observations(segment);
     const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
     const bool ok = failure.empty() && created && evidence.Valid();
-    if (!ok && failure.empty()) failure = "Feature 18 runtime evidence did not arm the inline interception contract.";
+    const NeuralPreflightDiagnosis diagnosis =
+        DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure);
+    if (!ok && failure.empty()) failure = L"Feature 18 runtime evidence did not arm the inline interception contract.";
+    // The classified sentence names the code and the action; the generic one
+    // is only what is left when nothing could be classified.
+    const std::wstring& error = diagnosis.cause == NeuralPreflightCause::None ? failure : diagnosis.detail;
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
 
-    std::string json = "{\"schema\":1,\"ok\":";
+    std::string json = "{\"schema\":2,\"ok\":";
     json += ok ? "true" : "false";
     json += ",\"workerVersion\":\"" DLSS_VIDEO_PLAYER_VERSION "\"";
     json += ",\"elapsedMilliseconds\":" + std::to_string(elapsed);
@@ -337,7 +451,9 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             ",\"laterFailure\":" + (evidence.laterFailure ? "true" : "false") +
             ",\"highestEvaluation\":" + std::to_string(evidence.highestObservedEvaluation) +
             ",\"probeFrames\":" + std::to_string(attempts) +
-            ",\"ngxCreateResult\":\"" + HexResult(static_cast<long>(ngxResult)) + "\"" +
+            ",\"carrierCreateResult\":\"" + HexResultText(static_cast<uint32_t>(ngxResult)) + "\"" +
+            ",\"createResult\":\"" +
+            (diagnosis.ngxResult ? HexResultText(*diagnosis.ngxResult) : std::string()) + "\"" +
             ",\"observations\":[";
     for (size_t index = 0; index < observations.size(); ++index) {
         if (index) json += ',';
@@ -345,7 +461,9 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                 JsonEscape(observations[index].line) + "\"}";
     }
     json += "]}";
-    if (!failure.empty()) json += ",\"error\":\"" + JsonEscape(failure) + "\"";
+    json += ",\"diagnosis\":{\"cause\":\"" + std::string(NeuralPreflightCauseName(diagnosis.cause)) +
+            "\",\"detail\":\"" + JsonEscapeWide(diagnosis.detail) + "\"}";
+    if (!error.empty()) json += ",\"error\":\"" + JsonEscapeWide(error) + "\"";
     json += "}";
 
     neural_worker_protocol::PreflightPayload payload;

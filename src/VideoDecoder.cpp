@@ -1,4 +1,5 @@
 #include "VideoDecoder.h"
+#include "HardErrorSuppression.h"
 #include "Log.h"
 #include <propvarutil.h>
 #include <algorithm>
@@ -258,6 +259,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
             CloseHandle(job); job = nullptr;
         }
     }
+    const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL ok = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
@@ -588,6 +590,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
     const auto spawnStarted=std::chrono::steady_clock::now();
+    const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL ok = job&&CreateProcessW(m_ffmpegExe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);

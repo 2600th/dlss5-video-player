@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.18.0 - 2026-09-10
+
+- The driver is now checked before the neural path runs. Feature 18 is created
+  by the driver's own NGX core, so a driver older than the core that knows the
+  feature refuses the create before this player is involved: an RTX 3060 Laptop
+  on driver 566.14 (DXGI `32.0.15.6614`) logged `feature 18 create failed with
+  0xbad00002`, which is `NVSDK_NGX_Result_FAIL_PlatformError`. The locked
+  runtime was never the problem there - its fatbin carries `sm_75/86/89/120`,
+  Ampere included, and its own architecture refusal returns `0xbad00001`, not
+  `0xbad00002`. `ClassifyNeuralDriver` now parses the DXGI driver string
+  (`(c % 10) * 10000 + d`, so `32.0.15.6614` is 566.14 and `32.0.16.1664` is
+  616.64) and compares it against a 610.47 floor - the lowest driver this
+  project has actually rendered on - naming 616.64, the verified one, in the
+  message. Startup logs the verdict; a render below the floor is refused with
+  "Neural rendering needs a newer NVIDIA driver" and the three numbers, instead
+  of spending five seconds in a probe that cannot pass. The community-published
+  floor for the same runtime is 616.56.
+- The preflight receipt no longer reports a feature-18 result it never read.
+  `feature18.ngxCreateResult` was the DLSS Super Resolution carrier's result and
+  said `0x00000001` (Success) on the machine above, where feature 18 had failed;
+  the real code survived only as text inside an observation line. It is now
+  `feature18.carrierCreateResult`, beside a `feature18.createResult` parsed out
+  of the observations, and the receipt gained
+  `diagnosis:{cause,detail}` (`driverBelowFloor`, `platformRefusal`,
+  `architectureUnsupported`, `outOfVideoMemory`, `evidenceIncomplete`,
+  `probeFailed`). Receipt schema 1 -> 2. The player's failure text is that
+  detail, so `0xbad00002` now reads as a driver or second-consumer problem and
+  `0xbad0000d` as a VRAM problem, rather than "did not arm feature 18".
+- A failed preflight is no longer repeated on every play and seek. The field log
+  ran three ~5 s probes in 65 s, each ending the session and dropping seven
+  frames. `NeuralPreflightLatch` keeps one negative verdict per GPU, driver and
+  runtime digest; a different driver or runtime re-probes.
+- Added an update notice. On startup, and at most once a day, the player asks
+  GitHub for the newest release and shows `↑ Update <version>` right-justified
+  in the menu bar; opening it goes to the releases page and retires that release
+  until the next one ships. **Advanced > Check for updates** forces a check and
+  reports the answer either way. It reads `/releases`, not `/releases/latest`:
+  every release this project publishes is flagged as a pre-release, and the
+  `latest` endpoint answers 404 on such a repository. Drafts are skipped, the
+  highest version wins regardless of feed order, and the
+  `dlss5-video-player-v0.18.0` tag shape is parsed directly. State lives in
+  `[Updates]` in `DLSSVideoPlayer.ini`; `Enabled=0` turns the check off. Checked
+  against the live API: the player logged
+  `latest release dlss5-video-player-v0.17.2; this build is 0.18.0` and stayed
+  quiet, as it should for a build newer than the feed.
+- Fixed a hang: a corrupt bundled helper stopped a worker thread on a Windows
+  hard-error dialog instead of failing. Seen while running the test suite - the
+  placeholder `yt-dlp.exe` a resolver test writes produced a modal
+  "cannot start or run due to incompatibility with 64-bit versions of Windows"
+  (`ERROR_EXE_MACHINE_TYPE_MISMATCH`), and `CreateProcessW` does not return
+  until that dialog is dismissed, so a half-extracted package would have stalled
+  acquisition, decode, audio or a render with nothing in the log. Every spawn of
+  a bundled executable - ffmpeg, ffprobe, yt-dlp, NeuralWorker and the
+  safe-mode relaunch - now runs inside `ScopedHardErrorSuppression`
+  (`SetThreadErrorMode(SEM_FAILCRITICALERRORS)`, restored on scope exit), so
+  the call fails closed on the error every call site already handles.
+  `PolicyTests` finishes in 18 s instead of blocking on the dialog.
+- Removed dead code the tests were keeping alive. The in-process bootstrap
+  relaunch family went with the isolated helper it belonged to
+  (`BootstrapAction`, `DecideBootstrap`, `DecideBootstrapFromObservedUpdate`,
+  `BuildBootstrapRelaunchArguments`, and the `addonBootstrapRestarted` flag that
+  was set and never read), along with `DecideNeuralOpen`/`NeuralOpenAction` and
+  `ExecuteNeuralReplacementSequence`, which the player had stopped routing
+  through, and the 150-line YouTube format-availability JSON parser
+  (`ParseYouTubeFormatMetadata`, `FormatJsonParser`) that nothing ever
+  consulted. `--addon-bootstrap-restarted` is still swallowed by the argument
+  parser so an old shortcut still starts the player. Their tests went with them;
+  the assertions that covered live behaviour were kept and renamed.
+- Removed 2.6 MB of unreferenced files: the raw JSON dumps beside the
+  7 September runtime comparison (`analysis.json`, `binary-inventory.json`,
+  `crash-events.json`, `visual-metrics.json`), `docs/media/validation.json`, and
+  the orphaned `VERIFICATION-2026-09-03-MEDIA.md` record. The prose report that
+  those dumps fed is unchanged. `ECOSYSTEM_REVIEW.md` no longer claims the
+  driver floor and the fatbin architecture check are missing.
+
 ## 0.17.2 - 2026-09-10
 
 - Fixed the neural render wedging at the 60th present, reported on an RTX 4070

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NeuralPreflight.h"
 #include "OfflineNeuralRenderer.h"
 
 #include <windows.h>
@@ -8,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -40,10 +42,41 @@ struct NeuralPreflightResult {
     bool cancelled{};
     std::string json;
     std::wstring detail;
+    // Classified reason the probe failed, scanned back out of the receipt so
+    // the caller can branch (offer a driver update, stop offering a retry).
+    NeuralPreflightCause cause{NeuralPreflightCause::None};
 };
 NeuralPreflightResult RunNeuralPreflight(
     const std::filesystem::path& executable,
     std::stop_token stop = {});
+
+// Identity a preflight verdict belongs to. Anything that can change the
+// answer - the adapter, its driver, the runtime files - is in the key.
+struct NeuralPreflightKey {
+    std::wstring gpu;
+    std::wstring driver;
+    std::string runtimeDigest;
+    bool operator==(const NeuralPreflightKey&) const = default;
+};
+
+// One remembered negative verdict, shared by the UI thread and job threads.
+// A doomed preflight costs ~5 s and ends the running session: the field log
+// shows three of them in 65 s, one per playback start, each dropping frames.
+// The verdict stands until the identity changes or the runtime is replaced.
+class NeuralPreflightLatch {
+public:
+    void RecordFailure(const NeuralPreflightKey& key, std::wstring detail);
+    void RecordSuccess(const NeuralPreflightKey& key);
+    // Empty unless this exact key is latched as failed.
+    std::wstring LatchedFailureDetail(const NeuralPreflightKey& key) const;
+    void Invalidate();
+
+private:
+    mutable std::mutex mutex_;
+    NeuralPreflightKey key_;
+    std::wstring detail_;
+    bool failed_{};
+};
 
 // Serializes every use of the shared neural-runtime directory. The parent
 // rewrites ReShade.ini with the render's neural settings per job and the

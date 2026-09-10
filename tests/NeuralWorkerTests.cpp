@@ -131,9 +131,24 @@ int RunFakeWorker(int argc, wchar_t** argv)
     if (!parsed) return 9;
     const HANDLE handle = parsed->metadata;
     if (parsed->preflight) {
+        // The parent picks the receipt shape: a refusal carrying a diagnosis,
+        // a refusal without one, or the normal success.
+        std::array<wchar_t, 16> mode{};
+        const DWORD length = GetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", mode.data(),
+                                                     static_cast<DWORD>(mode.size()));
+        const std::wstring_view shape(mode.data(), length < mode.size() ? length : 0);
         PreflightPayload payload;
-        payload.ok = !parsed->configurationRestarted;
-        payload.json = parsed->configurationRestarted ? "{\"ok\":false,\"restarted\":true}" : "{\"ok\":true,\"gpu\":\"fake\"}";
+        if (shape == L"refused") {
+            payload.json = "{\"schema\":2,\"ok\":false,\"feature18\":{\"carrierCreateResult\":\"0x00000001\","
+                           "\"createResult\":\"0xbad00002\"},\"diagnosis\":{\"cause\":\"driverBelowFloor\","
+                           "\"detail\":\"NVIDIA driver 566.14 is below the 610.47 minimum for neural rendering. "
+                           "Update to 616.64 or newer, then try again.\"}}";
+        } else if (shape == L"bare") {
+            payload.json = "{\"schema\":2,\"ok\":false}";
+        } else {
+            payload.ok = !parsed->configurationRestarted;
+            payload.json = parsed->configurationRestarted ? "{\"ok\":false,\"restarted\":true}" : "{\"ok\":true,\"gpu\":\"fake\"}";
+        }
         const auto bytes = EncodePreflight(payload);
         return WriteMessage(handle, WireKind::Preflight, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 15;
     }
@@ -587,6 +602,71 @@ void preflight_receipt_round_trips_and_restarts_once_test()
     CHECK(!missing.detail.empty());
 }
 
+void preflight_failure_detail_comes_from_the_receipt_diagnosis_test()
+{
+    const auto withShape = [](const wchar_t* shape) {
+        CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", shape) != FALSE);
+        const NeuralPreflightResult result = RunNeuralPreflight(CurrentExecutable());
+        CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", nullptr) != FALSE);
+        return result;
+    };
+
+    // The classified sentence and its cause survive the receipt round trip.
+    const NeuralPreflightResult refused = withShape(L"refused");
+    CHECK(!refused.ok);
+    CHECK(!refused.cancelled);
+    CHECK(refused.cause == NeuralPreflightCause::DriverBelowFloor);
+    CHECK(refused.detail.find(L"566.14") != std::wstring::npos);
+    CHECK(refused.detail.find(L"610.47") != std::wstring::npos);
+    CHECK(refused.detail.find(L"616.64") != std::wstring::npos);
+
+    // A receipt without a diagnosis still says something, unclassified.
+    const NeuralPreflightResult bare = withShape(L"bare");
+    CHECK(!bare.ok);
+    CHECK(bare.cause == NeuralPreflightCause::None);
+    CHECK_EQ(std::wstring(L"The neural runtime preflight did not arm feature 18."), bare.detail);
+}
+
+void preflight_latch_holds_one_verdict_per_runtime_identity_test()
+{
+    const NeuralPreflightKey key{L"NVIDIA GeForce RTX 3060 Laptop GPU", L"32.0.15.6614", "runtime-digest-a"};
+    constexpr std::wstring_view detail =
+        L"NVIDIA driver 566.14 is below the 610.47 minimum for neural rendering.";
+    NeuralPreflightLatch latch;
+    // A non-empty detail is the whole predicate: it is both the reason to skip
+    // the probe and the sentence the render fails with.
+    CHECK(latch.LatchedFailureDetail(key).empty());
+
+    latch.RecordFailure(key, std::wstring(detail));
+    CHECK_EQ(std::wstring(detail), latch.LatchedFailureDetail(key));
+
+    // Anything that can change the answer carries no verdict, so it probes.
+    const NeuralPreflightKey newDriver{key.gpu, L"32.0.16.1664", key.runtimeDigest};
+    const NeuralPreflightKey otherGpu{L"NVIDIA GeForce RTX 5090", key.driver, key.runtimeDigest};
+    const NeuralPreflightKey newRuntime{key.gpu, key.driver, "runtime-digest-b"};
+    for (const NeuralPreflightKey& other : {newDriver, otherGpu, newRuntime})
+        CHECK(latch.LatchedFailureDetail(other).empty());
+    CHECK(!latch.LatchedFailureDetail(key).empty());
+
+    latch.RecordSuccess(key);
+    CHECK(latch.LatchedFailureDetail(key).empty());
+
+    latch.RecordFailure(key, std::wstring(detail));
+    latch.Invalidate();
+    CHECK(latch.LatchedFailureDetail(key).empty());
+
+    // The field storm: three playback starts on the same doomed machine ran
+    // three ~5 s probes in 65 s. One probe is the whole point of the latch.
+    NeuralPreflightLatch storm;
+    int probes = 0;
+    for (int playbackStart = 0; playbackStart < 3; ++playbackStart) {
+        if (!storm.LatchedFailureDetail(key).empty()) continue;
+        ++probes;
+        storm.RecordFailure(key, std::wstring(detail));
+    }
+    CHECK_EQ(1, probes);
+}
+
 void runtime_lease_admits_one_holder_per_directory_test()
 {
     const std::filesystem::path runtime = L"D:/example/neural-runtime";
@@ -800,6 +880,8 @@ int wmain(int argc, wchar_t** argv)
     request_fields_reach_the_helper_intact_test();
     crashed_helper_is_relaunched_at_most_once_test();
     preflight_receipt_round_trips_and_restarts_once_test();
+    preflight_failure_detail_comes_from_the_receipt_diagnosis_test();
+    preflight_latch_holds_one_verdict_per_runtime_identity_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
     segment_messages_round_trip_and_reject_malformed_test();

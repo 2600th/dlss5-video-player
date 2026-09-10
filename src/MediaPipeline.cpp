@@ -1,5 +1,7 @@
 #include "MediaPipeline.h"
 
+#include "HardErrorSuppression.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -184,6 +186,7 @@ struct ChildProcess {
         }
         PROCESS_INFORMATION info{};
         std::wstring command = CommandLine(executable, arguments);
+        const ScopedHardErrorSuppression noHardErrorDialog;
         const BOOL created = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
             pipeInput ? TRUE : FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED |
             (pipeInput ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
@@ -282,6 +285,7 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
     startup.lpAttributeList = attributeList;
     PROCESS_INFORMATION info{};
     std::wstring command = CommandLine(executable, arguments);
+    const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL created = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr,
         TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
         nullptr, executable.parent_path().c_str(), &startup.StartupInfo, &info);

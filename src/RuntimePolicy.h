@@ -2,8 +2,10 @@
 
 #include "OfflineNeuralRenderer.h"
 
+#include <compare>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,6 +46,75 @@ struct DetectedGpu {
     std::wstring driverVersion;
 };
 
+// NVIDIA publishes a driver as "566.14"; DXGI reports the user-mode driver as
+// four 16-bit parts and hides that number in the last two. Verified against
+// three machines this project has run on:
+//   32.0.15.6614 -> 566.14  RTX 3060 Laptop, feature 18 refused (0xbad00002)
+//   32.0.16.1047 -> 610.47  RTX 4080 SUPER, feature 18 runs
+//   32.0.16.1664 -> 616.64  RTX 5090, feature 18 runs
+// number = (part3 % 10) * 10000 + part4, then major = number / 100.
+struct NvidiaDriverVersion {
+    uint32_t major{};
+    uint32_t minor{};
+    auto operator<=>(const NvidiaDriverVersion&) const = default;
+};
+
+// Defined here rather than in RuntimePolicy.cpp because the preflight
+// diagnosis needs them in translation units that link no DXGI: unlike the
+// rest of this header's implementation they are pure text.
+inline std::optional<NvidiaDriverVersion> ParseNvidiaDriverVersion(std::wstring_view dxgiVersion)
+{
+    uint32_t parts[4]{};
+    size_t offset = 0;
+    for (size_t index = 0; index < 4; ++index) {
+        const size_t dot = dxgiVersion.find(L'.', offset);
+        const bool last = index == 3;
+        // Exactly four parts: a separator is required before the last one and
+        // forbidden after it.
+        if (last != (dot == std::wstring_view::npos)) return std::nullopt;
+        const std::wstring_view part =
+            dxgiVersion.substr(offset, last ? std::wstring_view::npos : dot - offset);
+        if (part.empty() || part.size() > 5) return std::nullopt;
+        uint32_t value = 0;
+        for (const wchar_t character : part) {
+            if (character < L'0' || character > L'9') return std::nullopt;
+            value = value * 10u + static_cast<uint32_t>(character - L'0');
+        }
+        parts[index] = value;
+        offset = dot + 1;
+    }
+    if (parts[3] > 9999) return std::nullopt;
+    const uint32_t number = (parts[2] % 10u) * 10000u + parts[3];
+    const NvidiaDriverVersion version{number / 100u, number % 100u};
+    if (version.major == 0) return std::nullopt;
+    return version;
+}
+
+inline std::wstring FormatNvidiaDriverVersion(NvidiaDriverVersion version)
+{
+    std::wstring text = std::to_wstring(version.major);
+    text += L'.';
+    if (version.minor < 10) text += L'0';
+    text += std::to_wstring(version.minor);
+    return text;
+}
+
+// 610.47 is the lowest driver this project has actually run feature 18 on;
+// 616.64 is the driver the locked runtime is verified against. The floor is
+// deliberately the measured one - the community-published floor for this
+// runtime is 616.56, which no machine here has bracketed.
+inline constexpr NvidiaDriverVersion kNeuralDriverFloor{610, 47};
+inline constexpr NvidiaDriverVersion kNeuralDriverRecommended{616, 64};
+
+enum class NeuralDriverSupport { Unknown, BelowFloor, Supported };
+
+inline NeuralDriverSupport ClassifyNeuralDriver(std::wstring_view dxgiVersion)
+{
+    const std::optional<NvidiaDriverVersion> version = ParseNvidiaDriverVersion(dxgiVersion);
+    if (!version) return NeuralDriverSupport::Unknown;
+    return *version < kNeuralDriverFloor ? NeuralDriverSupport::BelowFloor : NeuralDriverSupport::Supported;
+}
+
 struct NeuralRenderDefaults {
     uint32_t width{};
     uint32_t height{};
@@ -52,15 +123,8 @@ struct NeuralRenderDefaults {
 struct RuntimeArguments {
     bool ok{false};
     bool safeMode{false};
-    bool addonBootstrapRestarted{false};
     std::vector<std::wstring> userArguments;
     std::wstring error;
-};
-
-enum class BootstrapAction {
-    Continue,
-    Relaunch,
-    Fail,
 };
 
 enum class NeuralRuntimeLayout {
@@ -114,12 +178,7 @@ struct NeuralPlaybackLifecycle {
     void Invalidate();
 };
 
-enum class NeuralOpenAction { UseCache, StartJob, OriginalOnly };
-NeuralOpenAction DecideNeuralOpen(bool runtimeComplete, bool safeMode, bool cacheValid);
 bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid);
-void ExecuteNeuralReplacementSequence(const std::function<void()>& requestStop,
-                                      const std::function<void()>& joinWorker,
-                                      const std::function<void()>& replace);
 
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
@@ -134,20 +193,7 @@ NeuralRuntimeLayout ClassifyNeuralRuntimeLayout(
     bool hasNeuralAddon,
     bool hasNeuralRuntime);
 DetectedGpu DetectHighPerformanceGpu();
-BootstrapAction DecideBootstrap(
-    bool desiredEnabled,
-    bool configEnabled,
-    bool alreadyRestarted,
-    bool updateSucceeded);
-BootstrapAction DecideBootstrapFromObservedUpdate(
-    bool desiredEnabled,
-    bool previousEnabled,
-    bool currentEnabled,
-    bool alreadyRestarted,
-    bool updateSucceeded);
 RuntimeArguments ParseRuntimeArguments(int argc, const wchar_t* const* argv);
-std::vector<std::wstring> BuildBootstrapRelaunchArguments(
-    const std::vector<std::wstring>& userArguments);
 std::vector<std::wstring> BuildSafeModeRestartArguments(
     const std::vector<std::wstring>& userArguments);
 SafeModeRestartOutcome ExecuteAdvancedSafeModeRestart(

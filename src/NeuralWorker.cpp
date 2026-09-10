@@ -1,5 +1,6 @@
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
+#include "HardErrorSuppression.h"
 
 #include <windows.h>
 
@@ -317,6 +318,7 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     startup.StartupInfo.cb = sizeof(startup);
     startup.lpAttributeList = attributeList;
     PROCESS_INFORMATION process{};
+    const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL created = CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr,
         executable.parent_path().c_str(), &startup.StartupInfo, &process);
@@ -425,6 +427,73 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
         return mismatch;
     }
     return result;
+}
+
+// The receipt's "diagnosis" object, read back without a JSON parser: the
+// probe wrote it, and the parent only needs the two strings out of it.
+struct ReceiptDiagnosis {
+    NeuralPreflightCause cause{NeuralPreflightCause::None};
+    std::wstring detail;
+};
+
+std::string_view ScanDiagnosisMember(std::string_view object, std::string_view field)
+{
+    std::string key = "\"";
+    key += field;
+    key += "\":\"";
+    const size_t start = object.find(key);
+    if (start == std::string_view::npos) return {};
+    size_t position = start + key.size();
+    const size_t valueStart = position;
+    while (position < object.size() && object[position] != '"') {
+        position += object[position] == '\\' ? 2 : 1;
+    }
+    return object.substr(valueStart, std::min(position, object.size()) - valueStart);
+}
+
+std::wstring UnescapeJsonToWide(std::string_view escaped)
+{
+    std::string text;
+    text.reserve(escaped.size());
+    for (size_t index = 0; index < escaped.size(); ++index) {
+        if (escaped[index] != '\\' || index + 1 == escaped.size()) {
+            text.push_back(escaped[index]);
+            continue;
+        }
+        switch (escaped[++index]) {
+            case 'n': text.push_back('\n'); break;
+            case 'r': text.push_back('\r'); break;
+            case 't': text.push_back('\t'); break;
+            // \uXXXX never appears: the probe escapes only control characters
+            // it also never emits, and every other escape is the literal.
+            default: text.push_back(escaped[index]); break;
+        }
+    }
+    if (text.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring wide(static_cast<size_t>(std::max(length, 0)), L'\0');
+    if (length > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
+    }
+    return wide;
+}
+
+ReceiptDiagnosis ScanReceiptDiagnosis(std::string_view json)
+{
+    ReceiptDiagnosis diagnosis;
+    const size_t start = json.find("\"diagnosis\":{");
+    if (start == std::string_view::npos) return diagnosis;
+    const size_t end = json.find('}', start);
+    const std::string_view object =
+        json.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
+    const std::string_view cause = ScanDiagnosisMember(object, "cause");
+    for (size_t index = 0; index < kNeuralPreflightCauseNames.size(); ++index) {
+        if (kNeuralPreflightCauseNames[index] != cause) continue;
+        diagnosis.cause = static_cast<NeuralPreflightCause>(index);
+        break;
+    }
+    diagnosis.detail = UnescapeJsonToWide(ScanDiagnosisMember(object, "detail"));
+    return diagnosis;
 }
 
 } // namespace
@@ -651,9 +720,44 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
         }
         result.ok = reader.Preflight().ok;
         result.json = reader.Preflight().json;
-        if (!result.ok) result.detail = L"The neural runtime preflight did not arm feature 18.";
+        if (!result.ok) {
+            const ReceiptDiagnosis diagnosis = ScanReceiptDiagnosis(result.json);
+            result.cause = diagnosis.cause;
+            result.detail = diagnosis.detail.empty() ? L"The neural runtime preflight did not arm feature 18." :
+                                                       diagnosis.detail;
+        }
         return result;
     }
+}
+
+void NeuralPreflightLatch::RecordFailure(const NeuralPreflightKey& key, std::wstring detail)
+{
+    const std::lock_guard<std::mutex> guard(mutex_);
+    key_ = key;
+    detail_ = std::move(detail);
+    failed_ = true;
+}
+
+void NeuralPreflightLatch::RecordSuccess(const NeuralPreflightKey& key)
+{
+    const std::lock_guard<std::mutex> guard(mutex_);
+    key_ = key;
+    detail_.clear();
+    failed_ = false;
+}
+
+std::wstring NeuralPreflightLatch::LatchedFailureDetail(const NeuralPreflightKey& key) const
+{
+    const std::lock_guard<std::mutex> guard(mutex_);
+    return failed_ && key_ == key ? detail_ : std::wstring{};
+}
+
+void NeuralPreflightLatch::Invalidate()
+{
+    const std::lock_guard<std::mutex> guard(mutex_);
+    key_ = {};
+    detail_.clear();
+    failed_ = false;
 }
 
 std::wstring NeuralRuntimeLease::MutexName(const std::filesystem::path& runtimeDirectory)

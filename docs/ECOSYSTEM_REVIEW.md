@@ -263,15 +263,22 @@ frame generation (neural-upstream `FINDINGS.md`).
 
 ### Quick additions
 
-- **Driver floor and known-bad list** in preflight. We only report the driver
-  version (`src/RuntimePolicy.cpp:222-226`, `src/NeuralPreflight.cpp:317`); no
-  comparison, floor or blocklist exists anywhere in `src/`. OptiScaler floors at
-  616.56; Feeder's `--test` matrix found 616.64 faulting inside
-  `nvngx_dlssnr.dll` for its own consumer, and dlss5-bridge closes a driver NGX
-  loader route in memory for two named driver builds.
-- **Fatbin architecture check.** Autopilot opens the runtime and validates its
-  CUDA fatbin records against the detected GPU before installing. This directly
-  answers our open "RTX 20 and 30 are enabled but nobody has run them" risk.
+- ~~**Driver floor and known-bad list** in preflight.~~ **Done.** The DXGI
+  driver string is parsed and compared against a 610.47 floor
+  (`src/RuntimePolicy.h`, `ClassifyNeuralDriver`); a render below it is refused
+  with the detected, minimum and verified versions instead of paying for a probe
+  that cannot pass, and the preflight receipt classifies the NGX result
+  (`src/NeuralPreflight.h`, `DiagnoseNeuralPreflight`). The floor is this
+  project's own lowest working driver; OptiScaler publishes 616.56, and Feeder's
+  `--test` matrix found 616.64 faulting inside `nvngx_dlssnr.dll` for its own
+  consumer. A per-driver blocklist is still not implemented.
+- ~~**Fatbin architecture check.**~~ **Answered by measurement.** Parsing the
+  locked `310.8.SF-v2` fatbin records gives `sm_75/86/89/120`, so Turing and
+  Ampere kernels are present, and its internal architecture gate is patched to
+  accept them (its refusal path returns `0xbad00001`). The first Ampere run - an
+  RTX 3060 Laptop - was refused by the driver with `0xbad00002` instead, which is
+  what the floor above now reports up front. An install-time check would add
+  nothing the runtime does not already answer.
 - **A delta×20 debug view** beside the existing final/DLSS-input/motion/depth
   views. It is the single best tool for judging whether NR did anything.
 - **`SHA256SUMS.txt` plus `gh attestation verify` provenance** on releases.

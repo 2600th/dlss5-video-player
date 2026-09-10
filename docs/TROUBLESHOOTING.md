@@ -1,7 +1,7 @@
 # Troubleshooting
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe v0.17.2.
+These instructions describe v0.18.0.
 
 ## The player cannot find the neural runtime
 
@@ -12,6 +12,41 @@ does not supply the experimental runtime automatically.
 
 Choose **Advanced > Restart in DLSS SR safe mode** to skip the neural helper
 for that launch while retaining optional runtime Super Resolution.
+
+## Neural rendering is refused because the driver is too old
+
+Feature 18 is created by the NVIDIA driver's own NGX core, so a driver older
+than the core that knows the feature refuses the create before the player is
+involved. The refusal appears in `neural-runtime/ReShade.log` as
+`feature 18 create failed with 0xbad00002`
+(`NVSDK_NGX_Result_FAIL_PlatformError`).
+
+The player reads the driver from DXGI and compares it against a **610.47**
+floor, the lowest driver this project has rendered on; **616.64** is the driver
+the verification records used, and 616.56 is the floor the wider community
+publishes for the same runtime. Below the floor the render is refused up front
+with the detected, minimum and verified numbers, and the startup log carries the
+same verdict. DXGI reports the driver as `32.0.15.6614`-style; that is
+566.14, and `32.0.16.1664` is 616.64.
+
+Update the driver, then start the render again. A GPU whose architecture the
+runtime itself refuses fails differently, with `0xbad00001`, and no driver
+update changes that. `0xbad0000d` is GPU memory: choose a lower source
+resolution or close other GPU applications.
+
+One failing probe is remembered per GPU, driver and runtime, so a doomed
+preflight is not re-run on every play and seek. Updating the driver or the
+runtime clears it.
+
+## Update notice in the menu bar
+
+`↑ Update <version>` right-justified in the menu bar means a newer stable
+release exists; opening it goes to the GitHub releases page and retires that
+version until the next one ships. **Advanced > Check for updates** asks
+immediately and answers either way. The check runs at most once a day, ignores
+drafts and pre-releases, and stores its state in `[Updates]` in
+`DLSSVideoPlayer.ini` beside the executable; `Enabled=0` turns it off. When
+GitHub cannot be reached the player says so and keeps playing.
 
 ## A render fails or starts again
 

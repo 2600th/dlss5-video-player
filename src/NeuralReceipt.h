@@ -29,6 +29,7 @@ struct NeuralRenderReceiptInputs {
 //  result{...}}. Single line, no trailing newline.
 std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs);
 
-// One log line: gpu/driver/reshade/renodx/nr/feature18 from the preflight
-// JSON plus lock status, failure kind and frame counts.
+// One log line: gpu/driver/reshade/renodx/nr/feature18 (with the feature's
+// own NGX result and the diagnosed cause when the probe classified one) from
+// the preflight JSON plus lock status, failure kind and frame counts.
 std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs);

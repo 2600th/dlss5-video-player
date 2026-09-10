@@ -19,6 +19,7 @@
 #include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
 #include "SynchronizedPlayback.h"
+#include "HardErrorSuppression.h"
 #ifdef small
 #undef small
 #endif
@@ -2288,6 +2289,58 @@ void gpu_classification_table_test()
     }
 }
 
+void nvidia_driver_version_is_read_out_of_the_dxgi_quad_test()
+{
+    struct Case {
+        std::wstring_view dxgi;
+        uint32_t major;
+        uint32_t minor;
+    };
+    // The three machines this project has actually run on.
+    constexpr Case accepted[] = {
+        {L"32.0.15.6614", 566, 14},  // RTX 3060 Laptop, feature 18 refused
+        {L"32.0.16.1047", 610, 47},  // RTX 4080 SUPER
+        {L"32.0.16.1664", 616, 64},  // RTX 5090
+    };
+    for (const auto& test : accepted) {
+        const auto parsed = ParseNvidiaDriverVersion(test.dxgi);
+        CHECK(parsed.has_value());
+        if (!parsed) continue;
+        CHECK_EQ(test.major, parsed->major);
+        CHECK_EQ(test.minor, parsed->minor);
+        CHECK_EQ(std::to_wstring(test.major) + L"." + std::to_wstring(test.minor),
+                 FormatNvidiaDriverVersion(*parsed));
+    }
+    // A single-digit minor keeps the two-digit form NVIDIA publishes.
+    CHECK_EQ(std::wstring(L"580.05"), FormatNvidiaDriverVersion(NvidiaDriverVersion{580, 5}));
+
+    constexpr std::wstring_view rejected[] = {
+        L"", L"32.0.16", L"32.0.16.abcd", L"32.0.16.99999", L"32.0.16.1664.2", L"32.0..1664",
+        L"32.0.16.", L"32.0.16.16 64", L"0.0.0.0",
+    };
+    for (const std::wstring_view text : rejected) {
+        CHECK(!ParseNvidiaDriverVersion(text).has_value());
+    }
+}
+
+void neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test()
+{
+    CHECK_EQ(NeuralDriverSupport::BelowFloor, ClassifyNeuralDriver(L"32.0.15.6614"));
+    CHECK_EQ(NeuralDriverSupport::Supported, ClassifyNeuralDriver(L"32.0.16.1047"));
+    CHECK_EQ(NeuralDriverSupport::Supported, ClassifyNeuralDriver(L"32.0.16.1664"));
+    CHECK_EQ(NeuralDriverSupport::Unknown, ClassifyNeuralDriver(L"not-a-driver"));
+    CHECK_EQ(NeuralDriverSupport::Unknown, ClassifyNeuralDriver(L""));
+
+    // The boundary is inclusive: 610.47 is the lowest driver known to work.
+    CHECK_EQ(NeuralDriverSupport::BelowFloor, ClassifyNeuralDriver(L"32.0.16.1046"));
+    constexpr NvidiaDriverVersion justBelowFloor{610, 46};
+    CHECK(justBelowFloor < kNeuralDriverFloor);
+    CHECK(!(kNeuralDriverFloor < kNeuralDriverFloor));
+    CHECK(kNeuralDriverFloor < kNeuralDriverRecommended);
+    CHECK_EQ(std::wstring(L"610.47"), FormatNvidiaDriverVersion(kNeuralDriverFloor));
+    CHECK_EQ(std::wstring(L"616.64"), FormatNvidiaDriverVersion(kNeuralDriverRecommended));
+}
+
 void neural_addon_policy_test()
 {
     for (const GpuGeneration rtx : {GpuGeneration::Rtx20Turing, GpuGeneration::Rtx30Ampere,
@@ -2321,26 +2374,18 @@ void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
     CHECK_EQ(uint32_t{2160}, nativeOnly.height);
 }
 
-void neural_open_uses_valid_cache_without_starting_a_job_test()
+void neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test()
 {
-    CHECK_EQ(NeuralOpenAction::UseCache,DecideNeuralOpen(true,false,true));
     NeuralPlaybackLifecycle lifecycle;const uint64_t generation=lifecycle.Begin();
     CHECK(lifecycle.Accept(generation));CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
 }
 
-void neural_open_starts_materialize_then_render_on_cache_miss_test()
+void neural_playback_lifecycle_runs_render_validate_then_ready_test()
 {
-    CHECK_EQ(NeuralOpenAction::StartJob,DecideNeuralOpen(true,false,false));
     NeuralPlaybackLifecycle lifecycle;lifecycle.Begin();
     CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
     CHECK(lifecycle.Transition(NeuralPlaybackState::Validating));
     CHECK(lifecycle.Transition(NeuralPlaybackState::Ready));
-}
-
-void neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test()
-{
-    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(false,false,true));
-    CHECK_EQ(NeuralOpenAction::OriginalOnly,DecideNeuralOpen(true,true,true));
 }
 
 void neural_completion_publishes_only_after_probe_and_manifest_validation_test()
@@ -2457,26 +2502,6 @@ void dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature
     CHECK_EQ(ComparisonView::Original,ToggleComparisonView(ComparisonView::Neural));
 }
 
-void source_change_cancels_and_joins_the_owned_job_before_replacement_test()
-{
-    std::vector<int> order;
-    ExecuteNeuralReplacementSequence([&]{order.push_back(1);},[&]{order.push_back(2);},
-                                     [&]{order.push_back(3);});
-    CHECK_EQ(std::vector<int>({1,2,3}),order);
-}
-
-void youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test()
-{
-    const auto formats=ParseYouTubeFormatMetadata(
-        R"([{"format_note":"escaped \"height\":2160","height":1080},{"height":1440},{"height":2160},{"height":1080},{"height":null}])");
-    CHECK(formats.valid);CHECK(formats.autoAvailable);CHECK(formats.p1080);CHECK(formats.p1440);CHECK(formats.p2160);
-    const auto low=ParseYouTubeFormatMetadata(R"([{"height":720},{"height":480}])");
-    CHECK(low.valid);CHECK(low.autoAvailable);CHECK(!low.p1080);CHECK(!low.p1440);CHECK(!low.p2160);
-    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080},])").valid);
-    CHECK(!ParseYouTubeFormatMetadata(R"([{"height":1080}] trailing)").valid);
-    CHECK(!ParseYouTubeFormatMetadata(std::string(kMaximumYouTubeFormatMetadataBytes+1,' ')).valid);
-}
-
 void neural_runtime_layout_is_absent_complete_or_fail_closed_test()
 {
     CHECK_EQ(NeuralRuntimeLayout::Absent,
@@ -2498,39 +2523,6 @@ void default_neural_carrier_uses_native_resolution_dlaa_test()
 {
     CHECK_EQ(NVSDK_NGX_PerfQuality_Value_DLAA,
              DefaultNeuralCarrierQuality());
-}
-
-void bootstrap_action_matrix_test()
-{
-    struct Case {
-        bool desired_enabled;
-        bool config_enabled;
-        bool already_restarted;
-        bool update_succeeded;
-        BootstrapAction expected;
-    };
-
-    constexpr Case cases[] = {
-        {true, true, false, true, BootstrapAction::Continue},
-        {false, false, false, true, BootstrapAction::Continue},
-        {true, true, true, true, BootstrapAction::Continue},
-        {false, false, true, true, BootstrapAction::Continue},
-        {true, false, false, true, BootstrapAction::Relaunch},
-        {false, true, false, true, BootstrapAction::Relaunch},
-        {true, false, true, true, BootstrapAction::Fail},
-        {false, true, true, true, BootstrapAction::Fail},
-        {true, true, false, false, BootstrapAction::Fail},
-        {false, true, false, false, BootstrapAction::Fail},
-        {true, false, true, false, BootstrapAction::Fail},
-    };
-
-    for (const auto& test : cases) {
-        CHECK_EQ(test.expected, DecideBootstrap(
-            test.desired_enabled,
-            test.config_enabled,
-            test.already_restarted,
-            test.update_succeeded));
-    }
 }
 
 void windows_command_line_quoting_round_trip_test()
@@ -2597,7 +2589,6 @@ void runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test()
     const RuntimeArguments parsed = ParseRuntimeArguments(static_cast<int>(std::size(argv)), argv);
     CHECK(parsed.ok);
     CHECK(parsed.safeMode);
-    CHECK(parsed.addonBootstrapRestarted);
     CHECK(parsed.error.empty());
     CHECK_EQ(expected.size(), parsed.userArguments.size());
     if (parsed.userArguments.size() == expected.size()) {
@@ -2609,25 +2600,8 @@ void runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test()
     const RuntimeArguments failed = ParseRuntimeArguments(0, nullptr);
     CHECK(!failed.ok);
     CHECK(!failed.safeMode);
-    CHECK(!failed.addonBootstrapRestarted);
     CHECK(failed.userArguments.empty());
     CHECK(!failed.error.empty());
-}
-
-void observed_config_bootstrap_decision_test()
-{
-    CHECK_EQ(BootstrapAction::Continue,
-        DecideBootstrapFromObservedUpdate(true, true, true, false, true));
-    CHECK_EQ(BootstrapAction::Continue,
-        DecideBootstrapFromObservedUpdate(false, false, false, true, true));
-    CHECK_EQ(BootstrapAction::Relaunch,
-        DecideBootstrapFromObservedUpdate(true, false, true, false, true));
-    CHECK_EQ(BootstrapAction::Fail,
-        DecideBootstrapFromObservedUpdate(true, false, true, true, true));
-    CHECK_EQ(BootstrapAction::Fail,
-        DecideBootstrapFromObservedUpdate(true, false, false, false, true));
-    CHECK_EQ(BootstrapAction::Fail,
-        DecideBootstrapFromObservedUpdate(false, true, false, false, false));
 }
 
 void restart_argument_lifecycle_and_create_process_command_line_test()
@@ -2641,21 +2615,6 @@ void restart_argument_lifecycle_and_create_process_command_line_test()
         L"--safe-mode",
         L"--addon-bootstrap-restarted",
     };
-
-    const std::vector<std::wstring> bootstrap = BuildBootstrapRelaunchArguments(contaminated);
-    const std::vector<std::wstring> expectedBootstrap = {
-        L"--future-flag",
-        L"",
-        L"C:\\Videos\\clip with spaces.mp4",
-        L"--safe-mode",
-        L"--addon-bootstrap-restarted",
-    };
-    CHECK_EQ(expectedBootstrap.size(), bootstrap.size());
-    if (bootstrap.size() == expectedBootstrap.size()) {
-        for (size_t index = 0; index < bootstrap.size(); ++index) {
-            CHECK_EQ(expectedBootstrap[index], bootstrap[index]);
-        }
-    }
 
     const std::vector<std::wstring> safeMode = BuildSafeModeRestartArguments(contaminated);
     const std::vector<std::wstring> expectedSafeMode = {
@@ -2676,8 +2635,8 @@ void restart_argument_lifecycle_and_create_process_command_line_test()
         L"\"C:\\Program Files\\DLSS Player\\DLSSVideoPlayer.exe\" "
         L"\"--future-flag\" \"\" "
         L"\"C:\\Videos\\clip with spaces.mp4\" "
-        L"\"--safe-mode\" \"--addon-bootstrap-restarted\"";
-    CHECK_EQ(std::wstring(expectedCommandLine), BuildWindowsCommandLine(executable, bootstrap));
+        L"\"--safe-mode\"";
+    CHECK_EQ(std::wstring(expectedCommandLine), BuildWindowsCommandLine(executable, safeMode));
 }
 
 void advanced_safe_mode_normal_invocation_adds_safe_mode_test()
@@ -5552,6 +5511,51 @@ void ngx_live_feature_is_never_released_on_a_frame_count_test()
     CHECK_EQ(1, releases);
 }
 
+// A half-extracted package leaves a helper that is not a PE image. Windows
+// answers such a CreateProcessW with a modal hard-error dialog on the calling
+// thread and does not return until it is dismissed, which is exactly how a
+// worker thread stops forever with nothing in the log. Every spawn site wraps
+// itself in ScopedHardErrorSuppression so the call fails instead.
+void spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test()
+{
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+        (L"PolicyTests-CorruptHelper-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(GetTickCount64()));
+    std::error_code directoryError;
+    std::filesystem::create_directories(directory, directoryError);
+    CHECK(!directoryError);
+    const std::filesystem::path helper = directory / L"yt-dlp.exe";
+    write_binary_file(helper, "not a Windows executable");
+
+    std::wstring command = L"\"" + helper.wstring() + L"\"";
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    const DWORD modeBefore = GetThreadErrorMode();
+    const auto started = std::chrono::steady_clock::now();
+    BOOL created = FALSE;
+    DWORD error = 0;
+    {
+        const ScopedHardErrorSuppression noHardErrorDialog;
+        CHECK((GetThreadErrorMode() & SEM_FAILCRITICALERRORS) != 0);
+        created = CreateProcessW(helper.c_str(), command.data(), nullptr, nullptr, FALSE,
+                                 CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process);
+        error = GetLastError();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(!created);
+    // 216 is what a non-PE stub reports here and what the suppressed dialog was
+    // about ("incompatibility with 64-bit versions of Windows"); a differently
+    // malformed image reports 193. Either way the call answers instead of hanging.
+    CHECK(error == DWORD{ERROR_EXE_MACHINE_TYPE_MISMATCH} || error == DWORD{ERROR_BAD_EXE_FORMAT});
+    // Unsuppressed, the call blocks on the dialog rather than returning at all.
+    CHECK(elapsed < std::chrono::seconds{5});
+    // The mode belongs to the scope, not to the thread from here on.
+    CHECK_EQ(modeBefore, GetThreadErrorMode());
+    if (created) { CloseHandle(process.hThread); CloseHandle(process.hProcess); }
+    std::filesystem::remove_all(directory, directoryError);
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[])
@@ -5666,11 +5670,12 @@ int wmain(int argc, wchar_t* argv[])
     renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test();
     renderer_cache_capture_does_not_apply_playback_color_adjustments_test();
     gpu_classification_table_test();
+    nvidia_driver_version_is_read_out_of_the_dxgi_quad_test();
+    neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test();
     neural_addon_policy_test();
     neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
-    neural_open_uses_valid_cache_without_starting_a_job_test();
-    neural_open_starts_materialize_then_render_on_cache_miss_test();
-    neural_open_bypasses_prerender_when_runtime_is_absent_or_safe_mode_test();
+    neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test();
+    neural_playback_lifecycle_runs_render_validate_then_ready_test();
     neural_completion_publishes_only_after_probe_and_manifest_validation_test();
     neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
     neural_pause_suspends_rendering_and_resumes_without_advancing_test();
@@ -5678,14 +5683,10 @@ int wmain(int argc, wchar_t* argv[])
     neural_failure_kind_selects_the_lifecycle_state_test();
     neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test();
     dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
-    source_change_cancels_and_joins_the_owned_job_before_replacement_test();
-    youtube_format_metadata_parser_is_strict_and_enables_only_exact_manual_heights_test();
     neural_runtime_layout_is_absent_complete_or_fail_closed_test();
     default_neural_carrier_uses_native_resolution_dlaa_test();
-    bootstrap_action_matrix_test();
     windows_command_line_quoting_round_trip_test();
     runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
-    observed_config_bootstrap_decision_test();
     restart_argument_lifecycle_and_create_process_command_line_test();
     advanced_safe_mode_normal_invocation_adds_safe_mode_test();
     advanced_safe_mode_cancel_keeps_current_open_without_launch_test();
@@ -5753,6 +5754,7 @@ int wmain(int argc, wchar_t* argv[])
     ngx_create_failure_is_not_retried_until_explicit_reset_test();
     ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test();
     ngx_live_feature_is_never_released_on_a_frame_count_test();
+    spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test();
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";

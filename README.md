@@ -15,17 +15,19 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 > [!IMPORTANT]
 > This is a community project, not an NVIDIA product. The neural runtime is a
 > modified, unsigned community build. v0.17.2 was checked on an RTX 4080 SUPER
-> and v0.17.1 on an RTX 5090; RTX 20 and 30 are enabled but nobody has run
-> them yet. Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
+> and v0.17.1 on an RTX 5090. RTX 20 and 30 are enabled, and the first Ampere
+> run - an RTX 3060 Laptop - was refused by its **driver**, not by the runtime:
+> feature 18 needs driver 610.47 or newer, and 616.64 is the verified one.
+> Details and notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
-**v0.17.2** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.17.2)
+**v0.18.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.18.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.17.2-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.17.2-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.18.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.18.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. The full package is
 attached by hand, because the automated build never fetches the runtime, so it
@@ -199,6 +201,11 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
   1.165x real time, while a 6.3 Mbit/s 4K re-encode costs 42 ms per frame, or
   0.78x, and drops nearly every present. The player measures your GPU after the
   first session and warns before one it expects to fall behind.
+- Driver. Neural rendering needs the driver's own NGX core to know feature 18:
+  below **610.47** the player refuses the render up front and names the version
+  to install (616.64 is the verified one). An older driver answers
+  `feature 18 create failed with 0xbad00002`, whatever the GPU is. See
+  [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
 - RTX 20 and 30 run the universal runtime without native FP8. Expect them to be
   several times slower. Nobody has verified them in this project yet.
 - Motion and depth guides are estimated from the video. Artifacts happen.
@@ -209,6 +216,9 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
 - YouTube: public, non-DRM videos only, no login. Availability can change.
 - History is five videos, not a size quota. Big videos take space.
   **Advanced > Clear Neural Cache** frees it.
+- The menu bar shows `↑ Update <version>` when a newer release exists;
+  **Advanced > Check for updates** asks GitHub on demand. `[Updates] Enabled=0`
+  in `DLSSVideoPlayer.ini` turns the daily check off.
 
 ## Building and contributing
 

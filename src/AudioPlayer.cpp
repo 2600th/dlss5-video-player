@@ -1,4 +1,5 @@
 #include "AudioPlayer.h"
+#include "HardErrorSuppression.h"
 #include "Log.h"
 #include <filesystem>
 #include <vector>
@@ -98,6 +99,7 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
     HANDLE job=CreateJobObjectW(nullptr,nullptr);if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
     PROCESS_INFORMATION pi{};
+    const ScopedHardErrorSuppression noHardErrorDialog;
     BOOL ok = job&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED,
                              nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe); if (nul) CloseHandle(nul);

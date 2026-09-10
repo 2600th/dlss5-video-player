@@ -34,6 +34,7 @@
 #include "UiLayout.h"
 #include "UiResources.h"
 #include "Log.h"
+#include "HardErrorSuppression.h"
 #include "ReShadeConfig.h"
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
@@ -54,6 +55,7 @@
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
+#include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
 #include "resources.h"
 
@@ -178,6 +180,7 @@ static constexpr UINT WM_YOUTUBE_RESOLVED = WM_APP + 41;
 static constexpr UINT WM_NEURAL_PROGRESS = WM_APP + 42;
 static constexpr UINT WM_NEURAL_COMPLETE = WM_APP + 43;
 static constexpr UINT WM_EXPORT_COMPLETE = WM_APP + 44;
+static constexpr UINT WM_UPDATE_CHECKED = WM_APP + 45;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -569,6 +572,13 @@ struct ExportCompletion {
     std::filesystem::path output;
 };
 
+struct UpdateCheckCompletion {
+    UpdateFetchResult fetch;
+    // A check the user asked for reports its outcome either way; the startup
+    // check stays silent unless it has something to show.
+    bool userRequested{false};
+};
+
 struct PreparedRendererCandidate {
     HWND window{};
     D3D12RendererOwner renderer;
@@ -583,7 +593,6 @@ struct AppOptions {
     NVSDK_NGX_PerfQuality_Value quality=DefaultNeuralCarrierQuality();
     bool qualityExplicit=true;
     bool safeMode=false;
-    bool addonBootstrapRestarted=false;
     bool neuralAddonRequested=false;
     bool neuralAddonConfigured=false;
     bool argumentsOk=false;
@@ -600,7 +609,6 @@ static AppOptions ParseArgs() {
     if(!runtimeArguments.ok){o.argumentError=runtimeArguments.error;return o;}
     o.argumentsOk=true;
     o.safeMode=runtimeArguments.safeMode;
-    o.addonBootstrapRestarted=runtimeArguments.addonBootstrapRestarted;
     o.userArguments=runtimeArguments.userArguments;
     for(size_t i=0;i<o.userArguments.size();++i) {
         const std::wstring& a=o.userArguments[i];
@@ -627,6 +635,15 @@ static std::string WideToUtf8(std::wstring_view value) {
     return result;
 }
 
+static std::wstring Utf8ToWide(std::string_view value) {
+    if(value.empty()) return {};
+    const int size=MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0);
+    if(size<=0) return {};
+    std::wstring result(static_cast<size_t>(size),L'\0');
+    if(MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),size)!=size) return {};
+    return result;
+}
+
 static std::wstring Win32Error(std::wstring_view operation) {
     return std::wstring(operation)+L" failed (Win32 error "+std::to_wstring(GetLastError())+L")";
 }
@@ -645,6 +662,7 @@ static bool LaunchSameExecutable(const std::vector<std::wstring>& arguments,std:
     if(!CurrentExecutablePath(executable,error)) return false;
     std::wstring commandLine=BuildWindowsCommandLine(executable.native(),arguments);
     STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
+    const ScopedHardErrorSuppression noHardErrorDialog;
     if(!CreateProcessW(executable.c_str(),commandLine.data(),nullptr,nullptr,FALSE,0,nullptr,nullptr,&startup,&process)) {
         error=Win32Error(L"Starting the player"); return false;
     }
@@ -697,6 +715,20 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
     options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
     options.neuralAddonConfigured=options.neuralAddonRequested;
     LOG("Isolated neural helper available; player remains hook-free. GPU=" << WideToUtf8(options.detectedGpu.description));
+    switch(ClassifyNeuralDriver(options.detectedGpu.driverVersion)){
+    case NeuralDriverSupport::BelowFloor:
+        // Feature 18 is serviced by the driver's NGX core, so a driver older
+        // than the floor refuses the create before this player is involved.
+        LOG("NVIDIA driver "<<WideToUtf8(options.detectedGpu.driverVersion)<<" is below the neural-rendering floor "
+            <<WideToUtf8(FormatNvidiaDriverVersion(kNeuralDriverFloor))<<"; neural rendering will be refused until the driver is updated to "
+            <<WideToUtf8(FormatNvidiaDriverVersion(kNeuralDriverRecommended))<<" or newer.");
+        break;
+    case NeuralDriverSupport::Unknown:
+        LOG("NVIDIA driver version could not be read from DXGI; the neural driver floor cannot be checked before the runtime probe.");
+        break;
+    case NeuralDriverSupport::Supported:
+        break;
+    }
     return StartupResult::Continue;
 }
 
@@ -881,6 +913,8 @@ public:
         ReadAnimationPreference();
         app_menu::UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);
         UpdateRecentMenu();
+        LoadUpdateSettings();
+        MaybeStartUpdateCheck(false);
         RegisterOverlayHotkeys();
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
         m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,nullptr);
@@ -1034,6 +1068,104 @@ private:
     }
     void CancelExport(){if(m_exportWorker.joinable()){m_exportWorker.request_stop();m_exportWorker.join();m_exportWorker=std::jthread{};}m_exportCompletions.Clear();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
     void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),L"Export complete",MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),L"Export failed",MB_OK|MB_ICONERROR);}
+
+    // Update notice. The check runs at most once a day in the background, keeps
+    // its answer in the INI beside the player, and never blocks startup: the
+    // badge appears when the reply arrives.
+    static int64_t UnixNow(){
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    }
+    std::string ReadIniNarrow(const wchar_t* section,const wchar_t* key)const{
+        wchar_t buffer[128]{};
+        const DWORD length=GetPrivateProfileStringW(section,key,L"",buffer,static_cast<DWORD>(std::size(buffer)),SettingsPath().c_str());
+        return WideToUtf8(std::wstring_view(buffer,length));
+    }
+    int64_t ReadIniInt64(const wchar_t* section,const wchar_t* key)const{
+        wchar_t buffer[64]{};
+        GetPrivateProfileStringW(section,key,L"0",buffer,static_cast<DWORD>(std::size(buffer)),SettingsPath().c_str());
+        wchar_t* end=nullptr;
+        const long long value=wcstoll(buffer,&end,10);
+        return (end&&end!=buffer)?static_cast<int64_t>(value):0;
+    }
+    void LoadUpdateSettings(){
+        m_updateChecksEnabled=GetPrivateProfileIntW(L"Updates",L"Enabled",1,SettingsPath().c_str())!=0;
+        m_updateLastChecked=ReadIniInt64(L"Updates",L"LastCheckedUnix");
+        m_updateLatestTag=ReadIniNarrow(L"Updates",L"LatestTag");
+        m_updateDismissedTag=ReadIniNarrow(L"Updates",L"DismissedTag");
+    }
+    void SaveUpdateSettings()const{
+        const auto path=SettingsPath();
+        WritePrivateProfileStringW(L"Updates",L"Enabled",m_updateChecksEnabled?L"1":L"0",path.c_str());
+        WritePrivateProfileStringW(L"Updates",L"LastCheckedUnix",std::to_wstring(m_updateLastChecked).c_str(),path.c_str());
+        WritePrivateProfileStringW(L"Updates",L"LatestTag",Utf8ToWide(m_updateLatestTag).c_str(),path.c_str());
+        WritePrivateProfileStringW(L"Updates",L"DismissedTag",Utf8ToWide(m_updateDismissedTag).c_str(),path.c_str());
+    }
+    void MaybeStartUpdateCheck(bool userRequested){
+        if(!m_hwnd||m_updateWorker.joinable())return;
+        const UpdateCheckDecision decision=userRequested
+            ?UpdateCheckDecision::Fetch
+            :DecideUpdateCheck(m_updateChecksEnabled,m_updateLastChecked,UnixNow(),kUpdateCheckIntervalSeconds);
+        if(decision==UpdateCheckDecision::Disabled)return;
+        if(decision==UpdateCheckDecision::UseCache){ApplyUpdateNotice(false,true);return;}
+        // An explicit check is also a request to stop hiding a dismissed release.
+        if(userRequested){m_updateDismissedTag.clear();SaveUpdateSettings();}
+        HWND target=m_hwnd;auto* completions=&m_updateCompletions;
+        try{
+            m_updateWorker=std::jthread([target,completions,userRequested](std::stop_token stop){
+                auto completion=std::make_unique<UpdateCheckCompletion>();
+                completion->userRequested=userRequested;
+                completion->fetch=FetchLatestReleaseTag(stop);
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){
+                    return PostMessageW(target,WM_UPDATE_CHECKED,static_cast<WPARAM>(token),0)!=FALSE;});
+            });
+        }catch(const std::system_error&){LOG("The update check worker could not start; continuing without it.");}
+    }
+    void CompleteUpdateCheck(uint64_t token){
+        auto completion=m_updateCompletions.Take(token);if(!completion)return;
+        if(m_updateWorker.joinable()){m_updateWorker.join();m_updateWorker=std::jthread{};}
+        if(completion->fetch.ok){
+            m_updateLatestTag=completion->fetch.tag;
+            m_updateLastChecked=UnixNow();
+            SaveUpdateSettings();
+            LOG("Update check: latest release "<<m_updateLatestTag<<"; this build is "<<DLSS_VIDEO_PLAYER_VERSION);
+        }else if(!completion->fetch.error.empty()){
+            LOG("Update check failed: "<<WideToUtf8(completion->fetch.error));
+        }
+        ApplyUpdateNotice(completion->userRequested,completion->fetch.ok);
+    }
+    void ApplyUpdateNotice(bool announce,bool reachable){
+        m_updateNotice=EvaluateUpdateNotice(DLSS_VIDEO_PLAYER_VERSION,m_updateLatestTag,m_updateDismissedTag);
+        if(HMENU bar=GetMenu(m_hwnd)){
+            const std::wstring label=m_updateNotice?T(L"update.badge")+FormatSemanticVersion(m_updateNotice->latest):std::wstring();
+            if(app_menu::SetUpdateBadge(bar,label))DrawMenuBar(m_hwnd);
+        }
+        if(!announce)return;
+        const std::wstring caption=T(L"app.title");
+        if(m_updateNotice){
+            const std::wstring message=T(L"update.available")+FormatSemanticVersion(m_updateNotice->latest)+T(L"update.open_question");
+            if(MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_YESNO|MB_ICONINFORMATION)==IDYES)OpenReleasesPage();
+            return;
+        }
+        const std::wstring message=reachable
+            ?T(L"update.up_to_date")+Utf8ToWide(DLSS_VIDEO_PLAYER_VERSION)
+            :T(L"update.unreachable");
+        MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_OK|(reachable?MB_ICONINFORMATION:MB_ICONWARNING));
+    }
+    void OpenReleasesPage(){
+        const std::wstring url(kUpdateReleasesPageUrl);
+        const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",url.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
+        if(result<=32)LOG("Opening the releases page failed: code="<<result);
+    }
+    // The badge is a one-shot reminder: opening the page retires this release
+    // so the bar goes quiet again until the next one ships.
+    void ActivateUpdateBadge(){
+        OpenReleasesPage();
+        if(!m_updateNotice)return;
+        m_updateDismissedTag=m_updateNotice->tag;
+        SaveUpdateSettings();
+        ApplyUpdateNotice(false,true);
+    }
     uint64_t ActivityElapsedMs()const{
         return m_activityBusy?static_cast<uint64_t>(std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-m_activityStarted).count())):0;
     }
@@ -1082,6 +1214,16 @@ private:
         RestoreDC(dc,saved);
     }
     std::wstring T(const wchar_t* key)const{return m_loc.Get(key);}
+    // Empty unless this machine's driver is below the neural floor. Built here
+    // so the render thread never touches the localizer.
+    std::wstring NeuralDriverNoticeText()const{
+        if(ClassifyNeuralDriver(m_opt.detectedGpu.driverVersion)!=NeuralDriverSupport::BelowFloor)return {};
+        std::wstring detected=m_opt.detectedGpu.driverVersion;
+        if(const auto parsed=ParseNvidiaDriverVersion(m_opt.detectedGpu.driverVersion))detected=FormatNvidiaDriverVersion(*parsed);
+        return T(L"driver.below_floor")+L"\n\n"+T(L"driver.detected")+detected+L"\n"+
+               T(L"driver.minimum")+FormatNvidiaDriverVersion(kNeuralDriverFloor)+L"\n"+
+               T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended);
+    }
     AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
     bool ReadNextCachedFrame(){
@@ -2842,7 +2984,12 @@ private:
                 if(ec){LOG("Active neural session could not create the segment directory for this job.");return;}
             }
             const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames](std::stop_token stop){
+            // The driver verdict and the latched preflight failure are read on
+            // this thread; the job only needs the answers.
+            const std::wstring driverNotice=NeuralDriverNoticeText();
+            const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
+            NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,driverNotice,preflightKey,preflightLatch](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -2922,12 +3069,24 @@ private:
                     }
                     if(prepareOnly){completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}
                     LOG("Neural cache miss or invalid entry; starting a new render.");
+                    // A driver below the floor cannot create feature 18 at all,
+                    // so do not pay five seconds for a probe to learn that.
+                    if(!driverNotice.empty()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=driverNotice;LOG("Neural render refused before the probe: "<<WideToUtf8(driverNotice));goto finish;}
+                    // The same runtime on the same driver fails the same way:
+                    // probe once per configuration, not once per play and seek.
+                    const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,*runtimeDigest};
+                    if(const std::wstring latched=preflightLatch->LatchedFailureDetail(runtimeKey);!latched.empty()){
+                        completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=latched;
+                        LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
+                        goto finish;
+                    }
                     // The feature-18 probe needs the GPU; only a cache miss pays for it.
                     NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
                     const auto workerExecutable=runtimeDirectory/L"NeuralWorker.exe";
                     const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
                     if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;LOG("Neural preflight failed: "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
+                    if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(runtimeKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
+                    preflightLatch->RecordSuccess(runtimeKey);
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
                     NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;
@@ -3500,6 +3659,7 @@ private:
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
         case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
+        case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();break;
@@ -3569,6 +3729,8 @@ private:
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;
         case IDM_NEURAL_SETTINGS:ShowNeuralSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
+        case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
+        case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustBlendAmount(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustBlendAmount(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
         }
@@ -3580,6 +3742,15 @@ private:
     std::filesystem::path m_neuralPath;
     CompletionRegistry<ExportCompletion> m_exportCompletions;
     std::jthread m_exportWorker;
+    CompletionRegistry<UpdateCheckCompletion> m_updateCompletions;
+    std::jthread m_updateWorker;
+    std::optional<UpdateNotice> m_updateNotice;
+    std::string m_updateLatestTag,m_updateDismissedTag;
+    int64_t m_updateLastChecked=0;
+    bool m_updateChecksEnabled=true;
+    // One negative verdict per GPU, driver and runtime digest; a failed probe
+    // is not repeated on every play and seek.
+    NeuralPreflightLatch m_preflightLatch;
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     // Timeline scrubbing: what playback was doing before the drag, and when the

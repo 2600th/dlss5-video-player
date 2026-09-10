@@ -44,6 +44,19 @@ private:
             {L"menu.neural_settings", L"Neural settings...\tCtrl+N"},
             {L"menu.advanced", L"Advanced"}, {L"menu.safe_mode", L"Restart in DLSS SR safe mode"},
             {L"menu.clear_neural_cache", L"Clear Neural Cache"}, {L"menu.open_receipt", L"Open render receipt"},
+            {L"menu.check_updates", L"Check for updates"},
+            // The badge sits right-justified in the menu bar; the arrow reads as
+            // "newer than this build" without needing colour, which a native
+            // menu bar does not give us.
+            {L"update.badge", L"\u2191 Update "},
+            {L"update.available", L"A newer release is available: "},
+            {L"update.open_question", L"\n\nOpen the GitHub releases page?"},
+            {L"update.up_to_date", L"This is the latest release: "},
+            {L"update.unreachable", L"The update check could not reach GitHub. Check the connection and try again."},
+            {L"driver.below_floor", L"Neural rendering needs a newer NVIDIA driver."},
+            {L"driver.detected", L"Detected driver: "},
+            {L"driver.minimum", L"Minimum for neural rendering: "},
+            {L"driver.verified", L"Verified for this build: "},
             {L"neural.phase.cache", L"Checking saved video"},
             {L"neural.cache.checking", L"Verifying cache; no re-encoding"},
             {L"neural.phase.acquiring", L"Acquiring"}, {L"neural.phase.rendering", L"Neural rendering"},

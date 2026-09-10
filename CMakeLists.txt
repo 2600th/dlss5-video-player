@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.17.2 LANGUAGES CXX RC)
+project(DLSSVideoPlayer VERSION 0.18.0 LANGUAGES CXX RC)
 
 include(CTest)
 
@@ -50,6 +50,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/DLSSBackend.h
     src/D3D12Renderer.cpp
     src/D3D12Renderer.h
+    src/HardErrorSuppression.h
     src/D3D12FenceWait.h
     src/TemporalGuides.cpp
     src/TemporalGuides.h
@@ -98,6 +99,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/NeuralSettings.h
     src/RangeSelection.cpp
     src/RangeSelection.h
+    src/UpdateCheck.cpp
+    src/UpdateCheck.h
 )
 
 target_compile_definitions(DLSSVideoPlayer PRIVATE
@@ -222,6 +225,13 @@ if(BUILD_TESTING)
     target_include_directories(UpscalingTests PRIVATE src)
     target_compile_definitions(UpscalingTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     add_test(NAME UpscalingTests COMMAND UpscalingTests)
+    add_executable(UpdateCheckTests tests/UpdateCheckTests.cpp src/UpdateCheck.cpp)
+    target_include_directories(UpdateCheckTests PRIVATE src)
+    target_compile_definitions(UpdateCheckTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+    target_compile_options(UpdateCheckTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_libraries(UpdateCheckTests PRIVATE winhttp)
+    add_test(NAME UpdateCheckTests COMMAND UpdateCheckTests)
     add_executable(PolicyTests
         tests/PolicyTests.cpp
         tests/TestSupport.h

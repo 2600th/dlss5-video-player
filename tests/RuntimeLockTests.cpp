@@ -233,14 +233,15 @@ void verify_reports_each_drift_kind_and_names_only_failing_files_test()
 }
 
 constexpr std::string_view kSamplePreflight =
-    "{\"schema\":1,\"ok\":true,\"workerVersion\":\"1.2.3\",\"elapsedMilliseconds\":812,"
+    "{\"schema\":2,\"ok\":true,\"workerVersion\":\"1.2.3\",\"elapsedMilliseconds\":812,"
     "\"gpu\":{\"description\":\"NVIDIA GeForce RTX 4090\",\"vendorId\":4318,\"deviceId\":9988,"
     "\"dedicatedVideoMemoryMiB\":24564,\"driverVersion\":\"32.0.15.6164\"},"
     "\"runtime\":{\"reshade\":\"6.8.0.2155\",\"addon\":\"0.2026.828.517\",\"addonApi\":\"18\",\"renodx\":\"4.7\","
     "\"renodxBuild\":\"Sep  2 2026 01:15:39\",\"dlssnr\":\"310.8.0\",\"activeSettings\":\"upscaling=OFF\"},"
     "\"modules\":[{\"name\":\"dxgi.dll\",\"present\":true,\"size\":5592064,\"fileVersion\":\"6.8.0.2155\",\"sha256\":\"00\"}],"
     "\"feature18\":{\"created\":true,\"evaluated\":true,\"armed\":true,\"upscalingOff\":true,\"inlineInterception\":true,"
-    "\"laterFailure\":false,\"highestEvaluation\":61,\"probeFrames\":61,\"ngxCreateResult\":1,\"observations\":[]}}";
+    "\"laterFailure\":false,\"highestEvaluation\":61,\"probeFrames\":61,\"carrierCreateResult\":\"0x00000001\","
+    "\"createResult\":\"\",\"observations\":[]},\"diagnosis\":{\"cause\":\"none\",\"detail\":\"\"}}";
 
 NeuralRenderReceiptInputs SampleInputs()
 {
@@ -322,7 +323,7 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(satisfied, "\"failure\":\"none\""));
 
     NeuralRenderReceiptInputs partial = inputs;
-    partial.preflightJson = "{\"schema\":1,\"ok\":false";
+    partial.preflightJson = "{\"schema\":2,\"ok\":false";
     CHECK(Contains(BuildNeuralRenderReceiptJson(partial), "\"preflight\":null,"));
 }
 
@@ -341,6 +342,7 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
                          "frames=48/48 verified=48 resets=2 retries=1"),
              SummarizeNeuralReceiptForLog(bare));
 
+    // A schema-1 receipt from before the diagnosis existed still summarizes.
     NeuralRenderReceiptInputs notArmed = inputs;
     notArmed.preflightJson = "{\"schema\":1,\"ok\":false,\"gpu\":{\"description\":\"Escaped \\\"GPU\\\"\",\"driverVersion\":\"\"},"
                              "\"feature18\":{\"created\":true,\"evaluated\":false,\"armed\":false}}";
@@ -348,6 +350,128 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
     CHECK_EQ(std::string("gpu=\"Escaped \\\"GPU\\\"\" driver=- reshade=- renodx=- nr=- feature18=not-armed lock=ok "
                          "failure=gpu-stall frames=48/48 verified=48 resets=2 retries=1"),
              SummarizeNeuralReceiptForLog(notArmed));
+
+    // The field receipt: the carrier reported success while feature 18 was
+    // refused, so the summary must carry the feature's own code and cause.
+    NeuralRenderReceiptInputs refused = inputs;
+    refused.preflightJson =
+        "{\"schema\":2,\"ok\":false,\"gpu\":{\"description\":\"NVIDIA GeForce RTX 3060 Laptop GPU\","
+        "\"driverVersion\":\"32.0.15.6614\"},\"feature18\":{\"created\":false,\"evaluated\":false,\"armed\":false,"
+        "\"carrierCreateResult\":\"0x00000001\",\"createResult\":\"0xbad00002\"},"
+        "\"diagnosis\":{\"cause\":\"driverBelowFloor\",\"detail\":\"NVIDIA driver 566.14 is below the 610.47 minimum.\"}}";
+    refused.lockChecks = {inputs.lockChecks[0]};
+    refused.result.failure = NeuralRenderFailure::Preflight;
+    CHECK_EQ(std::string("gpu=\"NVIDIA GeForce RTX 3060 Laptop GPU\" driver=32.0.15.6614 reshade=- renodx=- nr=- "
+                         "feature18=not-armed(0xbad00002) cause=driverBelowFloor lock=ok failure=preflight "
+                         "frames=48/48 verified=48 resets=2 retries=1"),
+             SummarizeNeuralReceiptForLog(refused));
+}
+
+void feature18_create_result_is_read_out_of_the_runtime_log_test()
+{
+    // The shape the failing machine actually logged, prefix and suffix and all.
+    const auto refused = CollectFeature18Observations(
+        "13:50:19:704 [23096] | INFO  | NR: Feature 18 create failed with 0xBAD00002, retrying next frame\r\n"
+        "13:50:19:705 [23096] | INFO  | NR skipped: feature unavailable\r\n");
+    CHECK_EQ(size_t{2}, refused.size());
+    const auto code = ParseFeature18CreateResult(refused);
+    CHECK(code.has_value());
+    CHECK(code && *code == 0xbad00002u);
+
+    // A clean session carries no code at all.
+    CHECK(!ParseFeature18CreateResult(CollectFeature18Observations(
+              "13:50:19:704 [23096] | INFO  | NR: feature 18 created (1920x1080)\r\n"
+              "13:50:19:812 [23096] | INFO  | NR: feature 18 evaluation succeeded\r\n")).has_value());
+    CHECK(!ParseFeature18CreateResult({}).has_value());
+
+    // Malformed or over-long hex is not a 32-bit NGX result.
+    CHECK(!ParseFeature18CreateResult(CollectFeature18Observations(
+              "| INFO | NR: feature 18 create failed with 0xnope\r\n")).has_value());
+    CHECK(!ParseFeature18CreateResult(CollectFeature18Observations(
+              "| INFO | NR: feature 18 create failed with 0x\r\n")).has_value());
+    CHECK(!ParseFeature18CreateResult(CollectFeature18Observations(
+              "| INFO | NR: feature 18 create failed with 0xbad000021\r\n")).has_value());
+
+    // The last create decides: an early refusal the runtime recovered from is
+    // not the verdict.
+    const auto sequence = ParseFeature18CreateResult(CollectFeature18Observations(
+        "| INFO | NR: feature 18 create failed with 0xbad0000d\r\n"
+        "| INFO | NR: feature 18 create failed with 0xbad00001\r\n"));
+    CHECK(sequence.has_value());
+    CHECK(sequence && *sequence == 0xbad00001u);
+}
+
+void neural_preflight_diagnosis_blames_the_actionable_cause_test()
+{
+    DetectedGpu ampere;
+    ampere.generation = GpuGeneration::Rtx30Ampere;
+    ampere.description = L"NVIDIA GeForce RTX 3060 Laptop GPU";
+    ampere.driverVersion = L"32.0.15.6614";  // 566.14
+    DetectedGpu blackwell;
+    blackwell.generation = GpuGeneration::Rtx50Blackwell;
+    blackwell.description = L"NVIDIA GeForce RTX 5090";
+    blackwell.driverVersion = L"32.0.16.1664";  // 616.64
+
+    const auto platformError = CollectFeature18Observations(
+        "| INFO | NR: feature 18 create failed with 0xbad00002\r\n");
+
+    // The field failure: the platform refusal is real, but the driver below
+    // the floor is the thing the user can fix, and the message says so.
+    const NeuralPreflightDiagnosis field = DiagnoseNeuralPreflight(ampere, platformError, true, false, {});
+    CHECK_EQ(NeuralPreflightCause::DriverBelowFloor, field.cause);
+    CHECK(field.ngxResult.has_value());
+    CHECK(field.ngxResult && *field.ngxResult == 0xbad00002u);
+    CHECK(Contains(field.detail, L"566.14"));
+    CHECK(Contains(field.detail, L"610.47"));
+    CHECK(Contains(field.detail, L"616.64"));
+    CHECK_EQ(std::string_view("driverBelowFloor"), std::string_view(NeuralPreflightCauseName(field.cause)));
+
+    // The same code on a driver above the floor is the runtime's own refusal.
+    const NeuralPreflightDiagnosis platform =
+        DiagnoseNeuralPreflight(blackwell, platformError, true, false, {});
+    CHECK_EQ(NeuralPreflightCause::PlatformRefusal, platform.cause);
+    CHECK(Contains(platform.detail, L"0xbad00002"));
+    CHECK(Contains(platform.detail, L"616.64"));
+    CHECK_EQ(std::string_view("platformRefusal"), std::string_view(NeuralPreflightCauseName(platform.cause)));
+
+    // Architecture and memory refusals are the runtime's answer whatever the
+    // driver is, so the driver floor never masks them.
+    const auto architecture = CollectFeature18Observations(
+        "| INFO | NR: feature 18 create failed with 0xbad00001\r\n");
+    for (const DetectedGpu& gpu : {ampere, blackwell}) {
+        const NeuralPreflightDiagnosis refusal = DiagnoseNeuralPreflight(gpu, architecture, true, false, {});
+        CHECK_EQ(NeuralPreflightCause::ArchitectureUnsupported, refusal.cause);
+        CHECK(Contains(refusal.detail, L"0xbad00001"));
+    }
+    const auto memory = CollectFeature18Observations(
+        "| INFO | NR: feature 18 create failed with 0xbad0000d\r\n");
+    const NeuralPreflightDiagnosis outOfMemory = DiagnoseNeuralPreflight(ampere, memory, true, false, {});
+    CHECK_EQ(NeuralPreflightCause::OutOfVideoMemory, outOfMemory.cause);
+    CHECK(Contains(outOfMemory.detail, L"0xbad0000d"));
+
+    // Without a code the probe's own failure is the message - unless the
+    // driver is below the floor, which explains it.
+    const NeuralPreflightDiagnosis probe =
+        DiagnoseNeuralPreflight(blackwell, {}, false, false, L"The probe renderer could not be initialized.");
+    CHECK_EQ(NeuralPreflightCause::ProbeFailed, probe.cause);
+    CHECK_EQ(std::wstring(L"The probe renderer could not be initialized."), probe.detail);
+    CHECK(!probe.ngxResult.has_value());
+    const NeuralPreflightDiagnosis staleDriver =
+        DiagnoseNeuralPreflight(ampere, {}, false, false, L"The probe renderer could not be initialized.");
+    CHECK_EQ(NeuralPreflightCause::DriverBelowFloor, staleDriver.cause);
+
+    // Created but unproven evidence is its own cause.
+    const NeuralPreflightDiagnosis incomplete = DiagnoseNeuralPreflight(blackwell, {}, true, false, {});
+    CHECK_EQ(NeuralPreflightCause::EvidenceIncomplete, incomplete.cause);
+    CHECK(!incomplete.detail.empty());
+
+    // A probe that ended up armed is never blamed, not even for a code the
+    // runtime recovered from: that receipt would contradict itself.
+    const NeuralPreflightDiagnosis armed = DiagnoseNeuralPreflight(ampere, platformError, true, true, {});
+    CHECK_EQ(NeuralPreflightCause::None, armed.cause);
+    CHECK(armed.detail.empty());
+    CHECK(armed.ngxResult.has_value());
+    CHECK_EQ(std::string_view("none"), std::string_view(NeuralPreflightCauseName(armed.cause)));
 }
 
 } // namespace
@@ -361,5 +485,7 @@ int wmain()
     verify_reports_each_drift_kind_and_names_only_failing_files_test();
     receipt_json_records_failure_lock_status_and_preflight_verbatim_test();
     receipt_log_summary_extracts_runtime_identity_and_lock_state_test();
+    feature18_create_result_is_read_out_of_the_runtime_log_test();
+    neural_preflight_diagnosis_blames_the_actionable_cause_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
