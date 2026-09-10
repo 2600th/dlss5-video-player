@@ -4077,6 +4077,30 @@ VideoFrame read_one_frame(VideoDecoder& decoder)
     return frame;
 }
 
+// Regression guard for the LocalFile queue thread's blocking ReadFile: once the fake
+// child parks in Sleep(INFINITE) with the pipe empty, the queue thread has nothing left
+// to peek-sleep-poll for and sits inside the kernel read instead. StopFrameQueue has to
+// unpark it with CancelSynchronousIo (rather than wait on a child that never exits), so
+// Close must still return promptly.
+void video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->OpenSequential(L"largeburst",MediaSourceKind::LocalFile));
+    // The fake child writes exactly 20 frames of 1024x1024 BGRA and then parks. Every
+    // one of them has to be consumed here: with any still unread the queue thread would
+    // be waiting for queue space, not inside the kernel read this test is about.
+    for(int index=0;index<20;++index)CHECK_EQ(size_t{1024u*1024u*4u},read_one_frame(*decoder).bgra.size());
+    // Give the queue thread a chance to settle into the blocking read for data that
+    // will never arrive.
+    Sleep(75);
+    const auto closeStarted=std::chrono::steady_clock::now();
+    decoder->Close();
+    const double elapsedMs=
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-closeStarted).count();
+    CHECK(elapsedMs<2000.0);
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -5647,6 +5671,7 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_remembers_dead_hardware_paths_test();
     video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
     video_decoder_background_queue_is_bounded_to_four_frames_test();
+    video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test();
     video_decoder_recycles_spent_frame_buffers_test();
     video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();

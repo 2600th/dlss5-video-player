@@ -797,7 +797,7 @@ VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
     return VideoReadResult::Error;
 }
 
-VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop) {
+VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop,bool block) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
     const size_t frameBytes = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4u;
     if (!frameBytes) return VideoReadResult::Error;
@@ -824,9 +824,44 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
             // exit/fallback path below observes the eventual exit code.
             available=0;
         }
+        if(!available&&block&&m_pendingFrameBytes<frameBytes){
+            // Local files: wait in the kernel for the next byte instead of peek-sleep
+            // polling for it. A byte-mode pipe ReadFile wakes as soon as >=1 byte is
+            // available, so this is strictly "peek->sleep->peek" replaced by "block".
+            const DWORD want=static_cast<DWORD>(std::min<size_t>(frameBytes-m_pendingFrameBytes,size_t{16u<<20}));
+            DWORD got=0;
+            const auto blockStart=std::chrono::steady_clock::now();
+            ++m_frameReadCalls;
+            const BOOL ok=ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr);
+            const DWORD err=ok?ERROR_SUCCESS:GetLastError();
+            m_frameBlockedNanos+=std::chrono::steady_clock::now()-blockStart;
+            if(!ok){
+                // CancelSynchronousIo (StopFrameQueue) unparks this as ERROR_OPERATION_ABORTED;
+                // any other failure racing a stop is reported as the cancel too, since the
+                // decoder is being torn down and Error would misclassify it.
+                if(err==ERROR_OPERATION_ABORTED||stop.stop_requested())return VideoReadResult::Cancelled;
+                // The child closing stdout surfaces here as ERROR_BROKEN_PIPE on this pipe
+                // type (not a TRUE/got==0 return); let the child-exit classification below
+                // decide what that means instead of reporting it as a read Error.
+                if(err!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+                break;
+            }
+            if(!got){
+                if(stop.stop_requested())return VideoReadResult::Cancelled;
+                break;
+            }
+            m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();
+            if(m_seekTimingPending){
+                std::scoped_lock timingLock(m_seekTimingMutex);
+                if(m_seekTiming.firstByteMs<0.0)m_seekTiming.firstByteMs=ElapsedMs(m_seekStart);
+            }
+            if(stop.stop_requested())return VideoReadResult::Cancelled;
+            continue;
+        }
         if(!available||m_pendingFrameBytes>=frameBytes)break;
         const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{16u<<20}}));
         DWORD got=0;
+        ++m_frameReadCalls;
         if(!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
         if(!got)break;
         m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();
@@ -915,6 +950,16 @@ void VideoDecoder::StopFrameQueue(QueueBuffer buffered) {
     if (m_frameThread.joinable()) {
         m_frameThread.request_stop();
         m_frameCv.notify_all();
+        // A LocalFile queue thread can be parked in the blocking ReadFile added for
+        // local sources, which the stop token alone never wakes. Cancel its pending I/O
+        // and re-check: CancelSynchronousIo can race a thread that has not entered
+        // ReadFile yet (it then returns FALSE/ERROR_NOT_FOUND, harmlessly), so keep
+        // cancelling until a wait on the thread itself stops timing out.
+        DWORD waitResult;
+        do {
+            CancelSynchronousIo(m_frameThread.native_handle());
+            waitResult = WaitForSingleObject(m_frameThread.native_handle(), 1);
+        } while (waitResult == WAIT_TIMEOUT);
         m_frameThread.join();
     }
     std::lock_guard lock(m_frameMutex);
@@ -936,6 +981,12 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
     uint64_t frames = 0, polls = 0, spaceWaits = 0;
     const auto loopStart = Clock::now();
     m_frameBufferFills = 0;
+    m_frameBlockedNanos = Clock::duration{};
+    m_frameReadCalls = 0;
+    // Local files can wait in the kernel for the next pipe byte instead of polling for
+    // it; network sources keep polling because their stall detection lives in the
+    // periodic NotReady return from ReadNextFFmpegProcessAvailable.
+    const bool block = (m_sourceKind == MediaSourceKind::LocalFile);
     while (!stop.stop_requested()) {
         {
             std::unique_lock lock(m_frameMutex);
@@ -950,7 +1001,7 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
 
         VideoFrame frame;
         const auto readStart = Clock::now();
-        const VideoReadResult result = ReadNextFFmpegProcessAvailable(frame, stop);
+        const VideoReadResult result = ReadNextFFmpegProcessAvailable(frame, stop, block);
         const auto readEnd = Clock::now();
         if (result == VideoReadResult::FrameReady) {
             ++frames;readNanos += readEnd - readStart;
@@ -977,12 +1028,18 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
     if (frames) {
         const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
         const double wall = ms(Clock::now() - loopStart);
+        // With blocking reads (LocalFile), readNanos includes the in-kernel wait for the
+        // child; m_frameBlockedNanos isolates that wait so pipeRead keeps meaning "time
+        // actually copying bytes out of the pipe". Clamp: a blocked wait can land on an
+        // iteration whose call did not end in FrameReady, so it is not always <= readNanos.
+        const Clock::duration blocked = std::min(m_frameBlockedNanos, readNanos);
         LOG("Decoder frame queue: frames=" << frames << " wallMs=" << std::fixed << std::setprecision(1) << wall
-            << " perFrameMs: pipeRead=" << std::setprecision(3) << ms(readNanos) / double(frames)
+            << " perFrameMs: pipeRead=" << std::setprecision(3) << ms(readNanos - blocked) / double(frames)
+            << " blockedWait=" << ms(m_frameBlockedNanos) / double(frames)
             << " emptyPoll=" << ms(pollNanos) / double(frames) << " emptySleep=" << ms(sleepNanos) / double(frames)
             << " queueFullWait=" << ms(spaceNanos) / double(frames)
             << " other=" << (wall - ms(readNanos + pollNanos + sleepNanos + spaceNanos)) / double(frames)
-            << " polls=" << polls << " queueFullWaits=" << spaceWaits << " zeroFills=" << m_frameBufferFills);
+            << " reads=" << m_frameReadCalls << " polls=" << polls << " queueFullWaits=" << spaceWaits << " zeroFills=" << m_frameBufferFills);
     }
 }
 

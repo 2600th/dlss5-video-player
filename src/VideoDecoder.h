@@ -150,7 +150,11 @@ private:
     // Empty when the pool holds nothing of this exact size.
     std::vector<uint8_t> TakeRecycledBuffer(size_t frameBytes);
     VideoReadResult ReadNextFFmpegAvailable(VideoFrame& out, std::stop_token stop);
-    VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop);
+    // block: wait in the kernel for pipe bytes instead of peek/sleep-polling for them.
+    // Only safe on the queue thread, whose parked ReadFile StopFrameQueue releases with
+    // CancelSynchronousIo - never from the UI pump's non-blocking callers.
+    VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop,
+                                                    bool block = false);
     VideoReadResult ClassifyFFmpegEnd(DWORD exitCode);
     bool TryNextFFmpegAcceleration(DWORD exitCode);
     void StopFFmpeg(DWORD waitTimeout = 500);
@@ -230,6 +234,11 @@ private:
     std::vector<std::vector<uint8_t>> m_bufferPool;
     // Whole-frame allocations the pool did not cover; queue-thread only.
     uint64_t m_frameBufferFills = 0;
+    // Time spent inside the blocking ReadFile (LocalFile queue thread only), reset at
+    // the top of each FrameQueueLoop run so the perFrameMs log line can separate the
+    // in-kernel wait for the child from the rest of pipeRead.
+    std::chrono::steady_clock::duration m_frameBlockedNanos{};
+    uint64_t m_frameReadCalls = 0;
     std::mutex m_frameMutex;
     std::condition_variable_any m_frameCv;
     std::deque<VideoFrame> m_frameQueue;
