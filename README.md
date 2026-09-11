@@ -20,12 +20,12 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.19.0** (2026-09-10): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.19.0)
+**v0.20.0** (2026-09-11): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.20.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.19.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.19.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.20.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.20.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -68,6 +68,19 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.20.0** (2026-09-11). Motion vectors now come from the optical flow engine built into
+every RTX card since Turing: 960x540 vectors instead of 160x90, and a
+thirty-second of a pixel instead of three pixels. The old estimator could not see
+a one-pixel pan at all, which is what made slow movement look unstuck from the
+picture. Costs about 1.7 ms a frame at 1080p. Sampling jitter is gone - it was
+borrowed from how games drive DLSS and does nothing useful to a video, where it
+only softened every frame by a different amount. On a still image that cut the
+worst-pixel shimmer by more than half. Fullscreen no longer tears. Opening a
+YouTube video while a render was running left the picture stuck on one frame
+with the old video's seek bar; and turning neural rendering off and on again
+re-rendered everything it had already done instead of picking up where it left
+off.
 
 **0.19.0** (2026-09-10). The export decodes with NVDEC and sends NV12 down the
 pipe instead of BGRA, and NVENC gets its CUDA context at spawn: 7.8 to 4.2 ms
@@ -223,7 +236,8 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
 - RTX 20 and 30 run the universal runtime without native FP8, so expect them to
   be several times slower. Nobody has rendered on one here yet.
-- Motion and depth guides are estimated from the video. Artifacts happen.
+- Depth is estimated from the picture, and so is motion on a card without the
+  optical flow engine. Artifacts happen.
 - Export copies the cached 8-bit render. Image adjustments and upscaling are not
   baked in, and HDR or lost source precision is not restored.
 - Subtitles stay as separate tracks. No in-player subtitle display, no burn-in,

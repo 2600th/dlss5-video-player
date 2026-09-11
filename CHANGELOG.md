@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.20.0 - 2026-09-11
+
+- Motion vectors now come from NVOFA, the optical flow engine that has been
+  sitting idle on every RTX card since Turing. The CPU estimator analysed a
+  160x90 grid, so one vector covered 24x24 source pixels at 1080p and its finest
+  step was three of them; measured against a synthetic pan on non-periodic
+  content it accepted 0 % of its cells at 0.5 px/frame and 2 % at 1.0, and a
+  vector it declines to emit is not "unknown" to the reconstruction, it is a
+  claim that nothing moved. The engine works on a 2x2 grid in S10.5 fixed point
+  - 960x540 vectors, a thirty-second of a pixel - and dlss5-bridge measured it
+  answering 0.156 at a true 0.10 px where a shader-based estimator reports zero.
+  Uploads and the flow capture moved into their own command list so the queue
+  can be signalled past them and the engine started without stalling the CPU;
+  the frame's list waits on the engine's fence on the GPU. Costs 1.7 ms/frame at
+  1080p (8.92 -> 10.62 ms loop). `TemporalGuideGenerator` keeps the depth proxy
+  and the cut detector, and keeps motion too on a card or a build without the
+  engine.
+- Sampling jitter is gone. Every frame was resampled by a Halton offset and that
+  offset reported to NGX, which is what a game does - but a game jitters its
+  projection and genuinely samples new points of a continuous scene, while a
+  decoded frame is a fixed grid of samples and shifting it bilinearly only
+  convolves it with a tent whose width changes every frame. The Nyquist gain of
+  that tent swings from 1.0 to 0.0625 across sixteen frames. Rendering 120
+  frames of a still image through the real neural path before and after: mean
+  frame-to-frame luma difference 0.158 -> 0.099, per-pixel temporal standard
+  deviation 2.23 -> 1.41, and at the 99th percentile - where visible shimmer
+  lives - 11.78 -> 4.61. Feature 18 has no jitter input at all, so nothing
+  downstream was undoing it either.
+- Tearing is no longer requested on a window anyone looks at. Both present paths
+  asked for `DXGI_PRESENT_ALLOW_TEARING` unconditionally; that belongs to the
+  hidden swapchain the offline carrier presents into purely so the add-on sees a
+  present per frame, where holding to the display refresh would cap an export
+  that already runs below real time. Playback keeps `syncInterval 0`, so its
+  pacing is unchanged - it just scans out whole frames now.
+- Opening a YouTube video while a live neural session was running left the
+  session, its segments and the synchronized pair attached to the new source.
+  `Tick` reads frames from that pair for as long as `m_cachedPlayback` is set,
+  so the newly swapped decoder was never read: audio ran, the picture sat on the
+  first frame, and the seek bar kept painting the previous video's rendered
+  span. `InstallPreparedYouTube` was the only source swap that never reached the
+  teardown `Unload` performs.
+- Toggling neural rendering off and on re-rendered everything instead of
+  resuming. Retained coverage is keyed on source, settings and guides, and for a
+  YouTube source that key used the signed media URL - which is reissued by every
+  resolution, including the one the toggle's own seek performs on the video
+  already playing. It now keys on the page URL, which is what Recent and the
+  source cache already use. A 100-second head survives a toggle.
+- A refused neural render says why. The reason was written to the log and then
+  dropped, so on a driver below the 610.47 floor the toggle appeared to do
+  nothing: the original kept playing and the only explanation was in a file. The
+  one-line reason now leads the status bar, and the driver notice - detected,
+  minimum and verified versions - is shown once per session, since the refusal
+  repeats on every play, seek and settings change and a dialog on each of those
+  would be worse than silence.
+
 ## 0.19.0 - 2026-09-10
 
 - The neural export moved its transport onto the GPU's own engines, from
