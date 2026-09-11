@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The Optical Flow SDK licence notice now ships in both packages.
+  `THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt` covers the MIT grant on the
+  two interface headers vendored in `external/nvof`, and `THIRD_PARTY.md` has
+  pointed at it since 0.20.0, but it was in neither package allowlist - so the
+  published 0.20.0 core zip references a notice it does not contain. The file
+  itself is in the repository and in the complete package; only the core zip is
+  affected, and it is left as published rather than replaced under a tag that is
+  already out.
+
 ## 0.20.0 - 2026-09-11
 
 - Motion vectors now come from NVOFA, the optical flow engine that has been
