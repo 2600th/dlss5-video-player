@@ -49,6 +49,10 @@ class ISynchronizedFrameSource {
 public:
     virtual ~ISynchronizedFrameSource() = default;
     virtual bool Open(const std::filesystem::path& path, std::stop_token stop) = 0;
+    // Live segments after the first are opened with the parameters the first one
+    // probed. A fake that does not care can leave this alone.
+    virtual bool OpenKnown(const std::filesystem::path& path, const VideoDecoder::KnownMedia&,
+                           std::stop_token stop) { return Open(path, stop); }
     virtual void Close() = 0;
     virtual VideoReadResult Read(VideoFrame& frame, std::stop_token stop) = 0;
     virtual bool SeekSeconds(double seconds) = 0;

@@ -1870,12 +1870,18 @@ void synchronized_playback_original_only_mode_remains_available_after_cancel_tes
 constexpr int64_t kLiveFrame100ns=333333;
 
 // One stream per path: 30 fps frames rebased to the file's own zero with
-// authoritative frame numbers, exactly like a finalized segment file.
+// authoritative frame numbers, exactly like a finalized segment file. Segment
+// files are opened on a worker thread now, so the counters are guarded.
 struct LiveFrameLibrary {
     struct Stream {
         std::vector<VideoFrame> frames;
         int opens{},closes{},seeks{},notReadyReads{};
         bool failOpen{};
+        // How the last open arrived: with the parameters a sibling probed, and
+        // on which thread. The boundary must pay for neither a probe nor a
+        // process start on the thread that presents frames.
+        bool known{};
+        std::thread::id thread{};
     };
     Stream& Add(const std::filesystem::path& path,uint64_t frameCount)
     {
@@ -1890,7 +1896,26 @@ struct LiveFrameLibrary {
         }
         return stream;
     }
+    int Opens(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].opens;}
+    int Closes(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].closes;}
+    int Seeks(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].seeks;}
+    // The background open lands within milliseconds; the deadline only keeps a
+    // broken prefetch from hanging the suite.
+    bool WaitForOpen(const std::filesystem::path& path,int expected)
+    {
+        for(int attempt=0;attempt<400;++attempt){
+            if(Opens(path)>=expected)return true;
+            std::this_thread::sleep_for(5ms);
+        }
+        return false;
+    }
+    bool OpenedKnown(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].known;}
+    std::thread::id OpenThread(const std::filesystem::path& path)
+    {
+        std::lock_guard lock(mutex);return streams[path].thread;
+    }
     std::map<std::filesystem::path,Stream> streams;
+    std::mutex mutex;
 };
 
 class LiveLibrarySource final : public ISynchronizedFrameSource {
@@ -1898,14 +1923,24 @@ public:
     explicit LiveLibrarySource(LiveFrameLibrary& library):library_(library){}
     bool Open(const std::filesystem::path& path,std::stop_token stop) override
     {
-        stream_=nullptr;
-        const auto found=library_.streams.find(path);
-        if(found==library_.streams.end()||found->second.failOpen||stop.stop_requested())return false;
-        stream_=&found->second;++stream_->opens;index_=0;return true;
+        return OpenRecording(path,stop,false);
     }
-    void Close() override { if(stream_)++stream_->closes;stream_=nullptr; }
+    bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia& media,
+                   std::stop_token stop) override
+    {
+        // Real segments after the first arrive here, with the geometry and frame
+        // rate the first one probed rather than a probe of their own.
+        if(!media.Valid())return false;
+        return OpenRecording(path,stop,true);
+    }
+    void Close() override
+    {
+        std::lock_guard lock(library_.mutex);
+        if(stream_)++stream_->closes;stream_=nullptr;
+    }
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
     {
+        std::lock_guard lock(library_.mutex);
         if(stop.stop_requested())return VideoReadResult::Cancelled;
         if(!stream_)return VideoReadResult::Error;
         if(stream_->notReadyReads>0){--stream_->notReadyReads;return VideoReadResult::NotReady;}
@@ -1914,6 +1949,7 @@ public:
     }
     bool SeekSeconds(double seconds) override
     {
+        std::lock_guard lock(library_.mutex);
         if(!stream_)return false;
         ++stream_->seeks;
         const int64_t target=static_cast<int64_t>(seconds*10000000.0);
@@ -1930,6 +1966,16 @@ public:
         return double(stream_->frames.back().timestamp100ns+kLiveFrame100ns)*1e-7;
     }
 private:
+    bool OpenRecording(const std::filesystem::path& path,std::stop_token stop,bool known)
+    {
+        std::lock_guard lock(library_.mutex);
+        stream_=nullptr;
+        const auto found=library_.streams.find(path);
+        if(found==library_.streams.end()||found->second.failOpen||stop.stop_requested())return false;
+        stream_=&found->second;++stream_->opens;index_=0;
+        stream_->known=known;stream_->thread=std::this_thread::get_id();
+        return true;
+    }
     LiveFrameLibrary& library_;
     LiveFrameLibrary::Stream* stream_{};
     size_t index_{};
@@ -2113,7 +2159,7 @@ void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
     // The playhead caught the head again; the job still owes frames.
     CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
     CHECK(playback.SetView(ComparisonView::Neural));
-    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].opens);
+    CHECK_EQ(1,library.Opens(L"neural-00000.mkv"));
     segments->Finish();
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
 }
@@ -2137,17 +2183,25 @@ void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
         played.push_back(pair->frameNumber);
         CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
         CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);
-        // The next file is opened while the current one still serves frames.
-        if(index==0)CHECK_EQ(1,library.streams[L"neural-00001.mkv"].opens);
+        // The next file is opened on a worker thread while the current one still
+        // serves frames, so the boundary itself spawns nothing.
+        if(index==0)CHECK(library.WaitForOpen(L"neural-00001.mkv",1));
     }
     std::vector<uint64_t> expected;
     for(uint64_t number=10;number<20;++number)expected.push_back(number);
     CHECK_EQ(expected,played);
     // The seam cost no reopen and no decode stall.
-    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].opens);
-    CHECK_EQ(1,library.streams[L"neural-00001.mkv"].opens);
-    CHECK_EQ(0,library.streams[L"neural-00001.mkv"].seeks);
-    CHECK_EQ(1,library.streams[L"neural-00000.mkv"].closes);
+    CHECK_EQ(1,library.Opens(L"neural-00000.mkv"));
+    CHECK_EQ(1,library.Opens(L"neural-00001.mkv"));
+    CHECK_EQ(0,library.Seeks(L"neural-00001.mkv"));
+    CHECK_EQ(1,library.Closes(L"neural-00000.mkv"));
+    // It also cost the presenting thread nothing: the second segment was opened
+    // on another thread, and with the first segment's parameters rather than a
+    // probe of its own. Doing either on this thread dropped 44% of the frames of
+    // a 1080p30 session (docs/VERIFICATION-2026-09-12-RTX5090.md).
+    CHECK(library.OpenThread(L"neural-00001.mkv")!=std::this_thread::get_id());
+    CHECK(library.OpenedKnown(L"neural-00001.mkv"));
+    CHECK(!library.OpenedKnown(L"neural-00000.mkv"));
     // The original runs on past the last finalized segment.
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
 }

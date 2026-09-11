@@ -4,6 +4,8 @@
 #include <cmath>
 #include <chrono>
 #include <functional>
+#include <future>
+#include <system_error>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -14,6 +16,10 @@ class FrameSource {
 public:
     virtual ~FrameSource() = default;
     virtual bool Open(const std::filesystem::path&, std::stop_token) = 0;
+    // Opens a file whose parameters a sibling already established. Only the
+    // real decoder can save the probe; a source that cannot just opens normally.
+    virtual bool OpenKnown(const std::filesystem::path& path, const VideoDecoder::KnownMedia&,
+                           std::stop_token stop) { return Open(path, stop); }
     virtual void Close() = 0;
     virtual VideoReadResult Read(VideoFrame&, std::stop_token) = 0;
     virtual bool SeekSeconds(double) = 0;
@@ -21,6 +27,11 @@ public:
     virtual uint32_t Height() const = 0;
     virtual double FrameRate() const = 0;
     virtual double DurationSeconds() const = 0;
+    // What the next sibling of the open file can be opened with.
+    virtual VideoDecoder::KnownMedia Media() const
+    {
+        return {Width(), Height(), FrameRate(), DurationSeconds(), {}};
+    }
 };
 
 #ifdef SYNCHRONIZED_PLAYBACK_TESTING
@@ -30,6 +41,8 @@ public:
     explicit TestFrameSource(std::unique_ptr<ISynchronizedFrameSource> source)
         : owned_(std::move(source)),source_(*owned_) {}
     bool Open(const std::filesystem::path& path,std::stop_token stop)override{return source_.Open(path,stop);}
+    bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia& media,
+                   std::stop_token stop)override{return source_.OpenKnown(path,media,stop);}
     void Close()override{source_.Close();}
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{return source_.Read(frame,stop);}
     bool SeekSeconds(double seconds)override{return source_.SeekSeconds(seconds);}
@@ -47,6 +60,10 @@ public:
     bool Open(const std::filesystem::path& path,std::stop_token stop)override{
         return decoder_.Open(path.wstring(),MediaSourceKind::LocalFile,stop);
     }
+    bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia& media,
+                   std::stop_token stop)override{
+        return decoder_.OpenKnown(path.wstring(),media,MediaSourceKind::LocalFile,stop);
+    }
     void Close()override{decoder_.Close();}
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{
         return decoder_.ReadNextAvailable(frame,stop);
@@ -56,6 +73,7 @@ public:
     uint32_t Height()const override{return decoder_.Height();}
     double FrameRate()const override{return decoder_.FrameRate();}
     double DurationSeconds()const override{return decoder_.DurationSeconds();}
+    VideoDecoder::KnownMedia Media()const override{return decoder_.Media();}
 private:
     VideoDecoder decoder_;
 };
@@ -109,6 +127,20 @@ struct SynchronizedPlayback::Impl {
     NeuralSegment segment{};
     NeuralSegment prefetchSegment{};
     std::optional<Pending> prefetchPending;
+    // Parameters of the first segment opened in this session. Every segment of
+    // one render is the same encoder at the same geometry, so the ones after it
+    // are opened without a probe.
+    VideoDecoder::KnownMedia segmentMedia{};
+    // A segment open in flight on another thread. Opening one costs a child
+    // process (and a probe, before segmentMedia is known); doing that on the
+    // thread that presents frames cost a measured 45% of them on a machine
+    // whose antivirus scans the spawn.
+    struct PendingOpen {
+        std::future<std::unique_ptr<FrameSource>> future;
+        std::stop_source stop;
+        NeuralSegment segment;
+    };
+    std::optional<PendingOpen> pendingOpen;
     bool live{};
     // Set when the open segment file ended before its declared window.
     bool segmentExhausted{};
@@ -132,11 +164,69 @@ struct SynchronizedPlayback::Impl {
 
     void CloseSegmentSources()
     {
+        CancelPendingOpen();
         if(segmentSource)segmentSource->Close();
         if(prefetchSource)prefetchSource->Close();
         segmentSource.reset();prefetchSource.reset();
         segment=NeuralSegment{};prefetchSegment=NeuralSegment{};
         prefetchPending.reset();segmentExhausted=false;
+    }
+
+    void CancelPendingOpen()
+    {
+        if(!pendingOpen)return;
+        pendingOpen->stop.request_stop();
+        if(pendingOpen->future.valid()){
+            auto source=pendingOpen->future.get();
+            if(source)source->Close();
+        }
+        pendingOpen.reset();
+    }
+
+    // Starts the open of `wanted` on another thread. Failures are silent: the
+    // boundary itself opens the file if this never produces one.
+    void StartAsyncOpen(NeuralSegment wanted)
+    {
+        if(pendingOpen||!makeSegmentSource)return;
+        PendingOpen pending{};
+        pending.segment=wanted;
+        // The worker touches nothing this object owns: it gets its own copies.
+        auto factory=makeSegmentSource;
+        const VideoDecoder::KnownMedia media=segmentMedia;
+        const std::filesystem::path path=wanted.path;
+        try{
+            pending.future=std::async(std::launch::async,
+                [factory,media,path,stop=pending.stop.get_token()]()->std::unique_ptr<FrameSource>{
+                    auto source=factory();
+                    if(!source)return nullptr;
+                    const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
+                                                  :source->Open(path,stop);
+                    if(!ready){source->Close();return nullptr;}
+                    return source;
+                });
+        }catch(const std::system_error&){
+            return;
+        }
+        pendingOpen=std::move(pending);
+    }
+
+    // Promotes a finished background open to the prefetch slot. Geometry is
+    // checked here, so a segment that does not match the original never becomes
+    // one; the synchronous path then reports it.
+    void HarvestAsyncOpen()
+    {
+        if(!pendingOpen||!pendingOpen->future.valid())return;
+        if(pendingOpen->future.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+        auto source=pendingOpen->future.get();
+        NeuralSegment landed=pendingOpen->segment;
+        pendingOpen.reset();
+        if(!source)return;
+        if(source->Width()!=original->Width()||source->Height()!=original->Height()){
+            source->Close();return;
+        }
+        if(prefetchSource)prefetchSource->Close();
+        prefetchSource=std::move(source);prefetchSegment=std::move(landed);
+        prefetchPending.reset();
     }
 
     // End of the playable window in seconds on the original timeline.
@@ -291,6 +381,11 @@ struct SynchronizedPlayback::Impl {
         // Only a disagreement between number and timestamp coverage can ask for
         // the file already open; serving it beats reopening it every frame.
         if(segmentSource&&segment.index==wanted.index)return SynchronizedReadResult::PairReady;
+        // The boundary arrived before the background open finished: wait for it
+        // rather than starting a second process for the same file.
+        if(pendingOpen&&pendingOpen->segment.index==wanted.index&&pendingOpen->future.valid())
+            pendingOpen->future.wait();
+        HarvestAsyncOpen();
         // The boundary is free when prefetch already opened and warmed the file.
         if(prefetchSource&&prefetchSegment.index==wanted.index){
             if(segmentSource)segmentSource->Close();
@@ -299,13 +394,24 @@ struct SynchronizedPlayback::Impl {
             prefetchSegment=NeuralSegment{};segmentExhausted=false;
             return SynchronizedReadResult::PairReady;
         }
+        // A prefetch for a segment the playhead skipped would otherwise sit
+        // there and block every later one.
+        if(prefetchSource){
+            prefetchSource->Close();prefetchSource.reset();
+            prefetchSegment=NeuralSegment{};prefetchPending.reset();
+        }
+        if(pendingOpen)CancelPendingOpen();
         auto source=makeSegmentSource?makeSegmentSource():nullptr;
         if(!source)return SynchronizedReadResult::Error;
-        if(!source->Open(wanted.path,stop))
+        const bool ready=segmentMedia.Valid()?source->OpenKnown(wanted.path,segmentMedia,stop)
+                                             :source->Open(wanted.path,stop);
+        if(!ready)
             return stop.stop_requested()?SynchronizedReadResult::Cancelled:SynchronizedReadResult::Error;
         if(source->Width()!=original->Width()||source->Height()!=original->Height()){
             source->Close();return SynchronizedReadResult::Error;
         }
+        // The first segment of a session is the one that pays for a probe.
+        if(!segmentMedia.Valid())segmentMedia=source->Media();
         // Segment files start at their own zero, so entering one mid-way (a seek)
         // seeks the file, not the source timeline.
         const int64_t local=timestamp100ns-wanted.firstTimestamp100ns;
@@ -340,19 +446,21 @@ struct SynchronizedPlayback::Impl {
         return AdoptSegment(std::move(*covering),timestamp100ns,stop);
     }
 
-    // A boundary costs a process start plus a first decode, so the next file is
-    // opened and warmed once the playhead enters the lead window of the current
-    // segment. Failures are silent: the next committed frame tries again.
+    // A boundary costs a process start (and a probe, for the first segment of a
+    // session), so the next file is opened on another thread once the playhead
+    // enters the lead window, and warmed here once that open lands. Failures are
+    // silent: the boundary itself opens the file if none of this worked.
     void PrefetchNextSegment(int64_t timestamp100ns,std::stop_token stop)
     {
         if(!segmentSource||stop.stop_requested())return;
+        HarvestAsyncOpen();
         if(!prefetchSource){
+            if(pendingOpen)return;
             if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
             auto following=SegmentByIndex(segment.index+1);
             if(!following)return;
-            auto source=makeSegmentSource?makeSegmentSource():nullptr;
-            if(!source||!source->Open(following->path,stop))return;
-            prefetchSource=std::move(source);prefetchSegment=std::move(*following);
+            StartAsyncOpen(std::move(*following));
+            return;
         }
         if(!prefetchPending)
             ReadOneShifted(*prefetchSource,prefetchPending,stop,prefetchSegment.firstTimestamp100ns,
@@ -510,6 +618,9 @@ bool SynchronizedPlayback::OpenLive(const std::filesystem::path& originalPath,
     // One second of lead is more than an ffmpeg start plus a first decode.
     impl_->prefetchLead100ns=std::max<int64_t>(10000000,2*impl_->tolerance100ns);
     impl_->segments=std::move(segments);impl_->live=true;
+    // A different render can be a different encoder or geometry: this session's
+    // first segment establishes the parameters again.
+    impl_->segmentMedia={};
     impl_->ResetPublished();impl_->opened=true;return true;
 }
 
@@ -519,7 +630,7 @@ void SynchronizedPlayback::Close()
 {
     if(!impl_)return;
     if(impl_->original)impl_->original->Close();if(impl_->neural)impl_->neural->Close();
-    impl_->CloseSegmentSources();impl_->segments.reset();impl_->live=false;
+    impl_->CloseSegmentSources();impl_->segments.reset();impl_->live=false;impl_->segmentMedia={};
     impl_->opened=false;impl_->ResetPublished();
 }
 

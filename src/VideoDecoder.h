@@ -91,6 +91,26 @@ public:
                         MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
                         std::stop_token stop = {},
                         bool preferNv12 = true);
+    // Parameters of a file this process just produced, so opening it does not
+    // pay for a probe. ffprobe is a child process: on a machine whose antivirus
+    // scans one, a probe costs ~0.7 s (measured 684 ms against 32 ms in an
+    // excluded directory), and a live neural session opens one segment file
+    // every two seconds on the thread that presents frames.
+    struct KnownMedia {
+        uint32_t width{};
+        uint32_t height{};
+        double fps{};
+        double durationSec{};
+        // Acceleration memo key of the sibling the parameters came from. All
+        // segments of one render carry one codec, so they share one key.
+        std::string hardwareProfile;
+        bool Valid() const { return width != 0 && height != 0 && fps > 0.0; }
+    };
+    bool OpenKnown(const std::wstring& path, const KnownMedia& media,
+                   MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
+                   std::stop_token stop = {});
+    // What a sibling file of the one this decoder has open can be opened with.
+    KnownMedia Media() const { return {m_width, m_height, m_fps, m_durationSec, m_hardwareProfile}; }
     void Close();
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});
@@ -158,10 +178,12 @@ private:
     bool OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                   std::stop_token stop, bool queueFrames,
                   FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda,
-                  bool sequential = false, bool sequentialNv12 = true);
+                  bool sequential = false, bool sequentialNv12 = true,
+                  const KnownMedia* known = nullptr);
 
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
-                    FFmpegAcceleration initialAcceleration);
+                    FFmpegAcceleration initialAcceleration,
+                    const KnownMedia* known);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
     // Restarts (seeks, resizes, recovery) default to the path that last produced
     // frames instead of re-running a hardware chain that already failed.

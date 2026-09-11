@@ -190,6 +190,11 @@ bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, st
     return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false);
 }
 
+bool VideoDecoder::OpenKnown(const std::wstring& path, const KnownMedia& media,
+                             MediaSourceKind sourceKind, std::stop_token stop) {
+    if (!media.Valid()) return Open(path, sourceKind, stop);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false, true, &media);
+}
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
                                   std::stop_token stop, bool preferNv12) {
     // NVDEC (this decode) and NVENC/D3D12 (the export encode and any render) are
@@ -204,7 +209,7 @@ bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sour
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                             std::stop_token stop, bool queueFrames,
                             FFmpegAcceleration acceleration, bool sequential,
-                            bool sequentialNv12) {
+                            bool sequentialNv12, const KnownMedia* known) {
     Close();
     m_path = path;
     m_width = m_height = 0;
@@ -229,7 +234,7 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
 
     // FFmpeg is intentionally preferred. It makes playback independent from
     // optional Microsoft Store codec packs and handles MKV/WebM/AV1/HEVC/etc.
-    if (OpenFFmpeg(path, stop, acceleration)) {
+    if (OpenFFmpeg(path, stop, acceleration, known)) {
         m_backend = Backend::FFmpeg;
         if (queueFrames) StartFrameQueue();
         LOG("Video decoder selected: FFmpeg");
@@ -733,17 +738,30 @@ void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
 }
 
 bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
-                              FFmpegAcceleration initialAcceleration) {
+                              FFmpegAcceleration initialAcceleration,
+                              const KnownMedia* known) {
     m_ffmpegExe = FindTool(L"ffmpeg.exe");
-    m_ffprobeExe = FindTool(L"ffprobe.exe");
-    if (m_ffmpegExe.empty() || m_ffprobeExe.empty()) {
+    m_ffprobeExe = known ? std::wstring{} : FindTool(L"ffprobe.exe");
+    if (m_ffmpegExe.empty() || (!known && m_ffprobeExe.empty())) {
         LOG("Bundled/system FFmpeg tools not found. ffmpeg=" << (!m_ffmpegExe.empty())
             << " ffprobe=" << (!m_ffprobeExe.empty()));
         return false;
     }
 
     LOG("FFmpeg executable detected.");
-    if (!ProbeFFmpeg(path,stop)||stop.stop_requested()) return false;
+    if (known) {
+        // A file this process produced beside one already probed: same encoder,
+        // same geometry, same frame rate. Probing it again would spend a child
+        // process on an answer already in hand.
+        m_width = m_nativeWidth = known->width;
+        m_height = m_nativeHeight = known->height;
+        m_fps = known->fps;
+        m_durationSec = known->durationSec;
+        m_hardwareProfile = known->hardwareProfile;
+        m_displayAspect = double(m_width) / double(m_height);
+    } else if (!ProbeFFmpeg(path,stop) || stop.stop_requested()) {
+        return false;
+    }
     // NV12 needs even plane dimensions (the UV plane is half-resolution in
     // both axes); odd geometry stays BGRA even for a sequential/export open,
     // and so does a caller that opted out of NV12 via preferNv12=false.
