@@ -147,6 +147,11 @@ struct NeuralRenderRequest {
     // Frames per finalized output file. 0 keeps the single-file behaviour:
     // every captured frame goes to stagingVideoPath and no segment is emitted.
     uint32_t segmentFrames{0};
+    // Frames in the FIRST finalized file, when it should be shorter than the
+    // rest. A live session cannot show anything until segment 0 is muxed, so a
+    // short first file is the difference between waiting two seconds for the
+    // picture and half a second. 0 means "same as segmentFrames".
+    uint32_t firstSegmentFrames{0};
     // Manual-reset event owned by the caller. Signalled means "pause"; the
     // worker checks it between frames and reports NeuralRenderPhase::Paused.
     HANDLE pauseEvent{};

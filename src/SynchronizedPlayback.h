@@ -87,10 +87,14 @@ public:
               SynchronizedRange range = {});
     // Plays the original against a render job that is still running: the neural
     // member is the growing segment index instead of one finished file.
+    // `originalMedia` is the caller's own probe of `originalPath` - the player
+    // has one open already, and probing the same file again costs a child
+    // process the attach is waiting on.
     bool OpenLive(const std::filesystem::path& originalPath,
                   std::shared_ptr<const NeuralSegmentIndex> segments,
                   SynchronizedRange range,
-                  std::stop_token stop = {});
+                  std::stop_token stop = {},
+                  const VideoDecoder::KnownMedia& originalMedia = {});
     SynchronizedRange Range() const;
     void Close();
     SynchronizedReadResult ReadNextAvailable(std::stop_token stop = {});

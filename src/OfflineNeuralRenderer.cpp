@@ -332,8 +332,10 @@ class SegmentWriter {
 public:
     SegmentWriter(std::function<std::unique_ptr<Encoder>()> factory,
                   const std::filesystem::path& stagingVideoPath, uint32_t segmentFrames,
-                  int64_t frameDuration100ns, NeuralSegmentSink sink, std::stop_token stop)
+                  int64_t frameDuration100ns, NeuralSegmentSink sink, std::stop_token stop,
+                  uint32_t firstSegmentFrames = 0)
         : factory_(std::move(factory)), staging_(stagingVideoPath), segmentFrames_(segmentFrames),
+          firstSegmentFrames_(firstSegmentFrames ? firstSegmentFrames : segmentFrames),
           frameDuration_(frameDuration100ns), sink_(std::move(sink)), stop_(std::move(stop)) {}
     ~SegmentWriter() { Cancel(); }
     SegmentWriter(const SegmentWriter&) = delete;
@@ -498,7 +500,10 @@ private:
 
     EncodeError WriteFrame(const Frame& frame)
     {
-        const uint64_t index = written_ / segmentFrames_;
+        // Segment 0 may be shorter than the rest, so the boundary is not a
+        // plain division: everything after it sits on the full-length grid.
+        const uint64_t index = written_ < firstSegmentFrames_
+            ? 0 : 1 + (written_ - firstSegmentFrames_) / segmentFrames_;
         if (!current_ || index != currentIndex_) {
             const EncodeError rotated = Rotate(index, frame);
             if (rotated != EncodeError::None) return rotated;
@@ -716,6 +721,7 @@ private:
     std::function<std::unique_ptr<Encoder>()> factory_;
     std::filesystem::path staging_;
     uint32_t segmentFrames_{};
+    uint32_t firstSegmentFrames_{};
     int64_t frameDuration_{};
     NeuralSegmentSink sink_;
     std::stop_token stop_;
@@ -896,7 +902,8 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     std::optional<SegmentWriter<Encoder>> writer;
     if (request.segmentFrames) {
         writer.emplace([&encoder] { return encoder.Create(); }, request.stagingVideoPath,
-                       request.segmentFrames, frameDuration, segments, stop);
+                       request.segmentFrames, frameDuration, segments, stop,
+                       request.firstSegmentFrames);
     }
     auto cancelOutput = [&] { if (writer) writer->Cancel(); else encoder.Cancel(); };
     const auto started = clock();

@@ -589,12 +589,16 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
 
 bool SynchronizedPlayback::OpenLive(const std::filesystem::path& originalPath,
                                     std::shared_ptr<const NeuralSegmentIndex> segments,
-                                    SynchronizedRange range,std::stop_token stop)
+                                    SynchronizedRange range,std::stop_token stop,
+                                    const VideoDecoder::KnownMedia& originalMedia)
 {
     Close();
     if(!impl_->original||!impl_->makeSegmentSource||originalPath.empty()||!segments)return false;
     if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
-    if(!impl_->original->Open(originalPath,stop))return false;
+    const bool ready=originalMedia.Valid()
+        ? impl_->original->OpenKnown(originalPath,originalMedia,stop)
+        : impl_->original->Open(originalPath,stop);
+    if(!ready)return false;
     const double originalFps=impl_->original->FrameRate();
     if(!impl_->original->Width()||!impl_->original->Height()||
        !std::isfinite(originalFps)||originalFps<=0.0){

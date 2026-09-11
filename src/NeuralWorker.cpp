@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -519,6 +521,10 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--segment-frames");
         arguments.emplace_back(std::to_wstring(request.segmentFrames));
     }
+    if (request.firstSegmentFrames && request.firstSegmentFrames != request.segmentFrames) {
+        arguments.emplace_back(L"--first-segment-frames");
+        arguments.emplace_back(std::to_wstring(request.firstSegmentFrames));
+    }
     // Absent means the CPU conversion inside ffmpeg, which is what every earlier
     // helper did, so an older parent and a newer helper still agree.
     if (request.gpuColorConversion) {
@@ -570,12 +576,12 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
-               GpuSourceConversion, KeyCount };
+               GpuSourceConversion, FirstSegmentFrames, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
         L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
-        L"--gpu-source-conversion"};
+        L"--gpu-source-conversion", L"--first-segment-frames"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -627,6 +633,14 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[SegmentFrames], segmentFrames) || segmentFrames > UINT32_MAX)
             return std::nullopt;
         request.segmentFrames = static_cast<uint32_t>(segmentFrames);
+    }
+    // Absent means the first file is as long as the rest, which is what every
+    // helper before this flag did.
+    if (values[FirstSegmentFrames]) {
+        uint64_t firstFrames = 0;
+        if (!ParseUnsigned(*values[FirstSegmentFrames], firstFrames) || firstFrames > UINT32_MAX)
+            return std::nullopt;
+        request.firstSegmentFrames = static_cast<uint32_t>(firstFrames);
     }
     if (values[GpuColorConversion]) {
         uint64_t enabled = 0;
@@ -772,15 +786,21 @@ void NeuralPreflightLatch::RecordFailure(const NeuralPreflightKey& key, std::wst
     const std::lock_guard<std::mutex> guard(mutex_);
     key_ = key;
     detail_ = std::move(detail);
+    json_.clear();
     failed_ = true;
+    passed_ = false;
 }
 
-void NeuralPreflightLatch::RecordSuccess(const NeuralPreflightKey& key)
+void NeuralPreflightLatch::RecordSuccess(const NeuralPreflightKey& key, std::string json)
 {
     const std::lock_guard<std::mutex> guard(mutex_);
     key_ = key;
     detail_.clear();
+    json_ = std::move(json);
     failed_ = false;
+    // A pass without a receipt is not reusable: the render's receipt would lose
+    // the probe evidence it is supposed to carry.
+    passed_ = !json_.empty();
 }
 
 std::wstring NeuralPreflightLatch::LatchedFailureDetail(const NeuralPreflightKey& key) const
@@ -789,13 +809,93 @@ std::wstring NeuralPreflightLatch::LatchedFailureDetail(const NeuralPreflightKey
     return failed_ && key_ == key ? detail_ : std::wstring{};
 }
 
+std::string NeuralPreflightLatch::LatchedSuccessJson(const NeuralPreflightKey& key) const
+{
+    const std::lock_guard<std::mutex> guard(mutex_);
+    return passed_ && key_ == key ? json_ : std::string{};
+}
+
 void NeuralPreflightLatch::Invalidate()
 {
     const std::lock_guard<std::mutex> guard(mutex_);
     key_ = {};
     detail_.clear();
+    json_.clear();
     failed_ = false;
+    passed_ = false;
 }
+
+namespace {
+// Identity the stored verdict belongs to, written as the file's first line and
+// compared on load, so the file name only has to be a short unique-ish label.
+std::string PreflightIdentity(const NeuralPreflightKey& key)
+{
+    std::string identity = Narrow(key.gpu);
+    identity += '|';
+    identity += Narrow(key.driver);
+    identity += '|';
+    identity += key.runtimeDigest;
+    return identity;
+}
+} // namespace
+
+std::filesystem::path NeuralPreflightReceiptPath(const std::filesystem::path& cacheRoot,
+                                                 const NeuralPreflightKey& key)
+{
+    if (cacheRoot.empty()) return {};
+    // FNV-1a, the same label hash the runtime lease uses for its mutex name: the
+    // identity itself is stored in the file, so this only has to be a filename.
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (const char c : PreflightIdentity(key)) {
+        hash ^= static_cast<uint8_t>(c);
+        hash *= 0x100000001b3ull;
+    }
+    wchar_t name[32]{};
+    swprintf_s(name, L"%016llx.txt", static_cast<unsigned long long>(hash));
+    return cacheRoot / L"preflight" / name;
+}
+
+std::string LoadNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
+                                       const NeuralPreflightKey& key)
+{
+    const auto path = NeuralPreflightReceiptPath(cacheRoot, key);
+    if (path.empty()) return {};
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    std::string identity;
+    if (!std::getline(input, identity) || identity != PreflightIdentity(key)) return {};
+    const std::string json{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}};
+    // Only a receipt that records a pass may stand in for a probe.
+    if (json.find("\"ok\":true") == std::string::npos) return {};
+    return json;
+}
+
+bool StoreNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
+                                 const NeuralPreflightKey& key, std::string_view json)
+{
+    const auto path = NeuralPreflightReceiptPath(cacheRoot, key);
+    if (path.empty() || json.empty()) return false;
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return false;
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output) return false;
+    const std::string identity = PreflightIdentity(key) + "\n";
+    output.write(identity.data(), static_cast<std::streamsize>(identity.size()));
+    output.write(json.data(), static_cast<std::streamsize>(json.size()));
+    return output.good();
+}
+
+std::string MarkReusedNeuralPreflight(std::string_view json)
+{
+    const size_t brace = json.find('{');
+    if (brace == std::string_view::npos) return std::string(json);
+    std::string stamped(json.substr(0, brace + 1));
+    stamped += "\"reusedVerdict\":true,";
+    stamped += json.substr(brace + 1);
+    return stamped;
+}
+
 
 std::wstring NeuralRuntimeLease::MutexName(const std::filesystem::path& runtimeDirectory)
 {

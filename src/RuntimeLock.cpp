@@ -397,7 +397,8 @@ std::vector<RuntimeLockCheck> VerifyRuntimeLock(const std::filesystem::path& run
             check.sizeMatches = check.actualSize == entry.size;
         }
         if (!stop.stop_requested()) {
-            if (auto digest = Sha256File(path, stop)) {
+            // Memoised: BuildRuntimeDigest hashed this identical set moments ago.
+            if (auto digest = Sha256FileCached(path, stop)) {
                 check.actualSha256 = std::move(*digest);
                 for (char& c : check.actualSha256) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 // Entries built by ParseRuntimeLock are lowercase already; a

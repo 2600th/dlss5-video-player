@@ -11,6 +11,7 @@
 #include <charconv>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <system_error>
 #include <vector>
 
@@ -381,6 +382,38 @@ std::optional<std::string> Sha256File(const std::filesystem::path& path, std::st
     return hasher.Finish();
 }
 
+std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, std::stop_token stop)
+{
+    struct Key {
+        std::wstring path;
+        uintmax_t size{};
+        int64_t writeTime{};
+        bool operator==(const Key&) const = default;
+    };
+    static std::mutex mutex;
+    static std::vector<std::pair<Key, std::string>> memo;
+
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) return Sha256File(path, stop);
+    const auto written = std::filesystem::last_write_time(path, error);
+    if (error) return Sha256File(path, stop);
+    const Key key{path.wstring(), size, written.time_since_epoch().count()};
+    {
+        std::lock_guard lock(mutex);
+        for (const auto& [candidate, digest] : memo)
+            if (candidate == key) return digest;
+    }
+    auto digest = Sha256File(path, stop);
+    if (!digest) return digest;
+    std::lock_guard lock(mutex);
+    // The locked set is twelve files and one source at a time; a cap this size
+    // only ever drops entries a settings change made stale anyway.
+    if (memo.size() >= 32) memo.clear();
+    memo.emplace_back(key, *digest);
+    return digest;
+}
+
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
 {
     std::string canonical;
@@ -431,7 +464,7 @@ std::optional<std::string> BuildRuntimeDigest(
     std::string canonical;
     for (const auto& relative : sorted) {
         if (stop.stop_requested()) return std::nullopt;
-        const auto digest = Sha256File(moduleDirectory / relative, stop);
+        const auto digest = Sha256FileCached(moduleDirectory / relative, stop);
         if (!digest) return std::nullopt;
         const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, relative.data(),
                                                  static_cast<int>(relative.size()), nullptr, 0,

@@ -1616,6 +1616,27 @@ void segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_tes
     CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3)));
 }
 
+// Nothing can be shown until the first file is muxed, so a live session asks
+// for a short one. Only the first: a boundary costs an encoder start.
+void segmented_offline_job_makes_only_the_first_file_short_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    SegmentEncoders farm;
+    std::vector<NeuralRenderSegment> announced;
+    NeuralSegmentSink sink;
+    sink.onSegment=[&](const NeuralRenderSegment& segment){announced.push_back(segment);};
+    OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence(),{},{},
+                              SegmentEncoderFactory(farm));
+    auto request=EvenOfflineRequest(fixture.Path());
+    request.segmentFrames=2;request.firstSegmentFrames=1;
+    const NeuralRenderResult result=job.Run(request,{},{},sink);
+    CHECK(result.ok);CHECK_EQ(uint64_t{5},result.frameCount);
+    CHECK_EQ(size_t{3},announced.size());
+    const std::vector<uint64_t> frames{announced[0].frameCount,announced[1].frameCount,announced[2].frameCount};
+    CHECK_EQ(std::vector<uint64_t>({1,2,2}),frames);
+    for(size_t index=0;index<announced.size();++index)CHECK_EQ(uint64_t(index),announced[index].index);
+}
+
 void segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test()
 {
     TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
@@ -2309,6 +2330,20 @@ void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_
     CHECK(live_session::ShouldResume(playing));
     playing.headSec=20.1;playing.finished=true;
     CHECK(std::abs(live_session::Lead(playing)-0.1)<1e-9);
+    // The cushion is sized for a card that barely keeps up. On one that renders
+    // several times faster it only makes the user wait for a buffer the render
+    // refills faster than playback drains it.
+    CHECK(std::abs(live_session::StartLead(0.0)-live_session::kStartLead)<1e-9);   // unmeasured
+    CHECK(std::abs(live_session::StartLead(1.0)-live_session::kStartLead)<1e-9);
+    CHECK(std::abs(live_session::StartLead(1.49)-live_session::kStartLead)<1e-9);
+    CHECK(std::abs(live_session::StartLead(1.5)-2.0)<1e-9);
+    CHECK(std::abs(live_session::StartLead(4.8)-1.0)<1e-9);                        // the 5090 at 1080p30
+    // Never above the caller's own ceiling.
+    CHECK(std::abs(live_session::StartLead(4.8,0.5)-0.5)<1e-9);
+    live_session::SessionView fast{};
+    fast.rangeStartSec=10.0;fast.positionSec=10.0;fast.headSec=11.2;
+    CHECK(!live_session::ShouldAttach(fast));
+    CHECK(live_session::ShouldAttach(fast,live_session::StartLead(4.8)));
 }
 
 void live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test()
@@ -2575,6 +2610,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_identity_mismatch_from_the_evaluator_fails_the_job_test();
     offline_job_passes_guide_controls_to_the_evaluator_test();
     segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_test();
+    segmented_offline_job_makes_only_the_first_file_short_test();
     segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test();
     segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test();
     reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test();

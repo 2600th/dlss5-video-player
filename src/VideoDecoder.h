@@ -111,6 +111,12 @@ public:
                    std::stop_token stop = {});
     // What a sibling file of the one this decoder has open can be opened with.
     KnownMedia Media() const { return {m_width, m_height, m_fps, m_durationSec, m_hardwareProfile}; }
+    // Geometry, frame rate and duration only: runs the probe and starts no
+    // decoder. The caller that just needs to describe a file was paying for a
+    // full ffmpeg child it closed two lines later.
+    bool OpenMetadata(const std::wstring& path,
+                      MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
+                      std::stop_token stop = {});
     void Close();
     bool ReadNext(VideoFrame& out);
     VideoReadResult ReadNextAvailable(VideoFrame& out, std::stop_token stop = {});

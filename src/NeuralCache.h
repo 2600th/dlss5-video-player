@@ -79,6 +79,13 @@ struct NeuralCacheEntry {
 
 std::optional<std::string> Sha256File(const std::filesystem::path& path,
                                       std::stop_token stop = {});
+// Same digest, memoised per process on (path, size, last write time). Only for
+// installation files that do not change while the player runs - the locked
+// runtime set is hashed three times per session otherwise (226 MB each pass,
+// ~0.5 s). Never use it for user content: a file rewritten with an identical
+// size and timestamp would keep the stale digest.
+std::optional<std::string> Sha256FileCached(const std::filesystem::path& path,
+                                            std::stop_token stop = {});
 std::optional<std::string> Sha256Bytes(std::string_view bytes);
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity);
 std::optional<std::string> BuildRuntimeDigest(

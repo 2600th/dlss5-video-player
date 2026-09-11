@@ -195,6 +195,35 @@ bool VideoDecoder::OpenKnown(const std::wstring& path, const KnownMedia& media,
     if (!media.Valid()) return Open(path, sourceKind, stop);
     return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false, true, &media);
 }
+
+bool VideoDecoder::OpenMetadata(const std::wstring& path, MediaSourceKind sourceKind,
+                                std::stop_token stop) {
+    Close();
+    m_path = path;
+    m_width = m_height = 0;
+    m_nativeWidth = m_nativeHeight = 0;
+    m_stride = 0;
+    m_fps = 30.0;
+    m_durationSec = 0.0;
+    m_stillImage = false;
+    m_gif = false;
+    m_displayAspect = 0.0;
+    m_sourceKind = sourceKind;
+    m_sequentialOpen = false;
+    m_sequentialNv12 = true;
+    m_layout = VideoPixelLayout::Bgra;
+    ++m_sourceGeneration;
+    m_ffprobeExe = FindTool(L"ffprobe.exe");
+    if (!m_ffprobeExe.empty() && ProbeFFmpeg(path, stop) && !stop.stop_requested()) return true;
+    if (stop.stop_requested()) return false;
+    // A container ffprobe cannot describe is still worth one Media Foundation
+    // question; its reader answers from the file, without a child process.
+    if (DecoderPolicyForSource(sourceKind) == DecoderOpenPolicy::FfmpegOnly) return false;
+    if (!OpenMediaFoundation(path)) return false;
+    m_backend = Backend::MediaFoundation;
+    return true;
+}
+
 bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sourceKind,
                                   std::stop_token stop, bool preferNv12) {
     // NVDEC (this decode) and NVENC/D3D12 (the export encode and any render) are

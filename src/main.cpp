@@ -2712,6 +2712,9 @@ private:
     // session is one long job that publishes finalized segments while it runs,
     // and playback follows the render head, buffering when it catches up.
     static constexpr double kLiveSegmentSeconds=2.0;
+    // The first file of a session is what the user is waiting for, so it is
+    // short; the ones behind it stay at kLiveSegmentSeconds.
+    static constexpr double kLiveFirstSegmentSeconds=0.5;
     static constexpr double kLiveStartLead=live_session::kStartLead;
     static constexpr double kLiveResumeLead=live_session::kResumeLead;
     bool LiveSessionAvailable()const{return RangeRenderAvailable()&&!m_cachedPlayback&&!m_decoder.IsStillImage();}
@@ -2796,6 +2799,12 @@ private:
         }
         m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
         m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
+        // A GPU that renders far faster than real time refills the buffer faster
+        // than playback drains it, so the four-second cushion is only a wait.
+        m_liveStartLead=live_session::StartLead(
+            playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
+                                                m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio,
+            kLiveStartLead);
         const int64_t renderFrom=std::max(range.start100ns,m_liveSegments->Head100ns());
         if(renderFrom<range.end100ns)m_liveSegments->Unfinish();
         EnterLiveBuffering();
@@ -2873,7 +2882,7 @@ private:
         if(!m_liveSegments->Containing(static_cast<int64_t>(std::llround(at*1e7))))return false;
         const bool wasPlaying=m_playing||m_liveResumePlaying;
         Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
-        if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns})){LOG("Active neural playback could not open the live pair.");return false;}
+        if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media())){LOG("Active neural playback could not open the live pair.");return false;}
         if(!m_synchronizedPlayback.SeekSeconds(at)||!m_synchronizedPlayback.VisibleFrame()){LOG("Active neural playback could not position the live pair at "<<at<<" s.");m_synchronizedPlayback.Close();return false;}
         // The view has to switch before the frame is read: VisibleFrame returns
         // whichever side the view selects, and reading it first presented the
@@ -2998,7 +3007,7 @@ private:
         if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
         const live_session::SessionView view=LiveSessionView();
         if(!m_liveAttached){
-            if(live_session::ShouldAttach(view)&&AttachLiveNeural())ExitLiveBuffering();
+            if(live_session::ShouldAttach(view,m_liveStartLead)&&AttachLiveNeural())ExitLiveBuffering();
             return;
         }
         if(m_liveBuffering&&live_session::ShouldResume(view))ExitLiveBuffering();
@@ -3047,7 +3056,7 @@ private:
         const std::wstring heading=m_previewJob?T(L"neural.preview.title"):m_liveAttached?T(L"neural.live.buffering"):T(L"neural.live.title");
         DrawTextW(dc,heading.c_str(),-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,m_fontSmall);SetTextColor(dc,ui_palette::SecondaryText);
-        const double lead=LiveLeadSeconds(),target=m_liveAttached?kLiveResumeLead:kLiveStartLead;
+        const double lead=LiveLeadSeconds(),target=m_liveAttached?kLiveResumeLead:m_liveStartLead;
         wchar_t detail[128]={};
         if(m_previewJob)swprintf_s(detail,L"%s",T(L"neural.preview.detail").c_str());
         // A session that is still acquiring its source has no frames to report,
@@ -3194,12 +3203,16 @@ private:
                 if(ec){LOG("Active neural session could not create the segment directory for this job.");return;}
             }
             const uint32_t segmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveSegmentSeconds))):0u;
+            // Nothing can be shown until the first file is muxed, so the first
+            // one is short. Later files stay long: a boundary costs an encoder
+            // start and a mux, and only the first one is on the user's clock.
+            const uint32_t firstSegmentFrames=kind==NeuralJobKind::Live?static_cast<uint32_t>(std::max<long>(1,std::lround(m_decoder.FrameRate()*kLiveFirstSegmentSeconds))):0u;
             // The driver verdict and the latched preflight failure are read on
             // this thread; the job only needs the answers.
             const std::wstring driverNotice=NeuralDriverNoticeText();
             const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
             NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,driverNotice,preflightKey,preflightLatch,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,preflightKey,preflightLatch,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -3240,7 +3253,9 @@ private:
                     }else sourcePath=std::filesystem::absolute(std::filesystem::path(mediaUrl));
                     completion->sourcePath=sourcePath;
                     const auto sourceDigest=Sha256File(sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
-                    VideoDecoder metadata;if(!metadata.Open(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
+                    // Metadata only: this decoder was opened and closed two lines
+                    // later, and a full open paid for an ffmpeg child for nothing.
+                    VideoDecoder metadata;if(!metadata.OpenMetadata(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
                     const uint32_t width=metadata.NativeWidth(),height=metadata.NativeHeight();const double fps=metadata.FrameRate(),duration=metadata.DurationSeconds();metadata.Close();
                     if(!width||!height||!std::isfinite(fps)||fps<=0.0||!std::isfinite(duration)||duration<=0.0){completion->result.detail=L"The source metadata is incomplete.";goto finish;}progressWidth=width;progressHeight=height;
                     NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;postProgress(checking);
@@ -3290,17 +3305,31 @@ private:
                         LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
                         goto finish;
                     }
-                    // The feature-18 probe needs the GPU; only a cache miss pays for it.
-                    NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
                     const auto workerExecutable=runtimeDirectory/L"NeuralWorker.exe";
-                    const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
-                    if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(runtimeKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
-                    preflightLatch->RecordSuccess(runtimeKey);
+                    // A pass is as reusable as a failure: the probe answers for a
+                    // GPU, a driver and a runtime, not for a playback session, and
+                    // paying five seconds per toggle for the same answer is what
+                    // made the picture take sixteen seconds to appear.
+                    std::string preflightJson=preflightLatch->LatchedSuccessJson(runtimeKey);
+                    if(preflightJson.empty())preflightJson=LoadNeuralPreflightReceipt(cacheRoot,runtimeKey);
+                    if(!preflightJson.empty()){
+                        preflightLatch->RecordSuccess(runtimeKey,preflightJson);
+                        preflightJson=MarkReusedNeuralPreflight(preflightJson);
+                        LOG("Neural preflight skipped; this runtime and driver already armed feature 18.");
+                    }else{
+                        // The feature-18 probe needs the GPU; only a cache miss pays for it.
+                        NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
+                        const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
+                        if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
+                        if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(runtimeKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
+                        preflightLatch->RecordSuccess(runtimeKey,preflight.json);
+                        StoreNeuralPreflightReceipt(cacheRoot,runtimeKey,preflight.json);
+                        preflightJson=preflight.json;
+                    }
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;
-                    NeuralRenderReceiptInputs receipt{preflight.json,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;
+                    NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
                     NeuralSegmentSink sink{};
                     if(liveIndex){
                         // Every finalized segment is playable on arrival; the
@@ -4090,7 +4119,7 @@ private:
     NeuralRenderRange m_previewRange{};
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;
-    int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;
+    int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
     playback_timing::RenderPaceProfile m_renderPace;
     HWND m_bufferWnd=nullptr;

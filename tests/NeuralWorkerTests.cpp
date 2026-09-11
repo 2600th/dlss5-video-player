@@ -719,12 +719,23 @@ void preflight_latch_holds_one_verdict_per_runtime_identity_test()
         CHECK(latch.LatchedFailureDetail(other).empty());
     CHECK(!latch.LatchedFailureDetail(key).empty());
 
-    latch.RecordSuccess(key);
+    // A pass is remembered too, with its receipt: skipping the probe is only
+    // allowed when the render's own receipt can still carry the evidence.
+    latch.RecordSuccess(key, "{\"schema\":2,\"ok\":true}");
     CHECK(latch.LatchedFailureDetail(key).empty());
+    CHECK_EQ(std::string("{\"schema\":2,\"ok\":true}"), latch.LatchedSuccessJson(key));
+    for (const NeuralPreflightKey& other : {newDriver, otherGpu, newRuntime})
+        CHECK(latch.LatchedSuccessJson(other).empty());
+    // A pass without a receipt cannot stand in for one.
+    latch.RecordSuccess(key, std::string{});
+    CHECK(latch.LatchedSuccessJson(key).empty());
 
+    latch.RecordSuccess(key, "{\"ok\":true}");
     latch.RecordFailure(key, std::wstring(detail));
+    CHECK(latch.LatchedSuccessJson(key).empty());
     latch.Invalidate();
     CHECK(latch.LatchedFailureDetail(key).empty());
+    CHECK(latch.LatchedSuccessJson(key).empty());
 
     // The field storm: three playback starts on the same doomed machine ran
     // three ~5 s probes in 65 s. One probe is the whole point of the latch.

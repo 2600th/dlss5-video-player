@@ -23,6 +23,19 @@ inline constexpr double kRebaseAhead = 15.0;
 // usually a rounding artifact of frame snapping rather than a real seek.
 inline constexpr double kBackwardSlack = 0.5;
 
+// Lead to require before the first attach, given how fast this GPU renders
+// relative to real time (`LiveRenderForecast::realtimeRatio`). The 4 s cushion
+// is sized for a card that barely keeps up; on one that renders three times
+// faster the buffer refills faster than playback drains it, so the same cushion
+// only makes the user wait. An unknown pace keeps the full cushion.
+inline double StartLead(double realtimeRatio, double startLead = kStartLead)
+{
+    if (!(realtimeRatio > 0.0)) return startLead;
+    if (realtimeRatio >= 3.0) return std::min(startLead, 1.0);
+    if (realtimeRatio >= 1.5) return std::min(startLead, 2.0);
+    return startLead;
+}
+
 struct SessionView {
     double positionSec = 0.0;   // where playback is
     double rangeStartSec = 0.0; // where the job began rendering

@@ -59,24 +59,50 @@ struct NeuralPreflightKey {
     bool operator==(const NeuralPreflightKey&) const = default;
 };
 
-// One remembered negative verdict, shared by the UI thread and job threads.
+// One remembered verdict, shared by the UI thread and job threads.
 // A doomed preflight costs ~5 s and ends the running session: the field log
 // shows three of them in 65 s, one per playback start, each dropping frames.
-// The verdict stands until the identity changes or the runtime is replaced.
+// A passing one costs the same ~5 s - a whole helper process that loads
+// ReShade, the add-on and NGX, creates feature 18, and exits - and only the
+// failures were remembered, so every session after the first paid again for an
+// answer already in hand. The verdict stands until the identity changes or the
+// runtime is replaced.
 class NeuralPreflightLatch {
 public:
     void RecordFailure(const NeuralPreflightKey& key, std::wstring detail);
-    void RecordSuccess(const NeuralPreflightKey& key);
+    void RecordSuccess(const NeuralPreflightKey& key, std::string json);
     // Empty unless this exact key is latched as failed.
     std::wstring LatchedFailureDetail(const NeuralPreflightKey& key) const;
+    // The receipt of a probe that already passed for this exact key, so the
+    // render's receipt still carries the evidence the probe produced. Empty
+    // when this key has not passed.
+    std::string LatchedSuccessJson(const NeuralPreflightKey& key) const;
     void Invalidate();
 
 private:
     mutable std::mutex mutex_;
     NeuralPreflightKey key_;
     std::wstring detail_;
+    std::string json_;
     bool failed_{};
+    bool passed_{};
 };
+
+// A passing verdict also survives the process, because the probe's answer is a
+// property of the machine, not of the run: same adapter, same driver, same
+// twelve runtime files means the same answer. The store lives beside the render
+// cache and is keyed by that identity; a render whose runtime was tampered with
+// behind the key still fails on its own armed-evidence check, so the worst a
+// stale entry costs is a less specific message.
+std::filesystem::path NeuralPreflightReceiptPath(const std::filesystem::path& cacheRoot,
+                                                 const NeuralPreflightKey& key);
+std::string LoadNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
+                                       const NeuralPreflightKey& key);
+bool StoreNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
+                                 const NeuralPreflightKey& key, std::string_view json);
+// Stamps a receipt that was reused rather than produced by this session, so the
+// render receipt does not claim a probe it never ran.
+std::string MarkReusedNeuralPreflight(std::string_view json);
 
 // Serializes every use of the shared neural-runtime directory. The parent
 // rewrites ReShade.ini with the render's neural settings per job and the

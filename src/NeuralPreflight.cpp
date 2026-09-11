@@ -288,7 +288,7 @@ std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::
             module.sizeBytes = std::filesystem::file_size(path, error);
             if (error) module.sizeBytes = 0;
             module.fileVersion = FileVersionText(path);
-            if (const auto digest = Sha256File(path)) module.sha256 = *digest;
+            if (const auto digest = Sha256FileCached(path)) module.sha256 = *digest;
         }
         modules.push_back(std::move(module));
     }
