@@ -77,6 +77,13 @@ D3D12Renderer::~D3D12Renderer() {
 #if defined(D3D12_RENDERER_TESTING)
     m_testOwnedResource.reset();
 #endif
+    // The flow engine holds registered views of textures this object owns, so it has to
+    // be torn down while the device and queue are still alive and only once the GPU has
+    // stopped touching those surfaces. Member destruction order cannot express that:
+    // m_nvof is declared ahead of the queue and the device, so it would be released
+    // after both had gone - which is an access violation on the way out, not a leak.
+    if (m_queue && m_fence && m_fenceEvent) WaitGPUForContinuedUse();
+    m_nvof.Shutdown();
     for (uint32_t i=0;i<FrameCount;++i) {
         if (m_upload[i] && m_uploadMapped[i]) m_upload[i]->Unmap(0,nullptr);
         if (m_guideUpload[i] && m_guideMapped[i]) m_guideUpload[i]->Unmap(0,nullptr);
@@ -89,7 +96,9 @@ D3D12Renderer::~D3D12Renderer() {
         if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
         m_cacheReadbackMapped[i]=nullptr;
     }
+    LOG("Renderer teardown: buffers unmapped");
     m_dlss.Shutdown();
+    LOG("Renderer teardown: NGX released");
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
 
@@ -131,12 +140,15 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     if(FAILED(m_queue->GetTimestampFrequency(&m_timestampFrequency)))m_timestampFrequency=0;
     for(uint32_t i=0;i<FrameCount;++i) {
         if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_allocators[i])),"CreateCommandAllocator"))return false;
+        if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_uploadAllocators[i])),"CreateCommandAllocator (upload)"))return false;
     }
     for(uint32_t i=0;i<FrameCount;++i) {
         if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,m_allocators[i].Get(),nullptr,IID_PPV_ARGS(&m_cmds[i])),"CreateCommandList"))return false;
         m_cmds[i]->Close();
+        if(!HR(m_device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,m_uploadAllocators[i].Get(),nullptr,IID_PPV_ARGS(&m_uploadCmds[i])),"CreateCommandList (upload)"))return false;
+        m_uploadCmds[i]->Close();
     }
-    BOOL tearing=FALSE;if(SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
+    BOOL tearing=FALSE;if(m_requestedTearing&&SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
@@ -163,7 +175,7 @@ bool D3D12Renderer::CreatePipelines(){
     const char* hlsl=R"(
 Texture2D T:register(t0); Texture2D Ref:register(t1); SamplerState S:register(s0);
 cbuffer Params:register(b0){
-    float2 JitterUV;
+    float2 Reserved0;  // was sampling jitter; see the note above PSConvert
     float2 Misc;   // x = one output pixel in UV (divider half-width), y = zoom scale
     float4 ColorA; // brightness, contrast, saturation, gamma
     float4 ColorB; // temperature, tint, reserved, reserved
@@ -174,7 +186,12 @@ struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
 V VS(uint id:SV_VertexID){float2 uv=float2((id<<1)&2,id&2);V o;o.uv=uv;o.p=float4(uv.x*2-1,1-uv.y*2,0,1);return o;}
 float3 SRGBToLinear(float3 c){float3 lo=c/12.92;float3 hi=pow(max((c+0.055)/1.055,0),2.4);return lerp(hi,lo,step(c,0.04045));}
 float3 LinearToSRGB(float3 c){c=max(c,0);float3 lo=c*12.92;float3 hi=1.055*pow(c,1.0/2.4)-0.055;return saturate(lerp(hi,lo,step(c,0.0031308)));}
-float4 PSConvert(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv+JitterUV,0).rgb;return float4(SRGBToLinear(c),1);}
+// A decoded video frame is an already-sampled, band-limited grid: there is no continuous
+// scene behind it to re-sample at a new sub-pixel phase. Offsetting this fetch would only
+// convolve the frame with a per-frame bilinear tent (Nyquist gain |1-2f|, so 1.0 at phase 0
+// and 0.0 at phase 0.5) and hand the reconstruction a different amount of blur every frame.
+// Feature 18 does not read a jitter offset at all, so nothing downstream undoes it either.
+float4 PSConvert(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv,0).rgb;return float4(SRGBToLinear(c),1);}
 float3 ApplyVideoAdjustments(float3 c){
     float brightness=ColorA.x;
     float contrast=max(ColorA.y,0.0);
@@ -251,8 +268,8 @@ float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=len
 float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
     // Depth comes directly from compact-guide B and is written through SV_Depth into
     // the exact typeless/D32 resource that NGX receives later in the frame.
-    float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv+JitterUV,0).b);}
-    float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv+JitterUV,0).xy;}
+    float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv,0).b);}
+    float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv,0).xy;}
 )";
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
     ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12;
@@ -299,6 +316,52 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.NumRenderTargets=0;p.RTVFormats[0]=DXGI_FORMAT_UNKNOWN;p.DSVFormat=DXGI_FORMAT_D32_FLOAT;
     p.DepthStencilState.DepthEnable=TRUE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;p.DepthStencilState.StencilEnable=FALSE;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthWrite)),"Create real depth-buffer PSO"))return false;
+
+    // The optical-flow resolve is compiled on its own because it reads integer and
+    // unsigned textures where the shared source declares float ones at the same
+    // registers. Same root signature, so it binds exactly like every other pass.
+    const char* nvofHlsl=R"(
+Texture2D<int2> Flow:register(t0); Texture2D<uint> Cost:register(t1);
+cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; };
+struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
+V VS(uint id:SV_VertexID){float2 uv=float2((id<<1)&2,id&2);V o;o.uv=uv;o.p=float4(uv.x*2-1,1-uv.y*2,0,1);return o;}
+// NVOFA writes S10.5 fixed point: one unit is 1/32 of an input pixel. With
+// inputFrame = this frame and referenceFrame = the previous one the vector already
+// points from the current pixel back to where that content was, which is verbatim the
+// DLSS convention, so there is no sign flip here.
+//
+// The fetch is NEAREST, not bilinear. Across a disocclusion the neighbouring cells
+// describe different surfaces and interpolating them manufactures a vector no cell
+// measured, widening the band instead of narrowing it. Where the field is smooth it
+// varies far more slowly than one cell and the two filters agree anyway.
+float2 PSNvofMotion(V i):SV_Target{
+    uint2 dim; Flow.GetDimensions(dim.x,dim.y);
+    int2 cell=int2(min(uint2(i.uv*float2(dim)),dim-1));
+    float2 motion=float2(Flow.Load(int3(cell,0)))*FlowScale;
+    // Gate.x == Gate.y disables the confidence gate, which is the default: the cost
+    // thresholds are not measured yet and inventing them would be a guess that silently
+    // deletes real motion. When they are set, a high-cost cell fades toward zero rather
+    // than switching off, so the decision cannot alternate frame to frame.
+    if(Gate.y>Gate.x){
+        float cost=float(Cost.Load(int3(cell,0)));
+        motion*=saturate((Gate.y-cost)/(Gate.y-Gate.x));
+    }
+    return motion;
+}
+)";
+    ComPtr<ID3DBlob> nvofVs,nvofPs,nvofErr;
+    auto CN=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{
+        nvofErr.Reset();
+        const HRESULT hr=D3DCompile(nvofHlsl,strlen(nvofHlsl),"nvof",nullptr,nullptr,entry,target,flags,0,&out,&nvofErr);
+        if(FAILED(hr)){if(nvofErr)LOG((char*)nvofErr->GetBufferPointer());return false;}
+        return true;
+    };
+    if(!CN("VS","vs_5_1",nvofVs)||!CN("PSNvofMotion","ps_5_1",nvofPs))return false;
+    p.VS={nvofVs->GetBufferPointer(),nvofVs->GetBufferSize()};
+    p.PS={nvofPs->GetBufferPointer(),nvofPs->GetBufferSize()};
+    p.NumRenderTargets=1;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.DSVFormat=DXGI_FORMAT_UNKNOWN;
+    p.DepthStencilState.DepthEnable=FALSE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+    if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoNvofMotion)),"Create NVOFA motion resolve PSO"))return false;
     return true;
 }
 
@@ -378,6 +441,28 @@ bool D3D12Renderer::CreateVideoResources(){
 
     auto mot=Tex2D(DXGI_FORMAT_R16G16_FLOAT,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&mot,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_motion)),"Create motion guide"))return false;
     m_motion->SetName(L"DLSS_MotionVectors_CurrentToPrevious_RG16F");srv.Format=DXGI_FORMAT_R16G16_FLOAT;m_device->CreateShaderResourceView(m_motion.Get(),&srv,SRVCPU(2));m_device->CreateRenderTargetView(m_motion.Get(),nullptr,RTV(FrameCount+1));
+
+    // Hardware optical flow replaces the CPU block matcher as the motion source when the
+    // engine is present. It is only offered when the frame handed to RenderFrame is
+    // already the DLSS input size, because the engine compares that exact texture: on
+    // every neural path renderW == sourceW, and the runtime SR toggle, which is the one
+    // case where they differ, keeps the CPU estimator.
+    m_nvofActive=false;
+    if(m_sourceW==m_renderW&&m_sourceH==m_renderH&&m_nvof.Initialize(m_device.Get(),m_renderW,m_renderH)){
+        D3D12_SHADER_RESOURCE_VIEW_DESC fsrv{};fsrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        fsrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;fsrv.Texture2D.MipLevels=1;
+        fsrv.Format=DXGI_FORMAT_R16G16_SINT;m_device->CreateShaderResourceView(m_nvof.Flow(),&fsrv,SRVCPU(NvofFlowSRV));
+        // The resolve pass always binds t1, so a device without a cost surface gets a
+        // defined descriptor rather than an empty slot; the gate is off by default.
+        if(m_nvof.Cost()){
+            fsrv.Format=m_nvof.Cost()->GetDesc().Format;
+            m_device->CreateShaderResourceView(m_nvof.Cost(),&fsrv,SRVCPU(NvofCostSRV));
+        }else{
+            fsrv.Format=DXGI_FORMAT_R8_UINT;
+            m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofCostSRV));
+        }
+        m_nvofActive=true;
+    }
 
     // One depth resource, two views: D32_FLOAT DSV for real depth writes / ReShade
     // discovery and R32_FLOAT SRV for debug/NGX sampling. Passing this exact resource
@@ -536,8 +621,6 @@ void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE
     });
 }
 
-float D3D12Renderer::Halton(uint32_t index,uint32_t base){float f=1.0f,r=0.0f;while(index){f/=float(base);r+=f*float(index%base);index/=base;}return r;}
-
 bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs){
     return RenderFrameInternal(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,temporalReset,frameTimeMs,nullptr);
 }
@@ -571,49 +654,80 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     }else CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
     if(!HR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
+    if(!HR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
+    auto* pre=m_uploadCmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame command list")) return false;
-    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
-    RecordReferenceUpload(cmd,slot);
+    if(!HR(pre->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset frame upload command list")) return false;
+    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);pre->SetDescriptorHeaps(1,heaps);
+    RecordReferenceUpload(pre,slot);
 
     D3D12_TEXTURE_COPY_LOCATION d{};d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_upload[slot].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     if(nv12Source){
         // Copy both planes, then one full-resolution draw converts them into the decoded
         // texture. The draw replaces the BGRA copy below; everything after it is shared.
-        if(!m_sourcePlanesInCopyDest){Barrier(cmd,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);Barrier(cmd,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);}
-        d.pResource=m_sourceLuma.Get();s.PlacedFootprint=m_sourceLumaFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
-        d.pResource=m_sourceChroma.Get();s.PlacedFootprint=m_sourceChromaFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
-        Barrier(cmd,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);Barrier(cmd,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourcePlanesInCopyDest=false;
-        Barrier(cmd,m_decodedTexture.Get(),m_sourceInCopyDest?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
-        D3D12_VIEWPORT svp{0,0,float(m_sourceW),float(m_sourceH),0,1};D3D12_RECT ssc{0,0,LONG(m_sourceW),LONG(m_sourceH)};cmd->RSSetViewports(1,&svp);cmd->RSSetScissorRects(1,&ssc);
-        auto srt=RTV(DecodedRTV);cmd->OMSetRenderTargets(1,&srt,FALSE,nullptr);
-        cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoSourceNv12.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(SourceLumaSRV));cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(SourceChromaSRV));
-        const float none[4]={0,0,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,none,0);cmd->DrawInstanced(3,1,0,0);
-        Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+        if(!m_sourcePlanesInCopyDest){Barrier(pre,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);Barrier(pre,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);}
+        d.pResource=m_sourceLuma.Get();s.PlacedFootprint=m_sourceLumaFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        d.pResource=m_sourceChroma.Get();s.PlacedFootprint=m_sourceChromaFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        Barrier(pre,m_sourceLuma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);Barrier(pre,m_sourceChroma.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourcePlanesInCopyDest=false;
+        Barrier(pre,m_decodedTexture.Get(),m_sourceInCopyDest?D3D12_RESOURCE_STATE_COPY_DEST:D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        D3D12_VIEWPORT svp{0,0,float(m_sourceW),float(m_sourceH),0,1};D3D12_RECT ssc{0,0,LONG(m_sourceW),LONG(m_sourceH)};pre->RSSetViewports(1,&svp);pre->RSSetScissorRects(1,&ssc);
+        auto srt=RTV(DecodedRTV);pre->OMSetRenderTargets(1,&srt,FALSE,nullptr);
+        pre->SetGraphicsRootSignature(m_rootSig.Get());pre->SetPipelineState(m_psoSourceNv12.Get());pre->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        pre->SetGraphicsRootDescriptorTable(RootView,SRVGPU(SourceLumaSRV));pre->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(SourceChromaSRV));
+        const float none[4]={0,0,0,0};pre->SetGraphicsRoot32BitConstants(RootConstants,4,none,0);pre->DrawInstanced(3,1,0,0);
+        Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
     }else{
-        if(!m_sourceInCopyDest)Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-        d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(cmd,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+        if(!m_sourceInCopyDest)Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
     }
 
-    if(!m_gridInCopyDest)Barrier(cmd,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-    d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
-    Barrier(cmd,m_guideGrid.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_gridInCopyDest=false;
+    if(!m_gridInCopyDest)Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+    d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+    Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_gridInCopyDest=false;
 
-    // One temporal jitter sample drives BOTH the color reconstruction input and the
-    // spatial lookup of all guide buffers.  The motion-vector VALUES themselves remain
-    // unjittered (hence no MVJittered create flag), matching the standard DLSS contract.
-    const float jitterX=DLSSEnabled()?Halton(uint32_t(m_framesPresented%1024)+1,2)-0.5f:0.0f;
-    const float jitterY=DLSSEnabled()?Halton(uint32_t(m_framesPresented%1024)+1,3)-0.5f:0.0f;
-    const float jitterUVX=jitterX/float(m_renderW), jitterUVY=jitterY/float(m_renderH);
+    // Hardware optical flow. The engine reads the decoded frame the list above just
+    // produced, so the queue is signalled past that list and the engine waits on the
+    // signal; the frame's own list then waits on the engine's fence before reading the
+    // field. Both waits are on the GPU. Recording the uploads into their own list is
+    // what makes that possible without resetting an allocator the rest of the frame is
+    // still recording into, which is the only reason the split exists.
+    const bool nvofFrame=m_nvofActive&&DLSSEnabled();
+    if(nvofFrame){
+        if(temporalReset)m_nvof.Reset();
+        m_nvof.Capture(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    if(!HR(pre->Close(),"Close frame upload command list")) return false;
+    {ID3D12CommandList*uploadLists[]={pre};m_queue->ExecuteCommandLists(1,uploadLists);}
+    // False on the first frame of a stream and on every cut: there is no previous frame
+    // to compare against. The compact CPU grid is already all-zero on exactly those
+    // frames, so falling back to it emits the zero motion the reset needs anyway.
+    const bool nvofFlow=nvofFrame&&m_nvof.Submit(m_queue.Get());
 
-    // GPU-expand the compact CPU optical-flow analysis to exact DLSS input
-    // resolution. Depth is deliberately NOT mirrored through a color RT anymore:
-    // it is written directly into the same typeless depth resource that NGX receives.
+    // Full-resolution motion for NGX: from the flow engine when it ran this frame,
+    // otherwise by expanding the compact CPU analysis grid. Depth below always comes
+    // from that grid - the engine estimates motion and nothing else.
     if(!m_guidesInRT)Barrier(cmd,m_motion.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_guidesInRT=true;
     D3D12_VIEWPORT gvp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT gsc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&gvp);cmd->RSSetScissorRects(1,&gsc);
     auto grt=RTV(FrameCount+1);cmd->OMSetRenderTargets(1,&grt,FALSE,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoExpandGuides.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));float guideParams[4]={jitterUVX,jitterUVY,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if(nvofFlow){
+        m_nvof.BeginRead(cmd);
+        cmd->SetPipelineState(m_psoNvofMotion.Get());
+        cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(NvofFlowSRV));
+        cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(NvofCostSRV));
+        // S10.5: one stored unit is 1/32 of an input pixel and the motion texture is in
+        // input pixels. The third and fourth constants are the confidence gate, left
+        // equal so it stays off until its thresholds are measured.
+        const float resolve[4]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f};
+        cmd->SetGraphicsRoot32BitConstants(RootConstants,4,resolve,0);
+        cmd->DrawInstanced(3,1,0,0);
+        m_nvof.EndRead(cmd);
+    }else{
+        cmd->SetPipelineState(m_psoExpandGuides.Get());
+        cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));
+        cmd->DrawInstanced(3,1,0,0);
+    }
     Barrier(cmd,m_motion.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_guidesInRT=false;
 
     // Populate the exact depth resource passed to NGX. The resource is R32_TYPELESS,
@@ -621,13 +735,13 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     if(!m_depthInWrite)Barrier(cmd,m_depth.Get(),DepthGuideReadState,D3D12_RESOURCE_STATE_DEPTH_WRITE);m_depthInWrite=true;
     D3D12_VIEWPORT dvp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT dsc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&dvp);cmd->RSSetScissorRects(1,&dsc);
     auto dsvh=DSV();cmd->OMSetRenderTargets(0,nullptr,FALSE,&dsvh);cmd->ClearDepthStencilView(dsvh,D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
-    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));cmd->SetGraphicsRoot32BitConstants(RootConstants,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
+    cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
 
     if(!m_colorInRT)Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_colorInRT=true;
     D3D12_VIEWPORT vp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT sc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
     auto crt=RTV(FrameCount);cmd->OMSetRenderTargets(1,&crt,FALSE,nullptr);const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(crt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoConvert.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(0));
-    float params[4]={jitterUVX,jitterUVY,0,0};cmd->SetGraphicsRoot32BitConstants(RootConstants,4,params,0);cmd->DrawInstanced(3,1,0,0);Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_colorInRT=false;
+    cmd->DrawInstanced(3,1,0,0);Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_colorInRT=false;
 
     ++m_framesPresented;
 
@@ -675,7 +789,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         if(!m_outputInUAV)Barrier(cmd,m_dlssOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);m_outputInUAV=true;
         const bool timed=m_timestampHeap&&m_timestampReadback&&m_timestampFrequency;
         if(timed)cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
-        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),temporalReset,frameTimeMs,jitterX,jitterY);
+        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),temporalReset,frameTimeMs);
         if(timed&&used){
             cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u+1u);
             cmd->ResolveQueryData(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u,2,m_timestampReadback.Get(),uint64_t{slot}*2u*sizeof(uint64_t));

@@ -1636,6 +1636,10 @@ struct ProductionEvaluatorAdapter {
         if(!renderer)return false;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetSourceLayout(layout);
+        // This swapchain is a hidden formality that exists so the neural add-on sees a
+        // present per frame; no one ever looks at it, and holding presents to the display
+        // refresh would cap an export that already runs below real time.
+        renderer->SetPresentTearing(true);
         if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
         // Both sides apply the same even-size rule, so this only fires if that rule drifts.
         if(renderer->ActiveSourceLayout()!=layout){

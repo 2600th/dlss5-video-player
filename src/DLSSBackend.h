@@ -35,9 +35,7 @@ public:
                   ID3D12Resource* depth,
                   ID3D12Resource* motion,
                   bool reset,
-                  float frameTimeMs,
-                  float jitterX,
-                  float jitterY);
+                  float frameTimeMs);
     void Shutdown();
 
     bool Available() const { return m_available && m_initialized && m_params != nullptr; }
@@ -60,9 +58,7 @@ private:
                                 ID3D12Resource* depth,
                                 ID3D12Resource* motion,
                                 bool reset,
-                                float frameTimeMs,
-                                float jitterX,
-                                float jitterY);
+                                float frameTimeMs);
 
     ID3D12Device* m_device = nullptr;
     const void* m_sessionKey = nullptr;

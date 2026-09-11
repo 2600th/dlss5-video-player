@@ -23,6 +23,21 @@ Source and terms: https://github.com/NVIDIA-RTX/Streamline
 The matching package includes the exact NVIDIA-signed Streamline 2.13 files in
 the runtime lock. NVIDIA files remain subject to NVIDIA's applicable terms.
 
+## NVIDIA Optical Flow SDK
+
+Source and terms: https://developer.nvidia.com/opticalflow-sdk
+
+Motion vectors are estimated on NVOFA through the SDK's D3D12 interface. Two
+headers are vendored in `external/nvof`. NVIDIA licenses each of them under MIT
+in its own copyright block, explicitly scoped - "this copyright notice applies
+to this header file only" - which is the same grant FFmpeg relies on to ship
+`nv-codec-headers`. Both notices are reproduced in
+`THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt`.
+
+Nothing else from the SDK is included. Its samples, helper classes and binaries
+are covered by NVIDIA's separate licence agreement, and `nvofapi64.dll` is a
+driver component loaded by name at run time, never redistributed here.
+
 ## ReShade
 
 Source and license: https://github.com/crosire/reshade

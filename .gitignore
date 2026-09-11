@@ -13,6 +13,12 @@
 !/external/youtube/
 /external/youtube/*
 !/external/youtube/README.md
+# The two Optical Flow interface headers carry their own MIT notice, scoped to the
+# file, so unlike the DLSS SDK they can live here and the build needs no download.
+!/external/nvof/
+/external/nvof/*
+!/external/nvof/nvOpticalFlowCommon.h
+!/external/nvof/nvOpticalFlowD3D12.h
 /external/runtime/
 /streamline/
 /Streamline/

@@ -58,6 +58,30 @@ the [verification record](https://github.com/2600th/dlss5-video-player/blob/main
 CMake accepts absolute `DLSS_SDK`, `FFMPEG_STAGED_DIR` and `YOUTUBE_STAGED_DIR`
 paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
 
+## Optical flow
+
+Motion vectors are estimated on NVOFA, the flow engine in every RTX card from
+Turing on. Nothing to install: the two interface headers the build needs are in
+`external/nvof`, and `nvofapi64.dll` comes from the installed driver and is
+loaded by name at run time.
+
+Those headers are committed because NVIDIA licenses each one under MIT in its
+own copyright block, scoped to the file - the same grant that lets FFmpeg ship
+`nv-codec-headers`. The rest of the Optical Flow SDK is under NVIDIA's licence
+agreement and is not here, and is not needed. See
+[third-party notices](../THIRD_PARTY.md).
+
+CMake reports which way it went and `NVOF_SDK` overrides the location:
+
+```
+-- NVIDIA Optical Flow SDK headers found at .../external/nvof; hardware optical flow enabled.
+```
+
+If the headers are missing the build still succeeds and the player falls back
+to its own CPU motion estimator, which is also what happens on a pre-Turing
+card or an older driver. The `NVOFA ready:` line in `DLSSVideoPlayer.log` tells
+you which backend actually came up.
+
 ## Add the experimental runtime
 
 Every file in `packaging/runtime-lock.json` is reproducible byte-for-byte from
@@ -113,13 +137,13 @@ fresh clean build and verifies an explicit file allowlist and manifest:
 
 ```powershell
 ./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix ''
-./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.19.0-win64.zip -PackageSuffix ''
+./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.20.0-win64.zip -PackageSuffix ''
 ```
 
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
-`dlss5-video-player-v0.19.0-win64.zip` name.
+`dlss5-video-player-v0.20.0-win64.zip` name.
 
 `package_release.bat` wraps the complete package with the default `-upscaling`
 suffix. `package_public_release.bat` creates the smaller core package:

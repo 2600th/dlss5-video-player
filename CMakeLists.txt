@@ -37,6 +37,29 @@ set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 
+# The two Optical Flow interface headers live in external/nvof: NVIDIA licenses each
+# under MIT in its own copyright block, so unlike the DLSS SDK they are committed and
+# there is nothing to fetch. Absent, the build still works and the CPU estimator in
+# TemporalGuides.cpp is the only motion backend, so a fork that strips them is not
+# broken - just slower and coarser.
+set(NVOF_SDK "${CMAKE_SOURCE_DIR}/external/nvof" CACHE PATH "Path to the NVIDIA Optical Flow SDK NvOFInterface headers")
+if(EXISTS "${NVOF_SDK}/nvOpticalFlowD3D12.h")
+    set(NVOF_FOUND TRUE)
+    message(STATUS "NVIDIA Optical Flow SDK headers found at ${NVOF_SDK}; hardware optical flow enabled.")
+else()
+    set(NVOF_FOUND FALSE)
+    message(WARNING "NVIDIA Optical Flow SDK headers are missing from ${NVOF_SDK}. They ship with this repository, so this build will fall back to the CPU motion estimator - see docs/BUILDING.md.")
+endif()
+
+# Every target that compiles D3D12Renderer.cpp also compiles the flow backend; this
+# only points it at the headers, because the source is listed with the renderer.
+function(dlss_video_player_use_nvof target)
+    if(NVOF_FOUND)
+        target_include_directories(${target} PRIVATE "${NVOF_SDK}")
+        target_compile_definitions(${target} PRIVATE DLSS_VIDEO_PLAYER_HAS_NVOF)
+    endif()
+endfunction()
+
 # The packaging lock is embedded so the player and helper verify the exact
 # runtime files at run time, not only at packaging time.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
@@ -62,6 +85,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/DLSSBackend.h
     src/D3D12Renderer.cpp
     src/D3D12Renderer.h
+    src/OpticalFlowNvof.cpp
+    src/OpticalFlowNvof.h
     src/HardErrorSuppression.h
     src/D3D12FenceWait.h
     src/TemporalGuides.cpp
@@ -129,13 +154,14 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt
     nvsdk_ngx_d
 )
+dlss_video_player_use_nvof(DLSSVideoPlayer)
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
 add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
     src/NeuralPreflight.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
     src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
-    src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
+    src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
     src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
 target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
@@ -144,6 +170,7 @@ target_compile_options(NeuralWorker PRIVATE /W4 /permissive- /EHsc /Zc:__cpluspl
 target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
 get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
 target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
+dlss_video_player_use_nvof(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 
@@ -216,12 +243,13 @@ if(BUILD_TESTING)
     add_test(NAME RangeSelectionTests COMMAND RangeSelectionTests)
     add_test(NAME FrameIdentityTests COMMAND FrameIdentityTests)
     add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
-        src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp
+        src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
         src/VideoDecoder.cpp src/RuntimePolicy.cpp src/UiLayout.cpp)
     target_include_directories(UpscalingGpuSmoke PRIVATE src "${DLSS_SDK}/include")
     target_compile_definitions(UpscalingGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
     target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
+    dlss_video_player_use_nvof(UpscalingGpuSmoke)
     add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
         src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/UiLayout.cpp)
     target_include_directories(MediaGpuSmoke PRIVATE src)
@@ -271,12 +299,15 @@ if(BUILD_TESTING)
         src/ParallelFor.h
         src/D3D12Renderer.cpp
         src/D3D12Renderer.h
+        src/OpticalFlowNvof.cpp
+        src/OpticalFlowNvof.h
         src/PixelLayout.h
         src/ReleasePackagePolicy.h
         src/DLSSBackend.cpp
         src/DLSSBackend.h
     )
     target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
+    dlss_video_player_use_nvof(PolicyTests)
     target_compile_definitions(PolicyTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING VIDEO_DECODER_TESTING AUDIO_PLAYER_TESTING D3D12_RENDERER_TESTING
     )
@@ -324,6 +355,7 @@ if(BUILD_TESTING)
     list(REMOVE_ITEM player_ui_sources src/main.cpp)
     add_executable(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
     target_include_directories(PlayerUiRegressionTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
+    dlss_video_player_use_nvof(PlayerUiRegressionTests)
     target_compile_definitions(PlayerUiRegressionTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX PLAYER_APP_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")

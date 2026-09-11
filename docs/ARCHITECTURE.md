@@ -58,16 +58,39 @@ Audio is the preferred master clock. The video side checks decoded timestamps ag
 
 ## Temporal guides
 
-A normal movie does not contain engine motion vectors or depth. `TemporalGuideGenerator` reconstructs approximate guides from image history:
+A normal movie does not contain engine motion vectors or depth. Motion comes from
+the GPU's optical flow engine where there is one, and from image analysis where
+there is not; depth and scene cuts are always derived from the image.
 
-- block/optical-flow-style temporal matching for current-to-previous motion,
-  gated on how much the winning displacement beats standing still and verified
-  by a reverse search where that margin is ambiguous, so cells whose match is
-  not trustworthy carry no motion at all;
-- image/motion cues for a stabilized depth proxy;
-- scene-cut detection for history resets.
+`OpticalFlowNvof` drives NVOFA, the dedicated flow engine on Turing and later
+cards, through the Optical Flow SDK's D3D12 interface. It compares the decoded
+frame against the previous one on a 2x2 pixel grid and returns S10.5 fixed point,
+so one vector covers four pixels and resolves a thirty-second of one. The engine
+is asynchronous: uploads and the flow capture are recorded into their own command
+list, the queue is signalled past it, and the engine waits on that signal and
+signals back when the field is ready. The frame's own list waits on the GPU for
+that second fence, so nothing stalls the CPU. Temporal hints are off, which keeps
+each pair independent of whatever preceded it - the engine's own hints survive a
+scene cut. Vectors are read with a nearest fetch rather than a filtered one:
+across a disocclusion the neighbouring cells describe different surfaces and
+interpolating them invents a vector no cell measured.
 
-CPU analysis is performed on a compact grid. D3D12 expands the result to the exact DLSS render dimensions.
+`TemporalGuideGenerator` still runs. It owns the depth proxy and the scene-cut
+decision, and it owns motion too on any machine without the engine - block
+matching on a compact grid, gated on how much the winning displacement beats
+standing still and verified by a reverse search where that margin is ambiguous,
+so cells whose match is not trustworthy carry no motion at all. That estimator
+analyses a 160x90 grid, which is one vector per 24x24 source pixels at 1080p with
+a finest step of three pixels; measured against a synthetic pan it accepts none
+of its cells at half a pixel per frame and two per cent at one pixel, which is
+why the engine is preferred wherever it exists. D3D12 expands whichever field was
+produced to the exact DLSS render dimensions.
+
+The engine is used only when the frame handed to the renderer is already the DLSS
+input size. That holds on every neural path; the runtime Super Resolution toggle,
+where the two differ, keeps the estimator. A machine without `nvofapi64.dll`, an
+older card or a build configured without the SDK headers all fall back the same
+way, and the log says which backend came up.
 
 Every decoded frame carries a `FrameIdentity` (frame number on the CFR
 timeline, timestamp, source generation, history generation, job id, reset
@@ -88,7 +111,8 @@ upscaler both ignore it (see `docs/BENCHMARK.md`).
 `D3D12Renderer` owns:
 
 - device / queue / swapchain;
-- three command allocators and command lists;
+- six frame slots, each with two command allocators and lists: one for uploads and
+  the optical-flow capture, one for the frame itself;
 - per-frame video/guide upload resources;
 - linear FP16 DLSS color input;
 - typeless depth resource with DSV/SRV views;
@@ -274,7 +298,11 @@ The main player does not load that proxy. Its independent runtime SR toggle
 defaults off, selects a supported NGX input range without resizing the source,
 and targets a 2560x1440 or 3840x2160 bounding box. It validates a candidate
 renderer on a separate child window before swapping; failure preserves playback.
-Ordinary playback disables sampling jitter. Frame Generation is unavailable.
+No path samples with jitter. A decoded frame is already a fixed sample grid, so a
+sub-pixel offset cannot reveal new detail; it only convolves the frame with a
+per-frame bilinear tent, and the neural-rendering feature does not read a jitter
+offset at all. `Jitter_Offset_X/Y` are pinned to zero for every evaluation.
+Frame Generation is unavailable.
 These controls do not alter the offline DLAA carrier or cache identity.
 
 Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.

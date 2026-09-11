@@ -271,18 +271,20 @@ void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
                                          ID3D12Resource* depth,
                                          ID3D12Resource* motion,
                                          bool reset,
-                                         float frameTimeMs,
-                                         float jitterX,
-                                         float jitterY) {
+                                         float frameTimeMs) {
     // Required DLSS-SR resources.
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_Color, color);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_Output, output);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_Depth, depth);
     NVSDK_NGX_Parameter_SetD3d12Resource(m_params, NVSDK_NGX_Parameter_MotionVectors, motion);
 
-    // Required/meaningful temporal constants.
-    NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Jitter_Offset_X, jitterX);
-    NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Jitter_Offset_Y, jitterY);
+    // Required/meaningful temporal constants. The jitter offset is pinned to zero: the
+    // colour buffer is a decoded video frame on a fixed sample grid, so there is no
+    // sub-pixel camera phase to declare. Reporting one that nothing applied would make
+    // the reconstruction resolve its history against an offset that never happened, and
+    // applying one by resampling the frame only convolves it with a per-frame tent.
+    NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Jitter_Offset_X, 0.0f);
+    NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Jitter_Offset_Y, 0.0f);
     NVSDK_NGX_Parameter_SetF(m_params, NVSDK_NGX_Parameter_Sharpness, 0.0f);
     NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_Reset, reset ? 1 : 0);
 
@@ -355,12 +357,10 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
                            ID3D12Resource* depth,
                            ID3D12Resource* motion,
                            bool reset,
-                           float frameTimeMs,
-                           float jitterX,
-                           float jitterY) {
+                           float frameTimeMs) {
     if (!Available() || !m_handle || !cmd || !color || !output || !depth || !motion) return false;
 
-    FillEvaluateParameters(color, output, depth, motion, reset, frameTimeMs, jitterX, jitterY);
+    FillEvaluateParameters(color, output, depth, motion, reset, frameTimeMs);
 
     // NVIDIA's current nvsdk_ngx_helpers.h finishes the D3D12 DLSS helper with
     // NVSDK_NGX_D3D12_EvaluateFeature_C. The leaked/generic RenoDX NR add-on also
@@ -387,7 +387,7 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
             << " depth=" << m_renderW << "x" << m_renderH
             << " mv=" << m_renderW << "x" << m_renderH
             << " output=" << m_outputW << "x" << m_outputH
-            << " jitter=(" << jitterX << "," << jitterY << ") reset=" << (reset?1:0));
+            << " jitter=(0,0) reset=" << (reset?1:0));
     }
     return true;
 }

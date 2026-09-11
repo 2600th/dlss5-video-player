@@ -191,13 +191,14 @@ Expose native **Tone Intensity**, including zero, which NVIDIA says preserves th
 
 ### 9. Confidence-aware optical flow
 
-Compare current motion against:
+**NVOFA is in.** Motion comes from the engine on a 2x2 grid in S10.5, with the
+CPU estimator kept as the fallback for cards and builds without it. What that
+leaves open is the confidence half: the engine's cost surface is produced and
+bound, but the gate is off because its thresholds have not been measured, and
+nothing yet uses forward/backward disagreement. The harness can settle both.
 
-- NVIDIA Optical Flow Accelerator
-- RAFT
-- Cheap Lucas–Kanade fallback
-
-Calculate forward/backward disagreement and flow cost. Reject unreliable motion around cuts, occlusions and transparent objects.
+Still worth comparing the engine against RAFT and a Lucas-Kanade fallback on
+the corpus before assuming it wins everywhere.
 
 **Links:** [NVIDIA Optical Flow SDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) · [video2dlssnr NVOFA pipeline](https://github.com/DaniilSokolyuk/video2dlssnr) · [HECer ComfyUI-DLSS5](https://github.com/HECer/ComfyUI-DLSS5)
 

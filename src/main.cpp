@@ -2018,7 +2018,7 @@ private:
     void Unload() {
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession();}
         DropRetainedLiveSegments();
-        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
+        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -2751,8 +2751,17 @@ private:
     // What makes retained coverage reusable: same source, same neural settings,
     // same guides. Anything else and the frames on disk are not the frames the
     // user would get now.
+    //
+    // A YouTube m_path is a signed media URL that is re-issued by every resolution,
+    // including the one a seek or a quality reload performs on the video already
+    // playing. Keying on it would make the retained coverage unadoptable after any
+    // of those, which is the same as not retaining at all. The page URL is the
+    // stable identity of the video, and it is what Recent and the source cache
+    // already key on.
     std::string LiveRetentionKey()const{
-        return WideToUtf8(m_path)+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
+        const std::wstring& identity=
+            (m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty())?m_youtubePageUrl:m_path;
+        return WideToUtf8(identity)+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
     }
     void DropRetainedLiveSegments(){
         m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
@@ -2844,13 +2853,13 @@ private:
         const bool covered=m_liveSegments&&!m_liveSegments->Empty();
         if(m_liveSegments)m_liveSegments->Finish();
         if(completion.result.ok){
-            m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);
+            m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);m_neuralNotice.clear();
             // Playback stays on the segments, but the published entry is what
             // "Save converted video" and the receipt need.
             m_neuralPath=completion.neuralPath;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;
             LOG("Active neural session rendered "<<completion.result.frameCount<<" frames and published its cache entry; save="<<(m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!ActivityBusy())<<" entry="<<(m_neuralPath.empty()?std::string("(none)"):WideToUtf8(m_neuralPath.wstring())));
         }else{
-            TransitionToFailure(completion.result.failure);
+            TransitionToFailure(completion.result.failure);NoteNeuralFailure(completion);
             LOG("Active neural session ended early: kind="<<NeuralRenderFailureName(completion.result.failure)<<" covered="<<covered<<" detail="<<WideToUtf8(completion.result.detail));
             if(!covered){StopLiveNeuralSession(true);return;}
         }
@@ -3112,6 +3121,28 @@ private:
         if(m_neuralLifecycle.Transition(next))return;
         if(next==NeuralPlaybackState::RetryExhausted&&m_neuralLifecycle.Transition(NeuralPlaybackState::Recovering)&&m_neuralLifecycle.Transition(next))return;
         m_neuralLifecycle.Transition(NeuralPlaybackState::Failed);
+    }
+    // A failed render used to leave nothing on screen. The detail was written to the
+    // log and then dropped, so a user whose driver is too old pressed the neural
+    // toggle, watched the original keep playing, and had no way to learn why without
+    // opening a file. This keeps a one-line reason in the status bar, and for the
+    // driver case - the one thing the user can actually act on - shows the full
+    // notice once per session. Once, because the refusal repeats on every play,
+    // seek and settings change, and a dialog on each of those is worse than silence.
+    // Returns true when it put the notice on screen, so a caller that would show its
+    // own dialog does not stack a second one on top.
+    bool NoteNeuralFailure(const NeuralJobCompletion& completion){
+        const bool belowFloor=completion.result.failure==NeuralRenderFailure::Preflight&&
+                              ClassifyNeuralDriver(m_opt.detectedGpu.driverVersion)==NeuralDriverSupport::BelowFloor;
+        if(belowFloor)m_neuralNotice=T(L"driver.below_floor");
+        else if(const wchar_t* kind=NeuralFailureTextKey(completion.result.failure))m_neuralNotice=T(kind);
+        else m_neuralNotice=completion.result.detail;
+        if(!belowFloor||m_driverNoticeShown)return false;
+        m_driverNoticeShown=true;
+        const std::wstring notice=NeuralDriverNoticeText();
+        if(notice.empty())return false;
+        MessageBoxW(m_hwnd,notice.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONWARNING);
+        return true;
     }
     void DrainNeuralMessages(){m_neuralProgressMessages.Clear();m_neuralCompletions.Clear();if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){};}
     void CancelNeuralJob(bool updateUi=true){
@@ -3403,11 +3434,12 @@ private:
         // Prepared: the source is cached and identified, no render exists yet.
         // Play the original so In/Out, previews and range renders are available.
         if(completion->preparedOnly){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);if(!LoadOriginalFallback(*completion))InvalidateRect(m_hwnd,nullptr,FALSE);SyncSourceActionAvailability();return;}
-        if(completion->result.ok&&!completion->neuralPath.empty()&&LoadCachedPlayback(*completion)){m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(*completion);SyncSourceActionAvailability();if(completion->cacheHit)LOG("Verified neural cache hit opened without re-rendering.");else LOG("Verified neural cache playback opened.");return;}
-        TransitionToFailure(completion->result.failure);LOG("Neural pre-render failed: kind="<<NeuralRenderFailureName(completion->result.failure)<<" state="<<WideToUtf8(NeuralPlaybackStateName(m_neuralLifecycle.state))<<" detail="<<WideToUtf8(completion->result.detail));
+        if(completion->result.ok&&!completion->neuralPath.empty()&&LoadCachedPlayback(*completion)){m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(*completion);m_neuralNotice.clear();SyncSourceActionAvailability();if(completion->cacheHit)LOG("Verified neural cache hit opened without re-rendering.");else LOG("Verified neural cache playback opened.");return;}
+        TransitionToFailure(completion->result.failure);const bool noticeShown=NoteNeuralFailure(*completion);LOG("Neural pre-render failed: kind="<<NeuralRenderFailureName(completion->result.failure)<<" state="<<WideToUtf8(NeuralPlaybackStateName(m_neuralLifecycle.state))<<" detail="<<WideToUtf8(completion->result.detail));
         SyncSourceActionAvailability();
         if(!completion->sourcePath.empty()&&std::filesystem::is_regular_file(completion->sourcePath)){m_neuralLifecycle.Transition(NeuralPlaybackState::OriginalOnly);LoadOriginalFallback(*completion);}
-        else{std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;if(const wchar_t* kind=NeuralFailureTextKey(completion->result.failure))detail=T(kind)+L"\n\n"+detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
+        else if(!noticeShown){std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;if(const wchar_t* kind=NeuralFailureTextKey(completion->result.failure))detail=T(kind)+L"\n\n"+detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
+        else InvalidateRect(m_hwnd,nullptr,FALSE);
     }
     static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,[[maybe_unused]] uint32_t maxW,[[maybe_unused]] uint32_t maxH,[[maybe_unused]] bool qualityExplicit,[[maybe_unused]] NVSDK_NGX_PerfQuality_Value explicitQuality){
         if(!completion.result.ok||stop.stop_requested())return;
@@ -3512,6 +3544,28 @@ private:
         return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),identity,guide,frameMs);
     }
     bool InstallPreparedYouTube(YouTubeCompletion& completion,std::unique_ptr<PreparedRendererCandidate> candidate){
+        // A new source cannot inherit the previous one's live session or cached pair.
+        // Tick() reads frames from m_synchronizedPlayback for as long as m_cachedPlayback
+        // is set, so leaving them attached starves the decoder swapped in below - the
+        // picture stops on the first frame while the swapped audio keeps running - and the
+        // timeline keeps painting the old session's rendered span. Unload() performs this
+        // same teardown; every other source-swap path reaches it and this one did not.
+        // Done before anything is swapped, so the release sees a consistent old state:
+        // ExecuteNetworkCandidateTransaction only calls this after the candidate renderer
+        // has been created and validated, so the rollback that promises to preserve the
+        // active state can no longer fire.
+        //
+        // Retained segments are deliberately NOT dropped here. This path is also how a
+        // seek or a quality reload re-commits the SAME video, and dropping them there
+        // deletes rendered coverage the next toggle would have resumed on - the whole
+        // point of ReleaseLiveSession(true). LiveRetentionKey() already guards adoption
+        // by source, settings and guides, so a genuinely different video cannot adopt
+        // them and StartLiveNeuralSession drops them itself.
+        if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession(true);}
+        m_synchronizedPlayback.Close();
+        m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
+        m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedReceiptPath.clear();
+        m_cachedSettings={};m_cachedGuides={};m_neuralPath.clear();m_markers={};
         const std::wstring source=std::move(completion.result.mediaUrl),audioSource=std::move(completion.result.audioUrl),pageUrl=std::move(completion.pageUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;D3D12RendererOwner oldRenderer;std::unique_ptr<AudioPlayer> oldNetworkAudio;
         const bool viewportWasVisible=IsWindowVisible(m_viewport)!=FALSE;
         const bool committed=CommitPreparedAudioHandoff(
@@ -3611,7 +3665,11 @@ private:
         else if(!m_liveSession&&RangeRenderAvailable())text=T(L"status.render_hint")+L" \u00b7 "+text;
         if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
         if(SourcePrefetchActive())text=T(L"status.preparing_source")+L" \u00b7 "+text;
-        if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;return text;
+        if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
+        // Ahead of everything else: it is the reason the picture on screen is the
+        // original rather than a rendered one.
+        if(!m_neuralNotice.empty())text=m_neuralNotice+L" \u00b7 "+text;
+        return text;
     }
     // Short canonical of the settings a cache entry was rendered with; the
     // full record is its receipt.json.
@@ -3942,6 +4000,11 @@ private:
     bool m_fullscreenControlsHidden=false,m_fullscreenMenuLoop=false,m_fullscreenKeyboardFocus=false,m_fullscreenPointerKnown=false;
     POINT m_fullscreenPointer{};
     Clock::time_point m_fullscreenLastInput=Clock::now();
+    // Why the last neural render did not produce a picture, in one line, for the
+    // status bar. Cleared by the next successful render and by Unload.
+    std::wstring m_neuralNotice;
+    // The driver notice is a modal, so it is shown once for the whole session.
+    bool m_driverNoticeShown=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;

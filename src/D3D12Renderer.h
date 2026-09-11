@@ -11,6 +11,7 @@
 #include "PixelLayout.h"
 #include "FrameIdentity.h"
 #include "NgxSession.h"
+#include "OpticalFlowNvof.h"
 
 #ifdef D3D12_RENDERER_TESTING
 #include <functional>
@@ -157,6 +158,14 @@ public:
     PixelLayout ActiveSourceLayout() const { return m_sourceLayout; }
     size_t SourceFrameBytes() const { return PixelLayoutFrameBytes(m_sourceLayout, m_sourceW, m_sourceH); }
 
+    // Tearing is opt-in and belongs only to a renderer nobody watches. The offline
+    // carrier presents into a hidden window purely so the neural add-on sees a present
+    // per frame, and capping that at the display refresh would throttle an export that
+    // already runs below real time. A visible playback window must never request it:
+    // syncInterval 0 without the tearing flag still returns immediately, it just scans
+    // out whole frames. Selected before Initialize, which creates the swapchain.
+    void SetPresentTearing(bool allow) { m_requestedTearing = allow; }
+
     // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
     // apart from a swapchain that is pacing it. Both counters only ever move on the
     // thread that drives the renderer, so they need no synchronisation.
@@ -242,7 +251,10 @@ private:
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
-    static constexpr uint32_t SRVCount = 9;
+    // Hardware optical flow: the S10.5 flow grid and its per-cell cost, bound at t0/t1
+    // for the one pass that turns them into full-resolution motion.
+    static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10;
+    static constexpr uint32_t SRVCount = 11;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source).
     static constexpr uint32_t DecodedRTV = FrameCount + 5, RTVCount = FrameCount + 6;
@@ -292,7 +304,6 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE DSV() const;
     D3D12_CPU_DESCRIPTOR_HANDLE SRVCPU(uint32_t index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE SRVGPU(uint32_t index) const;
-    static float Halton(uint32_t index, uint32_t base);
 
     HWND m_hwnd = nullptr;
     uint32_t m_sourceW=0,m_sourceH=0,m_outputW=0,m_outputH=0,m_renderW=0,m_renderH=0,m_gridW=0,m_gridH=0;
@@ -306,6 +317,13 @@ private:
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapchain;
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_allocators[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_cmds[FrameCount];
+    // Uploads and the optical-flow capture are recorded separately from the frame, so
+    // the queue can be signalled past them and the engine started without either a CPU
+    // stall or a second reset of the allocator the rest of the frame is still using.
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_uploadAllocators[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_uploadCmds[FrameCount];
+    OpticalFlowNvof m_nvof;
+    bool m_nvofActive = false;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValue = 0;
@@ -333,6 +351,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoExpandGuides;
+    // Turns the NVOFA S10.5 flow grid into the same R16G16_FLOAT motion texture
+    // PSExpandGuides writes, so everything downstream is unchanged.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoNvofMotion;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upload[FrameCount];
@@ -398,6 +419,7 @@ private:
     bool m_depthInWrite = true;
     bool m_outputInUAV = true;
     bool m_dlssEnabled = true;
+    bool m_requestedTearing = false;
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
     bool m_preserveSource = false;
