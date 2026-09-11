@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.1 - 2026-09-12
 
 - Live neural playback no longer drops half its frames. A session plays the
   render as two-second segment files, and the next file was opened on the thread

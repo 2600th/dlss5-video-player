@@ -20,12 +20,12 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.20.0** (2026-09-11): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.20.0)
+**v0.20.1** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.20.1)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.20.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.20.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.20.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.20.1-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -68,6 +68,20 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.20.1** (2026-09-12). Two things a neural session did to itself. Playback
+dropped 44 % of its frames - a 1080p30 trailer played 1415 of 2525 - because
+the player opened the next two-second segment file on the thread that draws
+frames, and opening one runs `ffprobe` as a separate program. On a normal
+install, where an antivirus inspects every program that starts, that is 0.7 s
+of frozen picture every 2 s; it is 32 ms inside a scanner exclusion, which is
+why it never showed up here. Same clip after the fix: 1 dropped frame out of
+2839. And turning neural rendering on took 15 s before anything appeared,
+most of it spent re-running a probe of the graphics runtime, re-hashing the
+same 226 MB three times, and waiting for four seconds of rendered video when
+this card produces it 4.8x faster than it plays. It is now under 6 s on the
+second and every later run - 9 s on a scanned install - and the first frame
+appears after half a second of render instead of two.
 
 **0.20.0** (2026-09-11). Motion vectors now come from the optical flow engine built into
 every RTX card since Turing: 960x540 vectors instead of 160x90, and a
