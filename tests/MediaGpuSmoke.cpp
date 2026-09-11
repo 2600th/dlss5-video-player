@@ -115,7 +115,9 @@ bool Decode(const fs::path& media, uint32_t width, uint32_t height,
         if (read == VideoReadResult::NotReady) { std::this_thread::sleep_for(1ms); continue; }
         if (read == VideoReadResult::EndOfStream) break;
         if (!Check(read == VideoReadResult::FrameReady, L"Export decode failed", report)) return false;
-        if (!Check(frame.bgra.size() == size_t(width) * height * 4,
+        // OpenSequential decodes to NV12 for even geometry (0.19.0's transport),
+        // so the complete size is the layout's, not four bytes per pixel.
+        if (!Check(frame.bgra.size() == FrameBytes(decoder.PixelLayout(), width, height),
             L"Export contains an incomplete decoded frame", report)) return false;
         if (frames == 0) firstPixels = frame.bgra;
         else if (frame.bgra != firstPixels) changedPixels = true;
