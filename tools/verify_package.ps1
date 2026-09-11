@@ -18,6 +18,7 @@ if ($PublicCore) {
         'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
         'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
         'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+        'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
         'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
         'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
         'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt'
@@ -35,6 +36,7 @@ else {
         'THIRD_PARTY_LICENSES/deno-2.9.5.txt', 'THIRD_PARTY_LICENSES/ffmpeg.txt',
         'THIRD_PARTY_LICENSES/experimental-runtime.txt',
         'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
+        'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
         'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
         'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
         'docs/TROUBLESHOOTING.md',
