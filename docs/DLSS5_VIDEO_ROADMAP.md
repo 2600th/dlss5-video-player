@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — Updated Roadmap
 
-_Current as of September 11, 2026._
+_Current as of September 12, 2026._
 
 ## Quick reality check
 
@@ -119,6 +119,71 @@ feature 18 `NVSDK_NGX_Feature_Reserved18`, and Streamline 2.14.1 shipped five da
 after DLSS 5 launched with no NR plugin or guide. Nothing states that video is or is
 not a supported use. Every ordering and threshold decision here is ours to measure;
 there is no spec to defer to.
+
+## Next after that — the persistent render helper (2026-09-12 measurement)
+
+**Why.** The unreleased startup work cut the toggle from 14.71 s to 9.24 s on a
+scanned install and from 11.43 s to 5.80 s on an excluded one by deleting
+duplicated work
+([record](VERIFICATION-2026-09-12-RTX5090.md)). What is left is not duplicated;
+it is a cold process. Every session still spawns `NeuralWorker.exe` and pays,
+in order: CreateProcess plus the antivirus scan of a 98 MB tree (~0.7 s
+observed), ReShade proxy init and add-on load (0.41 s), NGX init (1.51 s, with
+model-cache misses against a `C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0`
+that the driver never created), `CreateFeature` and the first evaluate
+(0.63 s), then the first segment's preroll, encode and mux (1.78 s). The render
+inside that window is 60 frames at 7.0 ms = 0.42 s.
+
+**What to build.** One helper, started when media is opened rather than when
+the user presses the key, kept alive across sessions, fed jobs over the
+existing protocol instead of argv. It keeps its D3D12 device, its NGX instance,
+its CUDA context and its NVENC session between jobs. Steady-state target is the
+first segment plus the attach, ~1 s.
+
+**Why this is the shape.** Every amortisation the vendors document is
+process-scoped, so nothing else can reach it: DLSS's cached feature memory
+"gets released when Shutdown() is called"
+([programming guide](https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf)),
+CUDA users measure that "it's crucial to keep the CUDA context alive to avoid
+this overhead in every new CUDA computation", and NVENC session open was
+measured at 953-1172 ms per instance on NVIDIA's own forum
+([thread](https://forums.developer.nvidia.com/t/nvenc-performance-issues-when-creating-multiple-encoders/44902)).
+`NvEncReconfigureEncoder` exists precisely to "change the encoder
+initialization parameters ... without closing existing encoder session and
+re-creating a new encoding session".
+
+**Every sibling converged on it.** `video2dlssnr` keeps one helper alive and
+streams raw RGBA over a pipe; Merserk's DLSS5 Visual Enhancer deleted the
+external injector entirely and runs NGX in-process, exposing segment length as
+a 1/2/4 s knob; DLSS5-Autopilot's video route installs DLSS into a long-lived
+MPC-HC and reports its live path running "about half a second behind", the only
+published live-path latency in the ecosystem.
+[video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) ·
+[Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) ·
+[Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)
+
+**The four things that make it a real change, not a flag.**
+- *Runtime lease.* `NeuralRuntimeLease` currently spans one job, and the
+  invariant is one writer of `ReShade.ini` and `ReShade.log` per runtime
+  directory. A resident helper has to hold the lease across its idle time or
+  re-acquire it per job, and release it on crash, or a second player instance
+  waits forever.
+- *Idle VRAM.* DLSS deliberately does not free feature memory on
+  `ReleaseFeature`. An idle helper therefore parks VRAM; the documented escape
+  is `NVSDK_NGX_Parameter_FreeMemOnReleaseFeature` while idle, which trades the
+  re-allocation back on the next job. Measure both before choosing.
+- *Orphan watchdog.* A helper that outlives the player is a hidden process
+  holding the GPU and the lease. It needs the parent's process handle and a
+  death wait, not only the existing job object.
+- *Receipt and lock identity.* `receipt.json` and the runtime lock assume a
+  fresh process per render. A reused process must re-verify that no locked file
+  changed between jobs and carry its preflight evidence forward - the same
+  identity the persisted preflight verdict already uses.
+
+**Acceptance.** Toggle to picture under 2 s on the excluded build and under 3 s
+on a scanned install, with `dropped=0` over a full clip, a second player
+instance still refused rather than interleaved, and no helper left running
+after the player exits or is killed.
 
 ## What “2× / 3×” can mean
 

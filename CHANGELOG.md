@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- Live neural playback no longer drops half its frames. A session plays the
+  render as two-second segment files, and the next file was opened on the thread
+  that presents frames - `VideoDecoder::Open` starts `ffprobe` as a child
+  process and waits for it. ffprobe.exe is 98 MB, so on a machine whose
+  antivirus scans a process start that probe costs 684 ms where the same probe
+  inside a scanner exclusion costs 32 ms, and the player paid it every two
+  seconds. On an RTX 5090 / 616.64, a 94.7 s 1080p30 YouTube trailer played
+  `presented=1415 dropped=1110`: 47 boundary opens at a median of 732 ms spent
+  36.5 s of 84 s of playback inside a segment open, and every frame that came
+  due in there was more than 1.5 frame intervals late and dropped, which also
+  reset the guides and the neural history. Two changes: segments after the first
+  are opened with the parameters the first one probed - same encoder, same
+  geometry, same frame rate - through the new `VideoDecoder::OpenKnown`, and the
+  open moved to a worker thread the boundary only waits for when the one-second
+  prefetch lead was not enough. Same clip, same folder, same antivirus:
+  `presented=2838 dropped=1`, 4 probes instead of 47, boundary opens at a median
+  of 9 ms. The render was never the problem - the same sessions verified
+  2805/2805 and 2779/2779 frames at ~7.0 ms/frame
+  (docs/VERIFICATION-2026-09-12-RTX5090.md).
+
+- Turning neural rendering on stopped taking sixteen seconds. Measured on an
+  RTX 5090 / 616.64 from the key press to the first neural frame on screen:
+  **14.71 s -> 9.24 s** in a packaged install whose antivirus scans every
+  process start, and **11.43 s -> 5.80 s** in a scanner-excluded one. Four
+  things were paying for answers already in hand:
+  - The feature-18 preflight - a whole second helper process that loads
+    ReShade, the add-on and NGX, creates feature 18 and exits, 4.4 s of it -
+    ran on every toggle. `NeuralPreflightLatch` remembered failures only; a
+    pass was recorded and never read. It now remembers the pass and its
+    receipt, and keeps it beside the render cache keyed on GPU, driver and the
+    runtime digest, so a fresh launch on the same machine skips the probe. The
+    reused receipt is stamped `reusedVerdict` rather than passed off as a probe
+    this session ran, and a render whose runtime changed behind that key still
+    fails on its own armed-evidence check.
+  - The 226 MB locked runtime was SHA-256'd three times per session
+    (`BuildRuntimeDigest`, `VerifyRuntimeLock`, `DescribeRuntimeModules`).
+    `Sha256FileCached` memoises installation files on (path, size, write time);
+    user content still goes through the uncached `Sha256File`.
+  - Nothing could be shown until the first two-second segment was muxed, and
+    then not until four seconds of lead existed. The first segment is now half
+    a second (`--first-segment-frames`; later ones stay at two), and the lead
+    scales with the measured pace - a GPU that renders 4.8x faster than real
+    time refills the buffer faster than playback drains it, so it attaches on
+    one second instead of four.
+  - Two probes were run on files that had already been probed: the job's
+    metadata read started a full ffmpeg child it closed two lines later
+    (`VideoDecoder::OpenMetadata` now runs the probe alone), and the live
+    attach re-probed the original the player already had open (it takes the
+    player's `KnownMedia`). On the scanned install those two were ~1.7 s.
+
+- `MediaGpuSmoke` measures a complete decoded frame against the layout the
+  decoder opened, not against four bytes per pixel. 0.19.0 moved the export's
+  sequential decode to NV12 and the gate has failed on every run since - ten
+  `Export contains an incomplete decoded frame` lines and `overall=FAIL` on an
+  otherwise healthy render. It reports `overall=PASS` again.
+
 - The Optical Flow SDK licence notice now ships in both packages.
   `THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt` covers the MIT grant on the
   two interface headers vendored in `external/nvof`, and `THIRD_PARTY.md` has
