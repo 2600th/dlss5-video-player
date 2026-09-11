@@ -16,6 +16,15 @@ project's claim it is marked as theirs, not reproduced here.
 The narrower "what we already adapted" note is
 [RELATED_PROJECTS.md](RELATED_PROJECTS.md). This page is the full comparison.
 
+> **Read this against the tree it describes, not the current one.** It was written
+> at v0.17.1; the tree is now v0.20.0, and roughly ten of its `file:line` citations
+> have moved. Three of its conclusions are now wrong: NVOFA motion vectors are
+> implemented (Tier 1 item 2), `NRPreset` was removed from the dialog as Tier 3
+> asks, and "confidence-gated flow" is listed below as a strength when the NVOFA
+> confidence gate is compiled but switched off in shipping code. The live list of
+> what is pending is the dated section at the top of
+> [DLSS5_VIDEO_ROADMAP.md](DLSS5_VIDEO_ROADMAP.md).
+
 ## Summary
 
 1. **Measurement is this project's strongest asset.** The harness under

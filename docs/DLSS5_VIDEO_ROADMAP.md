@@ -1,11 +1,124 @@
 # DLSS 5 Video Player — Updated Roadmap
 
-_Current as of September 9, 2026._
+_Current as of September 11, 2026._
 
 ## Quick reality check
 
 - DLSS 5 Neural Rendering is officially available on RTX 50-series GPUs, but NVIDIA's public DLSS repository still lists SDK 310.7. Video processing through Feature 18 remains an experimental community workflow. [NVIDIA announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/) · [DLSS 5 research](https://research.nvidia.com/labs/adlr/DLSS5/) · [Public SDK releases](https://github.com/NVIDIA/DLSS/releases)
 - Keep the player's currently tested stack pinned: **driver 616.64 + ReShade 6.8 + RenoDX 4.70 + NR/SR 310.8**. [Runtime lock](../packaging/runtime-lock.json) · [Measured report](measurements/runtime-comparison-20260907/REPORT.md)
+- **Unverified risk against that pin:** DLSS5-Autopilot's field data reports renodx-dlss5 4.6/4.7 faulting on every evaluate from driver 616.64, which is the driver we recommend. Untested here. See item 0 below.
+
+## Next session — ordered, from the 2026-09-11 survey
+
+Written after v0.20.0 shipped hardware optical flow. Everything here was checked
+against the source or an external document on that date; the ordering is by value
+over cost, not by ambition. Items 1–4 are together about four flags and thirty
+lines, and they aim at the symptom the whole 0.20.0 cycle was chasing: motion that
+does not feel attached to the picture.
+
+**0. Check the add-on against driver 616.64+ before anything else.** DLSS5-Autopilot's
+aggregated field data says "from 616.64 the driver routes neural rendering through
+its own runtime, and the renodx-dlss5 add-on the feeder route loads faults there -
+4.6 and 4.7 on every evaluate, 4.55 in some games". We pin renodx-dlss5 4.70 and we
+recommend 616.64, which is exactly the reported combination. Their workaround was a
+standalone route that never loads the add-on. One session on a current driver
+settles whether this reaches us.
+[Autopilot v1.8.1](https://github.com/Kizzuwatnaa/DLSS5-Autopilot/releases/tag/v1.8.1)
+
+**1. `NV_OF_PRED_DIRECTION_BOTH`.** `src/OpticalFlowNvof.cpp` asks for forward flow
+only. The NVOFA guide: "When `NV_OF_INIT_PARAMS::predDirection` is set to
+`NV_OF_PRED_DIRECTION_BOTH`, forward and backward flow will be generated in a single
+`NvOFExecute`/`NvOFExecuteD3D12`/`NvOFExecuteVk` API call", with `bwdOutputBuffer`
+and `bwdOutputCostBuffer` alongside. A forward/backward disagreement test is
+measured in pixels, so unlike the cost gate it needs no invented constant; the
+standard criterion is scale-free. This closes two open items at once and does not
+need a second session or a second Execute.
+[NVOFA guide](https://docs.nvidia.com/video-technologies/optical-flow-sdk/nvofa-programming-guide/index.html)
+
+**2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
+already issue: "a global flow vector is estimated from forward flow in the same
+`NvOFExecute` ... API call". A slow pan is a large, coherent global vector the
+per-cell field agrees with; a cut is one it does not. Our cut test currently has no
+motion evidence in it at all.
+
+**3. The zero-motion SAD we already discard.** `EstimateFlow` records the
+zero-displacement cost and drops it - only `bestGlobal` escapes as `globalCost`.
+x264/x265 do not threshold an absolute residual, they compare inter cost against a
+no-prediction baseline, which is scale-free where our fixed 0.10 band is not. Our
+own note records the softest observed real cut at 0.108, sitting on that threshold.
+mvtools adds the second half of the same idea: decide on the *fraction* of blocks
+that failed, not the mean. Per-cell confidence already exists; the fraction is one
+accumulate.
+[x265 scenecut-bias](https://x265.readthedocs.io/en/stable/cli.html) ·
+[mvtools thSCD2](https://avisynth.org.ru/mvtools/mvtools2.html)
+
+**4. Temporal metrics in the harness.** `tools/benchmark/analyze.py` has no
+per-pixel temporal variance, no false-motion rate and no cut precision/recall. The
+60.8 % -> 3.7 % false-motion figure and 0.20.0's 2.23 -> 1.41 temporal sigma are both
+prose from ad-hoc runs that no script reproduces. The ground truth for cuts is
+already written: `tools/benchmark/corpus.py` records hard-cut frame indices in the
+manifest and `analyze.py` only uses them to exclude frames. Until this exists, every
+item below is unfalsifiable, which is also why the reference table being stale
+matters more than it looks.
+
+**5. Then, now that they can be measured:** re-run the reference table; A/B `IsHDR`
+on the linear FP16 input; A/B a supplied 1x1 exposure texture against auto-exposure;
+A/B constant depth against the proxy; calibrate the NVOFA cost gate against the
+forward/backward mask from item 1 and keep it as the cheap one-pass runtime proxy if
+agreement is high.
+
+### Corrections this survey produced
+
+- **Temporal hints.** We disable them unconditionally. NVOFA guideline 3: "Disable
+  the temporal hints only if there is a-priori knowledge of no temporal correlation
+  (e.g. a scene change, independent successive frame pairs)." The shape NVIDIA
+  describes is on within a shot, off at a discontinuity - which we already detect.
+  The real cost of changing it is cache determinism, since output would then depend
+  on where the segment started. A design decision, not a bug.
+- **Auto-exposure is not a defect.** Streamline: "If `sl::kBufferTypeExposure` is NOT
+  provided or `dlssOptions.useAutoExposure` is set to be true then DLSS will be in
+  auto-exposure mode". Our null texture is the sanctioned path. Re-scope the item
+  from "fix" to "never measured against a supplied exposure".
+- **Depth is not in any official description of the model's inputs.** NVIDIA
+  Research: "the model is conditioned on the current rendered frame, engine motion
+  vectors, carried temporal state, and artistic-direction values." Depth appears
+  nowhere. Our SR carrier is a real SR feature and does consume depth, so it cannot
+  simply be deleted - but the useful experiment is constant-depth versus the proxy,
+  not more tuning of the per-frame normalizer.
+- **NVOFA cost has no published scale.** Three official sources say only that a
+  higher cost means a less accurate vector. No range, no normalization, no
+  recommended cutoff. The gate cannot be closed by reading; it has to be measured or
+  replaced by item 1.
+- **Hardware flow does not cover upscaling sessions.** `D3D12Renderer.cpp` only
+  offers the engine when the decoded frame is already the DLSS input size, so the
+  runtime SR toggle silently keeps the CPU estimator. True and deliberate, but only
+  ARCHITECTURE.md says so.
+- **The driver floor has an official citation now.** The 616.64 release notes name
+  it for DLSS 5 Neural Rendering, so `src/RuntimePolicy.h` can stop citing a
+  community figure in text that reaches a dialog.
+- **Frame generation for video is now an NVIDIA product**, in the Video Effects SDK
+  rather than DLSS, and it ships automatic shot-change detection with a hard bypass
+  on by default. That both decides the Frame Generation stub (point at VFG or delete
+  it) and independently confirms that a cut detector plus a bypass is the accepted
+  answer to our problem.
+  [VFG filter](https://docs.nvidia.com/maxine/vfx/latest/Filters/VideoFrameGeneration.html)
+
+### Where the ecosystem actually is
+
+Nobody has solved temporal coherence for video neural rendering. dlss5-bridge says
+of its own substitute contract that "text softens and dense foliage smears";
+DLSS5-Feeder tells users to "expect the temporal quality of estimated motion vectors
+(some ghosting in fast motion, softness on thin moving geometry)". video2dlssnr is in
+the identical state as us on the confidence gate, with the comment "Confidence gate
+disabled (costLo==costHi==0 -> shader keeps every vector)". No project in the survey
+implements a forward/backward check, and no one has published cost thresholds - that
+ground is unclaimed.
+
+NVIDIA has still published no neural-rendering API: the public NGX header names
+feature 18 `NVSDK_NGX_Feature_Reserved18`, and Streamline 2.14.1 shipped five days
+after DLSS 5 launched with no NR plugin or guide. Nothing states that video is or is
+not a supported use. Every ordering and threshold decision here is ours to measure;
+there is no spec to defer to.
 
 ## What “2× / 3×” can mean
 
@@ -195,7 +308,16 @@ Expose native **Tone Intensity**, including zero, which NVIDIA says preserves th
 CPU estimator kept as the fallback for cards and builds without it. What that
 leaves open is the confidence half: the engine's cost surface is produced and
 bound, but the gate is off because its thresholds have not been measured, and
-nothing yet uses forward/backward disagreement. The harness can settle both.
+nothing yet uses forward/backward disagreement.
+
+The 2026-09-11 survey found the cheap route to both, and it is items 1 and 2 of
+the plan at the top of this file: `NV_OF_PRED_DIRECTION_BOTH` returns backward
+flow and its cost from the same Execute, which makes the disagreement test a
+measurement in pixels rather than a guess at a cost threshold, and
+`enableGlobalFlow` returns the per-frame global vector the cut detector is
+missing. Neither needs a second session or a second Execute. NVIDIA publishes no
+numeric meaning for the cost values in any document, so calibrating the cheap
+gate against the forward/backward mask is the only honest way to keep it.
 
 Still worth comparing the engine against RAFT and a Lucas-Kanade fallback on
 the corpus before assuming it wins everywhere.

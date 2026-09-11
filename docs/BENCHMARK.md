@@ -127,6 +127,33 @@ comparison are historical.** Rerun it before quoting a number from it.
   0.952 mean cosine to the source with frame-to-frame drift equal to the
   source's own (0.137 vs 0.133). Two-pass is not a default candidate.
 
+## What the harness cannot yet measure
+
+Noted 2026-09-11. Several numbers this project quotes have no script behind them,
+which is why they cannot be reproduced or defended in a review:
+
+- **False-motion rate.** The 60.8 % → 3.7 % figure above, and every repetition of
+  it elsewhere in the docs, came from an ad-hoc run. Nothing under `tools/` computes
+  it.
+- **Per-pixel temporal variance.** 0.20.0's jitter removal is quoted as temporal
+  standard deviation 2.23 → 1.41 and p99 11.78 → 4.61, measured with a throwaway
+  script. `analyze.py` has only the frame-global mean `|ΔY|` flicker metric, which
+  averages localized shimmer away.
+- **Motion cell flip rate.** Nothing measures how often a cell's accept/reject
+  decision changes between consecutive frames, which is the quantity that turns a
+  threshold into visible instability.
+- **Cut precision and recall.** `corpus.py` already writes the ground-truth hard-cut
+  frame indices into the manifest, and `analyze.py` only uses them to exclude frames
+  from the flicker average. The labelled set needed to validate the 0.30/0.10/0.85
+  thresholds is therefore already on disk and unused.
+
+Until these exist, the confidence gate, the cut band, the depth proxy, `IsHDR` and
+the exposure contract are all undecidable by measurement, which is the real reason
+the reference table above matters. The VSR literature's warp-error metric is the
+shape to copy, and this project already owns the protocol: the flow rejection
+thresholds were chosen by warping the previous frame's full-resolution pixels and
+scoring the residual, which works just as well pointed at DLSS output.
+
 To A/B a guide against the **upscaling** feature rather than neural rendering,
 `UpscalingGpuSmoke` takes a probe form:
 `UpscalingGpuSmoke.exe <clip> <targetHeight> <out.raw> mv=1,depth=1 <frames>`
