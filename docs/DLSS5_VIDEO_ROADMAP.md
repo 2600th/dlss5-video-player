@@ -6,7 +6,7 @@ _Current as of September 12, 2026._
 
 - DLSS 5 Neural Rendering is officially available on RTX 50-series GPUs, but NVIDIA's public DLSS repository still lists SDK 310.7. Video processing through Feature 18 remains an experimental community workflow. [NVIDIA announcement](https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/) · [DLSS 5 research](https://research.nvidia.com/labs/adlr/DLSS5/) · [Public SDK releases](https://github.com/NVIDIA/DLSS/releases)
 - Keep the player's currently tested stack pinned: **driver 616.64 + ReShade 6.8 + RenoDX 4.70 + NR/SR 310.8**. [Runtime lock](../packaging/runtime-lock.json) · [Measured report](measurements/runtime-comparison-20260907/REPORT.md)
-- **Unverified risk against that pin:** DLSS5-Autopilot's field data reports renodx-dlss5 4.6/4.7 faulting on every evaluate from driver 616.64, which is the driver we recommend. Untested here. See item 0 below.
+- **Tested against that pin (2026-09-12):** DLSS5-Autopilot's field data reports renodx-dlss5 4.6/4.7 faulting on every evaluate from driver 616.64, which is the driver we recommend. Six live neural sessions on an RTX 5090 on 616.64 did not reproduce it: `failure=none`, `lock=ok`, every rendered frame verified. The pin stands. See item 0 below. [Session record](VERIFICATION-2026-09-12-RTX5090.md)
 
 ## Next session — ordered, from the 2026-09-11 survey
 
@@ -16,14 +16,25 @@ over cost, not by ambition. Items 1–4 are together about four flags and thirty
 lines, and they aim at the symptom the whole 0.20.0 cycle was chasing: motion that
 does not feel attached to the picture.
 
-**0. Check the add-on against driver 616.64+ before anything else.** DLSS5-Autopilot's
+**0. Closed 2026-09-12: it does not reproduce on this pin.** DLSS5-Autopilot's
 aggregated field data says "from 616.64 the driver routes neural rendering through
 its own runtime, and the renodx-dlss5 add-on the feeder route loads faults there -
 4.6 and 4.7 on every evaluate, 4.55 in some games". We pin renodx-dlss5 4.70 and we
-recommend 616.64, which is exactly the reported combination. Their workaround was a
-standalone route that never loads the add-on. One session on a current driver
-settles whether this reaches us.
-[Autopilot v1.8.1](https://github.com/Kizzuwatnaa/DLSS5-Autopilot/releases/tag/v1.8.1)
+recommend 616.64, which is exactly the reported combination, and their workaround
+was a standalone route that never loads the add-on. Six live neural sessions on
+2026-09-12 answer it: one machine, RTX 5090, driver 616.64, the pinned stack
+(ReShade 6.8.0.2155, RenoDX 4.7, DLSS-NR 310.8.0, `310.8.SF-v2`). The receipts read
+`frames=2805/2805 verified=2805`, `2779/2779`, `2697/2697` and `2607/2607`,
+`failure=none`, `lock=ok`, at about 7.0 ms/frame at 1920x1080. No evaluate faulted
+in any of them.
+
+What this tree can say is that the published field report was not reproduced here,
+which is not the same as saying it was wrong: their figure aggregates machines,
+add-on builds and titles one session cannot speak for. So the pin stays, and so
+does the warning against upgrading the runtime blind - what has now been tested is
+616.64 with renodx-dlss5 4.70, and nothing else.
+[Autopilot v1.8.1](https://github.com/Kizzuwatnaa/DLSS5-Autopilot/releases/tag/v1.8.1) ·
+[Session record](VERIFICATION-2026-09-12-RTX5090.md)
 
 **1. `NV_OF_PRED_DIRECTION_BOTH`.** `src/OpticalFlowNvof.cpp` asks for forward flow
 only. The NVOFA guide: "When `NV_OF_INIT_PARAMS::predDirection` is set to
