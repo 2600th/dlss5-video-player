@@ -41,6 +41,7 @@ struct PlayerAppTestAccess {
         app.m_renderGuides = GuideControls{false, true};
         app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
         app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.amount = 0.3f; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
+        app.m_comparison.strength = 0.4f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
         app.m_cacheRoot=savedCacheRoot;
         app.SaveVideoSettings();
@@ -60,6 +61,19 @@ struct PlayerAppTestAccess {
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK(std::abs(app.m_comparison.amount - 0.3f) < 0.001f && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
         CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
+        // The presentation-only strength dial rides the same save/load as the image
+        // adjustments it sits with, clamps to the 0..2 the shader composites over, and
+        // reads back as 1 (the neural frame untouched) when the key is absent.
+        CHECK(std::abs(app.m_comparison.strength - 0.4f) < 0.001f);
+        app.WriteIniFloat(L"VideoAdjustments", L"NeuralStrength", 9.0f);
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_comparison.strength, 2.0f);
+        app.WriteIniFloat(L"VideoAdjustments", L"NeuralStrength", -3.0f);
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_comparison.strength, 0.0f);
+        WritePrivateProfileStringW(L"VideoAdjustments", L"NeuralStrength", nullptr, app.SettingsPath().c_str());
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
         // Original is a view, not a comparison mode; an out-of-range mode falls back to Neural.
         WritePrivateProfileStringW(L"Comparison", L"Mode", L"1", app.SettingsPath().c_str());
         app.WriteIniFloat(L"Comparison", L"Amount", 4.0f);
@@ -224,6 +238,7 @@ struct PlayerAppTestAccess {
         CHECK(cachedStatusBeforeFeatureStatusFix.find(L"FG unavailable") != std::wstring::npos);
         CheckMarkersAndTimecode(app);
         CheckComparisonAvailability(app);
+        CheckNeuralStrengthDial(app);
         CheckNeuralSettingsDialog(app);
         CheckEncoderSettingsDialog(app);
 
@@ -513,6 +528,76 @@ private:
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
         app.m_comparison = {};
         app.SyncFeatureMenuState();
+    }
+
+    // The neural strength dial is presentation state: it must reach the renderer and the
+    // frame already on screen through the comparison path, share the adjustments dialog's
+    // reset and save, and degrade to 1 when no original is resident to composite against.
+    static void CheckNeuralStrengthDial(PlayerApp& app)
+    {
+        CHECK_EQ(ComparisonSettings{}.strength, 1.0f);
+        CHECK_EQ(ComparisonSettings{}.ratioGuard, 2.0f);
+        const bool cachedPlayback = app.m_cachedPlayback;
+        app.m_comparison = {}; app.m_cachedPlayback = true; app.m_neuralRequested = true;
+        app.ShowAdjustments();
+        CHECK(app.m_adjustWnd != nullptr);
+        if (!app.m_adjustWnd) return;
+        const HWND dialog = app.m_adjustWnd;
+        const HWND track = GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH);
+        CHECK(track != nullptr);
+        if (!track) return;
+        // The extra row must not push the note or the buttons out of the client area.
+        RECT client{};
+        CHECK(GetClientRect(dialog, &client) != FALSE);
+        CHECK_EQ(int(client.bottom), PlayerApp::kAdjustDesignH);
+        CHECK_EQ(int(SendMessageW(track, TBM_GETPOS, 0, 0)), 100);
+        SendMessageW(track, TBM_SETPOS, TRUE, 160);
+        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK(std::abs(app.m_comparison.strength - 1.6f) < 0.001f);
+        CHECK(std::abs(app.m_renderer->GetComparison().strength - 1.6f) < 0.001f);
+        CHECK_EQ(std::wstring(L"1.60"), ReadText(GetDlgItem(dialog, IDC_ADJ_NEURAL_STRENGTH + 100)));
+        // The control cannot ask for a strength outside the range the shader composites
+        // over: the trackbar clamps both ends to 0..2.
+        SendMessageW(track, TBM_SETPOS, TRUE, 900);
+        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK_EQ(app.m_comparison.strength, 2.0f);
+        SendMessageW(track, TBM_SETPOS, TRUE, -400);
+        app.AdjustWndProc(dialog, WM_HSCROLL, 0, 0);
+        CHECK_EQ(app.m_comparison.strength, 0.0f);
+        // Without a resident original the composite has nothing to mix against, so the
+        // effective strength falls back to 1 and the picture stays what it is today.
+        app.m_comparison.strength = 0.5f;
+        app.m_cachedPlayback = false;
+        CHECK_EQ(app.EffectiveComparison().strength, 1.0f);
+        app.m_cachedPlayback = true;
+        CHECK_EQ(app.EffectiveComparison().strength, 0.5f);
+        // The dial carries help text, like every control that needs explaining.
+        const auto tipHost = app.m_tipHosts.find(dialog);
+        CHECK(tipHost != app.m_tipHosts.end());
+        if (tipHost != app.m_tipHosts.end()) {
+            wchar_t text[512] = {};
+            TTTOOLINFOW info{};
+            info.cbSize = TTTOOLINFOW_V2_SIZE;
+            info.hwnd = dialog;
+            info.uId = reinterpret_cast<UINT_PTR>(track);
+            info.lpszText = text;
+            SendMessageW(tipHost->second, TTM_GETTEXTW, UINT_PTR{512}, reinterpret_cast<LPARAM>(&info));
+            CHECK(wcslen(text) > 20);
+        }
+        // One reset restores every adjustment, the dial included, without disturbing the
+        // comparison mode it shares a struct with, and saves through the same path.
+        app.m_comparison.mode = ComparisonMode::Wipe;
+        app.m_colorSettings.saturation = 2.0f;
+        app.AdjustWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ADJ_RESET, BN_CLICKED), 0);
+        CHECK_EQ(app.m_comparison.strength, 1.0f);
+        CHECK_EQ(app.m_colorSettings.saturation, 1.0f);
+        CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
+        CHECK_EQ(int(SendMessageW(track, TBM_GETPOS, 0, 0)), 100);
+        CHECK_EQ(app.ReadIniFloat(L"VideoAdjustments", L"NeuralStrength", -1.0f), 1.0f);
+        app.AdjustWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ADJ_CLOSE, BN_CLICKED), 0);
+        CHECK(app.m_adjustWnd == nullptr);
+        CHECK(!IsWindow(dialog));
+        app.m_comparison = {}; app.m_cachedPlayback = cachedPlayback;
     }
 
     static void CheckNeuralSettingsDialog(PlayerApp& app)

@@ -58,6 +58,10 @@ struct ComparisonSettings {
     ComparisonMode mode = ComparisonMode::Neural;
     float amount = 0.5f;       // Blend: lerp(original, neural, amount)
     float splitX = 0.5f;       // SplitVertical/Wipe divider, in image UV [0,1]
+    // Presentation-only neural strength dial: the composite of the neural frame against
+    // the original, which costs a present instead of a re-render.
+    float strength = 1.0f;     // 0..2, 1 shows the neural frame untouched
+    float ratioGuard = 2.0f;   // >= 1: two-sided bound on the luminance ratio above 1
     float zoomScale = 1.0f;    // >= 1 magnifies around the zoom center
     float zoomCenterX = 0.5f;
     float zoomCenterY = 0.5f;

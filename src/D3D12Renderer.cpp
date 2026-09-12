@@ -178,7 +178,7 @@ cbuffer Params:register(b0){
     float2 Reserved0;  // was sampling jitter; see the note above PSConvert
     float2 Misc;   // x = one output pixel in UV (divider half-width), y = zoom scale
     float4 ColorA; // brightness, contrast, saturation, gamma
-    float4 ColorB; // temperature, tint, reserved, reserved
+    float4 ColorB; // temperature, tint, neural strength (1 = untouched), luminance-ratio guard
     float4 Compare; // mode (0 neural,1 original,2 blend,3 split,4 wipe), amount|splitX, zoomCenterX, zoomCenterY
     float4 Capture; // xy = one chroma texel in UV, zw reserved
 }
@@ -192,6 +192,7 @@ float3 LinearToSRGB(float3 c){c=max(c,0);float3 lo=c*12.92;float3 hi=1.055*pow(c
 // and 0.0 at phase 0.5) and hand the reconstruction a different amount of blur every frame.
 // Feature 18 does not read a jitter offset at all, so nothing downstream undoes it either.
 float4 PSConvert(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv,0).rgb;return float4(SRGBToLinear(c),1);}
+float Luma709(float3 c){return dot(c,float3(0.2126,0.7152,0.0722));}
 float3 ApplyVideoAdjustments(float3 c){
     float brightness=ColorA.x;
     float contrast=max(ColorA.y,0.0);
@@ -203,26 +204,52 @@ float3 ApplyVideoAdjustments(float3 c){
     c=max(c,0.0);
     c*=exp2(brightness);
     c=(c-0.18)*contrast+0.18;
-    float l=dot(c,float3(0.2126,0.7152,0.0722));
+    float l=Luma709(c);
     c=lerp(l.xxx,c,saturation);
     c*=float3(1.0+0.12*temperature,1.0,1.0-0.12*temperature);
     c*=float3(1.0+0.05*tint,1.0-0.10*tint,1.0+0.05*tint);
     c=pow(max(c,0.0),1.0/gamma);
     return c;
 }
-// Zoom first, then choose the pair member, then the shared color adjustments. Ref is
-// the source-size sRGB original; T is the linear neural output or converted input.
+// The strength dial is a presentation composite, not a second neural pass: the add-on
+// overwrites the NGX output in place, so T already holds the composed neural frame and
+// Ref the original. Re-mixing those two is the whole dial, which is why moving it costs
+// a present and not a re-render. Below 1 it mixes back toward the original; above 1 it
+// extends the luminance RATIO the model produced, never an additive delta, because a
+// ratio applied as one scalar to the whole triple keeps the hue where the model put it.
+float3 ApplyNeuralStrength(float3 c,float3 ref,float s,float guard){
+    if(s<1.0)return lerp(ref,c,max(s,0.0));
+    // The 1/512 floor on both terms stops a near-black pixel from producing an
+    // unbounded ratio, and the two-sided guard bounds how far one pixel may travel.
+    float ratio=clamp((Luma709(c)+1.0/512.0)/(Luma709(ref)+1.0/512.0),1.0/guard,guard);
+    c*=pow(ratio,s-1.0);
+    // One scalar on the triple can push a saturated channel past 1. A luminance-only
+    // knee would let that channel clip on encode and rotate the hue, so normalise by
+    // the peak instead, which keeps the ratio between the channels intact.
+    float peak=max(c.r,max(c.g,c.b));
+    return peak>1.0?c/peak:c;
+}
+// Zoom first, then the strength composite, then choose the pair member, then the shared
+// color adjustments. Ref is the source-size sRGB original; T is the linear neural output
+// or converted input. The composite runs before the member selection so that Original
+// (mode 1) still shows the untouched original and every comparison mode shows the dialled
+// neural frame on its own side of the divider.
 float4 PSPresent(V i):SV_Target{
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
     float2 uv=saturate((i.uv-zc)/zoom+zc);
     float3 c=T.SampleLevel(S,uv,0).rgb;
     int mode=int(Compare.x+0.5);
-    if(mode!=0){
+    float strength=ColorB.z;
+    // The dial needs the original in the plain neural view too, so Ref is sampled when
+    // the mode reads it OR the dial is off its default. At strength 1 nothing here runs:
+    // the fetch is skipped and c reaches the adjustments as the untouched neural pixel.
+    if(mode!=0||strength!=1.0){
         float3 ref=SRGBToLinear(Ref.SampleLevel(S,uv,0).rgb);
+        if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
         if(mode==1)c=ref;
         else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
-        else c=uv.x<Compare.y?ref:c;
+        else if(mode!=0)c=uv.x<Compare.y?ref:c;
     }
     c=ApplyVideoAdjustments(c);
     if(mode==4){
@@ -235,7 +262,7 @@ float4 PSPresent(V i):SV_Target{
 // cache-capture pass produces; only the encoding differs, from 8-bit BGRA to BT.709
 // limited-range Y and interleaved UV, so ffmpeg never converts a frame on the CPU.
 float3 CaptureRGB(float2 uv){return LinearToSRGB(ApplyVideoAdjustments(T.SampleLevel(S,uv,0).rgb));}
-float CaptureY(float3 c){return (16.0+219.0*dot(c,float3(0.2126,0.7152,0.0722)))/255.0;}
+float CaptureY(float3 c){return (16.0+219.0*Luma709(c))/255.0;}
 float2 CaptureChromaOf(float3 c){
     float u=128.0+224.0*dot(c,float3(-0.114572,-0.385428,0.5));
     float v=128.0+224.0*dot(c,float3(0.5,-0.454153,-0.045847));
@@ -866,17 +893,23 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
 }
 
 // Root constants (PresentConstantCount floats): [0..1] JitterUV, [2] Misc.x = 1/outputW,
-// [3] Misc.y = zoom, [4..7] ColorA, [8..11] ColorB, [12..15] Compare{mode, amount|splitX,
-// zoomCenterX, zoomCenterY}, [16..17] Capture.xy = one chroma texel in UV.
+// [3] Misc.y = zoom, [4..7] ColorA, [8..9] ColorB.xy = temperature/tint, [10] ColorB.z =
+// neural strength, [11] ColorB.w = luminance-ratio guard, [12..15] Compare{mode,
+// amount|splitX, zoomCenterX, zoomCenterY}, [16..17] Capture.xy = one chroma texel in UV.
 // Also binds the comparison reference at t1. Without an uploaded reference every
 // comparison mode degrades to Neural so the shader never selects the black texture.
 void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference){
     const ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
     const float select=(mode==ComparisonMode::Blend)?cmp.amount:cmp.splitX;
+    // The dial composites against the reference, so without one it falls back to exactly
+    // 1: the capture pass and the offline renderer never upload a reference, which is
+    // what keeps every cached frame, export and settings digest bit-identical.
+    const float strength=useReference?std::clamp(cmp.strength,0.0f,2.0f):1.0f;
+    const float ratioGuard=std::max(cmp.ratioGuard,1.0f);
     const float params[PresentConstantCount]={
         0,0,m_outputW?1.0f/float(m_outputW):0.0f,std::max(cmp.zoomScale,0.01f),
         cs.brightness,cs.contrast,cs.saturation,cs.gamma,
-        cs.temperature,cs.tint,0,0,
+        cs.temperature,cs.tint,strength,ratioGuard,
         float(static_cast<int>(mode)),select,cmp.zoomCenterX,cmp.zoomCenterY,
         m_outputW?2.0f/float(m_outputW):0.0f,m_outputH?2.0f/float(m_outputH):0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootConstants,PresentConstantCount,params,0);

@@ -151,6 +151,7 @@ static constexpr int IDC_ADJ_SATURATION = 7103;
 static constexpr int IDC_ADJ_GAMMA = 7104;
 static constexpr int IDC_ADJ_TEMPERATURE = 7105;
 static constexpr int IDC_ADJ_TINT = 7106;
+static constexpr int IDC_ADJ_NEURAL_STRENGTH = 7107;
 static constexpr int IDC_ADJ_RESET = 7110;
 static constexpr int IDC_ADJ_CLOSE = 7111;
 
@@ -909,7 +910,6 @@ public:
         INITCOMMONCONTROLSEX icc{sizeof(icc),ICC_BAR_CLASSES};InitCommonControlsEx(&icc);
         WNDCLASSW r{}; r.style=CS_DBLCLKS|CS_OWNDC; r.lpfnWndProc=RenderWndProcStatic; r.hInstance=hi; r.lpszClassName=L"DLSSVideoRenderClassV11"; r.hCursor=LoadCursor(nullptr,IDC_ARROW); r.hbrBackground=nullptr; RegisterClassW(&r);
         WNDCLASSW v{}; v.lpfnWndProc=ViewportWndProcStatic; v.hInstance=hi; v.lpszClassName=L"DLSSVideoViewportClassV11"; v.hCursor=LoadCursor(nullptr,IDC_ARROW); v.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); RegisterClassW(&v);
-        WNDCLASSW a{}; a.lpfnWndProc=AdjustWndProcStatic; a.hInstance=hi; a.lpszClassName=L"DLSSVideoAdjustmentsClassV11"; a.hCursor=LoadCursor(nullptr,IDC_ARROW); a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&a);
         WNDCLASSEXW w{}; w.cbSize=sizeof(w); w.lpfnWndProc=WndProcStatic; w.hInstance=hi; w.lpszClassName=L"DLSSVideoPlayerV11Class"; w.hCursor=LoadCursor(nullptr,IDC_ARROW); w.hbrBackground=CreateSolidBrush(RGB(18,19,21));
         w.hIcon=static_cast<HICON>(LoadImageW(hi,MAKEINTRESOURCEW(IDI_DLSS_VIDEO_PLAYER),IMAGE_ICON,GetSystemMetrics(SM_CXICON),GetSystemMetrics(SM_CYICON),LR_SHARED));
         w.hIconSm=static_cast<HICON>(LoadImageW(hi,MAKEINTRESOURCEW(IDI_DLSS_VIDEO_PLAYER),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));
@@ -1363,6 +1363,8 @@ private:
         m_comparison.amount=std::clamp(ReadIniFloat(L"Comparison",L"Amount",0.5f),0.0f,1.0f);
         m_comparison.splitX=std::clamp(ReadIniFloat(L"Comparison",L"SplitX",0.5f),0.0f,1.0f);
         m_comparison.zoomScale=ReadIniFloat(L"Comparison",L"ZoomScale",1.0f)>=kZoomScale?kZoomScale:1.0f;
+        // Read back after the comparison defaults above, which would otherwise clear it.
+        m_comparison.strength=std::clamp(ReadIniFloat(L"VideoAdjustments",L"NeuralStrength",1.0f),0.0f,2.0f);
         LoadRenderPace();
     }
 
@@ -1427,6 +1429,9 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Gamma",m_colorSettings.gamma);
         WriteIniFloat(L"VideoAdjustments",L"Temperature",m_colorSettings.temperature);
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
+        // The dial lives in m_comparison but is grouped with the image adjustments here
+        // because the adjustments dialog owns its control and its reset.
+        WriteIniFloat(L"VideoAdjustments",L"NeuralStrength",m_comparison.strength);
         WritePrivateProfileStringW(L"NeuralGuides",L"MotionVectors",m_renderGuides.motionVectors?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralGuides",L"Depth",m_renderGuides.depth?L"1":L"0",SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"GpuColorConversion",m_gpuColorConversion?L"1":L"0",SettingsPath().c_str());
@@ -1449,12 +1454,18 @@ private:
     // Blend/Split/Wipe compare the neural member against the original of the
     // same pair; that only exists during cached playback with the neural view.
     bool ComparisonModesAvailable()const{return m_loaded&&m_cachedPlayback&&m_neuralRequested;}
-    ComparisonSettings EffectiveComparison()const{ComparisonSettings effective=m_comparison;if(!ComparisonModesAvailable())effective.mode=ComparisonMode::Neural;return effective;}
+    // Without a resident pair there is no original to composite against, so the mode
+    // degrades to Neural and the strength dial degrades to 1: a missing reference shows
+    // today's picture instead of compositing the neural frame against a black texture.
+    ComparisonSettings EffectiveComparison()const{ComparisonSettings effective=m_comparison;if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;}return effective;}
     static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Blend:return IDM_COMPARE_BLEND;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;default:return IDM_COMPARE_NEURAL;}}
     // Uploads the original member the presentation shader compares against.
-    // Only modes that read the reference pay for the source-size copy.
+    // Only modes that read the reference pay for the source-size copy, plus a strength
+    // dial off its default, which composites against that same original.
     void UploadComparisonReference(const VideoFrame& original){
-        if(!m_renderer||original.bgra.empty()||EffectiveComparison().mode==ComparisonMode::Neural)return;
+        if(!m_renderer||original.bgra.empty())return;
+        const ComparisonSettings effective=EffectiveComparison();
+        if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return;
         m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size());
     }
     void ApplyComparison(bool refreshPaused=true){
@@ -1547,6 +1558,7 @@ private:
         SetAdjustmentValue(h,IDC_ADJ_GAMMA,PlainValue(m_colorSettings.gamma));
         SetAdjustmentValue(h,IDC_ADJ_TEMPERATURE,SignedValue(m_colorSettings.temperature));
         SetAdjustmentValue(h,IDC_ADJ_TINT,SignedValue(m_colorSettings.tint));
+        SetAdjustmentValue(h,IDC_ADJ_NEURAL_STRENGTH,PlainValue(m_comparison.strength));
     }
 
     void SyncAdjustmentControls(HWND h){
@@ -1556,6 +1568,7 @@ private:
         SetTrack(h,IDC_ADJ_GAMMA,25,300,int(std::lround(m_colorSettings.gamma*100.0f)));
         SetTrack(h,IDC_ADJ_TEMPERATURE,0,200,int(std::lround((m_colorSettings.temperature+1.0f)*100.0f)));
         SetTrack(h,IDC_ADJ_TINT,0,200,int(std::lround((m_colorSettings.tint+1.0f)*100.0f)));
+        SetTrack(h,IDC_ADJ_NEURAL_STRENGTH,0,200,int(std::lround(m_comparison.strength*100.0f)));
         UpdateAdjustmentValueLabels(h);
     }
 
@@ -1567,7 +1580,11 @@ private:
         m_colorSettings.gamma=std::max(0.25f,float(pos(IDC_ADJ_GAMMA))/100.0f);
         m_colorSettings.temperature=float(pos(IDC_ADJ_TEMPERATURE))/100.0f-1.0f;
         m_colorSettings.tint=float(pos(IDC_ADJ_TINT))/100.0f-1.0f;
-        UpdateAdjustmentValueLabels(h);ApplyVideoAdjustments(true);
+        m_comparison.strength=float(pos(IDC_ADJ_NEURAL_STRENGTH))/100.0f;
+        // Colors first without a present, then the comparison path: it uploads the
+        // original the dial composites against and repaints the frame already on screen.
+        // Both are presentation state, so a drag costs one present and never a re-render.
+        UpdateAdjustmentValueLabels(h);ApplyVideoAdjustments(false);ApplyComparison(true);
     }
 
     // A tooltip host lives for as long as its dialog, and its tool text lives in
@@ -1679,24 +1696,32 @@ private:
         CreateAdjustmentRow(h,IDC_ADJ_GAMMA,L"adjustments.gamma",178);
         CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",228);
         CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",278);
+        CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",328,L"adjustments.neural_strength.tip");
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"adjustments.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,322,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"adjustments.reset").c_str(),WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,252,368,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_RESET,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"adjustments.close").c_str(),WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,348,368,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_CLOSE,nullptr,nullptr);
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"adjustments.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,372,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"adjustments.reset").c_str(),WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,252,418,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_RESET,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"adjustments.close").c_str(),WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,348,418,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         SyncAdjustmentControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kAdjustDesignW=466,kAdjustDesignH=452;
+    static constexpr int kAdjustDesignW=466,kAdjustDesignH=502;
 
     void ShowAdjustments(){
         if(m_adjustWnd&&IsWindow(m_adjustWnd)){ShowWindow(m_adjustWnd,SW_SHOWNORMAL);SetForegroundWindow(m_adjustWnd);return;}
+        // Registered here, next to the only CreateWindowExW that names it, exactly like
+        // the neural and encoder dialogs: the startup registration this replaced still
+        // named the class V11 while this call asked for V12, so the window was never
+        // created and the whole dialog was unreachable.
+        static constexpr const wchar_t* kClassName=L"DLSSVideoAdjustmentsClassV12";
+        WNDCLASSW a{};a.lpfnWndProc=AdjustWndProcStatic;a.hInstance=GetModuleHandleW(nullptr);a.lpszClassName=kClassName;a.hCursor=LoadCursor(nullptr,IDC_ARROW);a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        if(!RegisterClassW(&a)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
         const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
         const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
         RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);int x=int(pr.left)+std::max(0,(pw-w)/2),y=int(pr.top)+std::max(0,(ph-h)/2);
-        m_adjustWnd=CreateWindowExW(WS_EX_TOOLWINDOW,L"DLSSVideoAdjustmentsClassV12",T(L"adjustments.title").c_str(),
+        m_adjustWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"adjustments.title").c_str(),
             style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
@@ -1710,7 +1735,7 @@ private:
         }
         case WM_SIZE:ResizeSettingsChildren(h,kAdjustDesignW,kAdjustDesignH);return 0;
         case WM_COMMAND:
-            if(LOWORD(w)==IDC_ADJ_RESET){m_colorSettings={};SyncAdjustmentControls(h);ApplyVideoAdjustments(true);SaveVideoSettings();return 0;}
+            if(LOWORD(w)==IDC_ADJ_RESET){m_colorSettings={};m_comparison.strength=1.0f;SyncAdjustmentControls(h);ApplyVideoAdjustments(false);ApplyComparison(true);SaveVideoSettings();return 0;}
             if(LOWORD(w)==IDC_ADJ_CLOSE){DestroyWindow(h);return 0;}
             break;
         case WM_CLOSE:DestroyWindow(h);return 0;
