@@ -68,6 +68,11 @@ private:
             {L"neural.live.title", L"Neural rendering from here"},
             {L"neural.live.buffering", L"Buffering neural frames"},
             {L"neural.live.lead", L"buffered"},
+            // Which way the play press that arrived during buffering points: the
+            // button state alone was invisible, so a second press cancelled it.
+            {L"neural.live.stalled", L"Live rendering stopped: the render never reached this frame. Playing the original."},
+            {L"neural.live.will_play", L"starts when the buffer fills"},
+            {L"neural.live.will_stay_paused", L"stays paused when the buffer fills"},
             {L"neural.live.slow", L"This video is %ux%u at %.6g fps. On this GPU neural rendering runs at about %.3g frames per second, which is %.2gx real time, so watching it live would pause to buffer almost continuously.\n\nConvert the clip instead (DLSS > Convert & save) to watch it smoothly afterwards.\n\nStart the live session anyway?"},
             {L"neural.preview.title", L"Previewing neural settings"},
             {L"neural.preview.detail", L"Rendering this frame with the new settings"},

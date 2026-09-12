@@ -239,6 +239,8 @@ struct PlayerAppTestAccess {
         CheckMarkersAndTimecode(app);
         CheckComparisonAvailability(app);
         CheckNeuralStrengthDial(app);
+        CheckLiveBufferingPlayIntent(app);
+        CheckNeuralToggleQueuedDuringSeek(app);
         CheckNeuralSettingsDialog(app);
         CheckEncoderSettingsDialog(app);
 
@@ -528,6 +530,67 @@ private:
         CHECK(app.m_comparison.mode == ComparisonMode::Neural);
         app.m_comparison = {};
         app.SyncFeatureMenuState();
+    }
+
+    // A press on play while a live session buffers cannot be obeyed yet, only
+    // remembered. It used to be remembered invisibly: the control still read
+    // "Play", so the obvious second press cancelled the first and the picture
+    // never started when the lead arrived. The intent has to be on screen.
+    static void CheckLiveBufferingPlayIntent(PlayerApp& app)
+    {
+        const bool liveSession = app.m_liveSession, liveBuffering = app.m_liveBuffering;
+        const bool resume = app.m_liveResumePlaying, playing = app.m_playing, loaded = app.m_loaded;
+        app.m_loaded = true; app.m_playing = false;
+        app.m_liveSession = true; app.m_liveBuffering = true; app.m_liveResumePlaying = false;
+
+        const auto paused = app.ButtonContent(ToolbarAction::PlayPause);
+        CHECK_EQ(std::wstring(L"Play"), paused.label);
+        CHECK(!paused.active);
+        CHECK(app.LiveSessionStatusText().find(app.T(L"neural.live.will_stay_paused")) != std::wstring::npos);
+
+        app.TogglePause();
+        CHECK(app.m_liveResumePlaying);
+        CHECK(!app.m_playing);  // still buffering: the press is a promise, not a start
+        const auto pending = app.ButtonContent(ToolbarAction::PlayPause);
+        CHECK_EQ(std::wstring(L"Pause"), pending.label);
+        CHECK(pending.active);
+        CHECK(app.LiveSessionStatusText().find(app.T(L"neural.live.will_play")) != std::wstring::npos);
+
+        app.TogglePause();  // a second press is a real cancel, and says so
+        CHECK(!app.m_liveResumePlaying);
+        CHECK_EQ(std::wstring(L"Play"), app.ButtonContent(ToolbarAction::PlayPause).label);
+        CHECK(app.LiveSessionStatusText().find(app.T(L"neural.live.will_stay_paused")) != std::wstring::npos);
+
+        app.m_liveSession = liveSession; app.m_liveBuffering = liveBuffering;
+        app.m_liveResumePlaying = resume; app.m_playing = playing; app.m_loaded = loaded;
+    }
+
+    // Pressing the neural toggle right after a scrub used to do nothing at all:
+    // the request was refused for the seek in flight and dropped, and the log
+    // was the only place it showed. It is queued now, the label says so, and a
+    // seek that lands somewhere the toggle cannot act drops it explicitly.
+    static void CheckNeuralToggleQueuedDuringSeek(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback;
+        const bool pair = app.m_havePresentedPair, seeking = app.m_seeking;
+        app.m_loaded = true; app.m_cachedPlayback = true; app.m_havePresentedPair = true;
+        app.m_seeking = true; app.m_neuralToggleDeferred = false;
+        CHECK(!app.ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering));
+
+        app.ToggleNeuralRendering();
+        CHECK(app.m_neuralToggleDeferred);
+        CHECK_EQ(std::wstring(L"Neural Rendering · Queued for the seek"),
+                 app.ButtonContent(ToolbarAction::ToggleNeuralRendering).label);
+
+        // The seek landed on something unrenderable: drop the press, do not
+        // leave it queued for the next unrelated seek.
+        app.m_cachedPlayback = false; app.m_havePresentedPair = false; app.m_loaded = false;
+        app.SetSeeking(false);
+        CHECK(!app.m_neuralToggleDeferred);
+        CHECK(app.ButtonContent(ToolbarAction::ToggleNeuralRendering).label.find(L"Queued") == std::wstring::npos);
+
+        app.m_loaded = loaded; app.m_cachedPlayback = cached;
+        app.m_havePresentedPair = pair; app.m_seeking = seeking;
     }
 
     // The neural strength dial is presentation state: it must reach the renderer and the

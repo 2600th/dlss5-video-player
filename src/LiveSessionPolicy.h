@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 
 // Decisions an active neural session makes on the UI thread, separated from the
 // player so they can be tested without a window, a GPU or a render helper.
@@ -58,6 +59,38 @@ inline bool ShouldAttach(const SessionView& view, double startLead = kStartLead)
     if (view.attached) return false;
     const double lead = Lead(view);
     return lead >= startLead || (view.finished && lead > 0.0);
+}
+
+// Attaching needs a finalized segment that contains the playhead, which is not
+// the same thing as having a lead: adopted coverage can start after the
+// playhead, or a seek can land in a gap. When that happens the lead keeps
+// growing, `ShouldAttach` keeps saying yes, the attach keeps failing, and the
+// player sits behind the buffering panel with a full buffer and nothing to show
+// for it. After a few consecutive failures the session is in the wrong place,
+// so restart it at the playhead instead of retrying forever.
+inline constexpr int kAttachFailureLimit = 20;
+
+inline bool ShouldRebaseStalledAttach(const SessionView& view, int consecutiveFailures,
+                                      int failureLimit = kAttachFailureLimit)
+{
+    if (view.attached || view.seeking) return false;
+    if (consecutiveFailures < failureLimit) return false;
+    return Lead(view) > 0.0;
+}
+
+// Where the player should join the render. The session starts at the snapped
+// playhead, but the first segment it finalizes can begin a frame or two later -
+// one 30 fps clip toggled on at 12.033 s published coverage from 12.066 s.
+// Joining at the playhead then found no segment containing it, so the player
+// waited behind a filling buffer for a frame that would never be published, and
+// the recovery above restarted the same session at the same place forever.
+// Coverage that starts later is the frame playback continues from; coverage that
+// starts earlier is history, so the playhead stands.
+inline int64_t AttachPosition100ns(int64_t position100ns, int64_t rangeStart100ns,
+                                   int64_t coverageStart100ns)
+{
+    const int64_t floor = std::max(position100ns, rangeStart100ns);
+    return coverageStart100ns > floor ? coverageStart100ns : floor;
 }
 
 // True once a rebuffer can end.

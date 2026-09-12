@@ -2435,6 +2435,22 @@ void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_
     fast.rangeStartSec=10.0;fast.positionSec=10.0;fast.headSec=11.2;
     CHECK(!live_session::ShouldAttach(fast));
     CHECK(live_session::ShouldAttach(fast,live_session::StartLead(4.8)));
+    // A lead with no picture is the coverage being in the wrong place. Retrying
+    // an attach that cannot succeed left one session behind the buffering panel
+    // with its head at the end of the file, so a run of failures rebases.
+    live_session::SessionView stalled{};
+    stalled.rangeStartSec=10.0;stalled.positionSec=10.0;stalled.headSec=56.0;
+    CHECK(!live_session::ShouldRebaseStalledAttach(stalled,0));
+    CHECK(!live_session::ShouldRebaseStalledAttach(stalled,live_session::kAttachFailureLimit-1));
+    CHECK(live_session::ShouldRebaseStalledAttach(stalled,live_session::kAttachFailureLimit));
+    // Nothing rendered yet is a slow render, not a misplaced session.
+    live_session::SessionView empty=stalled;empty.headSec=0.0;
+    CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
+    // A session that is playing, or a seek in flight, has nothing to recover.
+    live_session::SessionView running=stalled;running.attached=true;
+    CHECK(!live_session::ShouldRebaseStalledAttach(running,live_session::kAttachFailureLimit));
+    live_session::SessionView midSeek=stalled;midSeek.seeking=true;
+    CHECK(!live_session::ShouldRebaseStalledAttach(midSeek,live_session::kAttachFailureLimit));
 }
 
 void live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test()
@@ -2461,6 +2477,31 @@ void live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test()
     CHECK(!live_session::NeedsRebase(seeking));
     // A head that has not moved past the range start still rebases forward.
     CHECK(live_session::NeedsRebase({.positionSec=40.0,.rangeStartSec=10.0,.headSec=0.0}));
+}
+
+// A session toggled on at 12.0329 s published its first segment from 12.0662 s,
+// a single 30 fps frame later. Joining at the playhead found no segment holding
+// it, so the player waited behind a filling buffer, the stalled-attach recovery
+// restarted the same session at the same instant, and the picture sat on one
+// frame until the clip ran out.
+void live_session_joins_the_render_where_its_coverage_actually_starts_test()
+{
+    constexpr int64_t kSecond=10'000'000;
+    // Coverage that starts a frame late: join there, not at the playhead.
+    CHECK_EQ(int64_t(120'662'000),
+             live_session::AttachPosition100ns(120'329'000,120'329'000,120'662'000));
+    // Coverage that already covers the playhead: the playhead stands.
+    CHECK_EQ(int64_t(12*kSecond),
+             live_session::AttachPosition100ns(12*kSecond,10*kSecond,10*kSecond));
+    // A playhead before the range - a seek that landed short - starts at the
+    // range, and coverage still wins when it begins later than that.
+    CHECK_EQ(int64_t(10*kSecond),
+             live_session::AttachPosition100ns(4*kSecond,10*kSecond,10*kSecond));
+    CHECK_EQ(int64_t(11*kSecond),
+             live_session::AttachPosition100ns(4*kSecond,10*kSecond,11*kSecond));
+    // No segments yet: nothing to clamp to, so the playhead is unchanged and
+    // the caller's own coverage check refuses the attach.
+    CHECK_EQ(int64_t(12*kSecond),live_session::AttachPosition100ns(12*kSecond,10*kSecond,0));
 }
 
 void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
@@ -2729,6 +2770,7 @@ int wmain(int argc, wchar_t* argv[])
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
+    live_session_joins_the_render_where_its_coverage_actually_starts_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();

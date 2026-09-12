@@ -1475,7 +1475,19 @@ private:
         }
         SyncFeatureMenuState();
     }
-    void SetComparisonMode(ComparisonMode mode){if(!ComparisonModesAvailable()||mode==ComparisonMode::Original)return;m_comparison.mode=mode;ApplyComparison();}
+    // A refused mode used to be indistinguishable from one that did nothing: the
+    // menu item greys out, but a command that arrives while no pair is resident
+    // left no trace at all. Say which precondition was missing.
+    void SetComparisonMode(ComparisonMode mode){
+        if(!ComparisonModesAvailable()){
+            LOG("Comparison mode refused: loaded="<<m_loaded<<" cachedPair="<<m_cachedPlayback<<" neuralView="<<m_neuralRequested);
+            return;
+        }
+        if(mode==ComparisonMode::Original)return;
+        m_comparison.mode=mode;ApplyComparison();
+        LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoom="<<m_comparison.zoomScale
+            <<" reference="<<m_havePresentedPair);
+    }
     void AdjustBlendAmount(float delta){if(!ComparisonModesAvailable())return;m_comparison.amount=std::clamp(std::round((m_comparison.amount+delta)*10.0f)/10.0f,0.0f,1.0f);ApplyComparison();}
     // The divider is an image-UV position; while zoomed the shader shows
     // uv=(screen-center)/zoom+center, so invert that to keep it under the pointer.
@@ -2294,6 +2306,8 @@ private:
     // Space pauses playback during an active session; the render behind it keeps
     // filling the buffer, and only an offline job takes the pause event.
     void TogglePause(){if(NeuralJobActive()&&!JobBehindPlayback()){SetNeuralJobPaused(!NeuralJobPaused());return;}if(m_liveBuffering){m_liveResumePlaying=!m_liveResumePlaying;InvalidateControls();return;}CancelPausedSettingsPreview();SetPaused(m_playing);}
+    // A play press made while the buffer fills is remembered, not obeyed yet.
+    bool LiveResumePending()const{return m_liveBuffering&&m_liveResumePlaying;}
     void StepCachedFrame(){
         if(!m_loaded||!m_cachedPlayback||m_playing||m_seeking)return;
         Audio().Pause(true);
@@ -2384,6 +2398,20 @@ private:
 
     void SetSeeking(bool seeking){
         if(m_seeking==seeking)return;m_seeking=seeking;ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateControls();
+        if(!seeking)RunDeferredNeuralToggle();
+    }
+    // The toggle press that arrived mid-seek, honoured once the seek lands. The
+    // press is dropped rather than queued twice if the seek left the player
+    // somewhere the toggle cannot act.
+    void RunDeferredNeuralToggle(){
+        if(!m_neuralToggleDeferred||m_seeking||m_seekPending)return;
+        m_neuralToggleDeferred=false;
+        if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering)){
+            LOG("Deferred neural rendering toggle dropped: the seek did not leave it available.");
+            UpdateCachedStatus();InvalidateControls();return;
+        }
+        LOG("Running the neural rendering toggle that arrived during the seek.");
+        ToggleNeuralRendering();
     }
 
     struct ToolbarButtonContent{UiIcon icon;std::wstring label;bool enabled;bool active;};
@@ -2395,11 +2423,16 @@ private:
         case ToolbarAction::Open:return{UiIcon::Open,T(OpenActionLabelKey(idleSurface).data()),enabled,false};
         case ToolbarAction::OpenYouTube:return{UiIcon::YouTube,T(L"idle.youtube"),enabled,false};
         case ToolbarAction::Back10:return{UiIcon::Rewind,L"10s",enabled,false};
-        case ToolbarAction::PlayPause:return{m_playing?UiIcon::Pause:UiIcon::Play,m_playing?L"Pause":L"Play",enabled,m_playing};
+        // A press on play while a session buffers can only be remembered; the
+        // control used to keep saying "Play", so the obvious second press
+        // cancelled the first and the picture never started.
+        case ToolbarAction::PlayPause:{const bool playing=m_playing||LiveResumePending();return{playing?UiIcon::Pause:UiIcon::Play,playing?L"Pause":L"Play",enabled,playing};}
+        // A toggle pressed during a seek is queued rather than dropped, and the
+        // label says so: a dead-looking key is how it read before.
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active};}
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active};}
         case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,UpscalingAvailable()?(UpscalingActive()?L"DLSS Upscaling · On":L"DLSS Upscaling · Off"):L"DLSS Upscaling · Unavailable",enabled,UpscalingActive()};
         case ToolbarAction::ToggleFrameGeneration:return{UiIcon::Sparkles,L"Frame Generation · Unavailable",false,false};
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill?L"Fit":L"Fill",enabled,m_fill};
@@ -2762,6 +2795,9 @@ private:
     bool StillImageRenderAvailable()const{
         return m_loaded&&m_decoder.IsStillImage()&&!m_cachedPlayback&&!m_previewJob&&RangeRenderAvailable();
     }
+    // One restart at the playhead is a recovery; a second means the coverage is
+    // never going to reach it, and looping is worse than falling back.
+    static constexpr int kLiveStalledRebaseLimit=1;
     double LiveHeadSeconds()const{return m_liveSegments?double(m_liveSegments->Head100ns())*1e-7:0.0;}
     double LiveLeadSeconds()const{return live_session::Lead(LiveSessionView());}
     bool LiveSessionFinished()const{return m_liveSegments&&m_liveSegments->Finished();}
@@ -2918,8 +2954,13 @@ private:
     // frame that is on screen.
     bool AttachLiveNeural(){
         if(!m_liveSession||m_liveAttached||!m_loaded||!m_liveSegments)return false;
-        const double at=std::max(Position(),double(m_liveRange.start100ns)*1e-7);
-        if(!m_liveSegments->Containing(static_cast<int64_t>(std::llround(at*1e7))))return false;
+        // Where to join is a policy decision, tested without a window: coverage
+        // that starts after the playhead is the frame playback continues from.
+        const int64_t at100=live_session::AttachPosition100ns(
+            static_cast<int64_t>(std::llround(Position()*1e7)),m_liveRange.start100ns,
+            m_liveSegments->Start100ns());
+        const double at=double(at100)*1e-7;
+        if(!m_liveSegments->Containing(at100))return false;
         const bool wasPlaying=m_playing||m_liveResumePlaying;
         Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
         if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media())){LOG("Active neural playback could not open the live pair.");return false;}
@@ -3047,9 +3088,33 @@ private:
         if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
         const live_session::SessionView view=LiveSessionView();
         if(!m_liveAttached){
-            if(live_session::ShouldAttach(view,m_liveStartLead)&&AttachLiveNeural())ExitLiveBuffering();
+            if(live_session::ShouldAttach(view,m_liveStartLead)){
+                if(AttachLiveNeural()){m_liveAttachFailures=0;m_liveStalledRebases=0;ExitLiveBuffering();return;}
+                ++m_liveAttachFailures;
+            }
+            // A lead that never becomes a picture is the coverage being in the
+            // wrong place, not a slow render. One restart at the playhead is a
+            // real recovery; repeating it is a loop, and this one did loop, so
+            // the second failure ends the session and hands the original stream
+            // back instead of re-rendering the same seconds forever.
+            if(live_session::ShouldRebaseStalledAttach(view,m_liveAttachFailures)){
+                LOG("Active neural playback never attached at "<<Position()<<" s with head "<<LiveHeadSeconds()
+                    <<" s over "<<(m_liveSegments?m_liveSegments->Count():size_t{0})<<" segments after "
+                    <<m_liveAttachFailures<<" attempts; rebase "<<(m_liveStalledRebases+1)<<" of "<<kLiveStalledRebaseLimit<<".");
+                m_liveAttachFailures=0;
+                if(++m_liveStalledRebases>kLiveStalledRebaseLimit){
+                    LOG("Active neural session gave up: its coverage never reached the playhead. Playing the original.");
+                    m_liveStalledRebases=0;
+                    StopLiveNeuralSession(false);
+                    m_neuralNotice=T(L"neural.live.stalled");
+                    UpdateCachedStatus();InvalidateControls();
+                    return;
+                }
+                StopLiveNeuralSession(true);StartLiveNeuralSession();
+            }
             return;
         }
+        m_liveAttachFailures=0;m_liveStalledRebases=0;
         if(m_liveBuffering&&live_session::ShouldResume(view))ExitLiveBuffering();
     }
     // Buffering panel. A popup owned by the main window, because the video is a
@@ -3773,6 +3838,8 @@ private:
         wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
         std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead")+
             L" \u00b7 head "+FormatTimecode(m_liveSegments?m_liveSegments->Head100ns():0,m_decoder.FrameRate(),true);
+        // What the next buffer fill will do with the press the user already made.
+        if(m_liveBuffering)text+=L" \u00b7 "+T(LiveResumePending()?L"neural.live.will_play":L"neural.live.will_stay_paused");
         // The forecast is a constant for one GPU; this is what the render is
         // actually managing here, including whatever else the machine is doing.
         if(const double ratio=LiveRealtimeRatio();ratio>0.0&&ratio<0.98){
@@ -3936,11 +4003,24 @@ private:
     // Without one it is how an active session is started, and how it is stopped.
     void ToggleNeuralRendering(){
         if(!ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering)){
+            // A seek in flight is the one refusal that is purely about timing:
+            // everything the toggle needs exists, it just cannot act mid-seek.
+            // Dropping the press made the key look dead - press D right after
+            // scrubbing and nothing happened - so remember it and run it when
+            // the seek lands.
+            if((m_seeking||m_seekPending)&&(LiveSessionAvailable()||m_liveSession||
+                                            (m_cachedPlayback&&m_havePresentedPair&&m_renderer))){
+                m_neuralToggleDeferred=true;
+                LOG("Neural rendering toggle deferred until the seek lands.");
+                UpdateCachedStatus();InvalidateControls();
+                return;
+            }
             LOG("Neural rendering toggle ignored: loaded="<<m_loaded<<" renderer="<<(m_renderer!=nullptr)<<" seeking="<<(m_seeking||m_seekPending)
                 <<" cachedPair="<<(m_cachedPlayback&&m_havePresentedPair)<<" sessionAvailable="<<LiveSessionAvailable()
                 <<" prerender="<<NeuralPreRenderEnabled()<<" stillImage="<<m_decoder.IsStillImage());
             return;
         }
+        m_neuralToggleDeferred=false;
         if(m_liveSession){StopLiveNeuralSession(true);return;}
         // A photo cannot run a session, so the toggle renders the one frame it
         // has. That is the same job the frame preview submits, and the cache
@@ -4214,11 +4294,18 @@ private:
     // receipt.json beside the payload (empty when the entry has none).
     NeuralRenderRange m_cachedRange;
     std::filesystem::path m_cachedReceiptPath;
+    // A neural toggle that arrived while a seek was in flight, waiting for it.
+    bool m_neuralToggleDeferred=false;
     // Manual-reset event shared with the render helper: signalled means pause.
     HANDLE m_neuralPauseEvent=nullptr;
     // Active neural rendering: the render job runs while playback continues and
     // the player consumes finalized segments as they land. m_liveDirectory holds
     // those segments; the promoted cache entry is a separate concatenated copy.
+    // Consecutive attaches that had a lead to work with and still produced no
+    // picture. Non-zero means the coverage does not contain the playhead.
+    int m_liveAttachFailures=0;
+    // Restarts already spent trying to put coverage under the playhead.
+    int m_liveStalledRebases=0;
     // Turning the toggle off keeps them in the retained slot, so turning it back
     // on resumes at the head instead of rendering the same frames again. Each
     // job writes into its own subdirectory of m_liveDirectory.

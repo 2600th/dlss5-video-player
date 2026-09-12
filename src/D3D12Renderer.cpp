@@ -254,7 +254,13 @@ float4 PSPresent(V i):SV_Target{
     c=ApplyVideoAdjustments(c);
     if(mode==4){
         float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
-        if(abs(i.uv.x-screenSplit)<Misc.x)c=1.0;
+        float d=abs(i.uv.x-screenSplit);
+        // A one-pixel white line disappears into bright content - a divider down
+        // a white shirt or a sky was invisible, which is the one thing this mode
+        // exists to show. A white core inside a dark edge always leaves one of
+        // the two with contrast against whatever it lands on.
+        if(d<Misc.x*2.5)c=0.0;
+        if(d<Misc.x)c=1.0;
     }
     return float4(LinearToSRGB(c),1);
 }
