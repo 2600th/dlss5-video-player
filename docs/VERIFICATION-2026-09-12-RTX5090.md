@@ -485,3 +485,55 @@ It was proven both ways:
   appear in these shots.
 - The figures are one frame from each of two sources. They document what the
   render does to a face, not an image-quality benchmark.
+
+## Fifth round, same day: the session that played one frame for a minute
+
+Reported from use, not from a script: "video stuck on frame", then "it's again
+and again rendering 12 sec frame". Reproduced immediately and named from the
+player's own log.
+
+`Active neural playback never attached at 12.0329 s with head 14.5661 s over 2
+segments after 20 attempts; rebasing the session here.` - five times in 25
+seconds, each followed by `Active neural session started at 12.0329 s through
+26 s`. The head was 2.5 s ahead of the playhead the whole time, so the lead test
+kept saying "attach", and the attach kept refusing: it required a finalized
+segment *containing* the playhead, and this session's first segment began at
+12.0662 s, one 30 fps frame later. Coverage that starts a frame late is the frame
+playback continues from, so the attach now clamps to it
+(`live_session::AttachPosition100ns`), and the recovery is bounded to one restart
+before the session gives up and hands the original back. With the fix, the same
+session attaches at 12.0662 s with 6.5 s buffered and plays.
+
+Three more defects fell out of recording the demonstration against the fixed
+build:
+
+- **Video ▸ Compare ▸ Split accepted the command and showed nothing.** The log
+  now proves the mode was applied (`Comparison mode=3 splitX=0.5 zoom=2
+  reference=1`), and the shader is where it went: only Wipe drew the divider.
+  Split without a divider is invisible on subtle content and is documented that
+  way in the usage guide, so Wipe is what the demonstration uses - and its
+  divider is now a white core inside a dark edge, because a single white pixel
+  column disappeared into a white shirt.
+- **A refused comparison mode left no trace.** `Comparison mode refused:
+  loaded=1 cachedPair=0 neuralView=1` names the missing precondition.
+- **The capture driver was measuring the wrong thing.** Its motion check watched
+  the status strip, which ticks on its own while a render publishes segments, so
+  it reported a frozen picture as playing and never pressed play: four takes were
+  recorded of a single frame. It measures the picture above the toolbar now, where
+  a paused player scores exactly 0. Separately, timeline clicks were landing
+  wherever the desktop pointer happened to sit - the player's scrub follows the
+  live cursor, not the posted coordinates - so the pointer is moved for real;
+  a seek to 74.0 s now lands at 74.02 on the first attempt instead of settling
+  14 s away.
+
+Limits of this round:
+
+- The attach clamp is unit-tested on its arithmetic and observed once end to end
+  on this machine. The bounded recovery was exercised by the fix removing the
+  loop, not by forcing a session whose coverage can never reach the playhead.
+- The divider change is presentation only: the capture pass does not read the
+  comparison mode, so exports and cached frames are byte-identical.
+- `1440p on an RTX 5090` in the demonstration is the geometry, not a pace claim.
+  The playback take drops frames like any other session (`presented=621
+  dropped=6` in the session behind an earlier take); the video does not claim
+  otherwise.

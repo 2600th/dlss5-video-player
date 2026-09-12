@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.21.2 - 2026-09-12
+
+- A live session whose first finalized segment starts after the playhead now
+  attaches instead of restarting forever. Toggling neural rendering on at
+  12.0329 s published coverage from 12.0662 s - one 30 fps frame later - and the
+  attach demanded a segment containing the playhead, so it failed, the
+  stalled-attach recovery restarted the session at the same instant, and that
+  repeated: `never attached at 12.0329 s with head 14.5661 s over 2 segments
+  after 20 attempts` five times in 25 seconds, with the picture stuck on one
+  frame while the render kept publishing. Playback now joins at the first
+  rendered frame, which is what continuing from there means, and the recovery is
+  bounded: one restart at the playhead, then the session ends and hands back the
+  original instead of looping. `live_session::AttachPosition100ns` decides it, so
+  it is tested without a window.
+- **Video ▸ Compare ▸ Wipe** survives bright content. The divider was a single
+  white pixel column, so it vanished into a white shirt or a sky - the one thing
+  the mode exists to show. It is now a white core inside a dark edge, so one of
+  the two always has contrast. Presentation only: exports and cached frames are
+  unchanged.
+- A comparison mode refused for want of a resident pair says so in the log
+  (`Comparison mode refused: loaded=1 cachedPair=0 neuralView=1`), and an
+  accepted one records the mode, the divider position, the zoom and whether the
+  reference is uploaded. A menu command that silently did nothing was
+  indistinguishable from one that did something invisible.
+- A play press made while the buffer fills is visible on the control: the button
+  reads `Pause` with the press remembered, and the status line says whether the
+  fill will start playback or stay paused. `m_playing` is false during a fill, so
+  the button kept reading `Play`, which read as "the press did nothing" and the
+  obvious second press cancelled the first.
+- A neural toggle pressed during a seek is queued and applied when the seek
+  lands, instead of being dropped with only a log line. The toolbar says
+  `Neural Rendering · Queued for the seek` while it waits.
+
 ## 0.21.1 - 2026-09-12
 
 - A finished render is no longer thrown away because something else had the file

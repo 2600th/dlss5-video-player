@@ -6,12 +6,14 @@ card.
 
 [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-[![Watch the 30-second DLSS 5 Video Player demonstration](docs/media/neural-comparison-poster.jpg)](docs/media/neural-comparison-demo.mp4)
+[![21-second DLSS 5 Video Player demonstration: a paused face compared original against neural, then playback with the render running](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
 
-**[30-second demo](docs/media/neural-comparison-demo.mp4)** from GTA VI and The
-Godfather. A paused frame with neural rendering off, then on, then playback with
-it left on - live sessions at 2560x1440, recorded as they ran. 1080p H.264, no
-sound. [How it was captured](docs/media/README.md).
+That preview plays inline and loops silently. **[Full 21-second video, 1080p
+H.264](docs/media/neural-comparison-demo.mp4)** - The Godfather and GTA VI, each
+paused and magnified 2x in the player, split down the face with the original on
+the left and the render on the right, then playback with the render running
+ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
+[How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
@@ -21,12 +23,12 @@ sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.21.1** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.1)
+**v0.21.2** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.2)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.21.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.21.1-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.21.2-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.21.2-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -69,6 +71,15 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.21.2** (2026-09-12). A live session could get stuck on one frame. If the
+render's first finished segment began a frame later than the playhead - 12.0662 s
+against 12.0329 s - playback refused to join it, the recovery restarted the same
+session at the same spot, and it did that until the clip ran out while the render
+kept working. Playback now joins at the first rendered frame, and the recovery
+gives up after one restart instead of looping. **Video ▸ Compare ▸ Wipe** also
+got a divider you can see on bright footage, and a play press made while the
+buffer fills now shows on the button.
 
 **0.21.1** (2026-09-12). A fourth way to lose a finished render, and this one was
 not the player's arithmetic: publishing a cache entry is a directory rename, and
@@ -189,7 +200,7 @@ pinned runtime hashes and a safe-mode escape hatch.
 | Open a file / a YouTube URL | `Ctrl+O` / `Ctrl+L` |
 | Play or pause | `Space` |
 | Neural rendering on or off | `D` |
-| Compare views | **Video > Compare**; `[` and `]` move the wipe, `Z` zooms |
+| Compare views | **Video > Compare**; `[` and `]` change the blend, `Z` zooms 2x |
 | Seek ten seconds / step one frame | `Left` / `Right`; `.` |
 | Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
@@ -235,12 +246,11 @@ trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 
 Real captures on an RTX 5090. The player pair below is v0.21.0; the menu and
 start-screen shots are older v0.13.0 captures of commands that have not changed.
-They show the UI, not image quality; click through for full size.
+They show the UI, not image quality; click any image for full size.
 
 ![File menu with Recent videos and the cached-video export command](docs/screenshots/current/recent-videos.jpg)
 
-<details>
-<summary>Same frame, original and neural</summary>
+### Same frame, original and neural
 
 ![GTA VI paused at 13 seconds with the neural view attached](docs/screenshots/current/neural-playback.jpg)
 
@@ -256,10 +266,7 @@ not a claim that every source gains detail.
 
 [Unscaled face crops from the same frame](docs/screenshots/current/face-comparison.png).
 
-</details>
-
-<details>
-<summary>Neural strength dial</summary>
+### Neural strength dial
 
 ![The image adjustments window with the Neural strength slider over a paused neural frame](docs/screenshots/current/neural-strength.jpg)
 
@@ -267,10 +274,7 @@ not a claim that every source gains detail.
 result, 200 % extends the change it made. It re-composes the frame already on
 screen, so it costs a present rather than a render.
 
-</details>
-
-<details>
-<summary>Faces, original beside the neural render</summary>
+### Faces, original beside the neural render
 
 Same source pixels on both sides, no scaling or retouching, default settings.
 The right half of each is a real render from the shipping worker.
@@ -291,14 +295,9 @@ and film grain rather than a game's shading model.
 The change is subtle and depends on the source. Skin shading and fine texture
 move; silhouettes and framing do not. Judge your own footage on its own preview.
 
-</details>
-
-<details>
-<summary>Start screen</summary>
+### Start screen
 
 ![Start screen with local file and YouTube URL actions](docs/screenshots/current/player-start.jpg)
-
-</details>
 
 [Capture details and footage attribution](docs/screenshots/README.md).
 
