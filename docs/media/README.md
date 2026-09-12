@@ -1,6 +1,6 @@
 # Player demonstration
 
-[Watch the 21-second MP4](neural-comparison-demo.mp4) ·
+[Watch the 22-second MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·
 [Full-size poster](neural-comparison-poster.jpg) ·
 [Remotion source](../../tools/demo-video/README.md)

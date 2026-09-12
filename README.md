@@ -6,9 +6,9 @@ card.
 
 [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-[![21-second DLSS 5 Video Player demonstration: a paused face compared original against neural, then playback with the render running](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
+[![22-second DLSS 5 Video Player demonstration: a paused face compared original against neural, then playback with the render running](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
 
-That preview plays inline and loops silently. **[Full 21-second video, 1080p
+That preview plays inline and loops silently. **[Full 22-second video, 1080p
 H.264](docs/media/neural-comparison-demo.mp4)** - The Godfather and GTA VI, each
 paused and magnified 2x in the player, split down the face with the original on
 the left and the render on the right, then playback with the render running

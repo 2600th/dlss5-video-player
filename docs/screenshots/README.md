@@ -164,7 +164,7 @@ the finished entry.
 
 ### The demonstration takes
 
-The five takes behind [the 21-second video](../media/README.md) were recorded the
+The five takes behind [the 22-second video](../media/README.md) were recorded the
 same day from the same two sources, on the build that carries this version's
 attach fix. Each comparison take is one paused frame inspected with the player's
 own controls - `Z` for 2x magnification centred on the pointer, then
