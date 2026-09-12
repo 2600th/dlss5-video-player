@@ -162,6 +162,28 @@ Godfather session is also the one that proved this version's publish fix - it
 published *after 20 rename attempts* while a file handle was deliberately held on
 the finished entry.
 
+### The demonstration takes
+
+The five takes behind [the 21-second video](../media/README.md) were recorded the
+same day from the same two sources, on the build that carries this version's
+attach fix. Each comparison take is one paused frame inspected with the player's
+own controls - `Z` for 2x magnification centred on the pointer, then
+**Video ▸ Compare ▸ Wipe** for the divider, then a drag to put that divider down
+the middle of the face - so both halves are the same source pixels at the same
+instant. The playback takes are continuous: playback was confirmed to be
+advancing by measuring the picture, not by trusting the toolbar.
+
+| Take | Source | Frame or window | What it shows |
+| --- | --- | --- | --- |
+| Title shot | The Godfather | from 72.06 s | 3.4 s of playback with the render attached |
+| Comparison 1 | The Godfather | paused at 74.02 s | zoom at 1.71 s, divider at 3.48 s into the take |
+| Comparison 2 | GTA VI | paused at 13.17 s | zoom at 1.57 s, divider at 3.33 s into the take |
+| Playback | GTA VI | from 11.30 s | 5 s continuous, neural on throughout |
+
+The zoom and divider instants are the capture driver's own report of when it
+pressed each control, measured from the first recorded byte, so the labels in the
+edit sit on the frames where the picture actually changed.
+
 `current/upcoming-games.jpg`, `current/recent-videos.jpg` and
 `current/player-start.jpg` are unchanged September 3 captures of menus and the
 start screen: they carry no video footage, and the commands they show are the

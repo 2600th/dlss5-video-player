@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   AbsoluteFill,
-  CanvasImage,
   Composition,
   Easing,
   Interactive,
@@ -14,16 +13,90 @@ import {
 } from 'remotion';
 import {Video} from '@remotion/media';
 
-// Chapter boundaries in seconds; the two middle chapters are the lengths of the
-// genuine recordings in public/, so nothing is stretched or slowed.
-const chapters = [0, 3, 13, 28, 30] as const;
+// What the video has to do, in order: say what this is, prove it on a face,
+// prove it survives motion, then say where to get it. Every shot is a screen
+// recording of the shipping player; `trim` is where a scene enters its
+// recording and the only edit made to it.
+//
+// The proof shots use the player's own inspection controls, on their measured
+// instants: 'Z' magnifies 2x around the pointer at `zoom` seconds, and
+// Video > Compare > Wipe splits the magnified frame with a white divider at
+// `wipe` seconds - original to the left of it, render to the right.
+type Scene = {
+  start: number;
+  length: number;
+  asset?: string;
+  trim?: number;
+  zoom?: number;
+  wipe?: number;
+  heading: string;
+  detail: string;
+  badge: string;
+  card?: 'cta';
+};
+
+const scenes: Scene[] = [
+  {
+    start: 0,
+    length: 3.4,
+    asset: 'playback-godfather.mp4',
+    trim: 3.4,
+    heading: 'Re-render\nyour videos\nwith DLSS 5.',
+    detail: 'An open-source player for sharper video on Windows.',
+    badge: 'Live, on an RTX 5090',
+  },
+  {
+    // Enter each proof just before its zoom: the setup is not the evidence, and
+    // the labelled split has to be on screen long enough to inspect.
+    start: 3.4,
+    length: 5.6,
+    asset: 'compare-godfather.mp4',
+    trim: 1.2,
+    zoom: 1.71,
+    wipe: 3.48,
+    heading: 'The Godfather,\n1972',
+    detail: 'One paused frame, magnified 2x in the player.',
+    badge: '2560x1440 source',
+  },
+  {
+    start: 9,
+    length: 5.6,
+    asset: 'compare-gta6.mp4',
+    trim: 1.1,
+    zoom: 1.57,
+    wipe: 3.33,
+    heading: 'Grand Theft\nAuto VI',
+    detail: 'Same frame, same single keypress.',
+    badge: '2560x1440 source',
+  },
+  {
+    start: 14.6,
+    length: 4.8,
+    asset: 'playback.mp4',
+    trim: 0.1,
+    heading: 'Neural rendering\nduring playback.',
+    detail: 'Faces, cuts and motion, while the render runs ahead.',
+    badge: '1440p on an RTX 5090',
+  },
+  {
+    start: 19.4,
+    length: 3.2,
+    card: 'cta',
+    heading: 'Download\nfor Windows',
+    detail: 'github.com/2600th/dlss5-video-player',
+    badge: 'Free, unofficial, community build',
+  },
+];
+
+const total = scenes[scenes.length - 1].start + scenes[scenes.length - 1].length;
 const lime = '#b6f36b';
 const clamp = {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'} as const;
-// The recordings are the player window at its captured size; titles and notices
-// sit outside it, so no pixel of the application is covered or rescaled.
+const ease = Easing.bezier(0.16, 1, 0.3, 1);
+// The recordings are the player window at its captured size, so no pixel of the
+// application is covered, cropped or rescaled.
 const playerStyle: React.CSSProperties = {
   position: 'absolute',
-  left: 426,
+  left: 462,
   top: 74,
   width: 1442,
   height: 932,
@@ -31,31 +104,47 @@ const playerStyle: React.CSSProperties = {
   boxShadow: '0 26px 70px #0008',
 };
 
-const headings = [
-  'Render once.\nCompare\ninstantly.',
-  'One frame.\nTwo views.',
-  'Neural On.\nKeep\nwatching.',
-  'Download.\nPlay.\nCompare.',
-];
-
-const details = [
-  'A native Windows player that re-renders video through the DLSS 5 neural runtime.',
-  'The Godfather at 01:14, paused. The real toggle switches Neural Rendering from Off to On.',
-  'GTA VI gameplay footage from An Extended Look, playing with the neural view left on.',
-  'Try the v0.21.0 Windows build. 1440p sources, an RTX card and a driver from 610.47.',
-];
+// Half-labels for the wipe. The divider is drawn by the player at the middle of
+// its magnified frame; these say which side is which, because the picture alone
+// does not.
+const Chip: React.FC<{left: number; text: string; light?: boolean}> = ({left, text, light}) => (
+  <Interactive.Div
+    name={`Chip-${text}`}
+    style={{
+      position: 'absolute',
+      left,
+      top: 152,
+      padding: '12px 22px',
+      borderRadius: 4,
+      fontSize: 36,
+      fontWeight: 650,
+      letterSpacing: 0.5,
+      backgroundColor: light ? '#b6f36bee' : '#0b1117dd',
+      color: light ? '#0b1117' : '#f0f4f8',
+    }}
+  >
+    {text}
+  </Interactive.Div>
+);
 
 const Demo = () => {
   const frame = useCurrentFrame();
   const {fps, durationInFrames} = useVideoConfig();
   const second = frame / fps;
-  const chapter = chapters.reduce<number>((current, start, index) => (second >= start ? index : current), 0);
+  const index = scenes.reduce<number>((current, scene, at) => (second >= scene.start ? at : current), 0);
+  const scene = scenes[index];
+  const sceneSecond = second - scene.start;
+  const trim = scene.trim ?? 0;
+  // Where the recording itself is, so a measured instant can be compared to it.
+  const sourceSecond = sceneSecond + trim;
+  const zoomed = scene.zoom !== undefined && sourceSecond >= scene.zoom;
+  const wiped = scene.wipe !== undefined && sourceSecond >= scene.wipe;
 
   return (
     <AbsoluteFill style={{backgroundColor: '#0b1117', color: '#f0f4f8', fontFamily: 'Segoe UI, sans-serif'}}>
       <Interactive.Div
         name="Wordmark"
-        style={{position: 'absolute', left: 64, top: 77, width: 290, color: lime, fontSize: 21, fontWeight: 600, letterSpacing: 2}}
+        style={{position: 'absolute', left: 56, top: 77, width: 340, color: lime, fontSize: 22, fontWeight: 600, letterSpacing: 2}}
       >
         DLSS 5<br />VIDEO PLAYER
       </Interactive.Div>
@@ -63,55 +152,96 @@ const Demo = () => {
         name="Heading"
         style={{
           position: 'absolute',
-          left: 64,
-          top: 246,
-          width: 332,
+          left: 56,
+          top: 230,
+          width: 390,
           whiteSpace: 'pre-line',
-          fontSize: 52,
-          lineHeight: 1.1,
-          letterSpacing: -1.8,
-          fontWeight: 650,
-          opacity: interpolate(frame, [0, 15], [0, 1], {...clamp, easing: Easing.bezier(0.16, 1, 0.3, 1)}),
+          fontSize: 62,
+          lineHeight: 1.06,
+          letterSpacing: -2.2,
+          fontWeight: 700,
+          opacity: interpolate(sceneSecond * fps, [0, 9], [0, 1], {...clamp, easing: ease}),
+          translate: interpolate(sceneSecond * fps, [0, 13], ['0px 16px', '0px 0px'], {...clamp, easing: ease}),
         }}
       >
-        {headings[chapter]}
+        {scene.heading}
       </Interactive.Div>
       <Interactive.Div
         name="Detail"
-        style={{position: 'absolute', left: 67, top: 513, width: 292, color: '#bac6d1', fontSize: 25, lineHeight: 1.42}}
+        style={{
+          position: 'absolute',
+          left: 58,
+          top: 560,
+          width: 380,
+          color: '#c6d2dd',
+          fontSize: 34,
+          lineHeight: 1.34,
+          opacity: interpolate(sceneSecond * fps, [4, 15], [0, 1], {...clamp, easing: ease}),
+        }}
       >
-        {details[chapter]}
+        {scene.detail}
       </Interactive.Div>
       <Interactive.Div
-        name="Conditions"
-        style={{position: 'absolute', left: 67, top: 757, width: 290, fontSize: 20, lineHeight: 1.5, color: '#93a3b1'}}
+        name="Badge"
+        style={{position: 'absolute', left: 58, top: 742, width: 380, fontSize: 25, lineHeight: 1.45, color: lime}}
       >
-        <span style={{color: lime}}>RECORDED ON RTX 5090</span>
-        <br />2560x1440 sources · Upscaling off
-        <br />Neutral playback adjustments
-      </Interactive.Div>
-      <Interactive.Div
-        name="Honesty"
-        style={{position: 'absolute', left: 67, top: 889, width: 292, fontSize: 20, lineHeight: 1.4, color: '#b9c6d0'}}
-      >
-        Live neural rendering, recorded
-        <br />as it ran. No simulated UI.
+        {scene.badge}
       </Interactive.Div>
 
-      <Sequence durationInFrames={chapters[1] * fps}>
-        <CanvasImage src={staticFile('hero.jpg')} style={playerStyle} />
-      </Sequence>
-      <Sequence from={chapters[1] * fps} durationInFrames={(chapters[2] - chapters[1]) * fps}>
-        <Video src={staticFile('face-take.mp4')} muted objectFit="contain" style={playerStyle} />
-      </Sequence>
-      <Sequence from={chapters[2] * fps} durationInFrames={(chapters[3] - chapters[2]) * fps}>
-        <Video src={staticFile('playback-take.mp4')} muted objectFit="contain" style={playerStyle} />
-      </Sequence>
-      <Sequence from={chapters[3] * fps}>
-        <CanvasImage src={staticFile('hero-godfather.jpg')} style={playerStyle} />
-      </Sequence>
+      {scenes.map((item) =>
+        item.asset ? (
+          <Sequence key={item.asset} from={item.start * fps} durationInFrames={item.length * fps}>
+            <Video
+              src={staticFile(item.asset)}
+              muted
+              objectFit="contain"
+              trimBefore={Math.round((item.trim ?? 0) * fps)}
+              style={playerStyle}
+            />
+          </Sequence>
+        ) : null,
+      )}
 
-      <Interactive.Div name="Attribution" style={{position: 'absolute', left: 67, top: 1017, fontSize: 16, color: '#8fa0ae'}}>
+      {/* One chip while the magnified render is alone on screen, two once the
+          player's divider splits it. Both sit clear of the divider, which the
+          player draws near the middle of the magnified frame. */}
+      {zoomed && !wiped && <Chip left={492} text="NEURAL RENDERED - 2x" light />}
+      {wiped && (
+        <>
+          <Chip left={492} text="ORIGINAL" />
+          <Chip left={1130} text="NEURAL RENDERED" light />
+        </>
+      )}
+
+      {scene.card === 'cta' && (
+        <Interactive.Div
+          name="CtaPanel"
+          style={{
+            ...playerStyle,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            paddingLeft: 96,
+            backgroundColor: '#111a22',
+            border: `1px solid ${lime}55`,
+          }}
+        >
+          <div style={{fontSize: 84, fontWeight: 700, letterSpacing: -2.6, lineHeight: 1.05}}>
+            Download for Windows
+            <br />
+            <span style={{color: lime}}>&rarr; GitHub Releases</span>
+          </div>
+          <div style={{fontSize: 40, color: '#e2e9f0', marginTop: 34, lineHeight: 1.4}}>
+            Needs an RTX card and NVIDIA driver 610.47+
+          </div>
+          <div style={{fontSize: 27, color: '#9fb0bd', marginTop: 26, lineHeight: 1.5}}>
+            v0.21.2 - dlss5-video-player-v0.21.2-win64.zip, 308 MB with the pinned runtime.
+            <br />Screen recordings of the shipping build: no simulated UI, no speed changes, no sound.
+          </div>
+        </Interactive.Div>
+      )}
+
+      <Interactive.Div name="Attribution" style={{position: 'absolute', left: 58, top: 1019, fontSize: 15, color: '#8fa0ae'}}>
         Unofficial RenoDX/ReShade experiment. NVIDIA components belong to NVIDIA. Grand Theft Auto VI footage (C) Rockstar
         Games; The Godfather footage (C) Paramount Pictures.
       </Interactive.Div>
@@ -131,5 +261,5 @@ const Demo = () => {
 };
 
 registerRoot(() => (
-  <Composition id="Demo" component={Demo} width={1920} height={1080} fps={30} durationInFrames={900} />
+  <Composition id="Demo" component={Demo} width={1920} height={1080} fps={30} durationInFrames={Math.round(total * 30)} />
 ));
