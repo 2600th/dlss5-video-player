@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.21.1 - 2026-09-12
+
+- A finished render is no longer thrown away because something else had the file
+  open for a second. Publishing an entry is a directory rename, and Windows
+  refuses to rename a directory while any file inside it is open - which is
+  exactly what an antivirus scanner does to a 186 MB file the moment it is
+  closed. One attempt was made, so a 2871/2871-verified 1440p render ended on
+  `The neural video failed final cache validation` while every number the gate
+  printed agreed: `probeFrames=2870 resultFrames=2870`, all three durations
+  within 17 ms of a 102 ms tolerance. The staging directory could not even be set
+  aside afterwards, which is what named the cause: both renames of the same
+  directory failed at the same instant, and it renamed cleanly by hand once the
+  process exited. Transient sharing errors are now retried for up to 3 s
+  (24 attempts, 125 ms apart), and the entry publishes.
+- The publish refusal says which half refused. `gate=` covers the evidence and
+  duration checks; `promoteStage=` names the step inside the promotion -
+  `payload-digest`, `manifest-reread`, `rename`, `reopen` - with the Win32 error
+  and the number of rename attempts. A failed set-aside now logs too, instead of
+  leaving a staging directory with no explanation. Proven end to end: with a
+  handle deliberately held on the finished entry, the log reads `Neural cache
+  entry published after 20 rename attempts` and the session publishes 2875/2875
+  frames; the same condition destroyed the render before this change.
+- New README video and screenshots, from Grand Theft Auto VI and The Godfather.
+  The 30-second demo is now two live 2560x1440 sessions recorded as they ran: the
+  real `Ctrl+Alt+D` toggle on a paused Godfather frame, then 15 seconds of GTA VI
+  playback with the neural view left on. The paused original/neural pairs, the
+  two new unscaled face figures and a shot of the new **Neural strength** dial
+  come from the same sessions. Rockstar's own *An Extended Look* upload is
+  age-restricted and no anonymous client can fetch it at any resolution, so the
+  GTA VI footage is Netflix's *Now Playing* cut of the same material. Captures
+  now use the window's visible frame (`DWMWA_EXTENDED_FRAME_BOUNDS`) instead of
+  `GetWindowRect`, which had been dragging a strip of the desktop into the shot.
+  Provenance, digests, frame numbers and crops: `docs/screenshots/README.md`.
+
 ## 0.21.0 - 2026-09-12
 
 - A completed neural render no longer loses its cache entry at the publish gate.

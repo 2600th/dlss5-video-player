@@ -415,3 +415,73 @@ assertions in `PolicyTests`, zeroing the floor constant fails 4 in
   age-restricted videos and were not implemented or tested.
 - The neural render still runs at whatever the source turned out to be. The
   player now says the source is 360p; it does not refuse to render one.
+
+## Fourth round, same day: the asset refresh, and a fifth lost render
+
+The task was new README media from Grand Theft Auto VI and The Godfather. It
+produced a defect report, because the first attempt at a 1440p session on this
+machine refused its own finished render.
+
+### What the media session measured
+
+| Clip | Source | Live session | Publish |
+| --- | --- | --- | --- |
+| GTA VI: An Extended Look (Netflix *Now Playing*, 2560x1440, 30 fps, 26 s) | `2b43b5ce…` | 702/702 and 764/764 verified, `failure=none`, `lock=ok` | published |
+| THE GODFATHER 50th Anniversary Trailer (2560x1440, 23.976 fps, 120 s) | `036afadb…` | 2871/2871 and 2875/2875 verified | published, one of them after 20 rename attempts |
+
+Per-frame neural GPU time on the isolated worker renders at 2560x1440 read
+`p50 5.11-5.15 ms` over 36 and 51 frames, which is 1.39 ms/megapixel against the
+0.59 ms/megapixel floor this version introduced: the DLAA-only failure mode stays
+well below a healthy 1440p render.
+
+### The defect: publishing an entry is a rename, and renames lose to scanners
+
+The first Godfather session ended on the modal wording with everything agreeing:
+
+```
+Neural publish refused: renderOk=1 manifestReusable=1 probeOk=1 probe=2560x1440
+expected=2560x1440 probeFrames=2870 resultFrames=2870 probeDuration=1197030000
+resultDuration=1196859756 expectedDuration=1197019757 tolerance=1027025 parts=61
+```
+
+All three duration pairs are within 17.0 ms of a 102.7 ms tolerance and the frame
+counts are equal, so the evidence gate passed and `PromoteRender` was what failed.
+What named the cause was the second failure in the same instant: the staging
+directory could not be moved aside either, and both operations are directory
+renames. Windows refuses to rename a directory while any file inside it is open,
+and the file this one had just closed is a 186 MB `neural.mkv`. The same directory
+renamed cleanly by hand once the player exited.
+
+The fix retries transient sharing errors for up to 3 s and names the failing step.
+It was proven both ways:
+
+- A unit test opens the payload with a scanner's share mode (read+write, never
+  delete), releases it after 600 ms, and requires the promotion to succeed with
+  `attempts > 1`. Reverting the retry to a single attempt fails that test on four
+  assertions.
+- A live session with a handle held on the finished entry logged `Neural cache
+  entry published after 20 rename attempts; the entry was held by another
+  process.` and published 2875/2875 frames. Before the change, that condition
+  destroyed the render.
+
+### Limits of this round
+
+- The refusal was observed once, on this machine, with one antivirus product. The
+  holder was not identified by name; what is proven is that two directory renames
+  of the same path failed at the same moment, that the path renamed fine after the
+  process exited, and that a deliberately held handle reproduces the refusal
+  exactly and is now survived.
+- Rockstar's own *An Extended Look* (`tJbzMqJGH4k`) could not be fetched at all:
+  every anonymous client is refused, the GameSpot mirror is gated too, and yt-dlp
+  could not read this machine's browser cookies. The GTA VI footage is therefore
+  Netflix's *Now Playing* cut of the same material, 26 s of it.
+- Captures moved from `GetWindowRect` to `DWMWA_EXTENDED_FRAME_BOUNDS` because the
+  first set carried a strip of the desktop down the left edge. Every asset in this
+  round was re-recorded after that change; the earlier files were discarded.
+- A live session keys its cache entry to the range it actually rendered, so
+  pressing the toggle again at a different position is a miss and renders again.
+  The captures work around it by rendering once and reusing the retained segments.
+  Not a defect this round investigated, but it is why "cached playback" does not
+  appear in these shots.
+- The figures are one frame from each of two sources. They document what the
+  render does to a face, not an image-quality benchmark.

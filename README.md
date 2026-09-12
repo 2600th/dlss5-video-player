@@ -8,9 +8,10 @@ card.
 
 [![Watch the 30-second DLSS 5 Video Player demonstration](docs/media/neural-comparison-poster.jpg)](docs/media/neural-comparison-demo.mp4)
 
-**[30-second demo](docs/media/neural-comparison-demo.mp4)** from The Witcher IV. A paused
-frame with neural rendering off, then on, then playback with it left on. 1080p
-H.264, no sound. [How it was captured](docs/media/README.md).
+**[30-second demo](docs/media/neural-comparison-demo.mp4)** from GTA VI and The
+Godfather. A paused frame with neural rendering off, then on, then playback with
+it left on - live sessions at 2560x1440, recorded as they ran. 1080p H.264, no
+sound. [How it was captured](docs/media/README.md).
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
@@ -20,12 +21,12 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.21.0** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.0)
+**v0.21.1** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.1)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.21.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.21.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.21.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.21.1-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -68,6 +69,15 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.21.1** (2026-09-12). A fourth way to lose a finished render, and this one was
+not the player's arithmetic: publishing a cache entry is a directory rename, and
+Windows refuses to rename a directory while any file inside it is open - which is
+what an antivirus scanner does to a 186 MB file the second it is written. One
+attempt was made, so a render that had verified all 2871 of its frames was
+discarded. It now waits the scan out, and a refusal names which step refused
+instead of one shared verdict. The README video and screenshots are new too:
+GTA VI and The Godfather, live 1440p sessions recorded as they ran.
 
 **0.21.0** (2026-09-12). YouTube trailers were arriving at the lowest bitrate
 YouTube offers. "Auto" asked for exactly 1080p, which on a trailer is the bottom
@@ -223,30 +233,54 @@ trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 
 ## Screenshots
 
-Real captures on an RTX 5090, v0.13.0 interface. They show the UI, not image
-quality; click through for full size.
+Real captures on an RTX 5090. The player pair below is v0.21.0; the menu and
+start-screen shots are older v0.13.0 captures of commands that have not changed.
+They show the UI, not image quality; click through for full size.
 
 ![File menu with Recent videos and the cached-video export command](docs/screenshots/current/recent-videos.jpg)
 
 <details>
 <summary>Same frame, original and neural</summary>
 
-![Cached neural view of Ciri in The Witcher IV daylight village sequence](docs/screenshots/current/neural-playback.jpg)
+![GTA VI paused at 13 seconds with the neural view attached](docs/screenshots/current/neural-playback.jpg)
 
-![Original video at the same paused timestamp as the neural view](docs/screenshots/current/original-comparison.jpg)
+![The same paused GTA VI frame with neural rendering off](docs/screenshots/current/original-comparison.jpg)
 
-Upscaling is off in both. This shows the synchronized toggle, not a claim that
-every source gains detail.
+![The Godfather paused at 1:14 with the neural view attached](docs/screenshots/current/godfather-neural.jpg)
+
+![The same paused Godfather frame with neural rendering off](docs/screenshots/current/godfather-original.jpg)
+
+Both pairs are one paused frame with only the view switched, from live sessions
+at 2560x1440. Upscaling is off in all four. This shows the synchronized toggle,
+not a claim that every source gains detail.
 
 [Unscaled face crops from the same frame](docs/screenshots/current/face-comparison.png).
 
 </details>
 
 <details>
-<summary>Faces from three more trailers</summary>
+<summary>Neural strength dial</summary>
+
+![The image adjustments window with the Neural strength slider over a paused neural frame](docs/screenshots/current/neural-strength.jpg)
+
+`Ctrl+E`, last slider. 0 % is the plain original, 100 % is the model's own
+result, 200 % extends the change it made. It re-composes the frame already on
+screen, so it costs a present rather than a render.
+
+</details>
+
+<details>
+<summary>Faces, original beside the neural render</summary>
 
 Same source pixels on both sides, no scaling or retouching, default settings.
 The right half of each is a real render from the shipping worker.
+
+![GTA VI close-up, original beside the neural render](docs/screenshots/current/face-gta6.png)
+
+![The Godfather close-up of Al Pacino, original beside the neural render](docs/screenshots/current/face-godfather.png)
+
+The Godfather is the interesting one: a 1972 film, so the left half is real skin
+and film grain rather than a game's shading model.
 
 ![Hellblade II close-up, original beside the neural render](docs/screenshots/current/face-hellblade.png)
 
