@@ -97,6 +97,39 @@ struct NeuralRenderTiming {
     friend bool operator==(const NeuralRenderTiming&, const NeuralRenderTiming&) = default;
 };
 
+// A DLAA-only run is indistinguishable from a healthy one in every counter the
+// evidence chain checks: feature 18 is created, it is evaluated, frames are
+// produced and verified. What it cannot fake is GPU cost. Measured at 1920x1080
+// on this project's RTX 5090 / driver 616.64: the worker that stopped
+// presenting after a feature recreate reported a median of 0.46 ms per frame
+// (docs/DLSS5_VIDEO_ROADMAP.md item 1 open gap), while healthy renders on the
+// same machine and geometry report 3.683776, 3.696608 and 3.715776 ms
+// (the three cache/v1 receipt.json files, 2534 to 2658 samples each) and the
+// reference benchmark run reads 3.26 to 3.27 ms (docs/BENCHMARK.md reference
+// table), the lowest healthy median in evidence. Those two ends are a factor of
+// 7.1 apart, so the floor is their geometric midpoint, 1.223 ms at 1920x1080:
+// 2.66x above the DLAA-only observation, 2.66x below the benchmark median and
+// 3.01x below the lowest receipt median. Per output megapixel because the pass
+// scales with pixels, and the remaining risk is one-sided in the safe
+// direction: per-pixel neural cost only rises on slower hardware, so a fixed
+// floor can misjudge a healthy run only on a GPU substantially faster than a
+// 5090, while the failure it catches sits 7x below it on the fastest card that
+// exists today.
+inline constexpr double kNeuralGpuMsFloorPerMegapixel = 0.59;
+
+inline double NeuralGpuMsFloor(uint32_t width, uint32_t height)
+{
+    return kNeuralGpuMsFloorPerMegapixel * (double(width) * double(height) / 1000000.0);
+}
+
+// No samples at all means the build carries no timing instrumentation (such
+// builds report the ms fields as zero), so a missing measurement is never a
+// verdict against the run.
+inline bool NeuralTimingClearsFloor(const NeuralRenderTiming& timing, uint32_t width, uint32_t height)
+{
+    return timing.samples == 0 || timing.neuralGpuMsP50 >= NeuralGpuMsFloor(width, height);
+}
+
 struct NeuralRuntimeEvidence {
     bool upscalingOff{};
     bool inlineInterceptionContract{};

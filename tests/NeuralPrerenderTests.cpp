@@ -867,7 +867,10 @@ public:
     std::optional<int> failCaptureAt,failCaptureFrom,cutAtCapture,mismatchAtCapture;
     NeuralRenderFailure captureFailure{NeuralRenderFailure::Neural};
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
-    double neuralGpuMs{};uint64_t peakVramMiB{};uint32_t historyGeneration{};
+    // A plausible healthy 1080p median (receipts on this machine read 3.68 to
+    // 3.72 ms); the render refuses a job whose median falls under the
+    // per-geometry floor, so the default has to look like real neural work.
+    double neuralGpuMs{3.7};uint64_t peakVramMiB{};uint32_t historyGeneration{};
     GuideControls controls;
     std::vector<int64_t> submitted,captured;std::vector<bool> resets;std::vector<FrameIdentity> ids;
 };
@@ -1294,6 +1297,41 @@ void offline_range_render_prerolls_without_capture_and_encodes_only_the_range_te
     CHECK_EQ(uint64_t{10},result.timing.samples);CHECK_EQ(2.5,result.timing.neuralGpuMsP50);
     CHECK_EQ(2.5,result.timing.neuralGpuMsP95);CHECK_EQ(2.5,result.timing.neuralGpuMsMax);
     CHECK_EQ(uint64_t{512},result.timing.peakLocalVramMiB);
+}
+
+// A worker that stops presenting after a feature recreate still reports full
+// frame, evaluation and evidence counters, so only the GPU cost separates it
+// from a real render: 0.46 ms per frame at 1920x1080 was the measured
+// DLAA-only output, and 3.26 ms is the lowest healthy median this project has
+// evidence for (docs/BENCHMARK.md reference run, same GPU and geometry).
+void offline_render_refuses_a_dlaa_only_median_neural_gpu_time_test()
+{
+    const auto hdRequest=[](const std::filesystem::path& directory){
+        auto request=OfflineRequest(directory);request.width=1920;request.height=1080;return request;
+    };
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        evaluator.neuralGpuMs=0.46;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(hdRequest(fixture.Path()),{},{});
+        CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(NeuralRenderFailure::Neural,result.failure);
+        // The refusal has to carry the numbers it judged, both to the user and
+        // into the receipt.
+        CHECK_EQ(uint64_t{5},result.timing.samples);CHECK_EQ(0.46,result.timing.neuralGpuMsP50);
+        CHECK(result.detail.find(L"0.46")!=std::wstring::npos);
+        CHECK(result.detail.find(L"1920x1080")!=std::wstring::npos);
+    }
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        evaluator.neuralGpuMs=3.26;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(hdRequest(fixture.Path()),{},{});
+        CHECK(result.ok);CHECK_EQ(NeuralRenderFailure::None,result.failure);
+        CHECK_EQ(uint64_t{5},result.frameCount);CHECK_EQ(3.26,result.timing.neuralGpuMsP50);
+    }
+    // A build without timing instrumentation reports no samples at all, which
+    // is a missing measurement rather than a missing neural pass.
+    CHECK(NeuralTimingClearsFloor(NeuralRenderTiming{},3840,2160));
 }
 
 void offline_range_start_without_preroll_resets_on_the_first_captured_frame_test()
@@ -2598,6 +2636,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_rejects_retry_when_only_abandoned_attempt_advanced_feature18_receipt_test();
     offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test();
     offline_range_render_prerolls_without_capture_and_encodes_only_the_range_test();
+    offline_render_refuses_a_dlaa_only_median_neural_gpu_time_test();
     offline_range_start_without_preroll_resets_on_the_first_captured_frame_test();
     offline_single_frame_preview_encodes_exactly_one_frame_test();
     offline_range_outside_the_source_fails_as_source_before_opening_test();

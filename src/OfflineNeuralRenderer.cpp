@@ -1408,17 +1408,29 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
     result.evidence=ParseNeuralRuntimeEvidence(evidenceProvider());
     result.historyResets=attempt.historyResets;
+    // Summarized before the verdicts below so a refusal carries the numbers it
+    // was based on into the receipt.
+    result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
     if(!result.evidence.Valid()||
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence did not advance after captured rendering or contained a later failure.");
+    }
+    if(!NeuralTimingClearsFloor(result.timing,request.width,request.height)){
+        std::wostringstream detail;
+        detail<<std::fixed<<std::setprecision(2)
+              <<L"The neural pass did not run: median neural GPU time was "<<result.timing.neuralGpuMsP50
+              <<L" ms per frame at "<<request.width<<L"x"<<request.height<<L", below the "
+              <<NeuralGpuMsFloor(request.width,request.height)
+              <<L" ms floor for that geometry, so the frames are upscaler output. "
+              <<L"Check that the neural add-on is loaded and that feature 18 stays armed, then render again.";
+        return fail(NeuralRenderFailure::Neural,detail.str());
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
     result.nativeEvaluations=attempt.evaluations;
     result.verifiedNeuralFrames=attempt.frames;
     result.firstTimestamp100ns=attempt.firstTimestamp;
     result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration;
-    result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
     emit(NeuralRenderPhase::Ready,attempt.frames,attempt.bytes,false);
     return result;
 }
