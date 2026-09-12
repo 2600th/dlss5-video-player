@@ -96,6 +96,22 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest);
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes);
 bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest);
 
+// Why a promotion did not publish. The publish gate reported one verdict for
+// every reason, so a rename that lost to an antivirus scan of the freshly
+// written entry was indistinguishable from a digest mismatch, and a finished
+// render was discarded with nothing to tell the two apart.
+struct NeuralCachePromotion {
+    enum class Stage {
+        Published, Rejected, PayloadDigest, ManifestRejected, SidecarDigest,
+        ManifestWrite, ManifestReread, ExistingEntry, StagingCleanup, Move, Reopen
+    };
+    Stage stage = Stage::Published;
+    // Win32 error and attempts from the rename that publishes the entry.
+    unsigned long win32Error = 0;
+    unsigned attempts = 0;
+};
+const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage);
+
 class NeuralCacheManager {
 public:
     // An empty root prefers <executable directory>/cache/v1, with LocalAppData
@@ -116,9 +132,11 @@ public:
     std::optional<std::filesystem::path> BeginSourceStaging(std::string_view key);
     std::optional<std::filesystem::path> BeginRenderStaging(std::string_view key);
     bool PromoteSource(std::string_view key, const std::filesystem::path& staging,
-                       NeuralCacheManifest manifest);
+                       NeuralCacheManifest manifest,
+                       NeuralCachePromotion* diagnostic = nullptr);
     bool PromoteRender(std::string_view key, const std::filesystem::path& staging,
-                       NeuralCacheManifest manifest);
+                       NeuralCacheManifest manifest,
+                       NeuralCachePromotion* diagnostic = nullptr);
     bool MarkInvalid(const std::filesystem::path& staging);
     bool Quarantine(const NeuralCacheEntry& entry);
     // Removes only this exact owned cache entry. Missing entries succeed.
@@ -137,7 +155,8 @@ private:
     std::optional<NeuralCacheEntry> Lookup(NeuralCacheEntryKind kind,
                                            std::string_view key) const;
     bool Promote(NeuralCacheEntryKind kind, std::string_view key,
-                 const std::filesystem::path& staging, NeuralCacheManifest manifest);
+                 const std::filesystem::path& staging, NeuralCacheManifest manifest,
+                 NeuralCachePromotion* diagnostic);
     bool Remove(NeuralCacheEntryKind kind, std::string_view key);
 
     std::filesystem::path root_;

@@ -3428,11 +3428,20 @@ private:
                     const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&NeuralPublishDurationsMatch(probe.duration100ns,completion->result.duration100ns,expectedDuration100ns,joinedDurationTolerance);
                     NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
                     const bool manifestReusable=IsReusableNeuralCacheManifest(publishCandidate);
-                    if(!CanPublishNeuralCompletion(completion->result.ok,probeMatches,manifestReusable)||!cache.PromoteRender(renderKey,*staging,manifest)){
-                        // This gate discarded a finished render once and left nothing to diagnose it with.
-                        LOG("Neural publish refused: renderOk="<<completion->result.ok<<" manifestReusable="<<manifestReusable<<" probeOk="<<probe.ok<<" probe="<<probe.width<<"x"<<probe.height<<" expected="<<width<<"x"<<height<<" probeFrames="<<probe.frameCount<<" resultFrames="<<completion->result.frameCount<<" probeDuration="<<probe.duration100ns<<" resultDuration="<<completion->result.duration100ns<<" expectedDuration="<<expectedDuration100ns<<" tolerance="<<joinedDurationTolerance<<" parts="<<joinedParts<<".");
-                        cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;
+                    const bool gate=CanPublishNeuralCompletion(completion->result.ok,probeMatches,manifestReusable);
+                    NeuralCachePromotion promotion{};
+                    const bool published=gate&&cache.PromoteRender(renderKey,*staging,manifest,&promotion);
+                    if(!published){
+                        // This gate discarded a finished render once and left nothing to diagnose it
+                        // with; then it did it again for a rename an antivirus scan was holding, and
+                        // the numbers below all agreed. Both halves of the verdict are named now.
+                        LOG("Neural publish refused: gate="<<gate<<" promoteStage="<<NeuralCachePromotionStageName(promotion.stage)
+                            <<" promoteError="<<promotion.win32Error<<" renameAttempts="<<promotion.attempts
+                            <<" renderOk="<<completion->result.ok<<" manifestReusable="<<manifestReusable<<" probeOk="<<probe.ok<<" probe="<<probe.width<<"x"<<probe.height<<" expected="<<width<<"x"<<height<<" probeFrames="<<probe.frameCount<<" resultFrames="<<completion->result.frameCount<<" probeDuration="<<probe.duration100ns<<" resultDuration="<<completion->result.duration100ns<<" expectedDuration="<<expectedDuration100ns<<" tolerance="<<joinedDurationTolerance<<" parts="<<joinedParts<<".");
+                        if(!cache.MarkInvalid(*staging))LOG("The refused staging directory could not be set aside either: "<<WideToUtf8(staging->wstring()));
+                        completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;
                     }
+                    if(promotion.attempts>1)LOG("Neural cache entry published after "<<promotion.attempts<<" rename attempts; the entry was held by another process.");
                     if(const auto promoted=cache.LookupRender(renderKey)){completion->neuralPath=promoted->payloadPath;completion->receiptPath=promoted->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
                 }
             finish:

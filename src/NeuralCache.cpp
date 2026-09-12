@@ -340,6 +340,35 @@ std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::
     return writableRoot;
 }
 
+// A directory cannot be renamed while any file inside it is open, and the file
+// this one just finished writing is a few hundred megabytes that an antivirus
+// scanner opens the instant it is closed. Publishing a render is a rename, so
+// one attempt throws a finished render away for a condition that clears itself
+// in well under a second. Only the sharing errors are retried; a wrong path or
+// a missing directory still fails immediately.
+constexpr unsigned kRenameAttempts = 24;
+constexpr DWORD kRenameDelayMs = 125;
+
+bool TransientRenameError(DWORD error)
+{
+    return error == ERROR_SHARING_VIOLATION || error == ERROR_ACCESS_DENIED ||
+           error == ERROR_LOCK_VIOLATION || error == ERROR_USER_MAPPED_FILE;
+}
+
+bool RenameDirectory(const std::filesystem::path& from, const std::filesystem::path& to,
+                     DWORD* lastError = nullptr, unsigned* attempts = nullptr)
+{
+    for (unsigned attempt = 1; attempt <= kRenameAttempts; ++attempt) {
+        if (attempts) *attempts = attempt;
+        if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_WRITE_THROUGH)) return true;
+        const DWORD error = GetLastError();
+        if (lastError) *lastError = error;
+        if (!TransientRenameError(error) || attempt == kRenameAttempts) return false;
+        Sleep(kRenameDelayMs);
+    }
+    return false;
+}
+
 bool MoveToInvalidDirectory(const std::filesystem::path& root,
                             const std::filesystem::path& source,
                             std::wstring_view prefix)
@@ -348,14 +377,32 @@ bool MoveToInvalidDirectory(const std::filesystem::path& root,
         const auto destination=root/L"staging"/
             (std::wstring(prefix)+L"-"+std::to_wstring(GetCurrentProcessId())+L"-"+
              std::to_wstring(++g_stagingNonce));
-        if(MoveFileExW(source.c_str(),destination.c_str(),MOVEFILE_WRITE_THROUGH))return true;
-        const DWORD error=GetLastError();
+        DWORD error=ERROR_SUCCESS;
+        if(RenameDirectory(source,destination,&error))return true;
         if(error!=ERROR_ALREADY_EXISTS&&error!=ERROR_FILE_EXISTS)return false;
     }
     return false;
 }
 
 } // namespace
+
+const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage)
+{
+    switch (stage) {
+    case NeuralCachePromotion::Stage::Published: return "published";
+    case NeuralCachePromotion::Stage::Rejected: return "rejected-request";
+    case NeuralCachePromotion::Stage::PayloadDigest: return "payload-digest";
+    case NeuralCachePromotion::Stage::ManifestRejected: return "manifest-rejected";
+    case NeuralCachePromotion::Stage::SidecarDigest: return "sidecar-digest";
+    case NeuralCachePromotion::Stage::ManifestWrite: return "manifest-write";
+    case NeuralCachePromotion::Stage::ManifestReread: return "manifest-reread";
+    case NeuralCachePromotion::Stage::ExistingEntry: return "existing-entry";
+    case NeuralCachePromotion::Stage::StagingCleanup: return "staging-cleanup";
+    case NeuralCachePromotion::Stage::Move: return "rename";
+    case NeuralCachePromotion::Stage::Reopen: return "reopen";
+    }
+    return "unknown";
+}
 
 std::optional<std::string> Sha256Bytes(std::string_view bytes)
 {
@@ -725,14 +772,22 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::LookupRender(std::string_vie
 
 bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key,
                                  const std::filesystem::path& staging,
-                                 NeuralCacheManifest manifest)
+                                 NeuralCacheManifest manifest,
+                                 NeuralCachePromotion* diagnostic)
 {
+    NeuralCachePromotion report{};
+    const auto fail = [&](NeuralCachePromotion::Stage stage) {
+        report.stage = stage;
+        if (diagnostic) *diagnostic = report;
+        return false;
+    };
     if (!valid_ || !ValidKey(key) || !OwnsPath(staging) ||
-        staging.parent_path().filename() != L"staging") return false;
+        staging.parent_path().filename() != L"staging")
+        return fail(NeuralCachePromotion::Stage::Rejected);
     const auto payload = staging /
         (kind == NeuralCacheEntryKind::Source ? L"source.mkv" : L"neural.mkv");
     const auto digest = Sha256File(payload);
-    if (!digest) return false;
+    if (!digest) return fail(NeuralCachePromotion::Stage::PayloadDigest);
     manifest.kind = kind;
     manifest.state = NeuralCacheState::Complete;
     manifest.schema = kSchema;
@@ -755,18 +810,21 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     } else {
         manifest.neuralDigest = *digest;
     }
-    if (!IsReusableNeuralCacheManifest(manifest)) return false;
+    if (!IsReusableNeuralCacheManifest(manifest))
+        return fail(NeuralCachePromotion::Stage::ManifestRejected);
     if (!manifest.settingsDigest.empty() &&
-        Sha256File(staging / L"neural-settings.ini") != manifest.settingsDigest) return false;
+        Sha256File(staging / L"neural-settings.ini") != manifest.settingsDigest)
+        return fail(NeuralCachePromotion::Stage::SidecarDigest);
     if (!manifest.receiptDigest.empty() &&
-        Sha256File(staging / L"receipt.json") != manifest.receiptDigest) return false;
+        Sha256File(staging / L"receipt.json") != manifest.receiptDigest)
+        return fail(NeuralCachePromotion::Stage::SidecarDigest);
     const auto manifestPath = staging / L"manifest.json";
     {
         std::ofstream output(manifestPath, std::ios::binary | std::ios::trunc);
-        if (!output.is_open()) return false;
+        if (!output.is_open()) return fail(NeuralCachePromotion::Stage::ManifestWrite);
         const std::string serialized = SerializeNeuralCacheManifest(manifest);
         output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
-        if (!output.good()) return false;
+        if (!output.good()) return fail(NeuralCachePromotion::Stage::ManifestWrite);
     }
     {
         std::ifstream input(manifestPath, std::ios::binary);
@@ -774,7 +832,7 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
                                      std::istreambuf_iterator<char>()};
         const auto reparsed = ParseNeuralCacheManifest(serialized);
         if (!reparsed || *reparsed != manifest || !IsReusableNeuralCacheManifest(*reparsed))
-            return false;
+            return fail(NeuralCachePromotion::Stage::ManifestReread);
     }
 
     const auto destination = root_ /
@@ -783,30 +841,37 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     if (Lookup(kind, key)) {
         std::error_code cleanupError;
         std::filesystem::remove_all(staging, cleanupError);
-        return !cleanupError;
+        if (cleanupError) return fail(NeuralCachePromotion::Stage::StagingCleanup);
+        if (diagnostic) *diagnostic = report;
+        return true;
     }
     std::error_code existsError;
     if (std::filesystem::exists(destination, existsError)) {
-        if (existsError) return false;
-        if(!MoveToInvalidDirectory(root_,destination,L"invalid-existing"))return false;
+        if (existsError) return fail(NeuralCachePromotion::Stage::ExistingEntry);
+        if (!MoveToInvalidDirectory(root_, destination, L"invalid-existing"))
+            return fail(NeuralCachePromotion::Stage::ExistingEntry);
     }
-    if (!MoveFileExW(staging.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
-        return false;
-    return Lookup(kind, key).has_value();
+    if (!RenameDirectory(staging, destination, &report.win32Error, &report.attempts))
+        return fail(NeuralCachePromotion::Stage::Move);
+    if (!Lookup(kind, key).has_value()) return fail(NeuralCachePromotion::Stage::Reopen);
+    if (diagnostic) *diagnostic = report;
+    return true;
 }
 
 bool NeuralCacheManager::PromoteSource(std::string_view key,
                                        const std::filesystem::path& staging,
-                                       NeuralCacheManifest manifest)
+                                       NeuralCacheManifest manifest,
+                                       NeuralCachePromotion* diagnostic)
 {
-    return Promote(NeuralCacheEntryKind::Source, key, staging, std::move(manifest));
+    return Promote(NeuralCacheEntryKind::Source, key, staging, std::move(manifest), diagnostic);
 }
 
 bool NeuralCacheManager::PromoteRender(std::string_view key,
                                        const std::filesystem::path& staging,
-                                       NeuralCacheManifest manifest)
+                                       NeuralCacheManifest manifest,
+                                       NeuralCachePromotion* diagnostic)
 {
-    return Promote(NeuralCacheEntryKind::Render, key, staging, std::move(manifest));
+    return Promote(NeuralCacheEntryKind::Render, key, staging, std::move(manifest), diagnostic);
 }
 
 bool NeuralCacheManager::MarkInvalid(const std::filesystem::path& staging)

@@ -420,6 +420,59 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(std::filesystem::is_directory(repairCollision));
 }
 
+// A finished render used to be discarded because publishing it is a directory
+// rename, and a directory cannot be renamed while any file inside it is open -
+// which is exactly what an antivirus scanner does to a freshly written 186 MB
+// entry. The rename now waits the scan out, and a promotion that still fails
+// says which step failed rather than one shared verdict.
+void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    CHECK(manager.Valid());
+
+    const std::string renderKey(64, '7');
+    const auto staging = manager.BeginRenderStaging(renderKey);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    const auto payload = *staging / L"neural.mkv";
+    WriteBytes(payload, "neural-frames");
+    const auto manifest = CompleteRenderManifest();
+
+    // FILE_SHARE_READ|WRITE without DELETE is what a scanner holds, and it is
+    // what blocks the rename of the directory the file sits in.
+    const HANDLE scanner = CreateFileW(payload.c_str(), GENERIC_READ,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(scanner != INVALID_HANDLE_VALUE);
+    if (scanner == INVALID_HANDLE_VALUE) return;
+    std::thread release([scanner] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        CloseHandle(scanner);
+    });
+    NeuralCachePromotion promotion{};
+    const bool published = manager.PromoteRender(renderKey, *staging, manifest, &promotion);
+    release.join();
+    CHECK(published);
+    CHECK(manager.LookupRender(renderKey).has_value());
+    CHECK(promotion.stage == NeuralCachePromotion::Stage::Published);
+    // It cannot have succeeded on the first try: the file was still open then.
+    CHECK(promotion.attempts > 1);
+    CHECK_EQ(std::string("rename"),
+             std::string(NeuralCachePromotionStageName(NeuralCachePromotion::Stage::Move)));
+
+    const auto second = manager.BeginRenderStaging(std::string(64, '8'));
+    CHECK(second.has_value());
+    if (!second) return;
+    WriteBytes(*second / L"neural.mkv", "neural-frames");
+    auto missingSidecar = manifest;
+    missingSidecar.settingsDigest = std::string(64, 'a');
+    NeuralCachePromotion rejected{};
+    CHECK(!manager.PromoteRender(std::string(64, '8'), *second, missingSidecar, &rejected));
+    CHECK(rejected.stage == NeuralCachePromotion::Stage::SidecarDigest);
+    CHECK_EQ(0u, rejected.attempts);
+}
+
 void interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test()
 {
     TempDirectory fixture;
@@ -2606,6 +2659,7 @@ int wmain(int argc, wchar_t* argv[])
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
     source_and_render_promotion_are_hash_validated_and_immutable_test();
+    promotion_waits_out_a_transient_lock_and_names_the_failing_step_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
