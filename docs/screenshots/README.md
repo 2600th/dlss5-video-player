@@ -39,8 +39,8 @@ retouching or color correction. [Reproduction script](../../tools/demo-video/mak
 
 | File | State |
 | --- | --- |
-| `current/neural-playback.jpg` | Paused cached neural view; also used in the demo poster |
-| `current/original-comparison.jpg` | Original at the identical paused moment |
+| `current/neural-playback.jpg` | Was this session's paused cached neural view; **replaced on 12 September 2026** by the GTA VI capture recorded below, so the Witcher IV pair is no longer in the tree |
+| `current/original-comparison.jpg` | Was the original at the identical paused moment; **replaced on 12 September 2026** the same way |
 | `current/upcoming-games.jpg` | Five official examples in the expanded File submenu |
 | `current/recent-videos.jpg` | File menu with Recent videos and Export cached video; history submenu closed to keep local paths out of the capture |
 | `current/player-start.jpg` | Retained September 3 start-screen capture from the v0.13.0 feature implementation before its version bump |
@@ -84,12 +84,103 @@ Footage is credited to Ninja Theory/Xbox Game Studios, CD PROJEKT RED and Hangar
 13/2K respectively. Including it here documents a feature; it is not an
 endorsement, and the source-code license does not relicense it.
 
-These images document feature states, not an image-quality benchmark or an
-official NVIDIA integration. A fixed five-game selection is not a popularity
-ranking. See [example provenance](../EXAMPLE_VIDEOS.md) and
-[functional verification](../VERIFICATION-2026-09-02.md).
+## September 12, 2026: GTA VI and The Godfather, live 1440p sessions
 
-Rights to NVIDIA components belong to NVIDIA. Other third-party components,
-game footage and trademarks belong to their respective owners. The Witcher IV
-trailer footage is credited to CD PROJEKT RED. The source-code license does not
-relicense this media or imply endorsement.
+Everything in this section was captured from the shipping **v0.21.0** player on
+an RTX 5090 (driver `616.64`, DXGI `32.0.16.1664`, ReShade 6.8.0.2155, RenoDX
+4.7, DLSS-NR 310.8.0). Two sources, both fetched with the bundled yt-dlp at the
+rung this version's YouTube **Auto** now selects - the tallest up to 1440p:
+
+| Source | Video | Stream | Frames | SHA-256 |
+| --- | --- | --- | --- | --- |
+| [Grand Theft Auto VI: An Extended Look - Now Playing](https://www.youtube.com/watch?v=uphThaa97ig) (Netflix, age limit 0) | 2560x1440 VP9, 30 fps, 26.0 s, 5.26 Mbps | `bv*[height<=1440]` | 780 | `2b43b5ce5865b396db03a008bdbaeb078f1799d3f89a37bbb8e2657a916a854d` |
+| [THE GODFATHER 50th Anniversary Trailer](https://www.youtube.com/watch?v=UaVTIH8mujA) (Paramount Pictures, age limit 0) | 2560x1440 VP9, 23.976 fps, 120.119 s, 3.92 Mbps | `bv*[height<=1440]` | 2880 | `036afadb30d470ae575270c6f10de307cde43c0196df8ae4a350bb2c626d59c8` |
+
+Rockstar's own 26-minute *An Extended Look* (`tJbzMqJGH4k`) is age-restricted:
+every anonymous client is refused outright, and so is the GameSpot mirror, so no
+unauthenticated session can fetch it at any resolution. Netflix's *Now Playing*
+cut is the same footage without the gate. That is the defect this version added a
+notice for, met in its strongest form.
+
+### The two face figures
+
+`current/face-gta6.png` and `current/face-godfather.png` were produced exactly
+like the September 9 set: both halves are the identical source pixels of the
+identical frame, no scaling, retouching or tonal adjustment, labels outside the
+image, and the right half is a real render from the shipping worker
+(`NeuralWorkerTests --real-worker`, `mv=1,depth=1`, neural settings at their
+defaults). Candidate frames were proposed by OpenCV's frontal-face cascade over
+every third frame and then chosen by eye for a large, lit, unoccluded face with
+open eyes; the selected scenes show fully clothed characters and no sexual
+content.
+
+Each render covers a window that **starts before the cut into the shot**, so the
+captured frame carries the temporal history a real session would have at that
+moment rather than being the first frame of a job. The neural index is the frame's
+position inside that render; it was confirmed by anchoring on the cut, which
+appears at the same place in both sequences.
+
+| Figure | Frame | Crop | Render window | Neural index | Worker result |
+| --- | --- | --- | --- | --- | --- |
+| `current/face-gta6.png` | 410 (13.67 s) | 700x880 at x=950, y=60 | 12.60-13.80 s, first frame 379 | 31 | 36/36 frames verified, neural GPU p50 5.15 ms/frame |
+| `current/face-godfather.png` | 1781 (74.28 s) | 700x880 at x=1177, y=183 | 72.30-74.40 s, first frame 1734, cut at 1757 | 47 | 51/51 frames verified, neural GPU p50 5.11 ms/frame |
+
+Reproduce with [the same script](../../tools/demo-video/make-face-comparison.py):
+
+```
+python tools/demo-video/make-face-comparison.py gta6-netflix.mp4 gta6-neural.mkv \
+    --frame 410 --neural-frame 31 --crop 950,60,700,880 --output docs/screenshots/current/face-gta6.png
+python tools/demo-video/make-face-comparison.py godfather-source.mp4 godfather-neural.mkv \
+    --frame 1781 --neural-frame 47 --crop 1177,183,700,880 --output docs/screenshots/current/face-godfather.png
+```
+
+### The player captures
+
+Each pair is one paused frame with only the view switched: the clip was rendered
+once by a live session, the toggle was turned off so the frames stayed retained,
+the timeline was pressed to land on the frame, and `Ctrl+Alt+D` then switched
+between the retained neural frame and the original. No seek happens between the
+two captures.
+
+The captured rectangle is the window's **visible** frame from
+`DWMWA_EXTENDED_FRAME_BOUNDS` - 1442 x 932 - not `GetWindowRect`, which includes
+an invisible resize border and drags a strip of the desktop into the shot. Each
+file is one JPEG encoding at quality 95 with no chroma subsampling; no UI
+replacement, face retouching, sharpening or colour adjustment was applied.
+
+| File | State |
+| --- | --- |
+| `current/neural-playback.jpg` | GTA VI paused at 13.17 s with the neural view attached; also the demo poster |
+| `current/original-comparison.jpg` | The same paused frame with Neural Rendering off |
+| `current/godfather-neural.jpg` | The Godfather paused at 73.98 s with the neural view attached |
+| `current/godfather-original.jpg` | The same paused frame with Neural Rendering off |
+| `current/neural-strength.jpg` | The image adjustments window over that frame, showing this version's new **Neural strength** dial at its 1.00 default |
+
+The sessions behind them, from the player's own log: 702/702 and 2875/2875 frames
+verified, `failure=none`, `lock=ok`, both published their cache entry. The
+Godfather session is also the one that proved this version's publish fix - it
+published *after 20 rename attempts* while a file handle was deliberately held on
+the finished entry.
+
+`current/upcoming-games.jpg`, `current/recent-videos.jpg` and
+`current/player-start.jpg` are unchanged September 3 captures of menus and the
+start screen: they carry no video footage, and the commands they show are the
+same. The September 3 and September 9 figures above are left exactly as they were
+recorded.
+
+Footage is credited to Rockstar Games (via Netflix's *Now Playing* upload) and
+Paramount Pictures. Including it here documents a feature; it is not an
+endorsement, and the source-code licence does not relicense it.
+
+These images document feature states, not an image-quality benchmark or an
+official NVIDIA integration. A fixed example selection is not a popularity
+ranking. See [example provenance](../EXAMPLE_VIDEOS.md),
+[functional verification](../VERIFICATION-2026-09-02.md) and the
+[12 September RTX 5090 record](../VERIFICATION-2026-09-12-RTX5090.md).
+
+Rights to NVIDIA components belong to NVIDIA. Other third-party components, game
+and film footage and trademarks belong to their respective owners: The Witcher IV
+to CD PROJEKT RED, Hellblade II to Ninja Theory/Xbox Game Studios, Cyberpunk 2077
+to CD PROJEKT RED, Mafia: The Old Country to Hangar 13/2K, Grand Theft Auto VI to
+Rockstar Games and The Godfather to Paramount Pictures. The source-code licence
+does not relicense this media or imply endorsement.

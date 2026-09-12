@@ -1,10 +1,12 @@
 # Rebuild the 30-second demonstration
 
 Small Remotion 4.0.520 composition around genuine player recordings. The official
-[Remotion agent skills](https://www.remotion.dev/docs/ai/skills) were evaluated
-and applied: `remotion-create`, `remotion-markup`, `remotion-render`, and
-`remotion-studio`, from skills revision
-`54e9b19a612897171e0b3b242e01c2badba4a272`.
+[Remotion agent skills](https://www.remotion.dev/docs/ai/skills) were read and
+applied for this edit - `remotion-best-practices`, `remotion-markup` and
+`remotion-render`, at skills version `4.0.523` - which is why the composition
+uses `<CanvasImage>`, `<Video>` from `@remotion/media`, `Interactive.Div` for the
+text blocks, `useVideoConfig()` for the frame rate and inline `interpolate()`
+calls instead of precomputed CSS transforms.
 
 From this directory, with Node.js and FFmpeg available:
 
@@ -16,46 +18,46 @@ npm run poster
 npm run render
 ```
 
-`prepare-inputs.ps1` copies the maintained hero and recovers the 9-second and
-15-second genuine app recordings from the delivery MP4. This works from a clean
-checkout, but adds one lossy encoding generation. For the original capture
-quality, supply the session's ignored raw directory instead:
+`prepare-inputs.ps1` copies the two maintained stills and recovers the 11-second
+and 16-second genuine app recordings from the delivered MP4. That works from a
+clean checkout but adds one lossy encoding generation. For the original capture
+quality, point it at the session's ignored working directory instead:
 
 ```powershell
-./prepare-inputs.ps1 -RawCaptureDirectory ../../build/media-refresh/witcher
+./prepare-inputs.ps1 -RawCaptureDirectory ../../build/media-refresh-20260912/takes2
 ```
 
-The raw inputs are `face-raw.mp4` (take at 9–18 seconds) and
-`playback-on-raw.mp4` (take at 1–16 seconds). Both targeted 30 fps using
-FFmpeg's desktop `gdigrab`, with a 1442 × 932 region at screen position 59,52.
-The recordings contain capture timestamp gaps; Remotion samples them at 30 fps
-while preserving elapsed time and playback speed.
-These coordinates describe this session only. For a new recording, use the
-computer-use skill to observe the current window and derive fresh bounds.
-Capture the desktop region: client-only GDI capture can miss the D3D surface.
-Keep the player foreground and helper windows out of the recorded region.
-Wait for cache promotion to finish before opening its files in FFmpeg or other
-inspection tools: an external reader can prevent Windows from moving staging
-files. Inspect a separate copy when the player is still working.
+The raw inputs are `godfather-toggle.mp4` (11 s) and `gta6-play.mp4` (16 s), both
+recorded on 12 September 2026 with FFmpeg's `gdigrab` at 30 fps over the player's
+**visible** window frame - `DWMWA_EXTENDED_FRAME_BOUNDS`, 1442 x 932, not
+`GetWindowRect`, which includes an invisible resize border and would drag a strip
+of the desktop into the shot. `build/media-refresh-20260912/capture.py` is the
+throwaway driver that placed the window, seeked by pressing the player's own
+timeline, pressed the real hotkeys and started the recorder; it is not part of the
+product.
 
-Use the real toggle in the paused comparison, then leave Neural Rendering On
-throughout moving playback and the closing card. Do not simulate UI or change
-playback speed. Keep source resolution, neutral image adjustments and upscaling-off
-settings. Check the selected faces for blinking and blur before recording.
-This edit uses The Witcher IV's daylight village sequence. Inspect every shot
-used in the export for nudity, sexual activity and sexualized imagery.
+Both takes are live neural rendering as it ran on an RTX 5090: the first is the
+real `Ctrl+Alt+D` toggle on a paused frame, the second is uninterrupted playback
+with the neural view left on. Do not simulate UI, retime a take or change playback
+speed. Keep source resolution, neutral image adjustments and upscaling off.
+Check the selected faces for blinking and blur before recording, and inspect
+every shot used in the export for nudity, sexual activity and sexualized imagery.
 
-The composition is 900 frames at 30 fps. The two moving/paused recordings remain
-at native capture size; titles and notices sit outside them. `src/index.tsx`
-defines the edit. `remotion.config.ts` sets H.264, yuv420p and CRF 19. The output
-is deliberately silent. There are no remote assets or runtime network calls
-in the composition.
+The composition is 900 frames at 30 fps: title card to 3 s, the paused toggle to
+13 s, moving playback to 28 s, closing card to 30 s. `chapters` in
+`src/index.tsx` holds those boundaries and the two middle ones are the lengths of
+the recordings, so nothing is stretched. The recordings stay at their captured
+1442 x 932 size; titles and notices sit outside them. `remotion.config.ts` sets
+H.264, `yuv420p` and CRF 19. The output is deliberately silent. There are no
+remote assets or runtime network calls in the composition.
 
 The optional `make-face-comparison.py ORIGINAL NEURAL` requires Python, Pillow
-and FFmpeg. It extracts frame 3375 and produces identical 700 × 880 unscaled
-crops for the documentation. The two arguments must refer to the synchronized
-source and cache documented in [screenshot provenance](../../docs/screenshots/README.md).
+and FFmpeg. It extracts one frame from each side and writes identical unscaled
+700 x 880 crops for the documentation; `--neural-frame` is the index inside the
+render, which starts at the render range's first frame rather than the source's.
+See [screenshot provenance](../../docs/screenshots/README.md) for the exact
+arguments used for the two current figures.
 
-After rendering, preview the whole file, inspect the cuts at 3, 12 and 27 seconds,
-verify all 900 frames decode, and confirm 1920 × 1080 / 30 fps with no audio.
+After rendering, preview the whole file, inspect the cuts at 3, 13 and 28 seconds,
+verify all 900 frames decode, and confirm 1920 x 1080 / 30 fps with no audio.
 Do not interpret a successful export as proof of image-quality improvement.
