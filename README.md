@@ -20,12 +20,12 @@ H.264, no sound. [How it was captured](docs/media/README.md).
 
 ## Download
 
-**v0.20.1** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.20.1)
+**v0.21.0** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.20.1-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.20.1-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.21.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.21.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -68,6 +68,23 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.21.0** (2026-09-12). YouTube trailers were arriving at the lowest bitrate
+YouTube offers. "Auto" asked for exactly 1080p, which on a trailer is the bottom
+of the ladder: 3899 kbps, where the same trailer has 7854 at 1440p and 20764 at
+2160p. Auto now takes the best rung up to 1440p, so the picture the model has to
+work with carries about twice the detail. Separately, some videos are
+age-restricted, and without a sign-in YouTube hands out a single 640x360 stream
+for them; the player played that silently and rendered it. It now says so on the
+status line, and names the sign-in as the reason. Three of the six bundled
+trailers are affected.
+
+There is also a new **Neural strength** slider under `Ctrl+E`, 0 to 200 %. It
+re-mixes the frame already on screen instead of re-rendering it, so unlike every
+model setting it costs nothing: 100 % is the render as it is, below that mixes
+back toward the original, above that pushes the model's own change further. And
+three ways a finished render could be lost are fixed, including one that threw
+away a cache entry after verifying all 2607 of its frames.
 
 **0.20.1** (2026-09-12). Two things a neural session did to itself. Playback
 dropped 44 % of its frames - a 1080p30 trailer played 1415 of 2525 - because
@@ -178,9 +195,28 @@ Everything you set is kept between launches: volume, view, upscaling, YouTube
 quality, image adjustments, neural settings and guide switches.
 
 Defaults on a fresh install: neural rendering on, DLSS upscaling off (1440p
-selected when you turn it on), YouTube quality Auto (exact 1080p if it exists,
-otherwise the best available up to 4K). Frame Generation has no backend and
-stays unavailable.
+selected when you turn it on), YouTube quality Auto. Frame Generation has no
+backend and stays unavailable.
+
+Auto takes the tallest rung up to 1440p, then the highest advertised video
+bitrate inside that rung. It used to ask for exactly 1080p, which on YouTube is
+the last rung still offered in H.264 and the thinnest one on the page. The same
+trailer, as the bundled yt-dlp 2026.08.19 lists it (The Last of Us Part II
+Remastered, `Tg1oRHd5zlw`, checked 12 September 2026):
+
+| Rung | Video bitrate | Codec |
+| --- | --- | --- |
+| 1080p60 | 3899 kbps | avc1.64002a |
+| 1440p60 | 7854 kbps | vp9 |
+| 2160p60 | 20764 kbps | vp9 |
+
+GTA VI Trailer 2 lists 4604, 9282 and 18971 kbps for the same three rungs.
+2160p is still there under **Video > YouTube source quality**, where Auto is
+listed as "Auto (up to 1440p, highest bitrate)", and it stays something you ask
+for rather than the default: 1440p is roughly twice the bitrate for about 1.8x
+the render cost (8.4 to 15.4 ms a frame on an RTX 5090), while 4K costs 42 ms a
+frame, 0.78x real time, four times the pixels to hold in VRAM and cache, and
+5.3x the bytes to pull down on the trailer above, 4.1x on GTA VI Trailer 2.
 
 More on the cache, settings and export in [USAGE.md](docs/USAGE.md). The
 trailer list is in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
@@ -257,6 +293,13 @@ move; silhouettes and framing do not. Judge your own footage on its own preview.
 - Subtitles stay as separate tracks. No in-player subtitle display, no burn-in,
   no queue, no HDR, no resume of an interrupted render across restarts.
 - YouTube: public, non-DRM videos only, no login. Availability can change.
+  Age-restricted videos are the awkward case: YouTube keeps the full ladder for
+  a signed-in session, so an anonymous one can be handed a single legacy
+  640x360 format instead, and which of the two you get is not stable between
+  calls. Three of the six bundled trailers are age-restricted. When the source
+  comes back small the status line names the height and rate that arrived and
+  says the video is age-restricted, instead of playing 360p without comment.
+  Details in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 - History is five videos, not a size quota. Big videos take space.
   **Advanced > Clear Neural Cache** frees it.
 - The menu bar shows `↑ Update <version>` when a newer release exists;

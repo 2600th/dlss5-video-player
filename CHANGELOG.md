@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.21.0 - 2026-09-12
+
+- A completed neural render no longer loses its cache entry at the publish gate.
+  A live session's entry is `ConcatenateMedia`'s join of the segment files the
+  render published, and the join took **every** segment in the index while the
+  manifest and the gate described only the last job. A session that rebased or
+  re-attached therefore labelled a file it did not match: the diagnostic added
+  below caught one joining 46 files of 2622 frames and 87.4 s against a result of
+  1647 frames and 54.9 s, and the gate correctly refused a render that had just
+  verified every frame it produced. The join now takes exactly this job's
+  segments, starting at the index the session handed it, so the file matches its
+  own label; earlier coverage stays in the index for playback to keep reading.
+  The refusal was also undiagnosable, so it now logs every number it judged
+  (both geometries, both frame counts, all three durations, the tolerance and the
+  part count) before it gives up. Live proof on an RTX 5090 / 616.64:
+  `frames=2656/2656 verified=2656` and `frames=2082/2082 verified=2082` sessions
+  both `published its cache entry`
+  (docs/VERIFICATION-2026-09-12-RTX5090.md).
+- The publish tolerance is also sized to the join now
+  (`RuntimePolicy::JoinedMediaDurationTolerance100ns`): one frame of playback
+  jitter plus one 1 ms Matroska rounding per joined file, 343334 ticks for a
+  single file and 773334 for a 44-part join at 30 fps, because those roundings
+  sum across a concatenation instead of cancelling. The frame count is still
+  compared exactly, since a join that loses a frame is a real defect.
+- Re-toggling neural rendering at full coverage no longer starts a doomed job.
+  The session head is an integer number of frames and the range end is a probed
+  duration, so a residual below one frame passed the "is there anything left to
+  render" guard and spawned a worker that immediately refused its own range with
+  `The requested render range lies outside the source`.
+  `RuntimePolicy::RenderRangeIsCovered` now treats a remainder shorter than one
+  frame as coverage. It was reachable through the publish failure above, which is
+  how it was found.
+- The render now refuses a run that produced frames without running the neural
+  pass. The evidence chain checked that feature 18 was created, evaluated and
+  that every frame was verified, all of which a DLAA-only run satisfies: one
+  reported `frames=900/900 verified=900` at 0.46 ms of neural GPU time per frame
+  against a healthy 5.7 ms. The median it cannot fake was already measured and
+  already in `receipt.json`, so `NeuralTimingClearsFloor` now requires
+  0.59 ms per output megapixel, 1.223 ms at 1080p. That is the geometric midpoint
+  of the 0.46 ms failure and the 3.26 ms lowest healthy median on record, 2.66x
+  from each, and the risk is one-sided: per-pixel cost only rises on slower
+  hardware. A build with no timing instrumentation reports zero samples and is
+  still accepted.
+- New **Neural strength** dial in the image adjustments window, 0 to 200 percent,
+  which re-composes the frame already on screen instead of re-rendering it. Every
+  existing strength-like control is a model parameter in `ReShade.ini`, and that
+  block is hashed into the render identity, so changing one costs a full render:
+  a median of 10.6 s per cold single-frame preview against 1.03 s from cache.
+  The add-on overwrites the neural output in place, so there is nothing to
+  re-evaluate, but the presentation shader already holds the composed neural
+  frame and the original side by side for the comparison modes. Below 100 percent
+  the dial mixes back toward the original; above it, it extends the luminance
+  ratio the model produced - a ratio, never an additive delta, with a two-sided
+  guard, a 1/512 floor, one scalar across the triple and peak normalisation on
+  encode (RenoDX's rules, MIT, read directly). At 100 percent the composite is
+  not entered, and the capture and export paths force it there, so no cached
+  render, export, digest or cache key changes. Measured on one paused frame:
+  52.9 % of pixels move at 0 percent, 51.7 % at 200 percent, and of the pixels
+  the model itself moved, 99.8 % follow its direction under the extension.
+- Roadmap item 0 is closed. The report that `renodx-dlss5` 4.6/4.7 faults on
+  every evaluate from driver 616.64 did not reproduce in six live sessions on an
+  RTX 5090 on that driver with the pinned stack: `2805/2805`, `2779/2779`,
+  `2697/2697`, `2607/2607` verified, `failure=none`, `lock=ok`, ~7.0 ms/frame.
+  The pin stands and the warning against blind runtime upgrades stands;
+  `docs/ECOSYSTEM_REVIEW.md` also had its citations re-verified against 0.20.1,
+  29 of which had moved since v0.17.1.
+- YouTube **Auto** no longer pins the lowest-bitrate rung YouTube offers. It
+  asked for exactly 1080p, which on YouTube is the bottom of the ladder:
+  measured with the bundled yt-dlp on one trailer, 1080p is 3899 kbps, 1440p is
+  7854 and 2160p is 20764, and on a second trailer 4604 / 9282 / 18971. Auto now
+  takes the tallest rung up to 1440p and the highest advertised bitrate inside
+  it, so the same trailer arrives at about twice the bitrate for about 1.8x the
+  render cost. The cap is 1440 and not 2160 on purpose: 4K is 42 ms/frame, 0.78x
+  real time, and four times the VRAM and cache footprint. 2160p remains an
+  explicit choice in **Video > YouTube source quality**.
+- The player now says what the stream actually is, instead of playing a
+  degraded one silently. A session reported here played an age-restricted
+  trailer at `640x360` and `451 kbps` and rendered at that resolution, with
+  nothing on screen to explain it: YouTube exposes one legacy progressive format
+  to an anonymous session for those videos, and which one you get is not stable
+  between calls. The resolver now reports the selected height, its bitrate and
+  the age gate; the log names them, and the status line names them too when the
+  height is below 720, with the sign-in reason when the video is age-restricted.
+  Three of the six bundled example trailers are age-restricted
+  (docs/EXAMPLE_VIDEOS.md).
+- A recent-history entry that names a source copy the cache no longer holds is
+  ignored instead of failing a render. Clearing the cache folder, or an
+  acquisition that never finished, left the key behind; a job handed that key
+  reported a missing source, and a live session ended on it with no message at
+  all. The key is now verified against the cache before it is used, a job that
+  still finds the copy gone re-acquires the stream it is already playing rather
+  than giving up, and the case that genuinely cannot recover carries a sentence.
+
 ## 0.20.1 - 2026-09-12
 
 - Live neural playback no longer drops half its frames. A session plays the
