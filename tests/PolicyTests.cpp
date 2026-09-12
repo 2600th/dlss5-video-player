@@ -1302,11 +1302,14 @@ void youtube_source_quality_menu_is_distinct_radio_group_and_updates_test()
     CHECK(video != nullptr);
     CHECK(quality != nullptr);
 
+    // The labels come from the localizer on purpose: this test defends the
+    // entry-to-command mapping and the radio group, not the wording, which
+    // changed when Auto stopped meaning "1080p preferred".
     const std::array expected{
-        std::pair{L"Auto (1080p preferred)", app_menu::IDM_YOUTUBE_QUALITY_AUTO},
-        std::pair{L"2160p", app_menu::IDM_YOUTUBE_QUALITY_2160},
-        std::pair{L"1440p", app_menu::IDM_YOUTUBE_QUALITY_1440},
-        std::pair{L"1080p", app_menu::IDM_YOUTUBE_QUALITY_1080},
+        std::pair{localizer.Get(L"menu.youtube_quality_auto"), app_menu::IDM_YOUTUBE_QUALITY_AUTO},
+        std::pair{localizer.Get(L"menu.youtube_quality_2160"), app_menu::IDM_YOUTUBE_QUALITY_2160},
+        std::pair{localizer.Get(L"menu.youtube_quality_1440"), app_menu::IDM_YOUTUBE_QUALITY_1440},
+        std::pair{localizer.Get(L"menu.youtube_quality_1080"), app_menu::IDM_YOUTUBE_QUALITY_1080},
     };
     std::vector<MenuEntry> entries;
     if (quality) collect_menu_entries(quality, entries);
@@ -3618,7 +3621,7 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
         L"height,vbr,abr",
         L"--get-url",
         L"--print",
-        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s",
+        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
         std::wstring(url),
     };
 
@@ -3626,11 +3629,13 @@ void youtube_resolver_argument_vector_is_exact_and_ordered_test()
                            helperDirectory, url, YouTubeSourceQuality::P1080));
 }
 
-void youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test()
+void youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test()
 {
     const std::array cases{
+        // Auto climbs to the tallest rung at or below 1440p and only falls through
+        // to 2160p when a video publishes nothing shorter.
         std::pair{YouTubeSourceQuality::Auto,
-                  std::wstring_view(L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]")},
+                  std::wstring_view(L"bv*[height<=1440]+ba/b[height<=1440]/bv*[height<=2160]+ba/b[height<=2160]")},
         std::pair{YouTubeSourceQuality::P2160,
                   std::wstring_view(L"bv*[height=2160]+ba/b[height=2160]")},
         std::pair{YouTubeSourceQuality::P1440,
@@ -3641,6 +3646,44 @@ void youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fa
     for (const auto& [quality, expected] : cases) {
         CHECK_EQ(expected, YouTubeFormatSelector(quality));
     }
+}
+
+void resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test()
+{
+    const ResolveResult restricted = ParseResolverOutput(
+        "duration=167;live_status=not_live;video_available_at=0;audio_available_at=0"
+        ";selected_height=1080;video_kbps=3898.893;age_limit=18"
+        "\nhttps://v.googlevideo.com/video\nhttps://a.googlevideo.com/audio\n", 0);
+    CHECK(restricted.ok);
+    CHECK_EQ(167.0, restricted.durationSeconds);
+    CHECK_EQ(1080, restricted.selectedHeight);
+    CHECK_EQ(3898.893, restricted.videoKbps);
+    CHECK_EQ(18, restricted.ageLimit);
+
+    // yt-dlp prints NA for any field it could not fill, and these three only
+    // describe what was picked. The stream URLs are what playback needs, so an
+    // unusable metric reads as zero instead of failing a usable resolve.
+    for (const auto* metrics : {";selected_height=NA;video_kbps=NA;age_limit=NA",
+                                ";selected_height=;video_kbps=;age_limit=",
+                                ";selected_height=-1;video_kbps=-1;age_limit=-1"}) {
+        const ResolveResult result = ParseResolverOutput(
+            std::string("duration=167;live_status=not_live") + metrics +
+            "\nhttps://v.googlevideo.com/video\n", 0);
+        CHECK(result.ok);
+        CHECK_EQ(167.0, result.durationSeconds);
+        CHECK_EQ(0, result.selectedHeight);
+        CHECK_EQ(0.0, result.videoKbps);
+        CHECK_EQ(0, result.ageLimit);
+    }
+
+    const ResolveResult withoutMetrics = ParseResolverOutput(
+        "duration=167;live_status=not_live;video_available_at=1788425760;audio_available_at=0"
+        "\nhttps://v.googlevideo.com/video\n", 0);
+    CHECK(withoutMetrics.ok);
+    CHECK_EQ(int64_t{1788425760}, withoutMetrics.availableAtUnixSeconds);
+    CHECK_EQ(0, withoutMetrics.selectedHeight);
+    CHECK_EQ(0.0, withoutMetrics.videoKbps);
+    CHECK_EQ(0, withoutMetrics.ageLimit);
 }
 
 std::filesystem::path current_test_executable()
@@ -3719,6 +3762,8 @@ void youtube_bitrate_selection_uses_real_helper_without_network_test()
         {"format_id":"1440avc","url":"https://example.invalid/1440avc","ext":"mp4","height":1440,"width":2560,"vcodec":"avc1","acodec":"none","vbr":8000},
         {"format_id":"2160av1","url":"https://example.invalid/2160av1","ext":"mp4","height":2160,"width":3840,"vcodec":"av01","acodec":"none","vbr":7000},
         {"format_id":"2160vp9","url":"https://example.invalid/2160vp9","ext":"webm","height":2160,"width":3840,"vcodec":"vp9","acodec":"none","vbr":12000})";
+    const std::string ultraOnly = R"({"format_id":"2160av1","url":"https://example.invalid/2160av1","ext":"mp4","height":2160,"width":3840,"vcodec":"av01","acodec":"none","vbr":7000},
+        {"format_id":"2160vp9","url":"https://example.invalid/2160vp9","ext":"webm","height":2160,"width":3840,"vcodec":"vp9","acodec":"none","vbr":12000})";
     auto checkSelection = [&](YouTubeSourceQuality quality, const std::string& video,
                               std::string_view expected) {
         write_binary_file(metadata, "{\"id\":\"fixture\",\"title\":\"Offline formats\",\"duration\":10,\"extractor\":\"youtube\",\"formats\":[" + audio + "," + video + "]}");
@@ -3760,8 +3805,12 @@ void youtube_bitrate_selection_uses_real_helper_without_network_test()
     checkSelection(YouTubeSourceQuality::P1080, p1080 + "," + others, "vp9+251");
     checkSelection(YouTubeSourceQuality::P1440, p1080 + "," + others, "1440avc+251");
     checkSelection(YouTubeSourceQuality::P2160, p1080 + "," + others, "2160vp9+251");
-    checkSelection(YouTubeSourceQuality::Auto, p1080 + "," + others, "vp9+251");
-    checkSelection(YouTubeSourceQuality::Auto, others, "2160vp9+251");
+    // Auto stops at the 1440p rung even when 2160p is published, and takes the
+    // fattest stream inside that rung rather than the first codec listed.
+    checkSelection(YouTubeSourceQuality::Auto, p1080 + "," + others, "1440avc+251");
+    checkSelection(YouTubeSourceQuality::Auto, others, "1440avc+251");
+    // Nothing at or below 1440p: the second rung keeps 4K-only videos playable.
+    checkSelection(YouTubeSourceQuality::Auto, ultraOnly, "2160vp9+251");
     checkSelection(YouTubeSourceQuality::P1080, others, "");
     checkSelection(YouTubeSourceQuality::P1080, p1080 + R"(,
         {"format_id":"combined","url":"https://example.invalid/combined","ext":"mp4","height":1080,"width":1920,"vcodec":"avc1","acodec":"mp4a.40.2","vbr":7000,"abr":128})", "combined");
@@ -4995,7 +5044,7 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
         std::wstring_view(argv[12]) != L"height,vbr,abr" ||
         std::wstring_view(argv[13]) != L"--get-url" ||
         std::wstring_view(argv[14]) != L"--print" ||
-        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s") {
+        std::wstring_view(argv[15]) != L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s") {
         return 91;
     }
     const std::filesystem::path expectedDeno =
@@ -5893,7 +5942,8 @@ int wmain(int argc, wchar_t* argv[])
     resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
     youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
     youtube_resolver_argument_vector_is_exact_and_ordered_test();
-    youtube_source_quality_selectors_prefer_exact_requested_heights_and_auto_fallback_test();
+    youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test();
+    resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test();
     youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
     youtube_resolver_waits_until_both_selected_streams_are_available_test();
     youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test();

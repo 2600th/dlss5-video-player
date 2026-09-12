@@ -26,7 +26,7 @@ private:
             {L"menu.mark_in", L"Mark In\tI"}, {L"menu.mark_out", L"Mark Out\tO"}, {L"menu.clear_marks", L"Clear Marks\tShift+I / Shift+O"},
             {L"menu.goto_timecode", L"Go to timecode...\tCtrl+G"}, {L"menu.pause_neural_render", L"Pause neural render\tSpace"},
             {L"menu.video", L"Video"}, {L"menu.aspectfit", L"Original aspect ratio (Fit)\tA"}, {L"menu.aspectfill", L"Fill without stretching (Crop)"},
-            {L"menu.youtube_quality", L"YouTube source quality"}, {L"menu.youtube_quality_auto", L"Auto (1080p preferred)"},
+            {L"menu.youtube_quality", L"YouTube source quality"}, {L"menu.youtube_quality_auto", L"Auto (up to 1440p, highest bitrate)"},
             {L"menu.youtube_quality_2160", L"2160p"}, {L"menu.youtube_quality_1440", L"1440p"}, {L"menu.youtube_quality_1080", L"1080p"},
             {L"menu.adjustments", L"Image adjustments...\tCtrl+E   (Overlay: Ctrl+Alt+C)"},
             {L"menu.compare", L"Compare"}, {L"menu.compare_neural", L"Neural"}, {L"menu.compare_blend", L"Blend"}, {L"menu.compare_split", L"Split"}, {L"menu.compare_wipe", L"Wipe"},
@@ -143,6 +143,12 @@ private:
             {L"youtube.error.ffmpeg", L"FFmpeg could not open this YouTube stream. Try another public, non-DRM video."},
             {L"youtube.error.media_timeout", L"The YouTube stream did not become ready within 20 seconds. Check your connection and try again."},
             {L"youtube.error.media_stalled", L"The YouTube stream stopped delivering video for 15 seconds. Check your connection and try again."},
+            // What the resolver actually got, said out loud. A silent 360p
+            // fallback on an age-restricted video is indistinguishable from a
+            // bad render otherwise.
+            {L"youtube.source.low", L"Source is only %dp at %.1f Mbps"},
+            {L"youtube.source.low.signin", L"Source is only %dp at %.1f Mbps: this video is age-restricted, and YouTube serves higher quality only to a signed-in session"},
+            {L"youtube.source.low_height", L"Source is only %dp: this copy was acquired at that height, so pick a YouTube source quality to fetch it again"},
             {L"error.decode", L"Could not open this media. Check the file and bundled FFmpeg files, then try again."},
             {L"error.renderer", L"DLSS is unavailable. Update the NVIDIA driver or use safe mode, then try again."},
             {L"error.frame", L"No video frame could be decoded. Try another file."},

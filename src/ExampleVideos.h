@@ -10,7 +10,9 @@ struct ExampleVideo {
 };
 
 inline constexpr std::array kExampleVideos{
-    // Human-focused trailers under three minutes, checked 2026-09-03; see docs/EXAMPLE_VIDEOS.md.
+    // Human-focused trailers under three minutes, re-checked 2026-09-12. Three of
+    // these are age-restricted and an anonymous session can be served a single
+    // 640x360 format; see docs/EXAMPLE_VIDEOS.md for which and what it costs.
     ExampleVideo{L"Hellblade II - Launch Trailer", L"XBOX", L"https://www.youtube.com/watch?v=PRbOmIcVXak"},
     ExampleVideo{L"The Last of Us Part II Remastered - PC Launch Trailer", L"PlayStation", L"https://www.youtube.com/watch?v=Tg1oRHd5zlw"},
     ExampleVideo{L"Mafia: The Old Country - Family Takes Sacrifice", L"Mafia Game", L"https://www.youtube.com/watch?v=EAEYZDgHNv8"},

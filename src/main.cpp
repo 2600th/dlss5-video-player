@@ -1041,7 +1041,7 @@ private:
                          completion.sourceKind==MediaSourceKind::YouTube))return false;
         m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;
         auto original=completion;original.renderKey.clear();RecordRecent(original,true);
-        UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);return true;
+        UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);NoteLoadedSourceQuality();return true;
     }
     void PruneRecentCache(){
         if(m_pendingCacheEvictions.empty()||ActivityBusy()||m_exportWorker.joinable())return;
@@ -2043,7 +2043,7 @@ private:
     void Unload() {
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession();}
         DropRetainedLiveSegments();
-        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
+        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -2643,7 +2643,19 @@ private:
     std::optional<std::string> CachedYouTubeSourceKey()const{
         if(!m_recent||m_youtubePageUrl.empty())return std::nullopt;
         const auto id=CanonicalYouTubeVideoId(m_youtubePageUrl);
-        for(const auto& entry:m_recent->Entries())if(entry.youtube&&entry.id==id&&entry.sourceQuality==static_cast<int>(m_youtubeSourceQuality)&&!entry.sourceKey.empty())return entry.sourceKey;
+        // The recent history outlives the cache folder: a user who clears the
+        // cache, or an acquisition that never finished, leaves an entry naming a
+        // copy that is not there. Handing that key to a job made it fail on a
+        // missing source instead of acquiring one, and a live session ended on it.
+        NeuralCacheManager cache(m_cacheRoot);
+        for(const auto& entry:m_recent->Entries()){
+            if(!entry.youtube||entry.id!=id||entry.sourceQuality!=static_cast<int>(m_youtubeSourceQuality)||entry.sourceKey.empty())continue;
+            if(!cache.Valid())return std::nullopt;
+            const auto cached=cache.LookupSource(entry.sourceKey);
+            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy)return entry.sourceKey;
+            LOG("A recent entry names a source copy that is no longer in the cache; ignoring it.");
+            return std::nullopt;
+        }
         return std::nullopt;
     }
     bool SourcePrefetchActive()const{return m_prefetchState&&!m_prefetchState->finished.load(std::memory_order_acquire);}
@@ -3249,25 +3261,38 @@ private:
                     std::filesystem::path sourcePath;
                     if(sourceKind==MediaSourceKind::YouTube){
                         std::string reuseKey=reuseSourceKey;
-                        if(reuseKey.empty()&&prefetch){
-                            // A background acquisition started when the user marked a
-                            // range. Wait for it instead of downloading the same
-                            // source a second time.
-                            if(!prefetch->finished.load(std::memory_order_acquire)){
-                                LOG("Waiting for the background source acquisition.");
-                                NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
-                                while(!prefetch->finished.load(std::memory_order_acquire)&&!stop.stop_requested())
-                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                            }
-                            if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                            reuseKey=prefetch->key;
+                        // Wait for an acquisition of this same source whenever one is
+                        // in flight, not only when no key is known: the recents entry
+                        // can already name the key that acquisition is still writing,
+                        // and looking it up mid-download finds an incomplete entry. A
+                        // live session that hit that ended with no message at all.
+                        if(prefetch&&!prefetch->finished.load(std::memory_order_acquire)){
+                            LOG("Waiting for the background source acquisition.");
+                            NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;postProgress(acquiring);
+                            while(!prefetch->finished.load(std::memory_order_acquire)&&!stop.stop_requested())
+                                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                         }
+                        if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
+                        if(reuseKey.empty()&&prefetch)reuseKey=prefetch->key;
                         if(!reuseKey.empty()){
                             const auto cached=cache.LookupSource(reuseKey);
-                            if(!cached||cached->manifest.encoder!=kCompleteSourcePolicy){completion->cachedSourceUnavailable=true;goto finish;}
-                            sourcePath=cached->payloadPath;completion->sourceKey=reuseKey;
-                            LOG("Owned source cache verified; network resolution skipped.");
-                        }else{
+                            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
+                                sourcePath=cached->payloadPath;completion->sourceKey=reuseKey;
+                                LOG("Owned source cache verified; network resolution skipped.");
+                            }else if(audioUrl.empty()){
+                                // No stream pair in hand, so there is nothing to acquire
+                                // from: the UI answers this by resolving the page again.
+                                completion->cachedSourceUnavailable=true;
+                                completion->result.detail=L"The downloaded copy of this video is no longer available.";goto finish;
+                            }else{
+                                // A recorded key whose copy is gone or half-written, with
+                                // the stream this session is already playing still in hand.
+                                // Acquiring again beats ending the session.
+                                LOG("The recorded source copy is missing or incomplete; acquiring this stream again.");
+                                reuseKey.clear();
+                            }
+                        }
+                        if(sourcePath.empty()){
                             const SourceAcquisition acquired=AcquireYouTubeSource(cache,moduleDirectory,mediaUrl,audioUrl,pageUrl,sourceQuality,expectedDurationSeconds,
                                 [&](const MediaDownloadProgress& download){
                                     NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;
@@ -3435,7 +3460,7 @@ private:
         if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
         m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
-        RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
+        RestoreUpscaling();UpdateTitle();NoteLoadedSourceQuality();UpdateCachedStatus();Layout();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
     void CompleteNeuralProgress(uint64_t token){
         auto message=m_neuralProgressMessages.Take(token);if(!message||!m_neuralLifecycle.Accept(message->generation))return;
@@ -3671,6 +3696,37 @@ private:
         UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
         return true;
     }
+    // The resolver reports what it actually selected. A 360p fallback on an
+    // age-restricted video used to reach the screen as a bad picture with no
+    // explanation, and the neural render then ran at that resolution too.
+    static constexpr int kUsableSourceHeight=720;
+    void NoteResolvedSourceQuality(const ResolveResult& result){
+        // A seek or a quality reload commits without resolving again, so its
+        // completion carries no format metadata. Fall back to geometry instead of
+        // reporting a 0p resolve that never happened.
+        if(result.selectedHeight<=0){NoteLoadedSourceQuality();return;}
+        m_sourceNotice.clear();
+        LOG("YouTube source selected: "<<result.selectedHeight<<"p at "<<result.videoKbps<<" kbps, age limit "<<result.ageLimit<<".");
+        if(result.selectedHeight>=kUsableSourceHeight)return;
+        wchar_t text[512]{};
+        swprintf_s(text,T(result.ageLimit>0?L"youtube.source.low.signin":L"youtube.source.low").c_str(),
+                   result.selectedHeight,result.videoKbps/1000.0);
+        m_sourceNotice=text;
+        LOG("YouTube served a degraded source: "<<WideToUtf8(m_sourceNotice));
+    }
+    // Every other way a source reaches the screen: a cached copy an earlier
+    // session acquired at a degraded height is reused as-is, and the resolver
+    // never runs, so geometry is the only signal those paths have. The rate is
+    // unknown here, so the text offers the way out instead of a number.
+    void NoteLoadedSourceQuality(){
+        if(!m_sourceNotice.empty()||m_sourceKind!=MediaSourceKind::YouTube)return;
+        const uint32_t height=m_decoder.Height();
+        if(!height||height>=uint32_t(kUsableSourceHeight))return;
+        wchar_t text[512]{};
+        swprintf_s(text,T(L"youtube.source.low_height").c_str(),int(height));
+        m_sourceNotice=text;
+        LOG("YouTube source is degraded: "<<height<<"p from a path that did not resolve a format.");
+    }
     void CompleteYouTubeResolution(uint64_t token){
         std::unique_ptr<YouTubeCompletion> completion=m_youtubeCompletions.Take(token);if(!completion)return;
         if(!m_youtubeLifecycle.Complete(completion->generation))return;
@@ -3695,6 +3751,9 @@ private:
             [&](PreparedRendererCandidate& candidate){return ValidatePreparedFrame(*completion,*candidate.renderer,candidate.guides);},
             [&](std::unique_ptr<PreparedRendererCandidate> candidate){return InstallPreparedYouTube(*completion,std::move(candidate));});
         if(!committed){const std::wstring message=T(candidateCreated?L"error.frame":L"error.renderer"),caption=T(L"app.title");MessageBoxW(m_hwnd,message.c_str(),caption.c_str(),MB_ICONERROR);LOG("Prepared YouTube renderer transaction rolled back; active state preserved.");}
+        // After the install, not before: committing a prepared renderer runs
+        // through Unload, which clears the notice.
+        if(committed)NoteResolvedSourceQuality(completion->result);
     }
     PlayerRuntimeStatus RuntimeStatus()const{
         return ResolvePlayerRuntimeStatus(m_opt.safeMode,m_opt.neuralAddonConfigured,m_renderer&&m_renderer->DLSSEnabled(),m_renderer&&m_renderer->DLSSFeatureCreated());
@@ -3740,6 +3799,9 @@ private:
         // Ahead of everything else: it is the reason the picture on screen is the
         // original rather than a rendered one.
         if(!m_neuralNotice.empty())text=m_neuralNotice+L" \u00b7 "+text;
+        // A source the resolver had to settle for outranks everything except the
+        // neural notice: no render can put back what the stream never carried.
+        if(!m_sourceNotice.empty())text=m_sourceNotice+L" \u00b7 "+text;
         return text;
     }
     // Short canonical of the settings a cache entry was rendered with; the
@@ -4074,6 +4136,9 @@ private:
     // Why the last neural render did not produce a picture, in one line, for the
     // status bar. Cleared by the next successful render and by Unload.
     std::wstring m_neuralNotice;
+    // What the resolver had to settle for on this source. Not a render failure,
+    // so it survives a successful render and is cleared only by Unload.
+    std::wstring m_sourceNotice;
     // The driver notice is a modal, so it is shown once for the whole session.
     bool m_driverNoticeShown=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;

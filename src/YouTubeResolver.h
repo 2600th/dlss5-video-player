@@ -43,6 +43,14 @@ struct ResolveResult {
     double durationSeconds{};
     // Latest selected stream availability, rounded up to avoid premature access.
     int64_t availableAtUnixSeconds{};
+    // Height in pixels of the rung yt-dlp actually selected; zero when unknown.
+    int selectedHeight{};
+    // Bitrate of that rung in kbps: the video stream's own rate for a merged
+    // selection, the whole stream's rate for a progressive one, which is what a
+    // legacy 360p fallback offers. Zero when yt-dlp advertised neither.
+    double videoKbps{};
+    // YouTube age gate in years, 18 on age-restricted videos; zero when none or unknown.
+    int ageLimit{};
 };
 
 bool IsSupportedYouTubeUrl(std::wstring_view value);

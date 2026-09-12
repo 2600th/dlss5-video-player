@@ -470,6 +470,27 @@ ResolveResult invalid_output()
     return result;
 }
 
+// yt-dlp --print writes NA for every field it could not fill, and the stream
+// metrics are diagnostics rather than playback inputs, so anything unusable
+// reads as zero instead of rejecting output that carries a playable stream URL.
+double optional_metric(std::string_view value)
+{
+    double parsed = 0.0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+        !std::isfinite(parsed) || parsed < 0.0) {
+        return 0.0;
+    }
+    return parsed;
+}
+
+// Heights and age gates print as integers, but parse through the float path so a
+// float-formatted value still reads, and bound the value before the cast.
+int optional_metric_count(std::string_view value)
+{
+    return static_cast<int>(std::min(optional_metric(value), 1000000.0));
+}
+
 } // namespace
 
 bool IsSupportedYouTubeUrl(std::wstring_view value)
@@ -560,6 +581,9 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
 
     double durationSeconds = 0.0;
     int64_t availableAtUnixSeconds = 0;
+    int selectedHeight = 0;
+    double videoKbps = 0.0;
+    int ageLimit = 0;
     if (stdoutBytes.starts_with("duration=")) {
         // yt-dlp --print emits metadata before the --get-url stream lines.
         // Legacy URL-only parsing stays available, but Resolve requires metadata.
@@ -567,6 +591,31 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
         if (metadataEnd == std::string_view::npos) return invalid_output();
         std::string_view metadata = stdoutBytes.substr(0, metadataEnd);
         if (metadata.ends_with('\r')) metadata.remove_suffix(1);
+        // The stream metrics ride at the end of the same printed line, so peel
+        // them off before the live fields below parse what is left.
+        constexpr std::string_view heightMarker = ";selected_height=";
+        const size_t metricsStart = metadata.find(heightMarker);
+        if (metricsStart != std::string_view::npos) {
+            constexpr std::string_view bitrateMarker = ";video_kbps=";
+            constexpr std::string_view ageMarker = ";age_limit=";
+            std::string_view metrics = metadata.substr(metricsStart + heightMarker.size());
+            metadata = metadata.substr(0, metricsStart);
+            std::string_view age;
+            if (const size_t ageStart = metrics.find(ageMarker); ageStart != std::string_view::npos) {
+                age = metrics.substr(ageStart + ageMarker.size());
+                metrics = metrics.substr(0, ageStart);
+            }
+            std::string_view bitrate;
+            if (const size_t bitrateStart = metrics.find(bitrateMarker);
+                bitrateStart != std::string_view::npos) {
+                bitrate = metrics.substr(bitrateStart + bitrateMarker.size());
+                metrics = metrics.substr(0, bitrateStart);
+            }
+            // What survives both peels is the height value on its own.
+            selectedHeight = optional_metric_count(metrics);
+            videoKbps = optional_metric(bitrate);
+            ageLimit = optional_metric_count(age);
+        }
         constexpr std::string_view statusMarker = ";live_status=";
         const size_t statusStart = metadata.find(statusMarker);
         if (statusStart == std::string_view::npos) return invalid_output();
@@ -644,6 +693,9 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
     result.audioUrl = std::move(audioUrl);
     result.durationSeconds = durationSeconds;
     result.availableAtUnixSeconds = availableAtUnixSeconds;
+    result.selectedHeight = selectedHeight;
+    result.videoKbps = videoKbps;
+    result.ageLimit = ageLimit;
     return result;
 }
 
@@ -651,7 +703,7 @@ std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
 {
     switch (quality) {
     case YouTubeSourceQuality::Auto:
-        return L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]";
+        return L"bv*[height<=1440]+ba/b[height<=1440]/bv*[height<=2160]+ba/b[height<=2160]";
     case YouTubeSourceQuality::P2160:
         return L"bv*[height=2160]+ba/b[height=2160]";
     case YouTubeSourceQuality::P1440:
@@ -659,7 +711,7 @@ std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality)
     case YouTubeSourceQuality::P1080:
         return L"bv*[height=1080]+ba/b[height=1080]";
     }
-    return L"bv*[height=1080]+ba/b[height=1080]/bv*[height<=2160]+ba/b[height<=2160]";
+    return L"bv*[height<=1440]+ba/b[height<=1440]/bv*[height<=2160]+ba/b[height<=2160]";
 }
 
 namespace {
@@ -708,14 +760,21 @@ std::vector<std::wstring> build_youtube_resolver_arguments(
         L"deno:" + (helperDirectory / L"deno.exe").wstring(),
         L"-f",
         std::wstring(YouTubeFormatSelector(quality)),
-        // Keep Auto's resolution fallback, then maximize advertised video bitrate
-        // ahead of codec, container, frame rate and extractor preferences.
+        // Auto takes the tallest rung up to 1440p and then the highest advertised
+        // video bitrate inside it, ahead of codec, container, frame rate and
+        // extractor preferences. The former height=1080 first rung pinned the
+        // lowest-bitrate copy YouTube publishes: one trailer measures 3899 kbps
+        // at 1080p against 7854 kbps at 1440p and 20764 kbps at 2160p. The cap is
+        // 1440 and not 2160 because 1440p roughly doubles the bitrate for about
+        // 1.8x the render cost, while 4K measures 42 ms per frame, 0.78x real
+        // time, and costs 4x the bandwidth, VRAM and cache footprint. The
+        // explicit 2160p menu entry stays the way to ask for that trade.
         L"--format-sort-force",
         L"-S",
         L"height,vbr,abr",
         L"--get-url",
         L"--print",
-        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s",
+        L"duration=%(duration)s;live_status=%(live_status)s;video_available_at=%(requested_formats.0.available_at,available_at|0)s;audio_available_at=%(requested_formats.1.available_at|0)s;selected_height=%(height)s;video_kbps=%(requested_formats.0.vbr,vbr,tbr|0)s;age_limit=%(age_limit)s",
         std::wstring(youtubeUrl),
     };
 }
