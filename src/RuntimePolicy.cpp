@@ -1,5 +1,7 @@
 #include "RuntimePolicy.h"
 
+#include <cmath>
+#include <cstdlib>
 #include <cwctype>
 #include <string>
 
@@ -17,6 +19,14 @@ constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-resta
 // 1080p on Blackwell, so the prior is high until one does. It only decides the
 // first session's forecast.
 constexpr double kAdaRenderPacePrior = 1.22;
+
+// Matroska's default timecode scale is 1 ms, so every muxed file quantises
+// its own timestamps and duration to that grid.
+constexpr int64_t kMatroskaTimecodeScale100ns = 10000;
+// A source whose frame rate could not be read still needs a duration
+// tolerance; 30 fps is the slowest pace this player treats as normal, so it
+// yields the widest single-frame allowance without inventing one.
+constexpr double kFallbackFrameRate = 30.0;
 
 bool ContainsCaseInsensitive(std::wstring_view text, std::wstring_view needle)
 {
@@ -417,4 +427,35 @@ void NeuralPlaybackLifecycle::Invalidate()
 bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid)
 {
     return renderOk && probeOk && manifestValid;
+}
+
+int64_t JoinedMediaDurationTolerance100ns(double fps, size_t parts)
+{
+    // One rounding per joined file, because each segment was muxed on its own
+    // and Matroska writes timestamps on a 1 ms grid; concatenation sums those
+    // errors instead of cancelling them. Playback jitter of a single frame is
+    // allowed on top, which is the whole tolerance a single-file render needs.
+    const double frame = std::isfinite(fps) && fps > 0.0 ? 10000000.0 / fps : 10000000.0 / kFallbackFrameRate;
+    const size_t joined = parts == 0 ? 1 : parts;
+    return static_cast<int64_t>(std::ceil(frame)) + static_cast<int64_t>(joined) * kMatroskaTimecodeScale100ns;
+}
+
+bool NeuralPublishDurationsMatch(
+    int64_t probeDuration100ns,
+    int64_t resultDuration100ns,
+    int64_t expectedDuration100ns,
+    int64_t tolerance100ns)
+{
+    return std::llabs(probeDuration100ns - resultDuration100ns) <= tolerance100ns &&
+           std::llabs(probeDuration100ns - expectedDuration100ns) <= tolerance100ns &&
+           std::llabs(resultDuration100ns - expectedDuration100ns) <= tolerance100ns;
+}
+
+bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps)
+{
+    if (renderFrom100ns >= rangeEnd100ns) return true;
+    // A residual of unknown length is work: without a frame rate there is no
+    // way to tell coverage from a missing frame.
+    if (!std::isfinite(fps) || fps <= 0.0) return false;
+    return rangeEnd100ns - renderFrom100ns < static_cast<int64_t>(std::ceil(10000000.0 / fps));
 }

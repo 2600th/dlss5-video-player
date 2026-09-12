@@ -2806,9 +2806,12 @@ private:
                                                 m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio,
             kLiveStartLead);
         const int64_t renderFrom=std::max(range.start100ns,m_liveSegments->Head100ns());
-        if(renderFrom<range.end100ns)m_liveSegments->Unfinish();
+        // A sub-frame residual between the integer-frame head and the probed
+        // range end is coverage, not work: rendering it earns a range refusal.
+        const bool rangeCovered=RenderRangeIsCovered(renderFrom,range.end100ns,m_decoder.FrameRate());
+        if(!rangeCovered)m_liveSegments->Unfinish();
         EnterLiveBuffering();
-        if(renderFrom>=range.end100ns){
+        if(rangeCovered){
             // The retained coverage already reaches the end of this range: there
             // is nothing to render, so play it and stop waiting for a head.
             m_liveSegments->Finish();
@@ -3349,11 +3352,19 @@ private:
                     receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
                     LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
+                    // The entry is keyed, labelled and proven by THIS job: its range, its
+                    // frame count, its evidence counters. So it must contain exactly the
+                    // segments this job published. A resumed session hands earlier coverage
+                    // to the next job for playback to keep reading, and joining that in too
+                    // produced a file longer than the label - one session joined 46 files of
+                    // 2622 frames and 87.4 s against a result of 1647 frames and 54.9 s, and
+                    // the gate correctly refused the render it had just finished.
+                    const size_t joinedParts=liveIndex?liveIndex->Count()-std::min(liveIndexBase,liveIndex->Count()):size_t{1};
                     if(liveIndex){
                         // The session's cache entry is one file, joined from the
                         // segments playback is still reading.
-                        std::vector<std::filesystem::path> parts;parts.reserve(liveIndex->Count());
-                        for(size_t index=0;index<liveIndex->Count();++index)if(const auto segment=liveIndex->At(index))parts.push_back(segment->path);
+                        std::vector<std::filesystem::path> parts;parts.reserve(joinedParts);
+                        for(size_t index=liveIndexBase;index<liveIndex->Count();++index)if(const auto segment=liveIndex->At(index))parts.push_back(segment->path);
                         if(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging/L"neural.mkv",stop)!=EncodeError::None){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;}
                     }
                     const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
@@ -3363,9 +3374,15 @@ private:
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
                     manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
-                    const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&std::llabs(probe.duration100ns-completion->result.duration100ns)<=frameDurationTolerance&&std::llabs(probe.duration100ns-expectedDuration100ns)<=frameDurationTolerance&&std::llabs(completion->result.duration100ns-expectedDuration100ns)<=frameDurationTolerance;
+                    const int64_t joinedDurationTolerance=JoinedMediaDurationTolerance100ns(fps,joinedParts);
+                    const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&NeuralPublishDurationsMatch(probe.duration100ns,completion->result.duration100ns,expectedDuration100ns,joinedDurationTolerance);
                     NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');
-                    if(!CanPublishNeuralCompletion(completion->result.ok,probeMatches,IsReusableNeuralCacheManifest(publishCandidate))||!cache.PromoteRender(renderKey,*staging,manifest)){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;}
+                    const bool manifestReusable=IsReusableNeuralCacheManifest(publishCandidate);
+                    if(!CanPublishNeuralCompletion(completion->result.ok,probeMatches,manifestReusable)||!cache.PromoteRender(renderKey,*staging,manifest)){
+                        // This gate discarded a finished render once and left nothing to diagnose it with.
+                        LOG("Neural publish refused: renderOk="<<completion->result.ok<<" manifestReusable="<<manifestReusable<<" probeOk="<<probe.ok<<" probe="<<probe.width<<"x"<<probe.height<<" expected="<<width<<"x"<<height<<" probeFrames="<<probe.frameCount<<" resultFrames="<<completion->result.frameCount<<" probeDuration="<<probe.duration100ns<<" resultDuration="<<completion->result.duration100ns<<" expectedDuration="<<expectedDuration100ns<<" tolerance="<<joinedDurationTolerance<<" parts="<<joinedParts<<".");
+                        cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;
+                    }
                     if(const auto promoted=cache.LookupRender(renderKey)){completion->neuralPath=promoted->payloadPath;completion->receiptPath=promoted->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
                 }
             finish:

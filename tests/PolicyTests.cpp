@@ -35,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <stop_token>
 #include <string>
@@ -2394,6 +2395,48 @@ void neural_completion_publishes_only_after_probe_and_manifest_validation_test()
     CHECK(!CanPublishNeuralCompletion(false,true,true));
     CHECK(!CanPublishNeuralCompletion(true,false,true));
     CHECK(!CanPublishNeuralCompletion(true,true,false));
+}
+
+void neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test()
+{
+    // The refused session: 2607 frames of 30 fps video published as 44
+    // separately muxed segments and then joined, so the joined file may sit
+    // one 1 ms Matroska rounding per part away from the rendered duration.
+    const int64_t rounding=10000;
+    const int64_t expected=869000000;
+    const int64_t drift=44*rounding;
+    const int64_t joined=JoinedMediaDurationTolerance100ns(30.0,44);
+    const int64_t single=JoinedMediaDurationTolerance100ns(30.0,1);
+    const bool durationsMatch=NeuralPublishDurationsMatch(expected+drift,expected,expected,joined);
+    CHECK(durationsMatch);
+    CHECK(!NeuralPublishDurationsMatch(expected+drift,expected,expected,single));
+    CHECK_EQ(joined-single,43*rounding);
+    // Drift beyond the roundings and the one allowed frame is still a defect,
+    // on whichever side it shows up.
+    CHECK(!NeuralPublishDurationsMatch(expected+joined+1,expected,expected,joined));
+    CHECK(!NeuralPublishDurationsMatch(expected,expected+joined+1,expected,joined));
+    // A lost frame is never publishable, however well the durations agree.
+    const uint64_t probeFrames=2606,resultFrames=2607;
+    CHECK(!CanPublishNeuralCompletion(true,durationsMatch&&probeFrames==resultFrames,true));
+    // An unreadable frame rate must not collapse the tolerance to nothing.
+    CHECK(JoinedMediaDurationTolerance100ns(0.0,44)>=drift);
+    CHECK(JoinedMediaDurationTolerance100ns(std::numeric_limits<double>::infinity(),0)>=rounding);
+}
+
+void render_range_residual_below_one_frame_is_coverage_not_work_test()
+{
+    // The re-toggled session: a head accumulated from integer per-frame
+    // segment ends against a range end taken from the probed source duration.
+    const int64_t head=947333000;
+    const int64_t frame=333334;
+    CHECK(RenderRangeIsCovered(head,head,30.0));
+    CHECK(RenderRangeIsCovered(head,head+1,30.0));
+    CHECK(RenderRangeIsCovered(head,head+frame-1,30.0));
+    CHECK(!RenderRangeIsCovered(head,head+frame,30.0));
+    CHECK(!RenderRangeIsCovered(head,head+30*frame,30.0));
+    // Without a frame rate a residual of unknown length stays work.
+    CHECK(!RenderRangeIsCovered(head,head+1,0.0));
+    CHECK(RenderRangeIsCovered(head+1,head,0.0));
 }
 
 void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
@@ -5799,6 +5842,8 @@ int wmain(int argc, wchar_t* argv[])
     neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test();
     neural_playback_lifecycle_runs_render_validate_then_ready_test();
     neural_completion_publishes_only_after_probe_and_manifest_validation_test();
+    neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test();
+    render_range_residual_below_one_frame_is_coverage_not_work_test();
     neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
     neural_pause_suspends_rendering_and_resumes_without_advancing_test();
     neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();

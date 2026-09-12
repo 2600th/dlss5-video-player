@@ -180,6 +180,30 @@ struct NeuralPlaybackLifecycle {
 
 bool CanPublishNeuralCompletion(bool renderOk, bool probeOk, bool manifestValid);
 
+// How far a joined media file's duration may legitimately differ from the
+// duration the render itself reported: one frame of playback jitter plus one
+// 1 ms muxer rounding per joined file. A live session publishes N separately
+// muxed segments concatenated into one cache entry, and Matroska's default
+// timecode scale quantises each file's timestamps to 1 ms, so those roundings
+// accumulate with the part count while a single-file render carries only one.
+int64_t JoinedMediaDurationTolerance100ns(double fps, size_t parts);
+
+// The three pairwise duration agreements the publish gate requires: the
+// probed file, the render result and the requested range must all describe
+// the same span.
+bool NeuralPublishDurationsMatch(
+    int64_t probeDuration100ns,
+    int64_t resultDuration100ns,
+    int64_t expectedDuration100ns,
+    int64_t tolerance100ns);
+
+// Whether a render range has nothing renderable left. The render head is an
+// integer multiple of a frame duration built from per-frame segment ends,
+// while the range end is a probed source duration: a residual shorter than
+// one frame is coverage, not work, and handing it to a worker only earns a
+// range refusal. An unreadable frame rate falls back to the plain comparison.
+bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps);
+
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
 NeuralRenderDefaults ResolveNeuralRenderDefaults(
