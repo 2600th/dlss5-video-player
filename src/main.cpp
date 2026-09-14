@@ -653,6 +653,16 @@ static std::wstring Utf8ToWide(std::string_view value) {
     return result;
 }
 
+// Substitutes into a localized format string. swprintf_s calls the invalid
+// parameter handler instead of truncating, and one substitution here is a
+// filesystem path, so the buffer is sized from the format and its arguments
+// rather than guessed.
+static std::wstring FormatLocalizedText(const std::wstring& format,const std::wstring& first,const std::wstring& second={}) {
+    std::vector<wchar_t> text(format.size()+first.size()+second.size()+1);
+    swprintf_s(text.data(),text.size(),format.c_str(),first.c_str(),second.c_str());
+    return text.data();
+}
+
 static std::wstring Win32Error(std::wstring_view operation) {
     return std::wstring(operation)+L" failed (Win32 error "+std::to_wstring(GetLastError())+L")";
 }
@@ -811,7 +821,40 @@ struct SourcePrefetchState {
     std::string key;
 };
 
+// The localizer belongs to the thread that owns the window, so a render job and
+// the background acquisition carry the cache-failure sentences they may need.
+// The message names the cache root the user can act on; the exact directory,
+// the cause and the filesystem error are on one line in the log.
+struct NeuralCacheFailureText {
+    std::wstring staging,root,unwritable,invalidKey,createFailed,alreadyExists,outsideRoot;
+    std::wstring Describe(const NeuralCacheManager& cache)const{
+        const auto& failure=cache.LastFailure();
+        return FormatLocalizedText(staging,(cache.Valid()?cache.Root():failure.path).wstring(),
+                                   CauseText(failure));
+    }
+    std::wstring DescribeRoot(const NeuralCacheFailure& failure)const{
+        return FormatLocalizedText(root,failure.path.wstring());
+    }
+private:
+    const std::wstring& CauseName(NeuralCacheFailure::Cause cause)const{
+        switch(cause){
+        case NeuralCacheFailure::Cause::InvalidKey:return invalidKey;
+        case NeuralCacheFailure::Cause::CreateFailed:return createFailed;
+        case NeuralCacheFailure::Cause::AlreadyExists:return alreadyExists;
+        case NeuralCacheFailure::Cause::OutsideRoot:return outsideRoot;
+        case NeuralCacheFailure::Cause::NoWritableRoot:case NeuralCacheFailure::Cause::None:break;
+        }
+        return unwritable;
+    }
+    std::wstring CauseText(const NeuralCacheFailure& failure)const{
+        std::wstring text=CauseName(failure.cause);
+        if(failure.error)text+=L" (error "+std::to_wstring(failure.error.value())+L")";
+        return text;
+    }
+};
+
 static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
+                                              const NeuralCacheFailureText& cacheFailureText,
                                               const std::filesystem::path& moduleDirectory,
                                               const std::wstring& mediaUrl,
                                               const std::wstring& audioUrl,
@@ -843,7 +886,7 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     LOG("Source cache miss or invalid entry; acquiring source.");
     if(onDownload)onDownload({});
     auto staging=cache.BeginSourceStaging(result.key);
-    if(!staging){result.detail=L"Source cache staging could not be created.";return result;}
+    if(!staging){result.detail=cacheFailureText.Describe(cache);return result;}
     MaterializeRequest request{mediaUrl,audioUrl,*staging/L"source.mkv",expectedDurationSeconds};
     MediaMaterializer materializer(moduleDirectory);
     auto materialized=materializer.Run(request,stop,onDownload);
@@ -864,7 +907,7 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
                 LOG("Re-resolved source identity changed; staging under key="<<retryKey);
                 cache.MarkInvalid(*staging);
                 auto retryStaging=cache.BeginSourceStaging(retryKey);
-                if(!retryStaging){result.detail=L"Source cache staging could not be created.";return result;}
+                if(!retryStaging){result.detail=cacheFailureText.Describe(cache);return result;}
                 staging=std::move(retryStaging);result.key=retryKey;
             }
             request.videoUrl=refreshed.mediaUrl;request.audioUrl=refreshed.audioUrl;request.output=*staging/L"source.mkv";
@@ -906,6 +949,10 @@ public:
             LOG("Neural cache directory: "<<WideToUtf8(m_cacheRoot.wstring()));
             m_recent=std::make_unique<RecentMediaHistory>(historyCache.Root()/L"recent-videos.dat");
             if(!m_recent->Load())LOG("Recent videos could not be loaded; existing file preserved until next successful playback.");
+        }else{
+            // Nothing can be rendered or acquired until this is fixed, and the
+            // idle surface is the only thing on screen at this point.
+            m_cacheNotice=CacheFailureText().DescribeRoot(historyCache.LastFailure());
         }
         INITCOMMONCONTROLSEX icc{sizeof(icc),ICC_BAR_CLASSES};InitCommonControlsEx(&icc);
         WNDCLASSW r{}; r.style=CS_DBLCLKS|CS_OWNDC; r.lpfnWndProc=RenderWndProcStatic; r.hInstance=hi; r.lpszClassName=L"DLSSVideoRenderClassV11"; r.hCursor=LoadCursor(nullptr,IDC_ARROW); r.hbrBackground=nullptr; RegisterClassW(&r);
@@ -1231,6 +1278,12 @@ private:
         return T(L"driver.below_floor")+L"\n\n"+T(L"driver.detected")+detected+L"\n"+
                T(L"driver.minimum")+FormatNvidiaDriverVersion(kNeuralDriverFloor)+L"\n"+
                T(L"driver.verified")+FormatNvidiaDriverVersion(kNeuralDriverRecommended);
+    }
+    // Built on this thread for the same reason as the driver notice above.
+    NeuralCacheFailureText CacheFailureText()const{
+        return {T(L"cache.staging_failed"),T(L"cache.not_writable"),T(L"cache.cause.unwritable"),
+                T(L"cache.cause.invalid_key"),T(L"cache.cause.create_failed"),
+                T(L"cache.cause.exists"),T(L"cache.cause.outside_root")};
     }
     AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
@@ -2536,7 +2589,7 @@ private:
             const IdleSurfaceLayout idle=IdleLayout();
             SetBkMode(dc,TRANSPARENT);
             SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
-            SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:T(L"idle.subtitle");RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
+            SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:(m_cacheNotice.empty()?T(L"idle.subtitle"):m_cacheNotice);RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
             for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
             if(!YouTubePlaybackAvailable()){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);const bool compactReason=idle.subtitle.top==idle.subtitle.bottom;std::wstring reason=T(compactReason?L"idle.youtube_unavailable_compact":L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);}return;
         }
@@ -2704,11 +2757,12 @@ private:
         auto state=std::make_shared<SourcePrefetchState>();
         const std::wstring media=m_path,audio=m_youtubeAudioUrl,page=m_youtubePageUrl;
         const auto quality=m_youtubeSourceQuality;const auto cacheRoot=m_cacheRoot,moduleDirectory=ExecutableDirectory();
+        const NeuralCacheFailureText cacheFailureText=CacheFailureText();
         try{
-            m_prefetchWorker=std::jthread([state,cacheRoot,moduleDirectory,media,audio,page,quality,duration](std::stop_token stop){
+            m_prefetchWorker=std::jthread([state,cacheRoot,moduleDirectory,media,audio,page,quality,duration,cacheFailureText](std::stop_token stop){
                 NeuralCacheManager cache(cacheRoot);
                 if(cache.Valid()){
-                    const SourceAcquisition acquired=AcquireYouTubeSource(cache,moduleDirectory,media,audio,page,quality,duration,{},stop);
+                    const SourceAcquisition acquired=AcquireYouTubeSource(cache,cacheFailureText,moduleDirectory,media,audio,page,quality,duration,{},stop);
                     if(!acquired.path.empty())state->key=acquired.key;
                 }
                 state->finished.store(true,std::memory_order_release);
@@ -3315,13 +3369,14 @@ private:
             // The driver verdict and the latched preflight failure are read on
             // this thread; the job only needs the answers.
             const std::wstring driverNotice=NeuralDriverNoticeText();
+            const NeuralCacheFailureText cacheFailureText=CacheFailureText();
             const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
             NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,preflightKey,preflightLatch,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
-                NeuralCacheManager cache(cacheRoot);if(!cache.Valid()){completion->result.detail=L"The neural cache directory is unavailable.";goto finish;}
+                NeuralCacheManager cache(cacheRoot);if(!cache.Valid()){completion->result.detail=cacheFailureText.DescribeRoot(cache.LastFailure());goto finish;}
                 {
                     std::filesystem::path sourcePath;
                     if(sourceKind==MediaSourceKind::YouTube){
@@ -3358,7 +3413,7 @@ private:
                             }
                         }
                         if(sourcePath.empty()){
-                            const SourceAcquisition acquired=AcquireYouTubeSource(cache,moduleDirectory,mediaUrl,audioUrl,pageUrl,sourceQuality,expectedDurationSeconds,
+                            const SourceAcquisition acquired=AcquireYouTubeSource(cache,cacheFailureText,moduleDirectory,mediaUrl,audioUrl,pageUrl,sourceQuality,expectedDurationSeconds,
                                 [&](const MediaDownloadProgress& download){
                                     NeuralRenderProgress acquiring{};acquiring.phase=NeuralRenderPhase::Acquiring;
                                     acquiring.bytes=download.bytes;acquiring.acquiredSeconds=download.seconds;
@@ -3444,7 +3499,7 @@ private:
                         StoreNeuralPreflightReceipt(cacheRoot,runtimeKey,preflight.json);
                         preflightJson=preflight.json;
                     }
-                    const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=L"Neural render staging could not be created.";goto finish;}
+                    const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=cacheFailureText.Describe(cache);goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
                     NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;
                     NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
@@ -3878,6 +3933,9 @@ private:
         // A source the resolver had to settle for outranks everything except the
         // neural notice: no render can put back what the stream never carried.
         if(!m_sourceNotice.empty())text=m_sourceNotice+L" \u00b7 "+text;
+        // Ahead of even that: nothing this player can do about the picture is
+        // worth reading while its cache cannot be written to.
+        if(!m_cacheNotice.empty())text=m_cacheNotice+L" \u00b7 "+text;
         return text;
     }
     // Short canonical of the settings a cache entry was rendered with; the
@@ -3912,7 +3970,7 @@ private:
     }
     void ClearNeuralCache(){
         if(ActivityBusy()||m_exportWorker.joinable()){MessageBoxW(m_hwnd,L"Finish or cancel rendering and export before clearing the cache.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONINFORMATION);return;}
-        NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){MessageBoxW(m_hwnd,L"The neural cache directory is unavailable.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
+        NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){MessageBoxW(m_hwnd,CacheFailureText().DescribeRoot(cache.LastFailure()).c_str(),T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);return;}
         const uintmax_t bytes=cache.SizeBytes();const std::wstring prompt=L"Close playback and delete "+std::to_wstring(bytes/(1024*1024))+L" MiB of neural cache data? Local original files will be kept.";
         if(MessageBoxW(m_hwnd,prompt.c_str(),T(L"menu.clear_neural_cache").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
         Unload();
@@ -4228,6 +4286,9 @@ private:
     // What the resolver had to settle for on this source. Not a render failure,
     // so it survives a successful render and is cleared only by Unload.
     std::wstring m_sourceNotice;
+    // Why the cache root could not be created, read once at startup. An
+    // installation condition rather than a playback one, so Unload leaves it.
+    std::wstring m_cacheNotice;
     // The driver notice is a modal, so it is shown once for the whole session.
     bool m_driverNoticeShown=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;

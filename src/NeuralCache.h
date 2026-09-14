@@ -9,6 +9,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 enum class NeuralCacheEntryKind {
     Source,
@@ -112,6 +113,23 @@ struct NeuralCachePromotion {
 };
 const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage);
 
+// Why a staging directory, or the cache root that holds it, could not be
+// created. Every one of these answered std::nullopt, so an install directory
+// the user cannot write to was indistinguishable from a rejected key, and the
+// one field report of it carried neither the path that was attempted nor the
+// error the filesystem gave for it.
+struct NeuralCacheFailure {
+    enum class Cause {
+        None, NoWritableRoot, InvalidKey, CreateFailed, AlreadyExists, OutsideRoot
+    };
+    Cause cause = Cause::None;
+    std::error_code error;
+    // The directory the attempt was made on; for a key the manager refused
+    // before touching the disk, the staging directory it would have gone in.
+    std::filesystem::path path;
+};
+const char* NeuralCacheFailureCauseName(NeuralCacheFailure::Cause cause);
+
 class NeuralCacheManager {
 public:
     // An empty root prefers <executable directory>/cache/v1, with LocalAppData
@@ -126,6 +144,10 @@ public:
 
     bool Valid() const { return valid_; }
     const std::filesystem::path& Root() const { return root_; }
+    // Why the last staging attempt returned nothing. A manager that never
+    // became valid keeps the constructor's verdict, because no attempt can get
+    // past it, and a successful attempt clears the record.
+    const NeuralCacheFailure& LastFailure() const { return failure_; }
 
     std::optional<NeuralCacheEntry> LookupSource(std::string_view key) const;
     std::optional<NeuralCacheEntry> LookupRender(std::string_view key) const;
@@ -161,4 +183,5 @@ private:
 
     std::filesystem::path root_;
     bool valid_{false};
+    NeuralCacheFailure failure_;
 };

@@ -1,5 +1,6 @@
 #include "NeuralCache.h"
 #include "GuideControls.h"
+#include "Log.h"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -301,7 +302,30 @@ std::filesystem::path CanonicalOrAbsolute(const std::filesystem::path& path,
 
 std::atomic<uint64_t> g_stagingNonce{0};
 
-std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::path& root)
+std::string Utf8(std::wstring_view text)
+{
+    if (text.empty()) return {};
+    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(),
+        static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(std::max(length, 0)), '\0');
+    if (length > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
+        utf8.data(), length, nullptr, nullptr);
+    return utf8;
+}
+
+// One line per refusal. The only field report of an uncreatable cache carried
+// the player's status string and nothing else, so the path, the cause, the
+// filesystem error and the ownership verdict all belong on it.
+void LogCacheFailure(std::string_view what, const NeuralCacheFailure& failure)
+{
+    LOG(what << ": cause=" << NeuralCacheFailureCauseName(failure.cause)
+             << " path=" << Utf8(failure.path.native())
+             << " error=" << failure.error.value() << " ownershipRejected="
+             << (failure.cause == NeuralCacheFailure::Cause::OutsideRoot ? 1 : 0));
+}
+
+std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::path& root,
+                                                         std::error_code& error)
 {
     // Windows can merge an existing LocalAppData directory with package-private
     // writes. A directory handle may report the read-side path; a newly created
@@ -311,33 +335,52 @@ std::optional<std::filesystem::path> ResolveWritableRoot(const std::filesystem::
     HANDLE file = CreateFileW(probe.c_str(), GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
         FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return std::nullopt;
+    if (file == INVALID_HANDLE_VALUE) {
+        error.assign(static_cast<int>(GetLastError()), std::system_category());
+        return std::nullopt;
+    }
     std::wstring physical(32768, L'\0');
     const DWORD length = GetFinalPathNameByHandleW(file, physical.data(),
         static_cast<DWORD>(physical.size()), FILE_NAME_NORMALIZED);
+    // Read before the close, which overwrites the thread's last error.
+    const DWORD nameError = length ? (length >= physical.size() ? ERROR_BUFFER_OVERFLOW
+                                                                : ERROR_SUCCESS)
+                                   : GetLastError();
     CloseHandle(file); // Deletes only this unique probe, including on failure.
-    if (!length || length >= physical.size()) return std::nullopt;
+    if (nameError != ERROR_SUCCESS) {
+        error.assign(static_cast<int>(nameError), std::system_category());
+        return std::nullopt;
+    }
     physical.resize(length);
-    std::error_code error;
     auto resolved = std::filesystem::canonical(std::filesystem::path(physical).parent_path(), error);
     if (error || resolved == resolved.root_path()) return std::nullopt;
     return resolved;
 }
 
-std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::path& root)
+std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::path& root,
+                                                         NeuralCacheFailure& failure)
 {
+    failure = {NeuralCacheFailure::Cause::NoWritableRoot, {}, root};
     std::error_code error;
     auto resolved = CanonicalOrAbsolute(root, error);
     if (error || resolved.empty() || resolved == resolved.root_path() ||
-        resolved.parent_path().empty()) return std::nullopt;
+        resolved.parent_path().empty()) { failure.error = error; return std::nullopt; }
+    failure.path = resolved;
+    // create_directories reports false for a directory that is already there,
+    // which a portable installation ships; only the error decides here.
     std::filesystem::create_directories(resolved, error);
-    if (error) return std::nullopt;
-    const auto writableRoot = ResolveWritableRoot(resolved);
-    if (!writableRoot) return std::nullopt;
+    if (error) { failure.error = error; return std::nullopt; }
+    const auto writableRoot = ResolveWritableRoot(resolved, error);
+    if (!writableRoot) { failure.error = error; return std::nullopt; }
     for (const auto directory : {L"sources", L"renders", L"staging"}) {
         std::filesystem::create_directories(*writableRoot / directory, error);
-        if (error) return std::nullopt;
+        if (error) {
+            failure.error = error;
+            failure.path = *writableRoot / directory;
+            return std::nullopt;
+        }
     }
+    failure = {};
     return writableRoot;
 }
 
@@ -401,6 +444,19 @@ const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage)
     case NeuralCachePromotion::Stage::StagingCleanup: return "staging-cleanup";
     case NeuralCachePromotion::Stage::Move: return "rename";
     case NeuralCachePromotion::Stage::Reopen: return "reopen";
+    }
+    return "unknown";
+}
+
+const char* NeuralCacheFailureCauseName(NeuralCacheFailure::Cause cause)
+{
+    switch (cause) {
+    case NeuralCacheFailure::Cause::None: return "none";
+    case NeuralCacheFailure::Cause::NoWritableRoot: return "no-writable-root";
+    case NeuralCacheFailure::Cause::InvalidKey: return "invalid-key";
+    case NeuralCacheFailure::Cause::CreateFailed: return "create-failed";
+    case NeuralCacheFailure::Cause::AlreadyExists: return "already-exists";
+    case NeuralCacheFailure::Cause::OutsideRoot: return "outside-root";
     }
     return "unknown";
 }
@@ -668,23 +724,31 @@ std::optional<std::filesystem::path> NeuralCacheManager::ResolvedLegacyDefaultRo
     if (!legacy) return std::nullopt;
     std::error_code error;
     if (!std::filesystem::is_directory(*legacy, error) || error) return std::nullopt;
-    return ResolveWritableRoot(*legacy);
+    return ResolveWritableRoot(*legacy, error);
 }
 
 NeuralCacheManager::NeuralCacheManager(std::filesystem::path root)
 {
     std::optional<std::filesystem::path> writableRoot;
     if (!root.empty()) {
-        writableRoot = PrepareWritableRoot(root);
+        writableRoot = PrepareWritableRoot(root, failure_);
     } else {
+        // An install directory the user cannot write to is the whole point of
+        // the fallback, so the portable attempt only decides whether
+        // LocalAppData is tried; its verdict is reported when that fails too.
+        NeuralCacheFailure portableFailure;
         if (const auto portable = DefaultRoot())
-            writableRoot = PrepareWritableRoot(*portable);
+            writableRoot = PrepareWritableRoot(*portable, portableFailure);
         if (!writableRoot) {
             if (const auto fallback = LegacyDefaultRoot())
-                writableRoot = PrepareWritableRoot(*fallback);
+                writableRoot = PrepareWritableRoot(*fallback, failure_);
+            else failure_ = portableFailure;
         }
     }
-    if (!writableRoot) return;
+    if (!writableRoot) {
+        LogCacheFailure("Neural cache root unavailable", failure_);
+        return;
+    }
     root_ = *writableRoot;
     valid_ = true;
 }
@@ -707,16 +771,33 @@ bool NeuralCacheManager::OwnsPath(const std::filesystem::path& path) const
 std::optional<std::filesystem::path> NeuralCacheManager::BeginStaging(
     NeuralCacheEntryKind kind, std::string_view key)
 {
-    if (!valid_ || !ValidKey(key)) return std::nullopt;
-    const uint64_t nonce = ++g_stagingNonce;
-    const std::wstring prefix = kind == NeuralCacheEntryKind::Source ? L"source-" : L"render-";
-    const std::filesystem::path directory = root_ / L"staging" /
-        (prefix + std::wstring(key.begin(), key.end()) + L"-" +
-         std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(nonce));
-    std::error_code error;
-    if (!std::filesystem::create_directories(directory, error) || error || !OwnsPath(directory))
-        return std::nullopt;
-    return directory;
+    // An invalid manager already holds the reason it never became one.
+    if (!valid_) return std::nullopt;
+    const std::filesystem::path staging = root_ / L"staging";
+    if (!ValidKey(key)) {
+        failure_ = {NeuralCacheFailure::Cause::InvalidKey, {}, staging};
+    } else {
+        const uint64_t nonce = ++g_stagingNonce;
+        const std::wstring prefix = kind == NeuralCacheEntryKind::Source ? L"source-" : L"render-";
+        const std::filesystem::path directory = staging /
+            (prefix + std::wstring(key.begin(), key.end()) + L"-" +
+             std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(nonce));
+        std::error_code error;
+        const bool created = std::filesystem::create_directories(directory, error);
+        // The name carries a per-process nonce, so a directory that is already
+        // there is an anomaly rather than a race and is still refused; the
+        // error is what separates it from a directory nothing may create.
+        if (error) failure_ = {NeuralCacheFailure::Cause::CreateFailed, error, directory};
+        else if (!created) failure_ = {NeuralCacheFailure::Cause::AlreadyExists, {}, directory};
+        else if (!OwnsPath(directory)) failure_ = {NeuralCacheFailure::Cause::OutsideRoot, {}, directory};
+        else {
+            failure_ = {};
+            return directory;
+        }
+    }
+    LogCacheFailure(std::string("Neural ") + std::string(KindName(kind)) + " staging refused",
+                    failure_);
+    return std::nullopt;
 }
 
 std::optional<std::filesystem::path> NeuralCacheManager::BeginSourceStaging(std::string_view key)

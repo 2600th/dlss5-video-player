@@ -75,6 +75,29 @@ confirmation. It closes playback first and is blocked during acquisition,
 rendering or export. Local originals and exported files are preserved. The last
 five videos remain in the menu, but their cleared caches must be rebuilt.
 
+## Neural cache staging could not be created
+
+The render never started because the cache could not make its own working
+directory, which is separate from neural runtime availability: the add-on can
+report as enabled while this fails. The status line names the cache root and
+the cause, and `DLSSVideoPlayer.log` carries one line per refusal with the
+exact directory, the cause, the filesystem error number and whether the
+ownership check rejected it, as
+`Neural render staging refused: cause=create-failed path=... error=5 ownershipRejected=0`.
+
+Extract the player to a folder you can write to; `C:\Program Files` and
+`C:\Program Files (x86)` are not writable without elevation, and a cache beside
+the EXE there falls back to `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`
+only when that fallback is itself writable. Controlled Folder Access, and
+third-party antivirus with the same feature, deny directory creation under
+Documents, Desktop and similar protected locations: add the player executable
+as an allowed app or choose a cache location outside them. `error=112` or
+`error=39` is a full disk; a render writes its whole encoded result into the
+cache before it is published, and an active session holds its segments there
+as well. `cause=create-failed` with `error=5` is a permission or policy refusal
+rather than a full disk, and `cause=already-exists` means a directory with this
+render's unique name was already there, which is refused rather than reused.
+
 ## A recent video is missing or needs a download
 
 Only the five most recent distinct videos are retained. Local files must still

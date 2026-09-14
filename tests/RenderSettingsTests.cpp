@@ -468,6 +468,51 @@ void default_cache_root_owns_new_writes_under_windows_appdata_virtualization()
     }
 }
 
+void a_cache_root_that_cannot_become_a_directory_is_invalid_and_names_the_cause()
+{
+    TempDirectory temp;
+    // Standing in for an install directory the user cannot write to: the
+    // player answered nullopt for every one of these, so the status string
+    // could not tell an unwritable location from a rejected key.
+    const auto occupied = temp.path / L"cache";
+    Write(occupied, "not a directory");
+    NeuralCacheManager cache(occupied);
+    CHECK(!cache.Valid());
+    CHECK_EQ(NeuralCacheFailure::Cause::NoWritableRoot, cache.LastFailure().cause);
+    CHECK_EQ(std::filesystem::canonical(occupied), cache.LastFailure().path);
+    CHECK(cache.LastFailure().error.value() != 0);
+    // An invalid manager keeps that verdict: no attempt can get past it.
+    CHECK(!cache.BeginRenderStaging(std::string(64, 'e')).has_value());
+    CHECK_EQ(NeuralCacheFailure::Cause::NoWritableRoot, cache.LastFailure().cause);
+}
+
+void staging_reports_the_latest_refusal_and_keeps_an_accepted_one_in_the_root()
+{
+    TempDirectory temp;
+    NeuralCacheManager cache(temp.path / L"cache");
+    CHECK(cache.Valid());
+    const auto staging = cache.Root() / L"staging";
+    CHECK(!cache.BeginRenderStaging("../../escape").has_value());
+    CHECK_EQ(NeuralCacheFailure::Cause::InvalidKey, cache.LastFailure().cause);
+    CHECK_EQ(staging, cache.LastFailure().path);
+    CHECK(std::filesystem::is_empty(staging));
+    const auto accepted = cache.BeginRenderStaging(std::string(64, 'f'));
+    CHECK(accepted.has_value());
+    if (accepted) {
+        CHECK_EQ(NeuralCacheFailure::Cause::None, cache.LastFailure().cause);
+        CHECK(cache.LastFailure().path.empty());
+        std::error_code error;
+        CHECK_EQ(staging, std::filesystem::canonical(*accepted, error).parent_path());
+        CHECK(!error);
+        // Only an owned staging directory can be set aside, so the ownership
+        // check answers here for itself.
+        CHECK(cache.MarkInvalid(*accepted));
+    }
+    // The record is the latest attempt, not everything that ever failed.
+    CHECK(!cache.BeginSourceStaging("not-a-digest").has_value());
+    CHECK_EQ(NeuralCacheFailure::Cause::InvalidKey, cache.LastFailure().cause);
+}
+
 } // namespace
 
 int main()
@@ -484,5 +529,7 @@ int main()
     neural_settings_round_trip_and_format_renodx_overrides();
     removing_one_owned_entry_preserves_other_entries_and_outside_files();
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
+    a_cache_root_that_cannot_become_a_directory_is_invalid_and_names_the_cause();
+    staging_reports_the_latest_refusal_and_keeps_an_accepted_one_in_the_root();
     return test_support::failure_count ? EXIT_FAILURE : EXIT_SUCCESS;
 }

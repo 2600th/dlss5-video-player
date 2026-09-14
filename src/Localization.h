@@ -60,6 +60,16 @@ private:
             {L"driver.verified", L"Verified for this build: "},
             {L"neural.phase.cache", L"Checking saved video"},
             {L"neural.cache.checking", L"Verifying cache; no re-encoding"},
+            // The cause is appended to the staging sentence, and the
+            // filesystem error number with it when there was one; the log line
+            // beside it names the exact directory that was refused.
+            {L"cache.staging_failed", L"Neural cache staging could not be created in %s: %s"},
+            {L"cache.not_writable", L"The neural cache is not writable at %s. Move the player to a folder you can write to, or free space in LocalAppData."},
+            {L"cache.cause.unwritable", L"the folder cannot be written to"},
+            {L"cache.cause.invalid_key", L"the cache key was rejected"},
+            {L"cache.cause.create_failed", L"the folder could not be created"},
+            {L"cache.cause.exists", L"a staging folder of that name is already there"},
+            {L"cache.cause.outside_root", L"the folder resolved outside the cache"},
             {L"neural.phase.acquiring", L"Acquiring"}, {L"neural.phase.rendering", L"Neural rendering"},
             {L"neural.phase.encoding", L"Encoding"}, {L"neural.phase.validating", L"Validating"},
             {L"neural.phase.ready", L"Ready"}, {L"neural.cancel", L"Cancel"},
