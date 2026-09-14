@@ -186,6 +186,15 @@ because it is 17 frames after the accepted cut at 70, inside the 0.6 s debounce.
 synthetic clip could show that — their shots are 1.0 s or more apart. Precision is
 1.00 everywhere, including through the dissolve.
 
+**Since fixed, and this clip is why.** The 0.6 s window was shortened to 0.3 s the
+same day, on the bracket these labels establish: this genuine 17-frame shot bounds it
+from above and `flash-exposure`'s transient, returning 4 frames after the cut that
+opened it, bounds it from below. Re-measured on the shortened window, `real-film-cuts`
+accepts all four cuts with residual and overlap bit-identical to the run above - only
+frame 87's verdict changed - so the real four score 1.000/1.000/1.000 and the nine
+synthetic clips are unchanged at 0.571/0.571/0.571. The numbers in this section stay
+as they were measured, keyed to the constant that shipped when they were taken.
+
 ## The scale to read those deltas against
 
 Same construction as the earlier record: the `intensity-0` control is the same tree

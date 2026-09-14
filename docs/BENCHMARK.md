@@ -136,7 +136,7 @@ independent measurements on 2026-09-14 converged on this. `NRLocalTone`'s full
 range moves delta-E by 0.77 on film and 4.02-8.11 on fractals, 5-11x. The automatic
 mask shifts false motion by at most 0.00108 on real clips against +-0.0093
 synthetic, one to two orders. And cut precision/recall goes 0.571/0.571 synthetic to
-1.000/0.800 real, which is the same bias from the other end, because those synthetic
+1.000/1.000 real, which is the same bias from the other end, because those synthetic
 clips were built adversarial on purpose. Part of it is the carrier: 1.26 delta-E of
 a shipped 2.48 is the NVENC floor before the model contributes anything, so effects
 shrink toward that floor on real footage.
@@ -350,13 +350,31 @@ family's 198:
 | residual (shipped shape) | 0.875 | 2 | 2 | flash-exposure |
 | failed fraction | 0.875 | 89 | 2 | flash-exposure |
 
-**The candidate is not better, so nothing in `src/` changed.** Both families reach the
-identical best operating point — every labelled cut found, no over-reset, and the same
-two false positives on the same clip — so the extra per-cell state a fraction needs in
-`EstimateFlow` would buy nothing. Neither score even orders the set correctly: the
-weakest true cut is 0.1853 residual against a 0.3739 non-cut, and 0.5661 failed
-fraction against a 0.7297 non-cut. Both families are carried by the two-arm split and
-the debounce, not by the score.
+**On the nine synthetic clips at the 0.6 s window the candidate was not better, so
+nothing in `src/` changed.** Both families reached the identical best operating point
+— every labelled cut found, no over-reset, and the same two false positives on the
+same clip — so the extra per-cell state a fraction needs in `EstimateFlow` would have
+bought nothing. Neither score even orders that set correctly: the weakest true cut is
+0.1853 residual against a 0.3739 non-cut, and 0.5661 failed fraction against a 0.7297
+non-cut. Both families were carried by the two-arm split and the debounce, not by the
+score.
+
+**That conclusion no longer holds on the corpus as it stands, and it is recorded here
+rather than acted on.** Re-scored 2026-09-14 over all thirteen clips at the shipped
+0.3 s window, the failed-fraction family strictly dominates: **P 0.857 / R 1.000 /
+F1 0.923** (12 true, 2 false, none missed) against the shipped residual criterion's
+**0.750 / 0.750 / 0.750** (9 true, 3 false, 3 missed). It suppresses the
+`cuts-motion` frame-91 over-reset - under that criterion 91 is a *weak*-arm fire, so
+the debounce reaches it - and it catches all three `cuts-similar` cuts the residual
+arm misses entirely. Its only remaining errors are `flash-exposure`'s two, which both
+families share.
+
+The swap is deliberately NOT proposed on this evidence. The per-cell state in
+`EstimateFlow` is a real cost, `flash-exposure` still defeats both families, and by
+the rule above a margin resting on four real clips should not size a decision. What
+this is, is the same trap as a pooled threshold: a conclusion that was true of the
+corpus it was measured on and stopped being true when the corpus grew. Settling it
+needs more real shot boundaries, not another sweep of the ones there are.
 
 The shipped thresholds were left alone for the same reason. The residual sweep's best
 point is `residual > 0.40`, or `> 0.13` with **no** histogram gate — and the gate is
@@ -370,12 +388,13 @@ either.
 ### The same criterion on real footage (2026-09-14, CPU only)
 
 The four `real` clips were added afterwards and scored separately, five labelled hard
-cuts over 312 frames:
+cuts over 312 frames. Both rows below were measured at the **0.6 s** weak-arm window
+that shipped at the time; the window is now **0.3 s**, and the re-measurement follows.
 
 | criterion | P | R | F1 | false pos | missed |
 |---|---:|---:|---:|---:|---:|
-| residual (shipped shape) | 1.000 | 0.800 | 0.889 | 0 | 1 |
-| failed fraction | 1.000 | 0.800 | 0.889 | 0 | 1 |
+| residual (shipped shape), 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
+| failed fraction, 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
 
 | clip | truth | accepted resets | missed | false positives |
 |---|---|---|---:|---|
@@ -383,13 +402,32 @@ cuts over 312 frames:
 | `real-game-cuts` | 32 | 32 | 0 | – |
 | `real-game-motion`, `real-dissolve` | none / soft 15–37 | none | 0 | – |
 
+**Re-measured at the 0.3 s window, which is what ships now.** `real-film-cuts` takes
+all four: 20 residual 0.3363, 47 residual 0.3114, 70 histogram 0.2504, 87 histogram
+0.2711 — accepted. Residual and overlap are bit-identical to the 0.6 s run and only
+frame 87's verdict changed, so the attribution is exact. The real four become
+**P 1.000 / R 1.000 / F1 1.000**, five of five with no false positive. The synthetic
+nine are **unchanged at 0.571/0.571/0.571**, so the shorter window costs the synthetic
+set nothing and buys the one real cut. `flash-exposure` keeps its frame-34 suppression
+(4 frames after 30, inside 9 as it was inside 18) and its two false positives at 30
+and 60; `cuts-motion` is unchanged because frame 91 fires the strong arm, which is
+never debounced at any window length.
+
 Two findings the synthetic set could not produce:
 
-- **The debounce, not a threshold, loses the one missed cut.** Local 87 fires the weak
-  arm at residual 0.2711 with overlap 0.5294 — a clear detection — and is suppressed
-  because it is 17 frames after the accepted cut at 70, inside the 0.6 s window. Real
-  editing puts shots that close together; the shortest synthetic segment here is
-  1.0 s, so no synthetic clip can exercise it. Note what raising the strong arm to the
+- **The debounce, not a threshold, lost that cut.** Local 87 fires the weak arm at
+  residual 0.2711 with overlap 0.5294 — a clear detection — and was suppressed for
+  being 17 frames after the accepted cut at 70, inside the old 0.6 s (18-frame)
+  window. Real editing puts shots that close together; the shortest synthetic segment
+  here is 1.0 s, so no synthetic clip can exercise it. The labelled corpus brackets
+  the replacement from both sides: `flash-exposure`'s transient returns 4 frames after
+  the cut that opened it, so the window must exceed 4, and this genuine shot is 17
+  frames, so it must not reach 17. The usable range is 5–17 frames and the shipped 9
+  sits in it — but asymmetrically, 5.7x of margin at the flash end against 1.9x at the
+  real end, so the next real clip with a sub-17-frame shot is what would squeeze it.
+  A label audit found no two labelled cuts anywhere in the corpus closer than 9
+  frames (tightest gaps 17, then 23) and both soft spans 22 frames wide, so the new
+  window discards no labelled cut. Note also what raising the strong arm to the
   sweep's "best" 0.40 would do to this set: `real-game-cuts` fires at 0.2174 and every
   `real-film-cuts` cut at 0.2504–0.3363, so all five would move to the debounced weak
   arm and the miss would get worse, not better.
