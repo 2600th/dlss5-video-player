@@ -107,6 +107,15 @@ public:
         return WriteMessage(handle_, WireKind::Ready, nullptr, 0);
     }
 
+    // A VRAM point sample. Non-terminal, so it may be written with no job in
+    // flight: the idle one is, and waits in the pipe for the next job's reader.
+    bool WriteMemory(const MemorySample& sample)
+    {
+        const WireMemory wire = EncodeMemory(sample);
+        std::lock_guard lock(mutex_);
+        return WriteMessage(handle_, WireKind::Memory, &wire, sizeof(wire));
+    }
+
 private:
     HANDLE handle_{};
     std::mutex mutex_;
@@ -133,6 +142,18 @@ private:
     bool comInitialized_{};
     bool mediaFoundationStarted_{};
 };
+
+// ASCII-only narrowing for the log, which is a narrow stream. Every string
+// that reaches it here is a fixed English diagnostic or a policy name, so a
+// non-ASCII character is a bug rather than a translation.
+std::string WideToNarrow(std::wstring_view value)
+{
+    std::string narrow;
+    narrow.reserve(value.size());
+    for (const wchar_t character : value)
+        narrow.push_back(character < 128 ? static_cast<char>(character) : '?');
+    return narrow;
+}
 
 LRESULT CALLBACK HiddenWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
@@ -203,6 +224,7 @@ bool RunWithMessagePump(Body&& body)
 NeuralRenderResult RunOneJob(OfflineNeuralRenderer& renderer, MetadataWriter& metadata,
                              const NeuralRenderRequest& request,
                              const NeuralColdStartTimeline& helperPhases,
+                             resident_helper::IdleVramPolicy idleVramPolicy,
                              std::stop_token stop)
 {
     // Segment messages are written from the renderer's finalize thread; the
@@ -232,6 +254,18 @@ NeuralRenderResult RunOneJob(OfflineNeuralRenderer& renderer, MetadataWriter& me
         if (!merged.Empty()) metadata.WriteTimeline(merged);
     });
     result.jobId = request.jobId;
+    // Sampled with the render finished and the device quiet, which is the
+    // moment a helper that stays resident starts parking whatever it did not
+    // give back. Written ahead of the result so a parent that judges the
+    // result and stops reading still has it, and logged as well so a session
+    // that nobody was pumping still leaves the number behind.
+    const OfflineNeuralRenderer::MemoryFootprint parked = renderer.SampleMemoryFootprint();
+    metadata.WriteMemory(MemorySample{MemoryStage::PostJob, idleVramPolicy, parked.featureArmed,
+                                      parked.localVramMiB});
+    LOG("Neural helper post-job VRAM: job=" << request.jobId
+        << " localVramMiB=" << parked.localVramMiB
+        << " featureArmed=" << (parked.featureArmed ? 1 : 0)
+        << " idleVramPolicy=" << WideToNarrow(resident_helper::IdleVramPolicyName(idleVramPolicy)));
     return result;
 }
 
@@ -303,13 +337,19 @@ const char* ResidentExitName(resident_worker::ResidentExit exit)
 // survives between jobs; everything the parent CAN change behind a running
 // process is re-checked per job, because a reused process must not assume the
 // runtime it loaded or the settings its proxy read are still the ones on disk.
+//
+// `idleVramPolicy_` is the one thing here that is fixed at launch and never
+// re-read: it decides what happens to the feature workset between jobs, and a
+// process that changed arms mid-life would report two idle samples that cannot
+// be compared with each other or with anything else.
 class ResidentRunner {
 public:
     ResidentRunner(MetadataWriter& metadata, HWND window, std::filesystem::path moduleDirectory,
-                   NeuralColdStartTimeline helperPhases, RuntimeStamps runtime, std::string settings)
+                   NeuralColdStartTimeline helperPhases, RuntimeStamps runtime, std::string settings,
+                   resident_helper::IdleVramPolicy idleVramPolicy)
         : metadata_(metadata), window_(window), moduleDirectory_(std::move(moduleDirectory)),
           helperPhases_(std::move(helperPhases)), runtime_(std::move(runtime)),
-          settings_(std::move(settings)) {}
+          settings_(std::move(settings)), idleVramPolicy_(idleVramPolicy) {}
 
     bool Ready() { return metadata_.WriteReady(); }
 
@@ -352,7 +392,7 @@ public:
         // Only the first job a resident helper serves paid the process start.
         const NeuralColdStartTimeline base =
             served_ ? NeuralColdStartTimeline{} : helperPhases_;
-        NeuralRenderResult result = RunOneJob(renderer_, metadata_, request, base, stop);
+        NeuralRenderResult result = RunOneJob(renderer_, metadata_, request, base, idleVramPolicy_, stop);
         ++served_;
         LOG("Resident helper served job " << request.jobId << " (" << served_ << " this process) as "
             << ResidencyName(renderer_.LastResidency()) << ": ok=" << (result.ok ? 1 : 0)
@@ -374,16 +414,48 @@ public:
         return resident_worker::JobOutcome::Completed;
     }
 
-private:
-    static std::string WideToNarrow(std::wstring_view value)
+    // The idle grace elapsed with no new job. Under KeepFeature this only
+    // measures what the process is parking; under FreeFeature it hands the
+    // feature-18 workset back first, so the number describes what the policy
+    // actually left behind rather than what it intended to.
+    //
+    // Both arms report the same way, on the metadata pipe and in the log. The
+    // pipe copy reaches the next job's receipt, which is the job that pays for
+    // whatever was given back; the log copy is what a helper that exits on the
+    // idle timeout instead leaves behind, because nobody is pumping the pipe
+    // between jobs.
+    void Idle()
     {
-        std::string narrow;
-        narrow.reserve(value.size());
-        for (const wchar_t character : value)
-            narrow.push_back(character < 128 ? static_cast<char>(character) : '?');
-        return narrow;
+        const std::string policyName = WideToNarrow(resident_helper::IdleVramPolicyName(idleVramPolicy_));
+        OfflineNeuralRenderer::MemoryFootprint parked;
+        if (idleVramPolicy_ == resident_helper::IdleVramPolicy::FreeFeature) {
+            const OfflineNeuralRenderer::IdleFeatureRelease observed =
+                renderer_.ReleaseIdleFeatureMemory();
+            parked = observed.after;
+            const uint64_t freed = observed.before.localVramMiB > observed.after.localVramMiB
+                ? observed.before.localVramMiB - observed.after.localVramMiB : 0;
+            // `observed=` is what the adapter said, not a claim that the
+            // release worked: DLSS is documented to keep feature memory, and a
+            // runtime that declines to give it back has to be recorded as
+            // having declined rather than reported as a success.
+            LOG("Resident helper idle VRAM: policy=" << policyName
+                << " beforeMiB=" << observed.before.localVramMiB
+                << " localVramMiB=" << observed.after.localVramMiB
+                << " freedMiB=" << freed
+                << " released=" << (observed.released ? 1 : 0)
+                << " featureArmed=" << (parked.featureArmed ? 1 : 0)
+                << " observed=" << (freed ? "freed" : "not-freed"));
+        } else {
+            parked = renderer_.SampleMemoryFootprint();
+            LOG("Resident helper idle VRAM: policy=" << policyName
+                << " localVramMiB=" << parked.localVramMiB
+                << " featureArmed=" << (parked.featureArmed ? 1 : 0));
+        }
+        metadata_.WriteMemory(MemorySample{MemoryStage::Idle, idleVramPolicy_, parked.featureArmed,
+                                           parked.localVramMiB});
     }
 
+private:
     // What the parent may have changed since this process started. Run per job
     // under the parent's lease, which is also when the parent rewrote the
     // settings and re-verified the lock.
@@ -429,6 +501,8 @@ private:
     NeuralColdStartTimeline helperPhases_;
     RuntimeStamps runtime_;
     std::string settings_;
+    // Fixed at launch: exactly one arm is in force per helper process.
+    resident_helper::IdleVramPolicy idleVramPolicy_{resident_helper::kDefaultIdleVramPolicy};
     // The device, the NGX instance, its feature-18 workset and the encoder's
     // helper lookup, kept for the process. Constructed here and destroyed with
     // this runner, which the session tears down before the render window its
@@ -512,13 +586,16 @@ int wmain(int argc, wchar_t** argv)
             return fail(settingsError.empty()
                 ? std::wstring(L"The helper could not read its neural settings.") : settingsError);
         }
+        LOG("Resident helper session starting with idleVramPolicy="
+            << WideToNarrow(resident_helper::IdleVramPolicyName(arguments->idleVramPolicy)));
         int exitCode = 0;
         // One pump for the whole session: the window and the device outlive any
         // single job, so the thread that owns them has to keep pumping between
         // jobs as well as during them.
         const bool pumped = RunWithMessagePump([&] {
             ResidentRunner runner(metadata, renderWindow, moduleDirectory, helperPhases,
-                                  SnapshotRuntimeStamps(moduleDirectory), *settings);
+                                  SnapshotRuntimeStamps(moduleDirectory), *settings,
+                                  arguments->idleVramPolicy);
             resident_worker::CommandChannel channel(arguments->command, arguments->parentProcess);
             const resident_worker::ResidentExit reason =
                 resident_worker::RunResidentLoop(channel, runner);
@@ -540,7 +617,11 @@ int wmain(int argc, wchar_t** argv)
     NeuralRenderResult result;
     const bool pumped = RunWithMessagePump([&] {
         OfflineNeuralRenderer renderer;
-        result = RunOneJob(renderer, metadata, request, helperPhases, {});
+        // A single-shot helper exits rather than idling, so its policy is the
+        // default whatever the parent thinks: it keeps the feature until the
+        // process goes, and the post-job sample says what that was worth.
+        result = RunOneJob(renderer, metadata, request, helperPhases,
+                           resident_helper::kDefaultIdleVramPolicy, {});
     });
     DestroyWindow(renderWindow);
     if (!pumped) return fail(L"The helper could not create its render completion event.");

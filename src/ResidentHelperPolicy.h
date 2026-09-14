@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -50,6 +52,48 @@ inline HelperKey MakeHelperKey(std::wstring_view runtimeDirectory, std::string r
     }
     while (!directory.empty() && directory.back() == L'\\') directory.pop_back();
     return HelperKey{std::move(directory), std::move(runtimeDigest), std::move(settingsDigest)};
+}
+
+// What a resident helper does with its feature-18 workset between jobs.
+//
+// DLSS does not give feature memory back on an ordinary ReleaseFeature, so a
+// parked helper keeps holding it; the documented escape is to ask for it with
+// NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, which trades the re-allocation
+// back onto the next job. Both arms are real, so both are implemented and the
+// choice is made once, at launch: switching mid-life would leave the two VRAM
+// samples describing different processes and neither number would mean
+// anything.
+//
+// Deliberately NOT part of HelperKey and deliberately not in the neural
+// settings the cache key hashes. It changes when memory is handed back, never
+// what the pass computes, so a render made under either arm is the same render
+// and must stay reusable across a change of it.
+enum class IdleVramPolicy : uint8_t {
+    KeepFeature,  // A: hold the workset, so the next job pays neither init nor arm
+    FreeFeature,  // B: hand it back while idle, so the next job re-arms
+};
+
+// A, because reuse latency is the whole point of keeping the process: the arm
+// this policy would give back is 0.689 s of the 2.10 s residency saves.
+inline constexpr IdleVramPolicy kDefaultIdleVramPolicy = IdleVramPolicy::KeepFeature;
+
+constexpr std::wstring_view IdleVramPolicyName(IdleVramPolicy policy) noexcept
+{
+    switch (policy) {
+        case IdleVramPolicy::KeepFeature: return L"keep";
+        case IdleVramPolicy::FreeFeature: return L"free";
+    }
+    return L"unknown";
+}
+
+// Exactly the two names above, nothing else. An unreadable value is refused
+// rather than defaulted: a run whose policy nobody can name produces VRAM
+// numbers nobody can attribute.
+constexpr std::optional<IdleVramPolicy> ParseIdleVramPolicy(std::wstring_view name) noexcept
+{
+    if (name == L"keep") return IdleVramPolicy::KeepFeature;
+    if (name == L"free") return IdleVramPolicy::FreeFeature;
+    return std::nullopt;
 }
 
 enum class HelperPlan {

@@ -47,6 +47,17 @@ reports the wall-clock offset of each keypress from the first recorded byte
 | [Grand Theft Auto VI: An Extended Look — Now Playing](https://www.youtube.com/watch?v=uphThaa97ig) (Netflix) | 2560 × 1440 VP9, 30 fps, 26 s | Comparison 2, the playback take |
 | [THE GODFATHER 50th Anniversary Trailer](https://www.youtube.com/watch?v=UaVTIH8mujA) (Paramount Pictures) | 2560 × 1440 VP9, 23.976 fps, 120 s | Title shot, comparison 1 |
 
+Those two uploads have a second job as of 2026-09-14. They are the upstreams of
+this capture, so cutting benchmark clips straight out of them produces material
+that has never been through the player: the `orig-*` clips in
+`tools/benchmark/corpus.py` are camera-original where every `real-*` clip is an
+NR-processed capture of the player's own DLSS-NR output. A third trailer joins
+them there for one reason - neither of these contains a cross-dissolve, and one
+was needed. None of the three is committed or redistributed;
+`tools/benchmark/fetch_camera_original.ps1` fetches them by video id and format
+id, and `docs/measurements/camera-original-20260914/REPORT.md` records what they
+established.
+
 Rockstar's own 26-minute *An Extended Look* upload is age-restricted, so an
 anonymous session cannot fetch it at all; Netflix's *Now Playing* cut of the same
 footage is not. [Screenshot and render provenance](../screenshots/README.md)

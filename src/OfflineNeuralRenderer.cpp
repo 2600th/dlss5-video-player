@@ -1776,10 +1776,15 @@ struct ProductionEvaluatorAdapter {
     bool builtGpuColorConversion{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
-    // True when the last Initialize kept a retained device, NGX instance and
-    // feature instead of building them. The job then paid neither the neural
-    // bring-up nor the feature arm, and its cold-start timeline omits both.
+    // True when the last Initialize kept a retained device and NGX instance
+    // instead of building them. The job then paid no neural bring-up; whether
+    // it also skipped the feature arm is `featureReleasedWhileIdle`.
     bool reused=false;
+    // Set when the idle policy handed the feature-18 workset back between
+    // jobs. The device, the NGX instance and the negotiated sizes all survived
+    // that, so the next job keeps them and re-arms the feature alone - which
+    // is the whole trade the FreeFeature arm makes.
+    bool featureReleasedWhileIdle=false;
     bool Reused()const{return reused;}
     bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,PixelLayout layout){
         // Everything compared here is fixed at bring-up and has no setter: the
@@ -1788,8 +1793,17 @@ struct ProductionEvaluatorAdapter {
         // upload path. D3D12Renderer cannot resize any of them, so a job that
         // differs in any one of them gets the device built again - which is
         // also the only way to release the feature the add-on holds.
-        reused=renderer&&renderer->DLSSFeatureCreated()&&width==w&&height==h&&fps==rate&&
+        //
+        // A feature handed back while idle is the one exception: nothing the
+        // device holds changed, only the workset, so the job re-arms it rather
+        // than rebuilding everything underneath it.
+        reused=renderer&&(renderer->DLSSFeatureCreated()||featureReleasedWhileIdle)&&
+               width==w&&height==h&&fps==rate&&
                sourceLayout==layout&&builtGpuColorConversion==gpuColorConversion;
+        // Answered, so spent: this job either re-arms the released feature or
+        // rebuilds the device, and either way the next Initialize must judge
+        // the feature on what it can see rather than on a stale promise.
+        featureReleasedWhileIdle=false;
         if(reused){
             // Guide controls are pure CPU state and are the one thing a job may
             // change without rebuilding anything.
@@ -1823,6 +1837,24 @@ struct ProductionEvaluatorAdapter {
     void Release(){
         DiscardPending();deferred.Shutdown();renderer.reset();
         successfulEvaluations=0;lastFailure=NeuralRenderFailure::None;resolveBroken=false;
+        featureReleasedWhileIdle=false;
+    }
+    // Hands the feature-18 workset back between jobs, keeping everything else
+    // this adapter retains. Only legal with no job running: the pending
+    // captures are drained first, and the renderer waits for every command
+    // list that referenced the feature before releasing it, which is what the
+    // DLSS guide S5.5 requires and what a mid-job release would break.
+    bool ReleaseFeatureForIdle(){
+        if(!renderer||!renderer->DLSSFeatureCreated())return false;
+        DiscardPending();
+        if(!renderer->ReleaseDLSSFeatureForIdle())return false;
+        featureReleasedWhileIdle=true;
+        return true;
+    }
+    // What the adapter's device is holding right now, rather than the peak it
+    // reached during a job.
+    uint64_t CurrentLocalVideoMemoryMiB()const{
+        return renderer?renderer->CurrentLocalVideoMemoryMiB():0;
     }
     // Per-job state on an evaluator that is about to serve another job. Each of
     // these would otherwise describe the previous one:
@@ -2360,6 +2392,31 @@ bool OfflineNeuralRenderer::ReusableForAnotherJob() const
 #endif
 }
 
+OfflineNeuralRenderer::MemoryFootprint OfflineNeuralRenderer::SampleMemoryFootprint() const
+{
+    MemoryFootprint footprint;
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+    if (!retained_) return footprint;
+    footprint.localVramMiB = retained_->evaluator.CurrentLocalVideoMemoryMiB();
+    footprint.featureArmed = retained_->evaluator.FeatureCreated();
+#endif
+    return footprint;
+}
+
+OfflineNeuralRenderer::IdleFeatureRelease OfflineNeuralRenderer::ReleaseIdleFeatureMemory()
+{
+    IdleFeatureRelease observed;
+#ifndef OFFLINE_NEURAL_RENDERER_TESTING
+    observed.before = SampleMemoryFootprint();
+    if (retained_) observed.released = retained_->evaluator.ReleaseFeatureForIdle();
+    // Sampled after the attempt either way: a release that could not drain the
+    // queue still has to report what the adapter says, because "nothing moved"
+    // is what separates a refused release from a runtime that declined to free.
+    observed.after = SampleMemoryFootprint();
+#endif
+    return observed;
+}
+
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
 OfflineNeuralRenderer::OfflineNeuralRenderer(
     IFrameSource& source,INeuralFrameEvaluator& evaluator,IFrameEncoder& encoder,
@@ -2403,7 +2460,13 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         [pauseEvent=request.pauseEvent]{
             return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
         },segments,coldStart);
-    residency_=state.evaluator.Reused()?Residency::FeatureReused
+    // Three distinguishable outcomes, and the middle one is what the
+    // FreeFeature idle policy produces: the device and the NGX instance were
+    // inherited but the workset was not, so the job skipped neuralInit and
+    // paid featureArm. Reporting that as a reuse would hide the cost the
+    // policy is being measured for.
+    residency_=state.evaluator.Reused()
+        ?(inheritedArmedFeature?Residency::FeatureReused:Residency::FeatureRecreated)
         :inheritedArmedFeature?Residency::FeatureRecreated:Residency::Initialized;
     return result;
 #endif

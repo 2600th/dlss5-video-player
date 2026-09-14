@@ -49,7 +49,7 @@ assert len(COLD_START_PHASES) == 9
 
 
 def decode_metadata(data: bytes) -> list[dict]:
-    """Decodes every complete NWR1 v5 message in ``data``.
+    """Decodes every complete NWR1 v6 message in ``data``.
 
     Progress records carry ``kind='progress'``, the final record ``kind='result'``,
     a preflight probe ``kind='preflight'`` with the parsed JSON receipt, and the
@@ -150,10 +150,16 @@ class FrameReader:
         import numpy as np
         self.np = np
         self.width, self.height = width, height
+        self.path = Path(path)
+        # A missing input is a caller bug, not an empty clip. FFmpeg would exit with
+        # nothing on stdout, which is byte-for-byte what end-of-stream looks like here,
+        # so a run whose recorded source has moved would silently score zero frames.
+        if not self.path.exists():
+            raise FileNotFoundError(f"frame source does not exist: {self.path}")
         select = []
         if start_frame:
             select.append(f"select=gte(n\\,{start_frame})")
-        args = [str(FFMPEG), "-v", "error", "-i", str(path), "-map", "0:v:0"]
+        args = [str(FFMPEG), "-v", "error", "-i", str(self.path), "-map", "0:v:0"]
         if select:
             args += ["-vf", ",".join(select)]
         if count is not None:
@@ -162,6 +168,7 @@ class FrameReader:
         self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                         creationflags=FLAGS, bufsize=0)
         self.frame_bytes = width * height * 3
+        self.delivered = 0
 
     def __iter__(self):
         return self
@@ -172,8 +179,14 @@ class FrameReader:
             chunk = self.process.stdout.read(self.frame_bytes - len(buffer))
             if not chunk:
                 self.close()
+                # Distinguish "the clip ended" from "FFmpeg could not decode it": a
+                # decoder that failed before the first frame must not read as an empty clip.
+                if self.delivered == 0 and self.process.returncode not in (0, None):
+                    raise RuntimeError(f"decoded no frames from {self.path} "
+                                       f"(ffmpeg exit {self.process.returncode})")
                 raise StopIteration
             buffer.extend(chunk)
+        self.delivered += 1
         return self.np.frombuffer(bytes(buffer), dtype=self.np.uint8).reshape(self.height, self.width, 3)
 
     def close(self):

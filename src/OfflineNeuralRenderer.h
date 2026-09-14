@@ -230,6 +230,35 @@ public:
     // relaunch should relaunch instead. Always true before the first Run.
     bool ReusableForAnotherJob() const;
 
+    // A point sample of what this renderer's process holds on the adapter's
+    // local segment, in MiB, from IDXGIAdapter3::QueryVideoMemoryInfo - the
+    // same source as the per-frame peak in NeuralRenderTiming, asked as a
+    // point question instead of a running maximum. All zero and unarmed
+    // before the first production Run: there is no device, so nothing of ours
+    // is resident to measure.
+    struct MemoryFootprint {
+        uint64_t localVramMiB{};
+        bool featureArmed{};
+    };
+    MemoryFootprint SampleMemoryFootprint() const;
+
+    // What an idle helper's attempt to give feature memory back observed.
+    // `released` is the mechanism - the workset was handed back - and never a
+    // claim that the runtime returned anything: the difference between the two
+    // footprints is the only thing that says whether it did.
+    struct IdleFeatureRelease {
+        MemoryFootprint before;
+        MemoryFootprint after;
+        bool released{};
+    };
+    // Hands the feature-18 workset back while no job is running, keeping the
+    // device, the NGX instance and the encoder's helper lookup. The next Run
+    // re-arms the feature through the same path a job that inherited none
+    // uses, so this costs the arm and saves whatever the runtime frees.
+    // Safe to call with no retained device: it reports an unarmed footprint
+    // and no release.
+    IdleFeatureRelease ReleaseIdleFeatureMemory();
+
 private:
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     IFrameSource* testSource_{};

@@ -99,10 +99,11 @@ Windows PowerShell 5.1, no external modules. Exit codes:
  13  Windows refused to inject the keystroke and the foreground window does not
      explain it
  14  Windows refused to inject the keystroke because the workstation is locked
-     or a higher-integrity window holds the foreground. Not detectable before
-     the fact: the modern lock screen is a protected window on the ordinary
-     desktop, so OpenInputDesktop still succeeds and the first chord is even
-     accepted - it simply goes nowhere.
+     or a higher-integrity window holds the foreground. The lock half of that
+     is read from the session manager (WTSSessionInfoEx SessionFlags), so it
+     is a cause rather than an inference - but it is still read after the
+     refusal, because a lock arriving mid-session is exactly what an
+     unattended run has to survive being told about.
 #>
 [CmdletBinding()]
 param(
@@ -210,6 +211,20 @@ namespace DlssPlayerSession {
         public InputUnion u;
     }
 
+    // The head of WTSINFOEXW: DWORD Level, then the WTSINFOEX_LEVEL_W union.
+    // The union's members start with LARGE_INTEGER-aligned fields, so it sits
+    // at offset 8 on x86 and x64 alike; the offsets are declared rather than
+    // hand-padded so the mapping is visible. Only the three fields ahead of
+    // WTSINFOEX_LEVEL1_W's strings are read - the station name, user, logon
+    // times and byte counts after them are left in the buffer.
+    [StructLayout(LayoutKind.Explicit)]
+    public struct WtsInfoEx {
+        [FieldOffset(0)] public uint Level;
+        [FieldOffset(8)] public uint SessionId;
+        [FieldOffset(12)] public int SessionState;
+        [FieldOffset(16)] public int SessionFlags;
+    }
+
     public static class Win32 {
         const uint INPUT_KEYBOARD = 1;
         const uint KEYEVENTF_KEYUP = 0x0002;
@@ -244,39 +259,109 @@ namespace DlssPlayerSession {
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool CloseHandle(IntPtr handle);
 
-        // Why SendInput would be refused, or null when it would not. Called
-        // only after a refusal, to explain it - never as a predicate.
-        //
-        // OpenInputDesktop is the textbook check and it is wrong here: the
-        // modern lock screen is a protected window on the ordinary Default
-        // desktop, so OpenInputDesktop still succeeds while injection is
-        // refused. Observed directly - an up-front check passed, the first
-        // chord was accepted and went nowhere, the second came back
-        // ERROR_ACCESS_DENIED. That guard was deleted rather than shipped.
-        //
-        // What decides it is the foreground window: SendInput is refused when
-        // that window's process outranks ours, and GetForegroundWindow returns
-        // null while the workstation is locked. But it does not return null
-        // *consistently* while locked - polling it eight times at 700 ms on a
-        // locked machine returned null twice and the lock-screen window six
-        // times, and one unlucky single sample is what made an earlier version
-        // of this script report a locked box as unlocked. So the foreground is
-        // sampled several times and any null decides it.
-        public static string InjectionBlockedReason() {
+        // The deterministic lock test. WTS_CURRENT_SERVER_HANDLE is IntPtr.Zero;
+        // the buffer it allocates is released with WTSFreeMemory.
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        static extern bool WTSQuerySessionInformationW(IntPtr server, uint sessionId, int infoClass,
+                                                       out IntPtr buffer, out uint bytesReturned);
+        [DllImport("wtsapi32.dll")]
+        static extern void WTSFreeMemory(IntPtr memory);
+
+        const int ForegroundSamples = 5;
+        const string LockedState = "locked";
+        const string UnlockedState = "unlocked";
+        // WTS_INFO_CLASS.WTSSessionInfoEx and the SessionFlags values, wtsapi32.h.
+        const int WTSSessionInfoEx = 25;
+        const uint WTS_CURRENT_SESSION = 0xFFFFFFFF;
+        const int WTS_SESSIONSTATE_LOCK = 0;
+        const int WTS_SESSIONSTATE_UNLOCK = 1;
+
+        // "locked", "unlocked", or "unknown: <why>" - the session manager's own
+        // record of the lock state, which is why this reading wins over
+        // anything inferred from windows.
+        public static string WorkstationLockState() {
+            // Windows 7 and Server 2008 R2 document SessionFlags with LOCK and
+            // UNLOCK reversed, so below Windows 8 the value is unusable in
+            // either direction and the caller falls back.
+            if (Environment.OSVersion.Version < new Version(6, 2))
+                return "unknown: Windows " + Environment.OSVersion.Version +
+                       " documents SessionFlags with LOCK and UNLOCK reversed";
+            IntPtr buffer;
+            uint bytes;
+            if (!WTSQuerySessionInformationW(IntPtr.Zero, WTS_CURRENT_SESSION, WTSSessionInfoEx, out buffer, out bytes))
+                return "unknown: WTSQuerySessionInformationW failed, Win32 error " + Marshal.GetLastWin32Error();
+            try {
+                int head = Marshal.SizeOf(typeof(WtsInfoEx));
+                if (bytes < (uint)head)
+                    return "unknown: WTSINFOEX came back " + bytes + " bytes, short of the " + head +
+                           " it takes to reach SessionFlags";
+                WtsInfoEx info = (WtsInfoEx)Marshal.PtrToStructure(buffer, typeof(WtsInfoEx));
+                if (info.Level != 1)
+                    return "unknown: WTSINFOEX level " + info.Level + " carries no SessionFlags";
+                if (info.SessionFlags == WTS_SESSIONSTATE_LOCK) return LockedState;
+                if (info.SessionFlags == WTS_SESSIONSTATE_UNLOCK) return UnlockedState;
+                // WTS_SESSIONSTATE_UNKNOWN (-1) lands here, and so would any
+                // value a later Windows adds.
+                return "unknown: SessionFlags = " + info.SessionFlags;
+            } finally {
+                WTSFreeMemory(buffer);
+            }
+        }
+
+        // One pass over several foreground samples: how often nothing held the
+        // foreground, and whatever outranked us if anything did.
+        static void SampleForeground(out int missing, out string outranked) {
             const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-            string outranked = null;
-            for (int sample = 0; sample < 5; ++sample) {
+            missing = 0;
+            outranked = null;
+            for (int sample = 0; sample < ForegroundSamples; ++sample) {
                 if (sample > 0) System.Threading.Thread.Sleep(120);
                 IntPtr window = GetForegroundWindow();
-                if (window == IntPtr.Zero)
-                    return "no window held the foreground on sample " + (sample + 1) +
-                           " of 5, which is what a locked workstation looks like from here";
+                if (window == IntPtr.Zero) { ++missing; continue; }
                 uint owner;
                 GetWindowThreadProcessId(window, out owner);
                 IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, owner);
                 if (process == IntPtr.Zero) outranked = ForegroundWindowInfo();
                 else CloseHandle(process);
             }
+        }
+
+        // Why SendInput would be refused, or null when it would not. Called
+        // only after a refusal, to explain it - never as a predicate.
+        //
+        // WTSINFOEXW's SessionFlags decides the lock question, and it decides
+        // it alone: it is one stable answer from the session manager instead of
+        // a guess from window ownership. Two window-level tests were tried
+        // first and neither is trusted now. OpenInputDesktop is the textbook
+        // one and it is wrong here - the modern lock screen is a protected
+        // window on the ordinary Default desktop, so OpenInputDesktop succeeds
+        // while injection is refused; observed directly, the guard passed, the
+        // first chord was accepted and went nowhere, and the second came back
+        // ERROR_ACCESS_DENIED. And GetForegroundWindow flaps while the lock
+        // screen is up: polled eight times at 700 ms on a locked machine it
+        // returned null twice and the lock-screen window six times, which is
+        // how an earlier version of this script reported a locked box as
+        // unlocked.
+        //
+        // That flapping foreground survives only as the fallback for the case
+        // the API will not answer - SessionFlags is WTS_SESSIONSTATE_UNKNOWN,
+        // or the host predates Windows 8 and the flag's two values are
+        // documented reversed - and there, as before, a missing foreground on
+        // any sample decides it. A foreground window whose process outranks
+        // ours refuses injection whether or not the desktop is locked, so it
+        // is reported either way.
+        public static string InjectionBlockedReason() {
+            string state = WorkstationLockState();
+            if (state == LockedState)
+                return "the session manager reports this session locked (WTSSessionInfoEx SessionFlags = " +
+                       "WTS_SESSIONSTATE_LOCK), so injected input goes nowhere";
+            int missing;
+            string outranked;
+            SampleForeground(out missing, out outranked);
+            if (state != UnlockedState && missing > 0)
+                return "the session manager would not say whether this session is locked (" + state +
+                       ") and no window held the foreground on " + missing + " of " + ForegroundSamples +
+                       " samples, which is what a locked workstation looks like from here";
             if (outranked != null)
                 return "the foreground window outranks this process (" + outranked +
                        "), so injected input is refused";

@@ -135,8 +135,7 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
         count = 1;
         if (fn.nvOFGetCaps(handle, bounds[i], &caps[i], &count) != NV_OF_SUCCESS) caps[i] = 0;
     }
-    if (caps[2] && caps[3] && (width < caps[0] || height < caps[1] ||
-                               width > caps[2] || height > caps[3])) {
+    if (!FlowGeometrySupported(width, height, caps[0], caps[1], caps[2], caps[3])) {
         LOG("NVOFA unavailable: " << width << "x" << height << " is outside the engine's "
             << caps[0] << "x" << caps[1] << ".." << caps[2] << "x" << caps[3] << " range.");
         Shutdown();

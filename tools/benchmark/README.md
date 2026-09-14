@@ -30,8 +30,8 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 | `analyze.py` | Per-run metrics, medians per clip/profile, guide and two-pass deltas, cut scores, `report.md` |
 | `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; needs no GPU, no worker and no render |
-| `blind.py` | Randomized A/B stills + 3 s excerpts with a sealed `key.json`; `--score` tallies a ballot |
-| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v4 decoder (progress, result, preflight, segment) |
+| `blind.py` | Randomized A/B stills + excerpts with a sealed `key.json`; every candidate frame is provably inside a manifest shot and each excerpt is clipped to that shot, so `--seconds` caps a length it does not guarantee; `--score` tallies a ballot |
+| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v6 decoder (progress, result, preflight, segment; unknown kinds are skipped by payload length, so a helper that adds one stays readable) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
 | `build-upscaling/benchmark-work/runtime-snapshot/` | Optional frozen copy of `Release/neural-runtime`; used in preference to `Release/` so a concurrent rebuild cannot change the worker mid-benchmark |
 | `build-upscaling/benchmark-work/profiles/<profile>/` | Isolated runtime clone, `ffmpeg.exe`/`ffprobe.exe` hard links, `profile.json`, `preflight.json` |
@@ -68,6 +68,13 @@ must never reset.
 | `real-game-cuts` | real | **NR-processed capture**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
 | `real-game-motion` | real | **NR-processed capture**: 76 frames, one continuous shot, camera translating while the subject occludes and disoccludes the background. No cut |
 | `real-dissolve` | real | NR-processed capture, **synthesised transition**: the source contains no dissolve, so two shots are cross-faded over 0.7 s. `cuts` is empty and `soft_cuts` marks the fade |
+| `orig-film-cuts-a` | camera-original | **Camera-original** (see below): 131 frames at 23.976 fps, **eight** hard cuts at 4/14/24/39/51/81/105/120 — the densest real editing rhythm here. Locals 4 and 51 have histogram overlap 0.65/0.75, so a threshold alone misses them |
+| `orig-film-cuts-b` | camera-original | **Camera-original**: 70 frames, three hard cuts at 13/41/60. Starts one frame later than first cut, so the clip does not open with a one-frame shot |
+| `orig-film-fade` | camera-original | **Camera-original**, and a **real** gradual transition: the trailer's own fade to black, luma 77 → 0 across locals 6-27, no pair above \|dY\| 6. `soft_cuts` marks it |
+| `orig-faces` | faces | **Camera-original** faces: 101 frames, four hard cuts at 19/34/56/83, a face clearly visible on at least one side of each. Replaces the `mafia-60s.mkv` fixture that is not in this repository |
+| `orig-game-cuts` | camera-original | **Camera-original** game footage: 91 frames, hard cuts at 20 and 70 (street chase → jet skis → armoured truck) |
+| `orig-game-motion` | camera-original | **Camera-original**: 66 frames, one continuous moving shot — the only span in its 26 s source that is both cut-free and actually moving (median \|dY\| 3.9); every other cut-free span is the static end card |
+| `orig-dissolve` | camera-original | **Camera-original**, and the **real cross-dissolve** this corpus lacked: locals 21-48 are a linear blend of the shots either side, alpha sliding 1 → 0, residual 0.063 of the endpoint difference, mid-transition gradient below both ends. Both sides carry burned-in title text |
 
 The four `real` clips are **not camera-original footage.** They are cut from
 `docs/media/neural-comparison-demo.mp4`, a screen capture of this player recorded
@@ -79,6 +86,35 @@ footage; `docs/BENCHMARK.md` carries the consequences, including what it does to
 `intensity-0` carrier control. No split-screen, divider or UI chrome is inside any
 clip: the capture's magnify/wipe demonstration starts one frame after
 `real-film-cuts` ends, checked frame by frame.
+
+The seven `orig-*` clips exist because of that paragraph. They are cut straight
+from the publisher's own releases - two of them the documented upstreams of the
+demo capture itself (`docs/media/README.md`), the third a restored trailer
+acquired for the cross-dissolve neither upstream contains - so nothing in them
+has been through the player. Geometry: crop to the active picture, scale to 1080
+height with lanczos, centre-crop to 1920 wide, so no padded black row joins the
+static-cell population that false motion is divided by. Native frame rate is
+kept: re-timing 23.976 to 30 would duplicate one frame in five, and a duplicate
+pair is motionless, which is exactly what makes `real-film-cuts` 37 % motionless.
+
+Those sources are copyrighted trailers, so they are neither committed nor
+redistributed. `tools/benchmark/fetch_camera_original.ps1` fetches them by video
+id and format id into `build-upscaling/camera-original/`, verifies the geometry
+and frame rate the labels were verified against, and each `orig-*` builder skips
+itself when its source is absent - the same contract `faces` has always had.
+Nothing is SHA-pinned, because a streaming site re-encodes its own files; the
+integrity check is downstream, in the per-clip frame digests this manifest
+records, so `python tools/benchmark/corpus.py --check` is what proves a rebuild
+produced the clips the committed labels were verified against.
+
+Every `orig-*` cut index was verified the same way as the `real-*` ones: a
+detector proposes (mean |dY| ≥ 25 with histogram overlap ≤ 0.55, computed on the
+built 1920x1080 clip so indices are clip-local), then every candidate and every
+other pair above |dY| 12 is inspected as a frame pair. Two clips were rebuilt
+when inspection contradicted the first labelling, and one whole span was
+discarded for containing two cuts a source-level scan had called continuous.
+`docs/measurements/camera-original-20260914/REPORT.md` has the method and what
+these clips settled.
 
 ## Scene-cut lab (`cutlab.py`)
 
@@ -109,7 +145,16 @@ A profile is `{guides, overrides, passes}`:
 `run.ABLATION` changes one factor per profile: `baseline`, `mv-off`, `depth-off`,
 `automask-off`, `structure-0`, `tone-0`, `intensity-0` (control),
 `preset-1..3`, `style-natural`, `style-cinematic`, `two-pass`. Custom sets:
-`--profile-file profiles.json` with `{name: {guides, overrides, passes, description}}`.
+`--profile-file profiles.json` with `{name: {guides, overrides, passes, description,
+worker_flags}}`.
+
+`worker_flags` is passed to the worker command line unchanged, and exists for
+switches that are a player policy rather than a render parameter - so an A/B over
+one becomes two profiles instead of two builds. The case it was added for is the
+NV12 conversion pair, `["--gpu-source-conversion", "1", "--gpu-color-conversion",
+"1"]`, whose defaults decide how many bytes cross the decoder pipe and the capture
+readback; `docs/measurements/gpu-readback-20260914/` carries that profile file and
+the measurement, which is why those defaults have not changed.
 
 The roadmap's depth A/B is `--profiles depth-constant depth-proxy`; both name guide
 strings the matrix already carries (`depth=0` *is* the constant 0.75 field), so they
@@ -172,8 +217,15 @@ temporal metrics were withheld.
 ## Blind A/B (`blind.py`)
 
 For each clip with both a `baseline` and a `two-pass` run, `blind.py` emits
-`pairs/<id>-A.png/.mp4` and `-B`, with A/B shuffled per pair from `--seed`,
-excerpt start frames chosen away from recorded cuts. The mapping is sealed in
+`pairs/<id>-A.png/.mp4` and `-B`, with A/B shuffled per pair from `--seed`.
+Candidate frames come from the manifest's own ground truth: shots are derived
+from `cuts` and `soft_cuts`, a frame must sit past a 0.1 s guard after the cut
+that opened its shot and leave at least `MIN_EXCERPT_SECONDS` (0.5 s) of that
+shot behind it, and the excerpt is then clipped to the shot so it never spans an
+edit. Shots too short to serve are named in `key.json` as `dropped_shots`, clips
+with no usable shot as `skipped_clips`, and a run with nothing left to judge
+fails rather than falling back to frame 0 - which is what it used to do on every
+cut-bearing clip. The mapping is sealed in
 `key.json`; fill `ballot.csv` (`preferred` = A/B/tie, `confidence` 1-5) without
 opening it, then `blind.py --score ballot.csv`.
 

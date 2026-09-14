@@ -21,11 +21,15 @@
 inline constexpr char kNvofResolveHlsl[] =
     R"(
 Texture2D<int2> Flow:register(t0); Texture2D<uint> Cost:register(t1); Texture2D<int2> BackFlow:register(t2);
-// CellsPerPixel turns a vector in input pixels into flow cells - the reciprocal of the
-// engine's output grid - and is zero when no backward field is bound. The round-trip
-// gate below is then absent rather than neutral, which is what makes a device that only
-// offered forward flow emit exactly what it emitted before the gate existed.
-cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; float CellsPerPixel; };
+// Everything down to the last line works in engine-input pixels, because that is the
+// unit FlowGate.h's beta is written in. CellsPerPixel turns such a vector into flow
+// cells - the reciprocal of the engine's output grid - and is zero when no backward
+// field is bound, so the round-trip gate below is absent rather than neutral, which is
+// what makes a device that only offered forward flow emit exactly what it emitted
+// before the gate existed. MotionScale is the last step and the only one that leaves
+// that unit: it converts a vector measured on the decoded frame into the DLSS input
+// pixels NGX reads, and is 1,1 whenever the two are the same size.
+cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; float2 MotionScale; float CellsPerPixel; };
 static const float GateAlpha=)" NVOF_RESOLVE_TOKEN(FLOW_GATE_ALPHA) R"(;
 static const float GateBeta=)" NVOF_RESOLVE_TOKEN(FLOW_GATE_BETA_PX2) R"(;
 struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
@@ -65,6 +69,6 @@ float2 PSNvofMotion(V i):SV_Target{
         float2 residual=flow+back;
         if(dot(residual,residual)>GateAlpha*(dot(flow,flow)+dot(back,back))+GateBeta)motion=float2(0,0);
     }
-    return motion;
+    return motion*MotionScale;
 }
 )";

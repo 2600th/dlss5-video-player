@@ -5,6 +5,8 @@
 // selection, runtime policy, the cache manifest) do not inherit <windows.h>,
 // the encoder pipeline, and the orchestrator class along with it.
 
+#include "ResidentHelperPolicy.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -89,6 +91,24 @@ struct NeuralRenderTiming {
     double guideMsMean{};
     double captureMsMean{};
     uint64_t peakLocalVramMiB{};
+    // Two point samples of the helper process's local-segment usage, beside
+    // the running per-frame maximum above. They are what makes the idle-VRAM
+    // policy decidable from a receipt instead of a debugger: the parked cost
+    // of residency is the first, and what the policy gave back is the second.
+    //
+    // postJobLocalVramMiB: what this process still held the moment this job's
+    //   render went quiet. A single-shot helper exits here, so this is only a
+    //   parked figure for a resident one.
+    // idleLocalVramMiB: what it still held after the idle grace that preceded
+    //   THIS job, i.e. after the idle policy had acted on the previous job's
+    //   memory. Zero when no idle period preceded this job - the first job a
+    //   process serves, and every single-shot render.
+    uint64_t postJobLocalVramMiB{};
+    uint64_t idleLocalVramMiB{};
+    // Which arm produced the two samples above. Fixed for a helper process, so
+    // it is a property of the run rather than of the job; carried here so two
+    // receipts with different idle numbers can be told apart.
+    resident_helper::IdleVramPolicy idleVramPolicy{resident_helper::kDefaultIdleVramPolicy};
 
     friend bool operator==(const NeuralRenderTiming&, const NeuralRenderTiming&) = default;
 };

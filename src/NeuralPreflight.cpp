@@ -3,23 +3,47 @@
 #include "NeuralCache.h"
 
 #include <windows.h>
+#include <knownfolders.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cwctype>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "version.lib")
 
 namespace {
 
-constexpr std::array<std::wstring_view, 12> kLockedRuntimeFiles{
+// The twelve lock-pinned vendor modules first, then the worker, so the pinned
+// set is this array's leading twelve entries and neither list can drift from
+// the other.
+constexpr std::array<std::wstring_view, 13> kLockedRuntimeFiles{
     L"nvngx_dlssnr.dll", L"nvngx_dlss.dll", L"dxgi.dll", L"renodx-dlss5.addon64", L"sl.common.dll",
     L"sl.dlss.dll", L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll", L"sl.pcl.dll",
-    L"sl.reflex.dll"};
+    L"sl.reflex.dll", L"NeuralWorker.exe"};
+constexpr size_t kLockPinnedRuntimeFileCount = 12;
+
+// The NGX core registration the display driver writes; NGX resolves the same
+// value through NGXGetPathUsingQAI, and on this machine it reads
+// C:\WINDOWS\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_<id>.
+constexpr const wchar_t* kNgxCoreKey = L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore";
+
+// The model store is over a gigabyte of weight blobs on this machine's driver
+// (measure it at %ProgramData%\NVIDIA\NGX\models), and this digest is computed
+// on the path that answers a cache lookup, so hashing every byte per request
+// is not affordable. Files at or below this bound - every config, mapping,
+// deny list and Streamline module, which is what decides *which* weights load
+// - are hashed byte for byte; the blobs above it are identified by relative
+// name, size and write time, the same identity Sha256FileCached already
+// trusts for installation files. A refresh writes new version directories and
+// new blob names, so it moves the listing either way.
+constexpr uintmax_t kModelContentHashLimit = 1u << 20;
 
 // Returns the text between `prefix` and the first `terminator` character
 // after it, searched on the original (case-preserved) log.
@@ -95,11 +119,186 @@ std::wstring FileVersionText(const std::filesystem::path& path)
            L'.' + std::to_wstring(HIWORD(info->dwFileVersionLS)) + L'.' + std::to_wstring(LOWORD(info->dwFileVersionLS));
 }
 
+std::wstring LowerWide(std::wstring value)
+{
+    std::ranges::transform(value, value.begin(), towlower);
+    return value;
+}
+
+// The NGX core directory the driver registers, or nothing when this machine
+// has no NVIDIA display driver installed.
+std::filesystem::path RegisteredNgxCoreDirectory()
+{
+    DWORD bytes = 0;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, kNgxCoreKey, L"FullPath", RRF_RT_REG_SZ, nullptr, nullptr,
+                     &bytes) != ERROR_SUCCESS || bytes < sizeof(wchar_t)) return {};
+    std::wstring value(bytes / sizeof(wchar_t), L'\0');
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, kNgxCoreKey, L"FullPath", RRF_RT_REG_SZ, nullptr,
+                     value.data(), &bytes) != ERROR_SUCCESS) return {};
+    if (const size_t terminator = value.find(L'\0'); terminator != std::wstring::npos)
+        value.resize(terminator);
+    if (value.empty()) return {};
+    return std::filesystem::path(value);
+}
+
+std::filesystem::path NgxModelStoreDirectory()
+{
+    PWSTR programData = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &programData)) || !programData)
+        return {};
+    std::filesystem::path models = std::filesystem::path(programData) / L"NVIDIA" / L"NGX" / L"models";
+    CoTaskMemFree(programData);
+    return models;
+}
+
+struct ModelStoreFile {
+    std::wstring relative;
+    uintmax_t size{};
+    int64_t writeTime{};
+    std::string digest;  // empty above kModelContentHashLimit or when unreadable
+};
+
+// One root's listing, or nothing when the root cannot be walked whole: a
+// partial listing would digest as though the files it missed did not exist.
+std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoot& root,
+                                                            std::stop_token stop)
+{
+    namespace fs = std::filesystem;
+    std::error_code error;
+    if (!fs::is_directory(root.directory, error) || error) return std::nullopt;
+    const std::wstring prefix = LowerWide(std::wstring(root.namePrefix));
+    std::vector<ModelStoreFile> files;
+    const auto consider = [&](const fs::directory_entry& entry) {
+        std::error_code local;
+        if (!entry.is_regular_file(local) || local) return;
+        if (!prefix.empty() && !LowerWide(entry.path().filename().wstring()).starts_with(prefix)) return;
+        ModelStoreFile file;
+        file.relative = LowerWide(entry.path().lexically_relative(root.directory).generic_wstring());
+        const uintmax_t size = entry.file_size(local);
+        const bool sized = !local;
+        if (sized) file.size = size;
+        local.clear();
+        const auto written = entry.last_write_time(local);
+        if (!local) file.writeTime = written.time_since_epoch().count();
+        if (sized && size <= kModelContentHashLimit) {
+            // Uncached on purpose. Sha256FileCached keys on (path, size, write
+            // time), and Windows write times move in ~15 ms ticks, so a small
+            // selector file replaced in place at the same size inside one tick
+            // reuses the previous digest. That is tolerable for installation
+            // files, which this process does not edit, and not tolerable for a
+            // term of the render identity: a stale digest here serves a render
+            // built against weights that are no longer the ones on disk. Only
+            // files at or below the bound reach this, so the re-read is small.
+            if (const auto digest = Sha256File(entry.path(), stop)) file.digest = *digest;
+        }
+        files.push_back(std::move(file));
+    };
+    constexpr auto options = fs::directory_options::skip_permission_denied;
+    if (root.recursive) {
+        for (fs::recursive_directory_iterator iterator(root.directory, options, error), end;
+             !error && iterator != end; iterator.increment(error)) {
+            if (stop.stop_requested()) return std::nullopt;
+            consider(*iterator);
+        }
+    } else {
+        for (fs::directory_iterator iterator(root.directory, options, error), end;
+             !error && iterator != end; iterator.increment(error)) {
+            if (stop.stop_requested()) return std::nullopt;
+            consider(*iterator);
+        }
+    }
+    if (error) return std::nullopt;
+    std::ranges::sort(files, {}, &ModelStoreFile::relative);
+    return files;
+}
+
 } // namespace
 
 std::span<const std::wstring_view> LockedRuntimeFileNames()
 {
     return kLockedRuntimeFiles;
+}
+
+std::span<const std::wstring_view> LockPinnedRuntimeFileNames()
+{
+    return std::span<const std::wstring_view>(kLockedRuntimeFiles).first(kLockPinnedRuntimeFileCount);
+}
+
+const char* NeuralModelStoreSourceName(NeuralModelStoreSource source) noexcept
+{
+    const size_t index = static_cast<size_t>(source);
+    // Every entry is a string literal, so data() is null-terminated.
+    return index < kNeuralModelStoreSourceNames.size() ? kNeuralModelStoreSourceNames[index].data()
+                                                       : "driverVersion";
+}
+
+std::vector<NeuralModelRoot> RegisteredNeuralModelRoots()
+{
+    std::vector<NeuralModelRoot> roots;
+    // The driver store holds the whole display driver, so only the NGX modules
+    // beside the registered core are listed; the model store is ours to walk.
+    if (std::filesystem::path core = RegisteredNgxCoreDirectory(); !core.empty())
+        roots.push_back(NeuralModelRoot{std::move(core), false, L"nvngx"});
+    if (std::filesystem::path models = NgxModelStoreDirectory(); !models.empty())
+        roots.push_back(NeuralModelRoot{std::move(models), true, {}});
+    return roots;
+}
+
+NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
+                                        std::wstring_view driverVersion,
+                                        std::stop_token stop)
+{
+    NeuralModelStore store;
+    // Canonical form 1. The root spelling is part of it: a driver update lands
+    // a new nv_dispsi.inf_<id> directory, so the name alone retires the renders
+    // made against the old one even before its contents are compared.
+    std::string canonical = "model-store=1\n";
+    for (const NeuralModelRoot& root : roots) {
+        const std::wstring spelling = LowerWide(root.directory.generic_wstring());
+        const auto files = CollectModelRoot(root, stop);
+        canonical += "root=" + Utf8(spelling);
+        if (!files) {
+            // An unreadable root still belongs in the digest: a machine that
+            // grows one later must not answer with the key it used without it.
+            canonical += "|unavailable\n";
+            if (!store.fallbackDetail.empty()) store.fallbackDetail += L"; ";
+            store.fallbackDetail += spelling + L" could not be enumerated";
+            continue;
+        }
+        canonical += '\n';
+        store.enumeratedRoots.push_back(spelling);
+        for (const ModelStoreFile& file : *files) {
+            canonical += Utf8(file.relative);
+            canonical.push_back('\0');
+            canonical += std::to_string(file.size);
+            canonical.push_back('\0');
+            canonical += std::to_string(file.writeTime);
+            canonical.push_back('\0');
+            canonical += file.digest.empty() ? "-" : file.digest;
+            canonical.push_back('\n');
+            ++store.files;
+            if (!file.digest.empty()) ++store.contentHashedFiles;
+            store.bytes += file.size;
+        }
+    }
+    if (store.enumeratedRoots.empty()) {
+        // The cheap fallback, and the only one available: with no root to read,
+        // the driver version is all that still moves when the weights do.
+        store.source = NeuralModelStoreSource::DriverVersion;
+        canonical = "model-store=1\ndriver=" + Utf8(driverVersion) + "\n";
+        if (store.fallbackDetail.empty())
+            store.fallbackDetail = L"No NGX model root is registered on this machine.";
+    } else {
+        store.source = NeuralModelStoreSource::ModelContents;
+    }
+    store.digest = Sha256Bytes(canonical).value_or(std::string{});
+    return store;
+}
+
+NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion, std::stop_token stop)
+{
+    const std::vector<NeuralModelRoot> roots = RegisteredNeuralModelRoots();
+    return DigestNeuralModelStore(roots, driverVersion, std::move(stop));
 }
 
 NeuralRuntimeBanner ParseNeuralRuntimeBanner(std::string_view reshadeLog)
@@ -303,9 +502,25 @@ std::string JsonEscapeWide(std::wstring_view text)
     return JsonEscape(Utf8(text));
 }
 
+std::string NeuralModelStoreJson(const NeuralModelStore& store)
+{
+    std::string json = "{\"source\":\"";
+    json += NeuralModelStoreSourceName(store.source);
+    json += "\",\"digest\":\"" + JsonEscape(store.digest) +
+            "\",\"files\":" + std::to_string(store.files) +
+            ",\"contentHashedFiles\":" + std::to_string(store.contentHashedFiles) +
+            ",\"bytes\":" + std::to_string(store.bytes) + ",\"roots\":[";
+    for (size_t index = 0; index < store.enumeratedRoots.size(); ++index) {
+        if (index) json += ',';
+        json += "\"" + JsonEscapeWide(store.enumeratedRoots[index]) + "\"";
+    }
+    json += "],\"fallback\":\"" + JsonEscapeWide(store.fallbackDetail) + "\"}";
+    return json;
+}
+
 std::string BuildPreflightFailureJson(std::wstring_view detail)
 {
-    return "{\"schema\":2,\"ok\":false,\"error\":\"" + JsonEscapeWide(detail) + "\"}";
+    return "{\"schema\":3,\"ok\":false,\"error\":\"" + JsonEscapeWide(detail) + "\"}";
 }
 
 // NGX results are always written as eight lower-case hex digits ("0xbad00002")

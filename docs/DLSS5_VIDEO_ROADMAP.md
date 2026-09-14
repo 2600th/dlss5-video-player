@@ -539,10 +539,20 @@ that treated two INI texts as equivalent while that comparison did not would tur
 a cheap relaunch into a failed job plus a relaunch. Both read the same
 canonicalisation today, which is where the single definition belongs.
 
-And `blind.py`'s candidate-frame filter admits nothing on clips with hard cuts, so
-it falls back to frame 0 and both pairs of `cuts-motion` and `cuts-similar` are the
-same frame - which makes the one instrument that could settle the tone question
-useless on half the corpus.
+`blind.py`'s candidate-frame filter used to admit nothing on clips with hard cuts,
+fall back to frame 0, and hand both pairs of `cuts-motion` and `cuts-similar` the
+same frame - which made the one instrument that could settle the tone question
+useless on half the corpus. **Fixed 2026-09-14.** Shots are now derived from the
+manifest's own `cuts` and `soft_cuts`, a candidate must sit past a 0.1 s guard
+after the cut that opened its shot and leave at least 0.5 s of that shot behind
+it, and the excerpt is clipped to the shot so it never spans an edit - `--seconds`
+is a cap, not a length. There is no frame-0 fallback left: a shot too short to
+serve is named in `key.json` as `dropped_shots`, a clip with no usable shot as
+`skipped_clips`, and a run with nothing left to judge fails with the reason. The
+roadmap's own complaint retested with its flags now picks `cuts-motion` frames 5
+and 59 and `cuts-similar` 11 and 33, in four different shots. The tone ballot is
+therefore runnable; it still has to be scored by a human, which is what item 7
+above is waiting on.
 
 **Links:** [ReShadeConfig.cpp](../src/ReShadeConfig.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [video2dlssnr controls](https://github.com/DaniilSokolyuk/video2dlssnr)
 
@@ -599,6 +609,22 @@ CPU estimator kept as the fallback for cards and builds without it. What that
 leaves open is the confidence half: the engine's cost surface is produced and
 bound, but the gate is off because its thresholds have not been measured, and
 nothing yet uses forward/backward disagreement.
+
+**And NVOFA now reaches playback-SR sessions too (2026-09-14).** It used to run
+only when the decoded frame already matched the DLSS input size, so turning
+runtime Super Resolution on silently dropped motion estimation to the CPU
+block matcher - a perf and quality cliff exactly where the user asked for more
+quality. The engine is now given the decoded frame's geometry and the resolve
+pass scales the vectors per axis into the DLSS input grid, which is exact because
+the convert pass is one full-screen triangle over uv 0..1 with no crop. The
+neural-size path is byte-unchanged: the scale is `1,1` there, asserted with an
+exact float compare rather than an epsilon, and a live session prints
+`Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame,
+vectors scaled by 1,1 into the 1920x1080 DLSS input`. The SR branch itself is
+unit-tested and not yet session-proven on this machine, because the player-root
+SR runtime is not staged here and `[Playback] SuperResolution=1` fails at
+`NGXLoadLibrary` - see
+[the readback report](measurements/gpu-readback-20260914/REPORT.md).
 
 The 2026-09-11 survey found the cheap route to both, and it is items 1 and 2 of
 the plan at the top of this file: `NV_OF_PRED_DIRECTION_BOTH` returns backward
@@ -664,6 +690,25 @@ Offer two distinct modes:
 - **Experimental live mode:** bounded latency with visible dropped-frame counters
 
 Dropped frames may be acceptable for live preview, never final export.
+
+**Audited end to end 2026-09-14, and the result is mostly a refusal.** Fourteen
+CPU round-trips on the live segment-capture path were enumerated with file:line
+and each marked necessary or removable. Two removals landed - five
+`ClearRenderTargetView` calls that wrote memory the very next full-target draw
+overwrote (66 MB + 33 MB + up to 33 MB per frame of write bandwidth at 4K), and a
+per-frame Map/Unmap of the timestamp readback, now persistently mapped. Neither
+is measurable: 1080p median moved -0.8 % and 4K +0.4 % against a session spread
+three to five times larger, so **item 12's own success criterion is unmet** and
+they are kept as bandwidth hygiene with a correctness argument, not as a win.
+
+The largest proportional item turned out not to be code at all but two policy
+defaults, `[Encoding] GpuSourceConversion` and `GpuColorConversion`, both off,
+which put 4 B/px instead of 1.5 across the decoder pipe and the capture readback.
+Turning both on is worth **+7 % processing throughput at 4K** and costs **0.75 dB
+PSNR, +0.95 dE and double the false motion**, because the NV12 readback subsamples
+chroma before the encoder sees it rather than after. So the defaults stay, the
+flags remain available per render, and the measurement is the reason rather than
+the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 
 **Links:** [MediaPipeline.cpp](../src/MediaPipeline.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [NVIDIA Video SDK samples](https://github.com/NVIDIA/video-sdk-samples) · [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)
 

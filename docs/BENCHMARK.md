@@ -133,7 +133,7 @@ corpus; a real dissolve still is not.
 | Fidelity | PSNR and SSIM vs the lossless source | `analyze.py` |
 | Text | rapidocr character-level ratio against the manifest's ground-truth strings, output and source side by side | text clip |
 | Faces | Haar-box crops; resnet18 cosine of output crop vs source crop and frame-to-frame drift | faces clip |
-| Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and 3 s excerpts | `report.md`, `blind/` |
+| Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and excerpts, each clipped to the shot it starts in (`--seconds` is a cap, not a length) | `report.md`, `blind/` |
 
 Ablation profiles (`run.py --ablation`) change one factor each: motion
 vectors, depth, RenoDX automatic mask, local structure, local
@@ -405,12 +405,28 @@ the debounce reaches it - and it catches all three `cuts-similar` cuts the resid
 arm misses entirely. Its only remaining errors are `flash-exposure`'s two, which both
 families share.
 
-The swap is deliberately NOT proposed on this evidence. The per-cell state in
-`EstimateFlow` is a real cost, `flash-exposure` still defeats both families, and by
-the rule above a margin resting on four real clips should not size a decision. What
-this is, is the same trap as a pooled threshold: a conclusion that was true of the
-corpus it was measured on and stopped being true when the corpus grew. Settling it
-needs more real shot boundaries, not another sweep of the ones there are.
+**Settled 2026-09-14 on a corpus with more real boundaries, and the answer is that
+the criterion stays.** The corpus grew from thirteen clips to twenty: seven
+camera-original clips carrying 17 frame-verified hard cuts joined the four
+NR-processed captures, which is what this paragraph asked for. Re-swept over all
+twenty at the shipped window, the aggregate still favours the candidate - F1 0.931
+against 0.897 - and split by provenance it inverts:
+
+| criterion | camera-original (7 clips, 17 cuts) | NR-capture (4 clips, 5 cuts) | synthetic (9 clips, 7 cuts) |
+|---|---|---|---|
+| shipped residual | 17/17, no miss, no false positive, no over-reset | 5/5, clean | 4/7, 3 missed, 3 false positives, 1 over-reset |
+| failed fraction | 15/17, two missed on `orig-film-cuts-a` | 5/5, clean | 7/7, no miss, 2 false positives |
+
+On all 22 real labelled cuts the shipped criterion is perfect and the candidate
+misses two of them; the candidate's aggregate advantage comes entirely from the
+synthetic half. That is this document's own rule about pooled numbers, arriving as
+a worked example on the very question that produced it, so the expired conclusion
+is retired rather than acted on. For completeness, with no missed cut and no
+over-reset the residual family reaches exactly one operating point (5 false
+positives; best F1 anywhere 0.949) and the failed-fraction family reaches ten
+(fewest 2 false positives; best F1 anywhere 0.967) - it is the better family on
+the pooled set and the worse one on real footage. Full tables:
+[camera-original report](measurements/camera-original-20260914/REPORT.md).
 
 The shipped thresholds were left alone for the same reason. The residual sweep's best
 point is `residual > 0.40`, or `> 0.13` with **no** histogram gate — and the gate is

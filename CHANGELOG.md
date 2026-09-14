@@ -2,13 +2,46 @@
 
 ## Unreleased
 
-Two notes for whoever cuts the next release. The render cache key carries the
-application version, so entries rendered before the scene-cut window changed
-(0.6 s → 0.3 s) stay valid hits for a build with the same `VERSION` - the bump
-is what retires them, not the code change. The same applies to a
-`neural-runtime/NeuralWorker.exe` left over from a pre-v6 build: the parent
-refuses it on the version check, which is the intended fail-closed behaviour and
-looks like a broken helper until the runtime is re-staged.
+One note for whoever cuts the next release, and it is now smaller than it was.
+The render cache key carries a driver version and a digest of the driver-store
+model contents, so a render no longer survives a driver update or a model refresh,
+and `NeuralWorker.exe` is hashed into the runtime digest, so rebuilding the worker
+with different guide or cut logic retires its entries by itself. The manifest
+schema moved 4 → 5, which retires every entry written before this change through
+the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
+`neural-runtime/NeuralWorker.exe` left over from a pre-v6 build is still refused
+by the parent on the version check, which is the intended fail-closed behaviour
+and looks like a broken helper until the runtime is re-staged.
+
+- The render identity now covers what the pass actually evaluates. It carried no
+  driver version, and `runtimeDigest` hashed the staged files while every run
+  resolves its weights out of the driver store and `%ProgramData%\NVIDIA\NGX\models`
+  - so a render produced on one driver was served *and* validated on a later one.
+  Both terms are in the key now, with the driver version as a fallback that the
+  preflight receipt records when a model root cannot be enumerated, rather than a
+  silent one. The model-store content hash is deliberately uncached: the memo used
+  elsewhere keys on path, size and write time, and Windows write times move in
+  ~15 ms ticks, which is enough for a selector file rewritten in place at the same
+  size to reuse a stale digest.
+- A resident helper can now be asked to give its idle feature memory back:
+  `[NeuralHelper] IdleVramPolicy=free` in `DLSSVideoPlayer.ini` returns 361 MiB of
+  the 1061 MiB an idle helper holds on this card, and costs 0.70 s on the next
+  reuse. The default stays `keep`, because that reuse latency is the whole point of
+  keeping a helper alive. The post-job and idle samples are in `receipt.json` under
+  `timing`, so the trade is checkable without a debugger.
+- A helper that dies mid-job, or a device that is removed under it, now costs one
+  restart instead of a lost render: the helper is relaunched once, re-preflighted
+  and the job resumes. A second failure fails closed with the reason in the log,
+  and neither path leaves an orphan holding VRAM.
+- Hardware optical flow now runs in playback Super Resolution sessions. It used to
+  require the decoded frame to already match the DLSS input size, so turning SR on
+  silently dropped motion estimation to the CPU block matcher - a quality and
+  performance cliff exactly where more quality was asked for. Sessions that were
+  already using hardware flow are byte-unchanged.
+- Five redundant full-target clears and a per-frame timestamp map/unmap are gone
+  from the render path. Honest caveat: neither is measurable at 1080p or 4K on this
+  card - they are removed because a clear that writes memory the next draw fully
+  overwrites is waste, not because anything got faster.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

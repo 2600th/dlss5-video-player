@@ -36,6 +36,15 @@ using neural_worker_protocol::CommandKind;
 // the process launch it saved on every job before this one.
 inline constexpr std::chrono::seconds kIdleTimeout{30};
 
+// How long after a job the helper samples its own video memory again, and the
+// moment the FreeFeature idle policy hands the feature-18 workset back. Well
+// short of kIdleTimeout on purpose: the sample has to be taken by a process
+// that is still there to be reused, and a release timed at the exit would give
+// back memory the exit was about to give back anyway and measure nothing.
+// Long enough that the back-to-back toggles residency exists for - seconds
+// apart - never reach it.
+inline constexpr std::chrono::seconds kIdleSampleGrace{5};
+
 struct Command {
     CommandKind kind{};
     // Job only, and only when the payload decoded.
@@ -302,19 +311,42 @@ enum class ResidentExit {
 //   bool Ready();                                             // answer Hello
 //   JobOutcome Job(std::span<const std::wstring>, std::stop_token);
 //   bool Refuse(std::wstring_view detail);                    // failed Result
+//   void Idle();                                              // idle grace elapsed
+//
+// `Idle` fires once per idle stretch, `grace` after the job that produced the
+// state it describes, and only for a helper that has served one: a process
+// that has rendered nothing has nothing parked to measure or to give back.
+// The idle budget keeps running underneath it, so a helper still exits at
+// `idle` whatever the sample found.
 template <class Runner>
 ResidentExit RunResidentLoop(CommandChannel& channel, Runner& runner,
                              std::chrono::milliseconds idle =
-                                 std::chrono::duration_cast<std::chrono::milliseconds>(kIdleTimeout))
+                                 std::chrono::duration_cast<std::chrono::milliseconds>(kIdleTimeout),
+                             std::chrono::milliseconds grace =
+                                 std::chrono::duration_cast<std::chrono::milliseconds>(kIdleSampleGrace))
 {
     auto deadline = std::chrono::steady_clock::now() + idle;
+    auto sampleAt = deadline;
+    bool served = false;
+    bool sampled = false;
     for (;;) {
-        const auto remaining = deadline - std::chrono::steady_clock::now();
-        if (remaining <= std::chrono::steady_clock::duration::zero()) return ResidentExit::Idle;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return ResidentExit::Idle;
+        const bool awaitingSample = served && !sampled;
+        if (awaitingSample && now >= sampleAt) {
+            sampled = true;
+            runner.Idle();
+            continue;
+        }
+        const auto until = awaitingSample && sampleAt < deadline ? sampleAt : deadline;
         Command command;
-        switch (channel.Next(std::chrono::duration_cast<std::chrono::milliseconds>(remaining),
+        switch (channel.Next(std::chrono::duration_cast<std::chrono::milliseconds>(until - now),
                              command)) {
-            case CommandChannel::Wake::Idle: return ResidentExit::Idle;
+            case CommandChannel::Wake::Idle:
+                // Either the grace ran out, which the top of the loop turns
+                // into the sample, or the whole budget did.
+                if (awaitingSample && until < deadline) continue;
+                return ResidentExit::Idle;
             case CommandChannel::Wake::Closed: return ResidentExit::Closed;
             case CommandChannel::Wake::Malformed: return ResidentExit::Malformed;
             case CommandChannel::Wake::ParentExited: return ResidentExit::ParentExited;
@@ -335,7 +367,11 @@ ResidentExit RunResidentLoop(CommandChannel& channel, Runner& runner,
                 if (command.undecodable) {
                     if (!runner.Refuse(L"The helper could not decode the job's argument vector."))
                         return ResidentExit::WriteFailed;
+                    // A refusal rendered nothing, so it moves the deadlines
+                    // without making this process one that has something to
+                    // sample.
                     deadline = std::chrono::steady_clock::now() + idle;
+                    sampleAt = std::chrono::steady_clock::now() + grace;
                     break;
                 }
                 std::stop_source stop;
@@ -343,8 +379,11 @@ ResidentExit RunResidentLoop(CommandChannel& channel, Runner& runner,
                 const JobOutcome outcome = runner.Job(command.arguments, stop.get_token());
                 channel.DetachJobStop();
                 // The idle budget is "no job for this long", so it runs from the
-                // end of the last one.
+                // end of the last one, and so does the sample grace.
                 deadline = std::chrono::steady_clock::now() + idle;
+                sampleAt = std::chrono::steady_clock::now() + grace;
+                served = true;
+                sampled = false;
                 if (outcome == JobOutcome::WriteFailed) return ResidentExit::WriteFailed;
                 if (outcome == JobOutcome::Invalidated) return ResidentExit::JobInvalidated;
                 break;

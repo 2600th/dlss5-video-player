@@ -1,0 +1,16 @@
+{
+  "cpu-conversion": {
+    "guides": "mv=1,depth=1",
+    "description": "shipped defaults: GpuColorConversion=0 and GpuSourceConversion=0, so ffmpeg converts NV12->BGRA on the CPU inside the decoder child (4 B/px over the pipe and through the upload heap) and the capture readback is BGRA (4 B/px)"
+  },
+  "gpu-conversion": {
+    "guides": "mv=1,depth=1",
+    "worker_flags": [
+      "--gpu-source-conversion",
+      "1",
+      "--gpu-color-conversion",
+      "1"
+    ],
+    "description": "both GPU conversion paths on: the decoder delivers NV12 (1.5 B/px over the pipe and the upload heap, converted by PSSourceNv12 on the GPU) and the capture plane is read back as NV12 (1.5 B/px). This is the audit's largest proportional item and it is a policy default, not a code change"
+  }
+}

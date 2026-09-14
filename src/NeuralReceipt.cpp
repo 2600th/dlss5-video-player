@@ -241,7 +241,16 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += ",\"neuralGpuMsMax\":" + Number(timing.neuralGpuMsMax);
     json += ",\"guideMsMean\":" + Number(timing.guideMsMean);
     json += ",\"captureMsMean\":" + Number(timing.captureMsMean);
-    json += ",\"peakLocalVramMiB\":" + std::to_string(timing.peakLocalVramMiB) + "}";
+    json += ",\"peakLocalVramMiB\":" + std::to_string(timing.peakLocalVramMiB);
+    // Two point samples beside the per-frame peak, and the arm that produced
+    // them. `idleLocalVramMiB` is zero for a job no idle period preceded - the
+    // first job a helper process serves, and every single-shot render - which
+    // is an absent measurement rather than a measured zero, so it is only ever
+    // read next to a run that had an idle period to measure.
+    json += ",\"postJobLocalVramMiB\":" + std::to_string(timing.postJobLocalVramMiB);
+    json += ",\"idleLocalVramMiB\":" + std::to_string(timing.idleLocalVramMiB);
+    json += ",\"idleVramPolicy\":" +
+            QuotedWide(resident_helper::IdleVramPolicyName(timing.idleVramPolicy)) + "}";
     // Beside the per-frame distribution above, and in the same unit-in-the-key
     // convention: one group, one unit, a null for every phase that never ran.
     const NeuralColdStartTimeline& coldStart = result.coldStart;

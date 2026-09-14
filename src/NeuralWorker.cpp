@@ -31,6 +31,14 @@ namespace {
 constexpr std::wstring_view kWorkerMode = L"--neural-worker";
 constexpr std::wstring_view kPreflightMode = L"--neural-preflight";
 constexpr std::wstring_view kRestartedFlag = L"--configuration-restarted";
+constexpr std::wstring_view kIdleVramPolicyFlag = L"--idle-vram-policy";
+// Section and key of the player's own settings file - not the neural runtime's
+// ReShade.ini. The idle-VRAM policy is a resource decision, so it must stay
+// out of the settings digest the render cache key hashes: a render made while
+// the helper frees memory between jobs is the same render, and flipping this
+// must not retire a single cache entry.
+constexpr wchar_t kIdleVramPolicySection[] = L"NeuralHelper";
+constexpr wchar_t kIdleVramPolicyKey[] = L"IdleVramPolicy";
 
 std::wstring QuoteArgument(std::wstring_view value)
 {
@@ -161,6 +169,12 @@ public:
     const PreflightPayload& Preflight() const { return *preflight_; }
     // Empty until the helper reports its share of the cold-start timeline.
     const NeuralColdStartTimeline& Timeline() const { return timeline_; }
+    // The two idle-VRAM samples this job saw, if the helper took them. The
+    // PostJob one belongs to this job; the Idle one arrived before it and
+    // describes the grace this job's helper spent parked beforehand, which is
+    // the cost this job's first frame just paid back.
+    const std::optional<MemorySample>& PostJobMemory() const { return postJobMemory_; }
+    const std::optional<MemorySample>& IdleMemory() const { return idleMemory_; }
     // A resident helper answered Hello. Evidence, not a gate: the parent hands
     // the first job over without waiting for it, because the command pipe holds
     // the frame until the helper's runtime is up and reading, and blocking on a
@@ -181,7 +195,8 @@ private:
                  header.kind != static_cast<uint16_t>(WireKind::Preflight) &&
                  header.kind != static_cast<uint16_t>(WireKind::Segment) &&
                  header.kind != static_cast<uint16_t>(WireKind::Timeline) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Ready))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Ready) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Memory))) {
                 malformed_ = true;
                 return false;
             }
@@ -257,6 +272,16 @@ private:
                     announced_ = true;
                     break;
                 }
+                case WireKind::Memory: {
+                    const auto sample = DecodeMemory(payload);
+                    if (!sample) { malformed_ = true; return false; }
+                    // One of each per job at most: a second sample of the same
+                    // stage would be a second answer to a question asked once.
+                    auto& slot = sample->stage == MemoryStage::PostJob ? postJobMemory_ : idleMemory_;
+                    if (slot) { malformed_ = true; return false; }
+                    slot = *sample;
+                    break;
+                }
             }
             offset += messageBytes;
         }
@@ -272,6 +297,8 @@ private:
     NeuralColdStartTimeline timeline_;
     std::optional<NeuralRenderResult> result_;
     std::optional<PreflightPayload> preflight_;
+    std::optional<MemorySample> postJobMemory_;
+    std::optional<MemorySample> idleMemory_;
     bool malformed_{};
     bool announced_{};
 };
@@ -610,6 +637,27 @@ NeuralRenderResult AcceptResult(const MetadataReader& reader, uint64_t jobId)
     return mismatch;
 }
 
+// Everything the reader collected about the helper itself rather than about
+// the render, copied onto the result the caller will publish. It lives here
+// instead of inside the result message because WireResult is a fixed 152
+// bytes that a released Python decoder already reads by offset; the cold-start
+// timeline and the VRAM samples travel as their own messages and are rejoined
+// here, so one job produces one record whatever arrived separately.
+void StampHelperObservations(const MetadataReader& reader, NeuralRenderResult& result)
+{
+    result.coldStart = reader.Timeline();
+    // The idle sample was taken before this job by the same process, so it
+    // names the same policy; the job's own sample wins where both are present.
+    if (const auto& idle = reader.IdleMemory()) {
+        result.timing.idleLocalVramMiB = idle->localVramMiB;
+        result.timing.idleVramPolicy = idle->policy;
+    }
+    if (const auto& postJob = reader.PostJobMemory()) {
+        result.timing.postJobLocalVramMiB = postJob->localVramMiB;
+        result.timing.idleVramPolicy = postJob->policy;
+    }
+}
+
 // One helper launch, judged. `restartRequested` is set when the helper repaired
 // its own configuration and exited for a fresh process to replace it.
 NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
@@ -681,10 +729,11 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
         return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true,
                                       processCreated, helperTimeline);
     }
-    // The reader outlives the judgement above, so a timeline that arrived
-    // before a crash, a cancel or a rejected result is still reported: the
-    // breakdown of a run that failed is the whole point of measuring it.
-    result.coldStart = reader.Timeline();
+    // The reader outlives the judgement above, so a timeline or a memory
+    // sample that arrived before a crash, a cancel or a rejected result is
+    // still reported: the breakdown of a run that failed is the whole point of
+    // measuring it.
+    StampHelperObservations(reader, result);
     return result;
 }
 
@@ -693,10 +742,15 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
 // history to resume, so the whole sequence restarts in a fresh process and
 // frames are never spliced across helper instances. `attempt` is one helper
 // instance being given one job, however it got there.
-template <class Attempt>
+//
+// `recover` runs between the failure and the relaunch and decides whether the
+// relaunch is worth making: a helper that died took its verdict with it, and
+// after a device removal the driver has restarted underneath this process. It
+// returns a result to fail closed with, or nothing to let the relaunch happen.
+template <class Attempt, class Recover>
 NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallback& progress,
                                      const NeuralSegmentSink& segments, uint32_t crashRelaunchLimit,
-                                     const Attempt& attempt)
+                                     const Attempt& attempt, const Recover& recover)
 {
     for (uint32_t tries = 0;; ++tries) {
         // A relaunch renders the range again from frame zero, so every segment
@@ -722,7 +776,45 @@ NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallba
             recovering.retries = tries + 1;
             progress(recovering);
         }
+        // Reported as Recovering above first, so the probe that follows runs
+        // under a phase the user can already see rather than in silence.
+        if (auto refused = recover(result)) return *refused;
     }
+}
+
+// The one controlled recovery between a helper that died and the relaunch that
+// replaces it: re-run the feature-18 probe in a fresh process, and relaunch
+// only if it still passes.
+//
+// A crash or a device removal invalidates the verdict the job was started on.
+// A TDR restarts the display driver, so the adapter this process probed is not
+// necessarily the one it now has, and spending the single relaunch on a
+// runtime that can no longer arm feature 18 buys a second identical crash
+// instead of a reason. The probe costs one process on a path that has already
+// lost a render, and it is bounded by the same relaunch limit, so there is
+// nothing here that can spin.
+std::optional<NeuralRenderResult> ProbeBeforeRelaunch(const std::filesystem::path& executable,
+                                                      std::stop_token stop,
+                                                      const NeuralRenderResult& failed)
+{
+    const NeuralPreflightResult preflight = RunNeuralPreflight(executable, stop);
+    if (preflight.ok) return std::nullopt;
+    NeuralRenderResult closed;
+    closed.jobId = failed.jobId;
+    closed.coldStart = failed.coldStart;
+    closed.timing = failed.timing;
+    if (preflight.cancelled || stop.stop_requested()) {
+        closed.cancelled = true;
+        closed.failure = NeuralRenderFailure::Cancelled;
+        closed.detail = L"Neural rendering was cancelled while the helper was recovering.";
+        return closed;
+    }
+    closed.failure = NeuralRenderFailure::Preflight;
+    closed.detail = L"The neural helper did not survive the render (" + failed.detail +
+                    L") and its runtime no longer passes preflight, so it was not restarted: " +
+                    (preflight.detail.empty() ? std::wstring(L"the probe did not arm feature 18.")
+                                              : preflight.detail);
+    return closed;
 }
 
 // How long an orderly exit is waited for after a resident helper is asked to
@@ -860,8 +952,9 @@ std::vector<std::wstring> neural_worker_detail::BuildPreflightArguments(HANDLE m
     return arguments;
 }
 
-std::vector<std::wstring> neural_worker_detail::BuildResidentArguments(HANDLE metadata, HANDLE command,
-                                                                       HANDLE pauseEvent, HANDLE parentProcess)
+std::vector<std::wstring> neural_worker_detail::BuildResidentArguments(
+    HANDLE metadata, HANDLE command, HANDLE pauseEvent, HANDLE parentProcess,
+    resident_helper::IdleVramPolicy idleVramPolicy)
 {
     std::vector<std::wstring> arguments{std::wstring(kWorkerMode), L"--metadata-handle", HandleText(metadata),
                                         L"--command-handle", HandleText(command)};
@@ -876,6 +969,11 @@ std::vector<std::wstring> neural_worker_detail::BuildResidentArguments(HANDLE me
         arguments.emplace_back(L"--parent-process");
         arguments.emplace_back(HandleText(parentProcess));
     }
+    // Written for both arms, the default included. An idle VRAM figure only
+    // means something beside the policy that produced it, and a flag that is
+    // absent for one arm leaves the launch line unable to say which ran.
+    arguments.emplace_back(kIdleVramPolicyFlag);
+    arguments.emplace_back(resident_helper::IdleVramPolicyName(idleVramPolicy));
     return arguments;
 }
 
@@ -895,12 +993,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
-               GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, KeyCount };
+               GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
         L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
-        L"--gpu-source-conversion", L"--first-segment-frames", L"--command-handle", L"--parent-process"};
+        L"--gpu-source-conversion", L"--first-segment-frames", L"--command-handle", L"--parent-process",
+        kIdleVramPolicyFlag};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -919,11 +1018,11 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         return parsed;
     }
     // Resident mode: the helper takes its jobs off the command channel, so its
-    // launch line describes a helper and not a job. Exactly four keys may
+    // launch line describes a helper and not a job. Exactly five keys may
     // appear, by allowlist - a job field here would be a job nobody asked for,
     // arriving beside a channel that is about to deliver one.
     if (values[Command]) {
-        constexpr std::array<Key, 4> permitted{Metadata, PauseEvent, Command, ParentProcess};
+        constexpr std::array<Key, 5> permitted{Metadata, PauseEvent, Command, ParentProcess, IdleVram};
         for (size_t key = 0; key < KeyCount; ++key) {
             const bool allowed = std::find(permitted.begin(), permitted.end(), static_cast<Key>(key)) !=
                                  permitted.end();
@@ -942,11 +1041,21 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
             if (!ParseUnsigned(*values[ParentProcess], rawParent) || !rawParent) return std::nullopt;
             parsed.parentProcess = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawParent));
         }
+        // Absent is the default arm, so a parent that predates the flag still
+        // produces a helper that keeps its feature memory - which is what
+        // every helper before the flag did. A value this build cannot name is
+        // refused: a policy nobody can state makes the samples unattributable.
+        if (values[IdleVram]) {
+            const auto policy = resident_helper::ParseIdleVramPolicy(*values[IdleVram]);
+            if (!policy) return std::nullopt;
+            parsed.idleVramPolicy = *policy;
+        }
         return parsed;
     }
     // The parent's process handle is only meaningful to a helper that outlives
-    // one job; on a single-shot line it is a handle nobody would wait on.
-    if (values[ParentProcess]) return std::nullopt;
+    // one job; on a single-shot line it is a handle nobody would wait on, and
+    // an idle policy is an instruction for an idle period that never comes.
+    if (values[ParentProcess] || values[IdleVram]) return std::nullopt;
     constexpr std::array<Key, 12> required{Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart,
                                            RangeEnd, Preroll, RetryLimit, Guides};
     for (const Key key : required) if (!values[key]) return std::nullopt;
@@ -1028,6 +1137,8 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
     return RunWithRelaunches(progress, segments, crashRelaunchLimit, [&] {
         return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false,
                                       processCreated, helperTimeline);
+    }, [&](const NeuralRenderResult& failed) {
+        return ProbeBeforeRelaunch(executable, stop, failed);
     });
 }
 
@@ -1070,12 +1181,14 @@ struct ResidentNeuralHelper::Session {
     void End() { EndHelper(helper, kResidentShutdownGrace); }
 
     std::wstring Start(const std::filesystem::path& executablePath, HANDLE pauseEvent,
+                       resident_helper::IdleVramPolicy idleVramPolicy,
                        const std::function<void()>& processCreated)
     {
         executable = executablePath;
         StartOutcome started = StartHelper(executablePath,
-            [](HANDLE metadata, HANDLE command, HANDLE pause, HANDLE parent) {
-                return neural_worker_detail::BuildResidentArguments(metadata, command, pause, parent);
+            [idleVramPolicy](HANDLE metadata, HANDLE command, HANDLE pause, HANDLE parent) {
+                return neural_worker_detail::BuildResidentArguments(metadata, command, pause, parent,
+                                                                    idleVramPolicy);
             }, pauseEvent, true, processCreated);
         launchPause = pauseEvent;
         if (!started.helper.Valid()) return std::move(started.detail);
@@ -1114,7 +1227,34 @@ struct ResidentNeuralHelper::Session {
     }
 };
 
-ResidentNeuralHelper::ResidentNeuralHelper() = default;
+std::filesystem::path PlayerSettingsPath()
+{
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!length || length >= path.size()) return {};
+    path.resize(length);
+    return std::filesystem::path(path).parent_path() / L"DLSSVideoPlayer.ini";
+}
+
+resident_helper::IdleVramPolicy ReadIdleVramPolicy(const std::filesystem::path& settingsIni)
+{
+    if (settingsIni.empty()) return resident_helper::kDefaultIdleVramPolicy;
+    // Longer than either name, so a longer value is read back in full and then
+    // refused rather than truncated into one that happens to match.
+    wchar_t value[32]{};
+    const DWORD length = GetPrivateProfileStringW(kIdleVramPolicySection, kIdleVramPolicyKey, L"",
+                                                  value, static_cast<DWORD>(std::size(value)),
+                                                  settingsIni.c_str());
+    const auto policy = resident_helper::ParseIdleVramPolicy(std::wstring_view(value, length));
+    return policy ? *policy : resident_helper::kDefaultIdleVramPolicy;
+}
+
+ResidentNeuralHelper::ResidentNeuralHelper()
+    : ResidentNeuralHelper(ReadIdleVramPolicy(PlayerSettingsPath())) {}
+
+ResidentNeuralHelper::ResidentNeuralHelper(resident_helper::IdleVramPolicy idleVramPolicy)
+    : idleVramPolicy_(idleVramPolicy) {}
+
 ResidentNeuralHelper::~ResidentNeuralHelper() { Release(); }
 
 bool ResidentNeuralHelper::Resident() const { return session_ && session_->Alive(); }
@@ -1164,7 +1304,12 @@ NeuralRenderResult ResidentNeuralHelper::RunJob(const std::filesystem::path& exe
         firstAcceptance = false;
     };
     return RunWithRelaunches(hooks.progress, hooks.segments, hooks.crashRelaunchLimit,
-        [&] { return RunAttempt(executable, key, request, hooks, stop, accepted); });
+        [&] { return RunAttempt(executable, key, request, hooks, stop, accepted); },
+        [&](const NeuralRenderResult& failed) {
+            // The dead helper's session is already dropped by the attempt that
+            // judged it, so the probe gets the runtime directory to itself.
+            return ProbeBeforeRelaunch(executable, stop, failed);
+        });
 }
 
 NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path& executable,
@@ -1186,11 +1331,12 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
         // first one measures a process starting, every later one measures only
         // the phase it actually paid for.
         MetadataReader reader(hooks.progress, hooks.segments, hooks.helperTimeline);
-        // The reader outlives every judgement below, so a timeline that arrived
-        // before a crash, a cancel or a rejected result is still reported: the
-        // breakdown of a run that failed is the whole point of measuring it.
+        // The reader outlives every judgement below, so a timeline or a VRAM
+        // sample that arrived before a crash, a cancel or a rejected result is
+        // still reported: the breakdown of a run that failed is the whole
+        // point of measuring it.
         auto finish = [&](NeuralRenderResult judged) {
-            judged.coldStart = reader.Timeline();
+            StampHelperObservations(reader, judged);
             return judged;
         };
 
@@ -1206,7 +1352,7 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
                 session_ = std::make_unique<Session>();
                 session_->key = key;
                 session_->configurationRestarted = configurationRestarted;
-                std::wstring detail = session_->Start(executable, request.pauseEvent,
+                std::wstring detail = session_->Start(executable, request.pauseEvent, idleVramPolicy_,
                                                       [&] { accepted(true); });
                 if (!detail.empty()) {
                     session_.reset();

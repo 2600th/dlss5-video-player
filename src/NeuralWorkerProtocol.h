@@ -43,8 +43,13 @@ inline constexpr uint32_t kMaximumJobArguments = 64;
 inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
 enum class WireKind : uint16_t {
-    Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5, Ready = 6
+    Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5, Ready = 6, Memory = 7
 };
+
+// Where in a resident helper's cycle a WireMemory sample was taken. The pair
+// is what makes the idle-VRAM policy decidable: PostJob is what residency
+// parks, Idle is what the policy left behind once the grace elapsed.
+enum class MemoryStage : uint8_t { PostJob = 0, Idle = 1 };
 
 // Parent to helper, on its own pipe. `Hello` asks a freshly launched helper to
 // announce itself, which it does with `WireKind::Ready`; `Job` carries an
@@ -141,6 +146,29 @@ struct WireTimeline {
     uint8_t reserved[4];
     int64_t microseconds[kNeuralColdStartPhaseCount];
 };
+
+// A point sample of the helper process's local-segment video memory, with the
+// idle policy that process was launched under. Non-terminal and fixed size,
+// like WireTimeline; unlike it, one is sent per stage per job cycle rather
+// than once per process.
+//
+// The Idle sample is written with no job in flight and nobody pumping, so it
+// waits in the pipe until the next job's reader drains it - which is the job
+// whose first frame pays for whatever the policy gave back, so that is the
+// receipt it belongs on. A helper that exits on the idle timeout instead
+// leaves it unread, and logs it as well for exactly that case.
+//
+// `featureHeld` records the mechanism rather than a claim about the runtime:
+// after a FreeFeature idle sample it is 0 because the workset was handed back,
+// and whether the runtime actually returned the memory is the difference
+// between this sample and the PostJob one before it.
+struct WireMemory {
+    uint8_t stage;        // MemoryStage
+    uint8_t policy;       // resident_helper::IdleVramPolicy, fixed for the process
+    uint8_t featureHeld;  // feature 18 is still armed at this sample
+    uint8_t reserved[5];
+    uint64_t localVramMiB;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WireHeader) == 12);
@@ -149,6 +177,7 @@ static_assert(sizeof(WireResult) == 152);
 static_assert(sizeof(WirePreflight) == 8);
 static_assert(sizeof(WireSegment) == 44);
 static_assert(sizeof(WireTimeline) == 80);
+static_assert(sizeof(WireMemory) == 16);
 
 inline bool IsKnownPhase(uint32_t phase) noexcept
 {
@@ -369,6 +398,43 @@ inline std::optional<NeuralColdStartTimeline> DecodeTimeline(std::span<const std
                         std::chrono::microseconds(wire.microseconds[index]));
     }
     return timeline;
+}
+
+// One VRAM sample as the parent reads it back.
+struct MemorySample {
+    MemoryStage stage{MemoryStage::PostJob};
+    resident_helper::IdleVramPolicy policy{resident_helper::kDefaultIdleVramPolicy};
+    bool featureHeld{};
+    uint64_t localVramMiB{};
+};
+
+inline WireMemory EncodeMemory(const MemorySample& sample)
+{
+    WireMemory wire{};
+    wire.stage = static_cast<uint8_t>(sample.stage);
+    wire.policy = static_cast<uint8_t>(sample.policy);
+    wire.featureHeld = sample.featureHeld ? 1 : 0;
+    wire.localVramMiB = sample.localVramMiB;
+    return wire;
+}
+
+// A sample whose stage or policy this parent cannot name describes nothing it
+// could attribute, so it is refused rather than recorded under a guess.
+inline std::optional<MemorySample> DecodeMemory(std::span<const std::byte> payload)
+{
+    if (payload.size() != sizeof(WireMemory)) return std::nullopt;
+    WireMemory wire{};
+    std::memcpy(&wire, payload.data(), sizeof(wire));
+    if (wire.stage > static_cast<uint8_t>(MemoryStage::Idle) ||
+        wire.policy > static_cast<uint8_t>(resident_helper::IdleVramPolicy::FreeFeature) ||
+        !IsBooleanByte(wire.featureHeld)) return std::nullopt;
+    for (const uint8_t byte : wire.reserved) if (byte) return std::nullopt;
+    MemorySample sample;
+    sample.stage = static_cast<MemoryStage>(wire.stage);
+    sample.policy = static_cast<resident_helper::IdleVramPolicy>(wire.policy);
+    sample.featureHeld = wire.featureHeld != 0;
+    sample.localVramMiB = wire.localVramMiB;
+    return sample;
 }
 
 inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)

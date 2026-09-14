@@ -215,7 +215,7 @@ first runs `--neural-preflight`: a synthetic Feature 18 probe whose JSON
 receipt records GPU, driver, ReShade/RenoDX/DLSS-NR banner versions, every
 locked module's hash and every feature-18 creation/evaluation observation.
 After the render, `receipt.json` (preflight, lock checks, request, result,
-timing, digests) is written beside `neural.mkv`, hashed into the schema-4
+timing, digests) is written beside `neural.mkv`, hashed into the schema-5
 manifest and summarized in one log line.
 
 The receipt also records what the scene-cut classifier did over the job: cuts
@@ -347,33 +347,43 @@ only when the portable directory is not writable. Source, application version,
 GPU path, runtime digest, native dimensions, quality, upscaling state, and a
 canonical neural-settings digest form the render identity.
 
-**The identity carries no driver version, and the runtime digest does not cover
-the weights.** `gpuPath` is a generation label, so every Ada card on every driver
-shares one value, and the lookup's validity check tests the same terms - so a
-render produced on 32.0.16.1047 is served *and* validated on any later driver.
-The gap is wider than the missing version string: `runtimeDigest` hashes the 12
-staged runtime files, but every run resolves its models out of the driver store
-(`NGXGetPathUsingQAI` → `...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
-`C:\ProgramData\NVIDIA\NGX\models`, neither of which is in that set and both of
+**The identity covers the driver and the weights, as of 2026-09-14.** It did not,
+and the gap was a correctness defect rather than a performance rider: `gpuPath` is
+a generation label, so every Ada card on every driver shared one value, and the
+lookup's validity check tests the same terms - so a render produced on
+32.0.16.1047 was served *and* validated on any later driver. The gap was wider
+than the missing version string. `runtimeDigest` hashes staged files, but every
+run resolves its models out of the driver store (`NGXGetPathUsingQAI` →
+`...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
+`C:\ProgramData\NVIDIA\NGX\models`, neither of which was in that set and both of
 which a driver update or a model refresh can replace with the digest unchanged.
-Adding the driver version is worth doing on its own and is not sufficient; an
-honest closure digests the resolved model-path contents, with the driver version
-as the cheap fallback. `gpu.driverVersion` is already in the preflight receipt,
-just not in the key. Recorded 2026-09-14; not fixed, and it is a correctness item
-rather than a rider on a performance change.
 
-The same gap covers the helper binary itself. `NeuralWorker.exe` is not among the
-twelve locked runtime files - those are the vendor DLLs - so rebuilding the worker
-with different guide or cut logic leaves `runtimeDigest` unchanged, and only
-`applicationVersion` retires the entries it produced. Between version bumps a
-stale cache hit therefore masks exactly the changes a developer is trying to see,
-which is what `-DropRenderCache` in the session harness exists for.
+Two terms close it. `driverVersion` enters the key directly, so a render cannot
+cross a driver change. `modelStoreDigest` covers the resolved model-path
+contents, so it cannot cross a model refresh on one driver either; when a root
+cannot be enumerated the digest falls back to the driver version alone, and
+`ResolveNeuralModelStore` records which of the two it got in the preflight
+receipt rather than degrading silently. The manifest schema moved 4 → 5 in the
+same change, which retires every entry written under the old identity through the
+schema gate rather than incidentally through a missing field.
+
+**Two runtime file sets exist, and they are deliberately different sizes.**
+`LockedRuntimeFileNames()` is the thirteen files hashed into `runtimeDigest` - the
+twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight
+failure quotes. `LockPinnedRuntimeFileNames()` is the twelve that
+`packaging/runtime-lock.json` pins and `VerifyRuntimeLock` checks; the worker is
+never pinned, because every build of the player changes it. The worker joined the
+hashed set because rebuilding it with different guide or cut logic used to leave
+`runtimeDigest` unchanged, so only an `applicationVersion` bump retired the
+entries it produced, and between bumps a stale hit masked exactly the change a
+developer was trying to see. `-DropRenderCache` in the session harness remains
+the way to force the issue during a live session.
 
 The settings snapshot is saved beside the video and its hash is checked on reuse.
 Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,
 not expiring signed stream URLs. Staging entries become reusable only after
-independent probing and atomic promotion. Schema 4 requires
+independent probing and atomic promotion. Schema 5 requires
 `nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
 interception contract armed before frame capture, a feature-18 success
 checkpoint that advances after the captured sequence, and no feature-18

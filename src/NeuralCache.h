@@ -36,10 +36,28 @@ struct NeuralCacheIdentity {
     // legacy key. Non-default guide controls append their canonical form.
     NeuralRenderRange range{};
     std::string guides;
+    // The two terms that stop a render from crossing the runtime it was made
+    // on. `driverVersion` closes a driver change: `gpuPath` is a generation
+    // label, so every Ada card on every driver shared one value and a render
+    // produced on one driver was served - and validated - on any later one.
+    // `modelStoreDigest` closes a model-store change: the pass resolves its
+    // weights out of the registered NGX core directory and
+    // %ProgramData%\NVIDIA\NGX\models, neither of which `runtimeDigest`
+    // covers, so a driver update or a model refresh used to leave the key
+    // identical (see ResolveNeuralModelStore). Both are appended to the
+    // canonical form only when set, so source entries - which have neither -
+    // keep their keys.
+    std::string driverVersion;
+    std::string modelStoreDigest;
 };
 
 struct NeuralCacheManifest {
-    uint32_t schema{4};
+    // Schema 5 carries schema 4's field list. The bump retires every schema-4
+    // entry, because those were written under a render identity that named
+    // neither the driver nor the model store: nothing recorded which weights
+    // produced them, so they cannot be matched against today's key and are
+    // refused by the schema gate rather than by a missing field.
+    uint32_t schema{5};
     NeuralCacheEntryKind kind{NeuralCacheEntryKind::Render};
     NeuralCacheState state{NeuralCacheState::Staging};
     std::string sourceDigest;
@@ -59,15 +77,15 @@ struct NeuralCacheManifest {
     // Empty for legacy schema-3 entries; present renders also authenticate
     // neural-settings.ini alongside the encoded payload.
     std::string settingsDigest;
-    // Schema 4. Parsed schema-3 entries keep these defaults: whole-source
+    // Schema 4 onwards. Parsed schema-3 entries keep these defaults: whole-source
     // range, default guides, no job identity and no receipt.
     int64_t rangeStart100ns{};
     int64_t rangeEnd100ns{};
     std::string guides;
     uint64_t jobId{};
     uint32_t historyResets{};
-    // Required on schema-4 renders, which authenticate receipt.json beside the
-    // payload; empty on sources and on legacy schema-3 entries.
+    // Required on current-schema renders, which authenticate receipt.json
+    // beside the payload; empty on sources and on legacy schema-3 entries.
     std::string receiptDigest;
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;

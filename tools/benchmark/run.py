@@ -45,8 +45,14 @@ DEFAULT_GUIDES = "mv=1,depth=1"
 PASS2_OVERRIDES = {"NRIntensity": "0.750000"}
 
 
-def profile(guides=DEFAULT_GUIDES, overrides=None, passes=1, description=""):
-    return dict(guides=guides, overrides=dict(overrides or {}), passes=passes, description=description)
+def profile(guides=DEFAULT_GUIDES, overrides=None, passes=1, description="", worker_flags=None):
+    # `worker_flags` are passed through to the worker command line unchanged. They
+    # exist for switches that are a player policy rather than a render parameter -
+    # the NV12 GPU conversion paths, whose defaults decide how many bytes cross the
+    # pipe and the readback - so an A/B over them is expressible as two profiles
+    # instead of a rebuild.
+    return dict(guides=guides, overrides=dict(overrides or {}), passes=passes, description=description,
+                worker_flags=list(worker_flags or ()))
 
 
 # Ablation matrix: one factor changes per profile relative to baseline so a
@@ -312,12 +318,13 @@ def preflight(name: str, runtime: Path, timeout: float) -> dict:
 
 
 def render(runtime: Path, source: Path, output: Path, dest: Path, stem: str, guides: str, job_id: int,
-           timeout: float) -> dict:
+           timeout: float, worker_flags: list[str] | None = None) -> dict:
     info = probe(source)
     args = ["--neural-worker", "--source", str(source), "--staging", str(output), "--width", str(info["width"]),
             "--height", str(info["height"]), "--fps", repr(info["fps"]), "--duration-100ns",
             str(info["duration_100ns"]), "--job-id", str(job_id), "--range-start-100ns", "0",
             "--range-end-100ns", "0", "--preroll-frames", "60", "--frame-retry-limit", "3", "--guides", guides]
+    args += list(worker_flags or ())
     attempts = with_restart(runtime, args, dest, stem, timeout, sample=True)
     last = attempts[-1]
     final = next((r for r in reversed(last["records"]) if r["kind"] == "result"), {})
@@ -344,7 +351,8 @@ def run_one(clip: dict, name: str, spec: dict, rep: int, timeout: float, corpus:
     receipt1 = preflight(name, runtime1, timeout)
     source = corpus / clip["file"]
     job_base = (hash((clip["name"], name, rep)) & 0xFFFF_FFFF) + 1
-    passes = [render(runtime1, source, dest / "output.mkv", dest, "pass1", spec["guides"], job_base, timeout)]
+    passes = [render(runtime1, source, dest / "output.mkv", dest, "pass1", spec["guides"], job_base, timeout,
+                     spec.get("worker_flags"))]
     passes[0]["pass"] = 1
     if spec["passes"] == 2 and passes[0]["result"].get("ok"):
         shutil.move(dest / "output.mkv", dest / "pass1.mkv")
@@ -352,12 +360,13 @@ def run_one(clip: dict, name: str, spec: dict, rep: int, timeout: float, corpus:
         runtime2 = prepare(name, spec, 2, fresh)
         preflight(f"{name}--pass2", runtime2, timeout)
         passes.append(render(runtime2, dest / "pass1.mkv", dest / "output.mkv", dest, "pass2", spec["guides"],
-                             job_base + 1, timeout))
+                             job_base + 1, timeout, spec.get("worker_flags")))
         passes[-1]["pass"] = 2
     final = passes[-1]
     result = dict(
         schema=1, run=dest.name, clip=clip["name"], category=clip["category"], profile=name, repeat=rep,
         guides=spec["guides"], overrides=spec["overrides"], passes=spec["passes"],
+        worker_flags=spec.get("worker_flags", []),
         pass2_reencoded_input=spec["passes"] == 2, pass2_overrides=PASS2_OVERRIDES if spec["passes"] == 2 else {},
         preflight_ok=receipt1["ok"], preflight=receipt1["receipt"], source=str(source),
         output=str(dest / "output.mkv"), width=clip["width"], height=clip["height"], fps=clip["fps"],
@@ -383,7 +392,8 @@ def load_profiles(path: Path | None) -> dict:
     if not path:
         return ABLATION
     custom = json.loads(path.read_text(encoding="utf-8"))
-    return {k: profile(v.get("guides", DEFAULT_GUIDES), v.get("overrides"), v.get("passes", 1), v.get("description", ""))
+    return {k: profile(v.get("guides", DEFAULT_GUIDES), v.get("overrides"), v.get("passes", 1),
+                       v.get("description", ""), v.get("worker_flags"))
             for k, v in custom.items()}
 
 

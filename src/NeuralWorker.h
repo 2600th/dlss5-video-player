@@ -69,6 +69,25 @@ struct NeuralJobHooks {
     uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit;
 };
 
+// The advanced setting that selects the idle-VRAM arm, read out of the
+// player's own `DLSSVideoPlayer.ini` (not the neural runtime's ReShade.ini -
+// putting it there would fold a resource policy into the settings digest the
+// render cache key hashes):
+//
+//   [NeuralHelper]
+//   IdleVramPolicy=keep    ; A, the default: hold the feature workset
+//   IdleVramPolicy=free    ; B: hand it back while idle, re-arm on the next job
+//
+// An absent file, an absent key or a name this build does not know all give
+// the default. A typo in a settings file is not worth refusing to render over,
+// and the arm that actually ran is on the helper's launch line and in every
+// receipt it produces, so nothing is attributed to a policy it did not run
+// under. `settingsIni` empty also gives the default.
+resident_helper::IdleVramPolicy ReadIdleVramPolicy(const std::filesystem::path& settingsIni);
+// `DLSSVideoPlayer.ini` beside the running executable, which is where the
+// player keeps its own settings.
+std::filesystem::path PlayerSettingsPath();
+
 // One neural helper process kept across jobs, so a warm toggle stops paying
 // for the NGX initialization and feature creation it already paid for. The
 // residency key is `(runtime directory, runtime digest, neural-settings
@@ -85,13 +104,20 @@ struct NeuralJobHooks {
 // NOT thread-safe, and does not need to be: the player runs one neural job at
 // a time on one job thread, and the UI thread only touches this once that
 // thread has been joined.
+//
+// The idle-VRAM policy every helper this object launches is given is fixed at
+// construction, because it is fixed for a helper process: switching it
+// mid-session would leave two idle samples describing two different arms and
+// neither number would mean anything. It is deliberately absent from the
+// residency key - it decides when memory is handed back, never what the pass
+// computes, so flipping it must not retire a cache entry or force a relaunch.
 class ResidentNeuralHelper {
 public:
     ResidentNeuralHelper();
+    explicit ResidentNeuralHelper(resident_helper::IdleVramPolicy idleVramPolicy);
     ~ResidentNeuralHelper();
     ResidentNeuralHelper(const ResidentNeuralHelper&) = delete;
     ResidentNeuralHelper& operator=(const ResidentNeuralHelper&) = delete;
-
     // Runs one job, launching, relaunching or reusing the helper as the policy
     // decides, and reports the decision through `plan` for the caller's log.
     // Everything the single-shot launcher accepts is accepted here, including
@@ -109,6 +135,11 @@ public:
     // True while a helper process is alive. Looks at the process, so an idle
     // timeout or a self-invalidating exit is observed rather than assumed.
     bool Resident() const;
+    // The arm every helper this object launches runs under, for the caller's
+    // log. Named for the invariant rather than for the type it returns:
+    // exactly one policy is in force per helper process, for this object's
+    // whole life, so there is nothing here a caller could set.
+    resident_helper::IdleVramPolicy IdleVramPolicyInForce() const noexcept { return idleVramPolicy_; }
 
 private:
     struct Session;
@@ -121,6 +152,7 @@ private:
                                   const NeuralJobHooks& hooks, std::stop_token stop,
                                   const std::function<void(bool launched)>& accepted);
     std::unique_ptr<Session> session_;
+    resident_helper::IdleVramPolicy idleVramPolicy_{resident_helper::kDefaultIdleVramPolicy};
 };
 
 // Short Feature-18 probe run in the same isolated helper before a render. The
@@ -241,6 +273,11 @@ struct WorkerArguments {
     HANDLE parentProcess{};
     bool preflight{};
     bool configurationRestarted{};
+    // What this helper does with its feature memory between jobs. Meaningful
+    // only in resident mode - a single-shot helper exits instead of idling -
+    // and fixed for the process, because two idle samples taken under
+    // different policies would describe nothing.
+    resident_helper::IdleVramPolicy idleVramPolicy{resident_helper::kDefaultIdleVramPolicy};
     NeuralRenderRequest request;
 
     // Resident mode is not a flag to keep in step with the handle; it is the
@@ -257,7 +294,8 @@ std::vector<std::wstring> BuildPreflightArguments(HANDLE metadata, bool configur
 // frames carrying the vector BuildWorkerArguments produces, so ParseWorkerArguments
 // stays the one definition and the one validator of what a job is.
 std::vector<std::wstring> BuildResidentArguments(HANDLE metadata, HANDLE command, HANDLE pauseEvent,
-                                                 HANDLE parentProcess);
+                                                 HANDLE parentProcess,
+                                                 resident_helper::IdleVramPolicy idleVramPolicy);
 std::optional<WorkerArguments> ParseWorkerArguments(std::span<const std::wstring_view> arguments);
 
 // Outcome of running one metadata byte stream through the parent's decoder.

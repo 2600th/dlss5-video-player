@@ -138,3 +138,62 @@ private:
     uint64_t m_appValue = 0;
     uint64_t m_ofaValue = 0;
 };
+
+// Whether hardware flow can be asked for a session, at what geometry, and what its
+// vectors have to be multiplied by. Decided from sizes alone, before any device call,
+// so the renderer can log the choice and a test can check it on a machine with no flow
+// engine.
+//
+// The engine compares the decoded frame itself - Capture() copies that exact texture
+// and D3D12 CopyResource carries no scale - so it is asked for the decoded size rather
+// than the DLSS input size. On every neural-size path the two are equal and this is the
+// same request as before. A runtime Super Resolution session is the case where they
+// differ, and it used to be the case that silently kept the CPU block matcher. NGX
+// reads motion in DLSS input pixels, which is also the unit TemporalGuides emits, so a
+// vector measured on the decoded grid is converted by the per-axis ratio between the
+// two sizes. That conversion is exact rather than approximate because the pass that
+// produces the DLSS input is a full-image resample of the decoded texture - one
+// full-screen triangle over uv 0..1, no crop and no letterbox - so the two grids differ
+// by nothing except that ratio.
+//
+// Nothing else is refused here. A geometry the engine cannot run is the engine's own
+// answer: Initialize() puts the size asked for against the four NV_OF_CAPS bounds below
+// and says which one was missed, and the caller keeps the CPU estimator for exactly
+// that case.
+struct HardwareFlowPlan {
+    bool attempt = false;
+    // The geometry to initialize the engine at: the decoded frame's own size.
+    uint32_t width = 0, height = 0;
+    // Engine-input pixels -> DLSS input pixels. Exactly 1 on a neural-size path, where
+    // the division is of a number by itself.
+    float motionScaleX = 1.0f, motionScaleY = 1.0f;
+    // Why the CPU estimator is kept. Empty while `attempt` is true.
+    const char* refusal = "";
+};
+
+constexpr HardwareFlowPlan PlanHardwareFlow(uint32_t sourceW, uint32_t sourceH,
+                                            uint32_t renderW, uint32_t renderH) noexcept
+{
+    HardwareFlowPlan plan;
+    if (!sourceW || !sourceH || !renderW || !renderH) {
+        plan.refusal = "the decoded frame or the DLSS input has a zero dimension";
+        return plan;
+    }
+    plan.attempt = true;
+    plan.width = sourceW;
+    plan.height = sourceH;
+    plan.motionScaleX = float(renderW) / float(sourceW);
+    plan.motionScaleY = float(renderH) / float(sourceH);
+    return plan;
+}
+
+// The engine's own geometry limits, as Initialize() applies them. A zero maximum is a
+// query that did not answer, and a bound nobody reported cannot refuse anything.
+constexpr bool FlowGeometrySupported(uint32_t width, uint32_t height,
+                                     uint32_t minWidth, uint32_t minHeight,
+                                     uint32_t maxWidth, uint32_t maxHeight) noexcept
+{
+    if (!maxWidth || !maxHeight) return true;
+    return width >= minWidth && height >= minHeight && width <= maxWidth &&
+           height <= maxHeight;
+}

@@ -354,19 +354,26 @@ already been refused, it is sampled five times, and any null decides it -
 otherwise the same locked machine would be classified `13` or `14` depending on
 which phase of the flap it happened to catch.
 
-**There is a deterministic test and this script does not use it yet.**
+**The deterministic test is now what the script uses (2026-09-14).**
 `WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
 WTSSessionInfoEx, ...)` returns `WTSINFOEXW` whose
 `Data.WTSInfoExLevel1.SessionFlags` is `WTS_SESSIONSTATE_LOCK` while the desktop
 is locked - correct on Windows 8 and later, documented inverted only on
-Windows 7 / 2008 R2. That would replace the five-sample heuristic with one stable
-answer and give exit code `14` a cause rather than an inference. Note that
-`OpenInputDesktop` is *not* the answer here even though it looks like it: it was
-tried and reported the desktop available while `SendInput` was refused, because
-the modern lock screen is a protected window on the ordinary `Default` desktop.
-A ten-line probe would settle the `WTS` route before it is shipped; until then the
-heuristic stands, and it is only ever consulted after an injection has already
-failed.
+Windows 7 / 2008 R2. `player_session.ps1` reads it first and reports one stable
+answer, so exit code `14` now has a cause rather than an inference. The
+five-sample foreground reading survives only as the fallback for
+`WTS_SESSIONSTATE_UNKNOWN` and the pre-Windows-8 inversion, and the script says
+which reading decided. `OpenInputDesktop` is still *not* the answer even though
+it looks like it: it was tried and reported the desktop available while
+`SendInput` was refused, because the modern lock screen is a protected window on
+the ordinary `Default` desktop. Everything above about the flap stays true of the
+fallback path and is why the fallback is a five-sample any-null rule rather than a
+single poll.
+
+The measurement that most needed this shipped the same day: the P3 idle-VRAM A/B
+is a driven session pair, and a harness that cannot say whether the box was locked
+cannot say whether an arm ran. See
+[`measurements/p3-idle-vram-20260914/REPORT.md`](measurements/p3-idle-vram-20260914/REPORT.md).
 
 ## What contention costs, and what one contended session costs afterwards
 

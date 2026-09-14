@@ -256,6 +256,17 @@ public:
     // resident helper keeps one device across several - would otherwise report
     // the highest usage any earlier job reached as this one's peak.
     void ResetPeakLocalVideoMemory() { m_peakLocalVideoMemoryMiB = 0; }
+    // Point sample of the adapter's local-segment CurrentUsage, MiB, rather
+    // than the running maximum above. An idle helper's question is "what is
+    // parked right now", which has no maximum in it.
+    uint64_t CurrentLocalVideoMemoryMiB() const;
+    // Drains the queue and hands the NGX feature back, asking the runtime to
+    // free its memory with it. Nothing else this renderer holds is touched;
+    // the next RenderFrame re-creates the feature through the ordinary
+    // EnsureFeature path. False when there was no feature, or the drain did
+    // not complete - releasing a feature whose command lists have not retired
+    // is what the DLSS guide S5.5 forbids, so the feature is kept instead.
+    bool ReleaseDLSSFeatureForIdle();
 
 private:
     friend struct D3D12RendererDeleter;
@@ -353,6 +364,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_uploadCmds[FrameCount];
     OpticalFlowNvof m_nvof;
     bool m_nvofActive = false;
+    // Engine-input pixels -> DLSS input pixels for the flow resolve pass, from
+    // PlanHardwareFlow. Both are 1 unless this is a Super Resolution session.
+    float m_nvofMotionScaleX = 1.0f, m_nvofMotionScaleY = 1.0f;
     Microsoft::WRL::ComPtr<ID3D12Fence> m_fence;
     HANDLE m_fenceEvent = nullptr;
     uint64_t m_fenceValue = 0;
@@ -407,6 +421,9 @@ private:
     uint8_t* m_guideMapped[FrameCount]{};
     uint8_t* m_referenceMapped[FrameCount]{};
     uint8_t* m_cacheReadbackMapped[CaptureSlots]{};
+    // Mapped for the renderer's lifetime like the capture readbacks beside it, and for
+    // the same reason: the alternative is a Map/Unmap pair on every frame.
+    const uint64_t* m_timestampMapped = nullptr;
     uint64_t m_captureFence[CaptureSlots]{};
     uint32_t m_captureWrite = 0;
     uint32_t m_captureRead = 0;

@@ -12,18 +12,18 @@ The keep rests on three measured facts and one honest negative.
 2. It is **nearly free** — 0.057–0.128 ms of CPU per frame at a 160×90 grid and *exactly nothing* on the GPU, because the depth resource, the `SV_Depth` pass and the NGX parameter are unconditional and `depth=0` merely writes a uniform `0.75f`.
 3. The **removal hypothesis was falsifiable, and it failed.** `real-game-motion` — a character running off a rooftop and falling, so the subject climbs the frame while getting *nearer*, inverting the proxy's `-0.42*yn` prior — is the adversarial case for that prior. The proxy improves **all four** all-pairs temporal/motion metrics there, one of only three clips in eight where it sweeps them all. The prior being locally wrong does not make it harmful.
 4. The honest negative: **no visible quality win, and this report's own published bar for one was not met.** Round 1 set a keep bar of "false motion and flip rate improve together by more than the 0.1–0.3 pp seen here". On real footage they improve together on 3 of 4 clips, including the adversarial one, but by **0.002–0.059 pp** — an order of magnitude *below* that bar. So this is a keep on cost-benefit, not a keep on a quality claim, and the distinction is load-bearing: nobody should cite this report for an image-quality improvement.
-5. Two scope limits on the real-footage half, added after the fact. Those four
-   clips are **NR-processed captures**, not footage: every frame was recorded with
-   neural rendering on, so the pixels are the player's own DLSS-NR output taken
-   through a screen capture, an h264 encode and a lanczos upscale before this A/B
-   rendered them again. Sound for an A/B where both arms see byte-identical input,
-   which this is; not a statement about original footage. And both arms ran on the
-   harness `baseline` profile, which writes no `NR*` key, so the add-on's own
-   defaults apply and its automatic mask is **off** — the player ships
-   `NRAutoMask=1`. The comparison is internally valid because both arms share that
-   state, but it is a verdict at a configuration the player does not ship. The gate
-   A/B was re-run at the shipped mask state and reproduced; **this one was not**, so
-   that check is still owed. See [Benchmark](../../BENCHMARK.md).
+5. One scope limit remains on the real-footage half, and one has been closed.
+   Those four clips are **NR-processed captures**, not footage: every frame was
+   recorded with neural rendering on, so the pixels are the player's own DLSS-NR
+   output taken through a screen capture, an h264 encode and a lanczos upscale
+   before this A/B rendered them again. Sound for an A/B where both arms see
+   byte-identical input, which this is; not a statement about original footage.
+   The mask-state check is now **done** and it does not leave the verdict where it
+   found it: at the shipped `NRAutoMask=1` the keep still stands on cost, but the
+   per-clip sweep this report leaned on does not reproduce - two of the four clips
+   change direction. See [The mask-state control](#the-mask-state-control-16-renders-at-nrautomask1)
+   at the end, which supersedes point 3's use of `real-game-motion` as the
+   settling result.
 
 The superseded first-round verdict ("undecided pending real footage") is preserved
 below with the reasoning that produced it, because the thing that changed it was
@@ -744,3 +744,90 @@ viewer could see. None of those is in evidence today.
 Render fixtures (48 `output.mkv`, ~1.5 GiB) are local build artifacts and are not
 committed; the claims above stand on the decoded-frame digests and the
 `analysis.json` metrics, both reproducible from the commands in this report.
+
+---
+
+## The mask-state control (16 renders at `NRAutoMask=1`)
+
+Measured 2026-09-14, later the same day, on the same machine and driver. The
+report above ran both arms on the harness `baseline` profile, which writes no
+`NR*` key at all and therefore leaves the add-on's automatic mask **off** while
+the player ships it **on**. This is that comparison repeated at the shipped mask
+state, and it is the check the verdict head above owed.
+
+Both arms write all eight player keys at their `src/NeuralSettings.h` defaults
+and differ in exactly one thing, the `--guides` string:
+
+```
+python run.py --clips real-film-cuts real-game-cuts real-game-motion real-dissolve ^
+  --profile-file ../../docs/measurements/depth-ab-20260914/shipped-state.profile.json ^
+  --profiles shipped-depth-proxy shipped-depth-constant --repeats 2
+python analyze.py --no-ocr --no-faces
+```
+
+16 renders, 0 failed, every clip/profile pair bit-identical across its two
+repeats (repeat spread exactly `0.00e+00` on all seven metrics), so every delta
+below is deterministic rather than sampled.
+
+### Direction: two of four clips change their answer
+
+| clip | mask **off** (this report) | mask **on** (shipped) | stable? |
+|---|---|---|---|
+| `real-film-cuts` | **4/4 proxy** | **4/4 proxy** | yes |
+| `real-game-cuts` | 3/4 proxy | **0/4 proxy** | no - flips to constant |
+| `real-game-motion` | **4/4 proxy** | 3/4 proxy | weakens |
+| `real-dissolve` | 4/4 constant | 3/4 proxy | no - flips to proxy |
+
+Aggregate is almost untouched - the proxy takes 11 of 16 all-pairs metrics at
+mask-off and 10 of 16 at mask-on - but the per-clip composition is not stable,
+and `real-game-motion`, the adversarial clip this report singled out *before*
+measuring and then used as its settling result, no longer sweeps.
+
+### Magnitude: unchanged, and still a rounding error on the pass
+
+| clip | source flicker | output flicker | pass effect | depth delta | depth % of pass |
+|---|---:|---:|---:|---:|---:|
+| real-film-cuts | 1.519 | 1.478 | -0.0415 | -0.0004 | 0.94 % |
+| real-game-cuts | 14.146 | 13.602 | -0.5437 | +0.0045 | 0.84 % |
+| real-game-motion | 6.264 | 6.665 | +0.4013 | -0.0011 | 0.27 % |
+| real-dissolve | 8.111 | 7.979 | -0.1322 | -0.0032 | 2.41 % |
+
+| clip | source sigma | output sigma | pass effect | depth delta | depth % of pass |
+|---|---:|---:|---:|---:|---:|
+| real-film-cuts | 5.479 | 5.386 | -0.0928 | -0.0034 | 3.62 % |
+| real-game-cuts | 26.020 | 25.052 | -0.9677 | +0.0067 | 0.69 % |
+| real-game-motion | 19.005 | 20.297 | +1.2913 | -0.0112 | 0.87 % |
+| real-dissolve | 34.301 | 34.611 | +0.3095 | -0.0063 | 2.02 % |
+
+The depth term is 0.27-3.62 % of what the neural pass itself does to the same
+metric, the same order as at mask-off. So the mask state does not shrink the
+depth effect; it reshuffles which clip the sign lands on, which is what an effect
+this small should be expected to do.
+
+### What this does and does not change
+
+- **The keep stands, and its basis is unchanged**: live channel, 0.057-0.128 ms
+  of CPU per frame, zero GPU, no guide path deleted by removal. None of that is
+  mask-dependent.
+- **Point 3 above is retracted as a quality argument.** "The proxy sweeps all
+  four metrics on the adversarial clip" is true at mask-off and false at the
+  shipped mask state. A per-clip sweep that moves when a variable *other than the
+  one under test* changes is not evidence about depth; it is evidence that the
+  effect is too small for per-clip direction to be stable. The falsification
+  argument survives in its weaker and still sufficient form: removal was
+  predicted to hurt the adversarial clip and does not, at either mask state.
+- **The gate A/B and this one are now asymmetric on purpose to note**: the gate
+  reproduced at mask-on within 0.00108, every conclusion intact; depth did not
+  reproduce clip-by-clip. The difference is effect size, not method - the gate
+  moves false motion by 4.6-14.4 % relative, depth by under 4 % of the pass.
+
+### A cross-check that fell out of it
+
+`history_resets` are identical arm-for-arm on all four clips, as at mask-off -
+`5/2/1/1` against the frozen record's `4/2/1/1`. The one extra reset is on
+`real-film-cuts` and is the **debounce fix landing on real material**: the cut at
+local 87 was suppressed under the shipped 0.6 s window and is accepted under
+0.3 s. The arms still agree with each other, so the depth guide does not touch
+the cut decision; the corpus and the criterion changed underneath, exactly as
+intended, and this is the first independent confirmation of that fix on a
+labelled real clip.

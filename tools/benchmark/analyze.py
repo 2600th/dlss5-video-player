@@ -284,6 +284,7 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
     sigma_src, sigma_out = ShotSigma(), ShotSigma()
     prev_src_y = prev_out_y = None
     prev_src_emb = prev_out_emb = None
+    index = -1
     for index, (s, o) in enumerate(zip(src, out)):
         sy, oy = luma(s), luma(o)
         if index in cuts:
@@ -322,6 +323,9 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                     face_rows.append(row)
     src.close()
     out.close()
+    if index < 0:
+        raise RuntimeError(f"{run.name}: compared no frame pairs - source {result['source']} "
+                           f"and output {output} did not both yield frames")
     rgb = np.mean(rgb_delta, axis=0) if rgb_delta else np.zeros(3)
     metrics.update(
         compared_frames=index + 1,
@@ -568,7 +572,14 @@ def main() -> int:
             rows.append(json.loads(cached.read_text(encoding="utf-8")))
             print(f"cached {run.name}", flush=True)
             continue
-        clip = clips[json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]]
+        name = json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]
+        if name not in clips:
+            # One runs directory can hold runs from several corpora. A run whose
+            # clip this manifest does not describe is not scoreable here, and it
+            # is not an error either - say so and move on.
+            print(f"skipping {run.name}: clip {name!r} is not in this corpus manifest", flush=True)
+            continue
+        clip = clips[name]
         m = analyze_run(run, clip, ocr, faces, args.sample_every)
         rows.append(m)
         print(f"{run.name}: ok={m['ok']} psnr={fmt(m.get('psnr_mean'), 2)} dE={fmt(m.get('delta_e_mean'), 2)} "

@@ -27,6 +27,15 @@ public:
                     NVSDK_NGX_PerfQuality_Value quality, bool preserveSource = false);
     bool EnsureFeature(ID3D12GraphicsCommandList* cmd);
     bool RecreateFeature(ID3D12GraphicsCommandList* cmd);
+    // Hands the feature back after asking the runtime to free its memory with
+    // it (NVSDK_NGX_Parameter_FreeMemOnReleaseFeature). For an idle helper
+    // only: everything else this backend holds - the NGX session, the
+    // parameter block, the negotiated sizes - stays, so the next
+    // EnsureFeature re-creates the feature without re-initializing NGX.
+    // False when there was no feature to hand back. Whether the runtime
+    // honours the request is not observable here; the caller measures the
+    // adapter on both sides of the call instead.
+    bool ReleaseFeatureFreeingMemory();
     bool FeatureCreated() const { return m_handle != nullptr; }
     uint64_t EvaluationCount() const { return m_evaluations; }
     bool Evaluate(ID3D12GraphicsCommandList* cmd,

@@ -4,6 +4,7 @@
 #include "TestSupport.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -137,6 +139,131 @@ NeuralColdStartTimeline FakeHelperTimeline()
     return timeline;
 }
 
+// --- Failure injection for a helper that must die mid-job -------------------
+//
+// A relaunched helper is a brand-new process handed the identical job, so
+// "fail the first attempt and complete the second" cannot be written into the
+// job: the two attempts share nothing but the machine. This file is that one
+// shared thing. One helper runs at a time - the launcher starts the
+// replacement only after the previous process is gone - so appending a byte
+// and reading the size back is a race-free attempt counter.
+//
+// Which failure is injected is selected by the job's source file name, the way
+// every other case in RunFakeWorker is selected, so the hook needs no build
+// flag and no second code path in the shipped launcher.
+std::filesystem::path FailureInjectionCounterPath(std::wstring_view token)
+{
+    std::error_code error;
+    const std::filesystem::path directory = std::filesystem::temp_directory_path(error);
+    return (error ? std::filesystem::path(L".") : directory) /
+           (L"dlss5-neural-worker-" + std::wstring(token) + L".attempts");
+}
+
+uint64_t RecordFailureInjectionAttempt(std::wstring_view token)
+{
+    const std::filesystem::path path = FailureInjectionCounterPath(token);
+    {
+        std::ofstream counter(path, std::ios::binary | std::ios::app);
+        counter.put('.');
+    }
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    return error ? 0 : static_cast<uint64_t>(size);
+}
+
+void ResetFailureInjection(std::wstring_view token)
+{
+    std::error_code error;
+    std::filesystem::remove(FailureInjectionCounterPath(token), error);
+}
+
+// Dies the way a helper dies: no unwinding, no result, a non-zero exit code.
+[[noreturn]] void KillThisHelper()
+{
+    TerminateProcess(GetCurrentProcess(), 0xC0000005u & 0xFF);
+    // TerminateProcess does not return for the calling process, but the
+    // compiler cannot know that.
+    ExitProcess(0xC0000005u & 0xFF);
+}
+
+// A fake resident helper: the production command channel and the production
+// loop, with a runner that answers a job instead of rendering one. Everything
+// the parent's recovery depends on is real - the framing, the Hello/Ready
+// exchange, the idle grace, and a process that dies with a job in its hands -
+// and only the render is not, which is what lets the launcher's relaunch-once
+// path be exercised on a machine with no GPU.
+struct FakeResidentRunner {
+    HANDLE metadata{};
+    resident_helper::IdleVramPolicy policy{resident_helper::kDefaultIdleVramPolicy};
+
+    // Invented figures, chosen so a transposed sample or a policy that never
+    // crossed the launch line shows up. What this exercises is the transport
+    // and the attribution of the two samples; the runtime's actual memory
+    // behaviour is a property of the GPU and cannot be asserted without one.
+    static constexpr uint64_t kParkedMiB = 1408;
+    static constexpr uint64_t kFreedMiB = 406;
+
+    bool Write(WireKind kind, const void* payload, uint32_t bytes)
+    {
+        return WriteMessage(metadata, kind, payload, bytes);
+    }
+
+    bool Ready() { return Write(WireKind::Ready, nullptr, 0); }
+
+    bool Refuse(std::wstring_view detail)
+    {
+        NeuralRenderResult refused;
+        refused.failure = NeuralRenderFailure::Protocol;
+        refused.detail = std::wstring(detail);
+        const auto bytes = EncodeResult(refused);
+        return Write(WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size()));
+    }
+
+    // The free arm hands the workset back, so it reports an unarmed feature
+    // and a smaller footprint; the keep arm reports what it is still holding.
+    void Idle()
+    {
+        const bool frees = policy == resident_helper::IdleVramPolicy::FreeFeature;
+        const WireMemory wire = EncodeMemory(
+            MemorySample{MemoryStage::Idle, policy, !frees, frees ? kFreedMiB : kParkedMiB});
+        Write(WireKind::Memory, &wire, sizeof(wire));
+    }
+
+    resident_worker::JobOutcome Job(std::span<const std::wstring> argv, std::stop_token)
+    {
+        std::vector<std::wstring_view> values(argv.begin(), argv.end());
+        const auto parsed = neural_worker_detail::ParseWorkerArguments(values);
+        if (!parsed || parsed->preflight || parsed->command) {
+            return Refuse(L"The fake helper rejected the job's argument vector.")
+                ? resident_worker::JobOutcome::Refused : resident_worker::JobOutcome::WriteFailed;
+        }
+        const std::wstring source = parsed->request.sourcePath.wstring();
+        if (source == L"resident-crash-always-source.mkv" ||
+            (source == L"resident-crash-once-source.mkv" &&
+             RecordFailureInjectionAttempt(L"crash-once") == 1)) {
+            KillThisHelper();
+        }
+        const WireMemory parked =
+            EncodeMemory(MemorySample{MemoryStage::PostJob, policy, true, kParkedMiB});
+        if (!Write(WireKind::Memory, &parked, sizeof(parked)))
+            return resident_worker::JobOutcome::WriteFailed;
+        const auto bytes = EncodeResult(ValidFakeResult(parsed->request.jobId));
+        if (!Write(WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())))
+            return resident_worker::JobOutcome::WriteFailed;
+        return resident_worker::JobOutcome::Completed;
+    }
+};
+
+int RunFakeResidentWorker(const neural_worker_detail::WorkerArguments& arguments)
+{
+    FakeResidentRunner runner{arguments.metadata, arguments.idleVramPolicy};
+    resident_worker::CommandChannel channel(arguments.command, arguments.parentProcess);
+    // 150 ms of grace instead of the shipped five seconds: the boundary under
+    // test is "a job, then quiet", not how long quiet has to last.
+    resident_worker::RunResidentLoop(channel, runner, 10s, 150ms);
+    return 0;
+}
+
 int RunFakeWorker(int argc, wchar_t** argv)
 {
     std::vector<std::wstring_view> values;
@@ -144,6 +271,9 @@ int RunFakeWorker(int argc, wchar_t** argv)
     const auto parsed = neural_worker_detail::ParseWorkerArguments(values);
     if (!parsed) return 9;
     const HANDLE handle = parsed->metadata;
+    // Resident mode is the command handle's presence, exactly as it is for the
+    // real helper: jobs arrive as command frames rather than on argv.
+    if (parsed->Resident()) return RunFakeResidentWorker(*parsed);
     if (parsed->preflight) {
         // The parent picks the receipt shape: a refusal carrying a diagnosis,
         // a refusal without one, or the normal success.
@@ -378,7 +508,14 @@ int RunRealWorker(int argc, wchar_t** argv)
         << L" timing={samples=" << result.timing.samples << L", neuralGpuMsP50=" << result.timing.neuralGpuMsP50
         << L", p95=" << result.timing.neuralGpuMsP95 << L", max=" << result.timing.neuralGpuMsMax
         << L", guideMsMean=" << result.timing.guideMsMean << L", captureMsMean=" << result.timing.captureMsMean
-        << L", peakLocalVramMiB=" << result.timing.peakLocalVramMiB << L"} detail=" << result.detail << L'\n';
+        << L", peakLocalVramMiB=" << result.timing.peakLocalVramMiB
+        // The idle-VRAM pair. This harness drives one single-shot helper, so
+        // idleLocalVramMiB is always 0 here - the process exits instead of
+        // idling - and postJobLocalVramMiB is what that render left resident.
+        << L", postJobLocalVramMiB=" << result.timing.postJobLocalVramMiB
+        << L", idleLocalVramMiB=" << result.timing.idleLocalVramMiB
+        << L", idleVramPolicy=" << resident_helper::IdleVramPolicyName(result.timing.idleVramPolicy)
+        << L"} detail=" << result.detail << L'\n';
     // The helper's own share of the cold start, in microseconds, as it arrived
     // over the pipe. An absent phase prints "-": this harness launches the
     // helper directly, so the player's four phases never exist here.
@@ -1127,6 +1264,7 @@ private:
 // is stopped so a cancel has something to interrupt.
 struct RecordingRunner {
     size_t readyCalls{};
+    size_t idleCalls{};
     std::vector<std::vector<std::wstring>> jobs;
     std::vector<std::wstring> refusals;
     JobOutcome outcome{JobOutcome::Completed};
@@ -1146,6 +1284,8 @@ struct RecordingRunner {
         refusals.emplace_back(detail);
         return true;
     }
+
+    void Idle() { ++idleCalls; }
 
     JobOutcome Job(std::span<const std::wstring> argv, std::stop_token stop)
     {
@@ -1449,6 +1589,288 @@ void resident_launch_line_is_a_helper_and_not_a_job_test()
     }
 }
 
+void resident_loop_samples_once_per_idle_stretch_test()
+{
+    // The shipped grace, stated here because it is the number the idle VRAM
+    // sample and the FreeFeature release are both timed on, and because it
+    // must stay well short of the exit budget for either to mean anything.
+    static_assert(resident_worker::kIdleSampleGrace < resident_worker::kIdleTimeout);
+
+    const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+    {
+        // A helper that has rendered nothing has nothing parked to measure and
+        // no workset to hand back, so the grace passes without a sample.
+        CommandPipe pipe;
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 300ms, 50ms) == ResidentExit::Idle);
+        CHECK_EQ(size_t{0}, runner.idleCalls);
+    }
+    {
+        // One job, then quiet: the sample fires at the grace, and the helper
+        // still leaves on the idle budget rather than on the grace.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, payload);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(RunResidentLoop(channel, runner, 400ms, 50ms) == ResidentExit::Idle);
+        CHECK(std::chrono::steady_clock::now() - started >= 380ms);
+        CHECK_EQ(size_t{1}, runner.idleCalls);
+    }
+    {
+        // A second job re-arms the grace, so each idle stretch is sampled once
+        // and a helper serving jobs steadily is never sampled at all.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, payload);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        std::jthread second([&] {
+            std::this_thread::sleep_for(250ms);
+            pipe.Send(CommandKind::Job, payload);
+        });
+        CHECK(RunResidentLoop(channel, runner, 700ms, 50ms) == ResidentExit::Idle);
+        CHECK_EQ(size_t{2}, runner.jobs.size());
+        CHECK_EQ(size_t{2}, runner.idleCalls);
+    }
+}
+
+void idle_vram_policy_is_named_on_the_launch_line_and_read_from_the_player_ini_test()
+{
+    using resident_helper::IdleVramPolicy;
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(11));
+    const HANDLE command = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(22));
+    auto roundTrip = [&](IdleVramPolicy policy) {
+        const auto built = neural_worker_detail::BuildResidentArguments(metadata, command, nullptr,
+                                                                        nullptr, policy);
+        std::vector<std::wstring_view> values{L"NeuralWorker.exe"};
+        for (const auto& argument : built) values.emplace_back(argument);
+        return neural_worker_detail::ParseWorkerArguments(values);
+    };
+    // Both arms survive the launch line, the default one included: a helper
+    // whose line does not say which arm it runs cannot attribute its samples.
+    const auto keep = roundTrip(IdleVramPolicy::KeepFeature);
+    CHECK(keep.has_value());
+    if (keep) CHECK(keep->idleVramPolicy == IdleVramPolicy::KeepFeature);
+    const auto free = roundTrip(IdleVramPolicy::FreeFeature);
+    CHECK(free.has_value());
+    if (free) CHECK(free->idleVramPolicy == IdleVramPolicy::FreeFeature);
+
+    // A helper launched by a parent that predates the flag keeps its feature
+    // memory, which is what every helper before the flag did.
+    const auto absent = neural_worker_detail::ParseWorkerArguments(
+        std::vector<std::wstring_view>{L"NeuralWorker.exe", L"--neural-worker", L"--metadata-handle",
+                                       L"11", L"--command-handle", L"22"});
+    CHECK(absent.has_value());
+    if (absent) CHECK(absent->idleVramPolicy == IdleVramPolicy::KeepFeature);
+    // A name this build cannot resolve is refused rather than defaulted: the
+    // helper would otherwise run one arm while its line claimed another.
+    CHECK(!neural_worker_detail::ParseWorkerArguments(
+        std::vector<std::wstring_view>{L"NeuralWorker.exe", L"--neural-worker", L"--metadata-handle",
+                                       L"11", L"--command-handle", L"22", L"--idle-vram-policy",
+                                       L"maybe"}).has_value());
+    // A single-shot helper exits instead of idling, so an idle instruction on
+    // its line is an instruction for a period it will never have.
+    const auto single = neural_worker_detail::BuildWorkerArguments(
+        TestRequest(L"single.mkv"), metadata, nullptr, false);
+    std::vector<std::wstring_view> withPolicy{L"NeuralWorker.exe"};
+    for (const auto& argument : single) withPolicy.emplace_back(argument);
+    withPolicy.emplace_back(L"--idle-vram-policy");
+    withPolicy.emplace_back(L"free");
+    CHECK(!neural_worker_detail::ParseWorkerArguments(withPolicy).has_value());
+
+    // The advanced setting the arm is selected with, out of the player's own
+    // ini rather than the neural runtime's - a resource policy must not reach
+    // the settings digest the render cache key hashes.
+    const std::filesystem::path ini =
+        FailureInjectionCounterPath(L"settings").replace_extension(L".ini");
+    std::error_code error;
+    std::filesystem::remove(ini, error);
+    // No file at all is the default, and so is a file without the key.
+    CHECK(ReadIdleVramPolicy(ini) == IdleVramPolicy::KeepFeature);
+    CHECK(WritePrivateProfileStringW(L"NeuralHelper", L"IdleVramPolicy", L"free", ini.c_str()) != FALSE);
+    CHECK(ReadIdleVramPolicy(ini) == IdleVramPolicy::FreeFeature);
+    CHECK(WritePrivateProfileStringW(L"NeuralHelper", L"IdleVramPolicy", L"keep", ini.c_str()) != FALSE);
+    CHECK(ReadIdleVramPolicy(ini) == IdleVramPolicy::KeepFeature);
+    // A typo in a settings file is not worth refusing to render over; the arm
+    // that actually ran is still on the launch line and in the receipt.
+    CHECK(WritePrivateProfileStringW(L"NeuralHelper", L"IdleVramPolicy", L"freee", ini.c_str()) != FALSE);
+    CHECK(ReadIdleVramPolicy(ini) == IdleVramPolicy::KeepFeature);
+    CHECK(ReadIdleVramPolicy({}) == IdleVramPolicy::KeepFeature);
+    std::filesystem::remove(ini, error);
+
+    // And the policy is not part of what decides whether a helper is reusable:
+    // two jobs that differ only in it must still reuse one process, because a
+    // relaunch here would cost the residency it is being measured against.
+    const resident_helper::HelperKey key =
+        resident_helper::MakeHelperKey(L"C:\\runtime", "digest", "settings");
+    CHECK(resident_helper::PlanForJob({true, key}, key) == resident_helper::HelperPlan::Reuse);
+}
+
+// --- A resident helper as a real process, killed while holding a job -------
+
+// Live processes this one started. Every helper is this executable re-run
+// inside a kill-on-close job object, so anything still alive here is exactly
+// the orphan that safety net exists to prevent - a process holding a GPU and
+// a runtime lease that no player is left to end.
+size_t LiveChildProcesses()
+{
+    const DWORD self = GetCurrentProcessId();
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    size_t alive = 0;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (entry.th32ProcessID == self || entry.th32ParentProcessID != self) continue;
+            const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, entry.th32ProcessID);
+            if (!process) continue;
+            // A terminated process is signalled, so this counts the ones that
+            // are genuinely still running rather than the snapshot's leftovers.
+            if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) ++alive;
+            CloseHandle(process);
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return alive;
+}
+
+// Bounded settle, because the launcher returns as soon as it has terminated
+// the job object and the kernel retires the last process a moment later. An
+// orphan never leaves, so this still fails for the case it is written against.
+size_t LiveChildProcessesAfterSettling()
+{
+    for (int attempt = 0; attempt < 40 && LiveChildProcesses(); ++attempt) {
+        std::this_thread::sleep_for(50ms);
+    }
+    return LiveChildProcesses();
+}
+
+uint64_t FailureInjectionAttempts(std::wstring_view token)
+{
+    std::error_code error;
+    const auto size = std::filesystem::file_size(FailureInjectionCounterPath(token), error);
+    return error ? 0 : static_cast<uint64_t>(size);
+}
+
+resident_helper::HelperKey ResidentTestKey()
+{
+    return resident_helper::MakeHelperKey(L"C:\\neural-runtime", "runtime-digest", "settings-digest");
+}
+
+NeuralRenderRequest ResidentRequest(std::wstring_view source, uint64_t jobId)
+{
+    NeuralRenderRequest request = TestRequest(source);
+    request.jobId = jobId;
+    return request;
+}
+
+void idle_vram_samples_reach_the_receipt_under_both_policies_test()
+{
+    using resident_helper::IdleVramPolicy;
+    for (const IdleVramPolicy policy : {IdleVramPolicy::KeepFeature, IdleVramPolicy::FreeFeature}) {
+        ResidentNeuralHelper helper(policy);
+        CHECK(helper.IdleVramPolicyInForce() == policy);
+        NeuralJobHooks hooks;
+        resident_helper::HelperPlan plan{};
+        const NeuralRenderResult first = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+            ResidentRequest(L"resident-source.mkv", 1), hooks, {}, &plan);
+        CHECK(first.ok);
+        CHECK(plan == resident_helper::HelperPlan::Launch);
+        // What the process is holding once its render went quiet, which is the
+        // figure residency parks, and the arm it was launched under - proof
+        // the policy crossed the launch line into another process.
+        CHECK_EQ(FakeResidentRunner::kParkedMiB, first.timing.postJobLocalVramMiB);
+        CHECK(first.timing.idleVramPolicy == policy);
+        // No idle period preceded the first job a process serves, so there is
+        // no idle figure rather than a measured zero.
+        CHECK_EQ(uint64_t{0}, first.timing.idleLocalVramMiB);
+
+        // Past the helper's idle grace, so the next job's receipt carries what
+        // the policy left parked while nothing was running.
+        std::this_thread::sleep_for(400ms);
+        const NeuralRenderResult second = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+            ResidentRequest(L"resident-source.mkv", 2), hooks, {}, &plan);
+        CHECK(second.ok);
+        CHECK(plan == resident_helper::HelperPlan::Reuse);
+        CHECK_EQ(policy == IdleVramPolicy::FreeFeature ? FakeResidentRunner::kFreedMiB
+                                                       : FakeResidentRunner::kParkedMiB,
+                 second.timing.idleLocalVramMiB);
+        CHECK_EQ(FakeResidentRunner::kParkedMiB, second.timing.postJobLocalVramMiB);
+        CHECK(second.timing.idleVramPolicy == policy);
+        helper.Release();
+    }
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
+void killed_resident_helper_restarts_once_and_completes_the_job_test()
+{
+    ResetFailureInjection(L"crash-once");
+    size_t restarts = 0;
+    NeuralJobHooks hooks;
+    hooks.segments.onRestart = [&] { ++restarts; };
+    ResidentNeuralHelper helper;
+    const NeuralRenderResult result = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-crash-once-source.mkv", 7), hooks);
+    // The observable outcome: the job the first helper died holding is
+    // finished by its replacement, under the job's own identity.
+    CHECK(result.ok);
+    CHECK(!result.cancelled);
+    CHECK(result.failure == NeuralRenderFailure::None);
+    CHECK_EQ(uint64_t{7}, result.jobId);
+    // Two helper processes took the job and no more: one controlled restart.
+    CHECK_EQ(uint64_t{2}, FailureInjectionAttempts(L"crash-once"));
+    // The replacement rendered the range again from frame zero, so anything
+    // the dead helper published is discarded rather than spliced onto.
+    CHECK_EQ(size_t{1}, restarts);
+    helper.Release();
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+    ResetFailureInjection(L"crash-once");
+}
+
+void second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test()
+{
+    NeuralJobHooks hooks;
+    ResidentNeuralHelper helper;
+    const NeuralRenderResult result = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-crash-always-source.mkv", 9), hooks);
+    // Closed, once, with something a user can be shown: the bounded relaunch
+    // is spent and the detail says so rather than the render retrying forever.
+    CHECK(!result.ok);
+    CHECK(!result.cancelled);
+    CHECK(result.failure == NeuralRenderFailure::RetryExhausted);
+    CHECK(result.detail.find(L"did not recover after 2 attempt(s)") != std::wstring::npos);
+    CHECK(!helper.Resident());
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+}
+
+void recovery_probe_refusal_fails_closed_instead_of_relaunching_test()
+{
+    // A probe that refuses between the death and the relaunch is what a TDR
+    // that took the runtime with it looks like from here. The one relaunch is
+    // not spent on it: a second render on a runtime that can no longer arm
+    // feature 18 buys a second identical crash instead of a reason.
+    ResetFailureInjection(L"crash-once");
+    CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", L"refused") != FALSE);
+    NeuralJobHooks hooks;
+    ResidentNeuralHelper helper;
+    const NeuralRenderResult result = helper.RunJob(CurrentExecutable(), ResidentTestKey(),
+        ResidentRequest(L"resident-crash-once-source.mkv", 11), hooks);
+    CHECK(SetEnvironmentVariableW(L"DLSSVIDEOPLAYER_FAKE_PREFLIGHT", nullptr) != FALSE);
+    CHECK(!result.ok);
+    CHECK(!result.cancelled);
+    CHECK(result.failure == NeuralRenderFailure::Preflight);
+    // The reason shown is the probe's, not a repeat of the crash.
+    CHECK(result.detail.find(L"610.47 minimum") != std::wstring::npos);
+    // Exactly one helper process ever took the job: the replacement the crash
+    // would otherwise have earned was never launched.
+    CHECK_EQ(uint64_t{1}, FailureInjectionAttempts(L"crash-once"));
+    CHECK(!helper.Resident());
+    CHECK_EQ(size_t{0}, LiveChildProcessesAfterSettling());
+    ResetFailureInjection(L"crash-once");
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -1486,5 +1908,11 @@ int wmain(int argc, wchar_t** argv)
     resident_loop_ends_when_the_parent_dies_test();
     resident_loop_stops_serving_after_an_invalidating_job_test();
     resident_launch_line_is_a_helper_and_not_a_job_test();
+    resident_loop_samples_once_per_idle_stretch_test();
+    idle_vram_policy_is_named_on_the_launch_line_and_read_from_the_player_ini_test();
+    idle_vram_samples_reach_the_receipt_under_both_policies_test();
+    killed_resident_helper_restarts_once_and_completes_the_job_test();
+    second_kill_fails_closed_with_a_reason_and_leaves_no_orphan_test();
+    recovery_probe_refusal_fails_closed_instead_of_relaunching_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

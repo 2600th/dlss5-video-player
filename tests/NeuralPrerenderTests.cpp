@@ -1,4 +1,5 @@
 #include "NeuralCache.h"
+#include "NeuralPreflight.h"
 #include "LiveSessionPolicy.h"
 #include "MediaPipeline.h"
 #include "PlaybackTiming.h"
@@ -247,38 +248,236 @@ NeuralCacheManifest CompleteRenderManifest()
     return manifest;
 }
 
-void cache_key_changes_for_every_material_input_test()
+// The lookup is the whole reuse decision: a render is answered from the cache
+// only under the key its identity builds, so an identity term that moves is a
+// render that is re-made. The driver and model-store terms exist because
+// neither moved before: gpuPath is a generation label, so a render made on one
+// driver was served on every later one, and runtimeDigest covers the staged
+// runtime directory only, never the weights the pass resolves out of the NGX
+// core directory and the ProgramData model store.
+void published_render_is_not_reused_across_identity_changes_test()
 {
-    NeuralCacheIdentity base;
-    base.sourceDigest = std::string(64, 'a');
-    base.width = 1920;
-    base.height = 1080;
-    base.applicationVersion = "0.12.0";
-    base.gpuPath = "rtx50";
-    base.runtimeDigest = std::string(64, 'b');
-    base.quality = "DLAA";
-    base.upscaling = false;
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    CHECK(manager.Valid());
 
-    const std::string key = BuildNeuralCacheKey(base);
+    NeuralCacheIdentity identity;
+    identity.sourceDigest = std::string(64, 'a');
+    identity.width = 1920;
+    identity.height = 1080;
+    identity.applicationVersion = "0.21.2";
+    identity.gpuPath = "rtx40";
+    identity.runtimeDigest = std::string(64, 'b');
+    identity.quality = "DLAA";
+    identity.settingsDigest = std::string(64, 'c');
+    identity.driverVersion = "32.0.16.1047";
+    identity.modelStoreDigest = std::string(64, 'd');
+
+    const std::string key = BuildNeuralCacheKey(identity);
     CHECK_EQ(size_t{64}, key.size());
-    auto changed = base;
-    changed.sourceDigest = std::string(64, 'c');
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
+    const auto staging = manager.BeginRenderStaging(key);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    WriteBytes(*staging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*staging);
+    CHECK(manager.PromoteRender(key, *staging, CompleteRenderManifest()));
+    CHECK(manager.LookupRender(key).has_value());
+
+    const auto served = [&](const NeuralCacheIdentity& candidate) {
+        const std::string other = BuildNeuralCacheKey(candidate);
+        return other == key || manager.LookupRender(other).has_value();
+    };
+    auto changed = identity;
+    changed.driverVersion = "32.0.16.2001";  // a driver update on the same card
+    CHECK(!served(changed));
+    changed = identity;
+    changed.modelStoreDigest = std::string(64, 'e');  // refreshed weights, same driver
+    CHECK(!served(changed));
+    changed = identity;
+    changed.runtimeDigest = std::string(64, 'f');  // a rebuilt worker or a swapped module
+    CHECK(!served(changed));
+    changed = identity;
+    changed.sourceDigest = std::string(64, '9');
+    CHECK(!served(changed));
+    changed = identity;
     changed.width = 2560;
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.applicationVersion = "0.12.1";
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.gpuPath = "rtx40";
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.runtimeDigest = std::string(64, 'd');
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
+    CHECK(!served(changed));
+    changed = identity;
+    changed.applicationVersion = "0.21.3";
+    CHECK(!served(changed));
+    changed = identity;
+    changed.gpuPath = "rtx50";
+    CHECK(!served(changed));
+    changed = identity;
     changed.upscaling = true;
-    CHECK(key != BuildNeuralCacheKey(changed));
+    CHECK(!served(changed));
+    changed = identity;
+    changed.settingsDigest = std::string(64, '8');
+    CHECK(!served(changed));
+    // The terms discriminate rather than refuse: the identity that produced the
+    // entry still answers from it.
+    CHECK(served(identity));
+
+    // Both terms are appended to the canonical form only when set, so a
+    // downloaded source - which carries neither - keeps the key it was
+    // published under; RenderSettingsTests pins that key's literal digest.
+}
+
+// A schema-4 entry was keyed under an identity that named neither the driver
+// nor the model store, so it has to be retired - and retired for its schema,
+// not because it is missing a field: schema 5 writes schema 4's field list, so
+// the number is the only difference between a retired manifest and a current
+// one, and it is the schema gate that refuses it.
+void schema_four_entries_are_retired_by_the_schema_gate_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    CHECK(manager.Valid());
+    const std::string key(64, '3');
+    const auto staging = manager.BeginRenderStaging(key);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    WriteBytes(*staging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*staging);
+    CHECK(manager.PromoteRender(key, *staging, CompleteRenderManifest()));
+    const auto published = manager.LookupRender(key);
+    CHECK(published.has_value());
+    if (!published) return;
+    CHECK_EQ(uint32_t{5}, published->manifest.schema);
+
+    auto retired = published->manifest;
+    retired.schema = 4;
+    const std::string retiredBytes = SerializeNeuralCacheManifest(retired);
+    std::string currentBytes = SerializeNeuralCacheManifest(published->manifest);
+    CHECK(currentBytes.starts_with("{\"schema\":5,"));
+    CHECK(retiredBytes.starts_with("{\"schema\":4,"));
+    // Identical once the number is swapped: nothing but the schema refuses it.
+    const size_t number = currentBytes.find("\"schema\":5");
+    CHECK(number != std::string::npos);
+    if (number != std::string::npos)
+        CHECK_EQ(currentBytes.replace(number, 10, "\"schema\":4"), retiredBytes);
+    CHECK(!ParseNeuralCacheManifest(retiredBytes).has_value());
+    CHECK(!IsReusableNeuralCacheManifest(retired));
+
+    // The same entry on disk, as the previous release left it: not served, and
+    // the payload is untouched by the refusal.
+    WriteBytes(published->directory / L"manifest.json", retiredBytes);
+    CHECK(!manager.LookupRender(key).has_value());
+    CHECK_EQ(std::string("neural-frames"), ReadBytes(published->payloadPath));
+}
+
+// The model-store term has to move when the weights do. Every file under a
+// resolved root is listed by relative name, size and write time; the files
+// small enough to afford it - the configs and selectors that decide which
+// weights load - are hashed byte for byte as well.
+void model_store_digest_tracks_root_contents_and_names_its_fallback_test()
+{
+    TempDirectory fixture;
+    const auto models = fixture.Path() / L"models";
+    const auto files = models / L"dlssd" / L"versions" / L"20318464" / L"files";
+    std::error_code error;
+    CHECK(std::filesystem::create_directories(files, error));
+    const auto config = models / L"nvngx_config.txt";
+    WriteBytes(config, "app_id=0\n");
+    WriteBytes(files / L"160_E658700.bin", std::string((1u << 20) + 1u, 'w'));
+    const std::array<NeuralModelRoot, 1> roots{NeuralModelRoot{models, true, {}}};
+
+    const auto first = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK_EQ(size_t{64}, first.digest.size());
+    CHECK(first.source == NeuralModelStoreSource::ModelContents);
+    CHECK(first.fallbackDetail.empty());
+    CHECK_EQ(uint32_t{2}, first.files);
+    // The blob is over the content bound, so it is listed and not hashed.
+    CHECK_EQ(uint32_t{1}, first.contentHashedFiles);
+    CHECK_EQ(uint64_t{(1u << 20) + 1u + 9u}, first.bytes);
+    // Unchanged contents digest the same, or every open would miss its own
+    // cache; and the driver version is not folded in, so the receipt can say
+    // which of the two terms moved.
+    CHECK_EQ(first.digest, DigestNeuralModelStore(roots, L"32.0.16.1047").digest);
+    CHECK_EQ(first.digest, DigestNeuralModelStore(roots, L"32.0.99.9999").digest);
+
+    // An edited selector: same file, new bytes.
+    WriteBytes(config, "app_id=1\n");
+    const auto edited = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(edited.digest != first.digest);
+
+    // A grown blob: above the bound, so its size is what the listing carries.
+    WriteBytes(files / L"160_E658700.bin", std::string((1u << 20) + 2u, 'w'));
+    const auto grown = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(grown.digest != edited.digest);
+
+    // A refreshed model store: a new version directory beside the old one.
+    const auto refreshedFiles = models / L"dlssd" / L"versions" / L"20318465" / L"files";
+    CHECK(std::filesystem::create_directories(refreshedFiles, error));
+    WriteBytes(refreshedFiles / L"160_E658701.bin", "refreshed-weights");
+    const auto refreshed = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(refreshed.digest != grown.digest);
+    CHECK_EQ(uint32_t{3}, refreshed.files);
+
+    // A driver-store root is not walked: only the NGX modules beside the
+    // registered core belong in a render's identity, because the rest of that
+    // directory is the whole display driver.
+    const auto core = fixture.Path() / L"core";
+    CHECK(std::filesystem::create_directories(core / L"nested", error));
+    WriteBytes(core / L"nvngx.dll", "ngx-core");
+    WriteBytes(core / L"nvcuda.dll", "unrelated");
+    WriteBytes(core / L"nested" / L"nvngx_dlssd.dll", "nested");
+    const std::array<NeuralModelRoot, 1> coreRoot{NeuralModelRoot{core, false, L"nvngx"}};
+    const auto described = DigestNeuralModelStore(coreRoot, L"32.0.16.1047");
+    CHECK_EQ(uint32_t{1}, described.files);
+    CHECK(described.source == NeuralModelStoreSource::ModelContents);
+
+    // A root that cannot be read is named rather than skipped, and with nothing
+    // left to enumerate the driver version is the whole term - the cheap
+    // fallback, on the receipt instead of silent.
+    const std::array<NeuralModelRoot, 1> absent{
+        NeuralModelRoot{fixture.Path() / L"no-such-root", true, {}}};
+    const auto fallback = DigestNeuralModelStore(absent, L"32.0.16.1047");
+    CHECK(fallback.source == NeuralModelStoreSource::DriverVersion);
+    CHECK(!fallback.fallbackDetail.empty());
+    CHECK(fallback.enumeratedRoots.empty());
+    CHECK_EQ(size_t{64}, fallback.digest.size());
+    CHECK(fallback.digest != DigestNeuralModelStore(absent, L"32.0.99.9999").digest);
+
+    const std::string fallbackJson = NeuralModelStoreJson(fallback);
+    CHECK(fallbackJson.find("\"source\":\"driverVersion\"") != std::string::npos);
+    CHECK(fallbackJson.find(fallback.digest) != std::string::npos);
+    CHECK(fallbackJson.find("\"fallback\":\"\"") == std::string::npos);
+    const std::string contentsJson = NeuralModelStoreJson(refreshed);
+    CHECK(contentsJson.find("\"source\":\"modelContents\"") != std::string::npos);
+    CHECK(contentsJson.find("\"fallback\":\"\"") != std::string::npos);
+}
+
+// NeuralWorker.exe decides the guides and the cut classification, so a worker
+// rebuilt with different logic is a different renderer and must not be handed
+// the previous one's renders. It is hashed into the runtime digest for that
+// reason, and deliberately not lock-pinned: the lock is the vendor stack, and
+// every build of this repository changes the worker.
+void hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test()
+{
+    const auto hashed = LockedRuntimeFileNames();
+    const auto pinned = LockPinnedRuntimeFileNames();
+    CHECK_EQ(size_t{13}, hashed.size());
+    CHECK_EQ(size_t{12}, pinned.size());
+    CHECK(std::ranges::find(hashed, std::wstring_view(L"NeuralWorker.exe")) != hashed.end());
+    CHECK(std::ranges::find(pinned, std::wstring_view(L"NeuralWorker.exe")) == pinned.end());
+    for (const std::wstring_view name : pinned)
+        CHECK(std::ranges::find(hashed, name) != hashed.end());
+
+    TempDirectory fixture;
+    for (const std::wstring_view name : hashed) WriteBytes(fixture.Path() / name, "staged-module");
+    const auto staged = BuildRuntimeDigest(fixture.Path(), hashed);
+    CHECK(staged.has_value());
+    WriteBytes(fixture.Path() / L"NeuralWorker.exe", "rebuilt-worker");
+    const auto rebuilt = BuildRuntimeDigest(fixture.Path(), hashed);
+    CHECK(rebuilt.has_value());
+    CHECK(staged != rebuilt);
+    // A missing locked file still leaves no digest, which the render path
+    // reports as an incomplete runtime rather than rendering against a stack
+    // it cannot name.
+    std::error_code error;
+    CHECK(std::filesystem::remove(fixture.Path() / L"NeuralWorker.exe", error));
+    CHECK(!BuildRuntimeDigest(fixture.Path(), hashed).has_value());
 }
 
 void runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test()
@@ -2799,8 +2998,9 @@ void resident_helper_relaunches_when_the_neural_settings_digest_changes_test()
                      StubHelperKey("settings-aaa"))==HelperPlan::Relaunch);
 }
 
-// A runtime digest change means the twelve locked files under neural-runtime are
-// not the ones the resident helper mapped. Its loaded proxy, add-on and NGX all
+// A runtime digest change means the hashed files under neural-runtime - the
+// twelve vendor modules and the worker beside them - are not the ones the
+// resident helper mapped. Its loaded proxy, add-on and NGX all
 // came from the old bytes, so there is nothing to reuse even though the
 // directory and the settings are unchanged.
 void resident_helper_relaunches_when_the_runtime_digest_changes_test()
@@ -2940,7 +3140,10 @@ int wmain(int argc, wchar_t* argv[])
     default_cache_falls_back_when_portable_layout_is_unusable_test();
     explicit_cache_root_remains_authoritative_test();
     invalid_explicit_cache_root_does_not_silently_fall_back_test();
-    cache_key_changes_for_every_material_input_test();
+    published_render_is_not_reused_across_identity_changes_test();
+    schema_four_entries_are_retired_by_the_schema_gate_test();
+    model_store_digest_tracks_root_contents_and_names_its_fallback_test();
+    hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
     source_and_render_promotion_are_hash_validated_and_immutable_test();
