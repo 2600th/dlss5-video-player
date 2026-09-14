@@ -55,3 +55,6 @@ ReShade.log
 *.suo
 Thumbs.db
 .DS_Store
+
+# Python bytecode from the benchmark tools
+__pycache__/

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Two notes for whoever cuts the next release. The render cache key carries the
+application version, so entries rendered before the scene-cut window changed
+(0.6 s → 0.3 s) stay valid hits for a build with the same `VERSION` - the bump
+is what retires them, not the code change. The same applies to a
+`neural-runtime/NeuralWorker.exe` left over from a pre-v6 build: the parent
+refuses it on the version check, which is the intended fail-closed behaviour and
+looks like a broken helper until the runtime is re-staged.
+
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index
   playback is bound to, and left it empty *and* finished - the one state where

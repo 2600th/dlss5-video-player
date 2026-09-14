@@ -12,6 +12,18 @@ The keep rests on three measured facts and one honest negative.
 2. It is **nearly free** — 0.057–0.128 ms of CPU per frame at a 160×90 grid and *exactly nothing* on the GPU, because the depth resource, the `SV_Depth` pass and the NGX parameter are unconditional and `depth=0` merely writes a uniform `0.75f`.
 3. The **removal hypothesis was falsifiable, and it failed.** `real-game-motion` — a character running off a rooftop and falling, so the subject climbs the frame while getting *nearer*, inverting the proxy's `-0.42*yn` prior — is the adversarial case for that prior. The proxy improves **all four** all-pairs temporal/motion metrics there, one of only three clips in eight where it sweeps them all. The prior being locally wrong does not make it harmful.
 4. The honest negative: **no visible quality win, and this report's own published bar for one was not met.** Round 1 set a keep bar of "false motion and flip rate improve together by more than the 0.1–0.3 pp seen here". On real footage they improve together on 3 of 4 clips, including the adversarial one, but by **0.002–0.059 pp** — an order of magnitude *below* that bar. So this is a keep on cost-benefit, not a keep on a quality claim, and the distinction is load-bearing: nobody should cite this report for an image-quality improvement.
+5. Two scope limits on the real-footage half, added after the fact. Those four
+   clips are **NR-processed captures**, not footage: every frame was recorded with
+   neural rendering on, so the pixels are the player's own DLSS-NR output taken
+   through a screen capture, an h264 encode and a lanczos upscale before this A/B
+   rendered them again. Sound for an A/B where both arms see byte-identical input,
+   which this is; not a statement about original footage. And both arms ran on the
+   harness `baseline` profile, which writes no `NR*` key, so the add-on's own
+   defaults apply and its automatic mask is **off** — the player ships
+   `NRAutoMask=1`. The comparison is internally valid because both arms share that
+   state, but it is a verdict at a configuration the player does not ship. The gate
+   A/B was re-run at the shipped mask state and reproduced; **this one was not**, so
+   that check is still owed. See [Benchmark](../../BENCHMARK.md).
 
 The superseded first-round verdict ("undecided pending real footage") is preserved
 below with the reasoning that produced it, because the thing that changed it was

@@ -66,21 +66,27 @@ clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
-**Settled the same day, and the answer reverses the synthetic one.** Four
-real-footage clips - cut from this repository's own demo capture, cuts verified
-frame by frame - were rendered on both trees. The gate **lowers** false motion on
-all four, by 4.6 to 14.4 % relative, which is 11.8 to 74.4 % of the share the
-`intensity-0` control attributes to the neural pass, and on two of them it improves
-false motion, cell flips and added sigma together - an outcome no synthetic clip
-produced. Repeats are bit-identical within each tree and the trees differ, so the
-deltas are signal. The gate is kept on evidence now, not only on the shape of its
-risk. What the synthetic result was really measuring is fractal and
-cellular-automaton motion, where "false motion" counts pixels on cells the source
-held static; the reversal is the clearest case this project has that synthetic
-patterns can point the wrong way. One caveat: the capture was taken with neural
-rendering on, so those pixels are the player's own output rather than
-camera-original footage.
-[Real-footage A/B](measurements/gate-real-footage-20260914/REPORT.md)
+**Settled the same day on NR-processed captures, and the answer reverses the
+synthetic one.** Four labelled clips - cut from this repository's own demo
+capture, cuts verified frame by frame - were rendered on both trees. Read
+"captures", not "footage": every frame was recorded with neural rendering on, so
+the pixels are the player's own DLSS-NR output put through a screen capture, an
+h264 encode and a lanczos upscale before this pass touched them again. The
+provenance chain and its consequences are in [Benchmark](BENCHMARK.md).
+
+The gate **lowers** false motion on all four, by 4.6 to 14.4 % relative, which is
+11.8 to 74.4 % of the share the `intensity-0` control attributes to the neural
+pass, and on two of them it improves false motion, cell flips and added sigma
+together - an outcome no synthetic clip produced. Repeats are bit-identical within
+each tree and the trees differ, so the deltas are signal. The gate is kept on
+evidence now, not only on the shape of its risk. What the synthetic result was
+really measuring is fractal and cellular-automaton motion, where "false motion"
+counts pixels on cells the source held static; the reversal is the clearest case
+this project has that synthetic patterns can point the wrong way on direction.
+Two limits travel with it: the `intensity-0` control measures a carrier that
+already carries NR relighting, and `real-film-cuts` ends in 15 frozen frames,
+which makes its static-cell denominator the least comparable of the four.
+[A/B report](measurements/gate-real-footage-20260914/REPORT.md)
 
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
@@ -298,13 +304,14 @@ What a resident helper removes from that is `neuralInit` plus `featureArm`:
 **2.10 s, and per-process.** What it does not remove is `firstOutput` (the first
 segment's preroll, encode and mux) or the attach, which together are 2.66 s. So
 the floor for a warm toggle on this machine is **~2.9 s**, and the acceptance
-criterion written above - under 2 s excluded, under 3 s scanned - cannot be met
-by making the helper resident, however well it is done. That criterion was
-written before anything measured the phases. Either it becomes **under 3 s warm
-on an excluded install**, which the arithmetic says is reachable, or P1 grows to
-include `firstOutput` and the attach, which are a different problem: the first
-segment's encode and mux, and the handoff from original to neural playback.
-Decide that before writing code, because it changes what P1 is.
+criterion written above - under 2 s excluded, under 3 s scanned - cannot be met by
+making the helper resident, however well it is done. That criterion was written
+before anything measured the phases. **Decision taken 2026-09-14: the
+acceptance becomes "under 3 s for a warm toggle", and `firstOutput` plus the
+attach - the first segment's preroll, encode and mux, and the handoff from
+original to neural playback - are a separate work item, not part of the helper.**
+Under 2 s would require shrinking that first-segment path (60-frame preroll, 4 s
+lead-in, first mux), which is a different change with a different risk.
 [Player-session record](VERIFICATION-matrix.md)
 
 **Built and accepted on Ada, 2026-09-14.** The helper is resident on `main`:
@@ -320,10 +327,13 @@ answers are in [Architecture](ARCHITECTURE.md).
 sessions, every one `plan=reuse`** - against the criterion of under 3 s, and
 against 5.23-5.41 s for the first toggle in the same process. The reused job pays
 no `helperStart`, `runtimeReady`, `neuralInit` or `featureArm`, which is 2.19 s it
-never incurs because no process starts; `firstOutput` (1.06 s) and the attach
-(1.29 s) remain, exactly as predicted. The ~2.9 s floor estimated above was sound
-in structure and pessimistic in size, because this clip's first segment encodes
-faster than the one the estimate came from.
+never incurs because no process starts; `firstOutput` and the attach remain, as
+predicted. The ~2.9 s floor estimated above assumed `firstOutput` would not move,
+and it did: 1.437 s on the launch job against 1.058 s on the reused one, same run
+and same clip, so it is a property of reuse and not of the media. Which property
+is unmeasured - the kept NGX feature skipping a first-evaluate warm-up, a decoder
+and encoder already up in that process, or the rewound playhead. The floor was
+right about structure and wrong to treat that phase as fixed.
 
 Helper-side, over real pipes: a warm job reports `firstOutput` only at 492-538 ms
 against a cold 2715-2751 ms, idle exit at 31.0 s, parent-handle exit, +1002 MiB
@@ -559,16 +569,16 @@ Preserve:
 
 Expose native **Tone Intensity**, including zero, which NVIDIA says preserves the rendered frame's exact colors. Add clipping and color-shift warnings.
 
-**Not taken up on 2026-09-14, and the reason is that nothing points at it.** The
+**Unmeasured, and deprioritised on 2026-09-14 - not a negative result.** The
 exposure half of this item - supplying NGX a 1x1 exposure texture and an `IsHDR`
 flag instead of the `AutoExposure` feature flag `DLSSBackend.cpp` sets
-unconditionally - was listed as runnable once the flag reached a harness profile.
-The art-knob sweep that ran that day found no evidence for it: of eight shipped
-keys only the automatic mask changes a pixel, and the exposure-sensitive clip in
-the corpus (`flash-exposure`, a 4-frame flash plus a sustained step) shows the
-carrier, not the exposure path, dominating every metric. Plumbing a flag to
-measure a suspicion nobody has is the wrong order of work while the persistent
-helper has a measured 2.10 s on the table.
+unconditionally - was listed as runnable once the flag reached a harness profile,
+and it still is. Nothing has measured it: that day's sweep varied the RenoDX `NR*`
+keys and never touched the NGX flag or an exposure texture, so it says nothing
+either way about this item, and an earlier draft of this note wrongly implied it
+did. The reason for deferring is ordering, not evidence - plumbing a flag to
+measure an untested suspicion while the persistent helper had a measured 2.10 s on
+the table was the wrong order of work.
 
 What would warrant it, specifically: an HDR10 or PQ source, which the corpus does
 not have and cannot synthesise honestly, or a clip where auto-exposure demonstrably

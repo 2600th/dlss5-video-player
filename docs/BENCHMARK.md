@@ -54,20 +54,40 @@ measured as the only region whose temporal standard deviation is nonzero while t
 capture plays video — and upscaled to 1920×1080 with lanczos so the corpus stays one
 resolution. The crop is not cosmetic: the static chrome is half the frame, and left
 in it would dominate the residual the cut test reads while inflating the static-cell
-denominator false motion is divided by. The upscale is the one concession — grain and
+denominator false motion is divided by. The upscale is one concession — grain and
 h264 texture survive it softened, not sharpened — and it is why these clips are
-labelled real footage rather than pristine footage.
+never called pristine footage.
 
-**The footage has already been through the pass under test.** Every frame of the
-capture was taken with neural rendering enabled — the toggle reads `Neural
-Rendering · On` and the status bar `Neural rendered · Source 2560×1440` — so the
-video surface is the player's own DLSS-NR output on an RTX 5090, not camera-original
-material. Re-rendering these clips measures the neural pass on pixels it has already
-touched once, at a different resolution and on different silicon. For an A/B where
-both trees see byte-identical input that is sound, and it is what the gate comparison
-rests on; as a claim about original footage it is not, and it means the grain here is
-post-pass grain, softened again by the 1440p → window → lanczos chain. The `faces`
-fixture remains the only route to camera-original material in this corpus.
+**These are NR-processed captures, not real footage, and the difference is
+load-bearing.** Every frame of the capture was taken with neural rendering enabled -
+the toggle reads `Neural Rendering · On` and the status bar `Neural rendered · Source
+2560×1440` - so the video surface is the player's own DLSS-NR output on an RTX 5090.
+The full chain a `real` clip's pixels have been through is: source video → DLSS-NR →
+the player's 1442×932 window → `gdigrab` screen capture → Remotion's h264 encode →
+`crop` → lanczos upscale to 1920×1080 → FFV1 → **and then the neural pass again**
+when the benchmark renders it. Re-rendering therefore measures the pass on pixels it
+has already touched, at a different resolution and on different silicon, with the
+grain being post-pass grain softened twice by resampling.
+
+For an A/B where both trees see byte-identical input this is sound, and it is what
+the gate and depth comparisons rest on. What it does not support is the phrase "real
+footage": say **NR-processed captures**. In particular the `intensity-0` control
+measures the carrier against a source that already carries NR relighting, so the
+"share attributable to the neural pass" it computes is a share of a second pass over
+a first one. The camera-original sources - 2560×1440 downloads named in
+`docs/media/README.md` - are not in the repository and the `faces` fixture is not on
+this machine, so nothing here closes that gap.
+
+**One clip carries a frozen tail.** `real-film-cuts` ends where the capture pauses
+before its magnify/wipe demonstration: source frames 102-116, which is local 87-101,
+are a single still frame repeated (consecutive mean |ΔY| ≤ 0.02 against 67.5 at the
+cut into it), so about 15 % of that clip is a static image rather than moving
+footage. That inflates its static-cell population, which is the denominator false
+motion is measured against, so `real-film-cuts`' false-motion numbers are the least
+comparable of the four. The clip stops one frame before the magnification begins
+(frame 116 is clean, 116→117 jumps by 25.0), so no split-screen, divider or UI
+chrome is inside any measured clip - checked frame by frame, and re-checked
+independently.
 
 **Every cut index was verified, not proposed.** FFmpeg scene detection on the cropped
 surface proposed the boundaries; each one was then confirmed by extracting every frame
@@ -131,24 +151,27 @@ all eight keys and varies one. `NRAutoMask` is also the only one of the eight wh
 explicit write changes a pixel; the other seven at shipped values are bit-identical
 to writing nothing, which proves only that the add-on agrees with us about them.
 
-**Synthetic clips preserve the sign of an effect and inflate its magnitude.** Three
-independent measurements on 2026-09-14 converged on this. `NRLocalTone`'s full
-range moves delta-E by 0.77 on film and 4.02-8.11 on fractals, 5-11x. The automatic
-mask shifts false motion by at most 0.00108 on real clips against +-0.0093
-synthetic, one to two orders. And cut precision/recall goes 0.571/0.571 synthetic to
-1.000/1.000 real, which is the same bias from the other end, because those synthetic
-clips were built adversarial on purpose. Part of it is the carrier: 1.26 delta-E of
-a shipped 2.48 is the NVENC floor before the model contributes anything, so effects
-shrink toward that floor on real footage.
+**Synthetic clips inflate an effect's magnitude, and can point the wrong way on its
+direction.** Three independent measurements on 2026-09-14 converged on the magnitude
+half. `NRLocalTone`'s full range moves delta-E by 0.77 on the NR-processed capture
+and 4.02-8.11 on fractals, 5-11x. The automatic mask shifts false motion by at most
+0.00108 on the real clips against ±0.0093 synthetic, one to two orders. And cut
+precision/recall goes 0.571/0.571 synthetic to 1.000/1.000 real, the same bias from
+the other end, because those synthetic clips were built adversarial on purpose. Part
+of it is the carrier: 1.26 delta-E of a shipped 2.48 is the NVENC floor before the
+model contributes anything, so effects shrink toward that floor on footage.
 
-The practical consequence is a rule for reading this document. Synthetic patterns
-are sound for deciding a **direction** and for regression-gating a change; they are
-unsound for **sizing** an effect or for tuning a threshold on pooled numbers. That
-is why the synthetic and real cut tables here are never pooled, and it is the
-argument against retuning the 0.30 / 0.10 / 0.85 criterion on a pooled set. The
-round-trip gate is the worked example: synthetic clips said it raises false motion
-on three of four, real footage said it lowers it on four of four, and the direction
-- not the magnitude - was what changed.
+Direction survived in the art-knob and mask cases - same sign, smaller size. It did
+**not** survive for the round-trip gate, which is the exception that sets the rule's
+strength: synthetic clips said the gate raises false motion on three of four, the
+captures said it lowers it on four of four. So a synthetic result is evidence about
+direction, not proof of it, and it is never evidence about size.
+
+The practical consequence is how to read this document. Synthetic patterns are sound
+for regression-gating a change and for forming a hypothesis about direction; they are
+unsound for **sizing** an effect, and unsound for tuning a threshold on pooled
+numbers. That is why the synthetic and real cut tables here are never pooled, and it
+is the argument against retuning the 0.30 / 0.10 / 0.85 criterion on a pooled set.
 
 The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
 guide strings the matrix already carries — a disabled depth guide *is* the constant
@@ -422,12 +445,20 @@ Two findings the synthetic set could not produce:
   here is 1.0 s, so no synthetic clip can exercise it. The labelled corpus brackets
   the replacement from both sides: `flash-exposure`'s transient returns 4 frames after
   the cut that opened it, so the window must exceed 4, and this genuine shot is 17
-  frames, so it must not reach 17. The usable range is 5–17 frames and the shipped 9
-  sits in it — but asymmetrically, 5.7x of margin at the flash end against 1.9x at the
-  real end, so the next real clip with a sub-17-frame shot is what would squeeze it.
-  A label audit found no two labelled cuts anywhere in the corpus closer than 9
-  frames (tightest gaps 17, then 23) and both soft spans 22 frames wide, so the new
-  window discards no labelled cut. Note also what raising the strong arm to the
+  frames, so the window must not exceed 17 — suppression is `since_cut < min_frames`,
+  so a 17-frame window still accepts a cut 17 frames out. The usable range is 5–17
+  frames inclusive and the shipped 9 sits in it, asymmetrically: 5.7x of margin at
+  the flash end against 1.9x at the real end, so the next clip with a sub-17-frame
+  shot is what would squeeze it. A label audit found no two labelled cuts anywhere in
+  the corpus closer than 9 frames (tightest gaps 17, then 23) and both soft spans 22
+  frames wide, so the new window discards no labelled cut.
+  **The lower bound is corpus-bound, not physical.** It rests on one synthetic
+  4-frame transient; the corpus contains no 6–15-frame transient, and a lightning
+  strike, a camera-flash bloom or a short exposure ramp at 30 fps is typically that
+  long. The old 18-frame window protected those cases and the shipped 9 would
+  double-reset on them. That is an accepted trade, not a measured safe margin, and a
+  `flash-exposure` variant with an 8–12-frame transient is what would close it.
+  Note also what raising the strong arm to the
   sweep's "best" 0.40 would do to this set: `real-game-cuts` fires at 0.2174 and every
   `real-film-cuts` cut at 0.2504–0.3363, so all five would move to the debounced weak
   arm and the miss would get worse, not better.

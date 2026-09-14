@@ -1,0 +1,124 @@
+﻿{
+    "schema":  1,
+    "tool":  "tools/verification/player_session.ps1",
+    "generated":  "2026-09-14T14:31:18Z",
+    "host":  {
+                 "computer":  "-PRANSHUL-",
+                 "os":  "Microsoft Windows 11 Pro",
+                 "version":  "10.0.26200",
+                 "powershell":  "5.1.26100.9444",
+                 "adapters":  [
+                                  "Intel(R) UHD Graphics 770 driver=32.0.101.6129",
+                                  "NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047"
+                              ]
+             },
+    "player":  {
+                   "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.exe",
+                   "bytes":  4466176,
+                   "built":  "2026-09-14T19:57:03",
+                   "runtime":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\neural-runtime"
+               },
+    "media":  {
+                  "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\docs\\media\\neural-comparison-demo.mp4",
+                  "bytes":  5349911,
+                  "width":  1920,
+                  "height":  1080,
+                  "fps":  30,
+                  "durationSeconds":  22.6
+              },
+    "options":  {
+                    "toggleAfterSeconds":  4,
+                    "runSeconds":  30,
+                    "sessions":  3,
+                    "freshProfile":  "First",
+                    "accelerator":  "CtrlAltD",
+                    "dropRenderCache":  true,
+                    "settleSeconds":  3,
+                    "note":  ""
+                },
+    "summary":  {
+                    "sessionsRequested":  3,
+                    "sessionsPassed":  0,
+                    "toggleToFirstNeuralFrameSeconds":  null,
+                    "playerReportedTotalSeconds":  null,
+                    "paceMsPerFrame":  null,
+                    "paceReferenceScale":  null,
+                    "receiptsOnDisk":  0,
+                    "coldStartLinesObserved":  0
+                },
+    "sessions":  [
+                     {
+                         "index":  1,
+                         "cold":  true,
+                         "failure":  "the neural toggle could not be injected: SendInput refused the chord, Win32 error 5; the foreground window is none - no window held the foreground on sample 1 of 5, which is what a locked workstation looks like from here",
+                         "exitCode":  14,
+                         "cleared":  [
+                                         "DLSSVideoPlayer.ini",
+                                         "cache/"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  23369,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  2,
+                         "player":  {
+                                        "pid":  46916,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-accept.session1.log"
+                     },
+                     {
+                         "index":  2,
+                         "cold":  false,
+                         "failure":  "the neural toggle could not be injected: SendInput refused the chord, Win32 error 5; the foreground window is none - no window held the foreground on sample 1 of 5, which is what a locked workstation looks like from here",
+                         "exitCode":  14,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  7915,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "player":  {
+                                        "pid":  45380,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-accept.session2.log"
+                     },
+                     {
+                         "index":  3,
+                         "cold":  false,
+                         "failure":  "the neural toggle could not be injected: SendInput refused the chord, Win32 error 5; the foreground window is none - no window held the foreground on sample 1 of 5, which is what a locked workstation looks like from here",
+                         "exitCode":  14,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  7541,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "player":  {
+                                        "pid":  28956,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-accept.session3.log"
+                     }
+                 ],
+    "outcome":  {
+                    "ok":  false,
+                    "exitCode":  14
+                }
+}

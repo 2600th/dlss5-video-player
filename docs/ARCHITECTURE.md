@@ -279,13 +279,14 @@ read as a broken instrument rather than as a render that never happened.
 
 Measured on an RTX 4080 SUPER, the helper side is 2.1-2.6 s, of which NGX init
 and feature arm are 95 %. From a driven player session the whole toggle costs
-**8.39-9.18 s on the first toggle after an install** and **4.88-5.16 s on every
-later one** over ten sessions; the 3.8 s difference is the feature-18 preflight
-probe, a second helper process whose verdict is cached per runtime identity. Of
-the warm 5 s, `neuralInit` plus `featureArm` is 2.10 s and per-process, so that
-is what a resident helper could remove; `firstOutput` and the attach are not
-removable this way, which puts the floor near 2.9 s at 1080p30 on this machine -
-arithmetic on measured phases, not a measurement of a resident helper. See
+**8.39-9.18 s on the first toggle with the preflight verdict and the cache
+cleared** and **4.88-5.16 s on every later one** over ten sessions; the 3.8 s
+difference is the feature-18 preflight probe, a second helper process whose
+verdict is cached per runtime identity. Of the warm 5 s, `neuralInit` plus
+`featureArm` is 2.10 s and per-process, so that is what a resident helper
+removes. `firstOutput` and the attach are not removable that way, which put the
+estimated floor near 2.9 s - arithmetic on measured phases, and reuse later beat
+it by also shortening `firstOutput`. See
 `docs/VERIFICATION-2026-09-14-RTX4080.md` and `docs/VERIFICATION-matrix.md`.
 
 **The helper is resident, and the protocol runs both ways to make that possible.**
@@ -338,9 +339,27 @@ toggle inside that coverage is answered from the cache in about 0.8 s with no
 helper job at all, which is correct and is not this measurement. See
 `docs/VERIFICATION-matrix.md`.
 
-`NeuralCacheManager` stages source and render artifacts under LocalAppData.
-Source, application version, GPU path, runtime digest, native dimensions,
-quality, upscaling state, and a canonical neural-settings digest form the render identity.
+`NeuralCacheManager` stages source and render artifacts in `cache/v1` beside the
+executable, which is the default root; LocalAppData is the legacy fallback used
+only when the portable directory is not writable. Source, application version,
+GPU path, runtime digest, native dimensions, quality, upscaling state, and a
+canonical neural-settings digest form the render identity.
+
+**The identity carries no driver version, and the runtime digest does not cover
+the weights.** `gpuPath` is a generation label, so every Ada card on every driver
+shares one value, and the lookup's validity check tests the same terms - so a
+render produced on 32.0.16.1047 is served *and* validated on any later driver.
+The gap is wider than the missing version string: `runtimeDigest` hashes the 12
+staged runtime files, but every run resolves its models out of the driver store
+(`NGXGetPathUsingQAI` → `...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
+`C:\ProgramData\NVIDIA\NGX\models`, neither of which is in that set and both of
+which a driver update or a model refresh can replace with the digest unchanged.
+Adding the driver version is worth doing on its own and is not sufficient; an
+honest closure digests the resolved model-path contents, with the driver version
+as the cheap fallback. `gpu.driverVersion` is already in the preflight receipt,
+just not in the key. Recorded 2026-09-14; not fixed, and it is a correctness item
+rather than a rider on a performance change.
+
 The settings snapshot is saved beside the video and its hash is checked on reuse.
 Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,

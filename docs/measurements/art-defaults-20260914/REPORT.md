@@ -480,12 +480,16 @@ worktree from nothing but the tracked `neural-comparison-demo.mp4` and the pinne
 statement than a same-tree rebuild can make.
 
 Five profiles, 2 repeats each, 10 runs, 0 failed, every group bit-identical across repeats.
-The `cut P/R/F1` column was measured in a worktree based on `0556eb0`, which carried the
-**0.6 s** weak-arm debounce; that constant is now 0.3 s and the same clip scores
-**1.00/1.00/1.00 with 5 resets** on `main` (measured by `RealCorpus` with `cutlab.py`, the
-run that also confirmed the shortened window costs the synthetic set nothing). The column is
-left as taken and keyed to its window - every other column here is debounce-independent and
-stands as measured.
+The `cut P/R/F1` column was measured in a worktree based on `0556eb0`, which carried
+the **0.6 s** weak-arm debounce. That constant is now 0.3 s on `main`, where the same
+clip's criterion re-scores to **1.00/1.00/1.00** (measured with `cutlab.py`, the run
+that also confirmed the shortened window costs the synthetic set nothing). Every
+column in this table was *rendered* at 0.6 s, and only the cut column has been
+re-scored: `cutlab.py` scores the criterion from decoded frames, it does not produce
+`history_resets`, and a render at 0.3 s would take an extra reset at frame 87 and so
+would differ in digest and in every metric after that frame. Nobody re-rendered it,
+so the digests, PSNR, SSIM, dE, flicker, sigma and false-motion figures below are
+0.6 s renders and are compared only against each other.
 
 | profile | det | digest | PSNR dB | SSIM | dE | flicker+ | sigma+ | false mv | cut P/R/F1 (0.6 s window) | resets |
 |---|---|---|---|---|---|---|---|---|---|---|

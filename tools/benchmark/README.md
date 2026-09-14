@@ -64,10 +64,21 @@ must never reset.
 | `dissolve` | cuts | 0.7 s cross-fade between two shots. `cuts` is empty and `soft_cuts` marks the fade: one reset inside it is tolerated, a second is a false positive |
 | `flash-exposure` | cuts | 3 s slow pan with a 4-frame flash and a sustained exposure step. Neither is a cut; both collapse the luma histogram |
 | `faces` | faces | **Not synthetic**: seconds 12-20 of `build-upscaling/runtime-comparison-20260907/fixtures/mafia-60s.mkv` (frontal/three-quarter faces, skin, hair). Skipped when the fixture is absent |
-| `real-film-cuts` | real | **Not synthetic**: 102 frames of film footage from `docs/media/neural-comparison-demo.mp4`, five shots hard-cut at 20/47/70/87. Grain, motion blur, and a two-frame muzzle flash *inside* one shot that is deliberately unlabelled |
-| `real-game-cuts` | real | **Not synthetic**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
-| `real-game-motion` | real | **Not synthetic**: 76 frames, one continuous shot, camera translating while the subject occludes and disoccludes the background. No cut |
-| `real-dissolve` | real | Real material, **synthesised transition**: the capture contains no dissolve, so two shots are cross-faded over 0.7 s. `cuts` is empty and `soft_cuts` marks the fade |
+| `real-film-cuts` | real | **NR-processed capture** (see below): 102 frames, five shots hard-cut at 20/47/70/87, grain and motion blur, a two-frame muzzle flash *inside* one shot that is deliberately unlabelled — and a frozen tail, local 87-101, where the capture paused |
+| `real-game-cuts` | real | **NR-processed capture**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
+| `real-game-motion` | real | **NR-processed capture**: 76 frames, one continuous shot, camera translating while the subject occludes and disoccludes the background. No cut |
+| `real-dissolve` | real | NR-processed capture, **synthesised transition**: the source contains no dissolve, so two shots are cross-faded over 0.7 s. `cuts` is empty and `soft_cuts` marks the fade |
+
+The four `real` clips are **not camera-original footage.** They are cut from
+`docs/media/neural-comparison-demo.mp4`, a screen capture of this player recorded
+with neural rendering *on*, so their pixels have been through: source → DLSS-NR →
+the player's window → `gdigrab` → an h264 encode → `crop` → a lanczos upscale — and
+then the neural pass again when the benchmark renders them. That is sound for an A/B
+where both arms see byte-identical input, and it is not a claim about original
+footage; `docs/BENCHMARK.md` carries the consequences, including what it does to the
+`intensity-0` carrier control. No split-screen, divider or UI chrome is inside any
+clip: the capture's magnify/wipe demonstration starts one frame after
+`real-film-cuts` ends, checked frame by frame.
 
 ## Scene-cut lab (`cutlab.py`)
 

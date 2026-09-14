@@ -350,6 +350,20 @@ already been refused, it is sampled five times, and any null decides it -
 otherwise the same locked machine would be classified `13` or `14` depending on
 which phase of the flap it happened to catch.
 
+**There is a deterministic test and this script does not use it yet.**
+`WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION,
+WTSSessionInfoEx, ...)` returns `WTSINFOEXW` whose
+`Data.WTSInfoExLevel1.SessionFlags` is `WTS_SESSIONSTATE_LOCK` while the desktop
+is locked - correct on Windows 8 and later, documented inverted only on
+Windows 7 / 2008 R2. That would replace the five-sample heuristic with one stable
+answer and give exit code `14` a cause rather than an inference. Note that
+`OpenInputDesktop` is *not* the answer here even though it looks like it: it was
+tried and reported the desktop available while `SendInput` was refused, because
+the modern lock screen is a protected window on the ordinary `Default` desktop.
+A ten-line probe would settle the `WTS` route before it is shipped; until then the
+heuristic stands, and it is only ever consulted after an injection has already
+failed.
+
 ## What contention costs, and what one contended session costs afterwards
 
 Sessions taken while other work was on the machine, kept only to show why the
@@ -443,7 +457,7 @@ criterion.** Every one of them reports `plan=reuse`.
 
 | session | first toggle in the process | second toggle | plan |
 |---|---:|---:|---|
-| 1 (cold install) | 9.142 s | **2.472 s** | reuse |
+| 1 (cold profile) | 9.142 s | **2.472 s** | reuse |
 | 2 (warm) | 5.331 s | **2.520 s** | reuse |
 | 3 (warm) | 5.406 s | **2.439 s** | reuse |
 | 4 (warm) | 5.229 s | **2.460 s** | reuse |
@@ -460,10 +474,19 @@ reuse:  total=2.453 request=0.074 preflight=-     launch=0.001 helperStart=-
 A reused job pays none of `helperStart`, `runtimeReady`, `neuralInit` or
 `featureArm` - 2.19 s on this machine - because no process started. What remains
 is `firstOutput` and the attach, which is what the arithmetic said a resident
-helper cannot remove. That arithmetic predicted a ~2.9 s floor from the 22.6 s
-clip's phases; the measured 2.47 s beats it because this clip's first segment
-encodes faster (`firstOutput` 1.058 s against 1.437 s), so the estimate was
-sound in structure and pessimistic in size.
+helper cannot remove.
+
+**But `firstOutput` also fell, and that is not explained.** The launch and reuse
+figures quoted above are session 1 of the same run on the same 90 s clip, so
+`firstOutput` 1.437 s → 1.058 s cannot be a property of the media: it is a
+property of reuse, and which property is unmeasured. The candidates are the kept
+NGX feature skipping a first-evaluate warm-up, a decoder and encoder already
+brought up in that process, and the rewound playhead starting at 0 s where the
+first session started at 4 s. That is also why the measured 2.47 s beats the
+~2.9 s arithmetic floor: the estimate assumed `firstOutput` would not move, so it
+was right about the structure and wrong to treat that phase as fixed. Anyone
+quoting the floor should quote it as an estimate that reuse invalidated
+downwards, not as a confirmed bound.
 
 **Two false measurements were taken first, and both are instructive.** A second
 toggle at the playhead where the first session left off returned in 0.77-0.80 s
@@ -488,8 +511,9 @@ The first attempt could not run at all: the workstation was locked, and
 ```
 
 All three of those sessions failed identically before launching a render.
-Artifact: `C:/Users/User/AppData/Local/Temp/p1-accept.json`. The box unlocked
-later and the acceptance run above is `p1-final.json`, four sessions, exit 0.
+Artifact: `measurements/p1-acceptance-20260914/p1-locked-attempt.json`. The box
+unlocked later, and the acceptance run above is
+`measurements/p1-acceptance-20260914/p1-final.json` - four sessions, exit 0.
 
 What else was exercised, by instrument rather than by argument:
 
