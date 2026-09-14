@@ -1,5 +1,6 @@
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
+#include "ResidentWorkerLoop.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -1065,6 +1066,389 @@ void cold_start_timeline_messages_are_validated_test()
     CHECK(neural_worker_detail::DecodeMetadataStream(truncated).malformed);
 }
 
+// --- The resident command channel and its job loop -------------------------
+
+using resident_worker::CommandChannel;
+using resident_worker::JobOutcome;
+using resident_worker::ResidentExit;
+
+// An anonymous pipe the test writes command frames into. The read end is handed
+// to the channel, which owns it from then on; the write end is closed here so
+// the channel's reader sees the end of the stream when the test means it to and
+// not when this process exits.
+class CommandPipe {
+public:
+    CommandPipe() { CHECK(CreatePipe(&read_, &write_, nullptr, 0) != 0); }
+    ~CommandPipe()
+    {
+        CloseWrite();
+        if (read_) CloseHandle(read_);
+    }
+    CommandPipe(const CommandPipe&) = delete;
+    CommandPipe& operator=(const CommandPipe&) = delete;
+
+    // Transfers the read end to the caller, which is what CommandChannel wants.
+    HANDLE TakeRead()
+    {
+        HANDLE handle = read_;
+        read_ = nullptr;
+        return handle;
+    }
+
+    void Send(CommandKind kind, std::span<const std::byte> payload = {})
+    {
+        CHECK(WriteCommand(write_, kind, payload.data(), static_cast<uint32_t>(payload.size())));
+    }
+
+    // A frame built without the protocol's own writer, so the header fields the
+    // helper is supposed to refuse can actually be produced.
+    void SendRaw(uint32_t magic, uint16_t version, uint16_t kind,
+                 std::span<const std::byte> payload = {})
+    {
+        const WireHeader header{magic, version, kind, static_cast<uint32_t>(payload.size())};
+        CHECK(WriteAll(write_, &header, sizeof(header)));
+        if (!payload.empty()) CHECK(WriteAll(write_, payload.data(), payload.size()));
+    }
+
+    void CloseWrite()
+    {
+        if (!write_) return;
+        CloseHandle(write_);
+        write_ = nullptr;
+    }
+
+private:
+    HANDLE read_{};
+    HANDLE write_{};
+};
+
+// Stands in for the runner that renders. Every observation the loop's contract
+// is written against is recorded here, and a job can be made to block until it
+// is stopped so a cancel has something to interrupt.
+struct RecordingRunner {
+    size_t readyCalls{};
+    std::vector<std::vector<std::wstring>> jobs;
+    std::vector<std::wstring> refusals;
+    JobOutcome outcome{JobOutcome::Completed};
+    bool blockUntilStopped{};
+    bool sawStop{};
+    bool readyFails{};
+    std::chrono::milliseconds jobDuration{0};
+
+    bool Ready()
+    {
+        ++readyCalls;
+        return !readyFails;
+    }
+
+    bool Refuse(std::wstring_view detail)
+    {
+        refusals.emplace_back(detail);
+        return true;
+    }
+
+    JobOutcome Job(std::span<const std::wstring> argv, std::stop_token stop)
+    {
+        jobs.emplace_back(argv.begin(), argv.end());
+        if (jobDuration.count()) std::this_thread::sleep_for(jobDuration);
+        while (blockUntilStopped && !stop.stop_requested()) std::this_thread::sleep_for(1ms);
+        sawStop = stop.stop_requested();
+        return sawStop ? JobOutcome::Cancelled : outcome;
+    }
+};
+
+std::vector<std::wstring> ResidentJobArguments()
+{
+    NeuralRenderRequest request = TestRequest(L"resident-source.mkv");
+    request.jobId = 4242;
+    std::vector<std::wstring> argv{L"NeuralWorker.exe"};
+    const auto tail = neural_worker_detail::BuildWorkerArguments(
+        request, reinterpret_cast<HANDLE>(static_cast<uintptr_t>(9)), nullptr, false);
+    argv.insert(argv.end(), tail.begin(), tail.end());
+    return argv;
+}
+
+void resident_loop_answers_hello_and_serves_jobs_test()
+{
+    const std::vector<std::wstring> argv = ResidentJobArguments();
+    const std::vector<std::byte> payload = EncodeJobArguments(argv);
+    CommandPipe pipe;
+    pipe.Send(CommandKind::Hello);
+    pipe.Send(CommandKind::Job, payload);
+    pipe.Send(CommandKind::Job, payload);
+    pipe.Send(CommandKind::Shutdown);
+    RecordingRunner runner;
+    CommandChannel channel(pipe.TakeRead(), nullptr);
+    CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Shutdown);
+    // Hello is answered exactly once, and the two jobs arrive with the argument
+    // vector the parent encoded, byte for byte: the helper's own parser is the
+    // only thing that decides what those arguments mean.
+    CHECK_EQ(size_t{1}, runner.readyCalls);
+    CHECK_EQ(size_t{2}, runner.jobs.size());
+    CHECK(runner.refusals.empty());
+    if (runner.jobs.size() == 2) {
+        CHECK(runner.jobs[0] == argv);
+        CHECK(runner.jobs[1] == argv);
+    }
+}
+
+void resident_loop_refuses_frames_it_cannot_trust_test()
+{
+    const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+    const std::array<std::byte, 4> fourBytes{};
+
+    // A header this version cannot vouch for leaves the stream at an unknown
+    // offset, so the session ends rather than guessing where the next frame
+    // starts. Every case here must end the session WITHOUT running a job.
+    struct Framing {
+        uint32_t magic;
+        uint16_t version;
+        uint16_t kind;
+        bool payload;
+    };
+    for (const Framing broken : {
+             Framing{kProtocolMagic, static_cast<uint16_t>(kProtocolVersion - 1),
+                     static_cast<uint16_t>(CommandKind::Job), true},
+             Framing{kProtocolMagic, static_cast<uint16_t>(kProtocolVersion + 1),
+                     static_cast<uint16_t>(CommandKind::Job), true},
+             Framing{kProtocolMagic ^ 1u, kProtocolVersion,
+                     static_cast<uint16_t>(CommandKind::Job), true},
+             Framing{kProtocolMagic, kProtocolVersion, 0, false},
+             Framing{kProtocolMagic, kProtocolVersion, 5, false},
+             // Only Job carries a payload; anything else with one is not this
+             // protocol's frame whatever its kind says.
+             Framing{kProtocolMagic, kProtocolVersion,
+                     static_cast<uint16_t>(CommandKind::Hello), true}}) {
+        CommandPipe pipe;
+        pipe.SendRaw(broken.magic, broken.version, broken.kind,
+                     broken.payload ? std::span<const std::byte>(payload)
+                                    : std::span<const std::byte>());
+        pipe.Send(CommandKind::Job, payload);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Malformed);
+        CHECK(runner.jobs.empty());
+        CHECK(runner.readyCalls == 0);
+    }
+
+    // A Job payload the decoder refuses is different in kind: the frame's
+    // length was known, so the stream is still in sync. That job is refused and
+    // the helper stays, which the Shutdown behind it proves.
+    std::vector<std::byte> trailing = payload;
+    trailing.push_back(std::byte{0});
+    uint32_t zeroCount = 0;
+    std::vector<std::byte> emptyVector(sizeof(zeroCount));
+    std::memcpy(emptyVector.data(), &zeroCount, sizeof(zeroCount));
+    for (const std::vector<std::byte>& refused : {trailing, emptyVector, std::vector<std::byte>{}}) {
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, refused);
+        pipe.Send(CommandKind::Shutdown);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Shutdown);
+        CHECK(runner.jobs.empty());
+        CHECK_EQ(size_t{1}, runner.refusals.size());
+    }
+}
+
+void resident_loop_exits_on_shutdown_and_on_idle_test()
+{
+    // The shipped budget, stated here because it is the number that bounds
+    // parked VRAM: a change to it is a change to that promise.
+    static_assert(resident_worker::kIdleTimeout == std::chrono::seconds{30});
+
+    {
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Shutdown);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Shutdown);
+    }
+    {
+        // Nothing arrives and the parent keeps its end of the pipe open, so the
+        // only thing that can end this session is the idle budget - and it must
+        // actually wait for it rather than falling out of an empty queue.
+        CommandPipe pipe;
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(RunResidentLoop(channel, runner, 200ms) == ResidentExit::Idle);
+        CHECK(std::chrono::steady_clock::now() - started >= 180ms);
+    }
+    {
+        // "No job for this long" is measured from the end of the last job, so a
+        // job that took longer than the budget does not itself expire it.
+        CommandPipe pipe;
+        const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+        pipe.Send(CommandKind::Job, payload);
+        RecordingRunner runner;
+        runner.jobDuration = 300ms;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(RunResidentLoop(channel, runner, 200ms) == ResidentExit::Idle);
+        CHECK(std::chrono::steady_clock::now() - started >= 480ms);
+        CHECK_EQ(size_t{1}, runner.jobs.size());
+    }
+}
+
+void resident_loop_cancel_stops_the_job_and_keeps_the_helper_test()
+{
+    const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+    {
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, payload);
+        pipe.Send(CommandKind::Cancel);
+        pipe.Send(CommandKind::Shutdown);
+        RecordingRunner runner;
+        runner.blockUntilStopped = true;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        // The job only ends because the cancel reached it while it was running,
+        // and the session only ends on the Shutdown behind it: a cancel leaves
+        // the helper resident and idle.
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Shutdown);
+        CHECK_EQ(size_t{1}, runner.jobs.size());
+        CHECK(runner.sawStop);
+    }
+    {
+        // A cancel arriving with no job to cancel is a no-op, not an exit.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Cancel);
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 200ms) == ResidentExit::Idle);
+    }
+    {
+        // Shutdown during a job stops it too, and the job still gets to report
+        // before the session ends.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, payload);
+        pipe.Send(CommandKind::Shutdown);
+        RecordingRunner runner;
+        runner.blockUntilStopped = true;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Shutdown);
+        CHECK_EQ(size_t{1}, runner.jobs.size());
+        CHECK(runner.sawStop);
+    }
+}
+
+void resident_loop_ends_when_the_parent_dies_test()
+{
+    // The job object already kills a helper whose player died. This is the
+    // second mechanism, because the failure it prevents is a process holding
+    // the GPU and the runtime lease with nobody left to reap it.
+    std::wstring commandLine = L"\"" + CurrentExecutable().wstring() + L"\" --exit-now";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    CHECK(CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                         nullptr, nullptr, &startup, &process) != 0);
+    if (!process.hProcess) return;
+    CloseHandle(process.hThread);
+    CommandPipe pipe;
+    RecordingRunner runner;
+    {
+        CommandChannel channel(pipe.TakeRead(), process.hProcess);
+        // The command pipe stays open and empty, and the idle budget is far
+        // longer than the child lives, so the only thing that can end this
+        // session is the parent handle signalling.
+        CHECK(RunResidentLoop(channel, runner, 30s) == ResidentExit::ParentExited);
+    }
+    CloseHandle(process.hProcess);
+    CHECK(runner.jobs.empty());
+}
+
+void resident_loop_stops_serving_after_an_invalidating_job_test()
+{
+    const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+    {
+        // A failed job retires the process: the session log's failure lines are
+        // scanned session-wide, so the second job queued behind it must never
+        // run in this helper.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Job, payload);
+        pipe.Send(CommandKind::Job, payload);
+        RecordingRunner runner;
+        runner.outcome = JobOutcome::Invalidated;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::JobInvalidated);
+        CHECK_EQ(size_t{1}, runner.jobs.size());
+    }
+    {
+        // Nothing left to report to: the session ends instead of rendering into
+        // a pipe nobody is reading.
+        CommandPipe pipe;
+        pipe.Send(CommandKind::Hello);
+        RecordingRunner runner;
+        runner.readyFails = true;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::WriteFailed);
+    }
+    {
+        // The parent closed its end without saying goodbye.
+        CommandPipe pipe;
+        pipe.CloseWrite();
+        RecordingRunner runner;
+        CommandChannel channel(pipe.TakeRead(), nullptr);
+        CHECK(RunResidentLoop(channel, runner, 10s) == ResidentExit::Closed);
+    }
+}
+
+void resident_launch_line_is_a_helper_and_not_a_job_test()
+{
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(11));
+    const HANDLE command = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(22));
+    const HANDLE pause = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(33));
+    const HANDLE parent = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(44));
+    auto parse = [](std::vector<std::wstring_view> values) {
+        return neural_worker_detail::ParseWorkerArguments(values);
+    };
+    const auto resident = parse({L"NeuralWorker.exe", L"--neural-worker", L"--metadata-handle", L"11",
+                                 L"--command-handle", L"22", L"--pause-event", L"33",
+                                 L"--parent-process", L"44"});
+    CHECK(resident.has_value());
+    if (resident) {
+        CHECK(resident->Resident());
+        CHECK(resident->metadata == metadata);
+        CHECK(resident->command == command);
+        CHECK(resident->request.pauseEvent == pause);
+        CHECK(resident->parentProcess == parent);
+        // The launch line describes a helper: it carries no job, and the first
+        // job arrives as a command frame.
+        CHECK(resident->request.sourcePath.empty());
+        CHECK(resident->request.width == 0);
+    }
+    // A job field on a resident launch line is a job nobody asked for, arriving
+    // beside a channel that is about to deliver one.
+    CHECK(!parse({L"NeuralWorker.exe", L"--neural-worker", L"--metadata-handle", L"11",
+                  L"--command-handle", L"22", L"--width", L"1920"}).has_value());
+    // A probe never goes resident, and a zero handle is not a handle.
+    CHECK(!parse({L"NeuralWorker.exe", L"--neural-preflight", L"--metadata-handle", L"11",
+                  L"--command-handle", L"22"}).has_value());
+    CHECK(!parse({L"NeuralWorker.exe", L"--neural-worker", L"--metadata-handle", L"11",
+                  L"--command-handle", L"0"}).has_value());
+    // The parent handle is only meaningful to a helper that outlives one job.
+    const auto single = neural_worker_detail::BuildWorkerArguments(
+        TestRequest(L"single.mkv"), metadata, nullptr, false);
+    std::vector<std::wstring_view> withParent{L"NeuralWorker.exe"};
+    for (const auto& argument : single) withParent.emplace_back(argument);
+    withParent.emplace_back(L"--parent-process");
+    withParent.emplace_back(L"44");
+    CHECK(!neural_worker_detail::ParseWorkerArguments(withParent).has_value());
+    // And the single-shot line the benchmark harness drives is still exactly
+    // what it was: no command handle, no residency.
+    std::vector<std::wstring_view> plain{L"NeuralWorker.exe"};
+    for (const auto& argument : single) plain.emplace_back(argument);
+    const auto parsed = neural_worker_detail::ParseWorkerArguments(plain);
+    CHECK(parsed.has_value());
+    if (parsed) {
+        CHECK(!parsed->Resident());
+        CHECK(parsed->command == nullptr);
+        CHECK(parsed->parentProcess == nullptr);
+        CHECK(parsed->request.width == 1920);
+    }
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -1073,6 +1457,10 @@ int wmain(int argc, wchar_t** argv)
                      std::wstring_view(argv[1]) == L"--neural-preflight")) return RunFakeWorker(argc, argv);
     if (argc > 1 && std::wstring_view(argv[1]) == L"--real-worker") return RunRealWorker(argc, argv);
     if (argc > 1 && std::wstring_view(argv[1]) == L"--real-preflight") return RunRealPreflight(argc, argv);
+    // A parent that dies immediately, for the resident helper's second
+    // orphan-safety mechanism. It has to be a real process handle: the wait it
+    // exercises is a wait on one.
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--exit-now") return 0;
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     cancellation_of_running_child_is_bounded_test();
@@ -1091,5 +1479,12 @@ int wmain(int argc, wchar_t** argv)
     configuration_retry_is_sequential_and_bounded_test();
     helper_cold_start_timeline_reaches_the_parent_test();
     cold_start_timeline_messages_are_validated_test();
+    resident_loop_answers_hello_and_serves_jobs_test();
+    resident_loop_refuses_frames_it_cannot_trust_test();
+    resident_loop_exits_on_shutdown_and_on_idle_test();
+    resident_loop_cancel_stops_the_job_and_keeps_the_helper_test();
+    resident_loop_ends_when_the_parent_dies_test();
+    resident_loop_stops_serving_after_an_invalidating_job_test();
+    resident_launch_line_is_a_helper_and_not_a_job_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

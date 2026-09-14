@@ -179,12 +179,22 @@ public:
 };
 #endif
 
+// One instance may serve several jobs. A resident helper keeps one of these for
+// its process lifetime so the D3D12 device, the NGX instance, the CUDA context
+// and the feature-18 workset survive between jobs; the per-job state that would
+// otherwise describe the previous job is reset on entry to Run.
 class OfflineNeuralRenderer {
 public:
     using ProgressCallback = std::function<void(const NeuralRenderProgress&)>;
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
 
-    OfflineNeuralRenderer() = default;
+    OfflineNeuralRenderer();
+    // Out of line because the retained device state is an incomplete type here,
+    // and because dropping it has to happen before the caller destroys the
+    // render window its swapchain is attached to.
+    ~OfflineNeuralRenderer();
+    OfflineNeuralRenderer(const OfflineNeuralRenderer&) = delete;
+    OfflineNeuralRenderer& operator=(const OfflineNeuralRenderer&) = delete;
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     // `paused` replaces NeuralRenderRequest::pauseEvent: true while the job
     // must hold between frames. `encoderFactory` supplies the extra encoders a
@@ -206,6 +216,20 @@ public:
                            const NeuralSegmentSink& segments = {},
                            NeuralColdStartCallback coldStart = {});
 
+    // What the last Run did with the device, the NGX instance and the feature
+    // this object retains. FeatureReused is the case residency exists for: the
+    // job paid neither the neural bring-up nor the feature arm, and its
+    // cold-start timeline says so by reporting neither phase.
+    enum class Residency { Initialized, FeatureReused, FeatureRecreated };
+    Residency LastResidency() const noexcept { return residency_; }
+
+    // False when this instance must not serve another job. The session log the
+    // evidence chain is read from is append-only for the life of the process,
+    // and past a size a read cannot return the next job would fail its evidence
+    // check for a reason that has nothing to do with it; a caller that can
+    // relaunch should relaunch instead. Always true before the first Run.
+    bool ReusableForAnotherJob() const;
+
 private:
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     IFrameSource* testSource_{};
@@ -216,4 +240,10 @@ private:
     std::function<bool()> testPaused_;
     std::function<std::unique_ptr<IFrameEncoder>()> testEncoderFactory_;
 #endif
+    // The production device, evaluator, encoder and session-log reader, kept
+    // across calls. Null until the first production Run; never used by the
+    // testing build, which supplies its own adapters per call.
+    struct Retained;
+    std::unique_ptr<Retained> retained_;
+    Residency residency_{Residency::Initialized};
 };

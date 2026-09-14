@@ -252,6 +252,10 @@ public:
     double LastNeuralGpuMs() const { return m_lastNeuralGpuMs; }
     // Running maximum of the adapter's local-segment CurrentUsage sampled per frame.
     uint64_t PeakLocalVideoMemoryMiB() const { return m_peakLocalVideoMemoryMiB; }
+    // Zeroed at the start of each job. A renderer that outlives its job - the
+    // resident helper keeps one device across several - would otherwise report
+    // the highest usage any earlier job reached as this one's peak.
+    void ResetPeakLocalVideoMemory() { m_peakLocalVideoMemoryMiB = 0; }
 
 private:
     friend struct D3D12RendererDeleter;
