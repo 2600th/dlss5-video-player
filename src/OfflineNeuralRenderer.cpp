@@ -1396,6 +1396,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         selected=EncoderKind::H264Software;
         attempt=runAttempt(selected);
     }
+    // Read after the last attempt, and on every exit from it: the counters describe the
+    // job, so a software-encoder retry's second pass belongs in the same tally. Only the
+    // production adapter owns a guide generator; the test one is compiled past.
+    if constexpr(requires{evaluator.SceneCuts();})result.sceneCuts=evaluator.SceneCuts();
     if (attempt.failure == NeuralRenderFailure::Cancelled)
         return cancelled(L"Neural render was cancelled.");
     if (attempt.failure != NeuralRenderFailure::None) {
@@ -1834,6 +1838,7 @@ struct ProductionEvaluatorAdapter {
     }
     NeuralRenderFailure LastFailure()const{return lastFailure;}
     uint64_t PeakLocalVideoMemoryMiB()const{return renderer?renderer->PeakLocalVideoMemoryMiB():0;}
+    const SceneCutAccounting& SceneCuts()const{return guides.SceneCuts();}
 };
 
 // WriteFrame pushes a whole frame, over 30 MB at 4K, into ffmpeg's stdin and blocks

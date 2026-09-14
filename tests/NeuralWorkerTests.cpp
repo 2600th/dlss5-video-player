@@ -220,6 +220,7 @@ int RunFakeWorker(int argc, wchar_t** argv)
     result.jobId = parsed->request.jobId;
     result.historyResets = 2;
     result.frameRetries = 1;
+    result.sceneCuts = {.acceptedStrong = 3, .acceptedWeak = 5, .suppressed = 7};
     result.firstTimestamp100ns = parsed->request.range.start100ns;
     result.timing = {60, 1.5, 2.5, 4.0, 0.7, 0.3, 2048};
     result.detail = L"validated fake helper result";
@@ -597,6 +598,8 @@ void valid_result_preserves_all_verification_fields_test()
     CHECK(result.jobId == 9001);
     CHECK(result.historyResets == 2);
     CHECK(result.frameRetries == 1);
+    const SceneCutAccounting expectedCuts{.acceptedStrong = 3, .acceptedWeak = 5, .suppressed = 7};
+    CHECK(result.sceneCuts == expectedCuts);
     CHECK(result.firstTimestamp100ns == 20'000'000);
     const NeuralRenderTiming expectedTiming{60, 1.5, 2.5, 4.0, 0.7, 0.3, 2048};
     CHECK(result.timing == expectedTiming);
@@ -797,6 +800,11 @@ void protocol_rejects_inconsistent_results_test()
     CHECK(!DecodeResult(EncodeResult(cancelledWrongKind)).has_value());
     cancelledWrongKind.failure = NeuralRenderFailure::Cancelled;
     CHECK(DecodeResult(EncodeResult(cancelledWrongKind)).has_value());
+    // The reserved bytes are the only growth room left in WireResult; a helper that
+    // writes anything there is not speaking this version of the protocol.
+    auto reservedInUse = EncodeResult(cancelledWrongKind);
+    reservedInUse[10] = std::byte{1};
+    CHECK(!DecodeResult(reservedInUse).has_value());
     NeuralRenderProgress recoveringWithoutKind;
     recoveringWithoutKind.phase = NeuralRenderPhase::Recovering;
     const WireProgress wire = EncodeProgress(recoveringWithoutKind);

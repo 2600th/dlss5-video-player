@@ -31,5 +31,6 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
 
 // One log line: gpu/driver/reshade/renodx/nr/feature18 (with the feature's
 // own NGX result and the diagnosed cause when the probe classified one) from
-// the preflight JSON plus lock status, failure kind and frame counts.
+// the preflight JSON plus lock status, failure kind, frame counts and the
+// scene-cut tally.
 std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs);

@@ -22,7 +22,11 @@
 namespace neural_worker_protocol {
 
 inline constexpr uint32_t kMagic = 0x3152574Eu; // NWR1
-inline constexpr uint16_t kVersion = 3;
+// 4 since the result carries the guide generator's scene-cut tally. The parent
+// rejects any header whose version is not exactly this, so a helper left over
+// from an older build in neural-runtime/ fails closed instead of having its
+// shorter WireResult read as a v4 one.
+inline constexpr uint16_t kVersion = 4;
 inline constexpr uint32_t kMaximumPayloadBytes = 64 * 1024;
 inline constexpr uint32_t kMaximumDetailBytes = 4 * 1024;
 // A segment name is a bare file name joined to the staging directory by the
@@ -78,6 +82,12 @@ struct WireResult {
     double captureMsMean;
     uint64_t peakLocalVramMiB;
     uint64_t timingSamples;
+    // Scene-cut decisions the helper's guide generator took and withheld. Kept
+    // ahead of detailBytes so that field stays the last one, describing the
+    // payload that follows the struct.
+    uint32_t acceptedStrongCuts;
+    uint32_t acceptedWeakCuts;
+    uint32_t suppressedCuts;
     uint32_t detailBytes;
 };
 
@@ -105,7 +115,7 @@ struct WirePreflight {
 
 static_assert(sizeof(WireHeader) == 12);
 static_assert(sizeof(WireProgress) == 52);
-static_assert(sizeof(WireResult) == 140);
+static_assert(sizeof(WireResult) == 152);
 static_assert(sizeof(WirePreflight) == 8);
 static_assert(sizeof(WireSegment) == 44);
 
@@ -265,6 +275,9 @@ inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)
     wire.captureMsMean = result.timing.captureMsMean;
     wire.peakLocalVramMiB = result.timing.peakLocalVramMiB;
     wire.timingSamples = result.timing.samples;
+    wire.acceptedStrongCuts = result.sceneCuts.acceptedStrong;
+    wire.acceptedWeakCuts = result.sceneCuts.acceptedWeak;
+    wire.suppressedCuts = result.sceneCuts.suppressed;
     wire.detailBytes = static_cast<uint32_t>(detail.size() * sizeof(wchar_t));
     std::vector<std::byte> payload(sizeof(wire) + wire.detailBytes);
     std::memcpy(payload.data(), &wire, sizeof(wire));
@@ -315,6 +328,10 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
     result.firstTimestamp100ns = wire.firstTimestamp100ns;
     result.timing = {wire.timingSamples, wire.neuralGpuMsP50, wire.neuralGpuMsP95, wire.neuralGpuMsMax,
         wire.guideMsMean, wire.captureMsMean, wire.peakLocalVramMiB};
+    // Advisory evidence, not part of the verification set: the tally spans preroll and
+    // every attempt, so it is not bounded by historyResets and there is nothing here a
+    // consistency check could prove.
+    result.sceneCuts = {wire.acceptedStrongCuts, wire.acceptedWeakCuts, wire.suppressedCuts};
     if (wire.detailBytes) {
         const auto* detail = reinterpret_cast<const wchar_t*>(payload.data() + sizeof(WireResult));
         result.detail.assign(detail, detail + wire.detailBytes / sizeof(wchar_t));

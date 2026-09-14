@@ -20,6 +20,23 @@ enum class SceneCutStrength {
     Residual,   // strong arm: correspondence failed outright
 };
 
+// Lifetime tally of the decisions the classifier made, split the way the
+// decision itself is: the strong arm is never withheld, the weak one can be,
+// and a withheld cut left the history running. A render carries these into its
+// receipt, so scoring the detector against a labelled corpus can start from
+// what the run decided instead of replaying the video through a rebuilt
+// generator and hoping it decides the same way twice.
+struct SceneCutAccounting {
+    uint32_t acceptedStrong{};  // Residual arm; history discarded
+    uint32_t acceptedWeak{};    // Histogram arm outside the debounce; history discarded
+    uint32_t suppressed{};      // Histogram arm inside the debounce; history continued
+
+    // Cuts that actually reset the history, whichever arm proved them.
+    uint32_t Accepted() const noexcept { return acceptedStrong + acceptedWeak; }
+
+    friend bool operator==(const SceneCutAccounting&, const SceneCutAccounting&) = default;
+};
+
 struct GuideFrame {
     // Compact analysis grid consumed by a GPU expansion pass:
     // R = motion X, G = motion Y (current -> previous, already in DLSS input pixels)
@@ -63,6 +80,9 @@ public:
     const GuideControls& Controls() const { return m_controls; }
     // Incremented every time this generator declares a reset.
     uint32_t HistoryGeneration() const { return m_historyGeneration; }
+    // Every scene-cut decision this generator has taken or withheld. Reset()
+    // leaves it alone; it describes the job, not the current shot.
+    const SceneCutAccounting& SceneCuts() const { return m_sceneCuts; }
 
     // Builds guides for `frame`. History is reset when the caller declares a
     // reset (frame.reset != None), the source generation changes, the frame
@@ -133,5 +153,6 @@ private:
     // have protected is already gone.
     uint32_t m_framesSinceCut = 0;
     bool m_haveAcceptedCut = false;
+    SceneCutAccounting m_sceneCuts;
     GuideControls m_controls;
 };

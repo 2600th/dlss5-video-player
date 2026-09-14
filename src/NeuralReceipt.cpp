@@ -211,6 +211,10 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += "}";
     json += ",\"historyResets\":" + std::to_string(result.historyResets);
     json += ",\"frameRetries\":" + std::to_string(result.frameRetries);
+    const SceneCutAccounting& cuts = result.sceneCuts;
+    json += ",\"sceneCuts\":{\"acceptedStrong\":" + std::to_string(cuts.acceptedStrong);
+    json += ",\"acceptedWeak\":" + std::to_string(cuts.acceptedWeak);
+    json += ",\"suppressed\":" + std::to_string(cuts.suppressed) + "}";
     json += ",\"firstTimestamp100ns\":" + std::to_string(result.firstTimestamp100ns);
     const NeuralRenderTiming& timing = result.timing;
     json += ",\"timing\":{\"samples\":" + std::to_string(timing.samples);
@@ -275,6 +279,8 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
     line += NeuralRenderFailureName(result.failure);
     line += " frames=" + std::to_string(result.frameCount) + "/" + std::to_string(result.nativeEvaluations) +
             " verified=" + std::to_string(result.verifiedNeuralFrames) +
-            " resets=" + std::to_string(result.historyResets) + " retries=" + std::to_string(result.frameRetries);
+            " resets=" + std::to_string(result.historyResets) + " retries=" + std::to_string(result.frameRetries) +
+            " cuts=" + std::to_string(result.sceneCuts.Accepted()) +
+            " suppressed=" + std::to_string(result.sceneCuts.suppressed);
     return line;
 }

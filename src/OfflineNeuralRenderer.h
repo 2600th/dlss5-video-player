@@ -4,6 +4,7 @@
 #include "GuideControls.h"
 #include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
+#include "TemporalGuides.h"
 
 #include <windows.h>
 
@@ -87,6 +88,9 @@ struct NeuralRenderResult {
     uint64_t jobId{};
     uint32_t historyResets{};
     uint32_t frameRetries{};
+    // Scene-cut decisions the job's guide generator took and withheld, over its
+    // whole lifetime: preroll, every captured frame and any encoder retry pass.
+    SceneCutAccounting sceneCuts{};
     // Absolute source pts of the first captured frame (== range.start100ns
     // for range renders, 0 for whole-source renders).
     int64_t firstTimestamp100ns{};

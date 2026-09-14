@@ -278,6 +278,7 @@ NeuralRenderReceiptInputs SampleInputs()
     inputs.result.duration100ns = 20000000;
     inputs.result.historyResets = 2;
     inputs.result.frameRetries = 1;
+    inputs.result.sceneCuts = {.acceptedStrong = 1, .acceptedWeak = 2, .suppressed = 4};
     inputs.result.firstTimestamp100ns = 10000000;
     inputs.result.timing.samples = 48;
     inputs.result.timing.neuralGpuMsP50 = 4.25;
@@ -307,7 +308,9 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "{\"name\":\"nvngx_dlss.dll\",\"present\":true,\"sizeMatches\":true,\"hashMatches\":true,\"versionMatches\":true,\"actualSize\":58956400,"));
     CHECK(Contains(json, "{\"name\":\"dxgi.dll\",\"present\":true,\"sizeMatches\":true,\"hashMatches\":false,\"versionMatches\":false,\"actualSize\":5592064,\"actualSha256\":\"" + Hex("other") + "\",\"actualFileVersion\":\"\"}"));
     CHECK(Contains(json, "\"result\":{\"ok\":false,\"cancelled\":false,\"failure\":\"gpu-stall\",\"encoder\":\"h264_software\",\"frameCount\":48,"));
-    CHECK(Contains(json, "\"historyResets\":2,\"frameRetries\":1,\"firstTimestamp100ns\":10000000,\"timing\":{\"samples\":48,\"neuralGpuMsP50\":4.25,"));
+    CHECK(Contains(json, "\"historyResets\":2,\"frameRetries\":1,"
+                         "\"sceneCuts\":{\"acceptedStrong\":1,\"acceptedWeak\":2,\"suppressed\":4},"
+                         "\"firstTimestamp100ns\":10000000,\"timing\":{\"samples\":48,\"neuralGpuMsP50\":4.25,"));
     CHECK(Contains(json, "\"peakLocalVramMiB\":3072}"));
     CHECK(Contains(json, "\"detail\":\"GPU stalled after 48 frames\""));
     CHECK(Contains(json, "\"evidence\":{\"upscalingOff\":false,"));
@@ -331,7 +334,8 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
 {
     const NeuralRenderReceiptInputs inputs = SampleInputs();
     CHECK_EQ(std::string("gpu=\"NVIDIA GeForce RTX 4090\" driver=32.0.15.6164 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 "
-                         "feature18=armed lock=drift(dxgi.dll) failure=gpu-stall frames=48/48 verified=48 resets=2 retries=1"),
+                         "feature18=armed lock=drift(dxgi.dll) failure=gpu-stall frames=48/48 verified=48 "
+                         "resets=2 retries=1 cuts=3 suppressed=4"),
              SummarizeNeuralReceiptForLog(inputs));
 
     NeuralRenderReceiptInputs bare = inputs;
@@ -339,7 +343,7 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
     bare.lockChecks.clear();
     bare.result.failure = NeuralRenderFailure::Preflight;
     CHECK_EQ(std::string("gpu=\"\" driver=- reshade=- renodx=- nr=- feature18=unknown lock=unverified failure=preflight "
-                         "frames=48/48 verified=48 resets=2 retries=1"),
+                         "frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
              SummarizeNeuralReceiptForLog(bare));
 
     // A schema-1 receipt from before the diagnosis existed still summarizes.
@@ -348,7 +352,7 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
                              "\"feature18\":{\"created\":true,\"evaluated\":false,\"armed\":false}}";
     notArmed.lockChecks = {inputs.lockChecks[0]};
     CHECK_EQ(std::string("gpu=\"Escaped \\\"GPU\\\"\" driver=- reshade=- renodx=- nr=- feature18=not-armed lock=ok "
-                         "failure=gpu-stall frames=48/48 verified=48 resets=2 retries=1"),
+                         "failure=gpu-stall frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
              SummarizeNeuralReceiptForLog(notArmed));
 
     // The field receipt: the carrier reported success while feature 18 was
@@ -363,7 +367,7 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
     refused.result.failure = NeuralRenderFailure::Preflight;
     CHECK_EQ(std::string("gpu=\"NVIDIA GeForce RTX 3060 Laptop GPU\" driver=32.0.15.6614 reshade=- renodx=- nr=- "
                          "feature18=not-armed(0xbad00002) cause=driverBelowFloor lock=ok failure=preflight "
-                         "frames=48/48 verified=48 resets=2 retries=1"),
+                         "frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
              SummarizeNeuralReceiptForLog(refused));
 }
 

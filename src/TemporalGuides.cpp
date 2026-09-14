@@ -29,7 +29,9 @@ void TemporalGuideGenerator::Reset() {
     m_firstFrame = true;
     // A declared reset already wiped the DLSS history, so there is nothing left for a
     // suppressed weak cut to protect: re-arm the weak arm instead of making the first
-    // real cut after a seek wait out the interval.
+    // real cut after a seek wait out the interval. The cut tally is deliberately not
+    // cleared: it is evidence about the whole job, and a seek or a source change does
+    // not unmake a decision this generator already took.
     m_framesSinceCut = 0;
     m_haveAcceptedCut = false;
 }
@@ -598,6 +600,14 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
             m_haveAcceptedCut = true;
         } else {
             MedianFlow(fx, fy, confidence, gw, gh);
+        }
+        // Tally the decision once per distinct frame. A re-evaluation re-decides a frame
+        // whose verdict is already counted - the offline receipt gate resubmits a single
+        // frame up to 120 times - and counting those would drown the evidence.
+        if (!repeat) {
+            if (cutSuppressed) ++m_sceneCuts.suppressed;
+            else if (cutStrength == SceneCutStrength::Residual) ++m_sceneCuts.acceptedStrong;
+            else if (cutStrength == SceneCutStrength::Histogram) ++m_sceneCuts.acceptedWeak;
         }
     }
     if (reset != HistoryReset::None) ++m_historyGeneration;

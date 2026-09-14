@@ -440,6 +440,65 @@ void a_declared_reset_rearms_the_scene_cut_interval_test()
     CHECK_EQ(HistoryReset::Cut, out.id.reset);
 }
 
+void scene_cut_accounting_survives_reset_and_counts_each_arm_test()
+{
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+    // Nothing is classified without a previous frame, and a clean pan is not a decision.
+    CHECK_EQ(SceneCutAccounting{}, guides.SceneCuts());
+
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 2, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 1}), guides.SceneCuts());
+
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(9, 3, kFlashLift), 3, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(12, 4, kFlashLift), 4, out));
+    // Frame 5 leaves the flash three frames into the window, so the same weak evidence is
+    // recognised and withheld. That is the number the corpus work needs: a suppression is
+    // either a flicker avoided or a cut missed, and only labelled footage can tell which.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(15, 5), 5, out));
+    CHECK(out.sceneCutSuppressed);
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 1, .suppressed = 1}), guides.SceneCuts());
+
+    for (uint64_t number = 6; number <= 16; ++number)
+        CHECK(GenerateAtCutFps(guides, TexturedFrame(int(number) * 3, int(number)), number, out));
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 1, .suppressed = 1}), guides.SceneCuts());
+
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(51, 17, kFlashLift), 17, out));
+    CHECK(!out.sceneCutSuppressed);
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 2, .suppressed = 1}), guides.SceneCuts());
+
+    // Re-submitting frame 17 re-decides it, this time as a suppression because the cut it
+    // is being compared against is its own. The offline job resubmits one frame up to 120
+    // times while it waits for the runtime receipt; the tally must not move.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(51, 17, kFlashLift), 17, out));
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 2, .suppressed = 1}), guides.SceneCuts());
+
+    // Frame 18 cuts to black one frame after an accepted cut. The strong arm ignores the
+    // window and is counted apart from the weak one.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(54, 18, -1.0), 18, out));
+    CHECK_EQ(SceneCutStrength::Residual, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    const SceneCutAccounting tally{.acceptedStrong = 1, .acceptedWeak = 2, .suppressed = 1};
+    CHECK_EQ(tally, guides.SceneCuts());
+    CHECK_EQ(uint32_t{3}, guides.SceneCuts().Accepted());
+
+    // A seek discards the image history but not the record of what was decided, and the
+    // generator keeps counting into the same tally afterwards.
+    guides.Reset();
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 19, out));
+    CHECK_EQ(HistoryReset::FirstFrame, out.id.reset);
+    CHECK_EQ(tally, guides.SceneCuts());
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 20, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 21, out));
+    CHECK(!out.sceneCutSuppressed);
+    CHECK_EQ((SceneCutAccounting{.acceptedStrong = 1, .acceptedWeak = 3, .suppressed = 1}),
+             guides.SceneCuts());
+}
+
 
 // Aliasing trap. The analysis grid is 128x72 at this size, i.e. 10 source pixels per cell, so
 // vertical stripes with a 20 px period repeat exactly every two cells: a 20 px displacement
@@ -766,6 +825,7 @@ int main()
     weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test();
     a_strong_scene_cut_fires_inside_the_minimum_interval_test();
     a_declared_reset_rearms_the_scene_cut_interval_test();
+    scene_cut_accounting_survives_reset_and_counts_each_arm_test();
     synchronized_range_offsets_neural_frames_onto_the_original_timeline_test();
     synchronized_range_ends_on_a_rebased_original_timestamp_test();
     synchronized_range_ending_on_the_last_source_frame_completes_test();
