@@ -251,18 +251,18 @@ phases above as a protocol v5 timeline, in the receipt and in one log line, so t
 acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
 the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
 99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
-and 1847 ms, feature 18 armed 680.5 and 641 ms. The two are not a controlled pair
-- the second came from a different build of the same instrumentation on a
-different, segmented job, and `neuralInit` brackets the source open as well as NGX
-- so the 509 ms gap is not run-to-run variance, and neither figure is an
-acceptance number: that check needs several samples from one build on one clip.
-One estimate above is structurally wrong rather
-than merely off: the ReShade proxy does not cost 0.41 s beside the loader, because
-it *is* the loader's work - the proxy is the helper's `dxgi` import and resolves
-before the entry point, inside a `helperStart` that is 0.10 s in total. That 0.10 s
-is a warm-cache figure taken with the tree already executed repeatedly in the
-session and the exclusion state unreadable without administrator, so the scanned
-budget is untouched by it. The premise stands and is now a measurement: **NGX init
+and 1847 ms, feature 18 armed 680.5 and 641 ms. The two are not a controlled
+pair: the second came from a different build of the same instrumentation on a
+different, segmented job, and `neuralInit` brackets the source open as well as
+NGX, so the 509 ms gap is not run-to-run variance and neither figure is an
+acceptance number - that check needs several samples from one build on one clip.
+One estimate above is structurally wrong rather than merely off: the ReShade
+proxy does not cost 0.41 s beside the loader, because it *is* the loader's work -
+the proxy is the helper's `dxgi` import and resolves before the entry point,
+inside a `helperStart` that is 0.10 s in total. That 0.10 s is a warm-cache
+figure taken with the tree already executed repeatedly in the session and the
+exclusion state unreadable without administrator, so the scanned budget is
+untouched by it. The premise stands and is now a measurement: **NGX init
 plus feature arm is 95 % of the helper's cold start in both runs, and all of it is
 per-process.** Still unmeasured is the player's half - request, preflight, launch,
 attach - because that needs a driven player session rather than the harness.
