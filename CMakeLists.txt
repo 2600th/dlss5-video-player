@@ -373,6 +373,12 @@ if(BUILD_TESTING)
     target_link_directories(NeuralPrerenderTests PRIVATE "${DLSS_LIB_DIR}")
     target_link_libraries(NeuralPrerenderTests PRIVATE ${player_libraries})
     dlss_video_player_use_nvof(NeuralPrerenderTests)
+    # Now that the production adapters compile here, the job's stage-cost logging
+    # runs too, and Log opens <module directory>/DLSSVideoPlayer.log truncating.
+    # Beside the player that erases its log every ctest run; the cache-root probe
+    # also stages a directory beside the executable. Give both their own place.
+    set_target_properties(NeuralPrerenderTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/neural-prerender/$<CONFIG>")
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     # Exercise the real player completion handlers and text submitted to Win32.
