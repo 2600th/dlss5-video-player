@@ -110,16 +110,24 @@ struct RendererOwnedSentinel final : D3D12RendererTestOwnedResource {
 };
 
 struct D3D12RendererTestAccess {
+    // The hooks object exists only once a test installs something.
+    static D3D12RendererTestHooks& Hooks(D3D12Renderer& renderer)
+    {
+        if(!renderer.m_testHooks)
+            renderer.m_testHooks=std::make_unique<D3D12RendererTestHooks>();
+        return *renderer.m_testHooks;
+    }
+
     static void ConfigureWait(D3D12Renderer& renderer,
                               d3d12_renderer_detail::FenceWaitResult result,
                               int& waits)
     {
-        renderer.m_testWaitGPU=[&waits,result]{++waits;return result;};
+        Hooks(renderer).waitGPU=[&waits,result]{++waits;return result;};
     }
     static void OwnSentinel(D3D12Renderer& renderer,
                             std::unique_ptr<D3D12RendererTestOwnedResource> sentinel)
     {
-        renderer.m_testOwnedResource=std::move(sentinel);
+        Hooks(renderer).ownedResource=std::move(sentinel);
     }
     static bool WaitForContinuedUse(D3D12Renderer& renderer)
     {
@@ -129,10 +137,10 @@ struct D3D12RendererTestAccess {
                                      HRESULT deviceRemovedReason,int& signalCalls,
                                      int& reasonChecks)
     {
-        renderer.m_testFrameSignal=[&signalCalls,signalResult](uint64_t){
+        Hooks(renderer).frameSignal=[&signalCalls,signalResult](uint64_t){
             ++signalCalls;return signalResult;
         };
-        renderer.m_testDeviceRemovedReason=[&reasonChecks,deviceRemovedReason]{
+        Hooks(renderer).deviceRemovedReason=[&reasonChecks,deviceRemovedReason]{
             ++reasonChecks;return deviceRemovedReason;
         };
     }
@@ -157,7 +165,7 @@ struct D3D12RendererTestAccess {
                                       std::function<bool(std::vector<uint8_t>&)> capture)
     {
         renderer.m_outputW=width;renderer.m_outputH=height;
-        renderer.m_lastDLSSUsed=neuralUsed;renderer.m_testCacheCapture=std::move(capture);
+        renderer.m_lastDLSSUsed=neuralUsed;Hooks(renderer).cacheCapture=std::move(capture);
     }
     static bool CaptureEvaluatedFrame(D3D12Renderer& renderer,CapturedVideoFrame& frame)
     {
