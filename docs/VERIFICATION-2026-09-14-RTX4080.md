@@ -7,11 +7,13 @@ does it improve anything measurable, does the scene-cut over-reset found by the
 CPU sweep also happen in a real render, and what does the cold-start stack a
 neural toggle pays for actually cost per phase.
 
-Three results. The gate comes up at its top rung and changes the output by less
-than this corpus can resolve - safe, unproven. The over-reset is real in a real
-render: `history_resets = 6` on a clip with four hard cuts. And the helper side of
-the cold start is **2.13 s**, of which NGX init and feature arm are 2.02 s, which
-is the number the persistent-helper item exists to remove.
+Three results. The gate comes up at its top rung, and against the pre-gate tree it
+moves no metric by a percentage point - reproducibly, since the renders are
+bit-identical between repeats - so it is safe and unproven rather than a win. The
+over-reset is real in a real render: `history_resets = 6` on a clip with four hard
+cuts. And the helper side of the cold start is **2.1-2.6 s** over two runs, of
+which NGX init and feature arm are 95 % in both, which is the cost the
+persistent-helper item exists to remove.
 
 ## Environment
 
@@ -23,7 +25,7 @@ is the number the persistent-helper item exists to remove.
 | Adapter used | LUID `0x1600b`, vendor `0x10de`, 16047 MiB, `m_gpuArch = 0x190` | device adapter log line, NGX log |
 | Repo commit | `16b6f3c` (wave two integrated) | `git rev-parse HEAD` |
 | Baseline commit | `1c41427` (before the gate) | second worktree |
-| Build | Release x64, VS 17 2022 / MSVC 19.44, zero warnings | build log |
+| Build | Release x64, VS 17 2022 / MSVC 19.44, `--clean-first`; zero lines matching `warning` or `error` in the full rebuild log | build log |
 | Runtime | 12 locked files staged, `nvngx_dlssnr.dll` `310.8.SF-v2` | `tools/stage_runtime.ps1` |
 | Encoder | `hevc_nvenc` | run results |
 
@@ -32,7 +34,10 @@ nothing here speaks for the pinned driver; it speaks for the floor.
 
 ## Gates
 
-- `ctest --test-dir build-upscaling -C Release`: **13/13 passed**, 29.43 s.
+- `ctest --test-dir build-upscaling -C Release`: **13/13 passed**, 30.26 s after a
+  clean rebuild.
+- Each measured clip rendered **twice**; the harness reports `deterministic: true`
+  per clip and every metric is identical between repeats.
 - `MediaGpuSmoke.exe external/ffmpeg/bin …/neural-runtime/NeuralWorker.exe …`:
   exit 0, `neural=1` with `verified` equal to `frames` on photo (1), animation
   (100) and video (24). Run twice, before and after wave two.
@@ -53,12 +58,28 @@ gate on. Registration of the backward, backward-cost and global-flow surfaces,
 and the global-flow readback's fence timing, are exercised by every frame of
 every run below.
 
-## What the gate is worth: nothing this corpus can see
+## What the gate is worth: a real effect, smaller than a percentage point
 
-Four labelled clips, 465 source frames, rendered twice through the real neural
-path - once at `16b6f3c` with the gate armed, once at `1c41427` before it existed
-- and scored by the same `analyze.py`. Identical corpus, identical profile
-(`baseline`, `mv=1,depth=1`), identical runtime files.
+Four labelled clips, 465 source frames, rendered through the real neural path on
+two trees and scored by the same `analyze.py`: `16b6f3c` with the gate armed and
+`1c41427` before it existed. Identical corpus, identical profile (`baseline`,
+`mv=1,depth=1`), identical runtime files.
+
+**This is a tree comparison, not a gate toggle.** `1c41427..16b6f3c` is two waves
+of work, and four of those commits touch files in the render path, so the
+attribution rests on reading them: `6528eb5` is the gate itself (both flow
+directions, global flow, the round-trip rejection in the resolve pass);
+`25952ef` adds scene-cut tally increments guarded on `!repeat` and changes no
+threshold and no decision; `8b9897a` adds a log line and one DXGI enumeration to
+device creation and leaves the selection loop alone; `df50c3a` stamps cold-start
+phases. Only the first can move a pixel, but a reader should know the others were
+in the build.
+
+**There is no noise floor to hide in.** Each clip was rendered twice on the gate
+side: `deterministic: true` per clip, and every metric below is identical to full
+float precision between repeat 1 and repeat 2 (spread exactly 0.00000 on all
+three metrics, all four clips). The pipeline is bit-reproducible, which is what
+the harness's determinism digest exists to assert, so the deltas are signal.
 
 | clip | false motion off → on | cell flips added off → on | temporal sigma added off → on |
 | --- | --- | --- | --- |
@@ -67,21 +88,23 @@ path - once at `16b6f3c` with the gate armed, once at `1c41427` before it existe
 | flash-exposure | 0.10439 → 0.10726 | 0.03441 → 0.04114 | −0.7067 → **−0.8079** |
 | pan-fast | 0.18074 → **0.17673** | 0.01230 → 0.01307 | −1.3496 → −1.2806 |
 
-No metric moves consistently and no move exceeds one percentage point. The gate
-wins the two numbers it was argued for on `cuts-motion` - the clip with real
-disocclusion, where flips fall 20 % relative and sigma improves - and loses them
-on clips built from patterns whose "motion" is a filter parameter. The honest
-reading is that the effect is inside this corpus's noise: every run re-encodes
-through `hevc_nvenc`, and the false-motion metric measures output pixels, not
-vectors, so the encoder's own non-determinism sets a floor under it.
+Every delta is reproducible and every delta is small: 0.29 to 0.92 percentage
+points on false motion, 0.08 to 0.67 on flips, 0.016 to 0.107 on sigma. The signs
+are mixed. The gate wins both numbers it was argued for on `cuts-motion` - the
+only clip with genuine disocclusion, where flips fall 20 % relative - and loses
+false motion on the three clips whose "motion" is a filter parameter rather than a
+moving object. Note also what the false-motion metric is: output pixels on cells
+the source held static, so it answers "did the pass invent appearance" and not
+"did the vector field improve", and a zeroed vector changes what NR is given as
+much as a wrong one does.
 
 **Decision: the gate stays, unchanged and unflagged.** It is a refusal - a cell
-the engine contradicts itself about emits no motion - so its risk is one-sided,
-and the one clip with genuine occlusion is the one it helps. It is not evidence
-of a quality win and must not be cited as one. What would settle it is real
-footage: grain, motion blur, a real dissolve, and a camera that occludes. The
-corpus's only real-footage clip (`faces`) needs a fixture that is not on this
-machine.
+the engine contradicts itself about emits no motion instead of a confident wrong
+one - so its risk is one-sided, and the clip with real occlusion is the clip it
+helps. It is not evidence of a quality win and must not be cited as one. What
+would settle it is real footage: grain, motion blur, a real dissolve, a camera
+that occludes. The corpus's only real-footage clip (`faces`) needs a fixture that
+is not on this machine.
 
 ## The scene-cut over-reset is real in a real render
 
@@ -108,30 +131,42 @@ and seven labelled positives is not a mandate.
 
 ## The cold stack, per phase, measured
 
-From the protocol v5 timeline message of the `cuts-motion` render. The player-side
-phases are null because the harness drives `NeuralWorker.exe` directly, and
-`firstOutput` is null because a single-file job never rotates a segment - both are
-the absence ladder behaving as designed, not missing data.
+From the protocol v5 timeline messages of two renders on this machine: **A** is
+the `cuts-motion` render above, **B** is a segmented 1080p30 render taken while
+the instrument was being written. The player-side phases are null in both because
+the harness drives `NeuralWorker.exe` directly, and `firstOutput` is null in A
+because a single-file job never rotates a segment - both are the absence ladder
+behaving as designed, not missing data.
 
-| Phase | Measured | Handoff's estimate | What it covers |
-| --- | --- | --- | --- |
-| `helperStart` | **104.4 ms** | ~700 ms scanned | process creation → entry point: AV scan of the runtime tree, loader, ReShade proxy |
-| `runtimeReady` | **10.2 ms** | ~410 ms | entry → add-on contract verified, adapter queried, MF up, window created |
-| `neuralInit` | **1338.5 ms** | ~1510 ms | render entry → source open, D3D12 device, NGX init |
-| `featureArm` | **680.5 ms** | ~630 ms | → feature 18 created, evaluated, inline interception armed |
-| helper total | **2133.6 ms** | | |
+| Phase | A | B | Handoff's estimate | What it covers |
+| --- | --- | --- | --- | --- |
+| `helperStart` | **104.4 ms** | 99 ms | ~700 ms scanned | process creation → entry point: AV scan of the runtime tree, the loader, and the ReShade proxy with them |
+| `runtimeReady` | **10.2 ms** | 10 ms | ~410 ms | entry → add-on contract verified, adapter queried, MF up, window created |
+| `neuralInit` | **1338.5 ms** | 1847 ms | ~1510 ms | render entry → source open, D3D12 device, NGX init |
+| `featureArm` | **680.5 ms** | 641 ms | ~630 ms | → feature 18 created, evaluated, inline interception armed |
+| `firstOutput` | absent (single file) | 2726 ms | ~1780 ms | → first finalized segment file |
+| helper total to armed | **2133.6 ms** | 2597 ms | | |
 
-Two corrections to the handoff's table fall out of this. The AV-scan window is
-0.10 s here, not 0.7 s - this install is excluded, and the 98 MB tree is not the
-cost anyone should optimise first. And ReShade proxy plus add-on load is 10 ms as
-measured at the helper's own boundaries, because the proxy is resolved as the
-helper's `dxgi` import *before* the entry point, so its cost is inside
-`helperStart`, not beside it.
+Unlike the render metrics, these are not reproducible: `neuralInit` differs by
+509 ms between two runs of the same binary on the same machine, so any single
+number here is one sample, and an acceptance check needs several.
 
-What survives intact is the item's premise: **NGX init plus feature arm is 2.02 s
-of the 2.13 s the helper pays, 95 %, and every one of those milliseconds is
-per-process.** A resident helper removes them from the second toggle onward. The
-render itself, for comparison, is 5.85 ms/frame at 1080p.
+Two things the handoff's table gets structurally wrong, independent of the
+spread. ReShade proxy plus add-on load is not 0.41 s beside the loader, because
+the proxy *is* the helper's `dxgi` import and resolves before the entry point:
+its cost is inside `helperStart`, which is 0.10 s in total. And the antivirus
+figure: `helperStart` is ~0.10 s in both runs, but this machine's exclusion state
+could not be read (`Get-MpPreference` needs administrator; real-time protection
+is reported **enabled**), and both samples were taken after the runtime tree had
+already been executed repeatedly in the same session. So 0.10 s is a warm-cache
+number, not evidence that a scanned first-touch install is cheap - the 3 s
+scanned acceptance budget stands unchallenged by this record.
+
+What survives intact, and is the reason the item exists: **NGX init plus feature
+arm is 2.02 s of A's 2.13 s and 2.49 s of B's 2.60 s - 95 % in both - and every
+one of those milliseconds is per-process.** A resident helper removes them from
+the second toggle onward. The render itself, for comparison, is 5.85 ms/frame at
+1080p.
 
 ## Render numbers
 

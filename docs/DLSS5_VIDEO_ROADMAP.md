@@ -55,12 +55,14 @@ so a cell the engine contradicts itself about emits no motion.
 
 **Measured on hardware 2026-09-14.** The ladder's top rung comes up on an RTX 4080
 SUPER - `direction=both, round-trip gate armed, global flow=on` - and four labelled
-clips rendered through the real neural path with and without the gate move no metric
-by as much as one percentage point. The gate wins cell-flip rate and temporal sigma
-on the one clip with genuine disocclusion and loses them on clips whose motion is a
-filter parameter, which is inside this corpus's encode noise. It stays because it is
-a refusal with one-sided risk, not because it is a proven win; settling it needs real
-footage. [Session record](VERIFICATION-2026-09-14-RTX4080.md)
+clips rendered through the real neural path on the pre-gate tree and on this one
+move no metric by as much as one percentage point. The renders are bit-reproducible
+(`deterministic: true`, repeats identical to full precision), so those small deltas
+are signal rather than noise: the gate wins cell-flip rate and temporal sigma on the
+one clip with genuine disocclusion and loses false motion on the three whose motion
+is a filter parameter. It stays because it is a refusal with one-sided risk, not
+because it is a proven win; settling it needs real footage.
+[Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
@@ -244,17 +246,22 @@ after the player exits or is killed.
 
 **Instrumented and partly re-measured, 2026-09-14.** Every render now reports the
 phases above as a protocol v5 timeline, in the receipt and in one log line, so the
-acceptance number stops being prose. On an RTX 4080 SUPER at 610.47 the helper side
-is 2133.6 ms: process creation to entry point 104.4 ms, entry to runtime ready
-10.2 ms, source open through NGX init 1338.5 ms, feature 18 armed 680.5 ms. Two
-estimates above were wrong in the same direction: the antivirus window is 0.10 s on
-an excluded install, not 0.7 s, and the ReShade proxy does not cost 0.41 s beside
-the loader because it *is* the loader's work - the proxy is the helper's `dxgi`
-import and resolves before the entry point. The premise stands and is now a
-measurement: **NGX init plus feature arm is 2.02 s of the 2.13 s, and all of it is
-per-process.** What is still unmeasured is the player's half - request, preflight,
-launch, attach - because that needs a driven player session rather than the
-harness. [Session record](VERIFICATION-2026-09-14-RTX4080.md)
+acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
+the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
+99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
+and 1847 ms, feature 18 armed 680.5 and 641 ms. The spread matters - `neuralInit`
+varies by half a second between runs of the same binary - so the acceptance check
+needs several samples, not one. One estimate above is structurally wrong rather
+than merely off: the ReShade proxy does not cost 0.41 s beside the loader, because
+it *is* the loader's work - the proxy is the helper's `dxgi` import and resolves
+before the entry point, inside a `helperStart` that is 0.10 s in total. That 0.10 s
+is a warm-cache figure taken with the tree already executed repeatedly in the
+session and the exclusion state unreadable without administrator, so the scanned
+budget is untouched by it. The premise stands and is now a measurement: **NGX init
+plus feature arm is 95 % of the helper's cold start in both runs, and all of it is
+per-process.** Still unmeasured is the player's half - request, preflight, launch,
+attach - because that needs a driven player session rather than the harness.
+[Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
 ## What “2× / 3×” can mean
 

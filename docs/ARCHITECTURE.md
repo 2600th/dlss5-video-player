@@ -265,7 +265,8 @@ travel as a protocol v5 `Timeline` message, land in the receipt beside `timing`
 and in one log line, and a phase that did not happen is absent rather than zero -
 a cache hit, a single-file job and a refused request each report less than a
 segmented render, and that difference is information. Measured on an RTX 4080
-SUPER the helper side is 2.13 s, of which NGX init and feature arm are 2.02 s
+SUPER over two renders the helper side is 2.1-2.6 s, of which NGX init and feature
+arm are 95 % in both, and `neuralInit` alone varies by half a second run to run
 (see `docs/VERIFICATION-2026-09-14-RTX4080.md`).
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
