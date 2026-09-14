@@ -164,7 +164,7 @@ add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
     src/NeuralPreflight.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
     src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp
     src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
-    src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
+    src/RuntimePolicy.cpp src/ReShadeConfig.cpp)
 target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
     DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
 target_include_directories(NeuralWorker PRIVATE "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
