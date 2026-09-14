@@ -363,6 +363,10 @@ if(BUILD_TESTING)
         src/DLSSBackend.cpp
         src/TemporalGuides.cpp
         src/OpticalFlowNvof.cpp
+        # D3D12Renderer.cpp asks RuntimePolicy which adapter to create the
+        # device on, the same reason PolicyTests and UpscalingGpuSmoke pair
+        # these two.
+        src/RuntimePolicy.cpp
     )
     target_include_directories(NeuralPrerenderTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
