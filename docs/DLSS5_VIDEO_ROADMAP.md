@@ -730,10 +730,17 @@ resolution). Both paths now state `bt709`/`tv` and the CPU path converts with
 `out_color_matrix=bt709`; labelling without converting would have been worse than
 the ambiguity. PSNR never saw any of it, because each path round-trips under its own
 tags, which is worth remembering the next time a colour question is handed to a
-fidelity metric. What remains is `color_primaries`/`color_transfer`, which the
-encoder still does not propagate, and the capture-side residual - now unconfounded,
-both paths being BT.709 end to end, so chroma siting is the live hypothesis. The
-flag defaults stay until that is closed, the
+fidelity metric. All four tags land now, on both paths, via `setparams` -
+the `-color_*` output options carry only matrix and range on this FFmpeg. Stamping
+them on the NV12 path's frames also **removed the capture-side quality cost
+entirely** (0.00 dB against the CPU path, where it had been -0.64 dB), which retired
+the chroma-siting hypothesis before it was tested: the cost was frames reaching the
+encoder undescribed, not sample positions. `GpuColorConversion` is therefore a
+candidate for defaulting on - no quality cost, +5.8 % throughput at 4K, and on this
+card it lowers GPU ms where the shipped note measured the opposite on a 5070 Ti, so
+re-measure that before flipping. `GpuSourceConversion` still needs the source
+colour-tag probe, which the export fix does not provide. The defaults stay this
+wave, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 

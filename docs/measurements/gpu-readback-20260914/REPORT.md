@@ -252,13 +252,14 @@ throughput win.
 `GpuColorConversion` keeps **-0.53 to -0.64 dB with tags present** at both
 resolutions, so that cost is its own and not a tagging artifact.
 
-The candidate mechanism is chroma siting: `PSCaptureChroma` converts four RGB
-samples and averages the results, which is centre-sited, while swscale's 4:2:0
-default is left-sited - plus 8-bit rounding in the same pass. The comment at
-`src/D3D12Renderer.cpp:325-327` says the averaging "is what a CPU 4:2:0 conversion
-does"; that is true of the averaging and not of the sample positions. Untested, and
-it is the next measurement rather than a conclusion. One confound to clear first,
-below: the two arms' *outputs* are tagged differently.
+Chroma siting was the leading suspect - `PSCaptureChroma` converts four RGB samples
+and averages the results, which is centre-sited, while swscale's 4:2:0 default is
+left-sited. **It was wrong, and the measurement that killed it is below**: once the
+NV12 path stamps its frames with all four colour properties, the capture-side cost
+goes to **zero** (30.10 dB against the CPU path's 30.10 dB, dE 3.33 against 3.30,
+where it had been -0.642 dB / +0.644 dE). Every capture-side number in this report
+therefore describes the code *before* that change: the cost was the NV12 path's
+frames carrying no primaries or transfer, not the shader's sample positions.
 
 ### A defect this A/B walked into, and it is now fixed
 
@@ -338,9 +339,23 @@ identity's pipeline term now carries `bt709-export-v1`, which retires them.
 Two consequences worth separating. First, this was a correctness defect in the
 default export path, independent of the throughput question and worth more than it:
 it affected every neural render, not only the ones made with an experimental flag.
-Second, the capture-side residual is **no longer confounded** - both paths are now
-BT.709 end to end - so the 0.5-0.65 dB that survives is the capture conversion's own
-chroma handling, and chroma siting is the live hypothesis rather than one of two.
+Second, stamping the same four properties on the NV12 path's frames **removed the
+capture-side quality cost entirely**, which retires the chroma-siting hypothesis
+before it was ever tested:
+
+| `orig-faces`, both paths post-fix | PSNR dB | dE mean |
+|---|---|---|
+| `cpu-conversion` | 30.10 | 3.30 |
+| `gpu-color-only` | 30.10 | 3.33 |
+
+A 0.00 dB delta where it had been -0.642 dB. The mechanism is the same one this
+whole section is about, one level down: the NV12 frames reached the encoder with no
+primaries or transfer, so the file they produced was decoded on assumptions that did
+not match the shader that made it. `setparams` is metadata-only and pixel-exact
+through a lossless round trip, so nothing about the pixels handed to NVENC changed -
+what changed is that they are now described. Measured against the source directly,
+the tagged encode is 0.66 dB closer (32.65 against 31.99 dB by FFmpeg's own `psnr`
+filter), which is the same 0.65 dB that used to look like a shader defect.
 
 Per-channel signed error (`rgb_shift`, mean output-minus-source, 8-bit levels) shows
 the same split - every arm carries the relight's own large bias, but only on the
@@ -355,11 +370,26 @@ untagged clip do the GPU arms swing it:
 | `orig-faces` | `gpu-color-only` | -3.176 | -4.106 | -0.562 |
 | `orig-faces` | `gpu-source-only` | -1.358 | -0.892 | -0.542 |
 
-**So the verdict splits.** The decoder-side flag is a tagging defect away from being
-free, and the honest blocker is the source colour-tag probe rather than any cost.
-The capture-side flag has a real, tag-independent cost of about two thirds of a
-decibel, with chroma siting the leading suspect and untested. Both defaults stay
-today, but for two different reasons, and only one of them is about bytes.
+**So the verdict splits, and neither half is what this report first concluded.**
+
+`GpuColorConversion` has **no measured quality cost** once the colour fix is in:
+0.00 dB against the CPU path, +5.8 % processing throughput at 4K, and on this card
+it *lowers* `gpu_ms_p50` (17.849 against 18.051) where `docs/USAGE.md:216-218`
+defaults it off on GPU-time grounds measured on an RTX 5070 Ti. That leaves it a
+candidate for defaulting on, blocked by one thing only: the GPU-time argument was
+measured on a different card and this one contradicts it, so the honest next step is
+re-measuring that, not flipping on one machine's numbers. Not flipped in this wave.
+
+`GpuSourceConversion` is free on **correctly tagged** input and its blocker is
+untouched by any of this. The colour fix states the *output's* colorimetry; it does
+not read the *source's*. A BT.601 or full-range source still meets a shader that
+assumes BT.709 limited range, which is exactly the hazard
+`docs/USAGE.md:219-221` names and exactly what the -0.64 dB on the untagged clip
+measures. That flag needs the source colour-tag probe before it can be a default,
+and that remains a correctness item rather than a performance one.
+
+So: both defaults stay today, for two different reasons, and neither reason is the
+one this report opened with.
 
 **This measurement is a confirmation, not a discovery, and the record already said
 so.** `docs/USAGE.md:214-221` documents both flags as deliberately off, with reasons:

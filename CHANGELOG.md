@@ -64,12 +64,18 @@ and looks like a broken helper until the runtime is re-staged.
   `out_color_matrix=bt709`, because tagging 601 pixels as 709 would have been worse
   than leaving them ambiguous. It also carries `setparams`, without which this
   FFmpeg drops the primaries and transfer tags in every container and encoder tried;
-  the NV12 path does not, because that filter measurably changes its decoded output
-  and that path exists to reach the encoder untouched. Verified on the same clip
-  before and after: tags go from none to all four and the pixels move with them
-  (mean Y 57.12 -> 58.41). The render identity's pipeline term moved to
-  `bt709-export-v1` as well, since encoder arguments are not part of the cache key
-  and renders made before this would otherwise have stayed valid hits.
+  both paths carry it, since it is metadata-only and pixel-exact through a lossless
+  round trip. Verified on the same clip before and after: tags go from none to all
+  four, and on the CPU path the pixels move with them (mean Y 57.12 -> 58.41)
+  because that path's matrix changed too. The render identity's pipeline term moved
+  to `bt709-export-v1`, since encoder arguments are not part of the cache key and
+  renders made before this would otherwise have stayed valid hits.
+- Describing the GPU-converted path's frames properly also removed a quality gap
+  nobody had explained: with all four properties stamped, a capture converted on the
+  GPU now matches the CPU path exactly (30.10 dB either way, where the GPU path had
+  been 0.64 dB behind). The encoder had been handed frames it could not interpret,
+  and the file it wrote was read on assumptions that did not match the shader that
+  made it.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

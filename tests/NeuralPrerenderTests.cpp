@@ -792,8 +792,9 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
 
     // A GPU-converted capture arrives as NV12 and leaves as NV12: NVENC takes it as it
     // stands, so no frame is converted on the CPU. It states the same colorimetry the
-    // capture shader produced, and it must take NO filter - a scale filter here would
-    // convert the frame on the CPU after all, which is the entire cost this path exists
+    // capture shader produced, and it carries `setparams` to do it - metadata only, and
+    // measured pixel-exact through a lossless round trip. What it must NOT carry is a
+    // `scale` filter: converting those pixels again is the entire cost this path exists
     // to avoid.
     EncoderSpec gpuConverted = encoder;
     gpuConverted.pixelFormat = EncoderPixelFormat::Nv12;
@@ -802,7 +803,10 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK_EQ((std::vector<std::wstring>{L"nv12", L"nv12"}), value(nv12, L"-pix_fmt"));
     CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(nv12, L"-colorspace"));
     CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(nv12, L"-color_range"));
-    CHECK(std::find(nv12.begin(), nv12.end(), L"-vf") == nv12.end());
+    CHECK_EQ((std::vector<std::wstring>{L"setparams=color_primaries=bt709:color_trc=bt709:"
+                                        L"colorspace=bt709:range=tv"}), value(nv12, L"-vf"));
+    for (const std::wstring& argument : nv12)
+        CHECK(argument.find(L"scale=") == std::wstring::npos);
     // x264 has no NV12 input, so that pairing converts one plane instead of a frame.
     EncoderSpec software = gpuConverted;
     software.kind = EncoderKind::H264Software;
