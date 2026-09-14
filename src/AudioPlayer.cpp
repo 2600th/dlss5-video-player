@@ -229,7 +229,8 @@ double AudioPlayer::PositionSeconds() const {
 
 uint64_t AudioPlayer::SubmittedBuffers() const
 {
-    return m_reader ? m_reader->submittedBuffers.load() : 0;
+    const auto state=m_reader;
+    return state?state->submittedBuffers.load():0;
 }
 
 bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->waveOut;}
