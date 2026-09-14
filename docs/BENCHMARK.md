@@ -108,6 +108,26 @@ tone, intensity (control), presets 1-3, styles natural/cinematic, two-pass.
 Every profile uses the same corpus, the same worker priming/preroll and the same
 runtime files, so differences attribute to the changed factor.
 
+**`baseline` is not the shipped configuration, and art-knob ablations must be read
+against the shipped one.** `baseline` writes no `NR*` key at all, so the add-on
+applies its own defaults - and its automatic mask defaults OFF, while the player
+writes `NRAutoMask=1` on every render (`src/main.cpp`, from `NeuralSettings{}`).
+Measured 2026-09-14 on four clips, both repeats, bit-identical by output digest:
+writing all eight keys with the mask off reproduces `baseline` exactly, and
+writing the single key `NRAutoMask=1` reproduces the shipped state exactly. So the
+`automask-off` ablation row is a no-op against `baseline`, and every absolute
+`baseline` number in this document - including the reference run below - describes
+a configuration the player never ships. Relative guide comparisons are unaffected,
+because both sides carry the same mask state.
+
+The sign can invert on the difference: `structure-0` improves delta-E by 2.46 on
+`cuts-similar` measured against `baseline` and worsens it by 2.94 measured against
+the shipped state. Run art-knob ablations from
+`docs/measurements/art-defaults-20260914/shipped-state.profile.json`, which writes
+all eight keys and varies one. `NRAutoMask` is also the only one of the eight whose
+explicit write changes a pixel; the other seven at shipped values are bit-identical
+to writing nothing, which proves only that the add-on agrees with us about them.
+
 The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
 guide strings the matrix already carries — a disabled depth guide *is* the constant
 0.75 field — so they resolve to `depth-off` and `baseline` and share their run

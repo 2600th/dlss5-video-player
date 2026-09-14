@@ -441,6 +441,34 @@ Provide:
 
 The visual blend can be instant, but changing native model parameters may require rerendering.
 
+**Measured 2026-09-14: keep all eight art defaults; one candidate for change.**
+204 renders over four labelled clips, every group deterministic. Of the nine
+alternatives the harness can express at the shipped mask state, three are
+bit-identical to it (`NRPreset` 1/2/3), one is the carrier floor rather than an
+art option (`NRIntensity=0`), four are worse or a wash (`NRAutoMask=0`,
+`NRLocalStructure=0`, both `NRStyle` values), and exactly one points anywhere:
+`NRLocalTone`. At 0.5 it recovers 2.0-3.9 dB PSNR and 2.6-5.7 delta-E on all four
+clips, monotone, with SSIM within 0.005 and both temporal metrics within 0.31
+levels - so the tone term moves colour and buys nothing measurable in stability.
+It is NOT changed on that evidence: on fractals "closer to the source" is the only
+thing PSNR and delta-E can mean, while on graded footage a deliberate relight is
+the product. The decision is gated on the real-footage clips and on a filled
+`blind.py` ballot; the sealed pairs exist on disk and no human has scored them, so
+no blind verdict exists. [Report](measurements/art-defaults-20260914/REPORT.md)
+
+Two defects that measurement found, neither fixed:
+`NRPreset` is inert on this runtime - 0/1/2/3 are bit-identical on every clip at
+both mask states - yet it enters the render identity through
+`CanonicalNeuralSettings`, so flipping it costs a full re-render for byte-identical
+output. Left in deliberately: inertness is a statement about DLSS-NR 310.8.0 with
+RenoDX 4.7 on this driver, and the identity also carries the runtime digest, so a
+future runtime that makes the knob live would re-render anyway. Splitting identity
+from provenance for one inert knob is not worth the complexity today.
+And `blind.py`'s candidate-frame filter admits nothing on clips with hard cuts, so
+it falls back to frame 0 and both pairs of `cuts-motion` and `cuts-similar` are the
+same frame - which makes the one instrument that could settle the tone question
+useless on half the corpus.
+
 **Links:** [ReShadeConfig.cpp](../src/ReShadeConfig.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [video2dlssnr controls](https://github.com/DaniilSokolyuk/video2dlssnr)
 
 ## P1 — High-value quality and performance
