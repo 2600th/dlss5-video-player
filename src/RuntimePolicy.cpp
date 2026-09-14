@@ -161,6 +161,9 @@ double RenderPacePrior(GpuGeneration generation) noexcept
         // RTX 4080 SUPER, driver 610.47, 1920x1080 live session: measured
         // against the same segment-arrival method as the reference numbers.
         case GpuGeneration::Rtx40Ada: return kAdaRenderPacePrior;
+        // Nothing has timed a session on these, and a guessed prior would be
+        // indistinguishable from a measured one by the time the forecast
+        // reaches the user.
         case GpuGeneration::Rtx20Turing:
         case GpuGeneration::Rtx30Ampere:
         case GpuGeneration::OtherRtx:

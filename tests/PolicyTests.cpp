@@ -18,6 +18,7 @@
 #include "D3D12Renderer.h"
 #include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
+#include "LiveSessionPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #ifdef small
@@ -2373,6 +2374,85 @@ void neural_addon_policy_test()
     CHECK_EQ(std::string_view("rtx50"), GpuGenerationPathName(GpuGeneration::Rtx50Blackwell));
     CHECK_EQ(std::string_view("rtx"), GpuGenerationPathName(GpuGeneration::OtherRtx));
     CHECK_EQ(std::string_view("unsupported"), GpuGenerationPathName(GpuGeneration::OtherNvidia));
+}
+
+// H2's regression gate, written as the machines this project has actually
+// seen: each adapter string paired with the driver DXGI reported on it. The
+// generation only picks cache identity and the pace prior, so the #9 Ampere
+// laptop is wanted exactly as much as the 5090 and the driver floor is the
+// axis that refuses it. The GTX row is the other half of the same rule - the
+// newest driver in the table grants nothing to a part with no tensor cores.
+void neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test()
+{
+    struct Machine {
+        uint32_t vendorId;
+        std::wstring_view description;
+        std::wstring_view driver;
+        GpuGeneration generation;
+        bool addonDesired;
+        NeuralDriverSupport driverSupport;
+    };
+
+    constexpr Machine machines[] = {
+        // Issue #9, in the shape Windows reports a mobile part.
+        {0x10DE, L"NVIDIA GeForce RTX 3070 Ti Laptop GPU", L"32.0.15.6614",
+         GpuGeneration::Rtx30Ampere, true, NeuralDriverSupport::BelowFloor},
+        // The oldest supported generation on the newest driver: age refuses nothing.
+        {0x10DE, L"NVIDIA GeForce RTX 2080 Ti", L"32.0.16.1664",
+         GpuGeneration::Rtx20Turing, true, NeuralDriverSupport::Supported},
+        {0x10DE, L"NVIDIA GeForce RTX 4080 SUPER", L"32.0.16.1047",
+         GpuGeneration::Rtx40Ada, true, NeuralDriverSupport::Supported},
+        {0x10DE, L"NVIDIA RTX PRO 6000 Blackwell", L"32.0.16.1664",
+         GpuGeneration::OtherRtx, true, NeuralDriverSupport::Supported},
+        {0x10DE, L"NVIDIA GeForce GTX 1660 SUPER", L"32.0.16.1664",
+         GpuGeneration::OtherNvidia, false, NeuralDriverSupport::Supported},
+        {0x8086, L"Intel(R) UHD Graphics 770", L"",
+         GpuGeneration::Unsupported, false, NeuralDriverSupport::Unknown},
+    };
+
+    for (const Machine& machine : machines) {
+        const GpuGeneration generation = ClassifyGpu(machine.vendorId, machine.description);
+        CHECK_EQ(machine.generation, generation);
+        CHECK_EQ(machine.addonDesired, NeuralAddonDesired(generation, false));
+        CHECK_EQ(machine.driverSupport, ClassifyNeuralDriver(machine.driver));
+    }
+}
+
+// A zero prior is a missing measurement, not a verdict that the card cannot
+// render. Downstream the two would be indistinguishable if the forecast ever
+// spoke from a guess: a shrunk start cushion would be a measurement the user
+// never made, and a refusal would turn "nobody has timed this generation" into
+// "unsupported". So the untimed generations must keep the full cushion while
+// the timed ones move it.
+void render_pace_prior_zero_means_unmeasured_not_unsupported_test()
+{
+    // The numbers themselves move as the field matrix fills in; that these
+    // two generations have one at all, and the others do not, is the contract.
+    for (const GpuGeneration timed : {GpuGeneration::Rtx40Ada, GpuGeneration::Rtx50Blackwell})
+        CHECK(RenderPacePrior(timed) > 0.0);
+    for (const GpuGeneration untimed : {GpuGeneration::Rtx20Turing, GpuGeneration::Rtx30Ampere,
+                                        GpuGeneration::OtherRtx, GpuGeneration::OtherNvidia,
+                                        GpuGeneration::Unsupported})
+        CHECK_EQ(0.0, RenderPacePrior(untimed));
+
+    // Same clip, same session, same empty profile: only the prior differs.
+    for (const GpuGeneration untimed : {GpuGeneration::Rtx20Turing, GpuGeneration::Rtx30Ampere,
+                                        GpuGeneration::OtherRtx}) {
+        CHECK(NeuralAddonDesired(untimed, false));
+        const auto forecast =
+            playback_timing::ForecastLiveRender(1920, 1080, 30.0, {}, RenderPacePrior(untimed));
+        CHECK(!forecast.measured);
+        CHECK(forecast.keepsUp);
+        CHECK_EQ(0.0, forecast.realtimeRatio);
+        CHECK_EQ(live_session::kStartLead, live_session::StartLead(forecast.realtimeRatio));
+    }
+    for (const GpuGeneration timed : {GpuGeneration::Rtx40Ada, GpuGeneration::Rtx50Blackwell}) {
+        const auto forecast =
+            playback_timing::ForecastLiveRender(1920, 1080, 30.0, {}, RenderPacePrior(timed));
+        CHECK(forecast.measured);
+        CHECK(forecast.realtimeRatio > 1.5);
+        CHECK(live_session::StartLead(forecast.realtimeRatio) < live_session::kStartLead);
+    }
 }
 
 void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
@@ -5899,6 +5979,8 @@ int wmain(int argc, wchar_t* argv[])
     nvidia_driver_version_is_read_out_of_the_dxgi_quad_test();
     neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test();
     neural_addon_policy_test();
+    neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test();
+    render_pace_prior_zero_means_unmeasured_not_unsupported_test();
     neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
     neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test();
     neural_playback_lifecycle_runs_render_validate_then_ready_test();

@@ -31,8 +31,9 @@ const char* GpuGenerationPathName(GpuGeneration generation) noexcept;
 
 // Scale on the reference render cost (RTX 5090, see PlaybackTiming.h) a fresh
 // install assumes for a generation before this machine has measured its own
-// pace. 0 means unknown: the live-session forecast then stays silent instead
-// of guessing, and the session simply buffers when it cannot keep up.
+// pace. 0 means unmeasured, never unsupported: no machine has timed a Turing,
+// Ampere or workstation session yet, so the live-session forecast stays silent
+// instead of guessing, and the session simply buffers when it cannot keep up.
 double RenderPacePrior(GpuGeneration generation) noexcept;
 
 struct DetectedGpu {
