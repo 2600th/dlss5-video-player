@@ -123,7 +123,7 @@ defined by the script rather than by prose. All of them mirror
 `src/TemporalGuides.cpp`: the cell grid is `AnalysisGrid` (width/10 cells clamped to
 96–160 below 45 fps, width/14 clamped to 96–128 above it, so 160×90 cells of 12×12
 source pixels for the 30-fps 1080p corpus), a cell's value is `DownsampleLuma`'s four
-stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.6 s
+stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.3 s
 weak-arm debounce are the generator's own. A threshold swept here therefore transfers
 to the runtime unchanged.
 

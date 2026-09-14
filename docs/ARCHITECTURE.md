@@ -143,7 +143,7 @@ upscaler both ignore it (see `docs/BENCHMARK.md`).
 The criterion is validated rather than asserted. `tools/benchmark/cutmirror.py`
 mirrors the cut path in `TemporalGuides.cpp` - the analysis grid, the stratified
 cell luma, the global search with its distance penalty and its refusal to prefer
-a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.6 s
+a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.3 s
 weak-arm debounce - and `tools/benchmark/cutlab.py` replays it over a corpus
 whose cuts are labelled in the manifest, so the thresholds can be swept without a
 GPU. Measured 2026-09-14 over nine clips and 1212 consecutive pairs, the shipped
@@ -220,12 +220,17 @@ manifest and summarized in one log line.
 
 The receipt also records what the scene-cut classifier did over the job: cuts
 accepted on the strong arm, cuts accepted on the weak arm, and weak cuts the
-minimum-interval debounce withheld. The debounce is a judgement about footage
-nobody has labelled yet, and a suppression is either a flicker avoided or a cut
-missed, so these are the numbers a sweep over labelled clips scores itself
-against. They count the job's guide generator over its whole life - preroll and
-every encoder attempt included - and a re-evaluated frame counts once, so they
-are not bounded by `historyResets`.
+minimum-interval debounce withheld. A suppression is either a flicker avoided or
+a cut missed, so these are the numbers a sweep over labelled clips scores itself
+against - and labelled real footage has now bracketed the window from both
+sides. The only transient in the corpus returns 4 frames after the cut that
+opened it, and the shortest genuine shot in it is 17 frames, so the window must
+exceed 4 and must not reach 17; the shipped 0.3 s sits between them. It was
+0.6 s, which is 18 frames at 30 fps, and discarded a hard cut 17 frames after
+its predecessor - the neural pass then kept accumulated history across a genuine
+discontinuity. The counters count the job's guide generator over its whole life -
+preroll and every encoder attempt included - and a re-evaluated frame counts
+once, so they are not bounded by `historyResets`.
 
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
@@ -264,11 +269,24 @@ through NGX init, feature 18 armed, first output) and finally the attach. They
 travel as a protocol v5 `Timeline` message, land in the receipt beside `timing`
 and in one log line, and a phase that did not happen is absent rather than zero -
 a cache hit, a single-file job and a refused request each report less than a
-segmented render, and that difference is information. Measured on an RTX 4080
-SUPER the helper side is 2.1-2.6 s across two renders, of which NGX init and
-feature arm are 95 % in both; the two are not a controlled pair, so the half-second
-spread in `neuralInit` is not a variance figure and an acceptance check needs
-several samples from one build (see `docs/VERIFICATION-2026-09-14-RTX4080.md`).
+segmented render, and that difference is information. The helper's five phases
+reach that line because the reader raises them the moment the helper reports
+them, not when the job returns: the job returns seconds after the attach, so a
+line written at first picture used to carry five dashes while the receipt for
+the same render carried all five numbers. A session that never started a helper
+says so - `helper=none(cache-hit)` - because five dashes beside a real total
+read as a broken instrument rather than as a render that never happened.
+
+Measured on an RTX 4080 SUPER, the helper side is 2.1-2.6 s, of which NGX init
+and feature arm are 95 %. From a driven player session the whole toggle costs
+**8.39-9.18 s on the first toggle after an install** and **4.88-5.16 s on every
+later one** over ten sessions; the 3.8 s difference is the feature-18 preflight
+probe, a second helper process whose verdict is cached per runtime identity. Of
+the warm 5 s, `neuralInit` plus `featureArm` is 2.10 s and per-process, so that
+is what a resident helper could remove; `firstOutput` and the attach are not
+removable this way, which puts the floor near 2.9 s at 1080p30 on this machine -
+arithmetic on measured phases, not a measurement of a resident helper. See
+`docs/VERIFICATION-2026-09-14-RTX4080.md` and `docs/VERIFICATION-matrix.md`.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
@@ -381,9 +399,15 @@ clips to **8.4 ms at 1080p, 15.4 at 1440p and 42.0 at 4K** (medians; see the
 [0.17.0 RTX 5090 record](VERIFICATION-2026-09-10-RTX5090.md)), which no longer
 fit one line: 1080p and 1440p came down 29% and 10% while the 4K figure did not
 move, because that clip is a 6.3 Mbit/s re-encode whose decode and encode, not
-the neural pass, set the pace. The player therefore keeps one measured pace per
-source geometry per GPU and predicts from those, falling back to the seed only
-until the first session has measured the machine itself.
+the neural pass, set the pace. The player therefore keeps the last five measured
+paces per source geometry per GPU and predicts from their median, falling back
+to the seed only until the first session has measured the machine itself. The
+median is what makes the record survive one bad sample: contention inflates a
+measurement and never deflates it, so a single session measured under load used
+to persist as the machine's pace and make the forecast refuse work the card does
+comfortably. Five samples and a median let the measurements outvote the outlier,
+and the minimum is deliberately not used - this forecast exists to refuse
+sessions that cannot keep up, so erasing slow evidence is the wrong failure.
 
 Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
 stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll
