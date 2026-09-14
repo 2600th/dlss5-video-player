@@ -582,13 +582,6 @@ void YouTubeResolutionLifecycle::Invalidate()
     resolving_ = false;
 }
 
-DecoderOpenPolicy DecoderPolicyForSource(MediaSourceKind sourceKind)
-{
-    return sourceKind == MediaSourceKind::YouTube
-        ? DecoderOpenPolicy::FfmpegOnly
-        : DecoderOpenPolicy::FfmpegThenMediaFoundation;
-}
-
 std::wstring DisplayTitleForSource(MediaSourceKind sourceKind,
                                    std::wstring_view suppliedTitle)
 {

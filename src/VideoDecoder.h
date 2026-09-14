@@ -16,7 +16,7 @@
 #include <optional>
 #include <utility>
 #include <thread>
-#include "UiLayout.h"
+#include "MediaSource.h"
 #include "FrameIdentity.h"
 
 #ifdef VIDEO_DECODER_TESTING

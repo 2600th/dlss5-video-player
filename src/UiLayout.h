@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "MediaSource.h"
+
 enum class ToolbarAction {
     Open, OpenYouTube, Back10, PlayPause, Stop, Forward10, Mute,
     ToggleNeuralRendering, ToggleUpscaling, ToggleFrameGeneration,
@@ -34,16 +36,6 @@ struct ToolbarAvailability {
     bool neuralSessionAvailable{false};
     bool upscalingAvailable{false};
     bool frameGenerationAvailable{false};
-};
-
-enum class MediaSourceKind {
-    LocalFile,
-    YouTube,
-};
-
-enum class DecoderOpenPolicy {
-    FfmpegThenMediaFoundation,
-    FfmpegOnly,
 };
 
 class YouTubeResolutionLifecycle {
@@ -192,7 +184,6 @@ PlayerRuntimeStatus ResolvePlayerRuntimeStatus(bool safeMode,
                                                bool dlssEnabled,
                                                bool dlssFeatureCreated);
 bool ExecuteGuardedRehook(int dialogResult, const std::function<void()>& requestRecreate);
-DecoderOpenPolicy DecoderPolicyForSource(MediaSourceKind sourceKind);
 std::wstring DisplayTitleForSource(MediaSourceKind sourceKind,
                                    std::wstring_view suppliedTitle);
 std::string_view SafeSourceLogLabel(MediaSourceKind sourceKind);

@@ -81,6 +81,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/UiResources.h
     src/VideoDecoder.cpp
     src/VideoDecoder.h
+    src/MediaSource.cpp
     src/DLSSBackend.cpp
     src/DLSSBackend.h
     src/D3D12Renderer.cpp
@@ -160,7 +161,7 @@ dlss_video_player_use_nvof(DLSSVideoPlayer)
 # stays hook-free for its independent runtime Super Resolution feature.
 add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
     src/NeuralPreflight.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
-    src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
+    src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp
     src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
     src/RuntimePolicy.cpp src/ReShadeConfig.cpp src/UiLayout.cpp)
 target_compile_definitions(NeuralWorker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
@@ -216,7 +217,7 @@ if(BUILD_TESTING)
     add_executable(RecentMediaTests tests/RecentMediaTests.cpp src/RecentMedia.cpp)
     add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp
         src/NeuralSettings.cpp)
-    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/UiLayout.cpp)
+    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     add_executable(RuntimeLockTests tests/RuntimeLockTests.cpp src/RuntimeLock.cpp src/NeuralReceipt.cpp
         src/NeuralPreflight.cpp src/NeuralCache.cpp)
     add_executable(RangeSelectionTests tests/RangeSelectionTests.cpp src/RangeSelection.cpp)
@@ -244,14 +245,14 @@ if(BUILD_TESTING)
     add_test(NAME FrameIdentityTests COMMAND FrameIdentityTests)
     add_executable(UpscalingGpuSmoke tests/UpscalingGpuSmoke.cpp
         src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
-        src/VideoDecoder.cpp src/RuntimePolicy.cpp src/UiLayout.cpp)
+        src/VideoDecoder.cpp src/MediaSource.cpp src/RuntimePolicy.cpp)
     target_include_directories(UpscalingGpuSmoke PRIVATE src "${DLSS_SDK}/include")
     target_compile_definitions(UpscalingGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
     target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
     dlss_video_player_use_nvof(UpscalingGpuSmoke)
     add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
-        src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/UiLayout.cpp)
+        src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     target_include_directories(MediaGpuSmoke PRIVATE src)
     target_compile_definitions(MediaGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(MediaGpuSmoke PRIVATE /W4 /permissive- /EHsc)
@@ -291,6 +292,7 @@ if(BUILD_TESTING)
         src/ExampleVideos.h
         src/VideoDecoder.cpp
         src/VideoDecoder.h
+        src/MediaSource.cpp
         src/CompletionRegistry.h
         src/AudioPlayer.cpp
         src/AudioPlayer.h
