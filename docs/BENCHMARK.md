@@ -90,7 +90,7 @@ corpus; a real dissolve still is not.
 | Group | Metric | Source |
 |---|---|---|
 | Runtime | preflight receipt: GPU, driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, Feature 18 creation/evaluation, RenoDX active settings | `--neural-preflight` probe, once per profile |
-| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v4) |
+| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v6) |
 | Memory | worker peak local VRAM (receipt) and NVML whole-GPU used/util/power/temperature at 2 Hz | `result.json`, `gpu.csv` |
 | Determinism | sha256 of the rgb24 per-frame MD5 sequence across repeats | `frames.md5` |
 | Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded; added per-pixel temporal σ and its p99 over the same shots | `analyze.py` |

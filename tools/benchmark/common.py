@@ -27,7 +27,7 @@ FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # src/NeuralWorkerProtocol.h
 WIRE_MAGIC = 0x3152574E  # NWR1
-WIRE_VERSION = 5
+WIRE_VERSION = 6
 KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT, KIND_TIMELINE = 1, 2, 3, 4, 5
 PHASES = ["Idle", "Decoding", "Priming", "Rendering", "Encoding", "Validating", "Completed", "Failed",
           "Cancelled", "Ready", "Preflight", "Paused", "Recovering"]

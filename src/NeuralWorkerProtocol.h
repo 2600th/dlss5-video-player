@@ -22,20 +22,36 @@
 namespace neural_worker_protocol {
 
 inline constexpr uint32_t kMagic = 0x3152574Eu; // NWR1
-// 5 since the helper reports its share of the cold-start timeline as its own
-// message kind. The parent rejects any header whose version is not exactly
-// this, so a helper left over from an older build in neural-runtime/ fails
-// closed instead of having a v4 stream read as a v5 one - and a v4 parent,
-// which would see this kind as malformed metadata and refuse the whole render,
-// never has to.
-inline constexpr uint16_t kVersion = 5;
+// 6 since the pipe is no longer one-way: the parent can hand a resident helper
+// another job over a command channel instead of spawning a process per render.
+// The parent rejects any header whose version is not exactly this, so a helper
+// left over from an older build in neural-runtime/ fails closed instead of
+// having a v5 stream read as a v6 one - and a v5 helper, which would see a
+// command frame as malformed input, never has to.
+inline constexpr uint16_t kVersion = 6;
 inline constexpr uint32_t kMaximumPayloadBytes = 64 * 1024;
 inline constexpr uint32_t kMaximumDetailBytes = 4 * 1024;
 // A segment name is a bare file name joined to the staging directory by the
 // parent, never a path.
 inline constexpr uint32_t kMaximumSegmentNameBytes = 512;
+// A job is handed over as the argument vector the helper already accepts on the
+// command line. That is deliberate: `ParseWorkerArguments` stays the single
+// definition of what a job is and the single place that validates one, so
+// residency changes how a job arrives and not what a job means. A parallel
+// struct here would be a second schema to keep in step with it.
+inline constexpr uint32_t kMaximumJobArguments = 64;
+inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
-enum class WireKind : uint16_t { Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5 };
+enum class WireKind : uint16_t {
+    Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5, Ready = 6
+};
+
+// Parent to helper, on its own pipe. `Hello` asks a freshly launched helper to
+// announce itself, which it does with `WireKind::Ready`; `Job` carries an
+// argument vector; `Cancel` asks the running job to stop, which still reports a
+// `Result` with `cancelled` set; `Shutdown` asks the helper to exit. Only `Job`
+// carries a payload.
+enum class CommandKind : uint16_t { Hello = 1, Job = 2, Cancel = 3, Shutdown = 4 };
 
 #pragma pack(push, 1)
 struct WireHeader {
@@ -179,6 +195,68 @@ inline bool WriteMessage(HANDLE handle, WireKind kind, const void* payload, uint
     const WireHeader header{kMagic, kVersion, static_cast<uint16_t>(kind), payloadBytes};
     return WriteAll(handle, &header, sizeof(header)) &&
            (!payloadBytes || WriteAll(handle, payload, payloadBytes));
+}
+
+inline bool IsKnownCommand(uint16_t kind) noexcept
+{
+    return kind >= static_cast<uint16_t>(CommandKind::Hello) &&
+           kind <= static_cast<uint16_t>(CommandKind::Shutdown);
+}
+
+inline bool WriteCommand(HANDLE handle, CommandKind kind, const void* payload, uint32_t payloadBytes)
+{
+    const WireHeader header{kMagic, kVersion, static_cast<uint16_t>(kind), payloadBytes};
+    return WriteAll(handle, &header, sizeof(header)) &&
+           (!payloadBytes || WriteAll(handle, payload, payloadBytes));
+}
+
+// `count`, then `count` pairs of byte length and UTF-16LE text. Lengths are
+// byte counts rather than character counts because that is what the reader
+// bounds-checks against, and an odd length is rejected rather than rounded.
+inline std::vector<std::byte> EncodeJobArguments(const std::vector<std::wstring>& arguments)
+{
+    std::vector<std::byte> payload;
+    const uint32_t count = static_cast<uint32_t>(arguments.size());
+    payload.resize(sizeof(count));
+    std::memcpy(payload.data(), &count, sizeof(count));
+    for (const std::wstring& argument : arguments) {
+        const uint32_t bytes = static_cast<uint32_t>(argument.size() * sizeof(wchar_t));
+        const size_t offset = payload.size();
+        payload.resize(offset + sizeof(bytes) + bytes);
+        std::memcpy(payload.data() + offset, &bytes, sizeof(bytes));
+        if (bytes) std::memcpy(payload.data() + offset + sizeof(bytes), argument.data(), bytes);
+    }
+    return payload;
+}
+
+// Rejects anything it cannot account for exactly: a count over the cap, a
+// length that overruns the payload, an odd length, an empty or NUL-bearing
+// argument, or trailing bytes nobody claimed. A job that does not decode is a
+// protocol failure, not a job to attempt with whatever survived.
+inline std::optional<std::vector<std::wstring>> DecodeJobArguments(std::span<const std::byte> payload)
+{
+    uint32_t count = 0;
+    if (payload.size() < sizeof(count)) return std::nullopt;
+    std::memcpy(&count, payload.data(), sizeof(count));
+    if (!count || count > kMaximumJobArguments) return std::nullopt;
+    std::vector<std::wstring> arguments;
+    arguments.reserve(count);
+    size_t cursor = sizeof(count);
+    for (uint32_t index = 0; index < count; ++index) {
+        uint32_t bytes = 0;
+        if (payload.size() - cursor < sizeof(bytes)) return std::nullopt;
+        std::memcpy(&bytes, payload.data() + cursor, sizeof(bytes));
+        cursor += sizeof(bytes);
+        if (!bytes || bytes > kMaximumJobArgumentBytes || bytes % sizeof(wchar_t)) return std::nullopt;
+        if (payload.size() - cursor < bytes) return std::nullopt;
+        std::wstring argument(bytes / sizeof(wchar_t), L'\0');
+        std::memcpy(argument.data(), payload.data() + cursor, bytes);
+        cursor += bytes;
+        if (argument.find(L'\0') != std::wstring::npos) return std::nullopt;
+        arguments.push_back(std::move(argument));
+    }
+    if (cursor != payload.size()) return std::nullopt;
+    return arguments;
 }
 
 inline WireProgress EncodeProgress(const NeuralRenderProgress& progress)

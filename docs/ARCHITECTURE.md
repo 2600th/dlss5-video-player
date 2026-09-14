@@ -266,7 +266,7 @@ persistent-helper work is judged in wall-clock and nothing measured it before:
 the player's request, the preflight probe, the launch, then the helper's own
 boundaries (process creation to entry point, entry to runtime ready, source open
 through NGX init, feature 18 armed, first output) and finally the attach. They
-travel as a protocol v5 `Timeline` message, land in the receipt beside `timing`
+travel as a protocol v6 `Timeline` message, land in the receipt beside `timing`
 and in one log line, and a phase that did not happen is absent rather than zero -
 a cache hit, a single-file job and a refused request each report less than a
 segmented render, and that difference is information. The helper's five phases
@@ -360,7 +360,7 @@ A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
 makes the helper rotate its encoder every N captured frames: the next segment's
 encoder starts before the current one is finished, finalization runs on a
 private FIFO thread, and each finished file is announced over the metadata pipe
-as a protocol v5 `Segment` message (index, absolute first pts and frame number,
+as a protocol v6 `Segment` message (index, absolute first pts and frame number,
 frame count, frame duration, file name). Temporal history, priming and preroll
 are untouched — only the encoder rotates.
 

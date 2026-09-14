@@ -247,7 +247,7 @@ instance still refused rather than interleaved, and no helper left running
 after the player exits or is killed.
 
 **Instrumented and partly re-measured, 2026-09-14.** Every render now reports the
-phases above as a protocol v5 timeline, in the receipt and in one log line, so the
+phases above as a protocol v6 timeline, in the receipt and in one log line, so the
 acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
 the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
 99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
