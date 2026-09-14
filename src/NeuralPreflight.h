@@ -10,14 +10,13 @@
 // Resolution carrier's, which reports success on machines where feature 18
 // was refused.
 
-#include "NeuralWorkerProtocol.h"
-#include "OfflineNeuralRenderer.h"
 #include "RuntimePolicy.h"
 
 #include <windows.h>
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
