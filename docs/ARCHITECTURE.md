@@ -147,6 +147,12 @@ and Zoom comparisons instantly without re-rendering; cache capture always
 samples the neural output with identity constants. Timestamp queries around
 the DLSS evaluation and a per-frame local VRAM sample feed the render receipt.
 
+GPU calls a test cannot make - the fence wait and signal, the device-removed
+reason, the capture readback - are reachable through one nullable
+`D3D12RendererTestHooks` pointer, null in every production renderer, so the
+class has the same size in every translation unit and each site falls through
+to the real call.
+
 ## Offline neural job and cache
 
 `OfflineNeuralRenderer` validates the requested range, primes feature 18,
