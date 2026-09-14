@@ -101,10 +101,9 @@ std::string JsonEscape(std::string_view text);
 std::string JsonEscapeWide(std::wstring_view text);
 std::string BuildPreflightFailureJson(std::wstring_view detail);
 
+// Lowercase 0x-prefixed eight-digit form of an NGX result code. Shared with the
+// probe, which reports the same codes in its receipt JSON.
+std::string HexResultText(uint32_t value);
+
 // The twelve runtime files whose hashes form the render identity.
 std::span<const std::wstring_view> LockedRuntimeFileNames();
-
-// Worker side. Primes feature 18 on a synthetic sequence, reads the runtime
-// evidence and returns the receipt. Never writes to the cache.
-neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
-    HWND renderWindow, const std::filesystem::path& moduleDirectory, const DetectedGpu& gpu);

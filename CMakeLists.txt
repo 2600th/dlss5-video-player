@@ -161,7 +161,7 @@ dlss_video_player_use_nvof(DLSSVideoPlayer)
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
 add_executable(NeuralWorker src/NeuralWorkerMain.cpp src/NeuralWorker.cpp
-    src/NeuralPreflight.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
+    src/NeuralPreflight.cpp src/NeuralPreflightProbe.cpp src/NeuralCache.cpp src/RuntimeLock.cpp
     src/OfflineNeuralRenderer.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp
     src/D3D12Renderer.cpp src/DLSSBackend.cpp src/TemporalGuides.cpp src/OpticalFlowNvof.cpp
     src/RuntimePolicy.cpp src/ReShadeConfig.cpp)
@@ -233,8 +233,7 @@ if(BUILD_TESTING)
         target_compile_definitions(${test_target} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
         target_compile_options(${test_target} PRIVATE /W4 /permissive- /EHsc)
     endforeach()
-    target_compile_definitions(RuntimeLockTests PRIVATE OFFLINE_NEURAL_RENDERER_TESTING
-        DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
+    target_compile_definitions(RuntimeLockTests PRIVATE DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
     target_link_libraries(RecentMediaTests PRIVATE user32)
     target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
     target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)

@@ -1,4 +1,5 @@
 #include "NeuralPreflight.h"
+#include "NeuralPreflightProbe.h"
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
 #include "ReShadeConfig.h"
