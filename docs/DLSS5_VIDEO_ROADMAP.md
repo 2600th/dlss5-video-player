@@ -66,6 +66,22 @@ clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
+**Settled the same day, and the answer reverses the synthetic one.** Four
+real-footage clips - cut from this repository's own demo capture, cuts verified
+frame by frame - were rendered on both trees. The gate **lowers** false motion on
+all four, by 4.6 to 14.4 % relative, which is 11.8 to 74.4 % of the share the
+`intensity-0` control attributes to the neural pass, and on two of them it improves
+false motion, cell flips and added sigma together - an outcome no synthetic clip
+produced. Repeats are bit-identical within each tree and the trees differ, so the
+deltas are signal. The gate is kept on evidence now, not only on the shape of its
+risk. What the synthetic result was really measuring is fractal and
+cellular-automaton motion, where "false motion" counts pixels on cells the source
+held static; the reversal is the clearest case this project has that synthetic
+patterns can point the wrong way. One caveat: the capture was taken with neural
+rendering on, so those pixels are the player's own output rather than
+camera-original footage.
+[Real-footage A/B](measurements/gate-real-footage-20260914/REPORT.md)
+
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
 `NvOFExecute` ... API call". A slow pan is a large, coherent global vector the
@@ -498,6 +514,22 @@ Preserve:
 - Original chroma when requested
 
 Expose native **Tone Intensity**, including zero, which NVIDIA says preserves the rendered frame's exact colors. Add clipping and color-shift warnings.
+
+**Not taken up on 2026-09-14, and the reason is that nothing points at it.** The
+exposure half of this item - supplying NGX a 1x1 exposure texture and an `IsHDR`
+flag instead of the `AutoExposure` feature flag `DLSSBackend.cpp` sets
+unconditionally - was listed as runnable once the flag reached a harness profile.
+The art-knob sweep that ran that day found no evidence for it: of eight shipped
+keys only the automatic mask changes a pixel, and the exposure-sensitive clip in
+the corpus (`flash-exposure`, a 4-frame flash plus a sustained step) shows the
+carrier, not the exposure path, dominating every metric. Plumbing a flag to
+measure a suspicion nobody has is the wrong order of work while the persistent
+helper has a measured 2.10 s on the table.
+
+What would warrant it, specifically: an HDR10 or PQ source, which the corpus does
+not have and cannot synthesise honestly, or a clip where auto-exposure demonstrably
+misreads - `highlights-gradients` clips to white by construction and is the
+candidate to check first. Either gives the A/B something to be about.
 
 **Links:** [NVIDIA DLSS 5 controls](https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/) · [neural-upstream](https://github.com/matiasLombo/neural-upstream) · [MediaPipeline.cpp](../src/MediaPipeline.cpp)
 
