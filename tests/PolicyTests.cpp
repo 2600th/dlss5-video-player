@@ -66,12 +66,16 @@ struct VideoDecoderTestAccess {
         VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None,
         bool resetAcceleration = true)
     {
-        // Dead hardware paths are remembered process-wide; a test decoder starts
-        // from a clean slate unless it is checking exactly that memory.
-        if(resetAcceleration)VideoDecoder::ResetAccelerationAvailabilityForTesting();
+        // Dead hardware paths are remembered per memo, so a test decoder gets a
+        // fresh one and never touches the process-wide memory. Passing false is
+        // how a test that is checking exactly that memory keeps the memo the
+        // previous Create handed out.
+        static std::shared_ptr<AccelerationMemo> memo;
+        if(resetAcceleration||!memo)memo=MakeAccelerationMemo();
         VideoDecoder::Settings settings;
         settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
-        return std::unique_ptr<VideoDecoder>(new VideoDecoder(std::move(settings)));
+        settings.accelerationMemo=memo;
+        return std::make_unique<VideoDecoder>(std::move(settings));
     }
 };
 

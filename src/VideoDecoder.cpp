@@ -17,6 +17,7 @@
 #include <system_error>
 #include <string_view>
 #include <map>
+#include <memory>
 #include <mutex>
 
 using Microsoft::WRL::ComPtr;
@@ -159,10 +160,9 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
         swap(m_bufferPool,other.m_bufferPool);
     }
     swap(m_pendingFrame,other.m_pendingFrame);swap(m_pendingFrameBytes,other.m_pendingFrameBytes);swap(m_lastFrameByte,other.m_lastFrameByte);swap(m_networkStallTimeout,other.m_networkStallTimeout);swap(m_probeTimeout,other.m_probeTimeout);
-#ifdef VIDEO_DECODER_TESTING
     swap(m_helperDirectory,other.m_helperDirectory);
     swap(m_failureStage,other.m_failureStage);
-#endif
+    swap(m_accelerationMemo,other.m_accelerationMemo);
     if(restartThis)StartFrameQueue();
     if(restartOther)other.StartFrameQueue();
 }
@@ -291,13 +291,11 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
 }
 
 std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
-#ifdef VIDEO_DECODER_TESTING
     if(!m_helperDirectory.empty()){
         const fs::path candidate=fs::path(m_helperDirectory)/exeName;std::error_code ec;
         if(fs::is_regular_file(candidate,ec))return candidate.wstring();
         return L"";
     }
-#endif
     wchar_t modulePath[32768]{};
     if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
         const fs::path base = fs::path(modulePath).parent_path();
@@ -382,9 +380,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
     }
     DWORD resumeResult=static_cast<DWORD>(-1);
-#ifdef VIDEO_DECODER_TESTING
     if(m_failureStage!=FailureStage::ProbeResume)
-#endif
     {
         resumeResult=ResumeThread(pi.hThread);
     }
@@ -542,45 +538,65 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     return true;
 }
 
+namespace {
+constexpr unsigned kCudaUnavailable=1u,kD3d11Unavailable=2u;
+} // namespace
+
 // A hardware path that cannot even start is a property of the codec plus this
 // build's ffmpeg, not of the file: remembering it per codec keeps every later
 // open and every seek from paying for the same dead process launches, while an
 // unsupported codec never downgrades the ones the GPU does handle.
-namespace {
-constexpr unsigned kCudaUnavailable=1u,kD3d11Unavailable=2u;
-std::mutex g_accelerationMemoMutex;
-std::map<std::string,unsigned> g_accelerationMemo;
+class AccelerationMemo {
+public:
+    unsigned Unavailable(const std::string& profile) const
+    {
+        std::scoped_lock lock(mutex_);
+        const auto found=paths_.find(Key(profile));
+        return found==paths_.end()?0u:found->second;
+    }
 
-unsigned UnavailableAccelerations(const std::string& profile)
+    void Remember(const std::string& profile,unsigned path)
+    {
+        const std::string key=Key(profile);
+        bool added=false;
+        {
+            std::scoped_lock lock(mutex_);
+            unsigned& paths=paths_[key];
+            added=(paths&path)==0;
+            paths|=path;
+        }
+        if(added)
+            LOG("Hardware decode path " << (path==kCudaUnavailable?"cuda":"d3d11va")
+                << " is unavailable for " << key << "; later opens and seeks skip it.");
+    }
+
+private:
+    static std::string Key(const std::string& profile)
+    {
+        return profile.empty()?std::string("unknown"):profile;
+    }
+
+    mutable std::mutex mutex_;
+    std::map<std::string,unsigned> paths_;
+};
+
+std::shared_ptr<AccelerationMemo> MakeAccelerationMemo()
 {
-    std::scoped_lock lock(g_accelerationMemoMutex);
-    const auto found=g_accelerationMemo.find(profile.empty()?std::string("unknown"):profile);
-    return found==g_accelerationMemo.end()?0u:found->second;
+    return std::make_shared<AccelerationMemo>();
 }
 
-void RememberUnavailableAcceleration(const std::string& profile,unsigned path)
+namespace {
+AccelerationMemo& ProcessAccelerationMemo()
 {
-    const std::string key=profile.empty()?std::string("unknown"):profile;
-    bool added=false;
-    {
-        std::scoped_lock lock(g_accelerationMemoMutex);
-        unsigned& paths=g_accelerationMemo[key];
-        added=(paths&path)==0;
-        paths|=path;
-    }
-    if(added)
-        LOG("Hardware decode path " << (path==kCudaUnavailable?"cuda":"d3d11va")
-            << " is unavailable for " << key << "; later opens and seeks skip it.");
+    static AccelerationMemo memo;
+    return memo;
 }
 } // namespace
 
-#ifdef VIDEO_DECODER_TESTING
-void VideoDecoder::ResetAccelerationAvailabilityForTesting()
+AccelerationMemo& VideoDecoder::AccelerationMemory() const
 {
-    std::scoped_lock lock(g_accelerationMemoMutex);
-    g_accelerationMemo.clear();
+    return m_accelerationMemo?*m_accelerationMemo:ProcessAccelerationMemo();
 }
-#endif
 
 // The job object carries KILL_ON_JOB_CLOSE, so closing it is what makes the
 // child die; waiting only makes that death observable to the caller.
@@ -599,7 +615,7 @@ static void StopFFmpegChild(HANDLE process,HANDLE job,HANDLE stdoutRead,DWORD wa
 
 bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
     FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
-    const unsigned unavailable=UnavailableAccelerations(m_hardwareProfile);
+    const unsigned unavailable=AccelerationMemory().Unavailable(m_hardwareProfile);
     if(acceleration==FFmpegAcceleration::Cuda&&(unavailable&kCudaUnavailable))
         acceleration=FFmpegAcceleration::D3D11Va;
     if(acceleration==FFmpegAcceleration::D3D11Va&&(unavailable&kD3d11Unavailable))
@@ -723,9 +739,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
         TerminateProcess(pi.hProcess,1);WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;
     }
     DWORD resumeResult=static_cast<DWORD>(-1);
-#ifdef VIDEO_DECODER_TESTING
     if(m_failureStage!=FailureStage::DecodeResume)
-#endif
     {
         resumeResult=ResumeThread(pi.hThread);
     }
@@ -818,7 +832,7 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     // later opens skip it. One that fails after delivering frames is a stream or
     // position problem and must not disqualify the hardware for everything else.
     if(m_ffmpegEmittedFrames==0)
-        RememberUnavailableAcceleration(m_hardwareProfile,
+        AccelerationMemory().Remember(m_hardwareProfile,
             m_ffmpegAcceleration==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;

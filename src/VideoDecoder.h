@@ -11,6 +11,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <stop_token>
 #include <optional>
@@ -19,9 +20,12 @@
 #include "MediaSource.h"
 #include "FrameIdentity.h"
 
-#ifdef VIDEO_DECODER_TESTING
-struct VideoDecoderTestAccess;
-#endif
+// Which hardware decode paths are known dead for a given ffprobe codec/pixel
+// profile. Defined in the .cpp: callers only ever hold one, never look inside.
+class AccelerationMemo;
+// A memo of its own, for a caller that must neither inherit the process-wide
+// memory nor publish into it.
+std::shared_ptr<AccelerationMemo> MakeAccelerationMemo();
 
 // PixelLayout.h: BGRA is 4 bytes/pixel; NV12 is 3/2 - 11.1 MB BGRA -> 4.2 MB NV12 per
 // 2578x1080 frame. OpenSequential (the neural export's source) selects Nv12 when the
@@ -70,15 +74,35 @@ enum class VideoReadResult {
 
 class VideoDecoder {
 public:
-#ifdef VIDEO_DECODER_TESTING
     enum class FailureStage {
         None,
         ProbeResume,
         DecodeResume,
     };
-#endif
+
+    // Where the helper executables are found, how long a probe and a stalled
+    // network read may run, and which process resume is forced to fail. Every
+    // one of those is either an environment fact or a Win32 call that cannot be
+    // made to fail on demand, so a caller that has to exercise the recovery they
+    // guard says so here. Default-constructed is production.
+    struct Settings {
+        // Empty: search next to the module, then PATH.
+        std::wstring helperDirectory;
+        std::chrono::milliseconds probeTimeout{15000};
+        std::chrono::milliseconds stallTimeout{15000};
+        FailureStage failureStage{FailureStage::None};
+        // Null: consult the memo shared by every decoder in this process. A
+        // dead path proven once should not be re-proven by the next decoder,
+        // and re-proving costs a spawned child per open, so sharing is the
+        // default and a private memo is the exception.
+        std::shared_ptr<AccelerationMemo> accelerationMemo;
+    };
 
     VideoDecoder() = default;
+    explicit VideoDecoder(Settings settings) : m_networkStallTimeout(settings.stallTimeout),
+        m_probeTimeout(settings.probeTimeout),m_helperDirectory(std::move(settings.helperDirectory)),
+        m_failureStage(settings.failureStage),
+        m_accelerationMemo(std::move(settings.accelerationMemo)) {}
     ~VideoDecoder();
 
     bool Open(const std::wstring& path,
@@ -195,13 +219,9 @@ private:
     // frames instead of re-running a hardware chain that already failed.
     bool StartFFmpeg(double seekSeconds,
                      std::optional<FFmpegAcceleration> acceleration = std::nullopt);
-#ifdef VIDEO_DECODER_TESTING
-public:
-    // The dead-path memory is process-wide, so a test that exercises the
-    // fallback chain has to start from a clean slate.
-    static void ResetAccelerationAvailabilityForTesting();
-private:
-#endif
+    // The memo this decoder consults: its own when one was injected, the
+    // process-wide one otherwise.
+    AccelerationMemo& AccelerationMemory() const;
     bool ReadNextFFmpeg(VideoFrame& out);
     // Empty when the pool holds nothing of this exact size.
     std::vector<uint8_t> TakeRecycledBuffer(size_t frameBytes);
@@ -311,18 +331,8 @@ private:
     VideoReadResult m_frameTerminal = VideoReadResult::NotReady;
     bool m_frameQueueEnabled = false;
     std::jthread m_frameThread;
-#ifdef VIDEO_DECODER_TESTING
-    struct Settings {
-        std::wstring helperDirectory;
-        std::chrono::milliseconds probeTimeout{15000};
-        std::chrono::milliseconds stallTimeout{15000};
-        FailureStage failureStage{FailureStage::None};
-    };
-    explicit VideoDecoder(Settings settings) : m_helperDirectory(std::move(settings.helperDirectory)),
-        m_networkStallTimeout(settings.stallTimeout),m_probeTimeout(settings.probeTimeout),
-        m_failureStage(settings.failureStage) {}
-    friend struct VideoDecoderTestAccess;
+    // Empty: ffprobe/ffmpeg are located next to the module, then on PATH.
     std::wstring m_helperDirectory;
     FailureStage m_failureStage{FailureStage::None};
-#endif
+    std::shared_ptr<AccelerationMemo> m_accelerationMemo;
 };
