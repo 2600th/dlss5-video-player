@@ -17,7 +17,7 @@ if(NOT WIN32)
     message(FATAL_ERROR "DLSSVideoPlayer currently targets Windows x64 / D3D12 only.")
 endif()
 if(NOT MSVC)
-    message(FATAL_ERROR "Use Visual Studio 2022 / MSVC for this build.")
+    message(FATAL_ERROR "This build needs MSVC: Visual Studio 2022 or newer, or its Build Tools.")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
