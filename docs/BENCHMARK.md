@@ -43,7 +43,7 @@ nothing to redistribute that the tree does not already carry.
 
 | clip | frames | labelled | what it is |
 |---|---:|---|---|
-| `real-film-cuts` | 102 | cuts 20, 47, 70, 87 | five film shots — hands over a bedspread, a car on a road, a man in a crowd, a revolver firing, a portrait — with grain, motion blur and a two-frame muzzle flash inside one shot |
+| `real-film-cuts` | 102 | cuts 20, 47, 70, 87 | four trailer shots — hands over a bedspread, a car on a road, a man in a crowd, a revolver firing — with grain, motion blur and a two-frame muzzle flash inside one shot, then a **static paused player frame** from local 87 on. The cut at 87 is the demo composition's scene boundary, not a film edit |
 | `real-game-cuts` | 68 | cut 32 | a race exterior hard-cut to a store interior, both with the game's own static HUD over fast camera motion |
 | `real-game-motion` | 76 | none | one continuous shot: a character runs off a rooftop and falls, so the camera translates while the subject occludes and disoccludes background throughout |
 | `real-dissolve` | 66 | soft cut 15–37 | the two shots above cross-faded over 0.7 s, held 0.5 s before and 1.0 s after |
@@ -63,11 +63,13 @@ load-bearing.** Every frame of the capture was taken with neural rendering enabl
 the toggle reads `Neural Rendering · On` and the status bar `Neural rendered · Source
 2560×1440` - so the video surface is the player's own DLSS-NR output on an RTX 5090.
 The full chain a `real` clip's pixels have been through is: source video → DLSS-NR →
-the player's 1442×932 window → `gdigrab` screen capture → Remotion's h264 encode →
-`crop` → lanczos upscale to 1920×1080 → FFV1 → **and then the neural pass again**
-when the benchmark renders it. Re-rendering therefore measures the pass on pixels it
-has already touched, at a different resolution and on different silicon, with the
-grain being post-pass grain softened twice by resampling.
+the player's 1442×932 window → `gdigrab` screen capture → an x264 re-encode at crf 17
+(`tools/demo-video/prepare-inputs.ps1`) → Remotion's own h264 encode → `crop` →
+lanczos upscale to 1920×1080 → FFV1 → **and then the neural pass again** when the
+benchmark renders it. That is two h264 generations before the corpus encode, not one.
+Re-rendering therefore measures the pass on pixels it has already touched, at a
+different resolution and on different silicon, with the grain being post-pass grain
+softened twice by resampling.
 
 For an A/B where both trees see byte-identical input this is sound, and it is what
 the gate and depth comparisons rest on. What it does not support is the phrase "real
@@ -78,16 +80,27 @@ a first one. The camera-original sources - 2560×1440 downloads named in
 `docs/media/README.md` - are not in the repository and the `faces` fixture is not on
 this machine, so nothing here closes that gap.
 
-**One clip carries a frozen tail.** `real-film-cuts` ends where the capture pauses
-before its magnify/wipe demonstration: source frames 102-116, which is local 87-101,
-are a single still frame repeated (consecutive mean |ΔY| ≤ 0.02 against 67.5 at the
-cut into it), so about 15 % of that clip is a static image rather than moving
-footage. That inflates its static-cell population, which is the denominator false
-motion is measured against, so `real-film-cuts`' false-motion numbers are the least
-comparable of the four. The clip stops one frame before the magnification begins
-(frame 116 is clean, 116→117 jumps by 25.0), so no split-screen, divider or UI
-chrome is inside any measured clip - checked frame by frame, and re-checked
-independently.
+**One clip is 37 % motionless, for two separate reasons.** `real-film-cuts` ends
+where the capture pauses before its magnify/wipe demonstration: source frames
+102-116, local 87-101, are a single still frame repeated (consecutive mean |ΔY| ≤
+0.02 against 67.5 at the cut into it), so its last 15 frames are a static image. The
+labelled cut at local 87 is therefore the demo composition's scene boundary rather
+than a film edit, and the fifth "shot" is a paused player frame. On top of that the
+Godfather source is a 23.976 fps trailer captured at 30 fps, so roughly one frame in
+five is a capture duplicate. Measured over the clip's 101 consecutive pairs, **37 %
+carry no motion at all** (<0.10 mean |ΔY|): 14 from the frozen tail and about 23 from
+frame-rate duplication. Both feed the static-cell population that false motion is
+divided by, which makes this clip's false-motion figures the least comparable of the
+four - it affects both trees identically, so the A/B stays valid, but the *level* is
+not comparable across clips.
+
+No split-screen, divider or UI chrome is inside any measured clip, and that was
+settled from the composition rather than inferred: `tools/demo-video/src/index.tsx`
+puts uninterrupted playback in frames 0-101 and 438-581 and the paused compare
+scenes in 102-269 and 270-437, at 30 fps. `real-film-cuts` stops at 116, one frame
+before the magnification (116→117 jumps by 25.0); both game ranges sit wholly inside
+the second playback scene, checked by eye at frames 450 and 540. The overlay chips,
+headings and progress bar all fall outside `crop=1362:766:502:126`.
 
 **Every cut index was verified, not proposed.** FFmpeg scene detection on the cropped
 surface proposed the boundaries; each one was then confirmed by extracting every frame
@@ -441,8 +454,11 @@ Two findings the synthetic set could not produce:
 - **The debounce, not a threshold, lost that cut.** Local 87 fires the weak arm at
   residual 0.2711 with overlap 0.5294 — a clear detection — and was suppressed for
   being 17 frames after the accepted cut at 70, inside the old 0.6 s (18-frame)
-  window. Real editing puts shots that close together; the shortest synthetic segment
-  here is 1.0 s, so no synthetic clip can exercise it. The labelled corpus brackets
+  window. Trailer editing puts shots that close together; the shortest synthetic
+  segment here is 1.0 s, so no synthetic clip can exercise it. The 17-frame shot is
+  the revolver, genuine trailer footage - what follows it is the paused player frame,
+  so the *cut* at 87 is the demo's scene boundary while the *shot length* the bracket
+  rests on is real. The labelled corpus brackets
   the replacement from both sides: `flash-exposure`'s transient returns 4 frames after
   the cut that opened it, so the window must exceed 4, and this genuine shot is 17
   frames, so the window must not exceed 17 — suppression is `since_cut < min_frames`,

@@ -11,11 +11,12 @@ accelerator through `SendInput`, and reads `DLSSVideoPlayer.log` until the
 render reports back.
 
 Four results, from ten passing sessions on an idle GPU. **Toggle-to-first-neural
--frame is 8.39-9.18 s on the first toggle after an install and 4.88-5.16 s on
-every later one**; the 3.8 s difference is the feature-18 preflight probe, which
-is a second helper process whose verdict is cached per runtime identity, not per
-toggle. The player's own request-to-picture stopwatch agrees with the wall clock
-to within 8-19 ms in ten of ten, so the instrument and the instrumented agree.
+-frame is 8.39-9.18 s on the first toggle with the preflight verdict and the cache
+cleared, and 4.88-5.16 s on every later one**; the 3.8 s difference is the
+feature-18 preflight probe, a second helper process whose verdict is cached per
+runtime identity, not per toggle. The player's own request-to-picture stopwatch
+agrees with the wall clock to within 8-19 ms in ten of ten, so the instrument and
+the instrumented agree.
 **`receipt.json` and its sibling group were observed on disk from a real player
 session for the first time**, along with the `Neural cold start:` line carrying a
 real total. And **the Ada render-pace prior is now bracketed by measurement at
@@ -190,15 +191,18 @@ helper. The four player-side phases and the total are new.
 1080p30, `neuralInit` + `featureArm` is 2.10 s and every millisecond of it is
 per-process - a resident helper removes it from the second toggle onward. The
 preflight probe is another 3.70 s, and it is already amortised: paid on the first
-toggle after an install and never again for that runtime identity, which is why
-the warm number is 5.04 s. What a resident helper cannot remove is `firstOutput`
-(1.41 s: the render must finalize a whole segment before anything is playable)
-and `attach` (1.24 s: the player's own work opening the pair, seeking it and
-presenting it). Those two are 2.66 s of the warm 5.04 s, so on the arithmetic of
-these phases **a resident helper takes the warm toggle-to-picture from ~5.0 s to
-~2.9 s at 1080p30 on this machine** - it does not take it below the
-segment-plus-attach floor. That projection is arithmetic on measured phases, not
-a measurement of a resident helper.
+toggle with a cleared preflight verdict and never again for that runtime identity,
+which is why the warm number is 5.04 s. What a resident helper was *assumed* not
+to remove is `firstOutput` (1.41 s: the render must finalize a whole segment
+before anything is playable) and `attach` (1.24 s: the player's own work opening
+the pair, seeking it and presenting it). Those two are 2.66 s of the warm 5.04 s,
+so on the arithmetic of these phases a resident helper looked like it would take
+the warm toggle from ~5.0 s to **~2.9 s**, no further.
+
+That projection was arithmetic on measured phases rather than a measurement, and
+the measurement later beat it: 2.44-2.52 s, because `firstOutput` is not fixed
+either and reuse shortened it to 1.058 s. The section on the acceptance run below
+has the numbers and what remains unexplained about them.
 
 ## The Ada render-pace prior: measured at both ends, and left alone
 

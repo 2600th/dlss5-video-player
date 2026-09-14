@@ -294,24 +294,29 @@ attach - because that needs a driven player session rather than the harness.
 unreachable, 2026-09-14.** `tools/verification/player_session.ps1` drives a real
 player, injects the toggle and scrapes the log, so the player's half is no longer
 prose. Ten sessions on an RTX 4080 SUPER at 610.47: toggle to first neural frame
-is **8.39-9.18 s on the first toggle after an install** and **4.88-5.16 s on every
+is **8.39-9.18 s on the first toggle with the preflight verdict and cache cleared** and **4.88-5.16 s on every
 later one**, the 3.8 s difference being the feature-18 preflight probe, whose
 verdict is cached per runtime identity. The nine-phase split of a warm 4.98 s
 session is request 0.077, launch 0.004, helperStart 0.101, runtimeReady 0.010,
 neuralInit 1.415, featureArm 0.689, firstOutput 1.414, attach 1.244.
 
 What a resident helper removes from that is `neuralInit` plus `featureArm`:
-**2.10 s, and per-process.** What it does not remove is `firstOutput` (the first
-segment's preroll, encode and mux) or the attach, which together are 2.66 s. So
-the floor for a warm toggle on this machine is **~2.9 s**, and the acceptance
-criterion written above - under 2 s excluded, under 3 s scanned - cannot be met by
-making the helper resident, however well it is done. That criterion was written
-before anything measured the phases. **Decision taken 2026-09-14: the
-acceptance becomes "under 3 s for a warm toggle", and `firstOutput` plus the
-attach - the first segment's preroll, encode and mux, and the handoff from
-original to neural playback - are a separate work item, not part of the helper.**
-Under 2 s would require shrinking that first-segment path (60-frame preroll, 4 s
-lead-in, first mux), which is a different change with a different risk.
+**2.10 s, and per-process.** It was assumed not to remove `firstOutput` (the first
+segment's preroll, encode and mux) or the attach, which together are 2.66 s,
+putting an estimated floor near **~2.9 s** - so the **under 2 s** half of the
+acceptance criterion written above could not be reached by making the helper
+resident, however well it is done. That criterion was written before anything
+measured the phases. **Decision taken 2026-09-14: the acceptance becomes "under
+3 s for a warm toggle", and `firstOutput` plus the attach - the first segment's
+preroll, encode and mux, and the handoff from original to neural playback - are a
+separate work item, not part of the helper.** Under 2 s would require shrinking
+that first-segment path (60-frame preroll, 4 s lead-in, first mux), a different
+change with a different risk.
+
+The measurement below then beat the 2.9 s estimate at **2.47 s**, because the
+estimate's own premise was wrong: `firstOutput` is not fixed, and reuse shortened
+it from 1.437 s to 1.058 s in the same run on the same clip. So the floor should
+be read as an estimate that reuse invalidated downwards, not as a bound.
 [Player-session record](VERIFICATION-matrix.md)
 
 **Built and accepted on Ada, 2026-09-14.** The helper is resident on `main`:

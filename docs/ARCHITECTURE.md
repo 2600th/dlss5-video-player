@@ -225,7 +225,9 @@ a cut missed, so these are the numbers a sweep over labelled clips scores itself
 against - and labelled real footage has now bracketed the window from both
 sides. The only transient in the corpus returns 4 frames after the cut that
 opened it, and the shortest genuine shot in it is 17 frames, so the window must
-exceed 4 and must not reach 17; the shipped 0.3 s sits between them. It was
+exceed 4 and must not exceed 17 - suppression is `since_cut < min_frames`, so a
+17-frame window still accepts a cut 17 frames out; the shipped 0.3 s sits
+between them. It was
 0.6 s, which is 18 frames at 30 fps, and discarded a hard cut 17 frames after
 its predecessor - the neural pass then kept accumulated history across a genuine
 discontinuity. The counters count the job's guide generator over its whole life -
@@ -375,6 +377,13 @@ hits retain full content-hash verification and use header-only metadata probes;
 frame counting and final-frame decoding run once before promotion, not on every
 replay. Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
+
+The same gap covers the helper binary itself. `NeuralWorker.exe` is not among the
+twelve locked runtime files - those are the vendor DLLs - so rebuilding the worker
+with different guide or cut logic leaves `runtimeDigest` unchanged, and only
+`applicationVersion` retires the entries it produced. Between version bumps a
+stale cache hit therefore masks exactly the changes a developer is trying to see,
+which is what `-DropRenderCache` in the session harness exists for.
 
 `RecentMediaHistory` atomically persists five distinct sources and their current
 cache keys. Displaced keys are removed only when unreferenced by that history and
