@@ -93,10 +93,10 @@ struct AudioPlayerTestAccess {
         settings.failFinalProcessWait=failFinalProcessWait;
         settings.failInitialReaderWait=failInitialReaderWait;
         settings.failFinalReaderWait=failFinalReaderWait;
-        return std::unique_ptr<AudioPlayer>(new AudioPlayer(std::move(settings)));
+        return std::make_unique<AudioPlayer>(std::move(settings));
     }
-    static double SeekBase(const AudioPlayer& player){return player.m_seekBaseSec;}
-    static uint64_t SubmittedBuffers(const AudioPlayer& player){return player.m_reader?player.m_reader->submittedBuffers.load():0;}
+    static double SeekBase(const AudioPlayer& player){return player.SeekBaseSeconds();}
+    static uint64_t SubmittedBuffers(const AudioPlayer& player){return player.SubmittedBuffers();}
 };
 
 struct RendererOwnedSentinel final : D3D12RendererTestOwnedResource {

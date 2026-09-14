@@ -9,10 +9,6 @@
 #include <memory>
 #include <utility>
 
-#ifdef AUDIO_PLAYER_TESTING
-struct AudioPlayerTestAccess;
-#endif
-
 enum class AudioStartState {
     Playing,
     Paused,
@@ -20,7 +16,26 @@ enum class AudioStartState {
 
 class AudioPlayer {
 public:
+    // Where the helper process is found, and which of the bounded waits on the
+    // stop path are forced to fail. Every one of those is a Win32 call that
+    // cannot be made to fail on demand, so a caller that has to exercise the
+    // recovery they guard says so here. Default-constructed is production:
+    // ffmpeg.exe is located next to the module, WaveOut is opened, and every
+    // wait is real.
+    struct Settings {
+        // Empty: search next to the module, then PATH.
+        std::wstring helperDirectory;
+        bool disableWaveOut{false};
+        bool failTerminateJob{false};
+        bool failInitialProcessWait{false};
+        bool failGetExitCodeProcess{false};
+        bool failFinalProcessWait{false};
+        bool failInitialReaderWait{false};
+        bool failFinalReaderWait{false};
+    };
+
     AudioPlayer() = default;
+    explicit AudioPlayer(Settings settings) : m_settings(std::move(settings)) {}
     ~AudioPlayer();
 
     bool Start(const std::wstring& videoPath, double seekSeconds = 0.0,
@@ -34,6 +49,10 @@ public:
     bool HasAudioData() const;
     bool Paused() const;
     double PositionSeconds() const;
+    // Seek position the current helper process was started at.
+    double SeekBaseSeconds() const { return m_seekBaseSec; }
+    // WaveOut buffers handed to the device since Start; 0 when stopped.
+    uint64_t SubmittedBuffers() const;
 
 private:
     struct ReaderState {
@@ -63,32 +82,5 @@ private:
     std::thread m_thread;
     double m_seekBaseSec = 0.0;
     float m_volume = 1.0f;
-    bool m_disableWaveOut = false;
-    bool m_failTerminateJob = false;
-    bool m_failInitialProcessWait = false;
-    bool m_failGetExitCodeProcess = false;
-    bool m_failFinalProcessWait = false;
-    bool m_failInitialReaderWait = false;
-    bool m_failFinalReaderWait = false;
-#ifdef AUDIO_PLAYER_TESTING
-    struct Settings {
-        std::wstring helperDirectory;
-        bool disableWaveOut{false};
-        bool failTerminateJob{false};
-        bool failInitialProcessWait{false};
-        bool failGetExitCodeProcess{false};
-        bool failFinalProcessWait{false};
-        bool failInitialReaderWait{false};
-        bool failFinalReaderWait{false};
-    };
-    explicit AudioPlayer(Settings settings) : m_helperDirectory(std::move(settings.helperDirectory)),
-        m_disableWaveOut(settings.disableWaveOut),m_failTerminateJob(settings.failTerminateJob),
-        m_failInitialProcessWait(settings.failInitialProcessWait),
-        m_failGetExitCodeProcess(settings.failGetExitCodeProcess),
-        m_failFinalProcessWait(settings.failFinalProcessWait),
-        m_failInitialReaderWait(settings.failInitialReaderWait),
-        m_failFinalReaderWait(settings.failFinalReaderWait) {}
-    friend struct AudioPlayerTestAccess;
-    std::wstring m_helperDirectory;
-#endif
+    Settings m_settings;
 };

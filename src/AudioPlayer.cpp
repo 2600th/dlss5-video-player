@@ -27,12 +27,10 @@ AudioPlayer::ReaderState::~ReaderState()
 }
 
 std::wstring AudioPlayer::FindFFmpeg() const {
-#ifdef AUDIO_PLAYER_TESTING
-    if(!m_helperDirectory.empty()){
-        const fs::path candidate=fs::path(m_helperDirectory)/L"ffmpeg.exe";std::error_code error;
+    if(!m_settings.helperDirectory.empty()){
+        const fs::path candidate=fs::path(m_settings.helperDirectory)/L"ffmpeg.exe";std::error_code error;
         return fs::is_regular_file(candidate,error)?candidate.wstring():std::wstring{};
     }
-#endif
     wchar_t modulePath[32768]{};
     if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
         fs::path base = fs::path(modulePath).parent_path();
@@ -53,7 +51,7 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
 
     auto reader=std::make_shared<ReaderState>();
-    reader->disableWaveOut=m_disableWaveOut;
+    reader->disableWaveOut=m_settings.disableWaveOut;
     reader->paused=state==AudioStartState::Paused;
     reader->completed=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if(!reader->completed){LOG("Audio: CreateEvent(reader completion) failed winerr="<<GetLastError());return false;}
@@ -117,9 +115,7 @@ void AudioPlayer::StopProcess(const std::shared_ptr<ReaderState>& state) {
     // has exited, so no handle used by ThreadMain is closed concurrently.
     if(state->job){
         BOOL terminated=FALSE;
-#ifdef AUDIO_PLAYER_TESTING
-        if(!m_failTerminateJob)
-#endif
+        if(!m_settings.failTerminateJob)
             terminated=TerminateJobObject(state->job,0);
         if(!terminated)LOG("Audio: job termination fallback engaged winerr="<<GetLastError());
         if(!CloseHandle(state->job))LOG("Audio: CloseHandle(job) failed winerr="<<GetLastError());
@@ -127,26 +123,20 @@ void AudioPlayer::StopProcess(const std::shared_ptr<ReaderState>& state) {
     }
     if(state->process){
         DWORD waitResult=WAIT_TIMEOUT;
-#ifdef AUDIO_PLAYER_TESTING
-        if(!m_failInitialProcessWait)
-#endif
+        if(!m_settings.failInitialProcessWait)
             waitResult=WaitForSingleObject(state->process,200);
         if(waitResult!=WAIT_OBJECT_0){
             if(waitResult==WAIT_FAILED)LOG("Audio: process wait failed winerr="<<GetLastError());
             DWORD code=STILL_ACTIVE;
             BOOL queried=FALSE;
-#ifdef AUDIO_PLAYER_TESTING
-            if(!m_failGetExitCodeProcess)
-#endif
+            if(!m_settings.failGetExitCodeProcess)
                 queried=GetExitCodeProcess(state->process,&code);
             if(!queried)LOG("Audio: GetExitCodeProcess failed winerr="<<GetLastError());
             if(!queried||code==STILL_ACTIVE){
                 if(!TerminateProcess(state->process,1))LOG("Audio: owned-process fallback termination failed winerr="<<GetLastError());
             }
             DWORD finalWait=WAIT_TIMEOUT;
-#ifdef AUDIO_PLAYER_TESTING
-            if(!m_failFinalProcessWait)
-#endif
+            if(!m_settings.failFinalProcessWait)
                 finalWait=WaitForSingleObject(state->process,200);
             if(finalWait!=WAIT_OBJECT_0)LOG("Audio: owned child did not exit within final bound result="<<finalWait);
         }
@@ -237,6 +227,11 @@ double AudioPlayer::PositionSeconds() const {
     return m_seekBaseSec + double(mt.u.sample) / 48000.0;
 }
 
+uint64_t AudioPlayer::SubmittedBuffers() const
+{
+    return m_reader ? m_reader->submittedBuffers.load() : 0;
+}
+
 bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->waveOut;}
 bool AudioPlayer::HasAudioData() const {const auto state=m_reader;return state&&state->hasAudioData.load();}
 bool AudioPlayer::Paused() const {const auto state=m_reader;return state&&state->paused.load();}
@@ -284,17 +279,13 @@ void AudioPlayer::Stop() {
         HANDLE readerThread=reinterpret_cast<HANDLE>(m_thread.native_handle());
         if(!CancelSynchronousIo(readerThread)){const DWORD error=GetLastError();if(error!=ERROR_NOT_FOUND)LOG("Audio: CancelSynchronousIo failed winerr="<<error);}
         DWORD readerWait=WAIT_TIMEOUT;
-#ifdef AUDIO_PLAYER_TESTING
-        if(!m_failInitialReaderWait)
-#endif
+        if(!m_settings.failInitialReaderWait)
             readerWait=WaitForSingleObject(state->completed,200);
         if(readerWait!=WAIT_OBJECT_0){
             LOG("Audio: reader required final bounded cancellation result="<<readerWait);StopProcess(state);
             if(!CancelSynchronousIo(readerThread)){const DWORD error=GetLastError();if(error!=ERROR_NOT_FOUND)LOG("Audio: final CancelSynchronousIo failed winerr="<<error);}
             readerWait=WAIT_TIMEOUT;
-#ifdef AUDIO_PLAYER_TESTING
-            if(!m_failFinalReaderWait)
-#endif
+            if(!m_settings.failFinalReaderWait)
                 readerWait=WaitForSingleObject(state->completed,200);
         }
         if(readerWait==WAIT_OBJECT_0)m_thread.join();
