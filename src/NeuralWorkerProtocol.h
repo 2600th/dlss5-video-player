@@ -1,10 +1,10 @@
 #pragma once
 
 // Versioned metadata pipe between the hook-free player and the isolated
-// neural helper. Only progress, finalized-segment announcements, preflight and
-// final results cross the pipe; encoded video stays in the cache. This header
-// is the single definition shared by the parent launcher, the helper
-// executable and the tests.
+// neural helper. Only progress, finalized-segment announcements, the
+// cold-start timeline, preflight and final results cross the pipe; encoded
+// video stays in the cache. This header is the single definition shared by the
+// parent launcher, the helper executable and the tests.
 
 #include "OfflineNeuralRenderer.h"
 
@@ -22,18 +22,20 @@
 namespace neural_worker_protocol {
 
 inline constexpr uint32_t kMagic = 0x3152574Eu; // NWR1
-// 4 since the result carries the guide generator's scene-cut tally. The parent
-// rejects any header whose version is not exactly this, so a helper left over
-// from an older build in neural-runtime/ fails closed instead of having its
-// shorter WireResult read as a v4 one.
-inline constexpr uint16_t kVersion = 4;
+// 5 since the helper reports its share of the cold-start timeline as its own
+// message kind. The parent rejects any header whose version is not exactly
+// this, so a helper left over from an older build in neural-runtime/ fails
+// closed instead of having a v4 stream read as a v5 one - and a v4 parent,
+// which would see this kind as malformed metadata and refuse the whole render,
+// never has to.
+inline constexpr uint16_t kVersion = 5;
 inline constexpr uint32_t kMaximumPayloadBytes = 64 * 1024;
 inline constexpr uint32_t kMaximumDetailBytes = 4 * 1024;
 // A segment name is a bare file name joined to the staging directory by the
 // parent, never a path.
 inline constexpr uint32_t kMaximumSegmentNameBytes = 512;
 
-enum class WireKind : uint16_t { Progress = 1, Result = 2, Preflight = 3, Segment = 4 };
+enum class WireKind : uint16_t { Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5 };
 
 #pragma pack(push, 1)
 struct WireHeader {
@@ -111,6 +113,18 @@ struct WirePreflight {
     uint8_t reserved[3];
     uint32_t jsonBytes;
 };
+
+// The helper's own share of the cold-start timeline. Non-terminal and sent at
+// most once per helper: it is the startup breakdown of one process, not a
+// running measurement, and it travels ahead of the result so a cancelled or
+// failed run still delivers it. `present` is a bit per NeuralColdStartPhase;
+// only the helper-owned phases may be set, and a phase without its bit did not
+// happen rather than took no time.
+struct WireTimeline {
+    uint32_t present;
+    uint8_t reserved[4];
+    int64_t microseconds[kNeuralColdStartPhaseCount];
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WireHeader) == 12);
@@ -118,6 +132,7 @@ static_assert(sizeof(WireProgress) == 52);
 static_assert(sizeof(WireResult) == 152);
 static_assert(sizeof(WirePreflight) == 8);
 static_assert(sizeof(WireSegment) == 44);
+static_assert(sizeof(WireTimeline) == 80);
 
 inline bool IsKnownPhase(uint32_t phase) noexcept
 {
@@ -241,6 +256,41 @@ inline std::optional<NeuralRenderSegment> DecodeSegment(std::span<const std::byt
     segment.fileName.assign(name, name + wire.nameBytes / sizeof(wchar_t));
     if (!IsValidSegmentName(segment.fileName)) return std::nullopt;
     return segment;
+}
+
+inline WireTimeline EncodeTimeline(const NeuralColdStartTimeline& timeline)
+{
+    WireTimeline wire{};
+    for (uint32_t index = 0; index < kNeuralColdStartPhaseCount; ++index) {
+        const auto phase = timeline.Phase(static_cast<NeuralColdStartPhase>(index));
+        if (!phase) continue;
+        wire.present |= 1u << index;
+        wire.microseconds[index] = phase->count();
+    }
+    return wire;
+}
+
+// A helper may only claim the phases it can see, and only with durations it
+// could have measured: anything else is a malformed helper, not a slow one.
+inline std::optional<NeuralColdStartTimeline> DecodeTimeline(std::span<const std::byte> payload)
+{
+    if (payload.size() != sizeof(WireTimeline)) return std::nullopt;
+    WireTimeline wire{};
+    std::memcpy(&wire, payload.data(), sizeof(wire));
+    if (!wire.present || (wire.present & ~kNeuralColdStartHelperPhases) ||
+        wire.reserved[0] || wire.reserved[1] || wire.reserved[2] || wire.reserved[3]) return std::nullopt;
+    NeuralColdStartTimeline timeline;
+    for (uint32_t index = 0; index < kNeuralColdStartPhaseCount; ++index) {
+        if (!(wire.present & (1u << index))) {
+            // A slot without its bit describes nothing, so it must carry nothing.
+            if (wire.microseconds[index]) return std::nullopt;
+            continue;
+        }
+        if (wire.microseconds[index] < 0) return std::nullopt;
+        timeline.Record(static_cast<NeuralColdStartPhase>(index),
+                        std::chrono::microseconds(wire.microseconds[index]));
+    }
+    return timeline;
 }
 
 inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)

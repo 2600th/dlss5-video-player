@@ -95,6 +95,9 @@ struct NeuralRenderResult {
     // for range renders, 0 for whole-source renders).
     int64_t firstTimestamp100ns{};
     NeuralRenderTiming timing{};
+    // Cold-start phases this run measured. The helper fills its own five; the
+    // player merges the four it owns before the receipt is written.
+    NeuralColdStartTimeline coldStart{};
     std::wstring detail;
 };
 
@@ -193,11 +196,15 @@ public:
                           std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory = {});
 #endif
 
-    // `segments` is used only when request.segmentFrames > 0.
+    // `segments` is used only when request.segmentFrames > 0. `coldStart` is
+    // invoked once, on the finalize thread when the first output file is
+    // published or on the calling thread when the job ends without publishing
+    // one, so a failed run still reports how far the stack got.
     NeuralRenderResult Run(const NeuralRenderRequest& request,
                            ProgressCallback progress = {},
                            std::stop_token stop = {},
-                           const NeuralSegmentSink& segments = {});
+                           const NeuralSegmentSink& segments = {},
+                           NeuralColdStartCallback coldStart = {});
 
 private:
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING

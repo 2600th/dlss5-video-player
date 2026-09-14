@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -24,6 +25,12 @@
 // `segments` receives the files a segmented job finalizes while it renders:
 // onSegment for each finalized file, onRestart whenever the sequence begins
 // again from index zero and every earlier file must be discarded.
+// `processCreated` fires once per launch, as soon as the helper's process
+// exists; a repair or crash relaunch fires it again, so the cold-start Launch
+// phase ends at the process that actually reported and a discarded first
+// process counts as launch cost instead of vanishing. The helper's own share of
+// the cold-start timeline arrives on the returned result, whether that result
+// is the helper's or one this launcher synthesized for a crash or a cancel.
 inline constexpr uint32_t kDefaultCrashRelaunchLimit = 1;
 NeuralRenderResult RunNeuralWorker(
     const std::filesystem::path& executable,
@@ -31,7 +38,8 @@ NeuralRenderResult RunNeuralWorker(
     OfflineNeuralRenderer::ProgressCallback progress = {},
     std::stop_token stop = {},
     const NeuralSegmentSink& segments = {},
-    uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit);
+    uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit,
+    const std::function<void()>& processCreated = {});
 
 // Short Feature-18 probe run in the same isolated helper before a render. The
 // JSON receipt names GPU, driver, runtime/consumer versions and every feature
@@ -155,6 +163,7 @@ struct MetadataStreamOutcome {
     size_t progressUpdates{};
     size_t restarts{};                  // sequences that began again at index 0
     std::vector<NeuralRenderSegment> segments;
+    NeuralColdStartTimeline timeline;  // empty unless the helper reported one
 };
 MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes);
 

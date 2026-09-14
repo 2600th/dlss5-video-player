@@ -166,6 +166,8 @@ public:
     bool Malformed() const { return malformed_; }
     const NeuralRenderResult& Result() const { return *result_; }
     const PreflightPayload& Preflight() const { return *preflight_; }
+    // Empty until the helper reports its share of the cold-start timeline.
+    const NeuralColdStartTimeline& Timeline() const { return timeline_; }
 
 private:
     bool Consume()
@@ -179,7 +181,8 @@ private:
                 (header.kind != static_cast<uint16_t>(WireKind::Progress) &&
                  header.kind != static_cast<uint16_t>(WireKind::Result) &&
                  header.kind != static_cast<uint16_t>(WireKind::Preflight) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Segment))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Segment) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Timeline))) {
                 malformed_ = true;
                 return false;
             }
@@ -222,6 +225,14 @@ private:
                     if (segments_.onSegment) segments_.onSegment(*segment);
                     break;
                 }
+                case WireKind::Timeline: {
+                    // One cold start per helper: a second timeline would mean
+                    // the helper measured a startup it did not have.
+                    auto timeline = DecodeTimeline(payload);
+                    if (!timeline || !timeline_.Empty()) { malformed_ = true; return false; }
+                    timeline_ = *timeline;
+                    break;
+                }
             }
             offset += messageBytes;
         }
@@ -233,6 +244,7 @@ private:
     NeuralSegmentSink segments_;
     std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
+    NeuralColdStartTimeline timeline_;
     std::optional<NeuralRenderResult> result_;
     std::optional<PreflightPayload> preflight_;
     bool malformed_{};
@@ -269,7 +281,8 @@ void RemoveStaleRuntimeLogs(const std::filesystem::path& runtimeDirectory)
 // caller cancels. The job object kills the whole helper tree on close.
 LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
                            const std::function<std::vector<std::wstring>(HANDLE metadata, HANDLE pause)>& arguments,
-                           HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop)
+                           HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop,
+                           const std::function<void()>& processCreated)
 {
     LaunchOutcome outcome;
     RemoveStaleRuntimeLogs(executable.parent_path());
@@ -332,6 +345,10 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
         outcome.detail = ErrorDetail(L"Starting the isolated neural helper failed");
         return outcome;
     }
+    // The helper exists from here on, suspended. This is the boundary the
+    // player's Launch phase ends at: the process is the parent's last
+    // observation before the loader window the helper measures itself.
+    if (processCreated) processCreated();
     const bool assigned = AssignProcessToJobObject(job, process.hProcess) != FALSE;
     const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
@@ -374,11 +391,13 @@ bool ValidRequest(const NeuralRenderRequest& request)
     return true;
 }
 
-NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
-                                          const NeuralRenderRequest& request,
-                                          const OfflineNeuralRenderer::ProgressCallback& progress,
-                                          const NeuralSegmentSink& segments,
-                                          std::stop_token stop, bool configurationRestarted)
+// One helper launch, judged. `restartRequested` is set when the helper repaired
+// its own configuration and exited for a fresh process to replace it.
+NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
+                                 const NeuralRenderRequest& request, std::stop_token stop,
+                                 bool configurationRestarted, MetadataReader& reader,
+                                 const std::function<void()>& processCreated,
+                                 bool& restartRequested)
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
@@ -388,11 +407,10 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
         result.detail = L"Neural rendering was cancelled before the helper started.";
         return result;
     }
-    MetadataReader reader(progress, segments);
     const LaunchOutcome launch = LaunchHelper(executable,
         [&](HANDLE metadata, HANDLE pause) {
             return neural_worker_detail::BuildWorkerArguments(request, metadata, pause, configurationRestarted);
-        }, request.pauseEvent, reader, stop);
+        }, request.pauseEvent, reader, stop, processCreated);
     if (!launch.launched) {
         result.failure = NeuralRenderFailure::Protocol;
         result.detail = launch.detail;
@@ -406,7 +424,8 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
     }
     if (launch.exitCode == neural_worker_detail::kConfigurationChangedExitCode &&
         !configurationRestarted && !reader.Malformed()) {
-        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true);
+        restartRequested = true;
+        return result;
     }
     if (launch.exitCode != 0) {
         result.failure = NeuralRenderFailure::WorkerCrashed;
@@ -428,6 +447,27 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
         mismatch.detail = L"The isolated neural helper reported a result for a different job.";
         return mismatch;
     }
+    return result;
+}
+
+NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
+                                          const NeuralRenderRequest& request,
+                                          const OfflineNeuralRenderer::ProgressCallback& progress,
+                                          const NeuralSegmentSink& segments,
+                                          std::stop_token stop, bool configurationRestarted,
+                                          const std::function<void()>& processCreated)
+{
+    MetadataReader reader(progress, segments);
+    bool restartRequested = false;
+    NeuralRenderResult result = RunHelperOnce(executable, request, stop,
+        configurationRestarted, reader, processCreated, restartRequested);
+    if (restartRequested) {
+        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true, processCreated);
+    }
+    // The reader outlives the judgement above, so a timeline that arrived
+    // before a crash, a cancel or a rejected result is still reported: the
+    // breakdown of a run that failed is the whole point of measuring it.
+    result.coldStart = reader.Timeline();
     return result;
 }
 
@@ -670,7 +710,8 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
                                    const NeuralRenderRequest& request,
                                    OfflineNeuralRenderer::ProgressCallback progress,
                                    std::stop_token stop, const NeuralSegmentSink& segments,
-                                   uint32_t crashRelaunchLimit)
+                                   uint32_t crashRelaunchLimit,
+                                   const std::function<void()>& processCreated)
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
@@ -693,7 +734,7 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
         // the previous helper published names a file that is about to be
         // rewritten.
         if (attempt && segments.onRestart) segments.onRestart();
-        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false);
+        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false, processCreated);
         const bool relaunchable = !result.ok && !result.cancelled &&
             (result.failure == NeuralRenderFailure::WorkerCrashed ||
              result.failure == NeuralRenderFailure::DeviceRemoved ||
@@ -731,6 +772,7 @@ neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadata
     }
     outcome.malformed = reader.Malformed();
     outcome.complete = reader.Complete();
+    outcome.timeline = reader.Timeline();
     return outcome;
 }
 
@@ -751,7 +793,7 @@ NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable
         MetadataReader reader({}, {});
         const LaunchOutcome launch = LaunchHelper(executable,
             [&](HANDLE metadata, HANDLE) { return neural_worker_detail::BuildPreflightArguments(metadata, restarted); },
-            nullptr, reader, stop);
+            nullptr, reader, stop, {});
         if (!launch.launched) { result.detail = launch.detail; return result; }
         if (launch.cancelled || stop.stop_requested()) {
             result.cancelled = true;

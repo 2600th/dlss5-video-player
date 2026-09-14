@@ -123,6 +123,19 @@ NeuralRenderResult ValidFakeResult(uint64_t jobId)
     return result;
 }
 
+// The five phases only a helper can see, with the orders of magnitude the
+// handoff's cold-start table records so a transposed field is obvious.
+NeuralColdStartTimeline FakeHelperTimeline()
+{
+    NeuralColdStartTimeline timeline;
+    timeline.Record(NeuralColdStartPhase::HelperStart, 712000us);
+    timeline.Record(NeuralColdStartPhase::RuntimeReady, 94000us);
+    timeline.Record(NeuralColdStartPhase::NeuralInit, 1511000us);
+    timeline.Record(NeuralColdStartPhase::FeatureArm, 631000us);
+    timeline.Record(NeuralColdStartPhase::FirstOutput, 1780000us);
+    return timeline;
+}
+
 int RunFakeWorker(int argc, wchar_t** argv)
 {
     std::vector<std::wstring_view> values;
@@ -207,6 +220,11 @@ int RunFakeWorker(int argc, wchar_t** argv)
             if (!WriteMessage(handle, WireKind::Segment, payload.data(),
                               static_cast<uint32_t>(payload.size()))) return 16;
         }
+    }
+    if (source == L"timeline-source.mkv") {
+        // Non-terminal and ahead of the result, the way the real helper sends it.
+        const WireTimeline wire = EncodeTimeline(FakeHelperTimeline());
+        if (!WriteMessage(handle, WireKind::Timeline, &wire, sizeof(wire))) return 17;
     }
     NeuralRenderResult result;
     result.ok = true;
@@ -360,6 +378,20 @@ int RunRealWorker(int argc, wchar_t** argv)
         << L", p95=" << result.timing.neuralGpuMsP95 << L", max=" << result.timing.neuralGpuMsMax
         << L", guideMsMean=" << result.timing.guideMsMean << L", captureMsMean=" << result.timing.captureMsMean
         << L", peakLocalVramMiB=" << result.timing.peakLocalVramMiB << L"} detail=" << result.detail << L'\n';
+    // The helper's own share of the cold start, in microseconds, as it arrived
+    // over the pipe. An absent phase prints "-": this harness launches the
+    // helper directly, so the player's four phases never exist here.
+    std::wcout << L"coldStart={";
+    for (uint32_t index = 0; index < kNeuralColdStartPhaseCount; ++index) {
+        const auto phase = static_cast<NeuralColdStartPhase>(index);
+        const auto elapsed = result.coldStart.Phase(phase);
+        const std::string name(NeuralColdStartPhaseName(phase));
+        if (index) std::wcout << L", ";
+        std::wcout << name.c_str() << L'=';
+        if (elapsed) std::wcout << elapsed->count() << L"us";
+        else std::wcout << L'-';
+    }
+    std::wcout << L"}\n";
     return result.ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -943,15 +975,94 @@ void running_helper_publishes_segments_before_its_result_test()
 
 void configuration_retry_is_sequential_and_bounded_test()
 {
-    size_t progressCount = 0;
+    size_t progressCount = 0, launches = 0;
     const auto configured = RunNeuralWorker(CurrentExecutable(), TestRequest(L"configure-once-source.mkv"),
-        [&](const NeuralRenderProgress&) { ++progressCount; });
+        [&](const NeuralRenderProgress&) { ++progressCount; }, {}, {}, kDefaultCrashRelaunchLimit,
+        [&] { ++launches; });
     CHECK(configured.ok);
     CHECK(configured.frameCount == 60);
     CHECK(progressCount == 1);
+    // The repaired helper and its replacement are both launch cost, so both
+    // processes are reported rather than only the one that rendered.
+    CHECK(launches == 2);
     const auto repeated = RunNeuralWorker(CurrentExecutable(), TestRequest(L"configure-always-source.mkv"));
     CHECK(!repeated.ok);
     CHECK(!repeated.detail.empty());
+}
+
+void helper_cold_start_timeline_reaches_the_parent_test()
+{
+    size_t launches = 0;
+    const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(),
+        TestRequest(L"timeline-source.mkv"), {}, {}, {}, kDefaultCrashRelaunchLimit,
+        [&] { ++launches; });
+    CHECK(result.ok);
+    CHECK(launches == 1);
+    CHECK(result.coldStart == FakeHelperTimeline());
+    // The helper measures its own five phases and claims nothing else: the
+    // player's preparation and its request-to-picture total are not its to report.
+    CHECK(!result.coldStart.Phase(NeuralColdStartPhase::Request).has_value());
+    CHECK(!result.coldStart.Phase(NeuralColdStartPhase::Attach).has_value());
+    CHECK(!result.coldStart.Total().has_value());
+    // A helper that never reports one leaves every phase absent rather than zero.
+    const NeuralRenderResult silent = RunNeuralWorker(CurrentExecutable(), TestRequest(L"valid-source.mkv"));
+    CHECK(silent.ok);
+    CHECK(silent.coldStart == NeuralColdStartTimeline{});
+}
+
+void cold_start_timeline_messages_are_validated_test()
+{
+    const auto resultPayload = EncodeResult(ValidFakeResult(9001));
+    const WireTimeline valid = EncodeTimeline(FakeHelperTimeline());
+    std::vector<std::byte> stream;
+    AppendMessage(stream, WireKind::Timeline, AsBytes(valid));
+    AppendMessage(stream, WireKind::Result, resultPayload);
+    const auto accepted = neural_worker_detail::DecodeMetadataStream(stream);
+    CHECK(!accepted.malformed);
+    CHECK(accepted.complete);
+    CHECK(accepted.timeline == FakeHelperTimeline());
+
+    // A helper speaking the previous protocol version is refused outright, so a
+    // stale NeuralWorker.exe cannot have its shorter messages read as v5 ones.
+    std::vector<std::byte> older;
+    AppendMessage(older, static_cast<uint16_t>(kProtocolVersion - 1), WireKind::Timeline, AsBytes(valid));
+    CHECK(neural_worker_detail::DecodeMetadataStream(older).malformed);
+
+    // Reserved bytes are the only room a later version has; a helper that
+    // writes there is not the helper this parent validated.
+    WireTimeline reserved = valid;
+    reserved.reserved[2] = 1;
+    std::vector<std::byte> dirty;
+    AppendMessage(dirty, WireKind::Timeline, AsBytes(reserved));
+    CHECK(neural_worker_detail::DecodeMetadataStream(dirty).malformed);
+
+    // A phase the player owns, a duration in a slot with no present bit, a
+    // negative duration, an empty timeline and a second timeline are all
+    // helpers that measured something they could not have measured.
+    for (const WireTimeline broken : {
+             [&] { WireTimeline value = valid;
+                   value.present |= 1u << static_cast<uint32_t>(NeuralColdStartPhase::Attach);
+                   return value; }(),
+             [&] { WireTimeline value = valid;
+                   value.microseconds[static_cast<size_t>(NeuralColdStartPhase::Request)] = 5;
+                   return value; }(),
+             [&] { WireTimeline value = valid;
+                   value.microseconds[static_cast<size_t>(NeuralColdStartPhase::NeuralInit)] = -1;
+                   return value; }(),
+             WireTimeline{}}) {
+        std::vector<std::byte> rejected;
+        AppendMessage(rejected, WireKind::Timeline, AsBytes(broken));
+        CHECK(neural_worker_detail::DecodeMetadataStream(rejected).malformed);
+    }
+    std::vector<std::byte> twice;
+    AppendMessage(twice, WireKind::Timeline, AsBytes(valid));
+    AppendMessage(twice, WireKind::Timeline, AsBytes(valid));
+    CHECK(neural_worker_detail::DecodeMetadataStream(twice).malformed);
+
+    // The payload is fixed size: a short or padded one is not a timeline.
+    std::vector<std::byte> truncated;
+    AppendMessage(truncated, WireKind::Timeline, AsBytes(valid).first(sizeof(WireTimeline) - 8));
+    CHECK(neural_worker_detail::DecodeMetadataStream(truncated).malformed);
 }
 
 } // namespace
@@ -978,5 +1089,7 @@ int wmain(int argc, wchar_t** argv)
     metadata_reader_accepts_segments_before_the_result_test();
     running_helper_publishes_segments_before_its_result_test();
     configuration_retry_is_sequential_and_bounded_test();
+    helper_cold_start_timeline_reaches_the_parent_test();
+    cold_start_timeline_messages_are_validated_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

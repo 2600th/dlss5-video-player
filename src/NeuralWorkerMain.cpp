@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <mfapi.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -29,6 +30,29 @@ std::filesystem::path ModuleDirectory()
     if (!length || length >= value.size()) return {};
     value.resize(length);
     return std::filesystem::path(value).parent_path();
+}
+
+// Process creation to now. The loader window - the antivirus scan of the
+// runtime tree and the ReShade proxy's own load, since the proxy is this
+// executable's dxgi import and is resolved before the entry point - cannot be
+// timed from inside the process any other way. The kernel's creation stamp and
+// the system clock are the only pair that spans it, and both are the same
+// clock, so the difference is a real interval even though neither end is
+// monotonic.
+std::optional<std::chrono::microseconds> ElapsedSinceProcessStart()
+{
+    FILETIME creation{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exited, &kernel, &user)) return std::nullopt;
+    FILETIME now{};
+    GetSystemTimePreciseAsFileTime(&now);
+    const auto packed = [](const FILETIME& value) {
+        return (static_cast<uint64_t>(value.dwHighDateTime) << 32) | value.dwLowDateTime;
+    };
+    const uint64_t started = packed(creation);
+    const uint64_t current = packed(now);
+    if (current < started) return std::nullopt;
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::duration<int64_t, std::ratio<1, 10000000>>(static_cast<int64_t>(current - started)));
 }
 
 class MetadataWriter {
@@ -61,6 +85,13 @@ public:
         const std::vector<std::byte> payload = EncodePreflight(preflight);
         std::lock_guard lock(mutex_);
         return WriteMessage(handle_, WireKind::Preflight, payload.data(), static_cast<uint32_t>(payload.size()));
+    }
+
+    bool WriteTimeline(const NeuralColdStartTimeline& timeline)
+    {
+        const WireTimeline wire = EncodeTimeline(timeline);
+        std::lock_guard lock(mutex_);
+        return WriteMessage(handle_, WireKind::Timeline, &wire, sizeof(wire));
     }
 
 private:
@@ -155,6 +186,8 @@ bool RunWithMessagePump(Body&& body)
 
 int wmain(int argc, wchar_t** argv)
 {
+    const auto entered = std::chrono::steady_clock::now();
+    const auto loaderWindow = ElapsedSinceProcessStart();
     std::vector<std::wstring_view> values;
     values.reserve(static_cast<size_t>(argc));
     for (int index = 0; index < argc; ++index) values.emplace_back(argv[index]);
@@ -194,6 +227,14 @@ int wmain(int argc, wchar_t** argv)
     if (!mediaFoundation.Start()) return fail(L"The helper could not initialize its media runtime.");
     HWND renderWindow = CreateHiddenRenderWindow();
     if (!renderWindow) return fail(L"The helper could not create its hidden render window.");
+    NeuralColdStartTimeline helperPhases;
+    if (loaderWindow) helperPhases.Record(NeuralColdStartPhase::HelperStart, *loaderWindow);
+    // Everything from the entry point to a render window: the add-on contract
+    // check, the adapter query, Media Foundation and the window itself. The
+    // helper cannot report a boundary before this one, so a probe or a repair
+    // exit reports nothing rather than a partial cold start.
+    helperPhases.Record(NeuralColdStartPhase::RuntimeReady,
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - entered));
 
     if (arguments->preflight) {
         PreflightPayload payload;
@@ -221,7 +262,15 @@ int wmain(int argc, wchar_t** argv)
         OfflineNeuralRenderer renderer;
         result = renderer.Run(request, [&](const NeuralRenderProgress& progress) {
             metadata.WriteProgress(progress);
-        }, {}, segments);
+        }, {}, segments, [&](const NeuralColdStartTimeline& rendered) {
+            // The helper's two bootstrap phases and the renderer's three are
+            // one timeline; the parent is told once, as soon as there is
+            // something to show, so a cancel that kills this process before it
+            // can write a result does not take the breakdown with it.
+            NeuralColdStartTimeline merged = helperPhases;
+            merged.Merge(rendered);
+            metadata.WriteTimeline(merged);
+        });
     });
     DestroyWindow(renderWindow);
     if (!pumped) return fail(L"The helper could not create its render completion event.");

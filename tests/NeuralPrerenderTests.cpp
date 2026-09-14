@@ -1707,6 +1707,70 @@ void segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_tes
     CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3)));
 }
 
+// The job reports the phases it reached and nothing else, exactly once, so a
+// cold-start breakdown can never claim a stage the render never entered.
+void offline_job_reports_the_cold_start_phases_it_reached_test()
+{
+    auto phases=[](const NeuralColdStartTimeline& timeline){
+        return std::array{timeline.Phase(NeuralColdStartPhase::NeuralInit).has_value(),
+                          timeline.Phase(NeuralColdStartPhase::FeatureArm).has_value(),
+                          timeline.Phase(NeuralColdStartPhase::FirstOutput).has_value()};
+    };
+    // A segmented job reaches all three: the first finalized file is the last
+    // boundary the helper owns.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        SegmentEncoders farm;std::vector<NeuralColdStartTimeline> reported;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence(),{},{},
+                                  SegmentEncoderFactory(farm));
+        auto request=EvenOfflineRequest(fixture.Path());request.segmentFrames=2;
+        const auto result=job.Run(request,{},{},{},
+            [&](const NeuralColdStartTimeline& timeline){reported.push_back(timeline);});
+        CHECK(result.ok);CHECK_EQ(size_t{1},reported.size());
+        if(reported.size()==1){
+            CHECK((phases(reported[0])==std::array{true,true,true}));
+            // The player's own phases and the request-to-picture total are not
+            // the job's to measure.
+            CHECK(!reported[0].Phase(NeuralColdStartPhase::Request).has_value());
+            CHECK(!reported[0].Total().has_value());
+        }
+    }
+    // A single-file job publishes nothing while it runs, so its last boundary
+    // is the arming: firstOutput is absent rather than zero.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        std::vector<NeuralColdStartTimeline> reported;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{},{},
+            [&](const NeuralColdStartTimeline& timeline){reported.push_back(timeline);});
+        CHECK(result.ok);CHECK_EQ(size_t{1},reported.size());
+        if(reported.size()==1)CHECK((phases(reported[0])==std::array{true,true,false}));
+    }
+    // A job whose feature is never created stops inside the arming, and still
+    // reports the initialization it did pay for.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        evaluator.requiredPrimeSubmissions=1000;
+        std::vector<NeuralColdStartTimeline> reported;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{},{},
+            [&](const NeuralColdStartTimeline& timeline){reported.push_back(timeline);});
+        CHECK(!result.ok);CHECK_EQ(size_t{1},reported.size());
+        if(reported.size()==1)CHECK((phases(reported[0])==std::array{true,false,false}));
+    }
+    // A request the job refuses outright never entered a phase at all.
+    {
+        TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+        std::vector<NeuralColdStartTimeline> reported;
+        OfflineNeuralRenderer job(source,evaluator,encoder,AdvancingNeuralEvidence());
+        auto request=EvenOfflineRequest(fixture.Path());request.width=0;
+        const auto result=job.Run(request,{},{},{},
+            [&](const NeuralColdStartTimeline& timeline){reported.push_back(timeline);});
+        CHECK(!result.ok);CHECK_EQ(size_t{1},reported.size());
+        if(reported.size()==1)CHECK(reported[0]==NeuralColdStartTimeline{});
+    }
+}
+
 // Nothing can be shown until the first file is muxed, so a live session asks
 // for a short one. Only the first: a boundary costs an encoder start.
 void segmented_offline_job_makes_only_the_first_file_short_test()
@@ -2744,6 +2808,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_identity_mismatch_from_the_evaluator_fails_the_job_test();
     offline_job_passes_guide_controls_to_the_evaluator_test();
     segmented_offline_job_publishes_finalized_files_and_drops_the_armed_one_test();
+    offline_job_reports_the_cold_start_phases_it_reached_test();
     segmented_offline_job_makes_only_the_first_file_short_test();
     segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test();
     segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test();

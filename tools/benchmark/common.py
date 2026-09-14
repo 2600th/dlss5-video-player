@@ -27,27 +27,34 @@ FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # src/NeuralWorkerProtocol.h
 WIRE_MAGIC = 0x3152574E  # NWR1
-WIRE_VERSION = 4
-KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT = 1, 2, 3, 4
+WIRE_VERSION = 5
+KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT, KIND_TIMELINE = 1, 2, 3, 4, 5
 PHASES = ["Idle", "Decoding", "Priming", "Rendering", "Encoding", "Validating", "Completed", "Failed",
           "Cancelled", "Ready", "Preflight", "Paused", "Recovering"]
 FAILURES = ["None", "Source", "Encoder", "Neural", "GpuStall", "DeviceRemoved", "WorkerCrashed",
             "RetryExhausted", "Cancelled", "Preflight", "Identity", "Protocol"]
+# src/NeuralRenderTypes.h NeuralColdStartPhase, in wire bit order.
+COLD_START_PHASES = ["request", "preflight", "launch", "helperStart", "runtimeReady", "neuralInit",
+                     "featureArm", "firstOutput", "attach"]
 ENCODERS = {0: "hevc_nvenc", 1: "h264_software"}  # src/MediaPipeline.h EncoderKind
 CONFIGURATION_CHANGED_EXIT = 75
 PROGRESS_STRUCT = struct.Struct("<IQQQqqII")  # 52 bytes
 RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQIIII")  # 152 bytes
 PREFLIGHT_STRUCT = struct.Struct("<B3xI")  # 8 bytes
 SEGMENT_STRUCT = struct.Struct("<QQqQqI")  # 44 bytes, then nameBytes of UTF-16LE
+TIMELINE_STRUCT = struct.Struct("<I4x9q")  # 80 bytes
 assert PROGRESS_STRUCT.size == 52 and RESULT_STRUCT.size == 152 and PREFLIGHT_STRUCT.size == 8
-assert SEGMENT_STRUCT.size == 44
+assert SEGMENT_STRUCT.size == 44 and TIMELINE_STRUCT.size == 80
+assert len(COLD_START_PHASES) == 9
 
 
 def decode_metadata(data: bytes) -> list[dict]:
-    """Decodes every complete NWR1 v4 message in ``data``.
+    """Decodes every complete NWR1 v5 message in ``data``.
 
-    Progress records carry ``kind='progress'``, the final record ``kind='result'``
-    and a preflight probe ``kind='preflight'`` with the parsed JSON receipt.
+    Progress records carry ``kind='progress'``, the final record ``kind='result'``,
+    a preflight probe ``kind='preflight'`` with the parsed JSON receipt, and the
+    helper's cold-start breakdown ``kind='timeline'``. A timeline phase the helper
+    did not measure is None rather than 0.
     """
     records: list[dict] = []
     pos = 0
@@ -94,6 +101,12 @@ def decode_metadata(data: bytes) -> list[dict]:
             records.append(dict(kind="segment", index=index, first_frame_number=first_frame,
                                 first_timestamp_100ns=first_pts, frame_count=frames,
                                 frame_duration_100ns=frame_duration, name=name))
+        elif kind == KIND_TIMELINE and len(payload) == TIMELINE_STRUCT.size:
+            values = TIMELINE_STRUCT.unpack(payload)
+            present = values[0]
+            records.append(dict(kind="timeline", microseconds={
+                name: (values[1 + index] if present & (1 << index) else None)
+                for index, name in enumerate(COLD_START_PHASES)}))
     return records
 
 

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -129,6 +130,23 @@ std::string_view OrDash(std::string_view value) noexcept
     return value.empty() ? std::string_view("-") : value;
 }
 
+// Microseconds as a JSON integer, or null for a phase that did not happen. The
+// two are different claims and the receipt keeps them apart.
+std::string Microseconds(std::optional<std::chrono::microseconds> elapsed)
+{
+    return elapsed ? std::to_string(elapsed->count()) : std::string("null");
+}
+
+// Seconds to millisecond resolution for the log line, which is the register the
+// handoff's cold-start table is written in. A dash is a phase that did not run.
+std::string Seconds(std::optional<std::chrono::microseconds> elapsed)
+{
+    if (!elapsed) return "-";
+    char buffer[32]{};
+    std::snprintf(buffer, sizeof(buffer), "%.3fs", double(elapsed->count()) / 1000000.0);
+    return buffer;
+}
+
 } // namespace
 
 std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs)
@@ -224,6 +242,16 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += ",\"guideMsMean\":" + Number(timing.guideMsMean);
     json += ",\"captureMsMean\":" + Number(timing.captureMsMean);
     json += ",\"peakLocalVramMiB\":" + std::to_string(timing.peakLocalVramMiB) + "}";
+    // Beside the per-frame distribution above, and in the same unit-in-the-key
+    // convention: one group, one unit, a null for every phase that never ran.
+    const NeuralColdStartTimeline& coldStart = result.coldStart;
+    json += ",\"coldStartMicroseconds\":{\"total\":" + Microseconds(coldStart.Total());
+    for (uint32_t index = 0; index < kNeuralColdStartPhaseCount; ++index) {
+        const auto phase = static_cast<NeuralColdStartPhase>(index);
+        json += ",\"" + std::string(NeuralColdStartPhaseName(phase)) + "\":" +
+                Microseconds(coldStart.Phase(phase));
+    }
+    json += "}";
     json += ",\"detail\":" + QuotedWide(result.detail);
     json += "}}";
     return json;
@@ -282,5 +310,20 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
             " resets=" + std::to_string(result.historyResets) + " retries=" + std::to_string(result.frameRetries) +
             " cuts=" + std::to_string(result.sceneCuts.Accepted()) +
             " suppressed=" + std::to_string(result.sceneCuts.suppressed);
+    return line;
+}
+
+std::string SummarizeNeuralColdStartForLog(const NeuralColdStartTimeline& timeline)
+{
+    // Total first: the acceptance criterion is written against it, and a reader
+    // checking a claim must not have to add nine numbers to find it.
+    std::string line = "total=" + Seconds(timeline.Total());
+    for (uint32_t index = 0; index < kNeuralColdStartPhaseCount; ++index) {
+        const auto phase = static_cast<NeuralColdStartPhase>(index);
+        line += ' ';
+        line += NeuralColdStartPhaseName(phase);
+        line += '=';
+        line += Seconds(timeline.Phase(phase));
+    }
     return line;
 }

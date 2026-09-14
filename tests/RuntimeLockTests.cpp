@@ -478,6 +478,42 @@ void neural_preflight_diagnosis_blames_the_actionable_cause_test()
     CHECK_EQ(std::string_view("none"), std::string_view(NeuralPreflightCauseName(armed.cause)));
 }
 
+void receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test()
+{
+    NeuralRenderReceiptInputs inputs = SampleInputs();
+    NeuralColdStartTimeline timeline;
+    // A latched preflight verdict and a whole-file render: two phases that did
+    // not happen, around seven that did.
+    timeline.Record(NeuralColdStartPhase::Request, std::chrono::microseconds(81000));
+    timeline.Record(NeuralColdStartPhase::Launch, std::chrono::microseconds(12000));
+    timeline.Record(NeuralColdStartPhase::HelperStart, std::chrono::microseconds(712000));
+    timeline.Record(NeuralColdStartPhase::RuntimeReady, std::chrono::microseconds(94000));
+    timeline.Record(NeuralColdStartPhase::NeuralInit, std::chrono::microseconds(1511000));
+    timeline.Record(NeuralColdStartPhase::FeatureArm, std::chrono::microseconds(631000));
+    timeline.Record(NeuralColdStartPhase::Attach, std::chrono::microseconds(0));
+    timeline.RecordTotal(std::chrono::microseconds(3041000));
+    inputs.result.coldStart = timeline;
+
+    const std::string json = BuildNeuralRenderReceiptJson(inputs);
+    CHECK(Contains(json, "\"peakLocalVramMiB\":3072},\"coldStartMicroseconds\":{\"total\":3041000,"
+                         "\"request\":81000,\"preflight\":null,\"launch\":12000,\"helperStart\":712000,"
+                         "\"runtimeReady\":94000,\"neuralInit\":1511000,\"featureArm\":631000,"
+                         "\"firstOutput\":null,\"attach\":0}"));
+    CHECK_EQ(std::string("total=3.041s request=0.081s preflight=- launch=0.012s helperStart=0.712s "
+                         "runtimeReady=0.094s neuralInit=1.511s featureArm=0.631s firstOutput=- attach=0.000s"),
+             SummarizeNeuralColdStartForLog(timeline));
+
+    // A render that measured nothing - a refusal before the helper, or a build
+    // whose helper never reported - must not read as a render that cost nothing.
+    const std::string unmeasured = BuildNeuralRenderReceiptJson(SampleInputs());
+    CHECK(Contains(unmeasured, "\"coldStartMicroseconds\":{\"total\":null,\"request\":null,\"preflight\":null,"
+                               "\"launch\":null,\"helperStart\":null,\"runtimeReady\":null,\"neuralInit\":null,"
+                               "\"featureArm\":null,\"firstOutput\":null,\"attach\":null}"));
+    CHECK_EQ(std::string("total=- request=- preflight=- launch=- helperStart=- runtimeReady=- "
+                         "neuralInit=- featureArm=- firstOutput=- attach=-"),
+             SummarizeNeuralColdStartForLog({}));
+}
+
 } // namespace
 
 int wmain()
@@ -489,6 +525,7 @@ int wmain()
     verify_reports_each_drift_kind_and_names_only_failing_files_test();
     receipt_json_records_failure_lock_status_and_preflight_verbatim_test();
     receipt_log_summary_extracts_runtime_identity_and_lock_state_test();
+    receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test();
     feature18_create_result_is_read_out_of_the_runtime_log_test();
     neural_preflight_diagnosis_blames_the_actionable_cause_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

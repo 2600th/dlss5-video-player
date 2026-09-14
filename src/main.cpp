@@ -25,6 +25,7 @@
 #include <optional>
 #include <functional>
 #include <thread>
+#include <mutex>
 #include <system_error>
 #include "VideoDecoder.h"
 #include "D3D12Renderer.h"
@@ -576,6 +577,59 @@ struct NeuralJobCompletion {
     std::filesystem::path receiptPath;
 };
 
+// One cold start, shared by the job thread that measures the stack and the UI
+// thread that puts the first neural frame on screen. Marks are segments: each
+// phase ends where the previous one ended, so the timeline stays contiguous
+// without either thread knowing what the other measured.
+class NeuralColdStartRecord {
+public:
+    NeuralColdStartRecord():origin_(Clock::now()),mark_(origin_){}
+    // Ends the phase that began at the previous mark. A phase that happens
+    // twice - the helper relaunched after repairing its configuration - sums
+    // its parts, so the discarded attempt is launch cost rather than a gap.
+    void Mark(NeuralColdStartPhase phase){const std::lock_guard guard(mutex_);MarkLocked(phase);}
+    // For a job that ended without ever reaching the phase this would follow:
+    // a cache hit or a refusal did the player's own work and nothing else, and
+    // that work is still worth naming.
+    void MarkIfAbsent(NeuralColdStartPhase phase){
+        const std::lock_guard guard(mutex_);
+        if(!timeline_.Phase(phase))MarkLocked(phase);
+    }
+    void Merge(const NeuralColdStartTimeline& helper){const std::lock_guard guard(mutex_);timeline_.Merge(helper);}
+    // The first playable neural output is in the player's hands: segment zero
+    // for an active session, the finished job for a cached or whole-file render.
+    void Ready(){const std::lock_guard guard(mutex_);if(!ready_)ready_=Clock::now();}
+    // The first neural frame is on screen. Attach is measured from Ready
+    // because both stamps are the player's own; the helper's last phase and
+    // this one are separated only by the metadata pipe's poll interval.
+    void Presented(){
+        const std::lock_guard guard(mutex_);if(presented_)return;
+        const auto now=Clock::now();presented_=now;
+        if(ready_)timeline_.Record(NeuralColdStartPhase::Attach,
+            std::chrono::duration_cast<std::chrono::microseconds>(now-*ready_));
+        timeline_.RecordTotal(std::chrono::duration_cast<std::chrono::microseconds>(now-origin_));
+    }
+    NeuralColdStartTimeline Snapshot()const{const std::lock_guard guard(mutex_);return timeline_;}
+    // One line per render: whichever end finishes first reports, the other is
+    // silent.
+    bool ClaimReport(){const std::lock_guard guard(mutex_);return !std::exchange(reported_,true);}
+
+private:
+    using Clock=std::chrono::steady_clock;
+    void MarkLocked(NeuralColdStartPhase phase){
+        const auto now=Clock::now();
+        auto elapsed=std::chrono::duration_cast<std::chrono::microseconds>(now-mark_);
+        if(const auto already=timeline_.Phase(phase))elapsed+=*already;
+        timeline_.Record(phase,elapsed);
+        mark_=now;
+    }
+    mutable std::mutex mutex_;
+    NeuralColdStartTimeline timeline_;
+    Clock::time_point origin_,mark_;
+    std::optional<Clock::time_point> ready_,presented_;
+    bool reported_=false;
+};
+
 struct ExportCompletion {
     MaterializeResult result;
     std::filesystem::path output;
@@ -733,7 +787,12 @@ static StartupResult RunNeuralAddonBootstrap(AppOptions& options) {
 
     options.neuralAddonRequested=NeuralAddonDesired(options.detectedGpu.generation,options.safeMode);
     options.neuralAddonConfigured=options.neuralAddonRequested;
-    LOG("Isolated neural helper available; player remains hook-free. GPU=" << WideToUtf8(options.detectedGpu.description));
+    // GPU, driver and generation on one line: the field verification matrix
+    // needs all three, and the driver floor message below only appears when
+    // the driver is too old to say anything else.
+    LOG("Isolated neural helper available; player remains hook-free. GPU=" << WideToUtf8(options.detectedGpu.description)
+        << " driver=" << WideToUtf8(options.detectedGpu.driverVersion)
+        << " generation=" << GpuGenerationPathName(options.detectedGpu.generation));
     switch(ClassifyNeuralDriver(options.detectedGpu.driverVersion)){
     case NeuralDriverSupport::BelowFloor:
         // Feature 18 is serviced by the driver's NGX core, so a driver older
@@ -3034,6 +3093,7 @@ private:
         if(Audio().Start(m_path,m_currentSec)){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!wasPlaying);}
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=wasPlaying;m_synchronizedPlayback.SetPaused(!wasPlaying);
         m_liveAttached=true;
+        NoteNeuralFramePresented();
         LOG("Active neural playback attached at "<<m_currentSec<<" s with "<<LiveLeadSeconds()<<" s buffered.");
         SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();return true;
     }
@@ -3313,6 +3373,20 @@ private:
         return true;
     }
     void DrainNeuralMessages(){m_neuralProgressMessages.Clear();m_neuralCompletions.Clear();if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){};}
+    // One line per render, in the same terse register as the receipt summary,
+    // so a user's log carries the whole breakdown without the receipt file.
+    void ReportNeuralColdStart(){
+        if(!m_coldStart||!m_coldStart->ClaimReport())return;
+        LOG("Neural cold start: "<<SummarizeNeuralColdStartForLog(m_coldStart->Snapshot()));
+    }
+    // The first neural frame of this render is on screen. Reported here rather
+    // than at the completion, because an active session that is toggled off
+    // never delivers a completion to report at.
+    void NoteNeuralFramePresented(){
+        if(!m_coldStart)return;
+        m_coldStart->Presented();
+        ReportNeuralColdStart();
+    }
     void CancelNeuralJob(bool updateUi=true){
         if(!NeuralJobActive())return;
         m_neuralLifecycle.Transition(NeuralPlaybackState::Cancelling);if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
@@ -3330,6 +3404,9 @@ private:
             }
         }
         LOG("Neural pre-render cancelled and worker stopped.");
+        // The cancelled job's measurements describe a picture that never came
+        // and must not be mistaken for the next render's.
+        m_coldStart.reset();
     }
     // `prepareOnly` acquires and identifies the source, replays a validated
     // cache entry when one exists, and otherwise stops before the feature-18
@@ -3372,7 +3449,12 @@ private:
             const NeuralCacheFailureText cacheFailureText=CacheFailureText();
             const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
             NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            // The request instant: every phase below is measured from here, and
+            // the total the acceptance criterion names ends when the first
+            // neural frame reaches the screen.
+            m_coldStart=std::make_shared<NeuralColdStartRecord>();
+            const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -3467,6 +3549,9 @@ private:
                     }
                     if(prepareOnly){completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}
                     LOG("Neural cache miss or invalid entry; starting a new render.");
+                    // Everything above is the player's own preparation; from
+                    // here the cost belongs to the probe and the helper.
+                    coldStart->Mark(NeuralColdStartPhase::Request);
                     // A driver below the floor cannot create feature 18 at all,
                     // so do not pay five seconds for a probe to learn that.
                     if(!driverNotice.empty()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=driverNotice;LOG("Neural render refused before the probe: "<<WideToUtf8(driverNotice));goto finish;}
@@ -3493,6 +3578,9 @@ private:
                         // The feature-18 probe needs the GPU; only a cache miss pays for it.
                         NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
                         const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
+                        // Marked before the verdict is read: a probe that failed
+                        // or was cancelled still cost what it cost.
+                        coldStart->Mark(NeuralColdStartPhase::Preflight);
                         if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(runtimeKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
                         preflightLatch->RecordSuccess(runtimeKey,preflight.json);
@@ -3511,14 +3599,22 @@ private:
                             NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.index=liveIndexBase+segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
                             LOG("Neural segment "<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
                             liveIndex->Append(std::move(entry));
+                            // The first file the player can show: everything
+                            // after it is the player's own attach cost.
+                            coldStart->Ready();
                         };
                         // A relaunched worker republishes from its own index 0,
                         // so only this job's segments are discarded; coverage a
                         // previous job left behind stays valid.
                         sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding this job's published segments.");liveIndex->TruncateTo(liveIndexBase);};
                     }
-                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink);
+                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink,
+                        kDefaultCrashRelaunchLimit,[&]{coldStart->Mark(NeuralColdStartPhase::Launch);});
                     if(liveIndex)liveIndex->Finish();
+                    // The helper measured five of the nine phases; the receipt
+                    // carries one timeline, not two halves.
+                    coldStart->Merge(completion->result.coldStart);
+                    completion->result.coldStart=coldStart->Snapshot();
                     receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
                     LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
@@ -3565,6 +3661,9 @@ private:
                     if(const auto promoted=cache.LookupRender(renderKey)){completion->neuralPath=promoted->payloadPath;completion->receiptPath=promoted->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
                 }
             finish:
+                // A cache hit, a refusal or a prepared open never reached a
+                // helper, so this is where the player's own work ends.
+                coldStart->MarkIfAbsent(NeuralColdStartPhase::Request);
                 completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
             });
         }catch(const std::system_error&){m_neuralLifecycle.Invalidate();SyncSourceActionAvailability();const std::wstring message=L"The neural pre-render worker could not start.";MessageBoxW(m_hwnd,message.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);}
@@ -3585,6 +3684,7 @@ private:
         if(firstRead!=SynchronizedReadResult::PairReady||!m_synchronizedPlayback.SetView(desiredView)||!m_synchronizedPlayback.VisibleFrame()){LOG("Cached playback could not produce its first synchronized pair (result="<<static_cast<int>(firstRead)<<").");Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         const VideoFrame first=*m_synchronizedPlayback.VisibleFrame();if(!RenderVideoFrame(first,true)){Unload();return false;}
+        NoteNeuralFramePresented();
         m_neuralPath=completion.neuralPath;m_cachedRange=completion.range;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
         if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
@@ -3649,6 +3749,13 @@ private:
     }
     void CompleteNeuralJob(uint64_t token){
         auto completion=m_neuralCompletions.Take(token);if(!completion||!m_neuralLifecycle.Accept(completion->generation))return;
+        // A render that publishes no segments has its first playable output
+        // here, and this is the last moment a picture could appear for it.
+        if(m_coldStart)m_coldStart->Ready();
+        HandleNeuralCompletion(completion);
+        ReportNeuralColdStart();
+    }
+    void HandleNeuralCompletion(const std::unique_ptr<NeuralJobCompletion>& completion){
         if(m_neuralWorker.joinable()){m_neuralWorker.join();m_neuralWorker=std::jthread{};}m_neuralProgressMessages.Clear();m_pendingNeuralTitle.clear();m_neuralCancelBounds={};
         // An active session already plays what the job produced: keep the media
         // loaded and only record how the job ended.
@@ -4386,6 +4493,8 @@ private:
     int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
     playback_timing::RenderPaceProfile m_renderPace;
+    // The cold start of the newest neural job, or null when no job has run.
+    std::shared_ptr<NeuralColdStartRecord> m_coldStart;
     HWND m_bufferWnd=nullptr;
     RECT m_bufferAnchor{};
 };

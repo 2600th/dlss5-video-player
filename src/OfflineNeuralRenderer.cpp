@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -867,10 +868,30 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                           OfflineNeuralRenderer::ProgressCallback progress,
                           std::stop_token stop, Source& source, Evaluator& evaluator,
                           Encoder& encoder, Evidence evidenceProvider, Clock clock, Paused paused,
-                          const NeuralSegmentSink& segments)
+                          const NeuralSegmentSink& segments,
+                          const NeuralColdStartCallback& coldStart)
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
+    // Cold-start phases run on the real clock rather than the job's progress
+    // clock: the first-output boundary is only observable on the finalize
+    // thread, and a caller-supplied clock is not shared across threads.
+    NeuralColdStartTimeline coldStartTimeline;
+    SteadyClock::time_point coldStartMark = SteadyClock::now();
+    std::atomic<bool> coldStartReported{false};
+    auto markColdStart = [&](NeuralColdStartPhase phase) {
+        const auto now = SteadyClock::now();
+        coldStartTimeline.Record(
+            phase, std::chrono::duration_cast<std::chrono::microseconds>(now - coldStartMark));
+        coldStartMark = now;
+    };
+    auto reportColdStart = [&] {
+        if (coldStart && !coldStartReported.exchange(true)) coldStart(coldStartTimeline);
+    };
+    // Reports on every exit, so a run that stopped before it published anything
+    // still says how far the stack got. Declared ahead of the segment writer so
+    // it runs after that writer's thread has joined.
+    ScopeExit<decltype(reportColdStart)> reportColdStartOnExit{reportColdStart};
     auto fail = [&](NeuralRenderFailure failure, std::wstring detail) {
         result.failure = failure;result.detail = std::move(detail);return result;
     };
@@ -897,12 +918,24 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // Replaced once the evaluator has settled on a capture format: a GPU-converted
     // capture is NV12, which is 1.5 bytes per pixel rather than 4.
     size_t expectedBytes = static_cast<size_t>(expectedBytes64);
+    // The finalize thread publishes each file, so the first-output boundary is
+    // stamped there. Everything above it is written before capture can begin
+    // and the encoder queue's lock orders the two, so the timeline that leaves
+    // with the first file is complete. A relaunched sequence repeats index 0;
+    // only the first one is a cold start.
+    NeuralSegmentSink instrumented = segments;
+    instrumented.onSegment = [&, forward = segments.onSegment](const NeuralRenderSegment& segment) {
+        if (!segment.index && !coldStartTimeline.Phase(NeuralColdStartPhase::FirstOutput))
+            markColdStart(NeuralColdStartPhase::FirstOutput);
+        if (forward) forward(segment);
+        reportColdStart();
+    };
     // A segmented job publishes finalized files while it renders; segmentFrames
     // == 0 keeps the single staging file and never starts a finalize thread.
     std::optional<SegmentWriter<Encoder>> writer;
     if (request.segmentFrames) {
         writer.emplace([&encoder] { return encoder.Create(); }, request.stagingVideoPath,
-                       request.segmentFrames, frameDuration, segments, stop,
+                       request.segmentFrames, frameDuration, instrumented, stop,
                        request.firstSegmentFrames);
     }
     auto cancelOutput = [&] { if (writer) writer->Cancel(); else encoder.Cancel(); };
@@ -975,6 +1008,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
+    // The source open and the evaluator's own bring-up (device, NGX) are one
+    // boundary: nothing between them is separately observable from here.
+    markColdStart(NeuralColdStartPhase::NeuralInit);
     expectedBytes = static_cast<size_t>(
         EncoderFrameBytes(evaluator.CapturePixelFormat(), request.width, request.height));
 
@@ -1046,6 +1082,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     L"Feature 18 inline interception was not armed before frame capture.");
     }
     result.feature18ArmedBeforeCapture=true;
+    markColdStart(NeuralColdStartPhase::FeatureArm);
     // Baseline read after any re-hook, so a create the add-on observed late
     // cannot be mistaken for the captured sequence's own evaluation.
     uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
@@ -2087,7 +2124,8 @@ OfflineNeuralRenderer::OfflineNeuralRenderer(
 
 NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request,
                                                ProgressCallback progress,std::stop_token stop,
-                                               const NeuralSegmentSink& segments)
+                                               const NeuralSegmentSink& segments,
+                                               NeuralColdStartCallback coldStart)
 {
 #ifdef OFFLINE_NEURAL_RENDERER_TESTING
     if(!testSource_||!testEvaluator_||!testEncoder_||!testEvidenceProvider_)
@@ -2098,7 +2136,7 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
     const Clock clock=testClock_?testClock_:[]{return SteadyClock::now();};
     const std::function<bool()> paused=testPaused_?testPaused_:[]{return false;};
     return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-                  testEvidenceProvider_,clock,paused,segments);
+                  testEvidenceProvider_,clock,paused,segments,coldStart);
 #else
     const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
@@ -2109,6 +2147,6 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         []{return SteadyClock::now();},
         [pauseEvent=request.pauseEvent]{
             return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
-        },segments);
+        },segments,coldStart);
 #endif
 }
