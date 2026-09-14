@@ -299,15 +299,41 @@ matters: labelling alone would have been worse than the defect, because tagging
 path takes no filter - its pixels are already BT.709 limited range from the capture
 shader, and a scale filter there would put the conversion back on the CPU.
 
-Verified after the fix on `orig-faces`: both arms' outputs report
-`color_space=bt709`, `color_range=tv`. Two honest limits. `color_primaries` and
-`color_transfer` still read `unknown` - the encoder does not propagate those two,
-and the pre-existing NV12 path behaved the same way, so this closes the matrix
-ambiguity that shifts colours and not the primaries tag. And the measured arm delta
-is **unchanged** (`cpu` 30.10 vs `gpu-color-only` 29.45, still -0.65 dB), which is
-exactly what the section below predicts: each path round-trips under its own tags,
-so PSNR against the source is blind to the matrix in both states. The case for the
-fix is that the file is now labelled for what it contains, not a metric moving.
+`-color_primaries` and `-color_trc` as *output options* turned out not to survive
+on this FFmpeg (9.0.1): only the matrix and range landed, in Matroska and MP4 alike,
+with NVENC and with x264, and an `hevc_metadata` bitstream filter did not help
+either. Setting them on the frames does work, so the BGRA path carries
+`setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv` after
+the scale. Measured pixel-safe there: scale-only and scale+setparams decode to
+identical planes and only the tags change.
+
+The same filter is **not** on the NV12 path, and that is a measured decision rather
+than caution: adding it changes that path's decoded output on this build,
+reproducibly, with NVENC confirmed deterministic over repeat encodes (identical
+input twice gives identical planes). A path whose entire purpose is to reach the
+encoder untouched does not get a filter that touches it, so it keeps the matrix and
+range - the two tags that decide whether colours come out right - and leaves
+primaries and transfer unstated until that is understood.
+
+**Verified end to end on identical input**, the same 4K clip rendered by the pre-fix
+and post-fix workers:
+
+| | output tags | plane sha256 | mean Y | mean U | mean V |
+|---|---|---|---|---|---|
+| pre-fix | `tv`, everything else `unknown` | `4aea41a439e7cfec` | 57.12 | 124.58 | 123.51 |
+| post-fix | `tv`, `bt709` x3 | `bac1336bc4cb1fbc` | 58.41 | 124.03 | 123.15 |
+
+So the pixels really moved (+1.29 mean Y), which is the point: the fix is a
+conversion change and not only a relabelling. And the arm delta is **unchanged**
+(`cpu` 30.10 vs `gpu-color-only` 29.45, still -0.65 dB), exactly as the section
+below predicts - each path round-trips under its own tags, so PSNR against the
+source is blind to the matrix in both states. The case for the fix is the file being
+labelled for what it contains, not a metric moving.
+
+One more consequence that needed code: the encoder arguments are deliberately not
+part of the render identity, so cached renders written before this change - BT.601
+pixels, no tags - would have stayed valid hits under an unchanged `VERSION`. The
+identity's pipeline term now carries `bt709-export-v1`, which retires them.
 
 Two consequences worth separating. First, this was a correctness defect in the
 default export path, independent of the throughput question and worth more than it:

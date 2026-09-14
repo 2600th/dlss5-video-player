@@ -568,7 +568,22 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     // filter: its pixels are already BT.709 limited range from the capture shader, and
     // a scale filter there would undo the whole point of converting on the GPU.
     if (!nv12) {
-        arguments.insert(arguments.end(), {L"-vf", L"scale=out_color_matrix=bt709:out_range=tv"});
+        // `scale` chooses the coefficients; `setparams` is what makes the primaries and
+        // transfer survive. On this FFmpeg (9.0.1) the `-color_primaries`/`-color_trc`
+        // output options below land the matrix and range and silently drop those two,
+        // in both Matroska and MP4, with NVENC and with x264 - so they are set on the
+        // frames instead. Measured pixel-safe on this path: scale-only and
+        // scale+setparams decode to identical planes, only the tags change.
+        //
+        // Deliberately NOT applied to the NV12 path. The same filter there changes the
+        // decoded output on this build - reproducibly, and NVENC is deterministic here,
+        // so it is not sampling noise - and that path exists to reach the encoder
+        // without a frame being touched. It keeps the matrix and range tags, which are
+        // the two that decide whether colours come out right; primaries and transfer
+        // stay unstated there until the cause is understood.
+        arguments.insert(arguments.end(), {
+            L"-vf", L"scale=out_color_matrix=bt709:out_range=tv,"
+                    L"setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"});
     }
     arguments.insert(arguments.end(), {
         L"-colorspace", L"bt709", L"-color_primaries", L"bt709",

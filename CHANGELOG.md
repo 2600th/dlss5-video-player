@@ -62,10 +62,14 @@ and looks like a broken helper until the runtime is re-staged.
   that assumes BT.709 for HD, which is the usual default, showed those colours
   shifted. Both paths now state `bt709`/`tv`, and the CPU path also converts with
   `out_color_matrix=bt709`, because tagging 601 pixels as 709 would have been worse
-  than leaving them ambiguous. `color_primaries` and `color_transfer` are still not
-  propagated by the encoder, which is a smaller gap and untouched here. Note this
-  changes the pixels of every default-path render, so a render cached earlier in
-  this unreleased window differs from one made now.
+  than leaving them ambiguous. It also carries `setparams`, without which this
+  FFmpeg drops the primaries and transfer tags in every container and encoder tried;
+  the NV12 path does not, because that filter measurably changes its decoded output
+  and that path exists to reach the encoder untouched. Verified on the same clip
+  before and after: tags go from none to all four and the pixels move with them
+  (mean Y 57.12 -> 58.41). The render identity's pipeline term moved to
+  `bt709-export-v1` as well, since encoder arguments are not part of the cache key
+  and renders made before this would otherwise have stayed valid hits.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

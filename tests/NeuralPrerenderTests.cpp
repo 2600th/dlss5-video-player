@@ -782,7 +782,12 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-colorspace"));
     CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-color_primaries"));
     CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(arguments, L"-color_range"));
-    CHECK_EQ((std::vector<std::wstring>{L"scale=out_color_matrix=bt709:out_range=tv"}),
+    // scale picks the coefficients; setparams is what makes primaries and transfer
+    // survive this FFmpeg's muxers, and it is pixel-safe here (scale-only and
+    // scale+setparams decode to identical planes).
+    CHECK_EQ((std::vector<std::wstring>{L"scale=out_color_matrix=bt709:out_range=tv,"
+                                        L"setparams=color_primaries=bt709:color_trc=bt709:"
+                                        L"colorspace=bt709:range=tv"}),
              value(arguments, L"-vf"));
 
     // A GPU-converted capture arrives as NV12 and leaves as NV12: NVENC takes it as it
