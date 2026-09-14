@@ -7,6 +7,8 @@ its cache or the committed runtime.
 
 ```
 python tools/benchmark/corpus.py                       # build-upscaling/benchmark-corpus/*.mkv + manifest.json
+python tools/benchmark/corpus.py --clips pan-fast zoom-fast           # a subset, into its own --corpus dir
+python tools/benchmark/cutlab.py --sweep               # scores the cut criterion against the labelled cuts
 python tools/benchmark/run.py --clips text-subtitles cuts-motion --profiles baseline mv-off --repeats 3
 python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.ABLATION
 python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
@@ -23,9 +25,11 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 
 | Path | Contents |
 |---|---|
-| `corpus.py` | Deterministic FFV1 corpus generator; `--check` re-hashes an existing corpus |
+| `corpus.py` | Deterministic FFV1 corpus generator; `--clips` builds a subset, `--check` re-hashes an existing corpus |
 | `run.py` | Profiles, ablation matrix, two-pass, preflight receipts, worker launches, NVML sampling |
 | `analyze.py` | Per-run metrics, medians per clip/profile, guide and two-pass deltas, cut scores, `report.md` |
+| `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
+| `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; needs no GPU, no worker and no render |
 | `blind.py` | Randomized A/B stills + 3 s excerpts with a sealed `key.json`; `--score` tallies a ballot |
 | `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v4 decoder (progress, result, preflight, segment) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
@@ -37,10 +41,16 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 
 ## Corpus
 
-1920x1080, 30 fps, FFV1 level 3 (lossless, `yuv420p`), 7-8 s each. Every
+1920x1080, 30 fps, FFV1 level 3 (lossless, `yuv420p`), 1-8 s each. Every
 synthetic clip comes from seeded FFmpeg sources with pinned colours; the
 manifest records an rgb24 `framemd5` sequence digest per clip, and
 `corpus.py --check` proves a regenerated corpus is bit-identical.
+
+Cut ground truth lives in two manifest keys. `cuts` is the list of frames at which a
+history reset must happen; `soft_cuts` is a list of `[first, last]` spans, used by the
+dissolve, inside which the first reset is tolerated and counted as neither a hit nor a
+false positive while a second one is still a false positive. A clip with both empty
+must never reset.
 
 | Clip | Category | Content |
 |---|---|---|
@@ -48,7 +58,30 @@ manifest records an rgb24 `framemd5` sequence digest per clip, and
 | `fine-detail` | detail | Mandelbrot zoom, sub-pixel-drifting 16 px grid, `zoompan` test-pattern inset |
 | `highlights-gradients` | tone | Animated linear gradients with two radial highlight sweeps that clip to white |
 | `cuts-motion` | cuts | Five dissimilar 1.5 s segments hard-cut at frames 45/90/135/180 (recorded in `cuts`) |
+| `cuts-similar` | cuts | Four 1.0 s mirrorings of one deep fractal still, hard-cut at 30/60/90. The shots share a luma histogram by construction, so only a correspondence test can see the cut |
+| `pan-fast` | cuts | 1.0 s diagonal pan across a 4K fractal still, 64×36 px per frame (6.1 analysis cells). No cut |
+| `zoom-fast` | cuts | 1.5 s centre zoom 1.0× → 2.2× on a fractal still, which no global translation can model. No cut |
+| `dissolve` | cuts | 0.7 s cross-fade between two shots. `cuts` is empty and `soft_cuts` marks the fade: one reset inside it is tolerated, a second is a false positive |
+| `flash-exposure` | cuts | 3 s slow pan with a 4-frame flash and a sustained exposure step. Neither is a cut; both collapse the luma histogram |
 | `faces` | faces | **Not synthetic**: seconds 12-20 of `build-upscaling/runtime-comparison-20260907/fixtures/mafia-60s.mkv` (frontal/three-quarter faces, skin, hair). Skipped when the fixture is absent |
+
+## Scene-cut lab (`cutlab.py`)
+
+Scores the criterion rather than a render, so it needs nothing but the corpus and
+FFmpeg. It replays `cutmirror` over every clip's cell grids, matches each accepted
+history reset against `cuts` / `soft_cuts`, and prints where the labelled cuts sit in
+each score's ordering, every firing with its residual/overlap/failed fraction, the
+per-clip verdicts, and - with `--sweep` - both threshold families ranked. Cell
+features are cached under `<corpus>/cutlab-cache` on the clip's own digest, so the
+first run costs a decode pass and later sweeps cost seconds.
+
+`--sweep` compares the shipped residual criterion against roadmap survey item 3, the
+scale-free candidate in `cutmirror.FailedFractionCriterion`: a cell's match failed
+when its winning displacement costs more than `ratio` x its standing-still cost, and
+the decision is the fraction of failed cells rather than a mean residual. As of
+2026-09-14 the two families reach the identical best operating point, so nothing in
+`src/` uses the candidate; see `docs/BENCHMARK.md` for the measurement and why the
+shipped thresholds were left alone.
 
 ## Profiles and ablation
 
@@ -108,7 +141,7 @@ pixels at 1080p, normalized Rec.709 cell luma), and are withheld whole - `null` 
 | sigma+ | output minus source per-pixel temporal standard deviation of luma inside a shot (frames between manifest cuts), meaned over pixels and frame-weighted over shots, in 8-bit luma levels; `temporal_sigma_p99_*` in `metrics.json` is the p99 of the same map. Localized shimmer a frame-global mean averages away moves this |
 | false mv | fraction of the cells the source held static across a consecutive pair (cell luma change ≤ 2/255) whose output changed by more than the same tolerance: motion the pass invented. The NVENC carrier sets a floor; `intensity-0` measures it |
 | flips+ | output minus source fraction of cells whose moving/static verdict changes from one consecutive pair to the next - instability of the motion field rather than of the pixels |
-| cut P/R/F1 | the generator's own cut test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, debounced over 0.6 s) run over each file's cell grids and matched to the manifest's hard cuts at ±1 frame, source and output. `cuts.*_evidence` in `metrics.json` records every firing frame with residual, overlap, arm and suppression |
+| cut P/R/F1 | the generator's own cut test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, debounced over 0.6 s) run over each file's cell grids and matched to the manifest's hard cuts at ±1 frame, source and output. `cuts.*_evidence` in `metrics.json` records every firing frame with residual, overlap, arm and suppression; `cutlab.py` scores the same test against the labelled corpus without needing a render |
 | dE | mean CIE76 ΔE*ab between output and source (OpenCV Lab, L rescaled to 0-100) |
 | RGB shift | mean per-channel (output − source) in `metrics.json` |
 | PSNR / SSIM | RGB PSNR and grayscale Gaussian SSIM against the lossless source. A relighting model is expected to move these; use them as a change magnitude, not a pass/fail |

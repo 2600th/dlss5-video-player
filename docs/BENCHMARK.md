@@ -10,7 +10,8 @@ against the isolated `NeuralWorker.exe`; this page is the operator's summary.
 ## Run it
 
 ```
-python tools/benchmark/corpus.py                                     # once; ~1 min
+python tools/benchmark/corpus.py                                     # once; ~2 min
+python tools/benchmark/cutlab.py --sweep                             # scores the cut criterion itself
 python tools/benchmark/run.py --profiles baseline mv-off --repeats 3 # renders
 python tools/benchmark/analyze.py                                    # metrics + report.md
 python tools/benchmark/blind.py                                      # A/B pairs (needs a two-pass run)
@@ -98,8 +99,10 @@ to the runtime unchanged.
   and is the same for every profile of a clip; the output column is what a consumer of
   the rendered file would detect. `cuts.*_evidence` records every firing frame with its
   residual, its histogram overlap, the arm that fired and whether the debounce withheld
-  it, which is the labelled set a sweep of 0.30 / 0.10 / 0.85 needs. A cut-free clip has
-  no recall to report and its detection count is its false-positive count.
+  it. A cut-free clip has no recall to report and its detection count is its
+  false-positive count. A clip may also carry `soft_cuts` spans — a dissolve, where no
+  single frame is the right one — inside which the first reset is neither a hit nor a
+  false positive and a second one still is.
 
 `--sample-every` strides ΔE/PSNR/SSIM/OCR/faces alone. Every metric above sees every
 consecutive frame pair whatever the stride is, and all of them are withheld whole —
@@ -178,8 +181,11 @@ whole reason the staleness matters.
   during the flow work is that changing the flow field does not change the
   render at all through the depth channel — the proxy is dominated by its
   vertical ramp. Depth is the next guide worth questioning.
-- The cut detector fires exactly on the clip's hard cuts (`resets` = 1 first
-  frame + 5 cuts on `cuts-motion`, 1 on the cut-free text clip).
+- The cut detector does **not** fire exactly on the clip's hard cuts, and the sentence
+  that used to stand here was wrong twice over: `cuts-motion` has **four** hard cuts
+  (frames 45/90/135/180), not five, and `resets` = 6 is one first-frame reset plus
+  **five** accepted cuts — an over-reset at frame 91, one frame after the frame-90 cut.
+  Measured with `cutlab.py`, below.
 - Per-frame cost has changed substantially since these runs: the neural pass is
   still ~3.3 ms GPU per 1080p frame, but guide generation is 3.1 ms (was 6.4),
   capture is 5.7 ms (was 6.7), and steady-state throughput is 12.50 ms/frame at
@@ -188,6 +194,83 @@ whole reason the staleness matters.
   and costs 2.8 dB PSNR and 11 OCR points on small text; face crops keep a
   0.952 mean cosine to the source with frame-to-frame drift equal to the
   source's own (0.137 vs 0.133). Two-pass is not a default candidate.
+
+## The scene-cut criterion, measured (2026-09-14, CPU only)
+
+`cutlab.py` scores the criterion itself rather than a render: no GPU, no worker, no
+neural pass. It replays `cutmirror` — the shared Python mirror of
+`src/TemporalGuides.cpp` that `analyze.py` also uses — over the corpus's cell grids
+and matches every accepted history reset against the manifest.
+
+```
+python tools/benchmark/corpus.py --corpus <dir>          # 9 clips, ~2 min
+python tools/benchmark/cutlab.py --corpus <dir> --sweep  # 1212 pairs, ~30 s cached
+```
+
+The labelled set grew for this: five clips exist only to be got right. `cuts-similar`
+hard-cuts between four mirrorings of one fractal still, so the shots share a luma
+histogram by construction and only correspondence can see the cut; `pan-fast` travels
+6.1 analysis cells per frame and `zoom-fast` goes 1.0× → 2.2× in 1.5 s, neither of
+which is a cut; `dissolve` cross-fades over 0.7 s, where one reset is right and two
+are not; `flash-exposure` has a four-frame flash and a sustained exposure step, and
+the scene never changes.
+
+**What the shipped 0.30 / 0.10 / 0.85 criterion does** (9 clips, 1212 consecutive
+pairs, 7 labelled hard cuts):
+
+| clip | truth | accepted resets | missed | false positives |
+|---|---|---|---:|---|
+| cuts-motion | 45, 90, 135, 180 | 45, 90, **91**, 135, 180 | 0 | 91 |
+| cuts-similar | 30, 60, 90 | none | 3 | – |
+| flash-exposure | none | 30, 60 (34 suppressed) | 0 | 30, 60 |
+| text-subtitles, fine-detail, highlights-gradients, pan-fast, zoom-fast, dissolve | none | none | 0 | – |
+
+Pooled precision 0.571, recall 0.571, F1 0.571. Three findings:
+
+- **The frame-91 over-reset is real.** Frame 90 cuts into the `life` automaton, and
+  frame 91 is that automaton's first generation step: residual 0.3739, overlap 0.1282.
+  The strong arm fires and, by design, is never debounced, so DLSS gets `Reset=1` twice
+  in two frames. It is the sixth reset the reference table reports.
+- **A cut between similar shots is invisible.** All three `cuts-similar` cuts land at
+  residual 0.185–0.213 with overlap 0.88–0.98: under the 0.30 strong arm and over the
+  0.85 histogram gate, so neither arm fires.
+- **A flash is indistinguishable from a cut.** Residual 0.25 with overlap 0.44 is
+  exactly the weak arm's shape. The 0.6 s debounce catches the frame that ends the
+  flash (34) but not the one that starts it (30), nor the exposure step at 60.
+
+**Roadmap survey item 3, the scale-free candidate.** A cell's match failed when its
+winning displacement cost exceeds `ratio` × its standing-still cost — the
+no-prediction baseline `EstimateFlow` computes and discards — among cells whose
+standing-still cost clears `floor`; the decision is the *fraction* of failed cells
+(x265 `scenecut-bias`, mvtools `thSCD2`) rather than a mean residual. Implemented in
+`cutmirror.FailedFractionCriterion`, swept over 1350 points against the residual
+family's 198:
+
+| family | best F1 | points with no missed cut and no over-reset | fewest false positives there | clips still wrong |
+|---|---:|---:|---:|---|
+| residual (shipped shape) | 0.875 | 2 | 2 | flash-exposure |
+| failed fraction | 0.875 | 89 | 2 | flash-exposure |
+
+**The candidate is not better, so nothing in `src/` changed.** Both families reach the
+identical best operating point — every labelled cut found, no over-reset, and the same
+two false positives on the same clip — so the extra per-cell state a fraction needs in
+`EstimateFlow` would buy nothing. Neither score even orders the set correctly: the
+weakest true cut is 0.1853 residual against a 0.3739 non-cut, and 0.5661 failed
+fraction against a 0.7297 non-cut. Both families are carried by the two-arm split and
+the debounce, not by the score.
+
+The shipped thresholds were left alone for the same reason. The residual sweep's best
+point is `residual > 0.40`, or `> 0.13` with **no** histogram gate — and the gate is
+what protects the corpus's own fast pan, which reaches residual 0.1252 on
+`cuts-motion` frame 39, a 3.8 % margin under that 0.13. Raising the strong arm to 0.40
+would also demote all four `cuts-motion` cuts (0.242–0.397) to the debounced weak arm,
+trading one documented over-reset for an unmeasured missed-cut risk on fast-cut
+footage. Seven labelled cuts over nine synthetic clips is not enough evidence to do
+either.
+
+What would settle it is footage this corpus cannot synthesize: real grain, real motion
+blur, real dissolves, and a shot-boundary set large enough that a three-parameter grid
+search is not fitting seven positives.
 
 ## What the harness measures now, and what it still cannot
 

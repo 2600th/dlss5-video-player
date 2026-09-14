@@ -53,18 +53,17 @@ import numpy as np
 
 from common import (ANALYSIS, CORPUS, FrameReader, RUNS, framemd5, load_manifest, run_dirs, sequence_digest,
                     write_json)
+from cutmirror import CUT_MATCH_FRAMES, CutRun, GuideGrid, cut_scores
 
 SAMPLE_EVERY = 15
 
 # The grid metrics mirror src/TemporalGuides.cpp instead of inventing a geometry: the
 # analysis grid, the stratified downsample, the normalized Rec.709 luma, the cut
-# thresholds and the weak-arm debounce are all the generator's own. A cell here is the
-# cell the worker solves a vector for, so a threshold swept here transfers unchanged.
+# thresholds and the weak-arm debounce all come from cutmirror, which is the
+# generator's own. A cell here is the cell the worker solves a vector for, so a
+# threshold swept there transfers unchanged.
 CELL_TOLERANCE = 2 / 255  # "unchanged": two 8-bit levels of a cell's normalized luma
-CUT_RESIDUAL_STRONG, CUT_RESIDUAL_WEAK, CUT_HISTOGRAM_OVERLAP = 0.30, 0.10, 0.85
-CUT_MATCH_FRAMES = 1
 MIN_SHOT_FRAMES = 3
-REC709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32) / 255
 
 
 def ssim_gray(a: np.ndarray, b: np.ndarray) -> float:
@@ -86,121 +85,6 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 def luma(rgb: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
-
-
-def analysis_grid(width: int, height: int, fps: float) -> tuple[int, int]:
-    """TemporalGuideGenerator::AnalysisGrid - the cell field the guide solver works on."""
-    high_fps = fps >= 45.0
-    gw = min(max(width // (14 if high_fps else 10), 96), 128 if high_fps else 160)
-    return gw, max(48 if high_fps else 54, gw * height // width)
-
-
-class GuideGrid:
-    """Reduces a frame to one Rec.709 luma value per analysis cell.
-
-    Four stratified samples per cell, which is DownsampleLuma's own scheme, so a verdict
-    about a cell here is a verdict about the cell the worker estimates a vector for.
-    """
-
-    def __init__(self, width: int, height: int, fps: float):
-        self.gw, self.gh = analysis_grid(width, height, fps)
-        self.cell_w, self.cell_h = width / self.gw, height / self.gh
-        self.rows, self.cols = self.taps(height, self.gh), self.taps(width, self.gw)
-
-    @staticmethod
-    def taps(size: int, cells: int) -> tuple[np.ndarray, np.ndarray]:
-        first = np.arange(cells) * size // cells
-        last = np.maximum(first + 1, (np.arange(cells) + 1) * size // cells)
-        return first, np.minimum(size - 1, (first + last) // 2)
-
-    def cells(self, rgb: np.ndarray) -> np.ndarray:
-        return sum(rgb[np.ix_(ys, xs)] @ REC709 for ys in self.rows for xs in self.cols) * 0.25
-
-
-def global_residual(cur: np.ndarray, prev: np.ndarray) -> float:
-    """EstimateFlow's whole-frame translation cost, which is the residual a cut is judged on.
-
-    The cheapest of the 225 shifts within +/-7 cells by mean |dY| over a 4-cell lattice,
-    with the same quadratic distance penalty and the same refusal to prefer a marginal
-    shift over standing still.
-    """
-    gh, gw = cur.shape
-    rows, cols = np.arange(4, gh - 4, 4), np.arange(4, gw - 4, 4)
-    if not rows.size or not cols.size:
-        return 0.0
-    patch = cur[np.ix_(rows, cols)]
-    best = zero = None
-    shifted = False
-    for dy in range(-7, 8):
-        keep_y = (rows + dy >= 0) & (rows + dy < gh)
-        for dx in range(-7, 8):
-            keep_x = (cols + dx >= 0) & (cols + dx < gw)
-            cost = 0.0 if not (keep_y.any() and keep_x.any()) else float(np.abs(
-                patch[np.ix_(keep_y, keep_x)] - prev[np.ix_(rows[keep_y] + dy, cols[keep_x] + dx)]).mean())
-            cost += 0.0015 * (dx * dx + dy * dy)
-            if dx == 0 and dy == 0:
-                zero = cost
-            if best is None or cost < best:
-                best, shifted = cost, (dx, dy) != (0, 0)
-    return zero if shifted and zero - best < 0.012 else best
-
-
-def histogram_overlap(cur: np.ndarray, prev: np.ndarray) -> float:
-    """LumaHistogramIntersection: normalized 32-bin intersection of two cell-luma histograms."""
-    counts = [np.bincount(np.clip(grid.ravel() * 32, 0, 31).astype(np.int32), minlength=32)
-              for grid in (cur, prev)]
-    return float(np.minimum(*counts).sum() / cur.size)
-
-
-class CutDetector:
-    """ClassifySceneCut and its weak-arm debounce, fed one stream's cell grids.
-
-    Frame 0 is the generator's FirstFrame reset rather than a detection; every later frame
-    is judged against its predecessor the way Generate does it, so ``cuts`` is the sequence
-    of history resets image evidence alone would produce on this stream, and ``evidence``
-    is the labelled set a threshold sweep needs.
-    """
-
-    def __init__(self, fps: float):
-        self.min_frames = max(2, round(0.6 * fps)) if fps > 0 else 2
-        self.since_cut, self.accepted_any = 0, False
-        self.cuts: list[int] = []
-        self.evidence: list[dict] = []
-
-    def feed(self, index: int, cur: np.ndarray, prev: np.ndarray) -> None:
-        self.since_cut += 1
-        residual, overlap = global_residual(cur, prev), histogram_overlap(cur, prev)
-        strong = residual > CUT_RESIDUAL_STRONG
-        weak = not strong and residual > CUT_RESIDUAL_WEAK and overlap < CUT_HISTOGRAM_OVERLAP
-        if not (strong or weak):
-            return
-        suppressed = weak and self.accepted_any and self.since_cut < self.min_frames
-        self.evidence.append(dict(frame=index, residual=residual, histogram_overlap=overlap,
-                                  arm="residual" if strong else "histogram", suppressed=suppressed))
-        if not suppressed:
-            self.cuts.append(index)
-            self.since_cut, self.accepted_any = 0, True
-
-
-def cut_scores(detected: list[int], truth: list[int], tolerance: int = CUT_MATCH_FRAMES) -> dict:
-    """Precision/recall/F1 against the manifest's hard-cut indices.
-
-    At most one detection matches each ground-truth cut, within ``tolerance`` frames of it.
-    A cut-free clip has no recall to report and its detection count is its false positives.
-    """
-    spare = sorted(detected)
-    matched = 0
-    for cut in sorted(truth):
-        near = [d for d in spare if abs(d - cut) <= tolerance]
-        if near:
-            spare.remove(min(near, key=lambda d: (abs(d - cut), d)))
-            matched += 1
-    precision = matched / len(detected) if detected else None
-    recall = matched / len(truth) if truth else None
-    f1 = None if precision is None or recall is None else \
-        (0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall))
-    return dict(detected=sorted(detected), matched=matched, missed=len(truth) - matched,
-                false_positives=spare, precision=precision, recall=recall, f1=f1)
 
 
 class ShotSigma:
@@ -262,7 +146,7 @@ class MotionField:
     def __init__(self, width: int, height: int, fps: float, cuts: set[int]):
         self.grid = GuideGrid(width, height, fps)
         self.cuts = cuts
-        self.detect_source, self.detect_output = CutDetector(fps), CutDetector(fps)
+        self.detect_source, self.detect_output = CutRun(fps), CutRun(fps)
         self.static = self.invented = self.pairs = 0
         self.flips_source = self.flips_output = self.transitions = 0
         self.previous = self.verdicts = None
@@ -467,8 +351,9 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
             temporal_sigma_p99_output=sigma_output[1] if sigma_output else None,
             temporal_sigma_shots=len(sigma_src.shots), motion_field=field.result(),
             cuts=dict(ground_truth=sorted(cuts), tolerance_frames=CUT_MATCH_FRAMES,
-                      source=cut_scores(field.detect_source.cuts, sorted(cuts)),
-                      output=cut_scores(field.detect_output.cuts, sorted(cuts)),
+                      tolerated_spans=clip.get("soft_cuts", []),
+                      source=cut_scores(field.detect_source.cuts, sorted(cuts), soft_cuts=clip.get("soft_cuts")),
+                      output=cut_scores(field.detect_output.cuts, sorted(cuts), soft_cuts=clip.get("soft_cuts")),
                       source_evidence=field.detect_source.evidence,
                       output_evidence=field.detect_output.evidence,
                       worker_accepted_strong=worker.get("accepted_strong_cuts"),
