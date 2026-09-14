@@ -265,18 +265,21 @@ private:
     // so more backbuffers would only spend VRAM in the visible player.
     static constexpr uint32_t SwapchainBuffers = 3;
     static_assert(SwapchainBuffers <= FrameCount);
-    // Root signature: [0] SRV table t0 (current view), [1] SRV table t1
-    // (comparison reference), [2] PresentConstantCount 32-bit constants (Params).
+    // Root signature: [0] SRV table t0 (current view), [1] SRV table t1 (comparison
+    // reference) and t2 (backward flow, read by the flow resolve alone), [2]
+    // PresentConstantCount 32-bit constants (Params).
     static constexpr uint32_t RootView = 0, RootReference = 1, RootConstants = 2;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
-    // Hardware optical flow: the S10.5 flow grid and its per-cell cost, bound at t0/t1
-    // for the one pass that turns them into full-resolution motion.
-    static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10;
-    static constexpr uint32_t SRVCount = 11;
+    // Hardware optical flow: the S10.5 flow grid, its per-cell cost and the reverse
+    // field, bound at t0/t1/t2 for the one pass that turns them into full-resolution
+    // motion. The cost and reverse slots hold null descriptors when the engine offered
+    // neither, because the reference table spans both of them.
+    static constexpr uint32_t NvofFlowSRV = 9, NvofCostSRV = 10, NvofBackFlowSRV = 11;
+    static constexpr uint32_t SRVCount = 12;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source).
     static constexpr uint32_t DecodedRTV = FrameCount + 5, RTVCount = FrameCount + 6;

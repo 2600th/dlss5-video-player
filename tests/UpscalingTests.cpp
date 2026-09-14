@@ -1,6 +1,10 @@
 #include "UpscalingPolicy.h"
+#include "FlowGate.h"
 #include "NgxSession.h"
+#include "NvofResolveShader.h"
 #include "TestSupport.h"
+
+#include <d3dcompiler.h>
 
 int main() {
     const auto hd = UpscalingTarget(1920,1080,1440);
@@ -31,5 +35,40 @@ int main() {
     const auto first=ngx_session_detail::PrepareFeatureForFrame(true,false,1,recreate,
         [&]{created=true;return true;},[]{return false;},true);
     CHECK(created);CHECK(first.selected);CHECK(first.needsFlush);
+
+    // The forward/backward round trip. A vector the reverse field cancels is motion that
+    // happened; one it repeats is an occlusion or a mismatch, and how much disagreement
+    // is tolerated follows the magnitude of the pair rather than a fixed pixel budget.
+    static_assert(flow_gate::Disagrees(4.0f,-3.0f,4.0f,-3.0f),
+                  "the gate is composed into HLSL, so it has to fold at compile time");
+    CHECK(!flow_gate::Disagrees(4.0f,-3.0f,-4.0f,3.0f));
+    CHECK(!flow_gate::Disagrees(0.0f,0.0f,0.0f,0.0f));
+    // Sub-pixel disagreement on a nearly still cell is the grid's own quantisation.
+    CHECK(!flow_gate::Disagrees(0.2f,0.1f,-0.1f,-0.2f));
+    // One pixel of round-trip error either way: kept on a 40 px/frame pan, rejected on a
+    // half-pixel drift, which is what scale-free means here.
+    CHECK(!flow_gate::Disagrees(40.0f,0.0f,-39.0f,0.0f));
+    CHECK(flow_gate::Disagrees(0.5f,0.0f,0.5f,0.0f));
+
+    // The resolve pass itself, compiled from the same string the renderer compiles, with
+    // its entry points, targets and flags. No device and no flow engine are involved, so
+    // this is the one check of that shader a machine without an RTX GPU can make - and
+    // the shader is otherwise first compiled on a user's.
+    auto compiles=[](const char* entry, const char* target) {
+        ID3DBlob* code = nullptr;
+        ID3DBlob* errors = nullptr;
+        const HRESULT hr = D3DCompile(kNvofResolveHlsl, sizeof(kNvofResolveHlsl) - 1, "nvof",
+                                      nullptr, nullptr, entry, target,
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        if (errors) {
+            if (FAILED(hr)) std::cerr << static_cast<const char*>(errors->GetBufferPointer()) << '\n';
+            errors->Release();
+        }
+        const bool compiled = SUCCEEDED(hr) && code && code->GetBufferSize() > 0;
+        if (code) code->Release();
+        return compiled;
+    };
+    CHECK(compiles("VS","vs_5_1"));
+    CHECK(compiles("PSNvofMotion","ps_5_1"));
     return test_support::failure_count==0?0:1;
 }

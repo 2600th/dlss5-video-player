@@ -88,6 +88,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/D3D12Renderer.h
     src/OpticalFlowNvof.cpp
     src/OpticalFlowNvof.h
+    src/FlowGate.h
+    src/NvofResolveShader.h
     src/HardErrorSuppression.h
     src/D3D12FenceWait.h
     src/TemporalGuides.cpp
@@ -268,6 +270,9 @@ if(BUILD_TESTING)
     add_executable(UpscalingTests tests/UpscalingTests.cpp)
     target_include_directories(UpscalingTests PRIVATE src)
     target_compile_definitions(UpscalingTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    # The resolve pass's HLSL is compiled headlessly by this suite, which needs no device
+    # and no flow engine - only the compiler.
+    target_link_libraries(UpscalingTests PRIVATE d3dcompiler)
     add_test(NAME UpscalingTests COMMAND UpscalingTests)
     add_executable(UpdateCheckTests tests/UpdateCheckTests.cpp src/UpdateCheck.cpp)
     target_include_directories(UpdateCheckTests PRIVATE src)
@@ -305,6 +310,8 @@ if(BUILD_TESTING)
         src/D3D12Renderer.h
         src/OpticalFlowNvof.cpp
         src/OpticalFlowNvof.h
+        src/FlowGate.h
+        src/NvofResolveShader.h
         src/PixelLayout.h
         src/ReleasePackagePolicy.h
         src/DLSSBackend.cpp

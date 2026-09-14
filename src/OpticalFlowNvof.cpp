@@ -9,6 +9,7 @@
 #if defined(DLSS_VIDEO_PLAYER_HAS_NVOF)
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 #include "nvOpticalFlowCommon.h"
@@ -40,6 +41,13 @@ const char* StatusName(NV_OF_STATUS status)
         case NV_OF_ERR_UNSUPPORTED_FEATURE: return "UNSUPPORTED_FEATURE";
         default: return "GENERIC";
     }
+}
+
+const char* ModeName(NV_OF_PRED_DIRECTION direction, bool global)
+{
+    if (direction == NV_OF_PRED_DIRECTION_BOTH)
+        return global ? "both directions with global flow" : "both directions";
+    return global ? "forward only with global flow" : "forward only";
 }
 
 ComPtr<ID3D12Resource> CreateSurface(ID3D12Device* device, DXGI_FORMAT format,
@@ -192,6 +200,49 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
                          : costFormats[0];
     }
 
+    // Global flow arrives as a single NV_OF_FLOW_VECTOR, which is two int16s - the same
+    // layout as a cell of the field. A device that names a format this side cannot
+    // decode gets no global flow rather than a guessed decode; a query the driver does
+    // not answer at all leaves the documented layout in place, which is also the format
+    // the forward surface above is created with unqueried.
+    DXGI_FORMAT globalFormat = DXGI_FORMAT_R16G16_SINT;
+    uint32_t globalCount = 0;
+    if (fn.nvOFGetSurfaceFormatCountD3D12(handle, NV_OF_BUFFER_USAGE_GLOBAL_FLOW,
+                                          NV_OF_MODE_OPTICALFLOW, &globalCount) == NV_OF_SUCCESS &&
+        globalCount > 0) {
+        std::vector<DXGI_FORMAT> globalFormats(globalCount);
+        fn.nvOFGetSurfaceFormatD3D12(handle, NV_OF_BUFFER_USAGE_GLOBAL_FLOW,
+                                     NV_OF_MODE_OPTICALFLOW, globalFormats.data());
+        if (std::find(globalFormats.begin(), globalFormats.end(), globalFormat) ==
+            globalFormats.end()) {
+            globalFormat = DXGI_FORMAT_UNKNOWN;
+            LOG("NVOFA: the engine names no global flow format this build can decode, so "
+                "global flow will not be asked for.");
+        }
+    }
+
+    // Neither the surfaces nor the fences depend on which mode the engine accepts, so
+    // they are created once here and the ladder below only adds what its rung needs.
+    m_flowW = (width + m_grid - 1) / m_grid;
+    m_flowH = (height + m_grid - 1) / m_grid;
+    m_input[0] = CreateSurface(device, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA_Input0");
+    m_input[1] = CreateSurface(device, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA_Input1");
+    m_flow = CreateSurface(device, DXGI_FORMAT_R16G16_SINT, m_flowW, m_flowH, L"NVOFA_Flow_S10_5");
+    if (costFormat != DXGI_FORMAT_UNKNOWN)
+        m_cost = CreateSurface(device, costFormat, m_flowW, m_flowH, L"NVOFA_Cost");
+    if (!m_input[0] || !m_input[1] || !m_flow) {
+        LOG("NVOFA unavailable: its surfaces could not be created.");
+        Shutdown();
+        return false;
+    }
+
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_appFence))) ||
+        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_ofaFence)))) {
+        LOG("NVOFA unavailable: its synchronization fences could not be created.");
+        Shutdown();
+        return false;
+    }
+
     NV_OF_INIT_PARAMS init{};
     init.width = width;
     init.height = height;
@@ -213,32 +264,74 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
     init.hPrivData = nullptr;
     init.disparityRange = NV_OF_STEREO_DISPARITY_RANGE_UNDEFINED;
     init.enableRoi = NV_OF_FALSE;
-    init.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
-    init.enableGlobalFlow = NV_OF_FALSE;
     init.inputBufferFormat = NV_OF_BUFFER_FORMAT_ABGR8;
-    status = fn.nvOFInit(handle, &init);
-    if (status != NV_OF_SUCCESS) {
-        LOG("NVOFA unavailable: nvOFInit returned " << StatusName(status) << ".");
-        Shutdown();
-        return false;
-    }
 
-    m_flowW = (width + m_grid - 1) / m_grid;
-    m_flowH = (height + m_grid - 1) / m_grid;
-    m_input[0] = CreateSurface(device, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA_Input0");
-    m_input[1] = CreateSurface(device, DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA_Input1");
-    m_flow = CreateSurface(device, DXGI_FORMAT_R16G16_SINT, m_flowW, m_flowH, L"NVOFA_Flow_S10_5");
-    if (costFormat != DXGI_FORMAT_UNKNOWN)
-        m_cost = CreateSurface(device, costFormat, m_flowW, m_flowH, L"NVOFA_Cost");
-    if (!m_input[0] || !m_input[1] || !m_flow) {
-        LOG("NVOFA unavailable: its surfaces could not be created.");
-        Shutdown();
-        return false;
+    // Both directions and the global flow estimate are the two capabilities worth asking
+    // this engine for: the reverse field lets the resolve pass discard vectors the engine
+    // contradicts itself about, and the global vector is the only motion evidence a
+    // scene-cut test can have that is not its own arithmetic again. Neither is worth
+    // losing hardware flow over, though, so a refused capability steps down one rung
+    // instead of failing, and the reverse field is given up last because it is the one
+    // that changes what the reconstruction sees. A refused nvOFInit leaves the session
+    // in a state the SDK offers no way to reset, so each rung gets a fresh one.
+    struct Mode { NV_OF_PRED_DIRECTION direction; bool global; };
+    const Mode ladder[] = {{NV_OF_PRED_DIRECTION_BOTH, true},
+                           {NV_OF_PRED_DIRECTION_BOTH, false},
+                           {NV_OF_PRED_DIRECTION_FORWARD, true},
+                           {NV_OF_PRED_DIRECTION_FORWARD, false}};
+    bool initialized = false;
+    for (const Mode& mode : ladder) {
+        if (mode.global && globalFormat == DXGI_FORMAT_UNKNOWN) continue;
+        if (!handle) {
+            status = fn.nvCreateOpticalFlowD3D12(device, reinterpret_cast<NvOFHandle*>(&m_session));
+            if (status != NV_OF_SUCCESS || !m_session) {
+                LOG("NVOFA unavailable: nvCreateOpticalFlowD3D12 returned " << StatusName(status)
+                    << " while stepping down to " << ModeName(mode.direction, mode.global) << ".");
+                Shutdown();
+                return false;
+            }
+            handle = static_cast<NvOFHandle>(m_session);
+        }
+        init.predDirection = mode.direction;
+        init.enableGlobalFlow = mode.global ? NV_OF_TRUE : NV_OF_FALSE;
+        status = fn.nvOFInit(handle, &init);
+        if (status == NV_OF_SUCCESS) {
+            if (mode.direction == NV_OF_PRED_DIRECTION_BOTH) {
+                m_backFlow = CreateSurface(device, DXGI_FORMAT_R16G16_SINT, m_flowW, m_flowH,
+                                           L"NVOFA_BackFlow_S10_5");
+                // enableOutputCost covers both directions at once, so the backward cost
+                // exists exactly when the forward one does. It is allocated so the engine
+                // has somewhere to put it; nothing reads it until the cost gate itself is
+                // measured.
+                if (m_cost)
+                    m_backCost = CreateSurface(device, costFormat, m_flowW, m_flowH,
+                                               L"NVOFA_BackCost");
+            }
+            if (mode.global)
+                m_globalSurface = CreateSurface(device, globalFormat, 1, 1, L"NVOFA_GlobalFlow");
+            const bool allocated = (mode.direction != NV_OF_PRED_DIRECTION_BOTH ||
+                                    (m_backFlow && (!m_cost || m_backCost))) &&
+                                   (!mode.global || m_globalSurface);
+            if (allocated) {
+                initialized = true;
+                break;
+            }
+            LOG("NVOFA: the surfaces " << ModeName(mode.direction, mode.global)
+                << " needs could not be created.");
+            m_backFlow.Reset();
+            m_backCost.Reset();
+            m_globalSurface.Reset();
+        } else {
+            LOG("NVOFA: nvOFInit refused " << ModeName(mode.direction, mode.global) << " with "
+                << StatusName(status) << ".");
+        }
+        if (fn.nvOFDestroy) fn.nvOFDestroy(handle);
+        m_session = nullptr;
+        handle = nullptr;
     }
-
-    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_appFence))) ||
-        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_ofaFence)))) {
-        LOG("NVOFA unavailable: its synchronization fences could not be created.");
+    if (!initialized) {
+        LOG("NVOFA unavailable: nvOFInit refused every mode, last with "
+            << StatusName(status) << ".");
         Shutdown();
         return false;
     }
@@ -246,10 +339,46 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
     if (!RegisterResource(m_input[0].Get(), &m_inputHandle[0]) ||
         !RegisterResource(m_input[1].Get(), &m_inputHandle[1]) ||
         !RegisterResource(m_flow.Get(), &m_flowHandle) ||
-        (m_cost && !RegisterResource(m_cost.Get(), &m_costHandle))) {
+        (m_cost && !RegisterResource(m_cost.Get(), &m_costHandle)) ||
+        (m_backFlow && !RegisterResource(m_backFlow.Get(), &m_backFlowHandle)) ||
+        (m_backCost && !RegisterResource(m_backCost.Get(), &m_backCostHandle)) ||
+        (m_globalSurface && !RegisterResource(m_globalSurface.Get(), &m_globalHandle))) {
         LOG("NVOFA unavailable: its surfaces could not be registered with the engine.");
         Shutdown();
         return false;
+    }
+
+    // The CPU side of global flow: four bytes copied out of the 1x1 surface into a buffer
+    // that stays mapped. Losing it costs only the reading, not the estimate, so the
+    // engine still comes up with global flow on.
+    if (m_globalSurface) {
+        const D3D12_RESOURCE_DESC surface = m_globalSurface->GetDesc();
+        uint64_t total = 0;
+        device->GetCopyableFootprints(&surface, 0, 1, 0, &m_globalFootprint, nullptr, nullptr,
+                                      &total);
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC buffer{};
+        buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        buffer.Width = total;
+        buffer.Height = 1;
+        buffer.DepthOrArraySize = 1;
+        buffer.MipLevels = 1;
+        buffer.Format = DXGI_FORMAT_UNKNOWN;
+        buffer.SampleDesc = {1, 0};
+        buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        void* mapped = nullptr;
+        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(&m_globalReadback))) ||
+            FAILED(m_globalReadback->Map(0, nullptr, &mapped))) {
+            m_globalReadback.Reset();
+            LOG("NVOFA: the global flow readback buffer could not be created, so the "
+                "estimate stays on the GPU.");
+        } else {
+            m_globalReadback->SetName(L"NVOFA_GlobalFlow_Readback");
+            m_globalMapped = static_cast<const unsigned char*>(mapped);
+        }
     }
 
     m_ready = true;
@@ -258,7 +387,11 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
         << (init.perfLevel == NV_OF_PERF_LEVEL_SLOW ? "SLOW"
             : init.perfLevel == NV_OF_PERF_LEVEL_MEDIUM ? "MEDIUM" : "FAST")
         << ", cost="
-        << (m_cost ? "on" : "unavailable") << ".");
+        << (m_cost ? "on" : "unavailable")
+        << ", direction="
+        << (m_backFlow ? "both, round-trip gate armed" : "forward only, gate off")
+        << ", global flow="
+        << (!m_globalSurface ? "off" : m_globalMapped ? "on" : "on but unreadable") << ".");
     return true;
 }
 
@@ -313,6 +446,38 @@ void OpticalFlowNvof::Capture(ID3D12GraphicsCommandList* cmd, ID3D12Resource* fr
     barriers[count].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
     ++count;
     cmd->ResourceBarrier(count, barriers);
+
+    ReadbackGlobalFlow(cmd);
+}
+
+void OpticalFlowNvof::ReadbackGlobalFlow(ID3D12GraphicsCommandList* cmd)
+{
+    if (!m_globalMapped) return;
+    // Submit() signals the application fence exactly once per frame, so the value it
+    // reaches next is the one that publishes the copy recorded below, and reading the
+    // buffer once the fence has passed that value is a comparison rather than a wait.
+    if (m_globalPending && m_appFence->GetCompletedValue() >= m_globalValue) {
+        int16_t vector[2]{};
+        std::memcpy(vector, m_globalMapped, sizeof(vector));
+        m_global = {vector[0] / 32.0f, vector[1] / 32.0f, true};
+        m_globalPending = false;
+    }
+    if (!m_executed) return;
+
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = m_globalReadback.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    destination.PlacedFootprint = m_globalFootprint;
+    D3D12_TEXTURE_COPY_LOCATION source{};
+    source.pResource = m_globalSurface.Get();
+    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    source.SubresourceIndex = 0;
+    // No barrier: COMMON promotes to COPY_SOURCE for this copy and decays straight back.
+    // The engine cannot be writing the surface meanwhile either, because its next
+    // Execute waits on the fence value Submit() signals after this list.
+    cmd->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+    m_globalValue = m_appValue + 1;
+    m_globalPending = true;
 }
 
 bool OpticalFlowNvof::Submit(ID3D12CommandQueue* queue)
@@ -355,6 +520,11 @@ bool OpticalFlowNvof::Submit(ID3D12CommandQueue* queue)
     out.outputBuffer = static_cast<NvOFGPUBufferHandle>(m_flowHandle);
     out.outputCostBuffer = static_cast<NvOFGPUBufferHandle>(m_costHandle);
     out.hPrivData = nullptr;
+    // Null unless the mode that came up asked for them, which is exactly the condition
+    // the SDK states for each: one Execute fills whichever of these are present.
+    out.bwdOutputBuffer = static_cast<NvOFGPUBufferHandle>(m_backFlowHandle);
+    out.bwdOutputCostBuffer = static_cast<NvOFGPUBufferHandle>(m_backCostHandle);
+    out.globalFlowBuffer = static_cast<NvOFGPUBufferHandle>(m_globalHandle);
     out.fencePoint = &done;
 
     const NV_OF_STATUS status =
@@ -364,6 +534,10 @@ bool OpticalFlowNvof::Submit(ID3D12CommandQueue* queue)
         return false;
     }
 
+    // The surfaces now hold an estimate rather than whatever the allocation left there,
+    // which is what makes the global flow copy in the next Capture() worth recording.
+    m_executed = true;
+
     // A GPU-side wait, not a CPU one: the application queue simply does not start the
     // resolve pass until the engine has published the field.
     return SUCCEEDED(queue->Wait(m_ofaFence.Get(), done.value));
@@ -372,9 +546,11 @@ bool OpticalFlowNvof::Submit(ID3D12CommandQueue* queue)
 void OpticalFlowNvof::BeginRead(ID3D12GraphicsCommandList* cmd)
 {
     if (!m_ready || !cmd) return;
-    D3D12_RESOURCE_BARRIER barriers[2]{};
+    D3D12_RESOURCE_BARRIER barriers[3]{};
     uint32_t count = 0;
-    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get()}) {
+    // The backward cost is deliberately not in this list: the engine writes it, and
+    // nothing reads it until the cost gate has thresholds that were measured.
+    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get()}) {
         if (!resource) continue;
         barriers[count].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[count].Transition.pResource = resource;
@@ -389,9 +565,9 @@ void OpticalFlowNvof::BeginRead(ID3D12GraphicsCommandList* cmd)
 void OpticalFlowNvof::EndRead(ID3D12GraphicsCommandList* cmd)
 {
     if (!m_ready || !cmd) return;
-    D3D12_RESOURCE_BARRIER barriers[2]{};
+    D3D12_RESOURCE_BARRIER barriers[3]{};
     uint32_t count = 0;
-    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get()}) {
+    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get()}) {
         if (!resource) continue;
         barriers[count].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[count].Transition.pResource = resource;
@@ -413,7 +589,8 @@ void OpticalFlowNvof::UnregisterAll()
         m_api->fn.nvOFUnregisterResourceD3D12(&params);
         handle = nullptr;
     }
-    for (void** handle : {&m_flowHandle, &m_costHandle}) {
+    for (void** handle : {&m_flowHandle, &m_costHandle, &m_backFlowHandle, &m_backCostHandle,
+                          &m_globalHandle}) {
         if (!*handle) continue;
         NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 params{};
         params.hOFGpuBuffer = static_cast<NvOFGPUBufferHandle>(*handle);
@@ -426,6 +603,7 @@ void OpticalFlowNvof::Shutdown()
 {
     m_ready = false;
     m_hasPrevious = false;
+    m_executed = false;
     // Order matters and follows the SDK's own: every buffer is unregistered and its
     // resource released while the session is still alive (NvOFBufferD3D12's destructor
     // unregisters, and the resource it holds goes with it), and only then is the session
@@ -433,8 +611,16 @@ void OpticalFlowNvof::Shutdown()
     UnregisterAll();
     m_flow.Reset();
     m_cost.Reset();
+    m_backFlow.Reset();
+    m_backCost.Reset();
+    m_globalSurface.Reset();
     m_input[0].Reset();
     m_input[1].Reset();
+    if (m_globalReadback && m_globalMapped) m_globalReadback->Unmap(0, nullptr);
+    m_globalMapped = nullptr;
+    m_globalReadback.Reset();
+    m_globalPending = false;
+    m_global = {};
     if (m_api && m_session && m_api->fn.nvOFDestroy) {
         m_api->fn.nvOFDestroy(static_cast<NvOFHandle>(m_session));
     }
@@ -461,6 +647,7 @@ void OpticalFlowNvof::BeginRead(ID3D12GraphicsCommandList*) {}
 void OpticalFlowNvof::EndRead(ID3D12GraphicsCommandList*) {}
 bool OpticalFlowNvof::RegisterResource(ID3D12Resource*, void**) { return false; }
 void OpticalFlowNvof::UnregisterAll() {}
+void OpticalFlowNvof::ReadbackGlobalFlow(ID3D12GraphicsCommandList*) {}
 
 bool OpticalFlowNvof::Initialize(ID3D12Device*, uint32_t, uint32_t)
 {

@@ -2,6 +2,7 @@
 #include "D3D12FenceWait.h"
 #include "TemporalGuides.h"
 #include "Log.h"
+#include "NvofResolveShader.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <chrono>
@@ -310,8 +311,14 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
        !C("PSSourceNv12","ps_5_1",sourceNv12))return false;
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     for(uint32_t r=0;r<2;++r){ranges[r].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[r].NumDescriptors=1;ranges[r].BaseShaderRegister=r;}
-    // [0] t0 current view, [1] t1 comparison reference, [2] PresentConstantCount root
-    // constants (Params).
+    // The reference table is two descriptors wide so the flow resolve can read the
+    // backward field at t2 beside the cost at t1 without a root parameter nothing else
+    // would use. Every other pass declares t1 alone and never touches the slot after it,
+    // which is a written descriptor either way because the flow views below are created
+    // whether or not the engine came up.
+    ranges[1].NumDescriptors=2;
+    // [0] t0 current view, [1] t1 comparison reference and t2 backward flow, [2]
+    // PresentConstantCount root constants (Params).
     D3D12_ROOT_PARAMETER rp[3]{};
     for(uint32_t r=0;r<2;++r){rp[r].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[r].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[r].DescriptorTable.NumDescriptorRanges=1;rp[r].DescriptorTable.pDescriptorRanges=&ranges[r];}
     rp[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[2].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[2].Constants.Num32BitValues=PresentConstantCount;rp[2].Constants.ShaderRegister=0;
@@ -348,42 +355,15 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.DepthStencilState.DepthEnable=TRUE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;p.DepthStencilState.StencilEnable=FALSE;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthWrite)),"Create real depth-buffer PSO"))return false;
 
-    // The optical-flow resolve is compiled on its own because it reads integer and
-    // unsigned textures where the shared source declares float ones at the same
-    // registers. Same root signature, so it binds exactly like every other pass.
-    const char* nvofHlsl=R"(
-Texture2D<int2> Flow:register(t0); Texture2D<uint> Cost:register(t1);
-cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; };
-struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
-V VS(uint id:SV_VertexID){float2 uv=float2((id<<1)&2,id&2);V o;o.uv=uv;o.p=float4(uv.x*2-1,1-uv.y*2,0,1);return o;}
-// NVOFA writes S10.5 fixed point: one unit is 1/32 of an input pixel. With
-// inputFrame = this frame and referenceFrame = the previous one the vector already
-// points from the current pixel back to where that content was, which is verbatim the
-// DLSS convention, so there is no sign flip here.
-//
-// The fetch is NEAREST, not bilinear. Across a disocclusion the neighbouring cells
-// describe different surfaces and interpolating them manufactures a vector no cell
-// measured, widening the band instead of narrowing it. Where the field is smooth it
-// varies far more slowly than one cell and the two filters agree anyway.
-float2 PSNvofMotion(V i):SV_Target{
-    uint2 dim; Flow.GetDimensions(dim.x,dim.y);
-    int2 cell=int2(min(uint2(i.uv*float2(dim)),dim-1));
-    float2 motion=float2(Flow.Load(int3(cell,0)))*FlowScale;
-    // Gate.x == Gate.y disables the confidence gate, which is the default: the cost
-    // thresholds are not measured yet and inventing them would be a guess that silently
-    // deletes real motion. When they are set, a high-cost cell fades toward zero rather
-    // than switching off, so the decision cannot alternate frame to frame.
-    if(Gate.y>Gate.x){
-        float cost=float(Cost.Load(int3(cell,0)));
-        motion*=saturate((Gate.y-cost)/(Gate.y-Gate.x));
-    }
-    return motion;
-}
-)";
+    // The resolve pass's text lives in NvofResolveShader.h. It is compiled on its own
+    // because it reads integer and unsigned textures where the shared source above
+    // declares float ones at the same registers, and keeping the string in a header lets
+    // a test compile it on a machine with no flow engine to run it on. Same root
+    // signature, so it binds exactly like every other pass.
     ComPtr<ID3DBlob> nvofVs,nvofPs,nvofErr;
     auto CN=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{
         nvofErr.Reset();
-        const HRESULT hr=D3DCompile(nvofHlsl,strlen(nvofHlsl),"nvof",nullptr,nullptr,entry,target,flags,0,&out,&nvofErr);
+        const HRESULT hr=D3DCompile(kNvofResolveHlsl,sizeof(kNvofResolveHlsl)-1,"nvof",nullptr,nullptr,entry,target,flags,0,&out,&nvofErr);
         if(FAILED(hr)){if(nvofErr)LOG((char*)nvofErr->GetBufferPointer());return false;}
         return true;
     };
@@ -460,6 +440,11 @@ bool D3D12Renderer::CreateVideoResources(){
             D3D12_RANGE r{0,0};if(!HR(m_upload[i]->Map(0,&r,reinterpret_cast<void**>(&m_uploadMapped[i])),"Map NV12 video upload"))return false;
         }
     }else{
+        // The reference table spans the slot after the one it is bound to, and the
+        // present pass binds it one before the luma plane, so these two get defined
+        // descriptors even on a source that has no NV12 planes.
+        srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(SourceLumaSRV));
+        srv.Format=DXGI_FORMAT_R8G8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(SourceChromaSRV));
         for(uint32_t i=0;i<FrameCount;++i){
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
             if(!CreateUploadForTexture(src,m_upload[i],m_uploadMapped[i],fp,rows,rowBytes,total,"Create video upload"))return false;
@@ -479,18 +464,27 @@ bool D3D12Renderer::CreateVideoResources(){
     // every neural path renderW == sourceW, and the runtime SR toggle, which is the one
     // case where they differ, keeps the CPU estimator.
     m_nvofActive=false;
+    // The three flow descriptors are written whether or not the engine comes up. A pass
+    // that binds the reference table at the cost slot now spans the slot after it too,
+    // and a heap slot nobody ever wrote is not a descriptor.
+    D3D12_SHADER_RESOURCE_VIEW_DESC fsrv{};fsrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    fsrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;fsrv.Texture2D.MipLevels=1;
+    fsrv.Format=DXGI_FORMAT_R16G16_SINT;
+    m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofFlowSRV));
+    m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofBackFlowSRV));
+    fsrv.Format=DXGI_FORMAT_R8_UINT;m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofCostSRV));
     if(m_sourceW==m_renderW&&m_sourceH==m_renderH&&m_nvof.Initialize(m_device.Get(),m_renderW,m_renderH)){
-        D3D12_SHADER_RESOURCE_VIEW_DESC fsrv{};fsrv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        fsrv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;fsrv.Texture2D.MipLevels=1;
         fsrv.Format=DXGI_FORMAT_R16G16_SINT;m_device->CreateShaderResourceView(m_nvof.Flow(),&fsrv,SRVCPU(NvofFlowSRV));
-        // The resolve pass always binds t1, so a device without a cost surface gets a
-        // defined descriptor rather than an empty slot; the gate is off by default.
+        // A device that offered no cost surface, or only the forward direction, keeps the
+        // null descriptor written above: the resolve pass binds t1 and t2 either way, and
+        // the gate that reads each is switched off by its own constant.
         if(m_nvof.Cost()){
             fsrv.Format=m_nvof.Cost()->GetDesc().Format;
             m_device->CreateShaderResourceView(m_nvof.Cost(),&fsrv,SRVCPU(NvofCostSRV));
-        }else{
-            fsrv.Format=DXGI_FORMAT_R8_UINT;
-            m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofCostSRV));
+        }
+        if(m_nvof.BackwardFlow()){
+            fsrv.Format=DXGI_FORMAT_R16G16_SINT;
+            m_device->CreateShaderResourceView(m_nvof.BackwardFlow(),&fsrv,SRVCPU(NvofBackFlowSRV));
         }
         m_nvofActive=true;
     }
@@ -749,9 +743,13 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(NvofCostSRV));
         // S10.5: one stored unit is 1/32 of an input pixel and the motion texture is in
         // input pixels. The third and fourth constants are the confidence gate, left
-        // equal so it stays off until its thresholds are measured.
-        const float resolve[4]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f};
-        cmd->SetGraphicsRoot32BitConstants(RootConstants,4,resolve,0);
+        // equal so it stays off until its thresholds are measured. The fifth is the flow
+        // grid's cell pitch, which the round-trip gate needs to find the cell a vector
+        // lands on; zero there is what leaves that gate out of the pass entirely on a
+        // device that gave no backward field.
+        const float cells=m_nvof.BackwardFlow()?1.0f/float(m_nvof.Grid()):0.0f;
+        const float resolve[5]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,cells};
+        cmd->SetGraphicsRoot32BitConstants(RootConstants,5,resolve,0);
         cmd->DrawInstanced(3,1,0,0);
         m_nvof.EndRead(cmd);
     }else{
