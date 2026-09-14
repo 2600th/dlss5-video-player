@@ -553,14 +553,26 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
             // converting a whole BGRA frame.
             L"-pix_fmt", (!nv12 && (spec.width % 2 || spec.height % 2)) ? L"yuv444p" : L"yuv420p"});
     }
-    // Only the GPU-converted path states its colorimetry, because only there does the
-    // player choose the matrix. The BGRA path leaves ffmpeg's own conversion, and its
-    // tagging, exactly as they were.
-    if (nv12) {
-        arguments.insert(arguments.end(), {
-            L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
-            L"-color_trc", L"bt709", L"-color_range", L"tv"});
+    // Colorimetry is stated on BOTH paths, and the BGRA path is additionally told
+    // which matrix to convert with. Until 2026-09-15 only the GPU-converted path said
+    // anything, on the reasoning that only there does the player pick the matrix - but
+    // the consequence was that every default-path render shipped untagged, and ffmpeg's
+    // own conversion picks BT.601 for an untagged rawvideo input. A BT.709 source
+    // therefore became a file that declared nothing and carried 601 pixels, which any
+    // consumer assuming 709 for HD decodes wrongly.
+    //
+    // Note the order of the two fixes: labelling alone would be worse than the defect.
+    // Tagging 601 pixels as BT.709 turns an ambiguous file into a confidently wrong
+    // one, so the BGRA path gets an explicit conversion matrix and range as well, which
+    // is also what makes the two paths comparable at last. The NV12 path takes no
+    // filter: its pixels are already BT.709 limited range from the capture shader, and
+    // a scale filter there would undo the whole point of converting on the GPU.
+    if (!nv12) {
+        arguments.insert(arguments.end(), {L"-vf", L"scale=out_color_matrix=bt709:out_range=tv"});
     }
+    arguments.insert(arguments.end(), {
+        L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
+        L"-color_trc", L"bt709", L"-color_range", L"tv"});
     arguments.insert(arguments.end(), {L"-f", L"matroska", output.wstring()});
     return arguments;
 }

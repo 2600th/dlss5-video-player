@@ -215,21 +215,31 @@ coefficients for a stream that declares nothing. So on untagged content the CPU 
 GPU halves of the pipeline are converting under two different matrices.
 
 **The test that settles it: the same pixels, tagged.** Two controls, because the
-first one changed clip and resolution at once. `orig-faces` is `bt709`/`tv` from its
-publisher source; `demo-4k-60-tagged` is `demo-4k-60` re-encoded with explicit
-`bt709` tags and nothing else changed. Arm deltas against each clip's own
-`cpu-conversion`:
+first changed clip and resolution at once. `orig-faces` is `bt709`/`tv` from its
+publisher source. `demo-4k-60-tagged` is the tag-only twin of `demo-4k-60`, built
+with `setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv` so
+that the encoded YUV is byte-identical - verified, raw `yuv420p` sha256
+`6ba4478652286864` on both. A first attempt re-encoded with `-colorspace` flags
+instead and silently altered the YUV (`3b95330a...`); it was discarded, because a
+twin whose pixels moved is not a control.
+
+One trap to name, since it caused that mistake: `framemd5` in `common.py` decodes to
+**rgb24**, so a clip's frame digest legitimately changes when only its tags change -
+the tag is what selects the YUV-to-RGB matrix. Pixel identity between tag variants
+has to be asserted in the YUV domain, not through the rgb24 digest.
+
+Arm deltas against each clip's own `cpu-conversion`:
 
 | clip | input tags | `gpu-color-only` | `gpu-source-only` |
 |---|---|---|---|
 | `demo-4k-60` | `unknown` | **-0.783 dB / +0.944 dE** | **-0.638 dB / +0.875 dE** |
-| `demo-4k-60-tagged` | `bt709` (same pixels) | **-0.530 dB / +0.920 dE** | **+0.140 dB / +0.290 dE** |
+| `demo-4k-60-tagged` | `bt709`, identical YUV | **-0.500 dB / +1.060 dE** | **+0.150 dB / +0.270 dE** |
 | `orig-faces` (1080p) | `bt709` | **-0.642 dB / +0.644 dE** | **+0.067 dB / +0.009 dE** |
 
 Read the deltas, not the absolutes: tagging changes the matrix the scorer itself
-decodes under, so `cpu-conversion` moves 29.09 -> 28.38 dB on identical pixels. That
-is a change of comparison basis, not of quality, and it is why only within-clip arm
-deltas mean anything here.
+decodes under, so `cpu-conversion` reads 29.09 dB untagged and 27.68 dB tagged on
+byte-identical YUV. That is a change of comparison basis, not of quality, and it is
+why only within-clip arm deltas mean anything here.
 
 `GpuSourceConversion` goes from **-0.64 dB to free** the moment the input carries
 tags, on two clips at two resolutions. Its entire measured penalty was the
@@ -250,35 +260,61 @@ does"; that is true of the averaging and not of the sample positions. Untested, 
 it is the next measurement rather than a conclusion. One confound to clear first,
 below: the two arms' *outputs* are tagged differently.
 
-### A defect this A/B walked into: every render this player writes is untagged
+### A defect this A/B walked into, and it is now fixed
 
-The arms' outputs do not carry the same colorimetry, and `src/MediaPipeline.cpp:556-563`
-says why in so many words - "Only the GPU-converted path states its colorimetry,
+The arms' outputs did not carry the same colorimetry, and `src/MediaPipeline.cpp`
+said why in so many words: "Only the GPU-converted path states its colorimetry,
 because only there does the player choose the matrix. The BGRA path leaves ffmpeg's
-own conversion, and its tagging, exactly as they were." Measured:
+own conversion, and its tagging, exactly as they were." Measured before the fix:
 
 | arm | output `color_space` | converted by |
 |---|---|---|
-| `cpu-conversion` (the shipped default) | **`unknown`** | swscale, BT.601 by default |
+| `cpu-conversion` (the shipped default) | **`unknown`** | swscale default |
 | `gpu-color-only` | `bt709` | the capture shader, BT.709 |
-| `gpu-source-only` | **`unknown`** | swscale, BT.601 by default |
+| `gpu-source-only` | **`unknown`** | swscale default |
 
-A normal render proves it is not an artifact of these profiles: the
+A normal render proved it was not an artifact of these profiles: the
 `orig-faces__shipped-depth-proxy` output - default flags, a `bt709`-tagged 1080p
-source - is `color_space=unknown`. **So the shipped path takes tagged HD input,
-converts it under BT.601, and writes a file that declares nothing.** A consumer that
-assumes BT.709 for HD, which is the common default, decodes those colours wrongly,
-and the source's own tag was available the whole time.
+source - was `color_space=unknown`.
 
-Two consequences worth separating. First, this is a correctness defect in the
+**Which matrix swscale actually used, measured rather than looked up.** A pure-red
+BGRA frame piped through the shipped encoder line and read back as `yuv420p`:
+
+| geometry | default | with `scale=out_color_matrix=bt709:out_range=tv` |
+|---|---|---|
+| 1920x1080 | Y=81 U=90 V=240 | Y=63 U=102 V=240 |
+| 640x480 | Y=81 U=90 V=240 | Y=63 U=102 V=240 |
+
+BT.601 predicts `(81, 90, 240)` for pure red and BT.709 predicts `(63, 102, 240)`,
+so this build's swscale takes **BT.601 at both HD and SD** - it does not switch on
+resolution, which was worth checking rather than assuming in either direction. The
+shipped path therefore took a BT.709 source, converted it with BT.601, and wrote a
+file that declared nothing.
+
+**The fix, landed in this wave:** both paths now state `-colorspace bt709`,
+`-color_primaries bt709`, `-color_trc bt709`, `-color_range tv`, and the BGRA path
+additionally converts with `scale=out_color_matrix=bt709:out_range=tv`. The order
+matters: labelling alone would have been worse than the defect, because tagging
+601 pixels as BT.709 turns an ambiguous file into a confidently wrong one. The NV12
+path takes no filter - its pixels are already BT.709 limited range from the capture
+shader, and a scale filter there would put the conversion back on the CPU.
+
+Verified after the fix on `orig-faces`: both arms' outputs report
+`color_space=bt709`, `color_range=tv`. Two honest limits. `color_primaries` and
+`color_transfer` still read `unknown` - the encoder does not propagate those two,
+and the pre-existing NV12 path behaved the same way, so this closes the matrix
+ambiguity that shifts colours and not the primaries tag. And the measured arm delta
+is **unchanged** (`cpu` 30.10 vs `gpu-color-only` 29.45, still -0.65 dB), which is
+exactly what the section below predicts: each path round-trips under its own tags,
+so PSNR against the source is blind to the matrix in both states. The case for the
+fix is that the file is now labelled for what it contains, not a metric moving.
+
+Two consequences worth separating. First, this was a correctness defect in the
 default export path, independent of the throughput question and worth more than it:
-it affects every neural render, not only the ones made with an experimental flag.
-Second, it is why PSNR against the source cannot see it - each arm round-trips
-under its own tags, so the metric scores both as self-consistent and stays blind to
-the file being mislabelled for everyone downstream. That also leaves the
-capture-side residual above partly confounded: the CPU arm is 601 end to end and the
-GPU arm 709 end to end, so a clean siting measurement needs the BGRA path tagged
-identically first.
+it affected every neural render, not only the ones made with an experimental flag.
+Second, the capture-side residual is **no longer confounded** - both paths are now
+BT.709 end to end - so the 0.5-0.65 dB that survives is the capture conversion's own
+chroma handling, and chroma siting is the live hypothesis rather than one of two.
 
 Per-channel signed error (`rgb_shift`, mean output-minus-source, 8-bit levels) shows
 the same split - every arm carries the relight's own large bias, but only on the

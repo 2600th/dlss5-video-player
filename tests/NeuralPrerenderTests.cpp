@@ -766,8 +766,12 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK(std::find(arguments.begin(), arguments.end(), L"pipe:0") != arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"cmd.exe") == arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"powershell.exe") == arguments.end());
-    // The CPU conversion inside ffmpeg is what the BGRA path pays for; the pixel format
-    // it is given must stay BGRA in, yuv420p out, and untagged.
+    // The CPU conversion inside ffmpeg is what the BGRA path pays for, so the pixel
+    // format it is given stays BGRA in, yuv420p out. It is NOT untagged: this path used
+    // to state no colorimetry at all, which shipped every default render as an untagged
+    // file carrying ffmpeg's BT.601 default, and a BT.709 source decoded wrongly
+    // downstream. It now states BT.709 *and* converts with it - a label without the
+    // matrix would be worse than the original defect.
     const auto value = [](const std::vector<std::wstring>& list, const wchar_t* flag) {
         std::vector<std::wstring> found;
         for (size_t index = 0; index + 1 < list.size(); ++index)
@@ -775,11 +779,17 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         return found;
     };
     CHECK_EQ((std::vector<std::wstring>{L"bgra", L"yuv420p"}), value(arguments, L"-pix_fmt"));
-    CHECK(std::find(arguments.begin(), arguments.end(), L"-colorspace") == arguments.end());
+    CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-colorspace"));
+    CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-color_primaries"));
+    CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(arguments, L"-color_range"));
+    CHECK_EQ((std::vector<std::wstring>{L"scale=out_color_matrix=bt709:out_range=tv"}),
+             value(arguments, L"-vf"));
 
     // A GPU-converted capture arrives as NV12 and leaves as NV12: NVENC takes it as it
-    // stands, so no frame is converted on the CPU. Only this path states its
-    // colorimetry, because only here does the player pick the matrix.
+    // stands, so no frame is converted on the CPU. It states the same colorimetry the
+    // capture shader produced, and it must take NO filter - a scale filter here would
+    // convert the frame on the CPU after all, which is the entire cost this path exists
+    // to avoid.
     EncoderSpec gpuConverted = encoder;
     gpuConverted.pixelFormat = EncoderPixelFormat::Nv12;
     const std::vector<std::wstring> nv12 = BuildEncoderArguments(
@@ -787,6 +797,7 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK_EQ((std::vector<std::wstring>{L"nv12", L"nv12"}), value(nv12, L"-pix_fmt"));
     CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(nv12, L"-colorspace"));
     CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(nv12, L"-color_range"));
+    CHECK(std::find(nv12.begin(), nv12.end(), L"-vf") == nv12.end());
     // x264 has no NV12 input, so that pairing converts one plane instead of a frame.
     EncoderSpec software = gpuConverted;
     software.kind = EncoderKind::H264Software;

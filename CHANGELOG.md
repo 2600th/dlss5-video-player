@@ -54,12 +54,18 @@ and looks like a broken helper until the runtime is re-staged.
   that penalty was a colour-tag mismatch rather than lost detail. The shipped
   defaults stay until the source tags are read and the capture pass's chroma siting
   is checked; the flags remain per-render for anyone who wants the other trade.
-- Found while measuring the above, not yet fixed: **every neural render written on
-  the default path is untagged**. The encoder states colorimetry only when the GPU
-  did the conversion, so a BT.709-tagged source becomes an output file that declares
-  no colour space, converted under ffmpeg's BT.601 default. Players that assume
-  BT.709 for HD - the common case - will show those colours shifted. The source's
-  own tags are available at that point and should be carried through.
+- Every neural render was written **untagged and converted with BT.601**. The
+  encoder stated colorimetry only when the GPU did the conversion, so a BT.709
+  source became a file that declared no colour space while carrying 601 pixels -
+  measured, not assumed: a pure-red frame through the shipped encoder line came back
+  Y=81 U=90 V=240, which is the BT.601 prediction, at 1080p *and* 480p. Any player
+  that assumes BT.709 for HD, which is the usual default, showed those colours
+  shifted. Both paths now state `bt709`/`tv`, and the CPU path also converts with
+  `out_color_matrix=bt709`, because tagging 601 pixels as 709 would have been worse
+  than leaving them ambiguous. `color_primaries` and `color_transfer` are still not
+  propagated by the encoder, which is a smaller gap and untouched here. Note this
+  changes the pixels of every default-path render, so a render cached earlier in
+  this unreleased window differs from one made now.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

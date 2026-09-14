@@ -720,16 +720,20 @@ resolutions; chroma siting is the leading suspect (`PSCaptureChroma` averages fo
 converted samples, centre-sited, against swscale's left-sited default) and is the
 next measurement.
 
-**The same audit walked into a larger defect, and it is not about bytes at all.**
-Every render this player writes on the default path is **untagged**: `MediaPipeline.cpp:556-563`
-states colorimetry only when the GPU converted the frame, so a `bt709` source
-becomes a file that declares nothing, converted under swscale's BT.601 default -
-verified on an ordinary render, not only on the experimental profiles. Any consumer
-that assumes BT.709 for HD decodes those colours wrongly, and the source's own tag
-was available throughout. It also explains why PSNR could not see it: each path
-round-trips under its own tags. Fixing it is propagating the source's colorimetry
-onto the BGRA path, which also unconfounds the capture-side measurement above. The
-flag defaults stay until these are closed, the
+**The same audit walked into a larger defect, and fixing it was the wave's most
+user-visible change.** Every render written on the default path was **untagged and
+BT.601-converted**: the encoder stated colorimetry only when the GPU converted the
+frame, so a `bt709` source became a file that declared nothing - verified on an
+ordinary render, and the matrix measured directly (a pure-red frame returns the
+BT.601 prediction at 1080p and 480p alike, so swscale does not switch on
+resolution). Both paths now state `bt709`/`tv` and the CPU path converts with
+`out_color_matrix=bt709`; labelling without converting would have been worse than
+the ambiguity. PSNR never saw any of it, because each path round-trips under its own
+tags, which is worth remembering the next time a colour question is handed to a
+fidelity metric. What remains is `color_primaries`/`color_transfer`, which the
+encoder still does not propagate, and the capture-side residual - now unconfounded,
+both paths being BT.709 end to end, so chroma siting is the live hypothesis. The
+flag defaults stay until that is closed, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 
