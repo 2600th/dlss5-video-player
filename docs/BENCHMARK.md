@@ -58,6 +58,17 @@ denominator false motion is divided by. The upscale is the one concession — gr
 h264 texture survive it softened, not sharpened — and it is why these clips are
 labelled real footage rather than pristine footage.
 
+**The footage has already been through the pass under test.** Every frame of the
+capture was taken with neural rendering enabled — the toggle reads `Neural
+Rendering · On` and the status bar `Neural rendered · Source 2560×1440` — so the
+video surface is the player's own DLSS-NR output on an RTX 5090, not camera-original
+material. Re-rendering these clips measures the neural pass on pixels it has already
+touched once, at a different resolution and on different silicon. For an A/B where
+both trees see byte-identical input that is sound, and it is what the gate comparison
+rests on; as a claim about original footage it is not, and it means the grain here is
+post-pass grain, softened again by the 1440p → window → lanczos chain. The `faces`
+fixture remains the only route to camera-original material in this corpus.
+
 **Every cut index was verified, not proposed.** FFmpeg scene detection on the cropped
 surface proposed the boundaries; each one was then confirmed by extracting every frame
 of the clip and inspecting it, and each `notes` field records how. The four

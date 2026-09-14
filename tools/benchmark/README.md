@@ -64,6 +64,10 @@ must never reset.
 | `dissolve` | cuts | 0.7 s cross-fade between two shots. `cuts` is empty and `soft_cuts` marks the fade: one reset inside it is tolerated, a second is a false positive |
 | `flash-exposure` | cuts | 3 s slow pan with a 4-frame flash and a sustained exposure step. Neither is a cut; both collapse the luma histogram |
 | `faces` | faces | **Not synthetic**: seconds 12-20 of `build-upscaling/runtime-comparison-20260907/fixtures/mafia-60s.mkv` (frontal/three-quarter faces, skin, hair). Skipped when the fixture is absent |
+| `real-film-cuts` | real | **Not synthetic**: 102 frames of film footage from `docs/media/neural-comparison-demo.mp4`, five shots hard-cut at 20/47/70/87. Grain, motion blur, and a two-frame muzzle flash *inside* one shot that is deliberately unlabelled |
+| `real-game-cuts` | real | **Not synthetic**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
+| `real-game-motion` | real | **Not synthetic**: 76 frames, one continuous shot, camera translating while the subject occludes and disoccludes the background. No cut |
+| `real-dissolve` | real | Real material, **synthesised transition**: the capture contains no dissolve, so two shots are cross-faded over 0.7 s. `cuts` is empty and `soft_cuts` marks the fade |
 
 ## Scene-cut lab (`cutlab.py`)
 
