@@ -269,7 +269,12 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                    guides=result.get("guides", ""))
     if not metrics["ok"]:
         return metrics
-    output = Path(result["output"])
+    # The render always writes output.mkv beside result.json, so prefer the path
+    # relative to this run directory and fall back to the absolute one recorded at
+    # render time. Moving a run between trees then just works, while a genuinely
+    # missing artifact still raises from FrameReader rather than scoring nothing.
+    beside = run / "output.mkv"
+    output = beside if beside.exists() else Path(result["output"])
     hashes = framemd5(output, run / "frames.md5")
     metrics.update(output_frames=len(hashes), output_digest=sequence_digest(hashes),
                    unique_output_frames=len(set(hashes)),

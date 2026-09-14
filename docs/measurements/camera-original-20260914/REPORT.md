@@ -56,7 +56,7 @@ releases of the same titles the demo capture filmed off the player's window.
 |---|---|---|
 | `godfather` | THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps, format 271 | `corpus.py:360-361` |
 | `gtavi` | Grand Theft Auto VI: An Extended Look (Netflix / Now Playing), 2560x1440 VP9, 30 fps, format 271 | `corpus.py:362-363` |
-| `lawrence` | Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), **1920x1038** h264, 23.976 fps, 122 s, video id `HFAkWNiETrg` | `corpus.py:364-367` |
+| `lawrence` | Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), **1920x1038** AV1 in mp4 (`ffprobe codec_name` = `av1`), 23.976 fps, 122 s, video id `HFAkWNiETrg`, format id `399` | `corpus.py:364-367` |
 
 The third source was acquired for exactly one reason: the cross-dissolve.
 
@@ -189,9 +189,21 @@ enabled=ON` - with N matching the arm on both clips: `preset=0` in the
 mask on), and `preset=1/2/3` in the three preset arms. Same check the original Q7
 used, and the reason its conclusion was citable.
 
-All four arms per clip also came from one worker build, which matters because the
-comparison is a digest equality: the preset arms and the preset-0 arm were rendered
-in the same batch against the post-integration `NeuralWorker.exe`.
+**The four arms did not all come from one worker build, and that turns out to be
+worth more than the tidy version.** The preset-0 arm is the `shipped-depth-proxy`
+run, rendered at 23:37 against a `NeuralWorker.exe` built at 20:47
+(sha256 `2d1fbfa07835d820...`); presets 1/2/3 ran at 00:15 against the
+post-integration worker built at 23:44 (`8ad1ce45fa513a57...`), which carries the
+five removed full-target clears and the persistently mapped timestamp readback.
+The decoded frames are byte-identical across all four.
+
+Two results fall out of that. The preset claim stands on same-build comparisons
+between presets 1, 2 and 3, with preset 0 agreeing from the older build. And the
+cross-build equality is the **bit-exactness proof the readback work only asserted**:
+`GpuPath` argued from the shader code that a clear immediately before a full-target
+draw cannot change a pixel, and here two builds either side of that change produce
+identical output on 171 frames of camera-original material. Recorded in
+[the readback report](../gpu-readback-20260914/REPORT.md) as well.
 
 The earlier finding rested on four synthetic clips plus one real graded clip
 (`docs/measurements/art-defaults-20260914/REPORT.md`). It now holds on publisher footage

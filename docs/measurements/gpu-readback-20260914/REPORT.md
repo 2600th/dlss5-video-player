@@ -185,7 +185,11 @@ one scored run per arm is sufficient and the deltas below are deterministic, not
 
 **The cause is now attributed, and it is not one flag.** The joint arm flipped two
 switches at once, which cannot say which one paid. Both single-flag arms were then
-run on the same clip, 3 repeats each, and each is bit-identical across its repeats:
+run on the same clip, 3 repeats each. Determinism is from the render side: each arm's
+three repeats carry one decoded-frame digest. The quality columns are **n=3 for every
+arm except `gpu-source-only`, which is n=1** - the scorer hit its 1800 s ceiling with
+that arm's repeats 2 and 3 unscored, and since the renders are digest-identical the
+missing rows would repeat the first, but they were not computed and are not claimed:
 
 | arm | PSNR dB | dE mean | flicker+ | sigma+ | false motion | proc fps (median) | gpu_ms_p50 (median) |
 |---|---|---|---|---|---|---|---|
@@ -196,15 +200,43 @@ run on the same clip, 3 repeats each, and each is bit-identical across its repea
 
 Each flag costs most of the quality on its own - **-0.79 dB / +0.94 dE** for the
 capture side alone, **-0.64 dB / +0.87 dE** for the decoder side alone - and the two
-together are no worse than either. So the earlier single-cause story (chroma
-subsampled in the capture readback before the encoder sees it) is **wrong as an
-explanation of the whole delta**: it can at most account for the capture arm. The
-decoder arm has its own documented mechanism, and it is a colour error rather than a
-chroma-resolution one - `docs/USAGE.md:218-221` records that `GpuSourceConversion`
-assumes BT.709 limited range and nothing reads the source's tags, so a clip whose
-tags disagree renders shifted. The only metric that is close to additive is false
-motion (0.0013 -> 0.0017 / 0.0019 -> 0.0026), which is what two independent precision
-losses in the same pipeline should look like.
+together are no worse than either. That non-additivity is the finding, because it
+rules out the story this report first told.
+
+**Chroma subsampling cannot be the mechanism, on either side.** The corpus clip is
+`yuv420p` (`corpus.py`'s `ENCODE`), so the source is already 4:2:0: no stage in this
+pipeline can lose chroma resolution the input never carried. And two independent
+precision losses would add, while these do not - either flag alone costs
+substantially the whole delta.
+
+What the per-channel signed error says instead, from the same scored runs
+(`rgb_shift`, mean signed output-minus-source per channel, in 8-bit levels):
+
+| arm | r | g | b |
+|---|---|---|---|
+| `cpu-conversion` | -9.307 | +1.552 | +3.022 |
+| `gpu-color-only` | -8.600 | +2.099 | +3.652 |
+| `gpu-source-only` | -10.609 | +3.121 | +5.946 |
+| both | -9.329 | +3.865 | +6.183 |
+
+Every arm carries a large systematic per-channel bias - that is the neural relight
+itself, which is what `intensity-0` exists to separate - but the GPU arms move that
+bias in a consistent direction, green and blue up by 0.5-2.9 levels and red
+scattered either way. A shared **matrix, range, rounding or chroma-siting difference
+between the GPU conversion shaders and ffmpeg's swscale** produces exactly that: a
+per-channel offset that appears whenever any GPU conversion is in the chain and does
+not double when two are. `PSConvert` and `PSSourceNv12` share that math, which is
+why one flag is enough to pay for it.
+
+**So this is a fixable precision defect, not an inherent trade.** The honest
+consequence is narrower than "do not flip": the *throughput* is real and the
+*current* quality cost is real, and the cost is a property of this implementation of
+the conversion rather than of moving conversion to the GPU. Closing it means
+comparing one frame's YUV values stage by stage against swscale with the source's
+own colour tags read - which is the same colour-tag probe the decoder flag has
+always been blocked on, now with a second reason to do it. Only false motion looks
+near-additive (0.0013 -> 0.0017 / 0.0019 -> 0.0026), consistent with each conversion
+adding its own per-pixel rounding noise on top of the shared offset.
 
 **This measurement is a confirmation, not a discovery, and the record already said
 so.** `docs/USAGE.md:214-221` documents both flags as deliberately off, with reasons:

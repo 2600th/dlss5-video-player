@@ -47,9 +47,11 @@ and looks like a broken helper until the runtime is re-staged.
   both on moves 2.7x fewer bytes across the decoder pipe and the capture readback
   and is worth +7 % throughput at 4K; it also costs 0.75 dB PSNR and doubles false
   motion on the same clip, and single-flag runs show neither half is free (capture
-  alone -0.79 dB, decoder alone -0.64 dB). The shipped defaults keep the slower,
-  more faithful path; the flags remain per-render for anyone who wants the other
-  trade.
+  alone -0.79 dB, decoder alone -0.64 dB) while being non-additive. Since the
+  source is already 4:2:0 that rules out lost chroma resolution and points at the
+  GPU conversion shaders' own colour math, so the cost looks fixable rather than
+  inherent. The shipped defaults keep the slower, more faithful path until that is
+  chased down; the flags remain per-render for anyone who wants the other trade.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

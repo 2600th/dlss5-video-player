@@ -707,10 +707,15 @@ which put 4 B/px instead of 1.5 across the decoder pipe and the capture readback
 Turning both on is worth **+7 % processing throughput at 4K** and costs **0.75 dB
 PSNR, +0.95 dE and double the false motion**, and single-flag arms attribute it:
 the capture side alone costs -0.79 dB / +0.94 dE, the decoder side alone -0.64 dB
-/ +0.87 dE, so neither flag is the innocent half. Both were already documented off
-in `docs/USAGE.md:214-221`, the decoder one for a colour-tag hazard rather than for
-readback cost, so this measurement prices a known refusal rather than discovering
-one. So the defaults stay, the
+/ +0.87 dE, and the two together are no worse than either. That non-additivity,
+plus a source that is already `yuv420p`, rules out chroma subsampling as the
+mechanism and points at the GPU conversion shaders' shared matrix/range/rounding
+math against ffmpeg's swscale - **a fixable precision defect rather than an
+inherent trade**, and a new item: compare one frame's YUV stage by stage with the
+source's colour tags read, which is the same probe the decoder flag has always
+been blocked on. Both flags were already documented off in
+`docs/USAGE.md:214-221`, so this prices a known refusal rather than discovering
+one. The defaults stay until that comparison is done, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 
