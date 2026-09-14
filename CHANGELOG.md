@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+- A live session whose render key was already published never presented. The job
+  was answered by the cache in about 50 ms, appended nothing to the segment index
+  playback is bound to, and left it empty *and* finished - the one state where
+  every decision said "wait": the attach saw zero lead, the rebase saw a playhead
+  inside the range, and the player sat behind the buffering panel indefinitely.
+  Coverage, not the job's verdict, now decides what a finished session plays, so a
+  cache-hit session hands playback to the published entry at its coverage start
+  and a session with nothing to show ends and returns the original. Reproduced
+  deliberately on a 1 fps clip, where the snapped playhead and so the render key
+  repeat by construction, and confirmed fixed on the same instrument.
+  `live_session::PlanForCompletedSession` decides it, so it is tested without a
+  window. This is the third form of the same family after 0.21.1 and 0.21.2.
+- One session measured under load no longer decides what the machine can do. The
+  render-pace profile kept a single sample per geometry and the newest replaced
+  the oldest unconditionally, so a session that contended for the GPU wrote
+  42.3 ms/frame - 3.7x this machine's idle mean - into `DLSSVideoPlayer.ini`, and
+  the next sessions warned that the card could not keep up with a clip it renders
+  faster than realtime. The profile now keeps the last five samples per geometry
+  and forecasts from their median. Not the minimum: contention only ever inflates
+  a measurement, and a forecast that exists to refuse sessions that cannot keep up
+  must not erase slow evidence. The old single-value `Samples=WxH:ms` form still
+  loads, as a one-sample ring.
+- The `Neural cold start:` log line now carries the helper's five phases instead
+  of five dashes. They arrive over the pipe while the render runs and the job only
+  returns seconds after the attach, so the line - written at first picture - could
+  never have held them; the receipt for the same render always did. A session that
+  never started a helper now says `helper=none(cache-hit)` rather than printing
+  dashes that read as a broken instrument.
+- A neural render whose weak-arm scene cut fell within 0.6 s of the previous one
+  was discarded, so the pass kept its accumulated history across a genuine shot
+  change. Found on real footage: a hard cut 17 frames after its predecessor fired
+  the weak arm cleanly and was suppressed by construction, because 17 is under the
+  18-frame window 0.6 s means at 30 fps. The window is now 0.3 s, which the
+  labelled corpus brackets from both sides - a transient returns 4 frames after
+  the cut that opened it, and the shortest genuine shot is 17 - and the shortened
+  window recovers that cut while leaving every synthetic score unchanged.
+- The render cache no longer serves a schema-4 render that has no receipt. The
+  receipt was verified only when the manifest carried a digest for it, so a
+  manifest that simply omitted the digest was served as a verified render out of a
+  user-writable directory. No released build ever wrote such an entry - schema 4
+  and the receipt digest landed in the same commit - so nothing legitimate is
+  invalidated. Legacy schema-3 entries and source entries keep their exemptions.
+- The neural helper can now serve many jobs from one process. Protocol v6 adds a
+  parent-to-helper command channel (`Hello`, `Job`, `Cancel`, `Shutdown`, and an
+  outbound `Ready`), and a job is handed over as the argument vector the helper
+  already validated, so nothing about what a job *is* changed. The helper is
+  reused only while the runtime directory, runtime digest and neural-settings
+  digest all match, holds the runtime lease only while a job runs, and exits
+  itself after 30 s idle. **This is integrated but not accepted**: its acceptance
+  criterion is a warm toggle under 3 s in a driven player session and that
+  measurement has not been taken, because the workstation was locked and injected
+  input is refused to a locked desktop. The two halves have each been exercised
+  and never against each other. See `docs/VERIFICATION-matrix.md`.
+
 ## 0.21.2 - 2026-09-12
 
 - A live session whose first finalized segment starts after the playhead now

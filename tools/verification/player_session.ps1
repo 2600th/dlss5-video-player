@@ -126,6 +126,14 @@ param(
     # is how a second measurement at the same playhead behaves, so a repeated
     # measurement needs the render entries gone and the warm preflight kept.
     [switch]$DropRenderCache,
+    # Toggle a second time in the same player process and measure that too. This
+    # is the only way to see a resident helper: residency lives in the player's
+    # lifetime, so a first toggle always pays a cold bring-up. The gap lets
+    # playback advance, which moves the snapped playhead and therefore the render
+    # key - at the same playhead the toggle is answered from the cache and no
+    # helper job runs at all.
+    [switch]$SecondToggle,
+    [double]$SecondToggleGapSeconds = 4.0,
     [string]$OutJson,
     [double]$WindowTimeoutSeconds = 45.0,
     [double]$ReadyTimeoutSeconds = 45.0,
@@ -886,6 +894,42 @@ function Invoke-PlayerSession {
         [void](Wait-ForLogLine -Context $context -Wanted @($P.Stopped) -TimeoutSeconds 10.0 -Since $toggleAt)
         Write-Progress-Line ('session ' + $Index + ': pace ' + $pace.Entry.Text)
 
+        # ---- optional: a second toggle in the SAME player process, which is the
+        # only way to exercise a resident helper. Residency lives in the player's
+        # own lifetime, so every first toggle in a process pays a cold bring-up
+        # however well the helper is kept. Playback has continued while neural was
+        # off, so this toggle snaps to a later playhead and therefore a different
+        # render key - without that it would land on the entry the first session
+        # just published and be answered from the cache with no helper job at all.
+        $second = $null
+        if ($SecondToggle) {
+            Start-Sleep -Milliseconds ([int]($SecondToggleGapSeconds * 1000))
+            $again = Send-NeuralToggle $context
+            if (-not $again.Ok) {
+                $record.failure = 'the second toggle could not be injected: ' + $again.Reason
+                $record.exitCode = $again.Code
+                return $record
+            }
+            $againAt = $again.At
+            $secondCold = Wait-ForLogLine -Context $context -Wanted @($P.ColdStart) -Refusals $refusals -TimeoutSeconds $NeuralFrameTimeoutSeconds -Since $againAt
+            if ($secondCold.Status -ne 'Matched') {
+                $record.failure = 'no neural frame after the second toggle (' + $secondCold.Status + ')'
+                $record.exitCode = $EXIT_NO_NEURAL_FRAME
+                return $record
+            }
+            $second = [ordered]@{
+                toggleToFirstNeuralFrameSeconds = Seconds-Between $againAt $secondCold.Entry.Time
+                coldStartLine                   = $secondCold.Entry.Text
+                plan                            = $null
+            }
+            $planLine = Find-LogLine -Context $context -Pattern 'Neural helper plan=(?<plan>[a-z-]+)' -Since $againAt
+            if ($planLine -ne $null -and $planLine.Text -match 'plan=(?<plan>[a-z-]+)') {
+                $second.plan = $Matches['plan']
+            }
+            Write-Progress-Line ('session ' + $Index + ': second toggle reached a neural frame in ' +
+                $second.toggleToFirstNeuralFrameSeconds + ' s, plan=' + $second.plan)
+        }
+
         # ---- harvest
         $startup = Find-LogLine -Context $context -Pattern $P.Startup
         $sessionStart = $accepted.Entry
@@ -1001,6 +1045,9 @@ function Invoke-PlayerSession {
             injectionCostMilliseconds      = [Math]::Round(($toggle.Done - $toggle.At).TotalMilliseconds, 3)
         }
         $record.coldStart = $phases
+        # Present only with -SecondToggle. The first toggle in a process always
+        # pays a cold bring-up, so this is the number a resident helper changes.
+        $record.secondToggle = $second
         $record.pace = $paceRecord
         $record.receipt = $receiptRecord
         $record.session = [ordered]@{

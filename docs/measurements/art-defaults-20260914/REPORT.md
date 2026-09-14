@@ -1,15 +1,21 @@
 # Q7: are the shipped art defaults the right ones? (2026-09-14, RTX 4080 SUPER)
 
-**Verdict, scoped to four synthetic clips.** Keep every shipped art default. Of the nine
-alternative settings the harness can express at the shipped state, three are **bit-identical**
-to the shipped picture (`NRPreset` 1, 2, 3), one is the carrier-floor control rather than an
-art option (`NRIntensity=0`), four are worse or a wash (`NRAutoMask=0`,
-`NRLocalStructure=0`, `NRStyle=1`, `NRStyle=2`), and exactly one points anywhere:
-`NRLocalTone`, where lowering the shipped `1.0` monotonically cuts the departure from the
-source by 36-68% in dE (4.6-7.7 dB PSNR) at no measured cost in temporal stability. That is
-a *candidate*, not a recommendation: on fractals "closer to the source" and "better picture"
-are the same number, and on real footage they are not. The change is gated on a human blind
-A/B over `RealCorpus`'s real-footage clips, which did not exist when this was measured.
+**Verdict.** Keep every shipped art default, including `NRLocalTone`. Of the nine alternative
+settings the harness can express at the shipped state, three are **bit-identical** to the
+shipped picture (`NRPreset` 1, 2, 3), one is the carrier-floor control rather than an art
+option (`NRIntensity=0`), four are worse or a wash (`NRAutoMask=0`, `NRLocalStructure=0`,
+`NRStyle=1`, `NRStyle=2`), and one looked like a candidate on synthetic clips: `NRLocalTone`,
+where lowering the shipped `1.0` cuts the departure from the source by 36-68% in dE (4.6-7.7
+dB PSNR) on fractals at no measured cost in temporal stability.
+
+**That candidacy is withdrawn, on real footage.** Repeated on a real graded film clip (Table
+F), the knob's entire range is dE 2.48 -> 1.71, a span of **0.77 dE** against 4.02-8.11 on
+the synthetic clips - and the NVENC carrier alone accounts for 1.26 dE of the 2.48, so the
+whole model contributes 1.22 dE above the floor and the tone term is 0.77 of that. There is
+no default change worth making for a sub-dE effect that no metric here distinguishes from the
+carrier, which is exactly the magnitude-non-transfer this report warns about twice over. A
+human blind A/B remains the only instrument that could overturn a *look* decision, and none
+was run.
 
 Two findings that matter more than any knob value:
 
@@ -126,6 +132,24 @@ python run.py --corpus <corpus> --clips cuts-motion cuts-similar flash-exposure 
              shipped-preset-2 shipped-preset-3 shipped-style-natural shipped-style-cinematic --repeats 2
 python analyze.py --corpus <corpus> --runs <tree>/build-upscaling/benchmark-work/runs --no-ocr --no-faces --force
 python blind.py --single baseline --double shipped-defaults --pairs-per-clip 2 --seconds 2 --seed 7
+
+:: the real-footage follow-up (Table F). corpus.py here is RealCorpus's committed version,
+:: `git show slice/corpus:tools/benchmark/corpus.py`, written to a scratch name inside
+:: tools/benchmark so its REPO-relative demo path resolves, then deleted. Their file is
+:: never modified and nothing of theirs is committed on this branch.
+python <scratch corpus.py> --corpus <tree>/build-upscaling/benchmark-corpus-real --clips real-film-cuts
+python run.py --corpus <real corpus> --clips real-film-cuts ^
+  --profile-file <docs>/shipped-defaults.profile.json --profiles shipped-defaults --repeats 2
+python run.py --corpus <real corpus> --clips real-film-cuts ^
+  --profile-file <docs>/shipped-state.profile.json --profiles shipped-tone-075 shipped-tone-050 ^
+             shipped-tone-0 shipped-intensity-0 --repeats 2
+:: real-footage runs must be scored against their own manifest, in their own runs directory
+move <tree>\build-upscaling\benchmark-work\runs\real-film-cuts__* ^
+     <tree>\build-upscaling\benchmark-work\runs-real\
+python analyze.py --corpus <real corpus> --runs <tree>/build-upscaling/benchmark-work/runs-real ^
+  --no-ocr --no-faces
+:: then copy benchmark-work/analysis -> benchmark-work/analysis-real and re-run the synthetic
+:: pass, because the analysis output directory is a fixed constant in common.py
 ```
 
 `run.py` was not modified. The three `--profile-file` JSONs are committed next to this
@@ -135,14 +159,22 @@ and `shipped-state.profile.json` (shipped defaults with exactly one knob changed
 
 ## Determinism
 
-204 runs: 102 clip/profile groups x 2 repeats. `analyze.py` reports `deterministic = true`
-for **all 102** groups - the two repeats of every group produce the same `output_digest`
-(SHA-256 over the rgb24 per-frame MD5 sequence). Zero failed runs, zero frame-count
-mismatches against the source, zero withheld temporal metrics. Every number below is a
-median over two bit-identical repeats, which means it is a single deterministic value rather
-than an average of two different ones; the repeats prove reproducibility, not variance.
-`DepthAB` independently established this wave that these renders are also bit-identical
-between an idle and a loaded box, so contention does not enter the quality numbers.
+214 runs in total: 204 synthetic (102 clip/profile groups x 2 repeats) and 10 on real footage
+(5 groups x 2 repeats). `analyze.py` reports `deterministic = true` for **all 107** groups -
+the two repeats of every group produce the same `output_digest` (SHA-256 over the rgb24
+per-frame MD5 sequence). Zero failed runs, zero frame-count mismatches against the source,
+zero withheld temporal metrics, in both sets. Every number below is a median over two
+bit-identical repeats, which means it is a single deterministic value rather than an average
+of two different ones; the repeats prove reproducibility, not variance. `DepthAB`
+independently established this wave that these renders are also bit-identical between an idle
+and a loaded box, so contention does not enter the quality numbers.
+
+The two sets are scored separately because `analyze.py` takes one manifest: the synthetic
+runs live in `benchmark-work/runs` and score against `benchmark-corpus`, the real-footage runs
+in `benchmark-work/runs-real` against `benchmark-corpus-real`, and because the analysis output
+directory is a fixed constant the real-footage `analysis.json`/`report.md` were copied to
+`benchmark-work/analysis-real/` before the synthetic pass was re-run. Pointing one pass at a
+mixed runs directory raises `KeyError` on the clip lookup rather than silently mis-scoring.
 
 Container bytes are *not* stable (the muxer stamps per-run metadata), so file hashes differ
 between repeats while the decoded frames do not. Identity claims here always use
@@ -427,6 +459,116 @@ on `cuts-motion` (cuts every 45 frames, 60-frame window) admits nothing, so it f
 frame 0 and both pairs of that clip are the same frame. On the two cut clips the eight pairs
 are really four distinct stills. Not my file to fix; reported rather than worked around.
 
+## Table F - the tone candidate on real footage (this slice's own measurement)
+
+`RealCorpus` named `real-film-cuts` as the right clip for this follow-up: it is the only one
+of theirs with real film grain and a real grade, and the one where the mask shifts the
+reference least (+0.00002 false motion), so a tone delta measured there is not competing with
+mask noise. The clip is cut from `docs/media/neural-comparison-demo.mp4`, which is tracked in
+the repository, so it could be rebuilt here: frames 15-116 of the demo, 102 frames of five
+film shots (hands over a bedspread, a car on a road, a man in a crowd, a revolver firing, a
+portrait), FFV1 1920x1080 30 fps, hard cuts at 20/47/70/87. It was built with `RealCorpus`'s
+own committed `corpus.py` (`slice/corpus` 78ed5e4), extracted read-only from their branch into
+a scratch file in this tree and deleted afterwards - their file was never modified and nothing
+of theirs is committed here.
+
+That rebuild is also a **cross-tree reproduction of their corpus**: the clip came out
+`8cfd7d5666bcd0577f8411b8a5c504314648949fbbebe18d09762b5ca856dee0`, which `RealCorpus`
+confirms is byte-for-byte their manifest's digest for the same clip. Built in a different
+worktree from nothing but the tracked `neural-comparison-demo.mp4` and the pinned FFmpeg
+9.0.1-essentials, it shows their builder carries no state from their tree - a stronger
+statement than a same-tree rebuild can make.
+
+Five profiles, 2 repeats each, 10 runs, 0 failed, every group bit-identical across repeats.
+The `cut P/R/F1` column was measured in a worktree based on `0556eb0`, which carried the
+**0.6 s** weak-arm debounce; that constant is now 0.3 s and the same clip scores
+**1.00/1.00/1.00 with 5 resets** on `main` (measured by `RealCorpus` with `cutlab.py`, the
+run that also confirmed the shortened window costs the synthetic set nothing). The column is
+left as taken and keyed to its window - every other column here is debounce-independent and
+stands as measured.
+
+| profile | det | digest | PSNR dB | SSIM | dE | flicker+ | sigma+ | false mv | cut P/R/F1 (0.6 s window) | resets |
+|---|---|---|---|---|---|---|---|---|---|---|
+| shipped-defaults | yes | 446fced2 | 33.50 | 0.9721 | 2.48 | -0.036 | -0.070 | 0.0115 | 1.00/0.75/0.86 | 4 |
+| shipped-tone-075 | yes | eb176ee7 | 34.47 | 0.9747 | 2.23 | -0.042 | -0.085 | 0.0115 | 1.00/0.75/0.86 | 4 |
+| shipped-tone-050 | yes | 29bdc151 | 35.66 | 0.9762 | 1.98 | -0.051 | -0.111 | 0.0113 | 1.00/0.75/0.86 | 4 |
+| shipped-tone-0 | yes | dea330a5 | 37.20 | 0.9781 | 1.71 | -0.055 | -0.111 | 0.0110 | 1.00/0.75/0.86 | 4 |
+| shipped-intensity-0 | yes | 925e85df | 41.46 | 0.9807 | 1.26 | -0.097 | -0.156 | 0.0089 | 1.00/0.75/0.86 | 4 |
+
+What this settles, and it is the report's most useful number:
+
+- The tone knob's **entire** range on real footage is dE 2.48 -> 1.71 = **0.77 dE**
+  (+3.70 dB PSNR). On the synthetic clips the same range was 4.02-8.11 dE. Same sign, same
+  monotonicity, magnitude 5-11x smaller.
+- The carrier is most of what the metric sees. `shipped-intensity-0` - the model doing
+  nothing, NVENC HEVC loss alone - is already at dE 1.26, so at the shipped defaults the whole
+  neural pass contributes 1.22 dE above the floor and the tone term is 0.77 of that 1.22. The
+  knob cannot be worth a default change at that size: the effect being traded is comparable
+  to the encoder's own error, and on this material `analyze.py` cannot tell the two apart.
+- Nothing temporal moves. Across the whole sweep `flicker+` spans 0.019 and `sigma+` spans
+  0.041 levels, false motion goes 0.0115 -> 0.0110, and cut precision/recall/F1 is
+  1.00/0.75/0.86 with 4 history resets for all five profiles including the floor control.
+- Real footage is a far easier target than the corpus overall: false motion is ~0.011 here
+  against 0.098-0.183 on the synthetic clips, with a 0.0089 carrier floor. Any threshold or
+  default tuned on the synthetic numbers is being tuned on a different population.
+
+This is one real clip, no faces, no text, and no human has looked at it. It is enough to
+withdraw a default-change proposal - the proposed gain is too small to defend - and not enough
+to propose one.
+
+### The preset gap on real footage, closed afterwards (measured by `RealCorpus`)
+
+This report's preset result was synthetic-only, which the wave's own rule made a
+weaker claim than it looked: the synthetic corpus preserves an effect's sign and
+inflates its magnitude, so "no difference on fractals" does not settle "no
+difference on film". Six further runs closed it - `shipped-preset-1/2/3`, two
+repeats each, on `real-film-cuts`, with this report's committed
+`shipped-state.profile.json` verbatim and the existing `shipped-defaults` pair as
+the `NRPreset=0` arm from the same build and corpus.
+
+**One digest, eight runs: `446fced262154452`.** All 102 frames, `ok=true`,
+`deterministic=true` per arm, and every quality column identical to the last
+decimal `analyze.py` prints (PSNR 33.497, SSIM 0.97210, dE 2.484, flicker+
+-0.0364, sigma+ -0.0698, false motion 0.01148, 4 resets), as they must be given
+one digest.
+
+What makes that evidence rather than a null result: the knob was confirmed to have
+been requested *and* to have reached the runtime, because "no difference" and "the
+key was never set" are otherwise the same measurement. Per arm, `run.py`'s
+`overrides.NRPreset`, the `NRPreset=` line in the copied `pass1-ReShade.ini`, and
+the add-on's own preflight `activeSettings` string all agree - RenoDX echoes back
+`preset=1`, `preset=2`, `preset=3` from its own state. So the hint was written,
+read by the add-on, echoed in its receipt, and changed not one bit of output on
+grained graded film.
+
+Scope, because a zero-difference claim earns no more than it measured: four
+presets, one real clip, the shipped mask state only, two repeats, DLSS-NR 310.8.0
+with RenoDX 4.7 on Ada at driver 32.0.16.1047. Not measured: mask-off on real
+footage, the other three real clips, any other driver or generation. This stays a
+property of this runtime on this driver, not a property of the preset hint.
+
+## Cross-check on real footage - `RealCorpus`'s measurement, not mine
+
+This slice's one transferable worry was that the mask state shifts the reference by about as
+much as a real effect: between `baseline` and `shipped-defaults` false motion moves by
+-0.0093 to +0.0059 on these synthetic clips, and it does not keep the same sign across them.
+`RealCorpus` re-ran their gate A/B at the shipped mask state using this report's committed
+`shipped-defaults.profile.json` on both of their trees (4 real-footage clips x 2 repeats per
+tree, 16 runs, 0 failed, repeats bit-identical, the eight digests differing between trees)
+and reported that on real footage the mask barely moves the reference at all: gate-tree false
+motion shifts by +0.00002, +0.00004, -0.00058 and -0.00108 between `baseline` and
+`shipped-defaults`, one to two orders of magnitude below the synthetic figure and well under
+their smallest gate delta. Their gate conclusions survive the mask unchanged (-13.9/-11.4/
+-9.4/-4.9 % false motion at mask-on against -14.4/-12.2/-9.5/-4.6 % at mask-off). Source:
+`docs/measurements/gate-real-footage-20260914/REPORT.md` on `slice/corpus` (78ed5e4).
+
+I did not observe those runs; they are recorded here because they bound one of my caveats
+from the outside, and the bound cuts both ways. The caveat was correct as a caveat - the mask
+state has to be checked rather than assumed - and on real material the answer happens to be
+benign. The broader lesson is the one this report keeps making: real content and synthetic
+patterns do not respond to an art knob by the same amount, so a magnitude measured on
+fractals is not a magnitude for footage even when the sign agrees.
+
 ## Recommendation
 
 **Keep all eight shipped art defaults as they are.** Specifically:
@@ -457,31 +599,47 @@ are really four distinct stills. Not my file to fix; reported rather than worked
   candidate: it is what the pipeline scores when the model does nothing (32.4-38.5 dB PSNR,
   1.35-6.06 dE, `false mv` 0.045-0.112), and it is the correct denominator for reading the
   rest of the table.
-- `NRLocalTone = 1.0` (**keep for now; the one candidate for change**). This is the only
-  knob where the evidence points anywhere. Lowering it is monotone and cheap: 0.5 recovers
-  2.0-3.9 dB PSNR and 2.6-5.7 dE on all four clips with SSIM within 0.005 and both temporal
-  metrics within 0.31 levels, and 0.0 recovers 4.6-7.7 dB and 4.0-8.1 dE. On this corpus the
-  local tone term does nothing except move colour away from the source. **Do not change it on
-  this evidence.** These are four synthetic clips - fractals, a cellular automaton, a test
-  pattern - where "closer to the source" is the only thing PSNR and dE can mean; on graded
-  real footage a deliberate relight is the product, and the same numbers would read as the
-  feature working. The decision needs (a) `RealCorpus`'s real-footage clips, which are being
-  built this wave, and (b) a filled `blind.py` ballot from a human on
-  `shipped-defaults` versus `shipped-tone-050`. If both point the same way, `0.5` is the
-  specific value to ship, and the tables above are the before/after.
+- `NRLocalTone = 1.0` (**keep** - this was the candidate, and real footage withdrew it). On
+  the synthetic clips it is the only knob whose numbers point anywhere: monotone, 0.5 recovers
+  2.0-3.9 dB PSNR and 2.6-5.7 dE, 0.0 recovers 4.6-7.7 dB and 4.0-8.1 dE, with SSIM within
+  0.005 and both temporal metrics within 0.31 levels. On `real-film-cuts` (Table F) the whole
+  1.0 -> 0.0 range is 0.77 dE and +3.70 dB, against a 1.26 dE carrier floor that accounts for
+  half of the 2.48 dE the shipped defaults score - so the effect on offer is the same size as
+  the encoder's own error, and nothing temporal moves at all (flicker+ spans 0.019, sigma+
+  0.041, cut P/R/F1 and history resets identical across the sweep). A sub-dE, metric-
+  indistinguishable-from-the-carrier gain does not justify changing a shipped default, and
+  the synthetic 4-8 dE that made it look like one was an artefact of fractal content.
+  Only a human blind A/B could overturn a look decision this small; the pairs exist
+  (`blind.py`), nobody judged them, and I did not invent a verdict. If anyone does run it,
+  `real-film-cuts` is the clip and `shipped-defaults` versus `shipped-tone-050` is the pair.
 
 **Scope of every claim above:** four synthetic 1080p30 clips (`cuts-motion`, `cuts-similar`,
-`flash-exposure`, `pan-fast`), one GPU (RTX 4080 SUPER, Ada, driver 32.0.16.1047), one
-runtime (DLSS-NR 310.8.0 / RenoDX 4.7), NVENC HEVC carrier, no faces, no text, no real
-footage. An art default that only holds on fractals is not an art default: the bit-identity
-results (mask, presets, explicit writes) are properties of the runtime and transfer; the
-metric rankings do not transfer until they are repeated on real footage.
+`flash-exposure`, `pan-fast`) plus one real graded film clip (`real-film-cuts`, 102 frames,
+used only for the tone question), one GPU (RTX 4080 SUPER, Ada, driver 32.0.16.1047), one
+runtime (DLSS-NR 310.8.0 / RenoDX 4.7), NVENC HEVC carrier, no faces, no text, no human
+judgement. The bit-identity results (mask, presets, explicit writes) are properties of the
+runtime and transfer as stated. The metric *rankings* hold on the material measured; the
+metric *magnitudes* demonstrably do not transfer between synthetic and real content - the
+tone knob moved 5-11x less on film than on fractals, and `RealCorpus` measured the mask
+moving 1-2 orders of magnitude less. The shape all three of this wave's instances agree on,
+in `RealCorpus`'s formulation: the synthetic corpus preserves the **sign** of an effect and
+systematically **inflates its magnitude**, which is what you would expect of clips built
+adversarial on purpose - their cut scores move the same way seen from the other end
+(precision/recall 0.571/0.571 synthetic against 1.000/0.800 real). So synthetic patterns are
+sound for deciding direction and for regression-gating, and unsound for sizing an effect or
+for tuning a threshold on pooled numbers. Nobody should retune an art default on a pooled
+synthetic-plus-real set.
 
 ## UNEXERCISED
 
-- **Real footage.** Every number here is synthetic. `RealCorpus` is building real-footage
-  clips this wave; the `NRLocalTone` candidate and every metric ranking must be repeated
-  there before any default changes.
+- **Real footage, beyond the tone question on one clip.** `NRLocalTone` was re-measured on
+  `real-film-cuts` (Table F) and the mask's own reference shift was measured on four real
+  clips by `RealCorpus`. Everything else - the mask comparison itself, `NRLocalStructure`,
+  both `NRStyle` values, the preset bit-identity, the carrier-floor share - rests on the four
+  synthetic clips only. Given that the tone magnitude shrank 5-11x on film, the style and
+  structure magnitudes should be assumed not to transfer either; their *signs* are the part
+  worth carrying forward. The remaining real clips (`real-game-cuts`, `real-game-motion`,
+  `real-dissolve`) were never rendered under any art profile.
 - **Blind human judgement.** Pairs, sealed key and ballot exist
   (`build-upscaling/benchmark-work/blind/`); no human filled them, so there is no verdict.
   `blind.py --score` on the empty ballot returns zeros and is reported as such.

@@ -434,6 +434,59 @@ under load and no way to distrust one.
 - **Timing, not quality.** No quality metric was computed. The renders were
   checked for `failure=none` and `verified == frames`, nothing more.
 
+## The resident helper: what is exercised, and what is not (2026-09-14, later)
+
+The resident helper (roadmap P1) is integrated on `main`. Its acceptance number
+is the one this instrument exists to take - a warm toggle under 3 s - and **it
+has not been taken.** The workstation was locked when the run was attempted and
+`SendInput` is refused to a locked desktop, so no driven session could run:
+
+```
+"failure": "the neural toggle could not be injected: SendInput refused the chord,
+ Win32 error 5; the foreground window is none - no window held the foreground on
+ sample 1 of 5, which is what a locked workstation looks like from here",
+"exitCode": 14
+```
+
+All three sessions failed identically at the same point, before launching a
+render. Artifact: `C:/Users/User/AppData/Local/Temp/p1-accept.json`.
+
+What *was* exercised, by instrument rather than by argument:
+
+| claim | instrument | result |
+|---|---|---|
+| protocol framing, argv codec, resident loop, idle exit, cancel, shutdown | `NeuralWorkerTests` over real anonymous pipes, GPU-free | 13/13 suites pass |
+| the reuse decision (reuse / relaunch / launch / single-shot) | `ResidentHelperPolicy` unit tests | pass |
+| a real helper serving a second job in one process | real `NeuralWorker.exe` over two real pipes | warm job reports `firstOutput` only at 492-538 ms against a cold 2715-2751 ms; idle exit at 31.0 s; parent-handle exit; +1002 MiB parked while idle, released on exit |
+| the player's client half | a stub process speaking v6 | reuse, relaunch on a changed settings digest, launch after an idle exit, cancel leaving the helper resident |
+| the single-shot path the harness and the preflight probe use | `run.py`, real render on the 4080 | `ok=true`, 30 frames, `hevc_nvenc`, gpu_ms_p50 5.87, preflight ok |
+
+The gap is specific and worth naming precisely: **the two halves have each been
+exercised, never against each other.** The worker served real jobs to a test
+driver; the player drove a stub. Nothing has yet measured a real player keeping a
+real helper across two toggles, which is both the feature and the acceptance
+criterion. Do not cite the 492-538 ms figure as toggle-to-picture: it is a
+helper-side phase measured over raw pipes, a different instrument entirely.
+
+To close it, on an unlocked session:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/verification/player_session.ps1 `
+  -Player build-upscaling/Release/DLSSVideoPlayer.exe `
+  -Media docs/media/neural-comparison-demo.mp4 `
+  -Sessions 3 -SecondToggle -DropRenderCache `
+  -OutJson build-upscaling/session-runs/p1.json -Note "P1 acceptance"
+```
+
+`-SecondToggle` was added for this: residency lives in the player's own lifetime,
+so a first toggle always pays a cold bring-up and only a second toggle in the
+same process can show reuse. The gap between them lets playback advance, which
+moves the snapped playhead and so the render key - at the same playhead the
+toggle is answered from the cache and no helper job runs at all. The number to
+read is `secondToggle.toggleToFirstNeuralFrameSeconds` with
+`secondToggle.plan == "reuse"`; the warm first-toggle band to compare against is
+4.88-5.16 s from the table above, and the arithmetic floor is ~2.9 s.
+
 ## Reproducing
 
 From the slice worktree, with the runtime staged into

@@ -307,6 +307,31 @@ segment's encode and mux, and the handoff from original to neural playback.
 Decide that before writing code, because it changes what P1 is.
 [Player-session record](VERIFICATION-matrix.md)
 
+**Built 2026-09-14; integrated, unit-tested, end-to-end UNEXERCISED.** The helper
+is resident on `main`: protocol v6 carries a command channel (`Hello`, `Job`,
+`Cancel`, `Shutdown`, plus an outbound `Ready`), a job is handed over as the argv
+the helper already validates, the reuse key is `(runtime directory, runtime digest,
+neural-settings digest)`, the lease is held only while a job runs, the helper exits
+after 30 s idle, and orphan safety is both the job object and a parent-handle wait.
+All four of the "real change, not a flag" problems above are answered in code and
+the answers are written up in `docs/ARCHITECTURE.md`.
+
+What is measured: a real `NeuralWorker.exe` serving a second job in one process
+reports `firstOutput` only, **492-538 ms against a cold 2715-2751 ms**, with idle
+exit at 31.0 s, parent-handle exit, and +1002 MiB parked while idle and released on
+exit. The single-shot path still renders on the 4080 (`ok=true`, 30 frames).
+
+What is NOT measured, and it is the acceptance criterion: **a warm toggle under 3 s
+in a driven player session.** The workstation was locked when that run was
+attempted and injected input is refused to a locked desktop - all three sessions
+exited 14 before rendering. The two halves have each been exercised and never
+against each other: the worker served real jobs to a test driver, the player drove
+a protocol stub. The helper-side 492-538 ms is a phase over raw pipes and must not
+be quoted as toggle-to-picture. The gap, and the one command that closes it, are in
+[the player-session record](VERIFICATION-matrix.md); `-SecondToggle` exists for it,
+because a first toggle in a process always pays a cold bring-up. Per this document's
+own gate, Blackwell is still owed as well.
+
 ## What “2× / 3×” can mean
 
 | Feature | Possible? | Meaning |
@@ -473,13 +498,27 @@ the product. The decision is gated on the real-footage clips and on a filled
 no blind verdict exists. [Report](measurements/art-defaults-20260914/REPORT.md)
 
 Two defects that measurement found, neither fixed:
-`NRPreset` is inert on this runtime - 0/1/2/3 are bit-identical on every clip at
-both mask states - yet it enters the render identity through
-`CanonicalNeuralSettings`, so flipping it costs a full re-render for byte-identical
-output. Left in deliberately: inertness is a statement about DLSS-NR 310.8.0 with
-RenoDX 4.7 on this driver, and the identity also carries the runtime digest, so a
-future runtime that makes the knob live would re-render anyway. Splitting identity
-from provenance for one inert knob is not worth the complexity today.
+`NRPreset` is inert here - 0/1/2/3 are bit-identical on four synthetic clips at
+both mask states and on one real graded film clip at the shipped mask state, two
+repeats each, one output digest across all eight runs - yet it enters the render
+identity through `CanonicalNeuralSettings`, so flipping it costs a full re-render
+for byte-identical output. The knob was confirmed to reach the runtime rather than
+be silently dropped: RenoDX echoes `preset=1|2|3` back in its own preflight
+`activeSettings`, so the hint was written, read and ignored. Since the resident
+helper landed the cost is doubled: a changed settings digest also evicts a healthy
+helper, paying a cold bring-up of 2715-2751 ms against a warm 492-538 ms.
+
+Left in deliberately. A zero-difference result earns only what it measured, so
+this stays a property of DLSS-NR 310.8.0 with RenoDX 4.7 on Ada at driver
+32.0.16.1047, not a property of the preset hint; the identity also carries the
+runtime digest, so a future runtime that makes the knob live re-renders anyway.
+Anyone who does narrow the key must narrow the helper's own
+`SnapshotNeuralAddonSettings` comparison in the same change: the helper re-reads
+its INI per job and fails the job outright on any textual difference, so a key
+that treated two INI texts as equivalent while that comparison did not would turn
+a cheap relaunch into a failed job plus a relaunch. Both read the same
+canonicalisation today, which is where the single definition belongs.
+
 And `blind.py`'s candidate-frame filter admits nothing on clips with hard cuts, so
 it falls back to frame 0 and both pairs of `cuts-motion` and `cuts-similar` are the
 same frame - which makes the one instrument that could settle the tone question

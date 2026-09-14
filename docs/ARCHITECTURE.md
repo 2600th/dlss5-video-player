@@ -288,6 +288,51 @@ removable this way, which puts the floor near 2.9 s at 1080p30 on this machine -
 arithmetic on measured phases, not a measurement of a resident helper. See
 `docs/VERIFICATION-2026-09-14-RTX4080.md` and `docs/VERIFICATION-matrix.md`.
 
+**The helper is resident, and the protocol runs both ways to make that possible.**
+Until v6 the metadata pipe was one-way and a job could only arrive as argv, so a
+process served exactly one render. v6 adds a command channel - `Hello`, `Job`,
+`Cancel`, `Shutdown`, answered by a new outbound `Ready` - on a second inherited
+pipe passed as `--command-handle`. A `Job` carries the argument vector the helper
+already accepted on its command line, so `ParseWorkerArguments` remains the single
+definition and single validator of what a job is; residency changed how a job
+arrives, not what one means. Without `--command-handle` the helper behaves exactly
+as before, one job then exit, which is the path the benchmark harness and the
+preflight probe drive.
+
+Five decisions shape it. The helper is reused only while `(runtime directory,
+runtime digest, neural-settings digest)` matches, because ReShade and RenoDX read
+their INI at process start and there is no way to re-read it in place - a settings
+change must relaunch. The runtime lease is held only while a job runs, so an idle
+resident helper never locks a second player instance out of the runtime directory,
+and every job re-verifies the runtime lock under that lease rather than trusting
+what it checked at startup. The helper exits itself after 30 s idle, which bounds
+the ~1 GiB of feature memory DLSS deliberately does not free on
+`ReleaseFeature`; keeping that memory is the trade, and the idle timeout is what
+makes it survivable. If the next job's geometry matches, the NGX feature is kept
+and the arm is skipped too. And orphan safety is two mechanisms, not one: the job
+object still carries `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and the helper also
+waits on the parent's process handle, because the failure being prevented is a
+process holding the GPU with nobody to reap it.
+
+Re-entering a render was where the work was. State that had never outlived a job
+had to be found and reset per job: the evaluator's successful-evaluation count
+(which becomes `nativeEvaluations`, so a carried value inflates every later job),
+the guide generator's scene-cut tally and history generation - whose `Reset()`
+deliberately preserves the tally because it is evidence about a whole job, so the
+generator is replaced rather than reset - a posted readback copy still holding a
+capture slot, and `D3D12Renderer`'s peak-VRAM high-water mark, which was a running
+maximum with no reset because nothing had ever needed one. A reused job reports no
+`neuralInit` and no `featureArm` in its timeline, because it did not pay them, and
+a session answered from the cache without any helper says `helper=none(cache-hit)`.
+
+**Not yet accepted.** The acceptance criterion is a warm toggle under 3 s in a
+driven player session, and that measurement has not been taken: the workstation
+was locked when it was attempted and injected input is refused to a locked
+desktop. Both halves are exercised - a real helper serving a second job over real
+pipes reports `firstOutput` only, 492-538 ms against a cold 2715-2751 ms, and the
+player's client half against a protocol stub - but never against each other. See
+`docs/VERIFICATION-matrix.md` for the gap and the command that closes it.
+
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
 quality, upscaling state, and a canonical neural-settings digest form the render identity.
