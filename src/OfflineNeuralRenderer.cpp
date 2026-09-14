@@ -1469,7 +1469,6 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     return result;
 }
 
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
 struct TestSourceAdapter {
     IFrameSource& source;
     bool gpuConversion{true};
@@ -1558,7 +1557,6 @@ struct TestEncoderAdapter {
         return adapter;
     }
 };
-#endif
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
     bool gpuConversion{true};
@@ -2101,32 +2099,33 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
     return evidence;
 }
 
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
 OfflineNeuralRenderer::OfflineNeuralRenderer(
     IFrameSource& source,INeuralFrameEvaluator& evaluator,IFrameEncoder& encoder,
     std::function<std::string()> evidenceProvider,Clock clock,std::function<bool()> paused,
     std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory)
-    : testSource_(&source),testEvaluator_(&evaluator),testEncoder_(&encoder),
-      testEvidenceProvider_(std::move(evidenceProvider)),testClock_(std::move(clock)),
-      testPaused_(std::move(paused)),testEncoderFactory_(std::move(encoderFactory)) {}
-#endif
+    : source_(&source),evaluator_(&evaluator),encoder_(&encoder),
+      evidenceProvider_(std::move(evidenceProvider)),clock_(std::move(clock)),
+      paused_(std::move(paused)),encoderFactory_(std::move(encoderFactory)) {}
 
 NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request,
                                                ProgressCallback progress,std::stop_token stop,
                                                const NeuralSegmentSink& segments,
                                                NeuralColdStartCallback coldStart)
 {
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
-    if(!testSource_||!testEvaluator_||!testEncoder_||!testEvidenceProvider_)
-        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
-                                  .detail=L"Offline renderer test dependencies are incomplete."};
-    TestSourceAdapter source{*testSource_};TestEvaluatorAdapter evaluator{*testEvaluator_};
-    TestEncoderAdapter encoder{testEncoder_,{},testEncoderFactory_};
-    const Clock clock=testClock_?testClock_:[]{return SteadyClock::now();};
-    const std::function<bool()> paused=testPaused_?testPaused_:[]{return false;};
-    return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-                  testEvidenceProvider_,clock,paused,segments,coldStart);
-#else
+    if(source_||evaluator_||encoder_||evidenceProvider_)
+    {
+        // A partial injection is a programming error, not a degraded run: falling
+        // back to the production adapters here would silently ignore the fakes.
+        if(!source_||!evaluator_||!encoder_||!evidenceProvider_)
+            return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+                                      .detail=L"Offline renderer was constructed with an incomplete set of collaborators."};
+        TestSourceAdapter source{*source_};TestEvaluatorAdapter evaluator{*evaluator_};
+        TestEncoderAdapter encoder{encoder_,{},encoderFactory_};
+        const Clock clock=clock_?clock_:[]{return SteadyClock::now();};
+        const std::function<bool()> paused=paused_?paused_:[]{return false;};
+        return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
+                      evidenceProvider_,clock,paused,segments,coldStart);
+    }
     const auto runtimeDirectory=ModuleDirectory();
     ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
     evaluator.gpuColorConversion=request.gpuColorConversion;
@@ -2137,5 +2136,4 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         [pauseEvent=request.pauseEvent]{
             return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
         },segments,coldStart);
-#endif
 }

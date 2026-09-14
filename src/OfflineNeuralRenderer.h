@@ -115,7 +115,6 @@ std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDire
 // this process's session.
 std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& runtimeDirectory);
 
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
 enum class OfflineFrameRead { FrameReady, EndOfStream, Error, Cancelled };
 
 struct OfflineDecodedFrame {
@@ -175,7 +174,6 @@ public:
     virtual EncodeError Finish(std::stop_token stop) = 0;
     virtual void Cancel() = 0;
 };
-#endif
 
 class OfflineNeuralRenderer {
 public:
@@ -183,16 +181,17 @@ public:
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
 
     OfflineNeuralRenderer() = default;
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
-    // `paused` replaces NeuralRenderRequest::pauseEvent: true while the job
-    // must hold between frames. `encoderFactory` supplies the extra encoders a
-    // segmented job rotates through; a single-file job never calls it.
+    // Injects the collaborators the job would otherwise build itself. Default
+    // construction is production: the real decoder, evaluator and encoder, the
+    // ReShade log beside the module, and request.pauseEvent. `paused` replaces
+    // NeuralRenderRequest::pauseEvent: true while the job must hold between
+    // frames. `encoderFactory` supplies the extra encoders a segmented job
+    // rotates through; a single-file job never calls it.
     OfflineNeuralRenderer(IFrameSource& source, INeuralFrameEvaluator& evaluator,
                           IFrameEncoder& encoder,
                           std::function<std::string()> evidenceProvider,
                           Clock clock = {}, std::function<bool()> paused = {},
                           std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory = {});
-#endif
 
     // `segments` is used only when request.segmentFrames > 0. `coldStart` is
     // invoked once, on the finalize thread when the first output file is
@@ -205,13 +204,12 @@ public:
                            NeuralColdStartCallback coldStart = {});
 
 private:
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
-    IFrameSource* testSource_{};
-    INeuralFrameEvaluator* testEvaluator_{};
-    IFrameEncoder* testEncoder_{};
-    std::function<std::string()> testEvidenceProvider_;
-    Clock testClock_;
-    std::function<bool()> testPaused_;
-    std::function<std::unique_ptr<IFrameEncoder>()> testEncoderFactory_;
-#endif
+    // Null unless a caller injected them; Run() builds the production adapters otherwise.
+    IFrameSource* source_{};
+    INeuralFrameEvaluator* evaluator_{};
+    IFrameEncoder* encoder_{};
+    std::function<std::string()> evidenceProvider_;
+    Clock clock_;
+    std::function<bool()> paused_;
+    std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory_;
 };

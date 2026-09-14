@@ -367,7 +367,6 @@ if(BUILD_TESTING)
     target_include_directories(NeuralPrerenderTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        OFFLINE_NEURAL_RENDERER_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
