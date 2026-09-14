@@ -11,11 +11,18 @@ The labelled set is every clip in the manifest: ``cuts`` are the frames a reset 
 land on, ``soft_cuts`` are gradual transitions where one reset is tolerated and a second
 inside the same transition is not, and a clip with neither must never reset at all.
 
-    python tools/benchmark/cutlab.py [--corpus DIR] [--clips NAME ...] [--sweep] [--json OUT]
+    python tools/benchmark/cutlab.py [--corpus DIR] [--cache DIR] [--clips NAME ...]
+                                     [--sweep] [--debounce S ...] [--json OUT]
 
 Cell features are expensive to extract and independent of every threshold, so they are
-cached under ``<corpus>/cutlab-cache`` keyed by the clip's frame digest; a sweep after
-the first run costs nothing but the replay.
+cached under ``--cache`` (default ``<corpus>/cutlab-cache``) keyed by the clip's frame
+digest; a sweep after the first run costs nothing but the replay. ``--cache`` exists
+because a shared labelled corpus is often mounted read-only.
+
+``--debounce`` sweeps the minimum-interval window instead of the thresholds. The window
+is the one decision a threshold sweep cannot reach: it adjudicates only weak-arm fires
+that land close behind an accepted cut, so it is invisible in every clip that has no
+such pair.
 """
 from __future__ import annotations
 
@@ -28,11 +35,6 @@ import numpy as np
 
 import cutmirror as cm
 from common import CORPUS, FrameReader, load_manifest, write_json
-
-# Two accepted resets closer together than the debounce window are two resets inside one
-# transition, which is the failure DLSS PG S3.13 describes. Counted separately from plain
-# false positives because it is a different defect with a different cost.
-MULTI_FIRE_FRAMES = cm.min_frames_between_cuts(30.0)
 
 
 def extract(clip: dict, corpus: Path, cache: Path) -> list[dict]:
@@ -60,19 +62,27 @@ def extract(clip: dict, corpus: Path, cache: Path) -> list[dict]:
     return features
 
 
-def replay(clip: dict, features: list[dict], criterion: cm.Criterion) -> cm.CutRun:
-    run = cm.CutRun(clip["fps"], criterion)
+def replay(clip: dict, features: list[dict], criterion: cm.Criterion,
+           seconds_between_cuts: float = cm.MIN_SECONDS_BETWEEN_CUTS) -> cm.CutRun:
+    run = cm.CutRun(clip["fps"], criterion, seconds_between_cuts)
     for offset, feature in enumerate(features):
         run.decide(offset + 1, feature)  # feature i compares frame i+1 against frame i
     return run
 
 
-def judge(clip: dict, run: cm.CutRun) -> dict:
-    """Score one replay: the manifest's verdict plus the over-reset count."""
+def judge(clip: dict, run: cm.CutRun,
+          seconds_between_cuts: float = cm.MIN_SECONDS_BETWEEN_CUTS) -> dict:
+    """Score one replay: the manifest's verdict plus the over-reset count.
+
+    Over-resetting is measured against the window in force, not against a fixed
+    distance: a second reset is only "inside one transition" if the generator would
+    have had the chance to withhold it.
+    """
     truth, soft = clip.get("cuts", []), clip.get("soft_cuts", [])
     scores = cm.cut_scores(run.cuts, truth, soft_cuts=soft)
+    window = cm.min_frames_between_cuts(30.0, seconds_between_cuts)
     multi = sum(1 for cut in truth
-                for fire in run.cuts if 0 < fire - cut <= MULTI_FIRE_FRAMES)
+                for fire in run.cuts if 0 < fire - cut < window)
     multi += sum(max(0, sum(1 for fire in run.cuts if first <= fire <= last) - 1)
                  for first, last in soft)
     return dict(clip=clip["name"], expected=truth, soft=soft, fired=run.cuts,
@@ -192,16 +202,51 @@ def rank(result: dict) -> tuple:
             -result["pooled"]["multi_fire"], -result["pooled"]["false_positives"])
 
 
-def evaluate(clips: list[dict], features: dict, criterion: cm.Criterion) -> dict:
-    verdicts = [judge(clip, replay(clip, features[clip["name"]], criterion)) for clip in clips]
-    return dict(criterion=str(criterion), kind=criterion.name, verdicts=verdicts, pooled=pooled(verdicts))
+def evaluate(clips: list[dict], features: dict, criterion: cm.Criterion,
+             seconds_between_cuts: float = cm.MIN_SECONDS_BETWEEN_CUTS) -> dict:
+    verdicts = [judge(clip, replay(clip, features[clip["name"]], criterion, seconds_between_cuts),
+                      seconds_between_cuts) for clip in clips]
+    return dict(criterion=str(criterion), kind=criterion.name, window=seconds_between_cuts,
+                verdicts=verdicts, pooled=pooled(verdicts))
+
+
+def debounce_clip_table(clips: list[dict], results: list[dict]) -> list[str]:
+    """Precision and recall per clip, one column per swept window.
+
+    A clip whose weak arm never fires close behind an accepted cut is constant across
+    the whole sweep; the ``varies`` column says which clips the window actually decides,
+    so a reader can see how narrow the evidence for a window length really is.
+    """
+    head = " | ".join(f"{r['window']:g} s / {cm.min_frames_between_cuts(30.0, r['window'])}f"
+                      for r in results)
+    lines = [f"| clip | truth | {head} | varies |", "|---|---|" + "---:|" * len(results) + "---|"]
+    for index, clip in enumerate(clips):
+        cells = [f"{fmt(r['verdicts'][index]['precision'], 2)}/"
+                 f"{fmt(r['verdicts'][index]['recall'], 2)}" for r in results]
+        fired = [str(r["verdicts"][index]["fired"]) for r in results]
+        lines.append(f"| {clip['name']} | {clip.get('cuts') or clip.get('soft_cuts') or '-'} | "
+                     f"{' | '.join(cells)} | {'yes' if len(set(fired)) > 1 else 'no'} |")
+    lines += ["", f"| pooled | P | R | F1 | FP | missed | multi | clips wrong |",
+              "|---|---:|---:|---:|---:|---:|---:|---|"]
+    for result in results:
+        p = result["pooled"]
+        lines.append(f"| {result['window']:g} s "
+                     f"({cm.min_frames_between_cuts(30.0, result['window'])}f @30) | "
+                     f"{fmt(p['precision'])} | {fmt(p['recall'])} | {fmt(p['f1'])} | "
+                     f"{p['false_positives']} | {p['missed']} | {p['multi_fire']} | "
+                     f"{', '.join(p['wrong']) or 'none'} |")
+    return lines
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--corpus", type=Path, default=CORPUS)
     parser.add_argument("--clips", nargs="*", help="clip names; default every clip in the manifest")
+    parser.add_argument("--cache", type=Path, help="feature cache; default <corpus>/cutlab-cache")
     parser.add_argument("--sweep", action="store_true", help="also sweep both criteria over the labelled set")
+    parser.add_argument("--debounce", type=float, nargs="*", metavar="SECONDS",
+                        help="sweep the minimum-interval window instead of the thresholds; "
+                             "omit the values for a default bracket around the shipped one")
     parser.add_argument("--json", type=Path, help="write the full result, sweep included, here")
     args = parser.parse_args()
 
@@ -210,7 +255,8 @@ def main() -> int:
     if not clips:
         print("no clips selected", file=sys.stderr)
         return 1
-    features = {c["name"]: extract(c, args.corpus, args.corpus / "cutlab-cache") for c in clips}
+    features = {c["name"]: extract(c, args.corpus, args.cache or args.corpus / "cutlab-cache")
+                for c in clips}
 
     shipped, candidate = cm.ResidualCriterion(), cm.FailedFractionCriterion()
     lines = ["# Scene-cut criterion lab", "",
@@ -264,11 +310,20 @@ def main() -> int:
             lines.append(f"| {kind} | {len(ranked)} | {len(clean)} | {fmt(fewest)} | "
                          f"{fmt(max((r['pooled']['f1'] or 0.0) for r in ranked))} |")
 
+    debounce: list[dict] = []
+    if args.debounce is not None:
+        windows = args.debounce or [0.0, 0.1, 0.133, 0.167, 0.2, 0.3, 0.4, 0.5, 0.567, 0.6, 0.8]
+        debounce = [evaluate(clips, features, shipped, w) for w in sorted(set(windows))]
+        lines += ["", f"## Sweep: debounce window ({len(debounce)} windows, shipped criterion)", ""]
+        lines += debounce_clip_table(clips, debounce)
+
     print("\n".join(lines))
     if args.json:
         write_json(args.json, dict(corpus=str(args.corpus), results=results,
                                    sweep={k: [dict(criterion=r["criterion"], pooled=r["pooled"]) for r in v]
-                                          for k, v in sweep.items()}))
+                                          for k, v in sweep.items()},
+                                   debounce=[dict(window=r["window"], verdicts=r["verdicts"],
+                                                  pooled=r["pooled"]) for r in debounce]))
     return 0
 
 

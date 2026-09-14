@@ -312,11 +312,11 @@ void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
     CHECK_EQ(0.5f, TemporalGuideGenerator::LumaHistogramIntersection(dark, mixed));
 }
 
-// The debounce is specified in seconds (PySceneDetect's 0.6 s min_scene_len default), so these
-// tests run at the frame rate where the derived interval is that project's other default: 0.6 s
-// at 25 fps is exactly 15 frames.
-constexpr double kCutFps = 25.0;
-constexpr uint32_t kCutWindowFrames = 15;
+// The debounce is specified in seconds, so these tests run at the frame rate the labelled
+// corpus was shot and scored at, where the derived interval is a whole number of frames:
+// 0.3 s at 30 fps is exactly 9.
+constexpr double kCutFps = 30.0;
+constexpr uint32_t kCutWindowFrames = 9;
 // Lifting the whole field by this much lands squarely in the weak arm's band: measured
 // residual 0.216 with histogram overlap 0.594, i.e. a cut only the histogram test believes in.
 constexpr double kFlashLift = 0.22;
@@ -370,21 +370,66 @@ void weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test()
     CHECK_EQ(HistoryReset::None, out.id.reset);
     CHECK_EQ(generationAfterCut, guides.HistoryGeneration());
 
-    // Frames 6..16 are an ordinary pan, so the window elapses without another accepted cut.
-    for (uint64_t number = 6; number <= 16; ++number) {
+    // Frames 6..10 are an ordinary pan, so the window elapses without another accepted cut.
+    for (uint64_t number = 6; number <= 10; ++number) {
         CHECK(GenerateAtCutFps(guides, TexturedFrame(int(number) * 3, int(number)), number, out));
         CHECK(out.hasHistory);
         CHECK_EQ(SceneCutStrength::None, out.sceneCut);
     }
 
-    // Frame 17 is exactly kCutWindowFrames frames after the accepted cut on frame 2, so the
-    // same weak evidence is trusted again.
-    CHECK(GenerateAtCutFps(guides, TexturedFrame(51, 17, kFlashLift), 17, out));
+    // Frame 11 is exactly kCutWindowFrames frames after the accepted cut on frame 2, which is
+    // the first interval the window no longer covers, so the same weak evidence is trusted
+    // again. One frame earlier it would still be withheld.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(33, 11, kFlashLift), 11, out));
     CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
     CHECK(!out.sceneCutSuppressed);
     CHECK(!out.hasHistory);
     CHECK_EQ(HistoryReset::Cut, out.id.reset);
     CHECK_EQ(generationAfterCut + 1, guides.HistoryGeneration());
+}
+
+// The defect the window length was changed for. On labelled real footage - corpus clip
+// `real-film-cuts`, hard cuts verified frame by frame at 20/47/70/87 - the cut at frame 87
+// is 17 frames after the one at 70, 0.57 s at 30 fps. It fires the weak arm (residual
+// 0.2711, histogram overlap 0.5294) and the 0.6 s window, 18 frames at this rate,
+// discarded it by construction: the neural pass kept its accumulated history across a
+// genuine discontinuity and the renderer was handed guides built from the wrong shot. No
+// synthetic clip can reach this case, because none of them cuts twice inside 0.6 s.
+void a_real_cut_one_frame_inside_the_old_window_is_taken_test()
+{
+    // The interval under test only means anything while the window is shorter than it.
+    CHECK(TemporalGuideGenerator::MinFramesBetweenCuts(kCutFps) <= 17u);
+
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(0, 0), 0, out));
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(3, 1), 1, out));
+
+    // Frame 2 is the first shot change, and is accepted with nothing before it.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(6, 2, kFlashLift), 2, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    const uint32_t generationAfterFirstCut = guides.HistoryGeneration();
+
+    // Frames 3..18 are the second shot: sixteen frames of ordinary pan, no decision.
+    for (uint64_t number = 3; number <= 18; ++number) {
+        CHECK(GenerateAtCutFps(guides, TexturedFrame(int(number) * 3, int(number), kFlashLift),
+                               number, out));
+        CHECK(out.hasHistory);
+        CHECK_EQ(SceneCutStrength::None, out.sceneCut);
+    }
+
+    // Frame 19 is the third shot change, 17 frames after the second - one frame short of
+    // the old window. It is a scene change, not a transient returning to the shot before
+    // it, so the history has to go.
+    CHECK(GenerateAtCutFps(guides, TexturedFrame(57, 19), 19, out));
+    CHECK_EQ(SceneCutStrength::Histogram, out.sceneCut);
+    CHECK(!out.sceneCutSuppressed);
+    CHECK(!out.hasHistory);
+    CHECK_EQ(HistoryReset::Cut, out.id.reset);
+    CHECK_EQ(generationAfterFirstCut + 1, guides.HistoryGeneration());
+    CHECK_EQ((SceneCutAccounting{.acceptedWeak = 2}), guides.SceneCuts());
 }
 
 void a_strong_scene_cut_fires_inside_the_minimum_interval_test()
@@ -823,6 +868,7 @@ int main()
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
     weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test();
+    a_real_cut_one_frame_inside_the_old_window_is_taken_test();
     a_strong_scene_cut_fires_inside_the_minimum_interval_test();
     a_declared_reset_rearms_the_scene_cut_interval_test();
     scene_cut_accounting_survives_reset_and_counts_each_arm_test();

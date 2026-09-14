@@ -77,15 +77,33 @@ float TemporalGuideGenerator::LumaHistogramIntersection(const std::vector<float>
 constexpr double kCutResidualStrong = 0.30;    // correspondence failed outright
 constexpr double kCutResidualWeak = 0.10;      // more than a pan, less than a certainty
 constexpr double kCutHistogramOverlap = 0.85;  // luma distribution no longer the same scene
-// PySceneDetect's min_scene_len, whose CLI default is 0.6 s (its API default of 15 frames is
-// the same thing at 25 fps), applied as the same kind of hard minimum-interval filter its
-// FlashFilter uses in SUPPRESS mode. This is the debounce the weak arm was missing: a
-// contributor measured 6 fires in 12 frames (#19119-19130) and 11 in 15 frames on another
-// clip, and per DLSS Programming Guide 310.6.0 S3.13 over-firing InReset is the documented
-// failure mode ("temporal flickering, heavy aliasing or other visual artifacts"), not a
-// missed reset. FFmpeg's scdet has no debounce; it also never has to protect an upscaler's
-// accumulated history.
-constexpr double kMinSecondsBetweenCuts = 0.6;
+// The weak arm's minimum interval. It exists because a transient - a flash, an exposure
+// step - fires the weak arm twice, once going in and once coming back out, and per DLSS
+// Programming Guide 310.6.0 S3.13 over-firing InReset is the documented failure mode
+// ("temporal flickering, heavy aliasing or other visual artifacts"), not a missed reset.
+// A contributor measured 6 fires in 12 frames (#19119-19130) and 11 in 15 frames on
+// another clip. FFmpeg's scdet has no debounce; it also never has to protect an
+// upscaler's accumulated history.
+//
+// It was PySceneDetect's min_scene_len CLI default of 0.6 s, which is 18 frames at 30 fps
+// and long enough to discard a real shot change: on labelled real footage a hard cut
+// verified frame by frame, 17 frames after the previous one, fired the weak arm
+// (residual 0.2711, overlap 0.5294) and was withheld by construction. The labelled
+// corpus brackets the window from both sides, and the bracket is wide:
+//   * the only transient in it returns 4 frames after the cut that opened it
+//     (residual 0.2537, overlap 0.4324), so the window must exceed 4 frames;
+//   * the shortest genuine shot in it is 17 frames, so the window must not exceed that.
+// Nothing else in the corpus changes anywhere in between - the dissolves never reach the
+// weak arm at all, so they are protected by kCutResidualWeak and not by this window.
+// Note that the transient's return has the *lower* histogram overlap of the two, so no
+// pair of evidence thresholds orders the two cases: the interval is the only thing that
+// separates them, which is why this is still a plain minimum interval and not a
+// strength-conditional rule. 0.3 s sits between the two bounds with roughly equal
+// multiplicative margin on each side (9 frames at 30 fps: 2.25x the observed transient,
+// 0.53x the shortest genuine shot). The cost is that the burst defence is now 9 frames
+// wide rather than 18, so a transition that keeps firing for longer than that produces a
+// second reset where it used to produce one; no clip in the corpus does.
+constexpr double kMinSecondsBetweenCuts = 0.3;
 
 SceneCutStrength TemporalGuideGenerator::ClassifySceneCut(double residual, double histogramOverlap) {
     if (residual > kCutResidualStrong) return SceneCutStrength::Residual;
