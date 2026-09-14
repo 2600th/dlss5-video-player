@@ -1,9 +1,11 @@
 """Generates the repeatable benchmark corpus (lossless FFV1 MKV, 1920x1080, 30 fps).
 
 Every synthetic clip is produced by deterministic FFmpeg sources with explicit
-seeds; ``manifest.json`` records per-clip category, hard-cut frame indices,
-burned-in ground-truth text and an rgb24 frame-hash digest so a regenerated
-corpus can be proven identical (``--check``).
+seeds; the ``real`` clips are cut from this repository's own demo capture
+(``docs/media/neural-comparison-demo.mp4``), which is tracked in git, so they are
+reproducible from a clean checkout too. ``manifest.json`` records per-clip
+category, hard-cut frame indices, burned-in ground-truth text and an rgb24
+frame-hash digest so a regenerated corpus can be proven identical (``--check``).
 
     python tools/benchmark/corpus.py [--corpus DIR] [--check]
 """
@@ -15,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import BUILD, CORPUS, FFMPEG, FLAGS, framemd5, probe, sequence_digest, write_json
+from common import BUILD, CORPUS, FFMPEG, FLAGS, REPO, framemd5, probe, sequence_digest, write_json
 
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 ENCODE = ["-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", "1", "-g", "1", "-slices", "4",
@@ -23,6 +25,16 @@ ENCODE = ["-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", "1", "-g", "
 FONT_MONO = "C\\\\:/Windows/Fonts/consola.ttf"
 FONT_UI = "C\\\\:/Windows/Fonts/segoeui.ttf"
 FACE_FIXTURE = BUILD / "runtime-comparison-20260907" / "fixtures" / "mafia-60s.mkv"
+DEMO = REPO / "docs" / "media" / "neural-comparison-demo.mp4"
+DEMO_RELATIVE = "docs/media/neural-comparison-demo.mp4"
+# The demo is a 1920x1080 screen capture of the player, so only part of each frame is
+# footage. This rectangle is that part: the columns and rows whose temporal standard
+# deviation is nonzero while the capture plays back video (501-1863 x 126-892, trimmed
+# to even sides), which is the player's video surface with its pillarbox and its
+# chrome excluded. Cropping is not cosmetic - the static chrome is 50 % of the frame,
+# and left in it would dominate the residual the cut test reads and inflate the
+# static-cell denominator false motion is measured against.
+DEMO_SURFACE = "crop=1362:766:502:126"
 
 # Ground truth for the OCR clip. Static lines drift slowly; subtitle cues are
 # burned from an SRT so the benchmark exercises real subtitle rendering.
@@ -220,6 +232,101 @@ def build_faces(corpus: Path) -> dict | None:
                       "hair). Re-encoded losslessly; the fixture itself is not redistributed.")
 
 
+def demo() -> str:
+    """The demo capture, which is tracked in git, so a missing file is a broken checkout."""
+    if not DEMO.exists():
+        raise SystemExit(f"{DEMO} is tracked in this repository and the real clips are cut from it; "
+                         f"restore it (git checkout -- {DEMO_RELATIVE}) and build again")
+    return str(DEMO)
+
+
+def real_segment(first: int, count: int) -> str:
+    """`count` frames of the demo's video surface, starting at decoded source frame `first`.
+
+    Selecting on the decoded frame index rather than seeking by time is deliberate: the
+    labelled cut indices below are decoded-frame indices, and `-ss` on an open-GOP h264
+    file resolves to a keyframe, which would shift every one of them.
+    """
+    return (f"select='between(n\\,{first}\\,{first + count - 1})',setpts=N/{FPS}/TB,"
+            f"{DEMO_SURFACE},scale={WIDTH}:{HEIGHT}:flags=lanczos,format=yuv420p")
+
+
+def build_real_film_cuts(corpus: Path) -> dict:
+    first, count = 15, 102
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-film-cuts.mkv"], corpus)
+    return dict(name="real-film-cuts", category="real", synthetic=False, cuts=[20, 47, 70, 87], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: five film shots from the demo capture (hands over a bedspread, a car on a "
+                      "road, a man in a crowd, a revolver firing, a portrait) with grain, motion blur and real "
+                      "camera motion. Cuts 20/47/70/87 (source 35/62/85/102) were proposed by FFmpeg scene "
+                      "detection on the cropped surface, which scored them 0.72/0.66/0.52/0.53, and then "
+                      "confirmed by eye: all 102 frames were extracted and inspected, those four pairs are the "
+                      "only ones where the shot changes, and the frame at each index is the first frame of the "
+                      "new shot. The eight smaller detector flags inside the clip (locals 2, 4, 7, 13, 15, 18, "
+                      "84 and 86, scoring 0.032-0.076) were checked the same way and are hand motion, a pan or "
+                      "the muzzle flash, so none is labelled: the flash at locals 84-85 is a real two-frame "
+                      "exposure spike inside one shot. Note the 70->87 gap is 17 frames, inside cutmirror's "
+                      "0.6 s weak-arm debounce - the editing rhythm no synthetic clip here has.")
+
+
+def build_real_game_cuts(corpus: Path) -> dict:
+    first, count = 438, 68
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-game-cuts.mkv"], corpus)
+    return dict(name="real-game-cuts", category="real", synthetic=False, cuts=[32], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: the demo's game-footage playback section - a dirt-bike race exterior "
+                      "(locals 0-31) hard-cut to a convenience-store interior (locals 32-67), both with the "
+                      "game's own static HUD over fast camera motion, which is where invented motion on static "
+                      "cells shows. The single cut at local 32 (source 470) was proposed at scene score 0.37 "
+                      "and confirmed by inspecting all 68 frames: 469 is the last race frame and 470 the first "
+                      "interior frame. The detector's neighbouring flags at locals 29 and 33 (0.16, 0.22) are "
+                      "camera motion and dust inside a shot - inspected, not cuts, so not labelled.")
+
+
+def build_real_game_motion(corpus: Path) -> dict:
+    first, count = 506, 76
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-game-motion.mkv"], corpus)
+    return dict(name="real-game-motion", category="real", synthetic=False, cuts=[], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: one continuous 2.5 s shot, a character running off a rooftop and falling "
+                      "towards a city, so the camera translates while the subject occludes and disoccludes "
+                      "background throughout - the real-footage negative. Nothing here is a cut: all 76 frames "
+                      "were inspected, and the strongest scene score of any pair inside the clip is 0.055 (at "
+                      "local 1, the second frame of the new shot; then 0.046, 0.045, 0.041) - far under the "
+                      "0.37-0.60 the confirmed cuts in the other real clips measure.")
+
+
+def build_real_dissolve(corpus: Path) -> dict:
+    # The demo capture contains no dissolve: across all 678 frames every transition is a
+    # single-frame jump, so there is no real fade to label. This clip therefore has real
+    # material and a synthesised transition - the honest half of what the gate question
+    # asks for - built from the two adjacent shots real-game-cuts and real-game-motion
+    # use, with the same 0.7 s fade the synthetic `dissolve` clip uses so the two are
+    # directly comparable.
+    fade, a_first, a_count, b_first, b_count = 0.7, 470, 36, 506, 51
+    fade_frames = round(fade * FPS)
+    graph = (f"[0:v]split=2[a0][b0];"
+             f"[a0]{real_segment(a_first, a_count)}[a];"
+             f"[b0]{real_segment(b_first, b_count)}[b];"
+             f"[a][b]xfade=transition=fade:duration={fade}:offset={(a_count - fade_frames) / FPS}")
+    ffmpeg(["-i", demo(), "-filter_complex", graph, "-frames:v", str(a_count + b_count - fade_frames),
+            *ENCODE, "real-dissolve.mkv"], corpus)
+    first = a_count - fade_frames
+    return dict(name="real-dissolve", category="real", synthetic=False, cuts=[],
+                soft_cuts=[[first, first + fade_frames + 1]], text=[],
+                source=f"{DEMO_RELATIVE} frames {a_first}-{a_first + a_count - 1} over "
+                       f"{b_first}-{b_first + b_count - 1}",
+                notes="Real material, synthesised transition, and the distinction matters: the demo capture "
+                      "has no dissolve anywhere in it (all 678 frames were differenced; every transition is a "
+                      "single-frame jump), so this is the store interior cross-faded into the rooftop fall over "
+                      "0.7 s, held 0.5 s before and 1.0 s after. The fade occupies frames 15-35 and is "
+                      "deliberately NOT in `cuts`: no single frame in it is where history stops being valid. At "
+                      "most one reset inside the span is correct; a second is the over-reset artifact.")
+
+
 def describe(corpus: Path, clip: dict) -> dict:
     path = corpus / f"{clip['name']}.mkv"
     info = probe(path)
@@ -232,7 +339,9 @@ def describe(corpus: Path, clip: dict) -> dict:
 BUILDERS = {"text-subtitles": build_text, "fine-detail": build_detail,
             "highlights-gradients": build_highlights, "cuts-motion": build_cuts,
             "cuts-similar": build_similar_cuts, "pan-fast": build_pan, "zoom-fast": build_zoom,
-            "dissolve": build_dissolve, "flash-exposure": build_flash, "faces": build_faces}
+            "dissolve": build_dissolve, "flash-exposure": build_flash, "faces": build_faces,
+            "real-film-cuts": build_real_film_cuts, "real-game-cuts": build_real_game_cuts,
+            "real-game-motion": build_real_game_motion, "real-dissolve": build_real_dissolve}
 
 
 def main() -> int:

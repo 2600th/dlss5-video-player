@@ -29,6 +29,51 @@ Prerequisites: Python 3.12 with `tools/benchmark/requirements.txt`,
 to `build-upscaling/benchmark-work/runtime-snapshot/` first when a build may
 run concurrently; the runner prefers the snapshot.
 
+### The corpus, and where it stops being synthetic
+
+`corpus.py` has fourteen builders. Thirteen run from a clean checkout; the
+fourteenth, `faces`, needs an external fixture and is skipped with a warning when it
+is absent. Nine are synthetic — seeded FFmpeg sources, pinned colours, no camera —
+and carry `"synthetic": true` in `manifest.json`. Four are `"category": "real"`,
+`"synthetic": false`, and are cut from this repository's own demo capture,
+`docs/media/neural-comparison-demo.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
+git). They exist because every quality conclusion here used to rest on mandelbrot
+zooms and cellular automata, and because they need no fixture to fetch and add
+nothing to redistribute that the tree does not already carry.
+
+| clip | frames | labelled | what it is |
+|---|---:|---|---|
+| `real-film-cuts` | 102 | cuts 20, 47, 70, 87 | five film shots — hands over a bedspread, a car on a road, a man in a crowd, a revolver firing, a portrait — with grain, motion blur and a two-frame muzzle flash inside one shot |
+| `real-game-cuts` | 68 | cut 32 | a race exterior hard-cut to a store interior, both with the game's own static HUD over fast camera motion |
+| `real-game-motion` | 76 | none | one continuous shot: a character runs off a rooftop and falls, so the camera translates while the subject occludes and disoccludes background throughout |
+| `real-dissolve` | 66 | soft cut 15–37 | the two shots above cross-faded over 0.7 s, held 0.5 s before and 1.0 s after |
+
+The demo is a screen capture of the player, so only half of each frame is footage.
+The clips are cropped to the player's video surface — `crop=1362:766:502:126`,
+measured as the only region whose temporal standard deviation is nonzero while the
+capture plays video — and upscaled to 1920×1080 with lanczos so the corpus stays one
+resolution. The crop is not cosmetic: the static chrome is half the frame, and left
+in it would dominate the residual the cut test reads while inflating the static-cell
+denominator false motion is divided by. The upscale is the one concession — grain and
+h264 texture survive it softened, not sharpened — and it is why these clips are
+labelled real footage rather than pristine footage.
+
+**Every cut index was verified, not proposed.** FFmpeg scene detection on the cropped
+surface proposed the boundaries; each one was then confirmed by extracting every frame
+of the clip and inspecting it, and each `notes` field records how. The four
+`real-film-cuts` indices scored 0.72/0.66/0.52/0.53 and are the only pairs in 102
+frames where the shot changes; the eight smaller detector flags inside that clip
+(0.032–0.076) are hand motion, a pan or the muzzle flash, and are deliberately not
+labelled. A wrong ground-truth index silently corrupts every cut precision/recall
+number computed afterwards, which is why "the detector said so" is not accepted here.
+
+**The capture contains no dissolve.** All 678 frames were differenced: every
+transition in it is a single-frame jump. `real-dissolve` therefore has real material
+and a synthesised transition, and says so in its `notes` — the fade is in `soft_cuts`,
+never in `cuts`, because no single frame of a dissolve is the one where history stops
+being valid. Real grain, real motion blur and a camera that occludes are now in the
+corpus; a real dissolve still is not.
+
 ## What is measured
 
 | Group | Metric | Source |
@@ -203,7 +248,7 @@ neural pass. It replays `cutmirror` — the shared Python mirror of
 and matches every accepted history reset against the manifest.
 
 ```
-python tools/benchmark/corpus.py --corpus <dir>          # 9 clips, ~2 min
+python tools/benchmark/corpus.py --corpus <dir>          # 13 clips, ~2 min
 python tools/benchmark/cutlab.py --corpus <dir> --sweep  # 1212 pairs, ~30 s cached
 ```
 
@@ -215,8 +260,9 @@ which is a cut; `dissolve` cross-fades over 0.7 s, where one reset is right and 
 are not; `flash-exposure` has a four-frame flash and a sustained exposure step, and
 the scene never changes.
 
-**What the shipped 0.30 / 0.10 / 0.85 criterion does** (9 clips, 1212 consecutive
-pairs, 7 labelled hard cuts):
+**What the shipped 0.30 / 0.10 / 0.85 criterion does** (the nine synthetic clips, 1212
+consecutive pairs, 7 labelled hard cuts — the four `real` clips were added later and
+are scored separately below):
 
 | clip | truth | accepted resets | missed | false positives |
 |---|---|---|---:|---|
@@ -268,9 +314,43 @@ trading one documented over-reset for an unmeasured missed-cut risk on fast-cut
 footage. Seven labelled cuts over nine synthetic clips is not enough evidence to do
 either.
 
-What would settle it is footage this corpus cannot synthesize: real grain, real motion
-blur, real dissolves, and a shot-boundary set large enough that a three-parameter grid
-search is not fitting seven positives.
+### The same criterion on real footage (2026-09-14, CPU only)
+
+The four `real` clips were added afterwards and scored separately, five labelled hard
+cuts over 312 frames:
+
+| criterion | P | R | F1 | false pos | missed |
+|---|---:|---:|---:|---:|---:|
+| residual (shipped shape) | 1.000 | 0.800 | 0.889 | 0 | 1 |
+| failed fraction | 1.000 | 0.800 | 0.889 | 0 | 1 |
+
+| clip | truth | accepted resets | missed | false positives |
+|---|---|---|---:|---|
+| `real-film-cuts` | 20, 47, 70, 87 | 20, 47, 70 (**87 suppressed**) | 1 | – |
+| `real-game-cuts` | 32 | 32 | 0 | – |
+| `real-game-motion`, `real-dissolve` | none / soft 15–37 | none | 0 | – |
+
+Two findings the synthetic set could not produce:
+
+- **The debounce, not a threshold, loses the one missed cut.** Local 87 fires the weak
+  arm at residual 0.2711 with overlap 0.5294 — a clear detection — and is suppressed
+  because it is 17 frames after the accepted cut at 70, inside the 0.6 s window. Real
+  editing puts shots that close together; the shortest synthetic segment here is
+  1.0 s, so no synthetic clip can exercise it. Note what raising the strong arm to the
+  sweep's "best" 0.40 would do to this set: `real-game-cuts` fires at 0.2174 and every
+  `real-film-cuts` cut at 0.2504–0.3363, so all five would move to the debounced weak
+  arm and the miss would get worse, not better.
+- **Precision is 1.000 on real material, dissolve included.** Grain, motion blur, a
+  muzzle flash inside a shot, a HUD over fast motion and a 0.7 s cross-fade produced
+  no false positive at all — including zero resets inside the fade, which is inside
+  the "at most one" tolerance. The two false positives in the synthetic table are both
+  `flash-exposure`, a deliberately adversarial clip.
+
+What is still missing is a real dissolve — the demo capture contains none, every
+transition in it is a single-frame jump — and a shot-boundary set large enough that a
+three-parameter grid search is not fitting twelve positives. The gate A/B these clips
+were built for is in
+[`docs/measurements/gate-real-footage-20260914/REPORT.md`](measurements/gate-real-footage-20260914/REPORT.md).
 
 ## What the harness measures now, and what it still cannot
 
