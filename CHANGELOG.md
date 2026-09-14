@@ -49,11 +49,17 @@ and looks like a broken helper until the runtime is re-staged.
   motion on the same clip, and single-flag runs show neither half is free (capture
   alone -0.78 dB, decoder alone -0.64 dB) on an untagged test clip. On a
   `bt709`-tagged clip the decoder half is free (+0.067 dB) and only the capture
-  half still costs (-0.64 dB): both conversion shaders hard-code BT.709 while
-  ffmpeg falls back to BT.601 for a stream that declares nothing, so most of that
-  penalty was a colour-tag mismatch rather than lost detail. The shipped defaults
-  stay until the source tags are read and the capture pass's chroma siting is
-  checked; the flags remain per-render for anyone who wants the other trade.
+  half still costs (-0.53 to -0.64 dB): both conversion shaders hard-code BT.709
+  while ffmpeg falls back to BT.601 for a stream that declares nothing, so most of
+  that penalty was a colour-tag mismatch rather than lost detail. The shipped
+  defaults stay until the source tags are read and the capture pass's chroma siting
+  is checked; the flags remain per-render for anyone who wants the other trade.
+- Found while measuring the above, not yet fixed: **every neural render written on
+  the default path is untagged**. The encoder states colorimetry only when the GPU
+  did the conversion, so a BT.709-tagged source becomes an output file that declares
+  no colour space, converted under ffmpeg's BT.601 default. Players that assume
+  BT.709 for HD - the common case - will show those colours shifted. The source's
+  own tags are available at that point and should be carried through.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

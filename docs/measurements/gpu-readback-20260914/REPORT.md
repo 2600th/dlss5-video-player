@@ -214,30 +214,71 @@ adds no `-colorspace`. Both GPU shaders hard-code BT.709 limited range
 coefficients for a stream that declares nothing. So on untagged content the CPU and
 GPU halves of the pipeline are converting under two different matrices.
 
-**The test that settles it: run the same arms on a clip that carries tags.**
-`orig-faces` is `bt709`/`tv` (its publisher source is tagged and the tags propagate
-through `corpus.py`), and there the two flags stop behaving alike:
+**The test that settles it: the same pixels, tagged.** Two controls, because the
+first one changed clip and resolution at once. `orig-faces` is `bt709`/`tv` from its
+publisher source; `demo-4k-60-tagged` is `demo-4k-60` re-encoded with explicit
+`bt709` tags and nothing else changed. Arm deltas against each clip's own
+`cpu-conversion`:
 
-| clip | tags | `gpu-color-only` vs cpu | `gpu-source-only` vs cpu |
+| clip | input tags | `gpu-color-only` | `gpu-source-only` |
 |---|---|---|---|
 | `demo-4k-60` | `unknown` | **-0.783 dB / +0.944 dE** | **-0.638 dB / +0.875 dE** |
-| `orig-faces` | `bt709` / `tv` | **-0.642 dB / +0.644 dE** | **+0.067 dB / +0.009 dE** |
+| `demo-4k-60-tagged` | `bt709` (same pixels) | **-0.530 dB / +0.920 dE** | **+0.140 dB / +0.290 dE** |
+| `orig-faces` (1080p) | `bt709` | **-0.642 dB / +0.644 dE** | **+0.067 dB / +0.009 dE** |
 
-`GpuSourceConversion` is **free on correctly tagged material** - marginally ahead on
-PSNR and level on dE - and its entire measured penalty was the 601-against-709
-mismatch on untagged input. That is not a readback cost and not shader imprecision:
+Read the deltas, not the absolutes: tagging changes the matrix the scorer itself
+decodes under, so `cpu-conversion` moves 29.09 -> 28.38 dB on identical pixels. That
+is a change of comparison basis, not of quality, and it is why only within-clip arm
+deltas mean anything here.
+
+`GpuSourceConversion` goes from **-0.64 dB to free** the moment the input carries
+tags, on two clips at two resolutions. Its entire measured penalty was the
+601-against-709 mismatch, which is not a readback cost and not shader imprecision:
 it is exactly the hazard `docs/USAGE.md:219-221` already names ("assumes BT.709
-limited range and nothing reads the source's tags"), now with a number on it and a
-demonstration that reading the tags is the whole fix.
+limited range and nothing reads the source's tags"), now with a number and a
+demonstration that reading the tags is the whole fix. On tagged input it is a pure
+throughput win.
 
-`GpuColorConversion` keeps costing **-0.64 dB / +0.64 dE with tags present**, so its
-penalty is its own conversion math rather than a tagging artifact. The candidate
-mechanism is chroma siting: `PSCaptureChroma` converts four RGB samples and averages
-the results, which is centre-sited, while swscale's 4:2:0 default is left-sited -
-plus 8-bit rounding in the same pass. Note the report's own comment at
-`src/D3D12Renderer.cpp:325-327` claims the averaging "is what a CPU 4:2:0 conversion
-does"; the siting difference means that is true of the averaging and not of the
-sample positions. Untested, and it is the next measurement, not a conclusion.
+`GpuColorConversion` keeps **-0.53 to -0.64 dB with tags present** at both
+resolutions, so that cost is its own and not a tagging artifact.
+
+The candidate mechanism is chroma siting: `PSCaptureChroma` converts four RGB
+samples and averages the results, which is centre-sited, while swscale's 4:2:0
+default is left-sited - plus 8-bit rounding in the same pass. The comment at
+`src/D3D12Renderer.cpp:325-327` says the averaging "is what a CPU 4:2:0 conversion
+does"; that is true of the averaging and not of the sample positions. Untested, and
+it is the next measurement rather than a conclusion. One confound to clear first,
+below: the two arms' *outputs* are tagged differently.
+
+### A defect this A/B walked into: every render this player writes is untagged
+
+The arms' outputs do not carry the same colorimetry, and `src/MediaPipeline.cpp:556-563`
+says why in so many words - "Only the GPU-converted path states its colorimetry,
+because only there does the player choose the matrix. The BGRA path leaves ffmpeg's
+own conversion, and its tagging, exactly as they were." Measured:
+
+| arm | output `color_space` | converted by |
+|---|---|---|
+| `cpu-conversion` (the shipped default) | **`unknown`** | swscale, BT.601 by default |
+| `gpu-color-only` | `bt709` | the capture shader, BT.709 |
+| `gpu-source-only` | **`unknown`** | swscale, BT.601 by default |
+
+A normal render proves it is not an artifact of these profiles: the
+`orig-faces__shipped-depth-proxy` output - default flags, a `bt709`-tagged 1080p
+source - is `color_space=unknown`. **So the shipped path takes tagged HD input,
+converts it under BT.601, and writes a file that declares nothing.** A consumer that
+assumes BT.709 for HD, which is the common default, decodes those colours wrongly,
+and the source's own tag was available the whole time.
+
+Two consequences worth separating. First, this is a correctness defect in the
+default export path, independent of the throughput question and worth more than it:
+it affects every neural render, not only the ones made with an experimental flag.
+Second, it is why PSNR against the source cannot see it - each arm round-trips
+under its own tags, so the metric scores both as self-consistent and stays blind to
+the file being mislabelled for everyone downstream. That also leaves the
+capture-side residual above partly confounded: the CPU arm is 601 end to end and the
+GPU arm 709 end to end, so a clean siting measurement needs the BGRA path tagged
+identically first.
 
 Per-channel signed error (`rgb_shift`, mean output-minus-source, 8-bit levels) shows
 the same split - every arm carries the relight's own large bias, but only on the

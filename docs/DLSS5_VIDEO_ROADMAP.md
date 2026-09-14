@@ -715,10 +715,21 @@ hard-code BT.709 limited range (`src/D3D12Renderer.cpp:316-341`) while swscale
 falls back to BT.601 for a stream that declares nothing. So `GpuSourceConversion`
 is a **tagging defect away from free** - exactly the hazard
 `docs/USAGE.md:219-221` already names - and its blocker is the source colour-tag
-probe, not readback cost. `GpuColorConversion`'s cost is tag-independent and its
-leading suspect is chroma siting (`PSCaptureChroma` averages four converted
-samples, centre-sited, against swscale's left-sited default), which is the next
-measurement. The defaults stay until those two are closed, the
+probe, not readback cost. `GpuColorConversion`'s cost survives tagged input at both
+resolutions; chroma siting is the leading suspect (`PSCaptureChroma` averages four
+converted samples, centre-sited, against swscale's left-sited default) and is the
+next measurement.
+
+**The same audit walked into a larger defect, and it is not about bytes at all.**
+Every render this player writes on the default path is **untagged**: `MediaPipeline.cpp:556-563`
+states colorimetry only when the GPU converted the frame, so a `bt709` source
+becomes a file that declares nothing, converted under swscale's BT.601 default -
+verified on an ordinary render, not only on the experimental profiles. Any consumer
+that assumes BT.709 for HD decodes those colours wrongly, and the source's own tag
+was available throughout. It also explains why PSNR could not see it: each path
+round-trips under its own tags. Fixing it is propagating the source's colorimetry
+onto the BGRA path, which also unconfounds the capture-side measurement above. The
+flag defaults stay until these are closed, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 
