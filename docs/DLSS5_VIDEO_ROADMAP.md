@@ -51,9 +51,16 @@ is asked for both directions and global flow and gives up one capability at a
 time rather than the whole engine, because a refused `nvOFInit` cannot be
 retried in place. The resolve pass gates each vector on the round trip
 (`src/FlowGate.h`, Sundaram/Brox alpha 0.01, beta 0.5 px², literature defaults),
-so a cell the engine contradicts itself about emits no motion. Verified by
-compiling and running the pass on an Intel iGPU with synthetic fields; the NVOFA
-calls themselves are unverified until someone runs it on an RTX card.
+so a cell the engine contradicts itself about emits no motion.
+
+**Measured on hardware 2026-09-14.** The ladder's top rung comes up on an RTX 4080
+SUPER - `direction=both, round-trip gate armed, global flow=on` - and four labelled
+clips rendered through the real neural path with and without the gate move no metric
+by as much as one percentage point. The gate wins cell-flip rate and temporal sigma
+on the one clip with genuine disocclusion and loses them on clips whose motion is a
+filter parameter, which is inside this corpus's encode noise. It stays because it is
+a refusal with one-sided risk, not because it is a proven win; settling it needs real
+footage. [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
@@ -76,6 +83,20 @@ that failed, not the mean. Per-cell confidence already exists; the fraction is o
 accumulate.
 [x265 scenecut-bias](https://x265.readthedocs.io/en/stable/cli.html) ·
 [mvtools thSCD2](https://avisynth.org.ru/mvtools/mvtools2.html)
+
+**Measured 2026-09-14, not adopted.** Implemented in `tools/benchmark/cutmirror.py`
+and swept over 1350 threshold points against the shipped residual family's 198, on
+nine labelled clips and 1212 consecutive pairs. Both families reach the identical
+best operating point - every labelled cut found, no over-reset, the same two false
+positives on the same clip, F1 0.875 - so the per-cell state the fraction needs in
+`EstimateFlow` would buy nothing. Neither score separates the set on its own: the
+weakest true cut is residual 0.1853 against a 0.3739 non-cut, and failed fraction
+0.5661 against a 0.7297 non-cut. Both families are carried by the two-arm split and
+the debounce, not by the score. The sweep and the reasoning are in
+`docs/BENCHMARK.md`; what the shipped criterion gets wrong - one over-reset on
+`cuts-motion`, every cut between shots that share a luma histogram, and a flash
+taken for a cut - is now labelled corpus, so the next attempt starts from a set
+rather than from a clip.
 
 **4. Temporal metrics in the harness.** `tools/benchmark/analyze.py` has no
 per-pixel temporal variance, no false-motion rate and no cut precision/recall. The
@@ -220,6 +241,20 @@ published live-path latency in the ecosystem.
 on a scanned install, with `dropped=0` over a full clip, a second player
 instance still refused rather than interleaved, and no helper left running
 after the player exits or is killed.
+
+**Instrumented and partly re-measured, 2026-09-14.** Every render now reports the
+phases above as a protocol v5 timeline, in the receipt and in one log line, so the
+acceptance number stops being prose. On an RTX 4080 SUPER at 610.47 the helper side
+is 2133.6 ms: process creation to entry point 104.4 ms, entry to runtime ready
+10.2 ms, source open through NGX init 1338.5 ms, feature 18 armed 680.5 ms. Two
+estimates above were wrong in the same direction: the antivirus window is 0.10 s on
+an excluded install, not 0.7 s, and the ReShade proxy does not cost 0.41 s beside
+the loader because it *is* the loader's work - the proxy is the helper's `dxgi`
+import and resolves before the entry point. The premise stands and is now a
+measurement: **NGX init plus feature arm is 2.02 s of the 2.13 s, and all of it is
+per-process.** What is still unmeasured is the player's half - request, preflight,
+launch, attach - because that needs a driven player session rather than the
+harness. [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
 ## What “2× / 3×” can mean
 

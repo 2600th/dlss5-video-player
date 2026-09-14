@@ -347,7 +347,7 @@ separate helper process; playback upscaling runs in the player.
 - [Build and test](docs/BUILDING.md)
 - [Architecture](docs/ARCHITECTURE.md), [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md), [RTX 5090 on 0.17.0](docs/VERIFICATION-2026-09-10-RTX5090.md)
+- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md), [RTX 5090 on 0.17.0](docs/VERIFICATION-2026-09-10-RTX5090.md), [RTX 4080 SUPER on 0.21.2+](docs/VERIFICATION-2026-09-14-RTX4080.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md), [issues](https://github.com/2600th/dlss5-video-player/issues)
 
 Bug report: build or commit, GPU, driver, source size and frame rate, steps,

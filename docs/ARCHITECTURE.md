@@ -140,6 +140,24 @@ third guide, a correspondence-failure mask bound to NGX's bias/disocclusion
 parameters; it was deleted after measurement showed neural rendering and the
 upscaler both ignore it (see `docs/BENCHMARK.md`).
 
+The criterion is validated rather than asserted. `tools/benchmark/cutmirror.py`
+mirrors the cut path in `TemporalGuides.cpp` - the analysis grid, the stratified
+cell luma, the global search with its distance penalty and its refusal to prefer
+a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.6 s
+weak-arm debounce - and `tools/benchmark/cutlab.py` replays it over a corpus
+whose cuts are labelled in the manifest, so the thresholds can be swept without a
+GPU. Measured 2026-09-14 over nine clips and 1212 consecutive pairs, the shipped
+0.30 / 0.10 / 0.85 criterion finds every cut in `cuts-motion` and takes one reset
+too many on it, misses cuts between shots that share a luma histogram, and takes
+a flash for a cut. The scale-free alternative - compare the winner against the
+zero-displacement cost `EstimateFlow` already discards and decide on the fraction
+of cells whose match failed - was implemented in the mirror and swept beside the
+shipped shape; the two reach indistinguishable best operating points, so the
+thresholds stand and the fraction lives in the harness as the measurement that
+justified leaving them alone. The consequence when changing the generator:
+`AnalysisGrid`, `DownsampleLuma`, `ClassifySceneCut` and `MinFramesBetweenCuts`
+have a second reader, and it is Python.
+
 ## D3D12 renderer
 
 `D3D12Renderer` owns:
@@ -228,6 +246,28 @@ verdict and keeps the full start cushion, where a prior-backed forecast reports
 one and shortens it. Both splits are pinned in `tests/PolicyTests.cpp` against
 the adapter and driver strings the machines in the field notes reported.
 
+Which adapter the device actually got is logged once per creation - description,
+LUID, vendor, dedicated memory - beside the adapter `DetectHighPerformanceGpu`
+picked, compared by LUID rather than by model name, because on a hybrid laptop
+the two can differ and then the cache identity, the receipt's GPU label and the
+pace prior all describe a part that did not render. Both binaries also export
+`NvOptimusEnablement` and `AmdPowerXpressRequestHighPerformance` from
+`src/GpuPreference.cpp`: the driver reads them from the main module at process
+launch, so there is nothing to call and the worker - the process that loads the
+neural stack - needs its own copy.
+
+Every render also reports what its cold start cost, phase by phase, because the
+persistent-helper work is judged in wall-clock and nothing measured it before:
+the player's request, the preflight probe, the launch, then the helper's own
+boundaries (process creation to entry point, entry to runtime ready, source open
+through NGX init, feature 18 armed, first output) and finally the attach. They
+travel as a protocol v5 `Timeline` message, land in the receipt beside `timing`
+and in one log line, and a phase that did not happen is absent rather than zero -
+a cache hit, a single-file job and a refused request each report less than a
+segmented render, and that difference is information. Measured on an RTX 4080
+SUPER the helper side is 2.13 s, of which NGX init and feature arm are 2.02 s
+(see `docs/VERIFICATION-2026-09-14-RTX4080.md`).
+
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
 quality, upscaling state, and a canonical neural-settings digest form the render identity.
@@ -300,7 +340,7 @@ A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
 makes the helper rotate its encoder every N captured frames: the next segment's
 encoder starts before the current one is finished, finalization runs on a
 private FIFO thread, and each finished file is announced over the metadata pipe
-as a protocol v4 `Segment` message (index, absolute first pts and frame number,
+as a protocol v5 `Segment` message (index, absolute first pts and frame number,
 frame count, frame duration, file name). Temporal history, priming and preroll
 are untouched — only the encoder rotates.
 
