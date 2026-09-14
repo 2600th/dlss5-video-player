@@ -1,0 +1,156 @@
+{
+  "shipped-automask-off": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "0"
+    },
+    "description": "shipped defaults with the automatic mask off (NRAutoMask=0) (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-structure-0": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "0.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults with local structure strength 0 (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-tone-0": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "0.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults with local tone strength 0 (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-intensity-0": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "0.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults with relighting intensity 0 (carrier/encoder floor control) (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-preset-1": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "1",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults, render preset #1 (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-preset-2": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "2",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults, render preset #2 (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-preset-3": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "3",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults, render preset #3 (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-style-natural": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "1",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults, style Natural (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-style-cinematic": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "2",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults, style Cinematic (all eight player keys written; one changed from src/NeuralSettings.h defaults)"
+  },
+  "shipped-tone-050": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "0.500000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults with local tone strength 0.500000 (monotonicity check between the shipped 1.0 and 0.0)"
+  },
+  "shipped-tone-075": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "0.750000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "shipped defaults with local tone strength 0.750000 (monotonicity check between the shipped 1.0 and 0.0)"
+  }
+}
