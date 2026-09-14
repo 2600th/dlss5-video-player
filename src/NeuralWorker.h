@@ -2,6 +2,7 @@
 
 #include "NeuralPreflight.h"
 #include "OfflineNeuralRenderer.h"
+#include "ResidentHelperPolicy.h"
 
 #include <windows.h>
 
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -48,6 +50,78 @@ NeuralRenderResult RunNeuralWorker(
     uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit,
     const std::function<void()>& processCreated = {},
     const NeuralColdStartCallback& helperTimeline = {});
+
+// The callbacks and limits one job hands the launcher. Collected into a struct
+// because a resident helper takes the same set as a single-shot one and the
+// eighth positional argument had stopped being readable.
+struct NeuralJobHooks {
+    OfflineNeuralRenderer::ProgressCallback progress;
+    NeuralSegmentSink segments;
+    // Fires the moment the helper holds this job: the created process for a
+    // launch, the written command frame for a reuse. Both end the player's
+    // Launch phase at the same boundary - the last thing the parent did before
+    // the helper's own clock starts - and the plan names which one it was,
+    // early enough for a caller that reports when the first frame reaches the
+    // screen rather than when the job ends. A crash relaunch fires it again,
+    // reporting Launch for the replacement process.
+    std::function<void(resident_helper::HelperPlan)> accepted;
+    NeuralColdStartCallback helperTimeline;
+    uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit;
+};
+
+// One neural helper process kept across jobs, so a warm toggle stops paying
+// for the NGX initialization and feature creation it already paid for. The
+// residency key is `(runtime directory, runtime digest, neural-settings
+// digest)`: the first two are the files the helper loaded, the third is the INI
+// it read at process start, which is why a settings change relaunches instead
+// of being re-read.
+//
+// The helper exits by itself after 30 s idle, and again after any job it could
+// not finish, so its absence is normal and never surfaces as an error: a
+// vanished helper is an ordinary Launch. Its process stays assigned to a job
+// object holding JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE for its whole life, so it
+// cannot outlive this object - or the player, however the player ends.
+//
+// NOT thread-safe, and does not need to be: the player runs one neural job at
+// a time on one job thread, and the UI thread only touches this once that
+// thread has been joined.
+class ResidentNeuralHelper {
+public:
+    ResidentNeuralHelper();
+    ~ResidentNeuralHelper();
+    ResidentNeuralHelper(const ResidentNeuralHelper&) = delete;
+    ResidentNeuralHelper& operator=(const ResidentNeuralHelper&) = delete;
+
+    // Runs one job, launching, relaunching or reusing the helper as the policy
+    // decides, and reports the decision through `plan` for the caller's log.
+    // Everything the single-shot launcher accepts is accepted here, including
+    // its bounded crash relaunch and its refusal to splice frames across
+    // helper instances.
+    NeuralRenderResult RunJob(const std::filesystem::path& executable,
+                              const resident_helper::HelperKey& key,
+                              const NeuralRenderRequest& request,
+                              const NeuralJobHooks& hooks,
+                              std::stop_token stop = {},
+                              resident_helper::HelperPlan* plan = nullptr);
+    // Asks a resident helper to exit, waits briefly for it, then takes the job
+    // object down over whatever is left. Idempotent, and safe with no helper.
+    void Release();
+    // True while a helper process is alive. Looks at the process, so an idle
+    // timeout or a self-invalidating exit is observed rather than assumed.
+    bool Resident() const;
+
+private:
+    struct Session;
+    // One helper instance being given this job: launch or reuse, dispatch,
+    // pump, judge. The crash relaunch calls it again, and `accepted` is told
+    // whether the instance that took the job was launched or reused.
+    NeuralRenderResult RunAttempt(const std::filesystem::path& executable,
+                                  const resident_helper::HelperKey& key,
+                                  const NeuralRenderRequest& request,
+                                  const NeuralJobHooks& hooks, std::stop_token stop,
+                                  const std::function<void(bool launched)>& accepted);
+    std::unique_ptr<Session> session_;
+};
 
 // Short Feature-18 probe run in the same isolated helper before a render. The
 // JSON receipt names GPU, driver, runtime/consumer versions and every feature
@@ -124,7 +198,12 @@ std::string MarkReusedNeuralPreflight(std::string_view json);
 // rewrites ReShade.ini with the render's neural settings per job and the
 // helper's proxy owns ReShade.log, so two concurrent renders would swap each
 // other's settings and evidence under cache keys that claim otherwise. Hold
-// this from the settings write until the helper has exited.
+// this from the settings write until the job has finished - not until the
+// helper has exited, because a resident helper outlives the job on purpose.
+// An idle helper writes nothing and reads nothing, so releasing the lease
+// between jobs is what keeps a resident helper from locking a second player
+// instance out of a runtime it is not using. The helper re-reads the lock and
+// the parent rewrites the INI under the lease for every job, resident or not.
 class NeuralRuntimeLease {
 public:
     explicit NeuralRuntimeLease(const std::filesystem::path& runtimeDirectory,
@@ -150,9 +229,23 @@ inline constexpr unsigned long kConfigurationChangedExitCode = 75;
 
 struct WorkerArguments {
     HANDLE metadata{};
+    // Parent to helper. Present only in resident mode, where the helper takes
+    // its jobs off this pipe instead of off its own command line; a job's
+    // argument vector never carries one, because nested residency would be
+    // meaningless. Its presence is what resident mode is.
+    HANDLE command{};
+    // The parent's own process handle, duplicated with SYNCHRONIZE. A resident
+    // helper waits on it and exits when it signals: the kill-on-close job
+    // object already covers a parent that dies, and this covers it a second
+    // time, because the process this guards is holding the GPU.
+    HANDLE parentProcess{};
     bool preflight{};
     bool configurationRestarted{};
     NeuralRenderRequest request;
+
+    // Resident mode is not a flag to keep in step with the handle; it is the
+    // handle. `request` is unset here - the first job arrives as a command.
+    bool Resident() const noexcept { return command != nullptr; }
 };
 
 // Exact argument envelope accepted by the helper executable. Shared with
@@ -160,6 +253,11 @@ struct WorkerArguments {
 std::vector<std::wstring> BuildWorkerArguments(const NeuralRenderRequest& request, HANDLE metadata,
                                                HANDLE pauseEvent, bool configurationRestarted);
 std::vector<std::wstring> BuildPreflightArguments(HANDLE metadata, bool configurationRestarted);
+// A resident helper's launch line: handles only, no job. Jobs arrive as command
+// frames carrying the vector BuildWorkerArguments produces, so ParseWorkerArguments
+// stays the one definition and the one validator of what a job is.
+std::vector<std::wstring> BuildResidentArguments(HANDLE metadata, HANDLE command, HANDLE pauseEvent,
+                                                 HANDLE parentProcess);
 std::optional<WorkerArguments> ParseWorkerArguments(std::span<const std::wstring_view> arguments);
 
 // Outcome of running one metadata byte stream through the parent's decoder.

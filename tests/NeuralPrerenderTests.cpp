@@ -4,6 +4,7 @@
 #include "PlaybackTiming.h"
 #include "NeuralSegmentIndex.h"
 #include "OfflineNeuralRenderer.h"
+#include "ResidentHelperPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "TestSupport.h"
 
@@ -2751,6 +2752,106 @@ void live_render_forecast_predicts_from_this_gpu_measured_geometries_test()
     CHECK_EQ(RenderPaceProfile::kMaxSamples,three.samples.size());
 }
 
+// Three fixed digests and one fixed directory: the policy never touches the
+// filesystem, so the key's parts only have to be distinguishable.
+resident_helper::HelperKey StubHelperKey(std::string settingsDigest = "settings-aaa")
+{
+    return resident_helper::MakeHelperKey(L"C:\\Player\\neural-runtime", "runtime-111",
+                                          std::move(settingsDigest));
+}
+
+resident_helper::ResidentState RunningHelper(const resident_helper::HelperKey& key)
+{
+    return resident_helper::ResidentState{true, key};
+}
+
+// The decision residency exists for. Reuse is the only answer that skips
+// neuralInit and featureArm, which on this machine is 2.10 s of a 4.88-5.16 s
+// warm toggle, so it must be reachable for the ordinary case: the same runtime,
+// the same files, the same settings, a different clip or a different range.
+// Spelling of the runtime directory is not part of the decision - a key folded
+// from a differently cased or slash-separated path is the same helper, because
+// paying 2.10 s over a backslash would be indefensible.
+void resident_helper_reuses_the_running_process_for_an_identical_key_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),StubHelperKey())==HelperPlan::Reuse);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"c:/Player/Neural-Runtime\\","runtime-111","settings-aaa"))==HelperPlan::Reuse);
+    // The job's own particulars are not in the key at all: a resident helper is
+    // reused for any job the same loaded stack can render.
+    CHECK(HelperPlanName(HelperPlan::Reuse)=="reuse");
+}
+
+// A settings change cannot be delivered to a running helper at all: ReShade and
+// RenoDX read their INI when the proxy loads, so a helper that started under the
+// old settings would render the new job with the old ones and the cache entry
+// would be keyed to settings it does not contain. This is the one relaunch that
+// is a correctness requirement rather than a cleanliness one.
+void resident_helper_relaunches_when_the_neural_settings_digest_changes_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey("settings-aaa");
+    CHECK(PlanForJob(RunningHelper(resident),StubHelperKey("settings-bbb"))==HelperPlan::Relaunch);
+    // And back again: the digest is compared, not remembered as "changed once".
+    CHECK(PlanForJob(RunningHelper(StubHelperKey("settings-bbb")),
+                     StubHelperKey("settings-aaa"))==HelperPlan::Relaunch);
+}
+
+// A runtime digest change means the twelve locked files under neural-runtime are
+// not the ones the resident helper mapped. Its loaded proxy, add-on and NGX all
+// came from the old bytes, so there is nothing to reuse even though the
+// directory and the settings are unchanged.
+void resident_helper_relaunches_when_the_runtime_digest_changes_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-222","settings-aaa"))==HelperPlan::Relaunch);
+    // A different runtime directory entirely is the same answer for the same
+    // reason, and must not be mistaken for the same helper.
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"D:\\Other\\neural-runtime","runtime-111","settings-aaa"))==HelperPlan::Relaunch);
+}
+
+// Launch is not a degraded Reuse: it is what the first job of a session does,
+// and what every job does after the helper's 30 s idle timeout or its exit
+// after a job it could not finish. The player finds out by looking at the
+// process, so "gone" arrives here as `running == false` and must produce an
+// ordinary launch rather than an error - the absence of a helper is never a
+// failure to report.
+void resident_helper_launches_when_no_helper_is_running_test()
+{
+    using namespace resident_helper;
+    CHECK(PlanForJob({},StubHelperKey())==HelperPlan::Launch);
+    // The key of a helper that has gone is still remembered; it must not make
+    // the job look reusable.
+    CHECK(PlanForJob(ResidentState{false,StubHelperKey()},StubHelperKey())==HelperPlan::Launch);
+    CHECK(PlanForJob(ResidentState{false,StubHelperKey("settings-bbb")},StubHelperKey())==HelperPlan::Launch);
+}
+
+// A job that cannot be identified may not be given a process that outlives it.
+// Without all three parts of the key, two jobs whose settings differ compare
+// equal, and the second would silently reuse the first one's loaded INI - so an
+// incomplete key runs the way every job ran before residency: one process, one
+// job, exit.
+void resident_helper_refuses_residency_for_an_unidentified_job_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),MakeHelperKey(L"","runtime-111","settings-aaa"))==HelperPlan::SingleShot);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","","settings-aaa"))==HelperPlan::SingleShot);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-111",""))==HelperPlan::SingleShot);
+    // Including when nothing is running: single-shot outranks launch, because
+    // the objection is to keeping this helper, not to starting one.
+    CHECK(PlanForJob({},MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-111",""))==HelperPlan::SingleShot);
+    CHECK(StubHelperKey().Complete());
+    CHECK(HelperPlanName(HelperPlan::SingleShot)=="single-shot");
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -2920,6 +3021,11 @@ int wmain(int argc, wchar_t* argv[])
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
     neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
+    resident_helper_reuses_the_running_process_for_an_identical_key_test();
+    resident_helper_relaunches_when_the_neural_settings_digest_changes_test();
+    resident_helper_relaunches_when_the_runtime_digest_changes_test();
+    resident_helper_launches_when_no_helper_is_running_test();
+    resident_helper_refuses_residency_for_an_unidentified_job_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;

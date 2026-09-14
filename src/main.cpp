@@ -616,13 +616,15 @@ public:
     // One line per render: whichever end finishes first reports, the other is
     // silent.
     bool ClaimReport(){const std::lock_guard guard(mutex_);return !std::exchange(reported_,true);}
-    // Why the helper's five phases are absent, when they are absent because no
-    // helper ran at all rather than because a measurement went missing: a
-    // render key already in the cache is answered without starting one, and
-    // five dashes beside a real total read as a broken instrument instead of as
-    // a render that never happened.
-    void NoteNoHelper(std::string_view reason){const std::lock_guard guard(mutex_);noHelper_=reason;}
-    std::string NoHelperReason()const{const std::lock_guard guard(mutex_);return noHelper_;}
+    // Which helper the render's phases belong to, because the same five dashes
+    // mean three different things. A render key already in the cache is
+    // answered without starting a helper at all; a reused resident helper did
+    // not pay neuralInit or featureArm because it had already paid them; and a
+    // measurement that went missing is none of the above. Without this, all
+    // three read as a broken instrument.
+    void NoteNoHelper(std::string_view reason){const std::lock_guard guard(mutex_);helper_="none("+std::string(reason)+")";}
+    void NoteHelper(std::string_view plan){const std::lock_guard guard(mutex_);helper_=plan;}
+    std::string HelperNote()const{const std::lock_guard guard(mutex_);return helper_;}
 
 private:
     using Clock=std::chrono::steady_clock;
@@ -638,7 +640,7 @@ private:
     Clock::time_point origin_,mark_;
     std::optional<Clock::time_point> ready_,presented_;
     bool reported_=false;
-    std::string noHelper_;
+    std::string helper_;
 };
 
 struct ExportCompletion {
@@ -3512,12 +3514,14 @@ private:
     // so a user's log carries the whole breakdown without the receipt file.
     void ReportNeuralColdStart(){
         if(!m_coldStart||!m_coldStart->ClaimReport())return;
-        // The helper's phases are absent whenever no helper ran, and a reader
-        // cannot tell that from a lost measurement. Name the reason when one is
-        // known; the field order the matrix tool parses is unchanged.
-        const std::string noHelper=m_coldStart->NoHelperReason();
+        // The helper's phases are absent whenever no helper ran, and absent
+        // again for the two a reused resident helper did not pay. A reader
+        // cannot tell either from a lost measurement, so the note names which
+        // helper the line describes: none(cache-hit), reuse, launch, relaunch
+        // or single-shot. The field order the matrix tool parses is unchanged.
+        const std::string helper=m_coldStart->HelperNote();
         LOG("Neural cold start: "<<SummarizeNeuralColdStartForLog(m_coldStart->Snapshot())
-            <<(noHelper.empty()?std::string{}:" helper=none("+noHelper+")"));
+            <<(helper.empty()?std::string{}:" helper="+helper));
     }
     // The first neural frame of this render is on screen. Reported here rather
     // than at the completion, because an active session that is toggled off
@@ -3589,12 +3593,16 @@ private:
             const NeuralCacheFailureText cacheFailureText=CacheFailureText();
             const NeuralPreflightKey preflightKey{m_opt.detectedGpu.description,m_opt.detectedGpu.driverVersion,std::string{}};
             NeuralPreflightLatch* preflightLatch=&m_preflightLatch;
+            // The helper this player keeps between jobs. Reached by pointer, like
+            // the latch above: one job runs at a time and the UI thread joins it
+            // before touching either, so the job thread owns both while it runs.
+            ResidentNeuralHelper* residentHelper=&m_residentHelper;
             // The request instant: every phase below is measured from here, and
             // the total the acceptance criterion names ends when the first
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -3720,6 +3728,12 @@ private:
                         LOG("Neural preflight skipped; this runtime and driver already armed feature 18.");
                     }else{
                         // The feature-18 probe needs the GPU; only a cache miss pays for it.
+                        // It also needs the runtime to itself: it loads its own proxy and
+                        // creates its own feature 18, and an idle resident helper from an
+                        // earlier job is still holding the device and the session log. That
+                        // helper is on its way out regardless - a probe only runs when the
+                        // runtime identity in its key changed.
+                        residentHelper->Release();
                         NeuralRenderProgress preflighting{};preflighting.phase=NeuralRenderPhase::Preflight;postProgress(preflighting);
                         const NeuralPreflightResult preflight=RunNeuralPreflight(workerExecutable,stop);
                         // Marked before the verdict is read: a probe that failed
@@ -3752,17 +3766,39 @@ private:
                         // previous job left behind stays valid.
                         sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding this job's published segments.");liveIndex->TruncateTo(liveIndexBase);};
                     }
-                    completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink,
-                        kDefaultCrashRelaunchLimit,[&]{coldStart->Mark(NeuralColdStartPhase::Launch);},
-                        // Merged the moment the helper reports it, which is when
-                        // its first output file exists. Merging only after the
-                        // call returned put the helper's five phases seconds
-                        // behind the attach: an active session presents its
-                        // first frame while the render runs on, and the log line
-                        // written there carried five dashes in ten of ten
-                        // sessions while receipt.json for the same render
-                        // carried all five numbers.
-                        [&](const NeuralColdStartTimeline& helper){coldStart->Merge(helper);});
+                    NeuralJobHooks hooks{};
+                    hooks.progress=postProgress;
+                    hooks.segments=sink;
+                    // The helper holds this job from here. For a launched one
+                    // that is its created process; for a reused one it is the
+                    // command frame, which is also the whole of what a warm
+                    // toggle now pays before the helper's own clock starts. The
+                    // plan is noted here rather than after the job, because an
+                    // active session reports its cold start when the first frame
+                    // reaches the screen - seconds before this call returns.
+                    hooks.accepted=[&](resident_helper::HelperPlan plan){
+                        coldStart->Mark(NeuralColdStartPhase::Launch);
+                        coldStart->NoteHelper(std::string(resident_helper::HelperPlanName(plan)));
+                    };
+                    // Merged the moment the helper reports it, which is when
+                    // its first output file exists. Merging only after the
+                    // call returned put the helper's five phases seconds
+                    // behind the attach: an active session presents its
+                    // first frame while the render runs on, and the log line
+                    // written there carried five dashes in ten of ten
+                    // sessions while receipt.json for the same render
+                    // carried all five numbers. A reused helper reports only
+                    // firstOutput, and the two phases it did not pay stay
+                    // absent rather than becoming zeroes.
+                    hooks.helperTimeline=[&](const NeuralColdStartTimeline& helper){coldStart->Merge(helper);};
+                    // The residency key: the runtime this job locked, the files
+                    // it verified, and the settings INI written above. ReShade
+                    // and RenoDX read that INI at process start, so a change to
+                    // it is a different helper and not a different job.
+                    const auto helperKey=resident_helper::MakeHelperKey(runtimeDirectory.wstring(),*runtimeDigest,*settingsDigest);
+                    resident_helper::HelperPlan helperPlan=resident_helper::HelperPlan::Launch;
+                    completion->result=residentHelper->RunJob(workerExecutable,helperKey,request,hooks,stop,&helperPlan);
+                    LOG("Neural helper plan="<<resident_helper::HelperPlanName(helperPlan)<<" resident="<<residentHelper->Resident()<<".");
                     if(liveIndex)liveIndex->Finish();
                     // Again for a timeline that arrived too late to be reported
                     // over the pipe - a crash or a cancel the launcher
@@ -4529,6 +4565,13 @@ private:
     // One negative verdict per GPU, driver and runtime digest; a failed probe
     // is not repeated on every play and seek.
     NeuralPreflightLatch m_preflightLatch;
+    // The neural helper kept between jobs. Declared ahead of m_neuralWorker,
+    // like the latch above and for the same reason: members are destroyed in
+    // reverse, so the job thread that uses this is joined before this goes.
+    // Its destructor asks the process to exit and then closes the job object
+    // over whatever is left; a player that dies without running it is covered
+    // by the kill-on-close job object instead.
+    ResidentNeuralHelper m_residentHelper;
     AppOptions m_opt;Localizer m_loc;UiResources m_uiResources;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=DefaultNeuralCarrierQuality();HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr,m_iconFont=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_waitingForNetworkFrame=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_trackingMouse=false,m_iconFallbackLogged=false,m_neuralRequested=true;
     // Timeline scrubbing: what playback was doing before the drag, and when the
