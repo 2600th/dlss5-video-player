@@ -73,7 +73,7 @@ struct VideoDecoderTestAccess {
         static std::shared_ptr<AccelerationMemo> memo;
         if(resetAcceleration||!memo)memo=MakeAccelerationMemo();
         VideoDecoder::Settings settings;
-        settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.failureStage=failureStage;
+        settings.helperDirectory=helperDirectory.wstring();settings.probeTimeout=probeTimeout;settings.stallTimeout=stallTimeout;settings.faults.resume=failureStage;
         settings.accelerationMemo=memo;
         return std::make_unique<VideoDecoder>(std::move(settings));
     }
@@ -90,13 +90,13 @@ struct AudioPlayerTestAccess {
         bool failFinalReaderWait = false)
     {
         AudioPlayer::Settings settings;
-        settings.helperDirectory=helperDirectory.wstring();settings.disableWaveOut=true;
-        settings.failTerminateJob=failTerminateJob;
-        settings.failInitialProcessWait=failInitialProcessWait;
-        settings.failGetExitCodeProcess=failGetExitCodeProcess;
-        settings.failFinalProcessWait=failFinalProcessWait;
-        settings.failInitialReaderWait=failInitialReaderWait;
-        settings.failFinalReaderWait=failFinalReaderWait;
+        settings.helperDirectory=helperDirectory.wstring();settings.faults.disableWaveOut=true;
+        settings.faults.failTerminateJob=failTerminateJob;
+        settings.faults.failInitialProcessWait=failInitialProcessWait;
+        settings.faults.failGetExitCodeProcess=failGetExitCodeProcess;
+        settings.faults.failFinalProcessWait=failFinalProcessWait;
+        settings.faults.failInitialReaderWait=failInitialReaderWait;
+        settings.faults.failFinalReaderWait=failFinalReaderWait;
         return std::make_unique<AudioPlayer>(std::move(settings));
     }
     static double SeekBase(const AudioPlayer& player){return player.SeekBaseSeconds();}

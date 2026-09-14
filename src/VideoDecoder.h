@@ -90,7 +90,16 @@ public:
         std::wstring helperDirectory;
         std::chrono::milliseconds probeTimeout{15000};
         std::chrono::milliseconds stallTimeout{15000};
-        FailureStage failureStage{FailureStage::None};
+
+        // Skipping a ResumeThread strands the spawned helper suspended, so a
+        // non-default value here leaks a child process. This is not
+        // configuration: it exists so the resume-failure recovery can be reached
+        // at all, and it is nested so that reaching it has to be deliberate.
+        struct FaultInjection {
+            FailureStage resume{FailureStage::None};
+        };
+        FaultInjection faults;
+
         // Null: consult the memo shared by every decoder in this process. A
         // dead path proven once should not be re-proven by the next decoder,
         // and re-proving costs a spawned child per open, so sharing is the
@@ -101,7 +110,7 @@ public:
     VideoDecoder() = default;
     explicit VideoDecoder(Settings settings) : m_networkStallTimeout(settings.stallTimeout),
         m_probeTimeout(settings.probeTimeout),m_helperDirectory(std::move(settings.helperDirectory)),
-        m_failureStage(settings.failureStage),
+        m_failureStage(settings.faults.resume),
         m_accelerationMemo(std::move(settings.accelerationMemo)) {}
     ~VideoDecoder();
 

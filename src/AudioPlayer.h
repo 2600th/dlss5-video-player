@@ -16,22 +16,30 @@ enum class AudioStartState {
 
 class AudioPlayer {
 public:
-    // Where the helper process is found, and which of the bounded waits on the
-    // stop path are forced to fail. Every one of those is a Win32 call that
-    // cannot be made to fail on demand, so a caller that has to exercise the
-    // recovery they guard says so here. Default-constructed is production:
-    // ffmpeg.exe is located next to the module, WaveOut is opened, and every
-    // wait is real.
+    // Where the helper process is found, plus the faults a caller injects to
+    // reach recovery that cannot be reached otherwise. Default-constructed is
+    // production: ffmpeg.exe is located next to the module, WaveOut is opened,
+    // and every wait is real.
     struct Settings {
         // Empty: search next to the module, then PATH.
         std::wstring helperDirectory;
-        bool disableWaveOut{false};
-        bool failTerminateJob{false};
-        bool failInitialProcessWait{false};
-        bool failGetExitCodeProcess{false};
-        bool failFinalProcessWait{false};
-        bool failInitialReaderWait{false};
-        bool failFinalReaderWait{false};
+
+        // Every field here disables something the player depends on - the audio
+        // device, or a Win32 call the shutdown needs - so a non-default value
+        // means no sound, or a live ffmpeg child and an unkilled job object left
+        // behind. None of it is configuration: these exist so the recovery those
+        // calls guard can be reached at all, and they are nested so that reaching
+        // them has to be deliberate.
+        struct FaultInjection {
+            bool disableWaveOut{false};
+            bool failTerminateJob{false};
+            bool failInitialProcessWait{false};
+            bool failGetExitCodeProcess{false};
+            bool failFinalProcessWait{false};
+            bool failInitialReaderWait{false};
+            bool failFinalReaderWait{false};
+        };
+        FaultInjection faults;
     };
 
     AudioPlayer() = default;
