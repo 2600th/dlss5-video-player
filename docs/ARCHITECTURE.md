@@ -325,13 +325,18 @@ maximum with no reset because nothing had ever needed one. A reused job reports 
 `neuralInit` and no `featureArm` in its timeline, because it did not pay them, and
 a session answered from the cache without any helper says `helper=none(cache-hit)`.
 
-**Not yet accepted.** The acceptance criterion is a warm toggle under 3 s in a
-driven player session, and that measurement has not been taken: the workstation
-was locked when it was attempted and injected input is refused to a locked
-desktop. Both halves are exercised - a real helper serving a second job over real
-pipes reports `firstOutput` only, 492-538 ms against a cold 2715-2751 ms, and the
-player's client half against a protocol stub - but never against each other. See
-`docs/VERIFICATION-matrix.md` for the gap and the command that closes it.
+**Measured, and it pays.** The acceptance criterion is a warm toggle under 3 s in
+a driven player session. A reused helper puts a neural frame on screen in
+**2.44-2.52 s over four sessions**, median 2.47 s, every one reporting
+`plan=reuse`, against 5.23-5.41 s for the first toggle in the same process. The
+reused job's timeline carries no `helperStart`, `runtimeReady`, `neuralInit` or
+`featureArm` - 2.19 s it did not pay because no process started - leaving
+`firstOutput` at 1.06 s and the attach at 1.29 s, which are exactly the two the
+arithmetic said residency cannot remove. Residency is reached only when the
+second job's range is not already covered by the first one's published entry; a
+toggle inside that coverage is answered from the cache in about 0.8 s with no
+helper job at all, which is correct and is not this measurement. See
+`docs/VERIFICATION-matrix.md`.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,

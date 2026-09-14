@@ -307,30 +307,35 @@ segment's encode and mux, and the handoff from original to neural playback.
 Decide that before writing code, because it changes what P1 is.
 [Player-session record](VERIFICATION-matrix.md)
 
-**Built 2026-09-14; integrated, unit-tested, end-to-end UNEXERCISED.** The helper
-is resident on `main`: protocol v6 carries a command channel (`Hello`, `Job`,
-`Cancel`, `Shutdown`, plus an outbound `Ready`), a job is handed over as the argv
-the helper already validates, the reuse key is `(runtime directory, runtime digest,
-neural-settings digest)`, the lease is held only while a job runs, the helper exits
-after 30 s idle, and orphan safety is both the job object and a parent-handle wait.
-All four of the "real change, not a flag" problems above are answered in code and
-the answers are written up in `docs/ARCHITECTURE.md`.
+**Built and accepted on Ada, 2026-09-14.** The helper is resident on `main`:
+protocol v6 carries a command channel (`Hello`, `Job`, `Cancel`, `Shutdown`, plus
+an outbound `Ready`), a job is handed over as the argv the helper already
+validates, the reuse key is `(runtime directory, runtime digest, neural-settings
+digest)`, the lease is held only while a job runs, the helper exits after 30 s
+idle, and orphan safety is both the job object and a parent-handle wait. All four
+of the "real change, not a flag" problems above are answered in code, and the
+answers are in [Architecture](ARCHITECTURE.md).
 
-What is measured: a real `NeuralWorker.exe` serving a second job in one process
-reports `firstOutput` only, **492-538 ms against a cold 2715-2751 ms**, with idle
-exit at 31.0 s, parent-handle exit, and +1002 MiB parked while idle and released on
-exit. The single-shot path still renders on the 4080 (`ok=true`, 30 frames).
+**The acceptance number: 2.44-2.52 s, median 2.47 s, over four driven player
+sessions, every one `plan=reuse`** - against the criterion of under 3 s, and
+against 5.23-5.41 s for the first toggle in the same process. The reused job pays
+no `helperStart`, `runtimeReady`, `neuralInit` or `featureArm`, which is 2.19 s it
+never incurs because no process starts; `firstOutput` (1.06 s) and the attach
+(1.29 s) remain, exactly as predicted. The ~2.9 s floor estimated above was sound
+in structure and pessimistic in size, because this clip's first segment encodes
+faster than the one the estimate came from.
 
-What is NOT measured, and it is the acceptance criterion: **a warm toggle under 3 s
-in a driven player session.** The workstation was locked when that run was
-attempted and injected input is refused to a locked desktop - all three sessions
-exited 14 before rendering. The two halves have each been exercised and never
-against each other: the worker served real jobs to a test driver, the player drove
-a protocol stub. The helper-side 492-538 ms is a phase over raw pipes and must not
-be quoted as toggle-to-picture. The gap, and the one command that closes it, are in
-[the player-session record](VERIFICATION-matrix.md); `-SecondToggle` exists for it,
-because a first toggle in a process always pays a cold bring-up. Per this document's
-own gate, Blackwell is still owed as well.
+Helper-side, over real pipes: a warm job reports `firstOutput` only at 492-538 ms
+against a cold 2715-2751 ms, idle exit at 31.0 s, parent-handle exit, +1002 MiB
+parked while idle and released on exit. Do not quote that figure as
+toggle-to-picture; it is a phase, measured with a different instrument.
+
+Two limits. Residency is reached only when the second job's range is not already
+covered by the first one's published entry - a toggle inside that coverage is
+answered from the cache in about 0.8 s with no helper job, which is correct
+behaviour and not this measurement. And per this document's own gate, **Blackwell
+is still owed**: everything above is one Ada card on driver 610.47.
+[Session record](VERIFICATION-matrix.md)
 
 ## What “2× / 3×” can mean
 

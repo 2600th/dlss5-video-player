@@ -50,11 +50,16 @@
   already validated, so nothing about what a job *is* changed. The helper is
   reused only while the runtime directory, runtime digest and neural-settings
   digest all match, holds the runtime lease only while a job runs, and exits
-  itself after 30 s idle. **This is integrated but not accepted**: its acceptance
-  criterion is a warm toggle under 3 s in a driven player session and that
-  measurement has not been taken, because the workstation was locked and injected
-  input is refused to a locked desktop. The two halves have each been exercised
-  and never against each other. See `docs/VERIFICATION-matrix.md`.
+  itself after 30 s idle so the ~1 GiB of feature memory DLSS will not release is
+  bounded in time. Toggling neural rendering on a second time in one player
+  session now reaches a picture in **2.44-2.52 s** instead of 5.23-5.41 s, over
+  four driven sessions: the reused job pays none of the process bring-up -
+  `helperStart`, `runtimeReady`, `neuralInit`, `featureArm`, 2.19 s on the machine
+  measured - and what is left is the first segment's encode and the attach, which
+  residency cannot remove. A toggle that lands inside a range the previous session
+  already rendered is still answered from the cache, in about 0.8 s, with no
+  helper job at all. Measured on one Ada card at driver 610.47;
+  `docs/VERIFICATION-matrix.md` carries the phases and the method.
 
 ## 0.21.2 - 2026-09-12
 

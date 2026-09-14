@@ -434,12 +434,51 @@ under load and no way to distrust one.
 - **Timing, not quality.** No quality metric was computed. The renders were
   checked for `failure=none` and `verified == frames`, nothing more.
 
-## The resident helper: what is exercised, and what is not (2026-09-14, later)
+## The resident helper: acceptance met (2026-09-14, later)
 
-The resident helper (roadmap P1) is integrated on `main`. Its acceptance number
-is the one this instrument exists to take - a warm toggle under 3 s - and **it
-has not been taken.** The workstation was locked when the run was attempted and
-`SendInput` is refused to a locked desktop, so no driven session could run:
+The resident helper (roadmap P1) is integrated on `main` and **its acceptance
+number has been taken: a reused helper puts a neural frame on screen in
+2.44-2.52 s, median 2.47 s, over four driven sessions, against the 3 s
+criterion.** Every one of them reports `plan=reuse`.
+
+| session | first toggle in the process | second toggle | plan |
+|---|---:|---:|---|
+| 1 (cold install) | 9.142 s | **2.472 s** | reuse |
+| 2 (warm) | 5.331 s | **2.520 s** | reuse |
+| 3 (warm) | 5.406 s | **2.439 s** | reuse |
+| 4 (warm) | 5.229 s | **2.460 s** | reuse |
+
+The phases say where the time went, and the absences are the point:
+
+```
+launch: total=9.115 request=0.078 preflight=3.950 launch=0.009 helperStart=0.101
+        runtimeReady=0.015 neuralInit=1.371 featureArm=0.705 firstOutput=1.437 attach=1.432
+reuse:  total=2.453 request=0.074 preflight=-     launch=0.001 helperStart=-
+        runtimeReady=-     neuralInit=-     featureArm=-     firstOutput=1.058 attach=1.289 helper=reuse
+```
+
+A reused job pays none of `helperStart`, `runtimeReady`, `neuralInit` or
+`featureArm` - 2.19 s on this machine - because no process started. What remains
+is `firstOutput` and the attach, which is what the arithmetic said a resident
+helper cannot remove. That arithmetic predicted a ~2.9 s floor from the 22.6 s
+clip's phases; the measured 2.47 s beats it because this clip's first segment
+encodes faster (`firstOutput` 1.058 s against 1.437 s), so the estimate was
+sound in structure and pessimistic in size.
+
+**Two false measurements were taken first, and both are instructive.** A second
+toggle at the playhead where the first session left off returned in 0.77-0.80 s
+with no helper plan at all: the render outruns playback by about 3x, so anything
+ahead of the first toggle is inside coverage the session already published and
+the player answers it from the cache - correct behaviour, and a measurement of
+the cache path rather than of residency. Before that, a 22.6 s clip was too short
+for two sessions at all: the first ran to the end of the file and the second
+toggle timed out with nothing left to render, which looked like a product defect
+and was an instrument defect. Hence `-SecondToggleSeekBacks`, which rewinds past
+the published range with the player's own back-10s hotkey, and a 90 s clip.
+Any second-toggle number without `plan=reuse` is invalid for P1.
+
+The first attempt could not run at all: the workstation was locked, and
+`SendInput` is refused to a locked desktop.
 
 ```
 "failure": "the neural toggle could not be injected: SendInput refused the chord,
@@ -448,10 +487,11 @@ has not been taken.** The workstation was locked when the run was attempted and
 "exitCode": 14
 ```
 
-All three sessions failed identically at the same point, before launching a
-render. Artifact: `C:/Users/User/AppData/Local/Temp/p1-accept.json`.
+All three of those sessions failed identically before launching a render.
+Artifact: `C:/Users/User/AppData/Local/Temp/p1-accept.json`. The box unlocked
+later and the acceptance run above is `p1-final.json`, four sessions, exit 0.
 
-What *was* exercised, by instrument rather than by argument:
+What else was exercised, by instrument rather than by argument:
 
 | claim | instrument | result |
 |---|---|---|
@@ -460,32 +500,27 @@ What *was* exercised, by instrument rather than by argument:
 | a real helper serving a second job in one process | real `NeuralWorker.exe` over two real pipes | warm job reports `firstOutput` only at 492-538 ms against a cold 2715-2751 ms; idle exit at 31.0 s; parent-handle exit; +1002 MiB parked while idle, released on exit |
 | the player's client half | a stub process speaking v6 | reuse, relaunch on a changed settings digest, launch after an idle exit, cancel leaving the helper resident |
 | the single-shot path the harness and the preflight probe use | `run.py`, real render on the 4080 | `ok=true`, 30 frames, `hevc_nvenc`, gpu_ms_p50 5.87, preflight ok |
+| **a real player keeping a real helper across two toggles** | this instrument, four driven sessions | **2.44-2.52 s, `plan=reuse`, acceptance met** |
 
-The gap is specific and worth naming precisely: **the two halves have each been
-exercised, never against each other.** The worker served real jobs to a test
-driver; the player drove a stub. Nothing has yet measured a real player keeping a
-real helper across two toggles, which is both the feature and the acceptance
-criterion. Do not cite the 492-538 ms figure as toggle-to-picture: it is a
-helper-side phase measured over raw pipes, a different instrument entirely.
+Do not cite the 492-538 ms figure as toggle-to-picture: it is a helper-side phase
+measured over raw pipes. The toggle-to-picture number is 2.44-2.52 s.
 
-To close it, on an unlocked session:
+To reproduce:
 
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/verification/player_session.ps1 `
   -Player build-upscaling/Release/DLSSVideoPlayer.exe `
-  -Media docs/media/neural-comparison-demo.mp4 `
-  -Sessions 3 -SecondToggle -DropRenderCache `
+  -Media <a clip of 60 s or more> `
+  -Sessions 4 -SecondToggle -SecondToggleSeekBacks 7 -DropRenderCache -RunSeconds 14 `
   -OutJson build-upscaling/session-runs/p1.json -Note "P1 acceptance"
 ```
 
-`-SecondToggle` was added for this: residency lives in the player's own lifetime,
-so a first toggle always pays a cold bring-up and only a second toggle in the
-same process can show reuse. The gap between them lets playback advance, which
-moves the snapped playhead and so the render key - at the same playhead the
-toggle is answered from the cache and no helper job runs at all. The number to
-read is `secondToggle.toggleToFirstNeuralFrameSeconds` with
-`secondToggle.plan == "reuse"`; the warm first-toggle band to compare against is
-4.88-5.16 s from the table above, and the arithmetic floor is ~2.9 s.
+Read `secondToggle.toggleToFirstNeuralFrameSeconds` and require
+`secondToggle.plan == "reuse"`. The media must outlast two sessions - a 22.6 s
+clip does not - and the rewind must put the second toggle behind the range the
+first session published, or the cache answers it and the number is meaningless.
+The warm first-toggle band to compare against is 5.23-5.41 s here, consistent
+with the 4.88-5.16 s measured earlier on a shorter clip.
 
 ## Reproducing
 

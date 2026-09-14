@@ -134,6 +134,11 @@ param(
     # helper job runs at all.
     [switch]$SecondToggle,
     [double]$SecondToggleGapSeconds = 4.0,
+    # Ctrl+Alt+Left presses (back 10 s each) before the second toggle, to put the
+    # playhead behind the range the first session published. Zero measures the
+    # cache path instead, which is what happens when a second toggle lands inside
+    # coverage the render already produced.
+    [int]$SecondToggleSeekBacks = 0,
     [string]$OutJson,
     [double]$WindowTimeoutSeconds = 45.0,
     [double]$ReadyTimeoutSeconds = 45.0,
@@ -344,7 +349,7 @@ namespace DlssPlayerSession {
 '@
 }
 
-$VK = @{ Control = 0x11; Menu = 0x12; D = 0x44 }
+$VK = @{ Control = 0x11; Menu = 0x12; D = 0x44; Left = 0x25 }
 $SW_RESTORE = 9
 $DIALOG_CLASS = '#32770'
 
@@ -517,6 +522,16 @@ function Send-NeuralToggle([hashtable]$Context) {
         return [pscustomobject]@{ Ok = $false; Reason = $reason; Code = $EXIT_INJECTION_DENIED }
     }
     return [pscustomobject]@{ Ok = $true; At = $sentAt; Done = $doneAt; Events = $sent; Reason = $null }
+}
+
+# Ctrl+Alt+Left is the player's back-10s global hotkey (src/main.cpp HK_BACK_10).
+# Used to put the playhead BEFORE the range the previous session published: the
+# render outruns playback by about 3x, so a second toggle anywhere ahead of the
+# first one is inside coverage already and is answered from the cache without a
+# helper job - which measures the cache path, not residency.
+function Send-SeekBack([hashtable]$Context) {
+    $sent = [DlssPlayerSession.Win32]::SendKeyChord([uint16[]]@([uint16]$VK.Control, [uint16]$VK.Menu), [uint16]$VK.Left)
+    return ($sent -gt 0)
 }
 
 # ------------------------------------------------------------------ patterns
@@ -904,6 +919,19 @@ function Invoke-PlayerSession {
         $second = $null
         if ($SecondToggle) {
             Start-Sleep -Milliseconds ([int]($SecondToggleGapSeconds * 1000))
+            # Rewind past the published range first, when asked. Without this the
+            # second toggle lands inside coverage the first session already
+            # rendered and the player answers it from the cache - a real result,
+            # but a measurement of the cache path rather than of the helper.
+            for ($back = 0; $back -lt $SecondToggleSeekBacks; $back++) {
+                if (-not (Send-SeekBack $context)) {
+                    $record.failure = 'the seek-back chord could not be injected before the second toggle'
+                    $record.exitCode = $EXIT_INJECTION_DENIED
+                    return $record
+                }
+                Start-Sleep -Milliseconds 450
+            }
+            if ($SecondToggleSeekBacks -gt 0) { Start-Sleep -Milliseconds 1200 }
             $again = Send-NeuralToggle $context
             if (-not $again.Ok) {
                 $record.failure = 'the second toggle could not be injected: ' + $again.Reason
@@ -917,14 +945,15 @@ function Invoke-PlayerSession {
                 $record.exitCode = $EXIT_NO_NEURAL_FRAME
                 return $record
             }
+            # `helper=` on the cold-start line is the authority: it is written by
+            # the same record that produced the total, so the plan and the number
+            # cannot disagree.
+            $plan = $null
+            if ($secondCold.Entry.Text -match 'helper=(?<helper>[a-z()-]+)') { $plan = $Matches['helper'] }
             $second = [ordered]@{
                 toggleToFirstNeuralFrameSeconds = Seconds-Between $againAt $secondCold.Entry.Time
+                plan                            = $plan
                 coldStartLine                   = $secondCold.Entry.Text
-                plan                            = $null
-            }
-            $planLine = Find-LogLine -Context $context -Pattern 'Neural helper plan=(?<plan>[a-z-]+)' -Since $againAt
-            if ($planLine -ne $null -and $planLine.Text -match 'plan=(?<plan>[a-z-]+)') {
-                $second.plan = $Matches['plan']
             }
             Write-Progress-Line ('session ' + $Index + ': second toggle reached a neural frame in ' +
                 $second.toggleToFirstNeuralFrameSeconds + ' s, plan=' + $second.plan)
