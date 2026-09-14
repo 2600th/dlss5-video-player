@@ -37,13 +37,23 @@ rem Visual Studio install, so nothing identified the toolset. Leave it empty and
 rem let CMake use its own default generator, which is the newest Visual Studio
 rem that CMake knows about. Naming a generator here instead is what made this
 rem script ask a 2026-only machine for the 2022 v143 toolset and fail MSB8020.
-rem A configured build directory is pinned to the generator that created it. Reuse
-rem it so installing a newer Visual Studio beside the old one does not make CMake
-rem refuse the existing cache - but say so, because a cache left behind by a
-rem failed configure otherwise keeps re-pinning a generator that cannot build.
-if exist "build-upscaling\CMakeCache.txt" for /f "tokens=2 delims==" %%I in ('findstr /b /c:"CMAKE_GENERATOR:INTERNAL=" "build-upscaling\CMakeCache.txt"') do (
-  if not "%%I"=="%VS_GENERATOR%" echo [NOTE] build-upscaling was configured with "%%I"; reusing it instead of "%VS_GENERATOR%". Delete build-upscaling to configure fresh.
-  set "VS_GENERATOR=%%I"
+rem A configured build directory is pinned to the generator that created it. That
+rem pin is the best information available only when nothing else identified a
+rem toolset; overriding a Visual Studio this script just found with a stale pin is
+rem what turns the cache a failed configure leaves behind into the same MSB8020
+rem failure on every later run - and whoever hit that failure has exactly such a
+rem cache. So when the two disagree, keep what was detected and let CMake refuse
+rem the mismatched cache, which names the directory to delete.
+set "CACHED_GENERATOR="
+if exist "build-upscaling\CMakeCache.txt" for /f "tokens=2 delims==" %%I in ('findstr /b /c:"CMAKE_GENERATOR:INTERNAL=" "build-upscaling\CMakeCache.txt"') do set "CACHED_GENERATOR=%%I"
+if defined CACHED_GENERATOR (
+  if not defined VS_GENERATOR (
+    set "VS_GENERATOR=%CACHED_GENERATOR%"
+  ) else if not "%CACHED_GENERATOR%"=="%VS_GENERATOR%" (
+    echo [NOTE] build-upscaling was configured with "%CACHED_GENERATOR%", not the
+    echo        detected "%VS_GENERATOR%". Configure will refuse the mismatched
+    echo        cache; delete build-upscaling to build with what was detected.
+  )
 )
 for %%I in ("%CMAKE_EXE%") do set "CTEST_EXE=%%~dpIctest.exe"
 if not exist "%CTEST_EXE%" set "CTEST_EXE=ctest.exe"
@@ -90,8 +100,11 @@ if defined VS_GENERATOR (
   echo [4/5] Configuring %VS_GENERATOR% x64...
   "%CMAKE_EXE%" -S . -B build-upscaling -G "%VS_GENERATOR%" -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
 ) else (
-  echo [4/5] Configuring with CMake's default generator, x64...
-  "%CMAKE_EXE%" -S . -B build-upscaling -A x64 -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
+  rem No -A here: the platform flag is only accepted by generators that have one,
+  rem and this branch runs precisely when nothing identified the generator. A
+  rem Visual Studio default already targets the x64 host.
+  echo [4/5] Configuring with CMake's default generator...
+  "%CMAKE_EXE%" -S . -B build-upscaling -DBUILD_TESTING=ON "-DDLSS_SDK=%DLSS_SDK_DIR%" "-DFFMPEG_STAGED_DIR=%FFMPEG_BIN_DIR%"
 )
 if errorlevel 1 (
   echo [ERROR] Configure failed. If the generator named above is not the Visual
