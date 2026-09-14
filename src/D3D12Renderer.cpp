@@ -3,6 +3,8 @@
 #include "TemporalGuides.h"
 #include "Log.h"
 #include "NvofResolveShader.h"
+#include "RuntimePolicy.h"
+#include "GpuPreference.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <chrono>
@@ -41,6 +43,48 @@ parallel_detail::WorkerPool& CaptureCopyPool()
     static parallel_detail::WorkerPool pool(
         std::max<size_t>(2u, parallel_detail::WorkerPool::DefaultWidth() / kCaptureCopyWidthDivisor));
     return pool;
+}
+
+// Local because every converter in this tree is private to the file that
+// needs one, and a single log line does not justify a shared header the
+// render loop would then have to carry.
+std::string WideToUtf8(std::wstring_view text)
+{
+    if(text.empty())return {};
+    const int length=static_cast<int>(text.size());
+    const int size=WideCharToMultiByte(CP_UTF8,0,text.data(),length,nullptr,0,nullptr,nullptr);
+    if(size<=0)return "<wide-string conversion failed>";
+    std::string result(static_cast<size_t>(size),'\0');
+    if(WideCharToMultiByte(CP_UTF8,0,text.data(),length,result.data(),size,nullptr,nullptr)!=size)
+        return "<wide-string conversion failed>";
+    return result;
+}
+
+// The adapter the device was actually created on, against the one the
+// high-performance policy classified. A hybrid laptop can place this process
+// on either GPU, and until this line existed nothing in the log told the two
+// apart: the cache identity, the receipt's GPU label and the render-pace
+// prior are all derived from the policy's pick, so a device on any other
+// adapter leaves all three describing a part that rendered nothing. Both
+// sides are printed every time and compared by LUID, never by description -
+// two identical cards share a description, and a laptop report has to be
+// readable without the machine in front of you. The policy's second
+// enumeration costs one DXGI factory per device creation.
+void LogDeviceAdapter(const DXGI_ADAPTER_DESC1& device)
+{
+    const DetectedGpu policy=DetectHighPerformanceGpu();
+    const uint64_t deviceLuid=PackAdapterLuid(device.AdapterLuid.HighPart,device.AdapterLuid.LowPart);
+    const char* verdict="cannot be compared with";
+    switch(CompareAdapterLuids(deviceLuid,policy.adapterLuid)){
+        case AdapterMatch::Same: verdict="is"; break;
+        case AdapterMatch::Different: verdict="is NOT"; break;
+        case AdapterMatch::Unknown: break;
+    }
+    LOG("D3D12 device adapter \""<<WideToUtf8(device.Description)<<"\" luid=0x"<<std::hex<<deviceLuid<<std::dec
+        <<" vendor=0x"<<std::hex<<device.VendorId<<std::dec<<" vram="<<(device.DedicatedVideoMemory>>20)<<"MiB "
+        <<verdict<<" the high-performance adapter \""<<WideToUtf8(policy.description)<<"\" luid=0x"
+        <<std::hex<<policy.adapterLuid<<std::dec
+        <<" that the cache identity, the receipt GPU label and the pace prior describe");
 }
 
 } // namespace
@@ -131,9 +175,9 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
         if(!fallback) fallback=a; if(d.VendorId==0x10DE){m_adapter=a;break;}
     }
     if(!m_adapter)m_adapter=fallback; if(!m_adapter){LOG("No D3D12 hardware adapter.");return false;}
-    DXGI_ADAPTER_DESC1 ad{};m_adapter->GetDesc1(&ad);LOG("D3D12 adapter vendor=0x"<<std::hex<<ad.VendorId<<" device=0x"<<ad.DeviceId);
     if(FAILED(m_adapter.As(&m_adapter3)))m_adapter3.Reset();
     if(!HR(D3D12CreateDevice(m_adapter.Get(),D3D_FEATURE_LEVEL_12_0,IID_PPV_ARGS(&m_device)),"D3D12CreateDevice"))return false;
+    DXGI_ADAPTER_DESC1 ad{};m_adapter->GetDesc1(&ad);LogDeviceAdapter(ad);
     D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
     if(!HR(m_device->CreateCommandQueue(&q,IID_PPV_ARGS(&m_queue)),"CreateCommandQueue"))return false;
     if(FAILED(m_queue->GetTimestampFrequency(&m_timestampFrequency)))m_timestampFrequency=0;

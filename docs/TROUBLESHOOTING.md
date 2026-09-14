@@ -38,6 +38,46 @@ One failing probe is remembered per GPU, driver and runtime, so a doomed
 preflight is not re-run on every play and seek. Updating the driver or the
 runtime clears it.
 
+## The render ran on the wrong GPU on a hybrid laptop
+
+A laptop with both an integrated GPU and a discrete NVIDIA one lets the display
+driver decide which of the two each process runs on, and it decides before the
+player or the helper has executed anything of its own. Both executables export
+the documented Optimus and PowerXpress hints that ask for the discrete GPU, but
+those are a request: Windows' own Graphics settings and the NVIDIA Control
+Panel override them, and a machine whose discrete GPU is disabled in firmware
+or muxed away from the panel ignores them entirely.
+
+`DLSSVideoPlayer.log` beside the EXE, and `neural-runtime/DLSSVideoPlayer.log`
+for the helper, carry one line per device creation naming the adapter that
+actually rendered:
+
+`D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe`
+
+Read the vendor first: `vendor=0x10de` is NVIDIA and anything else cannot run
+DLSS at all, so `vendor=0x8086` with a small `vram` on a laptop that has an RTX
+card is placement having landed on the integrated GPU. Then compare the two
+LUIDs, which identify physical parts rather than models - two identical cards
+share a description. `is` means the adapter the device was created on and the
+adapter the player classified are the same part, so the cache identity, the
+receipt's GPU label and the render-pace forecast all describe what rendered.
+`is NOT` means they are two different parts: the frames are real, but those
+three describe the other one, so quote the whole line in a report and treat
+that receipt's GPU and any pace figure from the session as unreliable.
+`cannot be compared with` means DXGI offered no high-performance adapter to
+this process, which on a laptop usually means the discrete GPU was powered
+down or hidden from it.
+
+To place both processes on the discrete GPU, open **Settings > System > Display
+> Graphics**, add `DLSSVideoPlayer.exe` and `neural-runtime\NeuralWorker.exe`
+as separate entries and set each to **High performance**. Setting only the
+player leaves the failure in place: the helper is the process that loads the
+neural stack and renders every cached frame. In **NVIDIA Control Panel > Manage
+3D settings > Program Settings**, add the same two executables and select the
+high-performance NVIDIA processor for each. No reboot is needed, but the player
+and the helper must be started again afterwards, because placement is decided
+at launch and cannot be changed by a running process.
+
 ## Update notice in the menu bar
 
 `↑ Update <version>` right-justified in the menu bar means a newer stable

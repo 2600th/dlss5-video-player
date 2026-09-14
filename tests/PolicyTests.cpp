@@ -1,6 +1,7 @@
 #include "TestSupport.h"
 
 #include "RuntimePolicy.h"
+#include "GpuPreference.h"
 #include "ReShadeConfig.h"
 #include "Localization.h"
 #include "AppMenu.h"
@@ -2304,6 +2305,77 @@ void gpu_classification_table_test()
     for (const auto& test : cases) {
         CHECK_EQ(test.expected, ClassifyGpu(test.vendor_id, test.description));
     }
+}
+
+// The renderer compares the adapter its device was created on against the one
+// DetectHighPerformanceGpu classified, and it has to do that by LUID: a
+// description is a model name, so two identical cards collide, and a hybrid
+// laptop is exactly the machine where the comparison has to hold. Zero is
+// DXGI's "no adapter", which is why it can never agree with anything - two
+// missing adapters are not the same adapter.
+void adapter_luid_identity_compares_parts_not_model_names_test()
+{
+    constexpr uint64_t part = PackAdapterLuid(0, uint32_t{0x0000C0DE});
+    constexpr uint64_t twin = PackAdapterLuid(0, uint32_t{0x0000C0DF});
+    CHECK_EQ(AdapterMatch::Same, CompareAdapterLuids(part, part));
+    CHECK_EQ(AdapterMatch::Different, CompareAdapterLuids(part, twin));
+    CHECK_EQ(AdapterMatch::Unknown, CompareAdapterLuids(part, 0));
+    CHECK_EQ(AdapterMatch::Unknown, CompareAdapterLuids(0, part));
+    CHECK_EQ(AdapterMatch::Unknown, CompareAdapterLuids(0, 0));
+
+    // HighPart is signed and DXGI does issue negative ones; sign-extending it
+    // would fold every such adapter onto the same packed value and make two
+    // different parts compare Same.
+    CHECK_EQ(uint64_t{0xFFFFFFFF0000C0DE}, PackAdapterLuid(-1, uint32_t{0x0000C0DE}));
+    CHECK_EQ(AdapterMatch::Different,
+             CompareAdapterLuids(PackAdapterLuid(-1, 1), PackAdapterLuid(-2, 1)));
+    // The two halves must not be interchangeable either.
+    CHECK_EQ(AdapterMatch::Different,
+             CompareAdapterLuids(PackAdapterLuid(7, 0), PackAdapterLuid(0, 7)));
+}
+
+// Whatever adapter this machine has, the LUID the policy reports must name
+// the adapter the rest of its answer describes - otherwise the renderer's
+// comparison would be against a part nobody classified. Checked by finding
+// that adapter again through DXGI, which needs no NVIDIA hardware.
+void detected_high_performance_gpu_carries_the_luid_of_the_adapter_it_describes_test()
+{
+    const DetectedGpu detected = DetectHighPerformanceGpu();
+    if (detected.adapterLuid == 0) {
+        // No hardware adapter was detected; then nothing else may claim one.
+        CHECK(detected.description.empty());
+        CHECK_EQ(uint32_t{0}, detected.vendorId);
+        CHECK_EQ(GpuGeneration::Unsupported, detected.generation);
+        return;
+    }
+
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    CHECK(SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))));
+    if (!factory) return;
+
+    unsigned matches = 0;
+    for (UINT index = 0;; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        if (factory->EnumAdapters1(index, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 description{};
+        if (FAILED(adapter->GetDesc1(&description))) continue;
+        if (CompareAdapterLuids(detected.adapterLuid,
+                                PackAdapterLuid(description.AdapterLuid.HighPart,
+                                                description.AdapterLuid.LowPart)) !=
+            AdapterMatch::Same) {
+            continue;
+        }
+        ++matches;
+        CHECK_EQ(detected.description, std::wstring(description.Description));
+        CHECK_EQ(detected.vendorId, description.VendorId);
+        CHECK_EQ(detected.deviceId, description.DeviceId);
+        CHECK_EQ(detected.dedicatedVideoMemoryBytes,
+                 static_cast<uint64_t>(description.DedicatedVideoMemory));
+        CHECK_EQ(detected.generation, ClassifyGpu(description.VendorId, description.Description));
+    }
+    // A LUID is unique per physical adapter, so the detected one resolves to
+    // exactly one entry of the same enumeration.
+    CHECK_EQ(unsigned{1}, matches);
 }
 
 void nvidia_driver_version_is_read_out_of_the_dxgi_quad_test()
@@ -5976,6 +6048,8 @@ int wmain(int argc, wchar_t* argv[])
     renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test();
     renderer_cache_capture_does_not_apply_playback_color_adjustments_test();
     gpu_classification_table_test();
+    adapter_luid_identity_compares_parts_not_model_names_test();
+    detected_high_performance_gpu_carries_the_luid_of_the_adapter_it_describes_test();
     nvidia_driver_version_is_read_out_of_the_dxgi_quad_test();
     neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test();
     neural_addon_policy_test();

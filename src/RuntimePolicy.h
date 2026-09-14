@@ -42,6 +42,10 @@ struct DetectedGpu {
     uint32_t vendorId{};
     uint32_t deviceId{};
     uint64_t dedicatedVideoMemoryBytes{};
+    // Packed DXGI adapter LUID (PackAdapterLuid in GpuPreference.h), zero
+    // when no adapter was detected. The description above names a model; this
+    // names the part, which is what the renderer compares its device against.
+    uint64_t adapterLuid{};
     // User-mode driver version reported by DXGI ("32.0.15.6164"); empty when
     // the adapter does not report one.
     std::wstring driverVersion;

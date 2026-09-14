@@ -1,4 +1,5 @@
 #include "RuntimePolicy.h"
+#include "GpuPreference.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -229,6 +230,8 @@ DetectedGpu DetectHighPerformanceGpu()
         detected.vendorId = adapterDescription.VendorId;
         detected.deviceId = adapterDescription.DeviceId;
         detected.dedicatedVideoMemoryBytes = adapterDescription.DedicatedVideoMemory;
+        detected.adapterLuid = PackAdapterLuid(adapterDescription.AdapterLuid.HighPart,
+                                               adapterDescription.AdapterLuid.LowPart);
         LARGE_INTEGER driver{};
         if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver))) {
             detected.driverVersion = std::to_wstring(driver.HighPart >> 16) + L'.' +
