@@ -707,15 +707,18 @@ which put 4 B/px instead of 1.5 across the decoder pipe and the capture readback
 Turning both on is worth **+7 % processing throughput at 4K** and costs **0.75 dB
 PSNR, +0.95 dE and double the false motion**, and single-flag arms attribute it:
 the capture side alone costs -0.79 dB / +0.94 dE, the decoder side alone -0.64 dB
-/ +0.87 dE, and the two together are no worse than either. That non-additivity,
-plus a source that is already `yuv420p`, rules out chroma subsampling as the
-mechanism and points at the GPU conversion shaders' shared matrix/range/rounding
-math against ffmpeg's swscale - **a fixable precision defect rather than an
-inherent trade**, and a new item: compare one frame's YUV stage by stage with the
-source's colour tags read, which is the same probe the decoder flag has always
-been blocked on. Both flags were already documented off in
-`docs/USAGE.md:214-221`, so this prices a known refusal rather than discovering
-one. The defaults stay until that comparison is done, the
+/ +0.88 dE on an **untagged** clip. Re-run on a `bt709`-tagged one, the two split:
+the decoder-side flag becomes **free** (+0.067 dB, +0.009 dE) while the
+capture-side flag still costs **-0.64 dB / +0.64 dE**. The source is already
+`yuv420p`, so nothing lost chroma resolution; what happened is that both shaders
+hard-code BT.709 limited range (`src/D3D12Renderer.cpp:316-341`) while swscale
+falls back to BT.601 for a stream that declares nothing. So `GpuSourceConversion`
+is a **tagging defect away from free** - exactly the hazard
+`docs/USAGE.md:219-221` already names - and its blocker is the source colour-tag
+probe, not readback cost. `GpuColorConversion`'s cost is tag-independent and its
+leading suspect is chroma siting (`PSCaptureChroma` averages four converted
+samples, centre-sited, against swscale's left-sited default), which is the next
+measurement. The defaults stay until those two are closed, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 

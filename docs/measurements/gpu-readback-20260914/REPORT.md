@@ -198,45 +198,65 @@ missing rows would repeat the first, but they were not computed and are not clai
 | `gpu-source-only` | 28.45 | 6.24 | 0.155 | 0.396 | 0.0019 | 32.98 | 18.249 |
 | both | 28.34 | 6.32 | 0.147 | 0.479 | 0.0026 | 33.35 | 18.355 |
 
-Each flag costs most of the quality on its own - **-0.79 dB / +0.94 dE** for the
-capture side alone, **-0.64 dB / +0.87 dE** for the decoder side alone - and the two
-together are no worse than either. That non-additivity is the finding, because it
-rules out the story this report first told.
+On that untagged 4K clip each flag costs most of the quality on its own - **-0.78 dB
+/ +0.94 dE** for the capture side, **-0.64 dB / +0.88 dE** for the decoder side - and
+the two together are no worse than either. The non-additivity is what unpicked it,
+because two independent precision losses would add.
 
-**Chroma subsampling cannot be the mechanism, on either side.** The corpus clip is
-`yuv420p` (`corpus.py`'s `ENCODE`), so the source is already 4:2:0: no stage in this
-pipeline can lose chroma resolution the input never carried. And two independent
-precision losses would add, while these do not - either flag alone costs
-substantially the whole delta.
+**Chroma subsampling is not the mechanism.** The clip is `yuv420p`, so the source is
+already 4:2:0 and no stage here can lose chroma resolution the input never carried.
+The real variable is a colour-matrix disagreement, and it is visible in the clip's
+own metadata: `demo-4k-60.mkv` reports `color_space=unknown`, because
+`docs/media/neural-comparison-demo.mp4` is itself untagged and `corpus.py`'s encode
+adds no `-colorspace`. Both GPU shaders hard-code BT.709 limited range
+(`src/D3D12Renderer.cpp:316-341`: `Luma709`, the 16/219 and 128/224 scalings, and
+`PSSourceNv12`'s `1.5748`/`1.8556` inverse), while swscale falls back to BT.601
+coefficients for a stream that declares nothing. So on untagged content the CPU and
+GPU halves of the pipeline are converting under two different matrices.
 
-What the per-channel signed error says instead, from the same scored runs
-(`rgb_shift`, mean signed output-minus-source per channel, in 8-bit levels):
+**The test that settles it: run the same arms on a clip that carries tags.**
+`orig-faces` is `bt709`/`tv` (its publisher source is tagged and the tags propagate
+through `corpus.py`), and there the two flags stop behaving alike:
 
-| arm | r | g | b |
+| clip | tags | `gpu-color-only` vs cpu | `gpu-source-only` vs cpu |
 |---|---|---|---|
-| `cpu-conversion` | -9.307 | +1.552 | +3.022 |
-| `gpu-color-only` | -8.600 | +2.099 | +3.652 |
-| `gpu-source-only` | -10.609 | +3.121 | +5.946 |
-| both | -9.329 | +3.865 | +6.183 |
+| `demo-4k-60` | `unknown` | **-0.783 dB / +0.944 dE** | **-0.638 dB / +0.875 dE** |
+| `orig-faces` | `bt709` / `tv` | **-0.642 dB / +0.644 dE** | **+0.067 dB / +0.009 dE** |
 
-Every arm carries a large systematic per-channel bias - that is the neural relight
-itself, which is what `intensity-0` exists to separate - but the GPU arms move that
-bias in a consistent direction, green and blue up by 0.5-2.9 levels and red
-scattered either way. A shared **matrix, range, rounding or chroma-siting difference
-between the GPU conversion shaders and ffmpeg's swscale** produces exactly that: a
-per-channel offset that appears whenever any GPU conversion is in the chain and does
-not double when two are. `PSConvert` and `PSSourceNv12` share that math, which is
-why one flag is enough to pay for it.
+`GpuSourceConversion` is **free on correctly tagged material** - marginally ahead on
+PSNR and level on dE - and its entire measured penalty was the 601-against-709
+mismatch on untagged input. That is not a readback cost and not shader imprecision:
+it is exactly the hazard `docs/USAGE.md:219-221` already names ("assumes BT.709
+limited range and nothing reads the source's tags"), now with a number on it and a
+demonstration that reading the tags is the whole fix.
 
-**So this is a fixable precision defect, not an inherent trade.** The honest
-consequence is narrower than "do not flip": the *throughput* is real and the
-*current* quality cost is real, and the cost is a property of this implementation of
-the conversion rather than of moving conversion to the GPU. Closing it means
-comparing one frame's YUV values stage by stage against swscale with the source's
-own colour tags read - which is the same colour-tag probe the decoder flag has
-always been blocked on, now with a second reason to do it. Only false motion looks
-near-additive (0.0013 -> 0.0017 / 0.0019 -> 0.0026), consistent with each conversion
-adding its own per-pixel rounding noise on top of the shared offset.
+`GpuColorConversion` keeps costing **-0.64 dB / +0.64 dE with tags present**, so its
+penalty is its own conversion math rather than a tagging artifact. The candidate
+mechanism is chroma siting: `PSCaptureChroma` converts four RGB samples and averages
+the results, which is centre-sited, while swscale's 4:2:0 default is left-sited -
+plus 8-bit rounding in the same pass. Note the report's own comment at
+`src/D3D12Renderer.cpp:325-327` claims the averaging "is what a CPU 4:2:0 conversion
+does"; the siting difference means that is true of the averaging and not of the
+sample positions. Untested, and it is the next measurement, not a conclusion.
+
+Per-channel signed error (`rgb_shift`, mean output-minus-source, 8-bit levels) shows
+the same split - every arm carries the relight's own large bias, but only on the
+untagged clip do the GPU arms swing it:
+
+| clip | arm | r | g | b |
+|---|---|---|---|---|
+| `demo-4k-60` | cpu | -9.307 | +1.552 | +3.022 |
+| `demo-4k-60` | `gpu-color-only` | -8.600 | +2.099 | +3.652 |
+| `demo-4k-60` | `gpu-source-only` | -10.609 | +3.121 | +5.946 |
+| `orig-faces` | cpu | -2.455 | -2.471 | -1.490 |
+| `orig-faces` | `gpu-color-only` | -3.176 | -4.106 | -0.562 |
+| `orig-faces` | `gpu-source-only` | -1.358 | -0.892 | -0.542 |
+
+**So the verdict splits.** The decoder-side flag is a tagging defect away from being
+free, and the honest blocker is the source colour-tag probe rather than any cost.
+The capture-side flag has a real, tag-independent cost of about two thirds of a
+decibel, with chroma siting the leading suspect and untested. Both defaults stay
+today, but for two different reasons, and only one of them is about bytes.
 
 **This measurement is a confirmation, not a discovery, and the record already said
 so.** `docs/USAGE.md:214-221` documents both flags as deliberately off, with reasons:
