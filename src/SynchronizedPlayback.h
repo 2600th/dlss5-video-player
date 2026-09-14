@@ -7,9 +7,7 @@
 #include <memory>
 #include <stop_token>
 #include <string>
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
 #include <functional>
-#endif
 
 enum class ComparisonView { Original, Neural };
 constexpr ComparisonView ToggleComparisonView(ComparisonView view) noexcept
@@ -44,7 +42,6 @@ enum class SynchronizedReadResult {
     WaitingForRender,
 };
 
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
 class ISynchronizedFrameSource {
 public:
     virtual ~ISynchronizedFrameSource() = default;
@@ -60,13 +57,16 @@ public:
     virtual uint32_t Height() const = 0;
     virtual double FrameRate() const = 0;
     virtual double DurationSeconds() const = 0;
+    // What the next sibling of the open file can be opened with.
+    virtual VideoDecoder::KnownMedia Media() const
+    {
+        return {Width(), Height(), FrameRate(), DurationSeconds(), {}};
+    }
 };
-#endif
 
 class SynchronizedPlayback {
 public:
     SynchronizedPlayback();
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
     // Live mode opens one decoder per segment file, so tests inject a factory
     // instead of a fixed pair. The created source is told which file to serve
     // by the path handed to its Open.
@@ -74,7 +74,6 @@ public:
     SynchronizedPlayback(ISynchronizedFrameSource& original,
                          ISynchronizedFrameSource& neural);
     SynchronizedPlayback(ISynchronizedFrameSource& original, SegmentSourceFactory segments);
-#endif
     ~SynchronizedPlayback();
     SynchronizedPlayback(const SynchronizedPlayback&) = delete;
     SynchronizedPlayback& operator=(const SynchronizedPlayback&) = delete;

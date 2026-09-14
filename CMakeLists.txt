@@ -221,8 +221,11 @@ if(BUILD_TESTING)
     add_executable(RuntimeLockTests tests/RuntimeLockTests.cpp src/RuntimeLock.cpp src/NeuralReceipt.cpp
         src/NeuralPreflight.cpp src/NeuralCache.cpp)
     add_executable(RangeSelectionTests tests/RangeSelectionTests.cpp src/RangeSelection.cpp)
+    # SynchronizedPlayback's DecoderFrameSource is compiled in every build now that
+    # the sources are injected rather than #ifdef-ed, so a target that links the
+    # playback also links the decoder behind it.
     add_executable(FrameIdentityTests tests/FrameIdentityTests.cpp src/TemporalGuides.cpp
-        src/SynchronizedPlayback.cpp)
+        src/SynchronizedPlayback.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests RuntimeLockTests
             RangeSelectionTests FrameIdentityTests)
         target_include_directories(${test_target} PRIVATE src "${GENERATED_INCLUDE_DIR}")
@@ -231,7 +234,6 @@ if(BUILD_TESTING)
     endforeach()
     target_compile_definitions(RuntimeLockTests PRIVATE OFFLINE_NEURAL_RENDERER_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
-    target_compile_definitions(FrameIdentityTests PRIVATE SYNCHRONIZED_PLAYBACK_TESTING)
     target_link_libraries(RecentMediaTests PRIVATE user32)
     target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
     target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)
@@ -340,16 +342,19 @@ if(BUILD_TESTING)
         src/OfflineNeuralRenderer.h
         src/SynchronizedPlayback.cpp
         src/SynchronizedPlayback.h
+        src/VideoDecoder.cpp
+        src/VideoDecoder.h
+        src/MediaSource.cpp
+        src/MediaSource.h
     )
     target_include_directories(NeuralPrerenderTests PRIVATE src "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         OFFLINE_NEURAL_RENDERER_TESTING
-        SYNCHRONIZED_PLAYBACK_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32)
+    target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32 mfplat mfreadwrite mfuuid ole32)
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     # Exercise the real player completion handlers and text submitted to Win32.

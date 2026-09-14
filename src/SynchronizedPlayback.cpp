@@ -12,50 +12,7 @@
 
 namespace {
 
-class FrameSource {
-public:
-    virtual ~FrameSource() = default;
-    virtual bool Open(const std::filesystem::path&, std::stop_token) = 0;
-    // Opens a file whose parameters a sibling already established. Only the
-    // real decoder can save the probe; a source that cannot just opens normally.
-    virtual bool OpenKnown(const std::filesystem::path& path, const VideoDecoder::KnownMedia&,
-                           std::stop_token stop) { return Open(path, stop); }
-    virtual void Close() = 0;
-    virtual VideoReadResult Read(VideoFrame&, std::stop_token) = 0;
-    virtual bool SeekSeconds(double) = 0;
-    virtual uint32_t Width() const = 0;
-    virtual uint32_t Height() const = 0;
-    virtual double FrameRate() const = 0;
-    virtual double DurationSeconds() const = 0;
-    // What the next sibling of the open file can be opened with.
-    virtual VideoDecoder::KnownMedia Media() const
-    {
-        return {Width(), Height(), FrameRate(), DurationSeconds(), {}};
-    }
-};
-
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
-class TestFrameSource final : public FrameSource {
-public:
-    explicit TestFrameSource(ISynchronizedFrameSource& source) : source_(source) {}
-    explicit TestFrameSource(std::unique_ptr<ISynchronizedFrameSource> source)
-        : owned_(std::move(source)),source_(*owned_) {}
-    bool Open(const std::filesystem::path& path,std::stop_token stop)override{return source_.Open(path,stop);}
-    bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia& media,
-                   std::stop_token stop)override{return source_.OpenKnown(path,media,stop);}
-    void Close()override{source_.Close();}
-    VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{return source_.Read(frame,stop);}
-    bool SeekSeconds(double seconds)override{return source_.SeekSeconds(seconds);}
-    uint32_t Width()const override{return source_.Width();}
-    uint32_t Height()const override{return source_.Height();}
-    double FrameRate()const override{return source_.FrameRate();}
-    double DurationSeconds()const override{return source_.DurationSeconds();}
-private:
-    std::unique_ptr<ISynchronizedFrameSource> owned_;
-    ISynchronizedFrameSource& source_;
-};
-#else
-class DecoderFrameSource final : public FrameSource {
+class DecoderFrameSource final : public ISynchronizedFrameSource {
 public:
     bool Open(const std::filesystem::path& path,std::stop_token stop)override{
         return decoder_.Open(path.wstring(),MediaSourceKind::LocalFile,stop);
@@ -77,7 +34,6 @@ public:
 private:
     VideoDecoder decoder_;
 };
-#endif
 
 SynchronizedReadResult ConvertRead(VideoReadResult result)
 {
@@ -103,8 +59,20 @@ struct SynchronizedPlayback::Impl {
     };
     // Outcome of comparing the two pending members.
     enum class Match { Pair, Mismatch, Skew };
-    std::unique_ptr<FrameSource> original;
-    std::unique_ptr<FrameSource> neural;
+    // The two comparison members are either owned (the default constructor builds
+    // real decoders) or borrowed from the caller that injected them, so the raw
+    // pointer is what the code reads and the unique_ptr only carries ownership
+    // when there is any.
+    ISynchronizedFrameSource* original{};
+    std::unique_ptr<ISynchronizedFrameSource> originalOwned;
+    ISynchronizedFrameSource* neural{};
+    std::unique_ptr<ISynchronizedFrameSource> neuralOwned;
+    // Set only by the injecting two-source constructor: a reopen has to restore
+    // the caller's neural member, which a no-neural Open cleared.
+    ISynchronizedFrameSource* injectedNeural{};
+    // Only a playback that owns its sources may build a decoder for a neural
+    // member on demand; an injected one must not invent a real decoder.
+    bool ownsSources{};
     std::optional<Pending> pendingOriginal;
     std::optional<Pending> pendingNeural;
     std::optional<SynchronizedFramePair> current;
@@ -120,10 +88,10 @@ struct SynchronizedPlayback::Impl {
     // Live mode: the neural member is a growing list of finalized files instead
     // of one whole render. One decoder serves the segment under the playhead
     // while a second one is opened ahead of the next boundary.
-    std::function<std::unique_ptr<FrameSource>()> makeSegmentSource;
+    std::function<std::unique_ptr<ISynchronizedFrameSource>()> makeSegmentSource;
     std::shared_ptr<const NeuralSegmentIndex> segments;
-    std::unique_ptr<FrameSource> segmentSource;
-    std::unique_ptr<FrameSource> prefetchSource;
+    std::unique_ptr<ISynchronizedFrameSource> segmentSource;
+    std::unique_ptr<ISynchronizedFrameSource> prefetchSource;
     NeuralSegment segment{};
     NeuralSegment prefetchSegment{};
     std::optional<Pending> prefetchPending;
@@ -136,7 +104,7 @@ struct SynchronizedPlayback::Impl {
     // thread that presents frames cost a measured 45% of them on a machine
     // whose antivirus scans the spawn.
     struct PendingOpen {
-        std::future<std::unique_ptr<FrameSource>> future;
+        std::future<std::unique_ptr<ISynchronizedFrameSource>> future;
         std::stop_source stop;
         NeuralSegment segment;
     };
@@ -196,7 +164,7 @@ struct SynchronizedPlayback::Impl {
         const std::filesystem::path path=wanted.path;
         try{
             pending.future=std::async(std::launch::async,
-                [factory,media,path,stop=pending.stop.get_token()]()->std::unique_ptr<FrameSource>{
+                [factory,media,path,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
                     auto source=factory();
                     if(!source)return nullptr;
                     const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
@@ -247,7 +215,7 @@ struct SynchronizedPlayback::Impl {
         return pending.frame.timestamp100ns>=range.end100ns-tolerance100ns/2;
     }
 
-    SynchronizedReadResult ReadOneShifted(FrameSource& source,std::optional<Pending>& pending,
+    SynchronizedReadResult ReadOneShifted(ISynchronizedFrameSource& source,std::optional<Pending>& pending,
                                           std::stop_token stop,int64_t timestampShift100ns,
                                           uint64_t frameShift)
     {
@@ -261,7 +229,7 @@ struct SynchronizedPlayback::Impl {
         pending=std::move(next);return SynchronizedReadResult::PairReady;
     }
 
-    SynchronizedReadResult ReadOne(FrameSource& source,std::optional<Pending>& pending,
+    SynchronizedReadResult ReadOne(ISynchronizedFrameSource& source,std::optional<Pending>& pending,
                                    std::stop_token stop,bool neuralMember)
     {
         // The neural render starts at its own zero; place it on the original timeline.
@@ -503,33 +471,30 @@ struct SynchronizedPlayback::Impl {
 
 SynchronizedPlayback::SynchronizedPlayback() : impl_(std::make_unique<Impl>())
 {
-#ifndef SYNCHRONIZED_PLAYBACK_TESTING
-    impl_->original=std::make_unique<DecoderFrameSource>();
-    impl_->makeSegmentSource=[]{return std::unique_ptr<FrameSource>(std::make_unique<DecoderFrameSource>());};
-#endif
+    impl_->ownsSources=true;
+    impl_->originalOwned=std::make_unique<DecoderFrameSource>();
+    impl_->original=impl_->originalOwned.get();
+    impl_->makeSegmentSource=[]{return std::unique_ptr<ISynchronizedFrameSource>(std::make_unique<DecoderFrameSource>());};
 }
 
-#ifdef SYNCHRONIZED_PLAYBACK_TESTING
 SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
                                              ISynchronizedFrameSource& neural)
     : impl_(std::make_unique<Impl>())
 {
-    impl_->original=std::make_unique<TestFrameSource>(original);
-    impl_->neural=std::make_unique<TestFrameSource>(neural);
+    impl_->original=&original;
+    impl_->neural=&neural;
+    impl_->injectedNeural=&neural;
 }
 
 SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
                                              SegmentSourceFactory segments)
     : impl_(std::make_unique<Impl>())
 {
-    impl_->original=std::make_unique<TestFrameSource>(original);
-    impl_->makeSegmentSource=[factory=std::move(segments)]()->std::unique_ptr<FrameSource>{
-        auto source=factory?factory():nullptr;
-        if(!source)return nullptr;
-        return std::make_unique<TestFrameSource>(std::move(source));
+    impl_->original=&original;
+    impl_->makeSegmentSource=[factory=std::move(segments)]()->std::unique_ptr<ISynchronizedFrameSource>{
+        return factory?factory():nullptr;
     };
 }
-#endif
 
 SynchronizedPlayback::~SynchronizedPlayback(){Close();}
 SynchronizedPlayback::SynchronizedPlayback(SynchronizedPlayback&&) noexcept=default;
@@ -556,9 +521,19 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
         impl_->original->Close();return false;
     }
     const bool useNeural=!neuralPath.empty();
-#ifndef SYNCHRONIZED_PLAYBACK_TESTING
-    if(useNeural)impl_->neural=std::make_unique<DecoderFrameSource>();
-#endif
+    // An owning playback built a fresh decoder on every Open before the sources
+    // became injectable, and still does: reusing one that a previous Open left
+    // behind is a lifetime the old code never exercised. An injected playback
+    // instead restores the member its caller handed over, which a no-neural Open
+    // may have cleared.
+    if(useNeural){
+        if(impl_->ownsSources){
+            impl_->neuralOwned=std::make_unique<DecoderFrameSource>();
+            impl_->neural=impl_->neuralOwned.get();
+        }else if(!impl_->neural&&impl_->injectedNeural){
+            impl_->neural=impl_->injectedNeural;
+        }
+    }
     if(useNeural){
         if(!impl_->neural||!impl_->neural->Open(neuralPath,stop)){impl_->original->Close();return false;}
         const double fps=originalFps;
@@ -575,7 +550,7 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
         }
         impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/fps));
     }else{
-        impl_->neural.reset();
+        impl_->neural=nullptr;impl_->neuralOwned.reset();
         const double fps=originalFps;
         if(std::isfinite(fps)&&fps>0.0)
             impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/fps));
@@ -613,7 +588,7 @@ bool SynchronizedPlayback::OpenLive(const std::filesystem::path& originalPath,
         impl_->original->Close();return false;
     }
     // Nothing to validate against: the render is still producing its files.
-    impl_->neural.reset();
+    impl_->neural=nullptr;impl_->neuralOwned.reset();
     impl_->tolerance100ns=static_cast<int64_t>(std::ceil(10000000.0/originalFps));
     impl_->range=range;
     impl_->rangeOffsetFrames=static_cast<uint64_t>(std::llround(startSeconds*originalFps));
