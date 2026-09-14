@@ -122,10 +122,23 @@ disocclusion clip it buys the two motion-field numbers (flips −20 % relative,
 sigma −0.107) that describe the field's stability. What it does not buy is less
 invented appearance: false motion rises on three of four clips, including that
 one. That is a real result and an uncomfortable one, and it is why this record
-refuses to call the gate a quality win. Settling it needs real footage - grain,
-motion blur, a real dissolve, a camera that occludes - and the corpus's only
-real-footage clip (`faces`) needs a fixture that is not on this machine. If it
-does not pay there either, the case for removing it is the honest next move.
+refuses to call the gate a quality win. Settling it needed real footage - grain,
+motion blur, a camera that occludes - which this corpus did not carry when the
+section above was written.
+
+**Answered later the same day.** Four real-footage clips were cut from this
+repository's own demo capture and the A/B was re-run against the pre-gate tree.
+The gate lowers false motion on **all four**, by 4.6 to 14.4 % relative, and on
+two of them it improves false motion, cell flips and added sigma together - an
+outcome no synthetic clip produced. Renders are bit-identical across repeats
+within each tree and differ between trees, so the deltas are signal. The
+synthetic result above stands exactly as measured; what it does not do is
+generalise to footage. Full table in the
+[real-footage A/B](measurements/gate-real-footage-20260914/REPORT.md). One caveat
+travels with that verdict: the capture was taken with neural rendering on, so its
+pixels are the player's own DLSS-NR output rather than camera-original footage,
+which is sound for an A/B where both trees see identical input and is not a
+statement about original footage.
 
 ## The scene-cut over-reset is real in a real render
 

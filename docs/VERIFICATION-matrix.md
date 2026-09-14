@@ -365,15 +365,26 @@ into any table above.
 
 ³ Not read from a log line but from the `[NeuralPace]` sample that session wrote
 into `DLSSVideoPlayer.ini`, which is the same number `RecordLiveRenderPace`
-logs. 3.7x the idle mean, from CPU contention alone - the GPU was free.
+logs. 3.7x the idle mean. The mechanism was first written up here as CPU
+contention with the GPU free; a later controlled test contradicted that and the
+attribution is withdrawn. Saturating all 20 threads at a verified 100 % moves
+1080p pace only 11.4 -> 15.5 ms/frame, 1.36x, because a live session's pace is
+GPU-dominated - so the 42.3 ms sample almost certainly carried GPU and NVENC
+contention from the three slices rendering that evening as well. The mechanism
+is a mix of undetermined proportions; CPU alone is measured insufficient.
 
 **And that sample is what produced the modal dialog.** The profile keeps one
 sample per geometry and the newest replaces the oldest, so a single session
 measured under load leaves 42.3 ms/frame on disk as this machine's 1080p pace.
-The next two sessions forecast 23.6 fps against a 30 fps playhead, decided the
-card could not keep up, and raised `ConfirmLiveSessionPace` - "Neural rendering
-from here" - on hardware that had just rendered the same clip at 2.9x realtime.
-Both exited 9. Nothing recovers the profile except another session, which the
+The next two sessions decided the card could not keep up and raised
+`ConfirmLiveSessionPace` - "Neural rendering from here" - on hardware that had
+just rendered the same clip faster than realtime. The dialog and its two exit-9
+sessions are observed; the figures it would have shown are NOT. Those sessions
+ran without log capture and the next launch truncated the log, so "23.6 fps
+against a 30 fps playhead" and "2.9x realtime" are arithmetic from the stored
+sample (1000/42.333 and 1000/11.422 over 30), not readings. They are quoted here
+as a calculation and must not be cited as measurements.
+Nothing recovers the profile except another session, which the
 user now has to click through a warning to start. That is a product finding, not
 an instrument one: `RenderPaceProfile::Record` has no notion of a sample taken
 under load and no way to distrust one.
