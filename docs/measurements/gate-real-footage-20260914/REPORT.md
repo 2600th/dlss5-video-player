@@ -4,12 +4,13 @@
 real-footage clips the forward/backward round-trip gate *lowers* false motion, by
 4.6 % to 14.4 % relative, and on two of the four it improves all three of false
 motion, cell flips and added temporal σ at once — the outcome no synthetic clip
-produced. The synthetic finding this measurement was built to test was that the gate
-raises false motion on `cuts-motion` by 13.5 % of the share attributable to the
-neural pass while improving flips and σ, with no clip improving on all three. That
-finding still stands on synthetic patterns; it does not generalize. Scope below is
-narrow and stated: one machine, one driver, one profile, 312 source frames, five
-labelled hard cuts.
+produced. The whole A/B was then repeated at the shipped auto-mask state and every
+conclusion survived (−4.9 % to −13.9 %). The synthetic finding this measurement was
+built to test was that the gate raises false motion on `cuts-motion` by 13.5 % of the
+share attributable to the neural pass while improving flips and σ, with no clip
+improving on all three. That finding still stands on synthetic patterns; it does not
+generalize. Scope below is narrow and stated: one machine, one driver, one guide
+configuration, 312 source frames, five labelled hard cuts.
 
 This is the measurement [`docs/VERIFICATION-2026-09-14-RTX4080.md`](../../VERIFICATION-2026-09-14-RTX4080.md)
 asked for in as many words — "real footage: grain, motion blur, a real dissolve, a
@@ -26,8 +27,8 @@ not, and that is called out rather than papered over.
 | Pre-gate tree | `1c41427` (detached, the commit before `6528eb5` landed the gate), worktree `../dlss5-pregate-corpus` | `git rev-parse HEAD` |
 | Build | Release x64, VS 17 2022 / MSVC 19.44, targets `DLSSVideoPlayer NeuralWorker` | build logs |
 | Runtime | the same 12 locked files staged into both trees from `external/runtime`; ReShade 6.8.0.2155, RenoDX 4.7, DLSS-NR 310.8.0, worker 0.21.2 on both sides | `tools/stage_runtime.ps1`, preflight receipts |
-| Encoder | `hevc_nvenc` on all 24 runs | `result.json` |
-| Profile | `baseline` (`mv=1,depth=1`, RenoDX defaults) plus `intensity-0` as the scale control, gate tree only | `run.py --list-profiles` |
+| Encoder | `hevc_nvenc` on all 40 runs | `result.json` |
+| Profiles | `baseline` (`mv=1,depth=1`, RenoDX defaults) on both trees; `shipped-defaults` (all eight player `NR*` keys, `NRAutoMask=1`) on both trees; `intensity-0` as the scale control, gate tree only | `run.py --list-profiles`, `--profile-file` |
 | FFmpeg | 9.0.1-essentials (gyan.dev), the same binary for corpus and analysis on both sides | `manifest.json` |
 
 The gate is observable in the two trees' own logs, which is what makes this a gate
@@ -105,7 +106,8 @@ python <gate>/tools/benchmark/analyze.py --corpus <gate>/build-upscaling/benchma
   --runs <tree>/build-upscaling/benchmark-work/runs --no-ocr --no-faces --force
 ```
 
-24 runs, 0 failed. `analyze.py` derives its output directory from its own location, so
+40 runs, 0 failed (16 `baseline`, 16 `shipped-defaults`, 8 `intensity-0`).
+`analyze.py` derives its output directory from its own location, so
 the pre-gate aggregate was scored first and copied aside to `analysis-pregate/` before
 the gate aggregate was written; per-run `metrics.json` lives in each tree's own run
 directory and was never crossed.
@@ -207,12 +209,57 @@ neural pass contributes to that metric. On the synthetic `cuts-motion` the same
 construction put the gate's *penalty* at 13.5 % of NR's share. The effect is not
 noise on either set; it changes sign with the material.
 
+## Repeated at the shipped mask state
+
+The `baseline` profile writes no `NR*` key at all, so it inherits the RenoDX add-on's
+own defaults — and `ArtDefaults` measured those to have the auto mask **off**, while
+the shipped player always writes `NRAutoMask=1`
+(`docs/measurements/art-defaults-20260914/REPORT.md`, Table D; `NeuralSettings.h`
+`autoMask{true}` through `NeuralAddonOverridesFor`). That matters here because the
+same report shows the mask moving synthetic false motion by −0.0093 to +0.0059
+*without keeping its sign*, which is the size of three of the four gate deltas above.
+A mask-off measurement therefore could not be assumed to predict the mask-on one, and
+the shift cannot be borrowed arithmetically from another slice's clips — the gate
+changes the rendered output, so the reference has to be re-rendered on this footage.
+
+So it was. Both trees re-rendered all four clips at the shipped mask state, two
+repeats each, using that slice's committed profile file verbatim:
+
+```
+python run.py --corpus <gate>/build-upscaling/benchmark-corpus \
+  --profile-file <art>/docs/measurements/art-defaults-20260914/shipped-defaults.profile.json \
+  --profiles shipped-defaults --clips real-film-cuts real-game-cuts real-game-motion real-dissolve \
+  --repeats 2
+```
+
+| clip | false motion pre → gate | Δ (relative) | flips added Δ | σ added Δ | PSNR Δ |
+|---|---:|---:|---:|---:|---:|
+| `real-film-cuts` | 0.01334 → **0.01148** | −0.00186 (−13.9 %) | −0.00621 | −0.0717 | −0.024 |
+| `real-game-cuts` | 0.16123 → **0.14280** | −0.01843 (−11.4 %) | −0.00258 | −0.0161 | +0.141 |
+| `real-game-motion` | 0.07660 → **0.06942** | −0.00718 (−9.4 %) | −0.00469 | +0.0873 | −0.338 |
+| `real-dissolve` | 0.13680 → **0.13006** | −0.00674 (−4.9 %) | +0.00121 | −0.0346 | −0.283 |
+
+**Every conclusion survives, and the numbers barely move.** False motion improves on
+all four clips again (−13.9 / −11.4 / −9.4 / −4.9 % against −14.4 / −12.2 / −9.5 /
+−4.6 % at mask-off); `real-film-cuts` and `real-game-cuts` again improve all three of
+false motion, flips and σ; the two exceptions are again the free-fall shot's σ and the
+dissolve's flips. All 16 mask-on runs are bit-identical between repeats with metric
+spread exactly `0.0000000000`, and the eight digests differ between trees.
+
+Worth recording, because it is the reason the caveat was worth testing rather than
+worth assuming: on *these* clips the mask barely moves the reference at all. Gate-tree
+false motion shifts by +0.00002, +0.00004, −0.00058 and −0.00108 between `baseline`
+and `shipped-defaults`, one to two orders of magnitude smaller than the ±0.009 the
+synthetic clips showed. Real content and synthetic patterns do not respond to the mask
+the same way either.
+
 ## Verdict
 
 1. **Real footage reverses the synthetic false-motion finding.** Four clips, four
    improvements, −4.6 % to −14.4 % relative, 11.8 % to 74.4 % of the neural pass's own
-   share of the metric. The synthetic result was one improvement in four clips and a
-   penalty on the clip the gate was argued for.
+   share of the metric, and the same four improvements (−4.9 % to −13.9 %) when the
+   whole A/B is repeated at the shipped mask state. The synthetic result was one
+   improvement in four clips and a penalty on the clip the gate was argued for.
 2. **"No clip improves on all three" no longer holds.** `real-film-cuts` and
    `real-game-cuts` improve false motion, cell flips and added σ simultaneously. The
    two clips where something gets worse are the free-fall shot (σ +0.096, PSNR −0.34)
@@ -238,10 +285,15 @@ noise on either set; it changes sign with the material.
   Every number above is a deterministic quality metric and is unaffected, but
   `wall_s`, `e2e_fps`, `proc_fps` and `gpu_ms_p50` from these runs are CONTENDED and
   not citable. No timing claim is made here.
-- **Breadth.** One machine, one driver, one GPU generation (Ada), one profile
-  (`baseline`, `mv=1,depth=1`), 312 source frames, five labelled hard cuts. Two of the
-  four clips are game footage rather than camera footage; only `real-film-cuts` carries
-  real film grain.
+- **Breadth.** One machine, one driver, one GPU generation (Ada), two mask states of
+  one guide configuration (`mv=1,depth=1`), 312 source frames, five labelled hard cuts.
+  Two of the four clips are game footage rather than camera footage; only
+  `real-film-cuts` carries real film grain.
+- **The scale control at mask-on.** The `intensity-0` share-of-NR table was measured
+  at mask-off only; the mask-on A/B above was not given its own control, so the
+  "11.8–74.4 % of NR's share" framing is a mask-off number. The mask moves the
+  reference on these clips by at most 0.00108, so the framing is unlikely to change,
+  but that is an argument and not a measurement.
 - **The upscale.** Clips are the player surface resampled 1362×766 → 1920×1080 with
   lanczos. Grain and h264 texture survive softened. This is real footage, not pristine
   footage, and a native-resolution real clip could read differently.

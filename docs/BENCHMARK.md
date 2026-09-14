@@ -117,8 +117,11 @@ writing all eight keys with the mask off reproduces `baseline` exactly, and
 writing the single key `NRAutoMask=1` reproduces the shipped state exactly. So the
 `automask-off` ablation row is a no-op against `baseline`, and every absolute
 `baseline` number in this document - including the reference run below - describes
-a configuration the player never ships. Relative guide comparisons are unaffected,
-because both sides carry the same mask state.
+a configuration the player never ships. Relative guide comparisons are structurally
+unaffected, because both sides carry the same mask state - and on the real clips
+that was checked rather than assumed: the whole gate A/B re-rendered at
+`NRAutoMask=1` reproduces every conclusion it reached at mask-off, with false
+motion shifting by at most 0.00108 between the two states.
 
 The sign can invert on the difference: `structure-0` improves delta-E by 2.46 on
 `cuts-similar` measured against `baseline` and worsens it by 2.94 measured against
@@ -127,6 +130,25 @@ the shipped state. Run art-knob ablations from
 all eight keys and varies one. `NRAutoMask` is also the only one of the eight whose
 explicit write changes a pixel; the other seven at shipped values are bit-identical
 to writing nothing, which proves only that the add-on agrees with us about them.
+
+**Synthetic clips preserve the sign of an effect and inflate its magnitude.** Three
+independent measurements on 2026-09-14 converged on this. `NRLocalTone`'s full
+range moves delta-E by 0.77 on film and 4.02-8.11 on fractals, 5-11x. The automatic
+mask shifts false motion by at most 0.00108 on real clips against +-0.0093
+synthetic, one to two orders. And cut precision/recall goes 0.571/0.571 synthetic to
+1.000/0.800 real, which is the same bias from the other end, because those synthetic
+clips were built adversarial on purpose. Part of it is the carrier: 1.26 delta-E of
+a shipped 2.48 is the NVENC floor before the model contributes anything, so effects
+shrink toward that floor on real footage.
+
+The practical consequence is a rule for reading this document. Synthetic patterns
+are sound for deciding a **direction** and for regression-gating a change; they are
+unsound for **sizing** an effect or for tuning a threshold on pooled numbers. That
+is why the synthetic and real cut tables here are never pooled, and it is the
+argument against retuning the 0.30 / 0.10 / 0.85 criterion on a pooled set. The
+round-trip gate is the worked example: synthetic clips said it raises false motion
+on three of four, real footage said it lowers it on four of four, and the direction
+- not the magnitude - was what changed.
 
 The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
 guide strings the matrix already carries — a disabled depth guide *is* the constant
