@@ -98,6 +98,17 @@ the source held static, so it answers "did the pass invent appearance" and not
 "did the vector field improve", and a zeroed vector changes what NR is given as
 much as a wrong one does.
 
+**The scale to read those against is the carrier, not repeat variance.** The
+`intensity-0` control - the same tree and the same gate, with the model's
+relighting at zero, so decode, guides, the feature-18 pass and the NVENC
+re-encode all still happen - reports false motion **0.09153** on `cuts-motion`,
+flips added **−0.00228** and sigma added **−3.4116** (PSNR 32.41 against
+baseline's 22.89). So of baseline's 0.16003, about 9.2 points are the carrier
+inventing appearance on static cells and about 6.8 are the neural pass itself. The
+gate's 0.92-point move is roughly an eighth of the part attributable to NR - small
+but not lost in the plumbing, which is why the verdict below is "unproven" rather
+than "no effect".
+
 **Decision: the gate stays, unchanged and unflagged.** It is a refusal - a cell
 the engine contradicts itself about emits no motion instead of a confident wrong
 one - so its risk is one-sided, and the clip with real occlusion is the clip it
@@ -132,8 +143,10 @@ and seven labelled positives is not a mandate.
 ## The cold stack, per phase, measured
 
 From the protocol v5 timeline messages of two renders on this machine: **A** is
-the `cuts-motion` render above, **B** is a segmented 1080p30 render taken while
-the instrument was being written. The player-side phases are null in both because
+the `cuts-motion` render above at `16b6f3c`; **B** is a segmented 1080p30 render
+taken in the slice worktree while the instrument was being written, so it is the
+same instrumentation from a different build and a different job. The player-side
+phases are null in both because
 the harness drives `NeuralWorker.exe` directly, and `firstOutput` is null in A
 because a single-file job never rotates a segment - both are the absence ladder
 behaving as designed, not missing data.
@@ -147,9 +160,12 @@ behaving as designed, not missing data.
 | `firstOutput` | absent (single file) | 2726 ms | ~1780 ms | → first finalized segment file |
 | helper total to armed | **2133.6 ms** | 2597 ms | | |
 
-Unlike the render metrics, these are not reproducible: `neuralInit` differs by
-509 ms between two runs of the same binary on the same machine, so any single
-number here is one sample, and an acceptance check needs several.
+Unlike the render metrics, these are not reproducible, and the two samples are not
+a controlled pair: **B** came from the slice worktree's own build of the same
+instrumentation, on a different, segmented job, and `neuralInit` brackets the
+source open as well as NGX. So the 509 ms gap is not attributable to run-to-run
+variance alone - but neither sample can stand as an acceptance number, and a check
+written against 2 s needs several samples from one build on one clip.
 
 Two things the handoff's table gets structurally wrong, independent of the
 spread. ReShade proxy plus add-on load is not 0.41 s beside the loader, because
