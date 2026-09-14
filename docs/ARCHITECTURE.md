@@ -49,6 +49,19 @@ playback path.
 
 `VideoDecoder` uses FFmpeg as the primary decoder by launching `ffmpeg.exe`/`ffprobe.exe` as helper processes. Media Foundation is kept as a fallback path.
 
+`VideoDecoder` and `AudioPlayer` take an optional `Settings` on construction.
+Default-constructed is production - helpers are resolved relative to the module,
+then PATH - and the shipping player always default-constructs; `Settings` exists
+so tests compile the same code the release does instead of a second program
+behind an `#ifdef`. `Settings::helperDirectory` overrides that search and
+`Settings::faults` reaches Win32 failures no test can provoke, so both are public
+in a release build with no production caller. `YouTubeResolver` is deliberately
+different: it canonicalizes its helper directory, refuses reparse points and
+holds `yt-dlp.exe`/`deno.exe` open before spawning them, so its injecting
+constructor stays behind `YOUTUBE_RESOLVER_TESTING` and two configure-time
+compile checks plus `ReleaseApiCompileTests` assert a release build cannot reach
+it.
+
 Playback preserves the decoded source dimensions. Selecting an SR output never
 downsamples a source to fit a nominal DLSS quality ratio.
 

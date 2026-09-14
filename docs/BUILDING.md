@@ -1,8 +1,9 @@
 # Building and testing
 
-Use Windows x64, Visual Studio 2022 with the **Desktop development with C++**
-workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the commands
-below from the repository root in a Developer PowerShell for VS 2022.
+Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
+C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
+commands below from the repository root in a Developer PowerShell for that
+Visual Studio.
 
 The source builds native NVIDIA NGX / DLSS Super Resolution and the offline
 worker. Experimental neural rendering additionally needs the separately
@@ -32,13 +33,22 @@ yt-dlp helper. CI fetches all three sets of assets before building.
 
 ## Build and run the tests
 
-Use one `build-upscaling` directory throughout:
+Use one `build-upscaling` directory throughout. Name the generator your install
+actually provides - `Visual Studio 17 2022` or `Visual Studio 18 2026` - or omit
+`-G` and let CMake pick the newest one it finds:
 
 ```powershell
-cmake -S . -B build-upscaling -G 'Visual Studio 17 2022' -A x64 -DBUILD_TESTING=ON
+cmake -S . -B build-upscaling -G 'Visual Studio 18 2026' -A x64 -DBUILD_TESTING=ON
 cmake --build build-upscaling --config Release --parallel
 ctest --test-dir build-upscaling -C Release --output-on-failure
 ```
+
+Naming `Visual Studio 17 2022` on a machine that has only 2026 asks for the v143
+toolset that install does not carry, and MSBuild stops with MSB8020 before
+compiling anything. A configured directory keeps the generator that created it,
+so delete `build-upscaling` after switching toolchains. `build_windows.bat`
+detects the edition itself; 2026 installs under
+`...\Microsoft Visual Studio\18\<Edition>`, not under the year.
 
 If `cmake` or `ctest` is not on PATH, use the CMake `bin` directory in your
 Visual Studio installation under
@@ -48,9 +58,10 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The twelve suites cover recent history, settings/cache integrity, real-media
-export, worker protocols, runtime policy, range selection, frame identity,
-prerender, playback and native UI regressions.
+The thirteen suites cover recent history, settings/cache integrity, real-media
+export, runtime lock and worker protocols, runtime and upscaling policy, range
+selection, frame identity, update checks, the release API surface, prerender,
+playback and native UI regressions.
 CTest does not establish GPU compatibility or visual quality. For changes to
 rendering, timing or decoding, also run applicable GPU/media smoke checks from
 the [verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).

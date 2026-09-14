@@ -6,7 +6,7 @@ and the canonical `build-upscaling` commands.
 ## Development guidelines
 
 - Keep Windows x64 / D3D12 behavior working.
-- Build with Visual Studio 2022 and keep `/W4` output clean when possible.
+- Build with Visual Studio 2022 or newer and keep `/W4` output clean when possible.
 - Do not commit NVIDIA SDK checkouts, FFmpeg binaries, ReShade binaries, experimental DLSS 5 DLLs or other third-party runtime packages.
 - Keep temporal-resource state transitions explicit and documented.
 - Avoid adding a per-frame `WaitGPU()` to the normal playback path.
@@ -15,7 +15,7 @@ and the canonical `build-upscaling` commands.
 
 ## Before opening a pull request
 
-For code changes, build Release x64 and run the twelve CTest suites. FFmpeg and
+For code changes, build Release x64 and run the thirteen CTest suites. FFmpeg and
 FFprobe must be staged so the real-media export suite runs. Keep automated
 results separate from GPU and visual-quality claims.
 
