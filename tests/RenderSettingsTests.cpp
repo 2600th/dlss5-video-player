@@ -51,6 +51,24 @@ NeuralCacheManifest RenderManifest()
     return result;
 }
 
+// The player never promotes a render without its receipt: it builds the
+// receipt JSON, writes receipt.json into staging and fails the render when it
+// cannot. RenderManifest() stays receipt-free for the parse-level tests, so a
+// promotable render is the same manifest plus the sidecar it has to carry.
+constexpr std::string_view kRenderReceipt = "{\"schema\":1,\"render\":\"fixture\"}\n";
+
+NeuralCacheManifest PromotableRenderManifest()
+{
+    auto result = RenderManifest();
+    result.receiptDigest = Sha256Bytes(kRenderReceipt).value_or("");
+    return result;
+}
+
+void StageRenderReceipt(const std::filesystem::path& staging)
+{
+    Write(staging / L"receipt.json", kRenderReceipt);
+}
+
 void harmless_ini_rewrites_preserve_snapshot_but_every_neural_tuning_changes_key()
 {
     const std::string first = UpdateNeuralAddonIni(
@@ -119,7 +137,7 @@ void authenticated_settings_survive_promotion_and_tampering_invalidates_cache()
     TempDirectory temp;
     NeuralCacheManager cache(temp.path / L"cache");
     const std::string key(64, 'c');
-    auto manifest = RenderManifest();
+    auto manifest = PromotableRenderManifest();
     const auto snapshot = SnapshotNeuralAddonSettings(UpdateNeuralAddonIni("", true));
     manifest.settingsDigest = Sha256Bytes(snapshot).value_or("");
     CHECK_EQ(size_t{64}, manifest.settingsDigest.size());
@@ -127,6 +145,9 @@ void authenticated_settings_survive_promotion_and_tampering_invalidates_cache()
     CHECK(staging.has_value());
     if (!staging) return;
     Write(*staging / L"neural.mkv", "encoded video");
+    StageRenderReceipt(*staging);
+    // neural-settings.ini is the sidecar this manifest promises and staging
+    // does not yet have.
     CHECK(!cache.PromoteRender(key, *staging, manifest));
     Write(*staging / L"neural-settings.ini", snapshot);
     CHECK(cache.PromoteRender(key, *staging, manifest));
@@ -282,6 +303,8 @@ void receipt_is_authenticated_on_promotion_and_lookup()
     CHECK(staging.has_value());
     if (!staging) return;
     Write(*staging / L"neural.mkv", "encoded video");
+    // receipt.json is the sidecar this manifest promises and staging does not
+    // yet have.
     CHECK(!cache.PromoteRender(key, *staging, manifest));
     Write(*staging / L"receipt.json", receipt);
     CHECK(cache.PromoteRender(key, *staging, manifest));
@@ -292,6 +315,8 @@ void receipt_is_authenticated_on_promotion_and_lookup()
     CHECK_EQ(manifest.receiptDigest, found->manifest.receiptDigest);
     CHECK_EQ(uint64_t{7}, found->manifest.jobId);
     CHECK_EQ(receipt, Read(found->directory / L"receipt.json"));
+    // One byte appended to the published receipt: the digest no longer
+    // authenticates it, so the entry is not served.
     Write(found->directory / L"receipt.json", receipt + " ");
     CHECK(!cache.LookupRender(key));
 }
@@ -413,10 +438,12 @@ void removing_one_owned_entry_preserves_other_entries_and_outside_files()
     Write(*source / L"source.mkv", "original");
     Write(*render / L"neural.mkv", "first render");
     Write(*other / L"neural.mkv", "second render");
+    StageRenderReceipt(*render);
+    StageRenderReceipt(*other);
     Write(temp.path / L"user.mkv", "user file");
     CHECK(cache.PromoteSource(first, *source, RenderManifest()));
-    CHECK(cache.PromoteRender(first, *render, RenderManifest()));
-    CHECK(cache.PromoteRender(second, *other, RenderManifest()));
+    CHECK(cache.PromoteRender(first, *render, PromotableRenderManifest()));
+    CHECK(cache.PromoteRender(second, *other, PromotableRenderManifest()));
     CHECK(cache.RemoveRender(first));
     CHECK(!cache.LookupRender(first));
     CHECK(cache.LookupSource(first).has_value());

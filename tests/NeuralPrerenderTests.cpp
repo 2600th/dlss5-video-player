@@ -214,6 +214,16 @@ void invalid_explicit_cache_root_does_not_silently_fall_back_test()
     CHECK_EQ(std::string("keep"), ReadBytes(fixture.Path() / L"chosen-cache"));
 }
 
+// The player never promotes a render without its receipt: it builds the
+// receipt JSON, writes receipt.json into staging and fails the render when it
+// cannot, so a promotable fixture stages the same sidecar.
+constexpr std::string_view kRenderReceipt = "{\"schema\":1,\"render\":\"fixture\"}\n";
+
+void StageRenderReceipt(const std::filesystem::path& staging)
+{
+    WriteBytes(staging / L"receipt.json", kRenderReceipt);
+}
+
 NeuralCacheManifest CompleteRenderManifest()
 {
     NeuralCacheManifest manifest;
@@ -232,6 +242,7 @@ NeuralCacheManifest CompleteRenderManifest()
     manifest.feature18Created = true;
     manifest.feature18ArmedBeforeCapture = true;
     manifest.upscaling = false;
+    manifest.receiptDigest = Sha256Bytes(kRenderReceipt).value_or("");
     return manifest;
 }
 
@@ -324,6 +335,14 @@ void manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test()
     manifest.verifiedNeuralFrames = manifest.frameCount;
     manifest.feature18ArmedBeforeCapture = false;
     CHECK(!IsReusableNeuralCacheManifest(manifest));
+    manifest.feature18ArmedBeforeCapture = true;
+    CHECK(IsReusableNeuralCacheManifest(manifest));
+    // A render is served as verified neural output out of a user-writable
+    // directory, and no release ever wrote a schema-4 render without a receipt
+    // digest, so a manifest that simply omits one has nothing vouching for how
+    // the payload was produced and is not reusable.
+    manifest.receiptDigest.clear();
+    CHECK(!IsReusableNeuralCacheManifest(manifest));
 }
 
 void source_and_render_promotion_are_hash_validated_and_immutable_test()
@@ -357,6 +376,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(renderStaging.has_value());
     if (!renderStaging) return;
     WriteBytes(*renderStaging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*renderStaging);
     auto renderManifest = CompleteRenderManifest();
     renderManifest.sourceDigest = source->manifest.sourceDigest;
     CHECK(manager.PromoteRender(renderKey, *renderStaging, renderManifest));
@@ -383,6 +403,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(restoredStaging.has_value());
     if (!restoredStaging) return;
     WriteBytes(*restoredStaging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*restoredStaging);
     CHECK(manager.PromoteRender(renderKey, *restoredStaging, renderManifest));
     const auto restored = manager.LookupRender(renderKey);
     CHECK(restored.has_value());
@@ -392,6 +413,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(replacement.has_value());
     if (replacement) {
         WriteBytes(*replacement / L"neural.mkv", "must-not-replace-valid-cache");
+        StageRenderReceipt(*replacement);
         CHECK(manager.PromoteRender(renderKey, *replacement, renderManifest));
     }
     CHECK_EQ(std::string("neural-frames"), ReadBytes(restored->payloadPath));
@@ -403,6 +425,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(repairStaging.has_value());
     if(!repairStaging)return;
     WriteBytes(*repairStaging/L"neural.mkv","repaired-neural-frames");
+    StageRenderReceipt(*repairStaging);
     const std::wstring repairName=repairStaging->filename().wstring();
     const size_t repairSeparator=repairName.rfind(L'-');
     CHECK(repairSeparator!=std::wstring::npos);
@@ -418,6 +441,21 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(repaired.has_value());
     if(repaired)CHECK_EQ(std::string("repaired-neural-frames"),ReadBytes(repaired->payloadPath));
     CHECK(std::filesystem::is_directory(repairCollision));
+
+    // The published directory is user-writable, so its manifest can be
+    // rewritten in place. Dropping the receipt digest, and the receipt with
+    // it, leaves every other digest matching - and must still not produce a
+    // served render.
+    if (repaired) {
+        auto stripped = repaired->manifest;
+        stripped.receiptDigest.clear();
+        WriteBytes(repaired->directory / L"manifest.json",
+                   SerializeNeuralCacheManifest(stripped));
+        std::error_code receiptRemoveError;
+        CHECK(std::filesystem::remove(repaired->directory / L"receipt.json",
+                                      receiptRemoveError));
+        CHECK(!manager.LookupRender(renderKey).has_value());
+    }
 }
 
 // A finished render used to be discarded because publishing it is a directory
@@ -437,6 +475,7 @@ void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
     if (!staging) return;
     const auto payload = *staging / L"neural.mkv";
     WriteBytes(payload, "neural-frames");
+    StageRenderReceipt(*staging);
     const auto manifest = CompleteRenderManifest();
 
     // FILE_SHARE_READ|WRITE without DELETE is what a scanner holds, and it is
@@ -465,10 +504,14 @@ void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
     CHECK(second.has_value());
     if (!second) return;
     WriteBytes(*second / L"neural.mkv", "neural-frames");
-    auto missingSidecar = manifest;
-    missingSidecar.settingsDigest = std::string(64, 'a');
+    StageRenderReceipt(*second);
+    // The receipt is staged; it is neural-settings.ini that this manifest
+    // promises and staging does not have.
+    auto missingSettingsSidecar = manifest;
+    missingSettingsSidecar.settingsDigest = std::string(64, 'a');
     NeuralCachePromotion rejected{};
-    CHECK(!manager.PromoteRender(std::string(64, '8'), *second, missingSidecar, &rejected));
+    CHECK(!manager.PromoteRender(std::string(64, '8'), *second,
+                                 missingSettingsSidecar, &rejected));
     CHECK(rejected.stage == NeuralCachePromotion::Stage::SidecarDigest);
     CHECK_EQ(0u, rejected.attempts);
 }

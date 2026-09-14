@@ -66,7 +66,8 @@ struct NeuralCacheManifest {
     std::string guides;
     uint64_t jobId{};
     uint32_t historyResets{};
-    // Non-empty renders also authenticate receipt.json beside the payload.
+    // Required on schema-4 renders, which authenticate receipt.json beside the
+    // payload; empty on sources and on legacy schema-3 entries.
     std::string receiptDigest;
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;

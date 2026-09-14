@@ -689,9 +689,21 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
         return IsHexDigest(manifest.sourceDigest) && manifest.neuralDigest.empty() &&
                !manifest.feature18Created;
     }
+    // A render entry is handed back as verified neural output out of a
+    // directory the user can write to, and receipt.json is the only thing that
+    // vouches for how it was produced; accepting an entry without one serves a
+    // render on the strength of a manifest that merely claims to be verified.
+    // The digest was allowed to be empty because it arrived with the rest of
+    // schema 4, beside fields that really are optional - but no release ever
+    // wrote a schema-4 render without it: the render path builds the receipt,
+    // stages receipt.json and fails the render when it cannot, so an empty
+    // digest is a shape this player has never produced. Legacy schema-3 entries
+    // predate receipts and are required to carry no digest at all
+    // (CommonManifestFieldsValid); sources never carry one either.
     return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
            IsHexDigest(manifest.runtimeDigest) && manifest.feature18Created &&
            manifest.feature18ArmedBeforeCapture &&
+           (manifest.schema == kLegacySchema || IsHexDigest(manifest.receiptDigest)) &&
            manifest.nativeEvaluations == manifest.frameCount &&
            manifest.verifiedNeuralFrames == manifest.frameCount &&
            manifest.observedFeature18Evaluations > 0;
@@ -829,6 +841,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     if (!manifest->settingsDigest.empty() &&
         Sha256File(directory / L"neural-settings.ini") != manifest->settingsDigest)
         return std::nullopt;
+    // A reusable render always has a receipt digest, so the empty case below is
+    // only ever reached by sources and legacy schema-3 entries, which have no
+    // receipt to authenticate.
     if (!manifest->receiptDigest.empty() &&
         Sha256File(directory / L"receipt.json") != manifest->receiptDigest)
         return std::nullopt;
