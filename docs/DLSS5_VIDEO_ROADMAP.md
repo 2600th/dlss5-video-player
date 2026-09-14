@@ -58,9 +58,11 @@ SUPER - `direction=both, round-trip gate armed, global flow=on` - and four label
 clips rendered through the real neural path on the pre-gate tree and on this one
 move no metric by as much as one percentage point. The renders are bit-reproducible
 (`deterministic: true`, repeats identical to full precision), so those small deltas
-are signal rather than noise: the gate wins cell-flip rate and temporal sigma on the
-one clip with genuine disocclusion and loses false motion on the three whose motion
-is a filter parameter. It stays because it is a refusal with one-sided risk, not
+are signal rather than noise, and they do not line up behind the gate: on the one
+clip with genuine disocclusion it improves cell-flip rate and temporal sigma but
+*raises* false motion by 0.92 points, which the `intensity-0` control puts at
+13.5 % of the share attributable to the neural pass; false motion improves on one
+clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
@@ -249,9 +251,12 @@ phases above as a protocol v5 timeline, in the receipt and in one log line, so t
 acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
 the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
 99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
-and 1847 ms, feature 18 armed 680.5 and 641 ms. The spread matters - `neuralInit`
-varies by half a second between runs of the same binary - so the acceptance check
-needs several samples, not one. One estimate above is structurally wrong rather
+and 1847 ms, feature 18 armed 680.5 and 641 ms. The two are not a controlled pair
+- the second came from a different build of the same instrumentation on a
+different, segmented job, and `neuralInit` brackets the source open as well as NGX
+- so the 509 ms gap is not run-to-run variance, and neither figure is an
+acceptance number: that check needs several samples from one build on one clip.
+One estimate above is structurally wrong rather
 than merely off: the ReShade proxy does not cost 0.41 s beside the loader, because
 it *is* the loader's work - the proxy is the helper's `dxgi` import and resolves
 before the entry point, inside a `helperStart` that is 0.10 s in total. That 0.10 s

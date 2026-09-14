@@ -7,12 +7,14 @@ does it improve anything measurable, does the scene-cut over-reset found by the
 CPU sweep also happen in a real render, and what does the cold-start stack a
 neural toggle pays for actually cost per phase.
 
-Three results. The gate comes up at its top rung, and against the pre-gate tree it
-moves no metric by a percentage point - reproducibly, since the renders are
-bit-identical between repeats - so it is safe and unproven rather than a win. The
-over-reset is real in a real render: `history_resets = 6` on a clip with four hard
-cuts. And the helper side of the cold start is **2.1-2.6 s** over two runs, of
-which NGX init and feature arm are 95 % in both, which is the cost the
+Three results. The gate comes up at its top rung, and against the pre-gate tree no
+metric moves by a percentage point - reproducibly, since the renders are
+bit-identical between repeats, so the small deltas are signal. They do not favour
+it: on the one clip with real disocclusion it steadies the motion field but raises
+invented appearance by 0.92 points, and false motion improves on the fast pan
+alone. The over-reset is real in a real render: `history_resets = 6` on a clip with
+four hard cuts. And the helper side of the cold start is **2.1-2.6 s** over two
+renders, of which NGX init and feature arm are 95 % in both, which is the cost the
 persistent-helper item exists to remove.
 
 ## Environment
@@ -89,14 +91,18 @@ the harness's determinism digest exists to assert, so the deltas are signal.
 | pan-fast | 0.18074 → **0.17673** | 0.01230 → 0.01307 | −1.3496 → −1.2806 |
 
 Every delta is reproducible and every delta is small: 0.29 to 0.92 percentage
-points on false motion, 0.08 to 0.67 on flips, 0.016 to 0.107 on sigma. The signs
-are mixed. The gate wins both numbers it was argued for on `cuts-motion` - the
-only clip with genuine disocclusion, where flips fall 20 % relative - and loses
-false motion on the three clips whose "motion" is a filter parameter rather than a
-moving object. Note also what the false-motion metric is: output pixels on cells
-the source held static, so it answers "did the pass invent appearance" and not
-"did the vector field improve", and a zeroed vector changes what NR is given as
-much as a wrong one does.
+points on false motion, 0.08 to 0.67 on flips, 0.016 to 0.107 on sigma. No clip
+improves on all three, and no metric improves on all clips. Per clip: on
+`cuts-motion` - the only one with genuine disocclusion - flips fall 20 % relative
+and sigma improves, while false motion *rises* by 0.92 points; on `pan-fast` false
+motion is the one that falls and the other two drift the wrong way;
+`flash-exposure` gains sigma and loses the other two; `cuts-similar` loses all
+three. The single clip where the gate improves false motion is the fast pan, and
+the clip it was argued for improves the two motion-field numbers instead. Note
+also what the false-motion metric is: output pixels on cells the source held
+static, so it answers "did the pass invent appearance" and not "did the vector
+field improve", and a zeroed vector changes what NR is given as much as a wrong
+one does.
 
 **The scale to read those against is the carrier, not repeat variance.** The
 `intensity-0` control - the same tree and the same gate, with the model's
@@ -104,18 +110,22 @@ relighting at zero, so decode, guides, the feature-18 pass and the NVENC
 re-encode all still happen - reports false motion **0.09153** on `cuts-motion`,
 flips added **−0.00228** and sigma added **−3.4116** (PSNR 32.41 against
 baseline's 22.89). So of baseline's 0.16003, about 9.2 points are the carrier
-inventing appearance on static cells and about 6.8 are the neural pass itself. The
-gate's 0.92-point move is roughly an eighth of the part attributable to NR - small
-but not lost in the plumbing, which is why the verdict below is "unproven" rather
-than "no effect".
+inventing appearance on static cells and 6.85 are the neural pass itself. The
+gate's 0.92-point rise on that clip is 13.5 % of the share attributable to NR - so
+it is neither noise nor plumbing, and on the metric the item was argued for it
+moves the wrong way on the clip the item was argued for.
 
 **Decision: the gate stays, unchanged and unflagged.** It is a refusal - a cell
 the engine contradicts itself about emits no motion instead of a confident wrong
-one - so its risk is one-sided, and the clip with real occlusion is the clip it
-helps. It is not evidence of a quality win and must not be cited as one. What
-would settle it is real footage: grain, motion blur, a real dissolve, a camera
-that occludes. The corpus's only real-footage clip (`faces`) needs a fixture that
-is not on this machine.
+one - so it cannot introduce a vector that was not measured, and on the
+disocclusion clip it buys the two motion-field numbers (flips −20 % relative,
+sigma −0.107) that describe the field's stability. What it does not buy is less
+invented appearance: false motion rises on three of four clips, including that
+one. That is a real result and an uncomfortable one, and it is why this record
+refuses to call the gate a quality win. Settling it needs real footage - grain,
+motion blur, a real dissolve, a camera that occludes - and the corpus's only
+real-footage clip (`faces`) needs a fixture that is not on this machine. If it
+does not pay there either, the case for removing it is the honest next move.
 
 ## The scene-cut over-reset is real in a real render
 
