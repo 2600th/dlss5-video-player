@@ -74,9 +74,7 @@ void D3D12RendererDeleter::operator()(D3D12Renderer* renderer)const noexcept{
 }
 
 D3D12Renderer::~D3D12Renderer() {
-#if defined(D3D12_RENDERER_TESTING)
-    m_testOwnedResource.reset();
-#endif
+    if(m_testHooks)m_testHooks->ownedResource.reset();
     // The flow engine holds registered views of textures this object owns, so it has to
     // be torn down while the device and queue are still alive and only once the GPU has
     // stopped touching those surfaces. Member destruction order cannot express that:
@@ -931,15 +929,13 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     const uint64_t tightBytes64=m_captureFormat==CaptureFormat::Nv12
         ?pixels64+pixels64/2u:pixels64*4u;
     if(tightBytes64>std::numeric_limits<size_t>::max())return false;
-#if defined(D3D12_RENDERER_TESTING)
-    if(m_testCacheCapture){
+    if(m_testHooks&&m_testHooks->cacheCapture){
         const size_t tightBytes=static_cast<size_t>(tightBytes64);
         std::vector<uint8_t> bytes;
-        if(!m_testCacheCapture(bytes)||bytes.size()!=tightBytes)return false;
+        if(!m_testHooks->cacheCapture(bytes)||bytes.size()!=tightBytes)return false;
         capture.pixels=std::move(bytes);capture.width=m_outputW;capture.height=m_outputH;
         return true;
     }
-#endif
     // The synchronous form owns the whole ring, so it may only be used while nothing is
     // in flight. The offline job uses it for the first frame, whose evidence receipt loop
     // has to read a capture back before deciding whether to resubmit the same frame.
@@ -1209,21 +1205,16 @@ bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     if(m_gpuUnusable||slot>=FrameCount)return false;
     const uint64_t v=m_fenceValue+1;
     HRESULT signalResult=E_FAIL;
-#if defined(D3D12_RENDERER_TESTING)
-    if(m_testFrameSignal)signalResult=m_testFrameSignal(v);
+    if(m_testHooks&&m_testHooks->frameSignal)signalResult=m_testHooks->frameSignal(v);
     else
-#endif
     {
         if(!m_queue||!m_fence)return false;
         signalResult=m_queue->Signal(m_fence.Get(),v);
     }
     if(FAILED(signalResult)){
         HRESULT removedReason=S_OK;
-#if defined(D3D12_RENDERER_TESTING)
-        if(m_testDeviceRemovedReason)removedReason=m_testDeviceRemovedReason();
-        else
-#endif
-        if(m_device)removedReason=m_device->GetDeviceRemovedReason();
+        if(m_testHooks&&m_testHooks->deviceRemovedReason)removedReason=m_testHooks->deviceRemovedReason();
+        else if(m_device)removedReason=m_device->GetDeviceRemovedReason();
         m_lastFenceWaitResult=d3d12_renderer_detail::ClassifyFenceWaitFailure(
             d3d12_renderer_detail::FenceWaitResult::SignalFailed,
             [=]{return removedReason;});
@@ -1236,13 +1227,11 @@ bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
     return true;
 }
 d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(DWORD budgetMilliseconds){
-#if defined(D3D12_RENDERER_TESTING)
-    if(m_testWaitGPU){
-        const auto result=m_testWaitGPU();m_lastFenceWaitResult=result;
+    if(m_testHooks&&m_testHooks->waitGPU){
+        const auto result=m_testHooks->waitGPU();m_lastFenceWaitResult=result;
         if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)m_gpuUnusable=true;
         return result;
     }
-#endif
     if(!m_queue||!m_fence||!m_fenceEvent)return d3d12_renderer_detail::FenceWaitResult::Completed;
     const uint64_t v=++m_fenceValue;
     const auto result=d3d12_renderer_detail::WaitForGPUFenceDrain(

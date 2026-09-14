@@ -313,7 +313,7 @@ if(BUILD_TESTING)
     target_include_directories(PolicyTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     dlss_video_player_use_nvof(PolicyTests)
     target_compile_definitions(PolicyTests PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING D3D12_RENDERER_TESTING
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX YOUTUBE_RESOLVER_TESTING
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_directories(PolicyTests PRIVATE "${DLSS_LIB_DIR}")

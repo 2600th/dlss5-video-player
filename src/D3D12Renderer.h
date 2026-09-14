@@ -13,13 +13,31 @@
 #include "NgxSession.h"
 #include "OpticalFlowNvof.h"
 
-#ifdef D3D12_RENDERER_TESTING
 #include <functional>
+
 struct D3D12RendererTestAccess;
+
+// A resource whose destruction a test wants to observe, handed to the renderer
+// so the renderer's own teardown order releases it.
 struct D3D12RendererTestOwnedResource {
     virtual ~D3D12RendererTestOwnedResource()=default;
 };
-#endif
+
+// Substitutes for the GPU operations a test cannot perform: the fence wait and
+// signal, the device-removed reason, and the capture readback. A renderer holds
+// one of these only when something installed it, and no production renderer
+// does, so each site below falls through to the real call. They are grouped
+// behind one pointer rather than living as five members so that the class is
+// the same size in every translation unit - the five-member form made
+// sizeof(D3D12Renderer) depend on a macro - and so the whole test surface is
+// visible in one place.
+struct D3D12RendererTestHooks {
+    std::function<d3d12_renderer_detail::FenceWaitResult()> waitGPU;
+    std::function<HRESULT(uint64_t)> frameSignal;
+    std::function<HRESULT()> deviceRemovedReason;
+    std::function<bool(std::vector<uint8_t>&)> cacheCapture;
+    std::unique_ptr<D3D12RendererTestOwnedResource> ownedResource;
+};
 
 class D3D12Renderer;
 struct D3D12RendererDeleter {
@@ -437,12 +455,7 @@ private:
         d3d12_renderer_detail::FenceWaitResult::Completed;
     DLSSBackend m_dlss;
 
-#ifdef D3D12_RENDERER_TESTING
     friend struct D3D12RendererTestAccess;
-    std::function<d3d12_renderer_detail::FenceWaitResult()> m_testWaitGPU;
-    std::function<HRESULT(uint64_t)> m_testFrameSignal;
-    std::function<HRESULT()> m_testDeviceRemovedReason;
-    std::function<bool(std::vector<uint8_t>&)> m_testCacheCapture;
-    std::unique_ptr<D3D12RendererTestOwnedResource> m_testOwnedResource;
-#endif
+    // Null in every production renderer; see D3D12RendererTestHooks.
+    std::unique_ptr<D3D12RendererTestHooks> m_testHooks;
 };
