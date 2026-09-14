@@ -9,6 +9,7 @@ its cache or the committed runtime.
 python tools/benchmark/corpus.py                       # build-upscaling/benchmark-corpus/*.mkv + manifest.json
 python tools/benchmark/run.py --clips text-subtitles cuts-motion --profiles baseline mv-off --repeats 3
 python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.ABLATION
+python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
 python tools/benchmark/analyze.py                      # build-upscaling/benchmark-work/analysis/report.md
 python tools/benchmark/blind.py --pairs-per-clip 3     # sealed A/B pairs for one-pass vs two-pass
 ```
@@ -24,9 +25,9 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 |---|---|
 | `corpus.py` | Deterministic FFV1 corpus generator; `--check` re-hashes an existing corpus |
 | `run.py` | Profiles, ablation matrix, two-pass, preflight receipts, worker launches, NVML sampling |
-| `analyze.py` | Per-run metrics, medians per clip/profile, two-pass deltas, `report.md` |
+| `analyze.py` | Per-run metrics, medians per clip/profile, guide and two-pass deltas, cut scores, `report.md` |
 | `blind.py` | Randomized A/B stills + 3 s excerpts with a sealed `key.json`; `--score` tallies a ballot |
-| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v3 decoder (progress, result, preflight, segment) |
+| `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v4 decoder (progress, result, preflight, segment) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
 | `build-upscaling/benchmark-work/runtime-snapshot/` | Optional frozen copy of `Release/neural-runtime`; used in preference to `Release/` so a concurrent rebuild cannot change the worker mid-benchmark |
 | `build-upscaling/benchmark-work/profiles/<profile>/` | Isolated runtime clone, `ffmpeg.exe`/`ffprobe.exe` hard links, `profile.json`, `preflight.json` |
@@ -62,6 +63,13 @@ A profile is `{guides, overrides, passes}`:
 `preset-1..3`, `style-natural`, `style-cinematic`, `two-pass`. Custom sets:
 `--profile-file profiles.json` with `{name: {guides, overrides, passes, description}}`.
 
+The roadmap's depth A/B is `--profiles depth-constant depth-proxy`; both name guide
+strings the matrix already carries (`depth=0` *is* the constant 0.75 field), so they
+resolve to `depth-off` and `baseline` and reuse their run directories rather than
+rendering the same configuration twice. `depth-of` is refused by name: `--guides`
+expresses only `mv=0|1,depth=0|1`, so depth from the NVOFA structure cannot be
+requested. `--list-profiles` prints the matrix, the two aliases and that refusal.
+
 Every profile runs `--neural-preflight` once; the Feature 18 probe receipt (GPU,
 driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, feature18
 creation/evaluation evidence, RenoDX "active settings" line) is stored in
@@ -82,7 +90,12 @@ generation on top of the model's effect.
 ## Metrics (`analyze.py`)
 
 All comparisons decode both files to rgb24 with FFmpeg and stream frame pairs;
-"sampled" metrics use every `--sample-every` (default 15) frames.
+"sampled" metrics use every `--sample-every` (default 15) frames, while `flicker+`,
+`sigma+`, `false mv`, `flips+` and the cut test always see every consecutive pair.
+`sigma+`, `false mv`, `flips+` and the cut test use the guide generator's own analysis
+grid and thresholds (`src/TemporalGuides.cpp`: at 30 fps 160×90 cells of 12×12 source
+pixels at 1080p, normalized Rec.709 cell luma), and are withheld whole - `null` plus a
+`temporal_withheld` reason - when the output frame count does not match the source.
 
 | Metric | Definition |
 |---|---|
@@ -92,6 +105,10 @@ All comparisons decode both files to rgb24 with FFmpeg and stream frame pairs;
 | gpu ms p50/p95/max, guide ms, capture ms, VRAM local | copied from the worker result (GPU timestamp queries around DLSS evaluate, CPU guide generation, readback/capture, `IDXGIAdapter3` local-budget peak). `0` means the worker build does not report it |
 | VRAM total | NVML `nvmlDeviceGetMemoryInfo.used` peak across the whole GPU during the run (every process, including the desktop) |
 | flicker+ | mean over frames of mean `|Y_t - Y_{t-1}|` for the output minus the same for the source, skipping manifest cut frames; positive = the neural pass added temporal change, negative = it smoothed |
+| sigma+ | output minus source per-pixel temporal standard deviation of luma inside a shot (frames between manifest cuts), meaned over pixels and frame-weighted over shots, in 8-bit luma levels; `temporal_sigma_p99_*` in `metrics.json` is the p99 of the same map. Localized shimmer a frame-global mean averages away moves this |
+| false mv | fraction of the cells the source held static across a consecutive pair (cell luma change ≤ 2/255) whose output changed by more than the same tolerance: motion the pass invented. The NVENC carrier sets a floor; `intensity-0` measures it |
+| flips+ | output minus source fraction of cells whose moving/static verdict changes from one consecutive pair to the next - instability of the motion field rather than of the pixels |
+| cut P/R/F1 | the generator's own cut test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, debounced over 0.6 s) run over each file's cell grids and matched to the manifest's hard cuts at ±1 frame, source and output. `cuts.*_evidence` in `metrics.json` records every firing frame with residual, overlap, arm and suppression |
 | dE | mean CIE76 ΔE*ab between output and source (OpenCV Lab, L rescaled to 0-100) |
 | RGB shift | mean per-channel (output − source) in `metrics.json` |
 | PSNR / SSIM | RGB PSNR and grayscale Gaussian SSIM against the lossless source. A relighting model is expected to move these; use them as a change magnitude, not a pass/fail |
@@ -99,7 +116,10 @@ All comparisons decode both files to rgb24 with FFmpeg and stream frame pairs;
 | face cos | resnet18 (ImageNet, penultimate layer) cosine between the source face crop and the same crop of the output; boxes from OpenCV Haar frontal+profile cascades on the source. `faces.output_drift_mean` in `metrics.json` is the frame-to-frame embedding drift of the output versus the source's own drift |
 | resets | `history_resets` from the worker result |
 
-Two-pass rows in `report.md` list metric deltas against `baseline` on the same clip.
+Two-pass rows in `report.md` list metric deltas against `baseline` on the same clip,
+and any profile whose guide string differs from `baseline`'s gets the same deltas in a
+guide A/B table. `report.md` also carries a per-run cut table and lists any run whose
+temporal metrics were withheld.
 
 ## Blind A/B (`blind.py`)
 

@@ -13,8 +13,13 @@ software H.264 re-encode) as the source of pass 2 at reduced strength. The
 result flags ``pass2_reencoded_input=True`` because the second pass never sees
 the lossless corpus frames.
 
+The depth A/B the roadmap asks for is `depth-constant` versus `depth-proxy`; both are
+names for guide strings the ablation matrix already carries, so they resolve to the
+profiles that express them instead of rendering the same configuration twice.
+
     python tools/benchmark/run.py --clips text-subtitles cuts-motion --profiles baseline mv-off --repeats 1
     python tools/benchmark/run.py --ablation            # every profile in ABLATION
+    python tools/benchmark/run.py --profiles depth-constant depth-proxy   # depth A/B
     python tools/benchmark/run.py --list-profiles
 """
 from __future__ import annotations
@@ -61,6 +66,37 @@ ABLATION = {
     "style-cinematic": profile(overrides={"NRStyle": "2"}, description="style Cinematic"),
     "two-pass": profile(passes=2, description="baseline, then pass 2 at NRIntensity 0.75 over the pass-1 output"),
 }
+
+
+# The roadmap's depth A/B under the names it uses. `--guides` expresses exactly
+# mv=0|1,depth=0|1 (GuideControls.h ParseGuideControls) and a disabled depth guide IS the
+# constant 0.75 field, so these two names are rows of the matrix above and resolve to
+# them; rendering the identical configuration under a second name would only split the
+# determinism grouping in the analysis.
+ALIASES = {"depth-proxy": "baseline", "depth-constant": "depth-off"}
+
+# The third depth profile the roadmap names has no argument behind it. Refusing it by
+# name beats letting it read as a typo, and beats inventing a player flag for it.
+UNAVAILABLE = {"depth-of": "depth would have to come from the gated NVOFA structure, and --guides "
+                           "selects only mv=0|1,depth=0|1 - there is no depth source to ask for"}
+
+
+def resolve(names: list[str], profiles: dict, parser: argparse.ArgumentParser) -> list[str]:
+    """Maps requested profile names onto the profiles that can express them."""
+    resolved = []
+    for name in names:
+        if name in profiles:
+            resolved.append(name)
+            continue
+        if name in UNAVAILABLE:
+            parser.error(f"profile {name} cannot be run: {UNAVAILABLE[name]}")
+        target = ALIASES.get(name)
+        if target not in profiles:
+            parser.error(f"unknown profile {name}; available: {list(profiles) + list(ALIASES)}")
+        print(f"{name} is {target} ({profiles[target]['guides']}); its runs land under "
+              f"runs/<clip>__{target}__<rep>", flush=True)
+        resolved.append(target)
+    return list(dict.fromkeys(resolved))
 
 
 class GpuMonitor:
@@ -368,6 +404,10 @@ def main() -> int:
         for name, spec in profiles.items():
             print(f"{name:16s} guides={spec['guides']} passes={spec['passes']} overrides={spec['overrides']} "
                   f"- {spec['description']}")
+        for name, target in ALIASES.items():
+            print(f"{name:16s} -> {target}")
+        for name, reason in UNAVAILABLE.items():
+            print(f"{name:16s} unavailable: {reason}")
         return 0
     manifest = load_manifest(args.corpus)
     clips = {c["name"]: c for c in manifest["clips"]}
@@ -375,10 +415,7 @@ def main() -> int:
     unknown = [c for c in wanted if c not in clips]
     if unknown:
         parser.error(f"unknown clips {unknown}; available: {list(clips)}")
-    names = list(profiles) if args.ablation else (args.profiles or ["baseline"])
-    unknown = [n for n in names if n not in profiles]
-    if unknown:
-        parser.error(f"unknown profiles {unknown}; available: {list(profiles)}")
+    names = list(profiles) if args.ablation else resolve(args.profiles or ["baseline"], profiles, parser)
     RUNS.mkdir(parents=True, exist_ok=True)
     failures = 0
     for rep in range(1, args.repeats + 1):

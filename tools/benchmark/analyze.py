@@ -16,12 +16,27 @@ Per run (all frames decoded to rgb24 through FFmpeg, streamed, never cached in R
                 (ImageNet, penultimate layer) cosine similarity of the output
                 crop vs the source crop, and frame-to-frame drift of the
                 output-crop embedding versus the source's own drift
+  sigma         per-pixel temporal standard deviation of luma inside a shot
+                (the frames between manifest cuts), meaned over pixels, output
+                and source side by side: the localized shimmer a frame-global
+                mean averages away
+  motion field  on the guide generator's own analysis grid, the fraction of
+                cells the source held static that the output moved anyway
+                (motion the pass invented) and the fraction of cells whose
+                moving/static verdict flips between consecutive pairs
+  cuts          precision/recall/F1 of the generator's own cut test against the
+                manifest hard-cut indices at +/-1 frame, on both streams
   two-pass      metric deltas of pass-2 profiles versus their single-pass
                 counterpart on the same clip
 
+--sample-every strides the dE/PSNR/SSIM/OCR/face block alone. Sigma, the motion field
+and the cut test always see every consecutive pair, and all three are withheld whole
+when the output frame count does not match the source, because frame i of one file is
+then not frame i of the other.
+
 Writes analysis/analysis.json, analysis/report.md and per-run metrics.json.
 
-    python tools/benchmark/analyze.py [--sample-every N] [--no-ocr] [--no-faces]
+    python tools/benchmark/analyze.py [--corpus DIR] [--runs DIR] [--sample-every N] [--no-ocr] [--no-faces]
 """
 from __future__ import annotations
 
@@ -36,9 +51,20 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from common import ANALYSIS, FrameReader, RUNS, framemd5, load_manifest, run_dirs, sequence_digest, write_json
+from common import (ANALYSIS, CORPUS, FrameReader, RUNS, framemd5, load_manifest, run_dirs, sequence_digest,
+                    write_json)
 
 SAMPLE_EVERY = 15
+
+# The grid metrics mirror src/TemporalGuides.cpp instead of inventing a geometry: the
+# analysis grid, the stratified downsample, the normalized Rec.709 luma, the cut
+# thresholds and the weak-arm debounce are all the generator's own. A cell here is the
+# cell the worker solves a vector for, so a threshold swept here transfers unchanged.
+CELL_TOLERANCE = 2 / 255  # "unchanged": two 8-bit levels of a cell's normalized luma
+CUT_RESIDUAL_STRONG, CUT_RESIDUAL_WEAK, CUT_HISTOGRAM_OVERLAP = 0.30, 0.10, 0.85
+CUT_MATCH_FRAMES = 1
+MIN_SHOT_FRAMES = 3
+REC709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32) / 255
 
 
 def ssim_gray(a: np.ndarray, b: np.ndarray) -> float:
@@ -60,6 +86,219 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
 
 def luma(rgb: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+
+
+def analysis_grid(width: int, height: int, fps: float) -> tuple[int, int]:
+    """TemporalGuideGenerator::AnalysisGrid - the cell field the guide solver works on."""
+    high_fps = fps >= 45.0
+    gw = min(max(width // (14 if high_fps else 10), 96), 128 if high_fps else 160)
+    return gw, max(48 if high_fps else 54, gw * height // width)
+
+
+class GuideGrid:
+    """Reduces a frame to one Rec.709 luma value per analysis cell.
+
+    Four stratified samples per cell, which is DownsampleLuma's own scheme, so a verdict
+    about a cell here is a verdict about the cell the worker estimates a vector for.
+    """
+
+    def __init__(self, width: int, height: int, fps: float):
+        self.gw, self.gh = analysis_grid(width, height, fps)
+        self.cell_w, self.cell_h = width / self.gw, height / self.gh
+        self.rows, self.cols = self.taps(height, self.gh), self.taps(width, self.gw)
+
+    @staticmethod
+    def taps(size: int, cells: int) -> tuple[np.ndarray, np.ndarray]:
+        first = np.arange(cells) * size // cells
+        last = np.maximum(first + 1, (np.arange(cells) + 1) * size // cells)
+        return first, np.minimum(size - 1, (first + last) // 2)
+
+    def cells(self, rgb: np.ndarray) -> np.ndarray:
+        return sum(rgb[np.ix_(ys, xs)] @ REC709 for ys in self.rows for xs in self.cols) * 0.25
+
+
+def global_residual(cur: np.ndarray, prev: np.ndarray) -> float:
+    """EstimateFlow's whole-frame translation cost, which is the residual a cut is judged on.
+
+    The cheapest of the 225 shifts within +/-7 cells by mean |dY| over a 4-cell lattice,
+    with the same quadratic distance penalty and the same refusal to prefer a marginal
+    shift over standing still.
+    """
+    gh, gw = cur.shape
+    rows, cols = np.arange(4, gh - 4, 4), np.arange(4, gw - 4, 4)
+    if not rows.size or not cols.size:
+        return 0.0
+    patch = cur[np.ix_(rows, cols)]
+    best = zero = None
+    shifted = False
+    for dy in range(-7, 8):
+        keep_y = (rows + dy >= 0) & (rows + dy < gh)
+        for dx in range(-7, 8):
+            keep_x = (cols + dx >= 0) & (cols + dx < gw)
+            cost = 0.0 if not (keep_y.any() and keep_x.any()) else float(np.abs(
+                patch[np.ix_(keep_y, keep_x)] - prev[np.ix_(rows[keep_y] + dy, cols[keep_x] + dx)]).mean())
+            cost += 0.0015 * (dx * dx + dy * dy)
+            if dx == 0 and dy == 0:
+                zero = cost
+            if best is None or cost < best:
+                best, shifted = cost, (dx, dy) != (0, 0)
+    return zero if shifted and zero - best < 0.012 else best
+
+
+def histogram_overlap(cur: np.ndarray, prev: np.ndarray) -> float:
+    """LumaHistogramIntersection: normalized 32-bin intersection of two cell-luma histograms."""
+    counts = [np.bincount(np.clip(grid.ravel() * 32, 0, 31).astype(np.int32), minlength=32)
+              for grid in (cur, prev)]
+    return float(np.minimum(*counts).sum() / cur.size)
+
+
+class CutDetector:
+    """ClassifySceneCut and its weak-arm debounce, fed one stream's cell grids.
+
+    Frame 0 is the generator's FirstFrame reset rather than a detection; every later frame
+    is judged against its predecessor the way Generate does it, so ``cuts`` is the sequence
+    of history resets image evidence alone would produce on this stream, and ``evidence``
+    is the labelled set a threshold sweep needs.
+    """
+
+    def __init__(self, fps: float):
+        self.min_frames = max(2, round(0.6 * fps)) if fps > 0 else 2
+        self.since_cut, self.accepted_any = 0, False
+        self.cuts: list[int] = []
+        self.evidence: list[dict] = []
+
+    def feed(self, index: int, cur: np.ndarray, prev: np.ndarray) -> None:
+        self.since_cut += 1
+        residual, overlap = global_residual(cur, prev), histogram_overlap(cur, prev)
+        strong = residual > CUT_RESIDUAL_STRONG
+        weak = not strong and residual > CUT_RESIDUAL_WEAK and overlap < CUT_HISTOGRAM_OVERLAP
+        if not (strong or weak):
+            return
+        suppressed = weak and self.accepted_any and self.since_cut < self.min_frames
+        self.evidence.append(dict(frame=index, residual=residual, histogram_overlap=overlap,
+                                  arm="residual" if strong else "histogram", suppressed=suppressed))
+        if not suppressed:
+            self.cuts.append(index)
+            self.since_cut, self.accepted_any = 0, True
+
+
+def cut_scores(detected: list[int], truth: list[int], tolerance: int = CUT_MATCH_FRAMES) -> dict:
+    """Precision/recall/F1 against the manifest's hard-cut indices.
+
+    At most one detection matches each ground-truth cut, within ``tolerance`` frames of it.
+    A cut-free clip has no recall to report and its detection count is its false positives.
+    """
+    spare = sorted(detected)
+    matched = 0
+    for cut in sorted(truth):
+        near = [d for d in spare if abs(d - cut) <= tolerance]
+        if near:
+            spare.remove(min(near, key=lambda d: (abs(d - cut), d)))
+            matched += 1
+    precision = matched / len(detected) if detected else None
+    recall = matched / len(truth) if truth else None
+    f1 = None if precision is None or recall is None else \
+        (0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall))
+    return dict(detected=sorted(detected), matched=matched, missed=len(truth) - matched,
+                false_positives=spare, precision=precision, recall=recall, f1=f1)
+
+
+class ShotSigma:
+    """Per-pixel temporal standard deviation of luma, accumulated one shot at a time.
+
+    A shot is the run of frames between manifest cuts: across a cut a pixel's spread is the
+    edit and not the pass, so the sums are flushed at every cut and never span one. Only a
+    running sum and sum of squares are held, in float64 because at float32 a shot's variance
+    disappears into the rounding of E[x^2] - E[x]^2.
+    """
+
+    def __init__(self):
+        self.total = self.squares = None
+        self.frames = 0
+        self.shots: list[tuple[int, float, float]] = []
+
+    def add(self, y: np.ndarray) -> None:
+        if self.total is None:
+            self.total, self.squares = np.zeros(y.shape, np.float64), np.zeros(y.shape, np.float64)
+        self.total += y
+        self.squares += np.square(y, dtype=np.float64)
+        self.frames += 1
+
+    def cut(self) -> None:
+        """Ends the current shot. Shots too short for a standard deviation to mean anything
+        are dropped rather than reported as suspiciously low sigma."""
+        if self.frames >= MIN_SHOT_FRAMES:
+            mean = self.total / self.frames
+            sigma = np.sqrt(np.maximum(self.squares / self.frames - mean * mean, 0.0))
+            self.shots.append((self.frames, float(sigma.mean()), float(np.percentile(sigma, 99))))
+        if self.total is not None:
+            self.total.fill(0.0)
+            self.squares.fill(0.0)
+        self.frames = 0
+
+    def result(self) -> tuple[float, float] | None:
+        """Frame-weighted mean over shots of the sigma map's mean and of its p99."""
+        self.cut()
+        if not self.shots:
+            return None
+        weight = sum(n for n, _, _ in self.shots)
+        return (sum(n * mean for n, mean, _ in self.shots) / weight,
+                sum(n * p99 for n, _, p99 in self.shots) / weight)
+
+
+class MotionField:
+    """Per-cell motion verdicts of the output against the source, on the guide grid.
+
+    A cell is moving when its cell luma changed by more than CELL_TOLERANCE across a
+    consecutive frame pair. Two numbers come out of that which a frame-global mean cannot
+    produce: the fraction of the cells the source held static that the output moved anyway,
+    which is motion the pass invented rather than carried, and the fraction of cells whose
+    verdict changes from one pair to the next, which is the instability of the motion field
+    itself rather than of the pixels - a threshold only becomes visible once it oscillates.
+    Pairs that span a manifest cut are excluded from both; the cut test is not, because
+    those pairs are what it exists to find.
+    """
+
+    def __init__(self, width: int, height: int, fps: float, cuts: set[int]):
+        self.grid = GuideGrid(width, height, fps)
+        self.cuts = cuts
+        self.detect_source, self.detect_output = CutDetector(fps), CutDetector(fps)
+        self.static = self.invented = self.pairs = 0
+        self.flips_source = self.flips_output = self.transitions = 0
+        self.previous = self.verdicts = None
+
+    def add(self, index: int, source: np.ndarray, output: np.ndarray) -> None:
+        cells = (self.grid.cells(source), self.grid.cells(output))
+        if self.previous is None:
+            self.previous = cells
+            return
+        self.detect_source.feed(index, cells[0], self.previous[0])
+        self.detect_output.feed(index, cells[1], self.previous[1])
+        if index in self.cuts:
+            self.previous, self.verdicts = cells, None
+            return
+        moving = tuple(np.abs(now - was) > CELL_TOLERANCE for now, was in zip(cells, self.previous))
+        static = ~moving[0]
+        self.static += int(static.sum())
+        self.invented += int((static & moving[1]).sum())
+        self.pairs += 1
+        if self.verdicts is not None:
+            self.flips_source += int((moving[0] != self.verdicts[0]).sum())
+            self.flips_output += int((moving[1] != self.verdicts[1]).sum())
+            self.transitions += 1
+        self.previous, self.verdicts = cells, moving
+
+    def result(self) -> dict:
+        cells = self.grid.gw * self.grid.gh
+        rate = lambda flips: flips / (self.transitions * cells) if self.transitions else None
+        return dict(grid=[self.grid.gw, self.grid.gh],
+                    cell_pixels=[round(self.grid.cell_w, 2), round(self.grid.cell_h, 2)],
+                    tolerance=CELL_TOLERANCE, pairs=self.pairs, cells=cells, static_cells=self.static,
+                    invented_cells=self.invented,
+                    false_motion_rate=self.invented / self.static if self.static else None,
+                    transitions=self.transitions, flip_rate_source=rate(self.flips_source),
+                    flip_rate_output=rate(self.flips_output),
+                    flip_rate_added=rate(self.flips_output - self.flips_source))
 
 
 def delta_e(a: np.ndarray, b: np.ndarray) -> float:
@@ -142,7 +381,8 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                    processing_fps=result["processing_fps"], timing=result["timing"], nvml=result["nvml"],
                    history_resets=result["result"].get("history_resets"),
                    frame_retries=result["result"].get("frame_retries"),
-                   pass2_reencoded_input=result.get("pass2_reencoded_input", False))
+                   pass2_reencoded_input=result.get("pass2_reencoded_input", False),
+                   guides=result.get("guides", ""))
     if not metrics["ok"]:
         return metrics
     output = Path(result["output"])
@@ -154,10 +394,20 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
     src, out = FrameReader(Path(result["source"]), w, h), FrameReader(output, w, h)
     flick_src, flick_out, de, rgb_delta, psnrs, ssims = [], [], [], [], [], []
     ocr_rows, face_rows = [], []
+    # The pair metrics ignore sample_every on purpose: a stride would measure a different
+    # clip's worth of motion under the same name. Sampling stays inside the block below.
+    field = MotionField(w, h, clip["fps"], cuts)
+    sigma_src, sigma_out = ShotSigma(), ShotSigma()
     prev_src_y = prev_out_y = None
     prev_src_emb = prev_out_emb = None
     for index, (s, o) in enumerate(zip(src, out)):
         sy, oy = luma(s), luma(o)
+        if index in cuts:
+            sigma_src.cut()
+            sigma_out.cut()
+        sigma_src.add(sy)
+        sigma_out.add(oy)
+        field.add(index, s, o)
         if prev_src_y is not None and index not in cuts:
             flick_src.append(float(np.abs(sy - prev_src_y).mean()))
             flick_out.append(float(np.abs(oy - prev_out_y).mean()))
@@ -200,6 +450,30 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
         psnr_mean=statistics.fmean(psnrs) if psnrs else None, psnr_min=min(psnrs) if psnrs else None,
         ssim_mean=statistics.fmean(ssims) if ssims else None, ssim_min=min(ssims) if ssims else None,
         sampled_frames=len(psnrs))
+    sigma_source, sigma_output = sigma_src.result(), sigma_out.result()
+    if not metrics["frame_count_matches_source"]:
+        metrics.update(temporal_sigma_source=None, temporal_sigma_output=None, temporal_sigma_added=None,
+                       temporal_sigma_p99_source=None, temporal_sigma_p99_output=None, temporal_sigma_shots=0,
+                       motion_field=None, cuts=None,
+                       temporal_withheld=f"output has {len(hashes)} frames against the source's "
+                                         f"{clip['frames']}, so consecutive pairs are not aligned")
+    else:
+        worker = result["result"]
+        metrics.update(
+            temporal_sigma_source=sigma_source[0] if sigma_source else None,
+            temporal_sigma_output=sigma_output[0] if sigma_output else None,
+            temporal_sigma_added=(sigma_output[0] - sigma_source[0]) if sigma_source and sigma_output else None,
+            temporal_sigma_p99_source=sigma_source[1] if sigma_source else None,
+            temporal_sigma_p99_output=sigma_output[1] if sigma_output else None,
+            temporal_sigma_shots=len(sigma_src.shots), motion_field=field.result(),
+            cuts=dict(ground_truth=sorted(cuts), tolerance_frames=CUT_MATCH_FRAMES,
+                      source=cut_scores(field.detect_source.cuts, sorted(cuts)),
+                      output=cut_scores(field.detect_output.cuts, sorted(cuts)),
+                      source_evidence=field.detect_source.evidence,
+                      output_evidence=field.detect_output.evidence,
+                      worker_accepted_strong=worker.get("accepted_strong_cuts"),
+                      worker_accepted_weak=worker.get("accepted_weak_cuts"),
+                      worker_suppressed=worker.get("suppressed_cuts")))
     if ocr_rows:
         metrics.update(ocr=dict(frames=ocr_rows,
                                 source_ratio_mean=statistics.fmean(r["source_ratio"] for r in ocr_rows),
@@ -225,28 +499,47 @@ def fmt(value, digits=3):
     return str(value)
 
 
-def summarize(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+def median_of(runs: list[dict], *path) -> float | None:
+    """Median over repeats of a metric named by a path through possibly absent dicts."""
+    values = []
+    for run in runs:
+        value = run
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if value is not None:
+            values.append(value)
+    return statistics.median(values) if values else None
+
+
+def summarize(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     groups = defaultdict(list)
     for r in rows:
         if r["ok"]:
             groups[(r["clip"], r["profile"])].append(r)
     summary = []
     for (clip, prof), runs in sorted(groups.items()):
-        med = lambda key: statistics.median(r[key] for r in runs if r.get(key) is not None) \
-            if any(r.get(key) is not None for r in runs) else None
-        timing = lambda key: statistics.median(r["timing"][key] for r in runs if r["timing"].get(key) is not None) \
-            if any(r["timing"].get(key) is not None for r in runs) else None
+        med = lambda *path: median_of(runs, *path)
         summary.append(dict(
-            clip=clip, profile=prof, repeats=len(runs), passes=runs[0]["passes"],
+            clip=clip, profile=prof, guides=runs[0].get("guides", ""), repeats=len(runs),
+            passes=runs[0]["passes"],
             deterministic=len({r["output_digest"] for r in runs}) == 1 if len(runs) > 1 else None,
             wall_seconds=med("wall_seconds"), end_to_end_fps=med("end_to_end_fps"),
             processing_fps=med("processing_fps"),
-            neural_gpu_ms_p50=timing("neural_gpu_ms_p50"), neural_gpu_ms_p95=timing("neural_gpu_ms_p95"),
-            neural_gpu_ms_max=timing("neural_gpu_ms_max"), guide_ms_mean=timing("guide_ms_mean"),
-            capture_ms_mean=timing("capture_ms_mean"), peak_local_vram_mib=timing("peak_local_vram_mib"),
+            neural_gpu_ms_p50=med("timing", "neural_gpu_ms_p50"),
+            neural_gpu_ms_p95=med("timing", "neural_gpu_ms_p95"),
+            neural_gpu_ms_max=med("timing", "neural_gpu_ms_max"), guide_ms_mean=med("timing", "guide_ms_mean"),
+            capture_ms_mean=med("timing", "capture_ms_mean"),
+            peak_local_vram_mib=med("timing", "peak_local_vram_mib"),
             nvml_total_used_peak_mib=statistics.median(r["nvml"].get("nvml_total_used_peak_mib") or 0 for r in runs),
             flicker_added=med("flicker_added"), delta_e_mean=med("delta_e_mean"), psnr_mean=med("psnr_mean"),
             ssim_mean=med("ssim_mean"),
+            temporal_sigma_source=med("temporal_sigma_source"),
+            temporal_sigma_output=med("temporal_sigma_output"), temporal_sigma_added=med("temporal_sigma_added"),
+            temporal_sigma_p99_output=med("temporal_sigma_p99_output"),
+            false_motion_rate=med("motion_field", "false_motion_rate"),
+            cell_flip_output=med("motion_field", "flip_rate_output"),
+            cell_flip_added=med("motion_field", "flip_rate_added"),
+            cut_f1_source=med("cuts", "source", "f1"), cut_f1_output=med("cuts", "output", "f1"),
             ocr_output=statistics.median(r["ocr"]["output_ratio_mean"] for r in runs) if runs[0].get("ocr") else None,
             ocr_source=statistics.median(r["ocr"]["source_ratio_mean"] for r in runs) if runs[0].get("ocr") else None,
             face_cosine=statistics.median(r["faces"]["source_vs_output_cosine_mean"] for r in runs)
@@ -255,30 +548,40 @@ def summarize(rows: list[dict]) -> tuple[list[dict], list[dict]]:
             if runs[0].get("faces") else None,
             history_resets=med("history_resets")))
     by_key = {(s["clip"], s["profile"]): s for s in summary}
-    two_pass = []
+    keys = ("flicker_added", "temporal_sigma_added", "temporal_sigma_output", "false_motion_rate",
+            "cell_flip_added", "cut_f1_output", "delta_e_mean", "psnr_mean", "ssim_mean", "ocr_output",
+            "face_cosine", "end_to_end_fps")
+    two_pass, guide_ab = [], []
     for s in summary:
-        if s["passes"] != 2:
-            continue
         base = by_key.get((s["clip"], "baseline"))
-        if not base:
+        if not base or s["profile"] == "baseline":
             continue
-        two_pass.append(dict(clip=s["clip"], profile=s["profile"], versus="baseline", **{
-            f"delta_{k}": (s[k] - base[k]) if s[k] is not None and base[k] is not None else None
-            for k in ("flicker_added", "delta_e_mean", "psnr_mean", "ssim_mean", "ocr_output", "face_cosine",
-                      "end_to_end_fps")}))
-    return summary, two_pass
+        delta = {f"delta_{k}": (s[k] - base[k]) if s[k] is not None and base[k] is not None else None
+                 for k in keys}
+        row = dict(clip=s["clip"], profile=s["profile"], versus="baseline", **delta)
+        if s["passes"] == 2:
+            two_pass.append(row)
+        elif s["guides"] != base["guides"]:
+            guide_ab.append(dict(row, guides=s["guides"]))
+    return summary, two_pass, guide_ab
 
 
-def report(summary: list[dict], two_pass: list[dict], rows: list[dict]) -> str:
+def report(summary: list[dict], two_pass: list[dict], guide_ab: list[dict], rows: list[dict]) -> str:
     lines = ["# Neural benchmark report", "",
-             "Per clip/profile medians over repeats. `flicker_added` = output minus source mean |dY| "
-             "(cut frames excluded); `dE` = mean CIE76 in CIELAB vs source; PSNR/SSIM vs the lossless source "
+             "Per clip/profile medians over repeats. `flicker+` = output minus source mean |dY| "
+             "(cut frames excluded); `sigma+` = output minus source per-pixel temporal standard deviation "
+             "inside a shot, in 8-bit luma levels; `false mv` = fraction of the cells the source held static "
+             "that the output moved anyway; `flips+` = output minus source fraction of cells whose "
+             "moving/static verdict changes from one pair to the next; `cut F1` = the generator's own cut test "
+             "on the output against the manifest's hard cuts at +/-1 frame; `dE` = mean CIE76 in CIELAB vs "
+             "source; PSNR/SSIM vs the lossless source "
              "(low values on a strong relight are expected, not failures); OCR = char-level ratio vs manifest "
              "strings (output | source); VRAM = worker peak local budget (receipt) | NVML whole-GPU peak; "
              "wall s = all passes, e2e fps = final pass only.", "",
              "| clip | profile | n | det | wall s | e2e fps | proc fps | gpu ms p50/p95/max | guide ms | capture ms "
-             "| VRAM MiB local|total | flicker+ | dE | PSNR | SSIM | OCR out|src | face cos | resets |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| VRAM MiB local|total | flicker+ | sigma+ | false mv | flips+ | cut F1 | dE | PSNR | SSIM "
+             "| OCR out|src | face cos | resets |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in summary:
         lines.append("| " + " | ".join([
             s["clip"], s["profile"], str(s["repeats"]), fmt(s["deterministic"]), fmt(s["wall_seconds"], 1),
@@ -287,20 +590,65 @@ def report(summary: list[dict], two_pass: list[dict], rows: list[dict]) -> str:
             f"{fmt(s['neural_gpu_ms_p50'], 2)}/{fmt(s['neural_gpu_ms_p95'], 2)}/{fmt(s['neural_gpu_ms_max'], 2)}",
             fmt(s["guide_ms_mean"], 2), fmt(s["capture_ms_mean"], 2),
             f"{fmt(s['peak_local_vram_mib'], 0)}|{fmt(s['nvml_total_used_peak_mib'], 0)}",
-            fmt(s["flicker_added"]), fmt(s["delta_e_mean"], 2), fmt(s["psnr_mean"], 2), fmt(s["ssim_mean"], 4),
+            fmt(s["flicker_added"]), fmt(s["temporal_sigma_added"]), fmt(s["false_motion_rate"], 4),
+            fmt(s["cell_flip_added"], 4), fmt(s["cut_f1_output"], 2),
+            fmt(s["delta_e_mean"], 2), fmt(s["psnr_mean"], 2), fmt(s["ssim_mean"], 4),
             f"{fmt(s['ocr_output'])}|{fmt(s['ocr_source'])}" if s["ocr_output"] is not None else "-",
             fmt(s["face_cosine"]), fmt(s["history_resets"], 0)]) + " |")
     failed = [r for r in rows if not r["ok"]]
     if failed:
         lines += ["", "## Failed runs", ""] + [f"- {r['run']}: {r['failure']}" for r in failed]
+    withheld = [r for r in rows if r.get("temporal_withheld")]
+    if withheld:
+        lines += ["", "## Temporal metrics withheld", ""] + \
+                 [f"- {r['run']}: {r['temporal_withheld']}" for r in withheld]
+    scored = [r for r in rows if r.get("cuts")]
+    if scored:
+        lines += ["", "## Cut detection against the manifest", "",
+                  "The generator's own test (residual > 0.30, or residual > 0.10 with histogram overlap < 0.85, "
+                  "debounced over 0.6 s) run frame by frame over the cell grids of both files and matched to the "
+                  "corpus's hard-cut indices at +/-1 frame. The source column is a threshold check and is the "
+                  "same for every profile of a clip; the output column is what a consumer of the rendered file "
+                  "would detect. `worker` is the render's own strong/weak/suppressed counters where the run "
+                  "reported them.", "",
+                  "| run | GT | source P/R/F1 | output P/R/F1 | detected | false+ | worker |",
+                  "|---|---|---|---|---|---|---|"]
+        for r in scored:
+            c = r["cuts"]
+            trio = lambda side: "/".join(fmt(c[side][k], 2) for k in ("precision", "recall", "f1"))
+            worker = "/".join(fmt(c[f"worker_{k}"], 0)
+                              for k in ("accepted_strong", "accepted_weak", "suppressed"))
+            lines.append("| " + " | ".join([r["run"], str(len(c["ground_truth"])), trio("source"), trio("output"),
+                                            str(len(c["output"]["detected"])),
+                                            str(len(c["output"]["false_positives"])), worker]) + " |")
+    if guide_ab:
+        lines += ["", "## Guide A/B versus baseline", "",
+                  "Same clip, same settings, one guide string changed. This is the table the motion-vector and "
+                  "depth claims stand or fall on: a guide that is doing its job lowers sigma+, false motion and "
+                  "the flip rate together. The roadmap's `depth-constant` and `depth-proxy` are `depth-off` and "
+                  "`baseline`, which are the two depth guide strings the worker can be asked for.", "",
+                  "| clip | profile | guides | d sigma+ | d false mv | d flips+ | d flicker+ | d cut F1 | d PSNR "
+                  "| d e2e fps |",
+                  "|---|---|---|---|---|---|---|---|---|---|"]
+        for g in guide_ab:
+            lines.append("| " + " | ".join([g["clip"], g["profile"], g["guides"],
+                                            fmt(g["delta_temporal_sigma_added"]),
+                                            fmt(g["delta_false_motion_rate"], 4),
+                                            fmt(g["delta_cell_flip_added"], 4), fmt(g["delta_flicker_added"]),
+                                            fmt(g["delta_cut_f1_output"], 2), fmt(g["delta_psnr_mean"], 2),
+                                            fmt(g["delta_end_to_end_fps"], 2)]) + " |")
     if two_pass:
         lines += ["", "## Two-pass versus single pass", "",
                   "Pass 2 re-renders the pass-1 *encoded* output (NVENC HEVC or software H.264), so its input "
                   "already carries one lossy generation; deltas mix model effect with re-encode loss.", "",
-                  "| clip | profile | d flicker+ | d dE | d PSNR | d SSIM | d OCR | d face cos | d e2e fps |",
-                  "|---|---|---|---|---|---|---|---|---|"]
+                  "| clip | profile | d flicker+ | d sigma+ | d false mv | d flips+ | d dE | d PSNR | d SSIM "
+                  "| d OCR | d face cos | d e2e fps |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for t in two_pass:
             lines.append("| " + " | ".join([t["clip"], t["profile"], fmt(t["delta_flicker_added"]),
+                                             fmt(t["delta_temporal_sigma_added"]),
+                                             fmt(t["delta_false_motion_rate"], 4),
+                                             fmt(t["delta_cell_flip_added"], 4),
                                              fmt(t["delta_delta_e_mean"], 2), fmt(t["delta_psnr_mean"], 2),
                                              fmt(t["delta_ssim_mean"], 4), fmt(t["delta_ocr_output"]),
                                              fmt(t["delta_face_cosine"]), fmt(t["delta_end_to_end_fps"], 2)]) + " |")
@@ -310,12 +658,14 @@ def report(summary: list[dict], two_pass: list[dict], rows: list[dict]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=Path, default=RUNS)
-    parser.add_argument("--sample-every", type=int, default=SAMPLE_EVERY, help="frame stride for dE/PSNR/SSIM/OCR/faces")
+    parser.add_argument("--corpus", type=Path, default=CORPUS, help="corpus holding manifest.json")
+    parser.add_argument("--sample-every", type=int, default=SAMPLE_EVERY,
+                        help="frame stride for dE/PSNR/SSIM/OCR/faces; pair metrics always use every frame")
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--no-faces", action="store_true")
     parser.add_argument("--force", action="store_true", help="recompute runs that already have metrics.json")
     args = parser.parse_args()
-    manifest = load_manifest()
+    manifest = load_manifest(args.corpus)
     clips = {c["name"]: c for c in manifest["clips"]}
     dirs = run_dirs(args.runs)
     if not dirs:
@@ -337,12 +687,16 @@ def main() -> int:
         m = analyze_run(run, clip, ocr, faces, args.sample_every)
         rows.append(m)
         print(f"{run.name}: ok={m['ok']} psnr={fmt(m.get('psnr_mean'), 2)} dE={fmt(m.get('delta_e_mean'), 2)} "
-              f"flicker+={fmt(m.get('flicker_added'))} ocr={fmt((m.get('ocr') or {}).get('output_ratio_mean'))}",
+              f"flicker+={fmt(m.get('flicker_added'))} sigma+={fmt(m.get('temporal_sigma_added'))} "
+              f"false-mv={fmt((m.get('motion_field') or {}).get('false_motion_rate'), 4)} "
+              f"cut-f1={fmt(((m.get('cuts') or {}).get('output') or {}).get('f1'), 2)} "
+              f"ocr={fmt((m.get('ocr') or {}).get('output_ratio_mean'))}",
               flush=True)
-    summary, two_pass = summarize(rows)
+    summary, two_pass, guide_ab = summarize(rows)
     ANALYSIS.mkdir(parents=True, exist_ok=True)
-    write_json(ANALYSIS / "analysis.json", dict(runs=rows, summary=summary, two_pass=two_pass))
-    text = report(summary, two_pass, rows)
+    write_json(ANALYSIS / "analysis.json",
+               dict(runs=rows, summary=summary, two_pass=two_pass, guide_ab=guide_ab))
+    text = report(summary, two_pass, guide_ab, rows)
     (ANALYSIS / "report.md").write_text(text, encoding="utf-8")
     print(text)
     print(f"analysis: {ANALYSIS}")

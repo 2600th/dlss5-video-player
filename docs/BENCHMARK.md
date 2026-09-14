@@ -33,10 +33,12 @@ run concurrently; the runner prefers the snapshot.
 | Group | Metric | Source |
 |---|---|---|
 | Runtime | preflight receipt: GPU, driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, Feature 18 creation/evaluation, RenoDX active settings | `--neural-preflight` probe, once per profile |
-| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v3) |
+| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v4) |
 | Memory | worker peak local VRAM (receipt) and NVML whole-GPU used/util/power/temperature at 2 Hz | `result.json`, `gpu.csv` |
 | Determinism | sha256 of the rgb24 per-frame MD5 sequence across repeats | `frames.md5` |
-| Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded | `analyze.py` |
+| Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded; added per-pixel temporal σ and its p99 over the same shots | `analyze.py` |
+| Motion field | false-motion rate and cell flip rate on the guide generator's own analysis grid | `analyze.py` |
+| Cuts | precision/recall/F1 of the generator's cut test against the manifest's hard-cut indices at ±1 frame, source and output | `analyze.py`, `manifest.json` |
 | Colour | mean CIE76 ΔE in CIELAB and per-channel RGB shift vs source | `analyze.py` |
 | Fidelity | PSNR and SSIM vs the lossless source | `analyze.py` |
 | Text | rapidocr character-level ratio against the manifest's ground-truth strings, output and source side by side | text clip |
@@ -48,6 +50,62 @@ vectors, depth, RenoDX automatic mask, local structure, local
 tone, intensity (control), presets 1-3, styles natural/cinematic, two-pass.
 Every profile uses the same corpus, the same worker priming/preroll and the same
 runtime files, so differences attribute to the changed factor.
+
+The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
+guide strings the matrix already carries — a disabled depth guide *is* the constant
+0.75 field — so they resolve to `depth-off` and `baseline` and share their run
+directories instead of rendering the same configuration twice. The third profile the
+roadmap names, `depth-of`, is refused by name: `--guides` expresses exactly
+`mv=0|1,depth=0|1`, so there is no way to ask the worker for depth derived from the
+NVOFA structure, and no flag was invented to pretend otherwise.
+
+### The temporal metrics
+
+These exist to make the motion-vector and depth claims falsifiable, so each one is
+defined by the script rather than by prose. All of them mirror
+`src/TemporalGuides.cpp`: the cell grid is `AnalysisGrid` (width/10 cells clamped to
+96–160 below 45 fps, width/14 clamped to 96–128 above it, so 160×90 cells of 12×12
+source pixels for the 30-fps 1080p corpus), a cell's value is `DownsampleLuma`'s four
+stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.6 s
+weak-arm debounce are the generator's own. A threshold swept here therefore transfers
+to the runtime unchanged.
+
+- **Per-pixel temporal σ** (`temporal_sigma_source/output/added`, 8-bit luma levels).
+  The temporal standard deviation of each pixel's luma inside a shot — the frames
+  between two manifest cuts, because across a cut a pixel's spread is the edit and not
+  the pass — meaned over pixels and then frame-weighted over the shots; `added` is
+  output minus source, and the p99 of the same map is reported beside it. Shots shorter
+  than 3 frames are dropped rather than reported as suspiciously low σ. This is the
+  number the "2.23 → 1.41" claim refers to. What moves it is localized shimmer that a
+  frame-global mean hides: jitter, breathing fine detail, a guide flickering on and off.
+  A pass that only shifts the picture's level does not move it at all.
+- **False-motion rate** (`motion_field.false_motion_rate`, fraction of cells).
+  Staticness comes from the source itself: a cell is static across a consecutive pair
+  when its cell luma changed by at most 2/255 — two 8-bit levels — and the rate is the
+  fraction of those cells whose output changed by more than the same tolerance. That is
+  motion the pass invented rather than carried. The carrier sets a floor, since an NVENC
+  re-encode of a still region is not bit-exact; `intensity-0` measures that floor for
+  the clip, and the rate is only meaningful against it.
+- **Cell flip rate** (`motion_field.flip_rate_source/output/added`, fraction of cells).
+  The fraction of cells whose moving/static verdict changes between one consecutive pair
+  and the next, on the same grid and the same tolerance, source and output side by side.
+  It is the instability of the motion field rather than of the pixels: a threshold only
+  becomes visible once it oscillates, and a field that drops and re-acquires the same
+  vector on alternate frames scores badly here while the pixel metrics look calm.
+- **Cut precision/recall/F1** (`cuts.source`, `cuts.output`). The generator's own test
+  run over each file's cell grids and matched to the manifest's hard-cut indices, at
+  most one detection per cut within ±1 frame. The source column is a threshold check
+  and is the same for every profile of a clip; the output column is what a consumer of
+  the rendered file would detect. `cuts.*_evidence` records every firing frame with its
+  residual, its histogram overlap, the arm that fired and whether the debounce withheld
+  it, which is the labelled set a sweep of 0.30 / 0.10 / 0.85 needs. A cut-free clip has
+  no recall to report and its detection count is its false-positive count.
+
+`--sample-every` strides ΔE/PSNR/SSIM/OCR/faces alone. Every metric above sees every
+consecutive frame pair whatever the stride is, and all of them are withheld whole —
+`null` fields plus a `temporal_withheld` reason in `metrics.json` and a section in
+`report.md` — when the output frame count does not match the source, because frame *i*
+of one file is then not frame *i* of the other.
 
 ## Reading the numbers
 
@@ -87,8 +145,12 @@ sequence so byte-identical outputs are visible directly.
 | text-subtitles | two-pass | 0 | 8b82158f | 27.4 | 15.35 | 31.37 | – | – | – | – | +0.172 | 3.07 | 26.73 | 0.9772 |
 
 Observations (P0-3 guide proof). **The table above predates the guide, capture,
-segment, decode and mask work described below; its rates and its `mv-off`
-comparison are historical.** Rerun it before quoting a number from it.
+segment, decode and mask work described below, it predates v0.20.0's hardware optical
+flow, and it predates every temporal metric this page documents; its rates, its
+`mv-off` comparison and its absent σ / false-motion / flip / cut columns are all
+historical.** Rerun it before quoting a number from it: `analyze.py` produces those
+columns now, so the rerun is one command and the comparison it then allows is the
+whole reason the staleness matters.
 
 - Rerenders are bit-identical across repeats (framemd5 sequence digests match).
 - The mask guide is gone, and the `mask-off` rows are why. `mask-off` was
@@ -127,30 +189,25 @@ comparison are historical.** Rerun it before quoting a number from it.
   0.952 mean cosine to the source with frame-to-frame drift equal to the
   source's own (0.137 vs 0.133). Two-pass is not a default candidate.
 
-## What the harness cannot yet measure
+## What the harness measures now, and what it still cannot
 
-Noted 2026-09-11. Several numbers this project quotes have no script behind them,
-which is why they cannot be reproduced or defended in a review:
+The four numbers this project used to quote from ad-hoc runs are scripted: false-motion
+rate, per-pixel temporal σ with its p99, cell flip rate, and cut precision/recall
+against the manifest's ground truth. `analyze.py` computes all four inside the single
+streaming pass it already made over each run, and `report.md` carries them per
+clip/profile, as deltas against `baseline` for every profile whose guide string
+differs, and as a per-run cut table. The 60.8 % → 3.7 % false-motion figure and the
+2.23 → 1.41 σ figure quoted above and elsewhere in these docs predate that script and
+were measured differently; they stand as history until a rerun replaces them with the
+script's own numbers.
 
-- **False-motion rate.** The 60.8 % → 3.7 % figure above, and every repetition of
-  it elsewhere in the docs, came from an ad-hoc run. Nothing under `tools/` computes
-  it.
-- **Per-pixel temporal variance.** 0.20.0's jitter removal is quoted as temporal
-  standard deviation 2.23 → 1.41 and p99 11.78 → 4.61, measured with a throwaway
-  script. `analyze.py` has only the frame-global mean `|ΔY|` flicker metric, which
-  averages localized shimmer away.
-- **Motion cell flip rate.** Nothing measures how often a cell's accept/reject
-  decision changes between consecutive frames, which is the quantity that turns a
-  threshold into visible instability.
-- **Cut precision and recall.** `corpus.py` already writes the ground-truth hard-cut
-  frame indices into the manifest, and `analyze.py` only uses them to exclude frames
-  from the flicker average. The labelled set needed to validate the 0.30/0.10/0.85
-  thresholds is therefore already on disk and unused.
-
-Until these exist, the confidence gate, the cut band, the depth proxy, `IsHDR` and
-the exposure contract are all undecidable by measurement, which is the real reason
-the reference table above matters. The VSR literature's warp-error metric is the
-shape to copy, and this project already owns the protocol: the flow rejection
+What still cannot be decided by measurement here: the NVOFA cost gate has no published
+scale, so calibrating it wants the forward/backward agreement mask rather than another
+invented threshold; `IsHDR` on the linear FP16 input, and a supplied 1×1 exposure
+texture against auto-exposure, are A/Bs nobody has run; and depth is now answerable as
+`depth-constant` versus `depth-proxy` but the OF-structure candidate has no argument
+behind it to run. The VSR literature's warp-error metric remains the shape to copy for
+a stronger false-motion number than a luma tolerance can give: the flow rejection
 thresholds were chosen by warping the previous frame's full-resolution pixels and
 scoring the residual, which works just as well pointed at DLSS output.
 

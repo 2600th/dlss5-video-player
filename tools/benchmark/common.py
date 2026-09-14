@@ -27,7 +27,7 @@ FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # src/NeuralWorkerProtocol.h
 WIRE_MAGIC = 0x3152574E  # NWR1
-WIRE_VERSION = 3
+WIRE_VERSION = 4
 KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT = 1, 2, 3, 4
 PHASES = ["Idle", "Decoding", "Priming", "Rendering", "Encoding", "Validating", "Completed", "Failed",
           "Cancelled", "Ready", "Preflight", "Paused", "Recovering"]
@@ -36,15 +36,15 @@ FAILURES = ["None", "Source", "Encoder", "Neural", "GpuStall", "DeviceRemoved", 
 ENCODERS = {0: "hevc_nvenc", 1: "h264_software"}  # src/MediaPipeline.h EncoderKind
 CONFIGURATION_CHANGED_EXIT = 75
 PROGRESS_STRUCT = struct.Struct("<IQQQqqII")  # 52 bytes
-RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQI")  # 140 bytes
+RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQIIII")  # 152 bytes
 PREFLIGHT_STRUCT = struct.Struct("<B3xI")  # 8 bytes
 SEGMENT_STRUCT = struct.Struct("<QQqQqI")  # 44 bytes, then nameBytes of UTF-16LE
-assert PROGRESS_STRUCT.size == 52 and RESULT_STRUCT.size == 140 and PREFLIGHT_STRUCT.size == 8
+assert PROGRESS_STRUCT.size == 52 and RESULT_STRUCT.size == 152 and PREFLIGHT_STRUCT.size == 8
 assert SEGMENT_STRUCT.size == 44
 
 
 def decode_metadata(data: bytes) -> list[dict]:
-    """Decodes every complete NWR1 v3 message in ``data``.
+    """Decodes every complete NWR1 v4 message in ``data``.
 
     Progress records carry ``kind='progress'``, the final record ``kind='result'``
     and a preflight probe ``kind='preflight'`` with the parsed JSON receipt.
@@ -78,7 +78,8 @@ def decode_metadata(data: bytes) -> list[dict]:
                 job_id=v[15], history_resets=v[16], frame_retries=v[17], first_timestamp_100ns=v[18],
                 neural_gpu_ms_p50=v[19], neural_gpu_ms_p95=v[20], neural_gpu_ms_max=v[21],
                 guide_ms_mean=v[22], capture_ms_mean=v[23], peak_local_vram_mib=v[24],
-                timing_samples=v[25], detail=detail))
+                timing_samples=v[25], accepted_strong_cuts=v[26], accepted_weak_cuts=v[27],
+                suppressed_cuts=v[28], detail=detail))
         elif kind == KIND_PREFLIGHT and len(payload) >= PREFLIGHT_STRUCT.size:
             ok, json_bytes = PREFLIGHT_STRUCT.unpack_from(payload)
             text = payload[PREFLIGHT_STRUCT.size:PREFLIGHT_STRUCT.size + json_bytes].decode("utf-8", "replace")
