@@ -52,8 +52,9 @@ and looks like a broken helper until the runtime is re-staged.
   half still costs (-0.53 to -0.64 dB): both conversion shaders hard-code BT.709
   while ffmpeg falls back to BT.601 for a stream that declares nothing, so most of
   that penalty was a colour-tag mismatch rather than lost detail. The shipped
-  defaults stay until the source tags are read and the capture pass's chroma siting
-  is checked; the flags remain per-render for anyone who wants the other trade.
+  defaults stay until the source tags are read, which is the decoder side's blocker;
+  the capture side has no quality cost left and is held only by the GPU-time note in
+  USAGE.md, measured on a different card. The flags remain per-render either way.
 - Every neural render was written **untagged and converted with BT.601**. The
   encoder stated colorimetry only when the GPU did the conversion, so a BT.709
   source became a file that declared no colour space while carrying 601 pixels -

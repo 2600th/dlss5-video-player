@@ -715,10 +715,9 @@ hard-code BT.709 limited range (`src/D3D12Renderer.cpp:316-341`) while swscale
 falls back to BT.601 for a stream that declares nothing. So `GpuSourceConversion`
 is a **tagging defect away from free** - exactly the hazard
 `docs/USAGE.md:219-221` already names - and its blocker is the source colour-tag
-probe, not readback cost. `GpuColorConversion`'s cost survives tagged input at both
-resolutions; chroma siting is the leading suspect (`PSCaptureChroma` averages four
-converted samples, centre-sited, against swscale's left-sited default) and is the
-next measurement.
+probe, not readback cost. `GpuColorConversion`'s cost survived tagged *input* at
+both resolutions, so it was not an input-tagging artifact - it turned out to be an
+output-side colour-metadata defect instead, and it is now gone. See below.
 
 **The same audit walked into a larger defect, and fixing it was the wave's most
 user-visible change.** Every render written on the default path was **untagged and

@@ -249,8 +249,10 @@ limited range and nothing reads the source's tags"), now with a number and a
 demonstration that reading the tags is the whole fix. On tagged input it is a pure
 throughput win.
 
-`GpuColorConversion` keeps **-0.53 to -0.64 dB with tags present** at both
-resolutions, so that cost is its own and not a tagging artifact.
+`GpuColorConversion` keeps **-0.53 to -0.64 dB with the *input* tagged** at both
+resolutions - so it is not an input-tagging artifact. It turned out to be an
+*output*-side colour-metadata defect all the same: its frames reached the encoder
+with no colour properties. See the retraction below.
 
 Chroma siting was the leading suspect - `PSCaptureChroma` converts four RGB samples
 and averages the results, which is centre-sited, while swscale's 4:2:0 default is
@@ -350,8 +352,15 @@ before it was ever tested:
 
 A 0.00 dB delta where it had been -0.642 dB. The mechanism is the same one this
 whole section is about, one level down: the NV12 frames reached the encoder with no
-primaries or transfer, so the file they produced was decoded on assumptions that did
-not match the shader that made it. `setparams` is metadata-only and pixel-exact
+primaries or transfer, and NVENC encoded them differently for it. The direction is
+measured on a flat synthetic frame: without the properties the decode comes back
+Y +3 and V -2 against the input (120 -> 123, 200 -> 203), and with them it
+reproduces the input exactly. That is *not* a range conversion - full-to-limited
+would map 120 -> 119.1 and 200 -> 187.8, limited-to-full 121.1 and 214.2 - so the
+cause sits inside the ffmpeg-to-NVENC path for frames whose colour properties are
+unspecified, and it is not isolated further than that. What is certain is the
+direction and the fix: described frames encode to the input, undescribed ones do
+not. `setparams` is metadata-only and pixel-exact
 through a lossless round trip, so nothing about the pixels handed to NVENC changed -
 what changed is that they are now described. Measured against the source directly,
 the tagged encode is 0.66 dB closer (32.65 against 31.99 dB by FFmpeg's own `psnr`
