@@ -454,18 +454,20 @@ Two findings the synthetic set could not produce:
 - **The debounce, not a threshold, lost that cut.** Local 87 fires the weak arm at
   residual 0.2711 with overlap 0.5294 — a clear detection — and was suppressed for
   being 17 frames after the accepted cut at 70, inside the old 0.6 s (18-frame)
-  window. Trailer editing puts shots that close together; the shortest synthetic
-  segment here is 1.0 s, so no synthetic clip can exercise it. The 17-frame shot is
-  the revolver, genuine trailer footage - what follows it is the paused player frame,
-  so the *cut* at 87 is the demo's scene boundary while the *shot length* the bracket
-  rests on is real. The labelled corpus brackets
-  the replacement from both sides: `flash-exposure`'s transient returns 4 frames after
-  the cut that opened it, so the window must exceed 4, and this genuine shot is 17
-  frames, so the window must not exceed 17 — suppression is `since_cut < min_frames`,
-  so a 17-frame window still accepts a cut 17 frames out. The usable range is 5–17
-  frames inclusive and the shipped 9 sits in it, asymmetrically: 5.7x of margin at
-  the flash end against 1.9x at the real end, so the next clip with a sub-17-frame
-  shot is what would squeeze it. A label audit found no two labelled cuts anywhere in
+  window. The shortest synthetic segment here is 1.0 s, so no synthetic clip can
+  exercise a gap that short. Note what the 17 frames actually are: the span runs
+  from the cut at 70 to the cut at 87, and 87 is where the capture's own scene
+  changes into the paused frame - so it is bounded above by the demo composition,
+  not by a trailer edit. It is therefore evidence that a reset must follow a
+  discontinuity 17 frames after its predecessor, and not evidence about how fast
+  film is cut. The labelled corpus brackets the replacement from both sides:
+  `flash-exposure`'s transient returns 4 frames after the cut that opened it, so the
+  window must exceed 4, and that labelled span is 17 frames, so the window must not
+  exceed 17 — suppression is `since_cut < min_frames`, so a 17-frame window still
+  accepts a cut 17 frames out. The usable range is 5–17 frames inclusive and the
+  shipped 9 sits in it, asymmetrically: 5.7x of margin at the flash end against
+  1.9x at the other, so the next clip with a shorter labelled span is what would
+  squeeze it. A label audit found no two labelled cuts anywhere in
   the corpus closer than 9 frames (tightest gaps 17, then 23) and both soft spans 22
   frames wide, so the new window discards no labelled cut.
   **The lower bound is corpus-bound, not physical.** It rests on one synthetic

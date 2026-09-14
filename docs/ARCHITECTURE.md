@@ -362,6 +362,13 @@ as the cheap fallback. `gpu.driverVersion` is already in the preflight receipt,
 just not in the key. Recorded 2026-09-14; not fixed, and it is a correctness item
 rather than a rider on a performance change.
 
+The same gap covers the helper binary itself. `NeuralWorker.exe` is not among the
+twelve locked runtime files - those are the vendor DLLs - so rebuilding the worker
+with different guide or cut logic leaves `runtimeDigest` unchanged, and only
+`applicationVersion` retires the entries it produced. Between version bumps a
+stale cache hit therefore masks exactly the changes a developer is trying to see,
+which is what `-DropRenderCache` in the session harness exists for.
+
 The settings snapshot is saved beside the video and its hash is checked on reuse.
 Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,
@@ -377,13 +384,6 @@ hits retain full content-hash verification and use header-only metadata probes;
 frame counting and final-frame decoding run once before promotion, not on every
 replay. Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
-
-The same gap covers the helper binary itself. `NeuralWorker.exe` is not among the
-twelve locked runtime files - those are the vendor DLLs - so rebuilding the worker
-with different guide or cut logic leaves `runtimeDigest` unchanged, and only
-`applicationVersion` retires the entries it produced. Between version bumps a
-stale cache hit therefore masks exactly the changes a developer is trying to see,
-which is what `-DropRenderCache` in the session harness exists for.
 
 `RecentMediaHistory` atomically persists five distinct sources and their current
 cache keys. Displaced keys are removed only when unreferenced by that history and

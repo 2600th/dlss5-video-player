@@ -86,13 +86,17 @@ constexpr double kCutHistogramOverlap = 0.85;  // luma distribution no longer th
 // upscaler's accumulated history.
 //
 // It was PySceneDetect's min_scene_len CLI default of 0.6 s, which is 18 frames at 30 fps
-// and long enough to discard a real shot change: on labelled real footage a hard cut
+// and long enough to discard a real discontinuity: on a labelled capture a hard cut
 // verified frame by frame, 17 frames after the previous one, fired the weak arm
 // (residual 0.2711, overlap 0.5294) and was withheld by construction. The labelled
 // corpus brackets the window from both sides, and the bracket is wide:
 //   * the only transient in it returns 4 frames after the cut that opened it
 //     (residual 0.2537, overlap 0.4324), so the window must exceed 4 frames;
-//   * the shortest genuine shot in it is 17 frames, so the window must not exceed that.
+//   * the shortest span between two labelled discontinuities is 17 frames, so the
+//     window must not exceed that.
+// That 17-frame span is bounded above by the capture's own scene change rather than by
+// a film edit, so it is evidence that a reset must follow a discontinuity 17 frames
+// after its predecessor - not evidence about how fast footage is cut.
 // Nothing else in the corpus changes anywhere in between - the dissolves never reach the
 // weak arm at all, so they are protected by kCutResidualWeak and not by this window.
 // Note that the transient's return has the *lower* histogram overlap of the two, so no
@@ -100,7 +104,7 @@ constexpr double kCutHistogramOverlap = 0.85;  // luma distribution no longer th
 // separates them, which is why this is still a plain minimum interval and not a
 // strength-conditional rule. 0.3 s sits between the two bounds with roughly equal
 // multiplicative margin on each side (9 frames at 30 fps: 2.25x the observed transient,
-// 0.53x the shortest genuine shot). The cost is that the burst defence is now 9 frames
+// 0.53x the shortest labelled span). The cost is that the burst defence is now 9 frames
 // wide rather than 18, so a transition that keeps firing for longer than that produces a
 // second reset where it used to produce one; no clip in the corpus does.
 constexpr double kMinSecondsBetweenCuts = 0.3;
