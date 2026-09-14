@@ -208,6 +208,19 @@ and never skips the frame. Device removal fails the job immediately and the
 launcher relaunches the helper from zero at most once. The helper checks an
 inherited pause event between frames and resumes without a temporal reset.
 
+The job reaches the decoder, the evaluator and the encoder through three
+duck-typed adapters. A second constructor injects `IFrameSource`,
+`INeuralFrameEvaluator` and `IFrameEncoder` instead, plus the evidence
+provider, clock and pause predicate the job would otherwise take from the
+ReShade log, the steady clock and `NeuralRenderRequest::pauseEvent`;
+`Run` picks between the two sets at runtime by whether anything was injected,
+and a partial injection is a Protocol failure rather than a silent fall back
+to the real decoder. Both sets compile in every build, so a change to
+`D3D12Renderer`, `VideoDecoder` or `DLSSBackend` that breaks the job's use of
+them breaks the test build too - which the previous
+`OFFLINE_NEURAL_RENDERER_TESTING` `#else` hid, since no test target compiled
+the production adapters at all. Injecting fakes still does not exercise them.
+
 Before every render the player verifies the staged runtime against the
 embedded `packaging/runtime-lock.json` (size, SHA-256, file version) and
 refuses drift instead of adopting a newer stack. On a cache miss the helper
