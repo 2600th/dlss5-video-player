@@ -359,15 +359,21 @@ if(BUILD_TESTING)
         src/VideoDecoder.h
         src/MediaSource.cpp
         src/MediaSource.h
+        src/D3D12Renderer.cpp
+        src/DLSSBackend.cpp
+        src/TemporalGuides.cpp
+        src/OpticalFlowNvof.cpp
     )
-    target_include_directories(NeuralPrerenderTests PRIVATE src "${GENERATED_INCLUDE_DIR}")
+    target_include_directories(NeuralPrerenderTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
         OFFLINE_NEURAL_RENDERER_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32 mfplat mfreadwrite mfuuid ole32)
+    target_link_directories(NeuralPrerenderTests PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(NeuralPrerenderTests PRIVATE ${player_libraries})
+    dlss_video_player_use_nvof(NeuralPrerenderTests)
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     # Exercise the real player completion handlers and text submitted to Win32.

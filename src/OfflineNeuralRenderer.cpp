@@ -20,13 +20,10 @@
 #include <thread>
 #include <vector>
 
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
-#include "Log.h"
-#endif
 
 namespace {
 
@@ -162,7 +159,6 @@ template <class Evaluator>
 void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
                         const AttemptResult& attempt, const Evaluator& evaluator)
 {
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
     const uint64_t frames = attempt.frames;
     if (!frames) return;
     std::string detail;
@@ -184,9 +180,6 @@ void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
          << " ms, measured loop " << Mean(attempt.stages.loop)
          << " ms." << detail;
     LOG(line.str());
-#else
-    (void)kind;(void)stages;(void)attempt;(void)evaluator;
-#endif
 }
 
 std::string LowerAscii(std::string_view value)
@@ -1565,7 +1558,7 @@ struct TestEncoderAdapter {
         return adapter;
     }
 };
-#else
+#endif
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
     bool gpuConversion{true};
@@ -2017,11 +2010,8 @@ std::filesystem::path ModuleDirectory()
     if(!length||length>=path.size())return {};path.resize(length);return std::filesystem::path(path).parent_path();
 }
 
-#endif
-
 } // namespace
 
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
 namespace {
 
 uint64_t FileTimeValue(const FILETIME& time)
@@ -2086,7 +2076,6 @@ std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDire
     }
     return latest;
 }
-#endif
 
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment)
