@@ -88,6 +88,27 @@ scene cut. Vectors are read with a nearest fetch rather than a filtered one:
 across a disocclusion the neighbouring cells describe different surfaces and
 interpolating them invents a vector no cell measured.
 
+The engine is asked for both prediction directions and for its global flow
+estimate, and capability is given up one rung at a time - both directions with
+global flow, both alone, forward with global flow, forward alone - so a refusal
+costs one feature rather than the engine; the mode that came up is in the `NVOFA
+ready` line, and each rung gets a fresh session because a refused `nvOFInit`
+leaves one in a state the SDK offers no way to reset. The reverse field is what
+the resolve pass gates on: `src/FlowGate.h` holds the scale-free forward/backward
+criterion as one `constexpr` function (Sundaram/Brox, alpha 0.01, beta 0.5 px²,
+literature defaults that nothing here has measured yet), and
+`src/NvofResolveShader.h` holds the pass's HLSL so those two numbers reach the
+shader by stringification instead of a second copy - and so `UpscalingTests` can
+compile the pass with `D3DCompile` on a machine with no flow engine to run it on.
+A cell the engine contradicts itself about, an occlusion or a repeating pattern,
+emits no motion instead of a confident wrong one. A device that offered only
+forward flow is passed a zero cell pitch, which takes the gate out of the shader
+rather than neutralising it, so it behaves exactly as before. The global vector
+arrives as a four-byte readback latched behind the fence the next submit signals,
+a frame or two behind the field and never stalling; nothing consumes it yet. The
+cost surface is still ungated: its scale is unpublished, and the round-trip mask
+is what it will be calibrated against.
+
 `TemporalGuideGenerator` still runs. It owns the depth proxy and the scene-cut
 decision, and it owns motion too on any machine without the engine - block
 matching on a compact grid, gated on how much the winning displacement beats
@@ -179,6 +200,15 @@ After the render, `receipt.json` (preflight, lock checks, request, result,
 timing, digests) is written beside `neural.mkv`, hashed into the schema-4
 manifest and summarized in one log line.
 
+The receipt also records what the scene-cut classifier did over the job: cuts
+accepted on the strong arm, cuts accepted on the weak arm, and weak cuts the
+minimum-interval debounce withheld. The debounce is a judgement about footage
+nobody has labelled yet, and a suppression is either a flicker avoided or a cut
+missed, so these are the numbers a sweep over labelled clips scores itself
+against. They count the job's guide generator over its whole life - preroll and
+every encoder attempt included - and a re-evaluated frame counts once, so they
+are not bounded by `historyResets`.
+
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
 settings write until the helper exits, so a second player instance cannot
@@ -186,6 +216,17 @@ interleave its neural settings or its proxy log with this render; it is
 refused with a distinct preflight failure instead. The helper still selects
 its log by session, because a crashed holder can leave a file that Windows
 will not let the next launch delete.
+
+Which machines reach any of this is two independent decisions, and they are kept
+independent. `ClassifyGpu` answers what the part is, which picks the cache
+identity, the receipt label and the render-pace prior; `NeuralAddonDesired`
+follows from RTX-ness alone, so a generation is never the reason the addon is
+withheld. The driver, classified against `kNeuralDriverFloor`, is the axis that
+refuses. `RenderPacePrior` returns zero for every generation nobody has timed,
+and zero means unmeasured, not unsupported: a forecast built from it reports no
+verdict and keeps the full start cushion, where a prior-backed forecast reports
+one and shortens it. Both splits are pinned in `tests/PolicyTests.cpp` against
+the adapter and driver strings the machines in the field notes reported.
 
 `NeuralCacheManager` stages source and render artifacts under LocalAppData.
 Source, application version, GPU path, runtime digest, native dimensions,
@@ -212,6 +253,16 @@ no active job/export can own them. Local originals are never removal targets.
 The cache root is resolved through a temporary delete-on-close file before bucket
 creation, so inherited Windows package redirection cannot split the ownership root
 from newly written children. Descendant and reparse-point checks remain in force.
+
+A refused staging directory is no longer an unexplained `nullopt`. The manager
+keeps the cause, the filesystem error and the directory it attempted; the
+constructor's verdict survives on an invalid manager because no attempt can get
+past it, and each refusal writes one log line with the path, the cause, the error
+number and whether the ownership check rejected it. The player reads that record
+for its message, so an unwritable install directory, a rejected key, a failed
+create and a directory that resolved outside the root are four different
+sentences instead of one, and a root that cannot be created at all is said at
+startup rather than at the first render.
 
 `CachedVideoExporter` stream-copies the validated neural video and source audio,
 compatible subtitles, attachments, metadata and chapters into a new MKV. It also
@@ -249,9 +300,13 @@ A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
 makes the helper rotate its encoder every N captured frames: the next segment's
 encoder starts before the current one is finished, finalization runs on a
 private FIFO thread, and each finished file is announced over the metadata pipe
-as a protocol v3 `Segment` message (index, absolute first pts and frame number,
+as a protocol v4 `Segment` message (index, absolute first pts and frame number,
 frame count, frame duration, file name). Temporal history, priming and preroll
 are untouched — only the encoder rotates.
+
+The parent refuses any header whose version is not exactly `kVersion`, so a
+helper left in `neural-runtime/` by an older build fails closed instead of
+having its shorter result read as a longer one.
 
 The player collects those messages into a `NeuralSegmentIndex` and hands it to
 `SynchronizedPlayback::OpenLive`, which pairs the original against the growing
@@ -370,6 +425,17 @@ active session, and protection masks were measured and abandoned because the
 NGX mask inputs are inert on both features. The remaining P1 work is
 source-color/HDR preservation, RTX Video modes and the rest of GPU-resident
 processing.
+
+The harness under `tools/benchmark/` is deliberately not a second implementation
+of what it scores. Its cell grid, cell luma, scene-cut thresholds and cut
+debounce are read off `src/TemporalGuides.cpp`, so per-pixel temporal sigma, the
+false-motion rate, the cell flip rate and cut precision/recall describe the field
+the guide generator actually solves on, and a threshold swept in Python transfers
+to the runtime without a second calibration. The manifest's hard-cut indices are
+the ground truth for the cut score, which is why `corpus.py` records them. The
+consequence when changing the generator: `AnalysisGrid`, `DownsampleLuma`,
+`ClassifySceneCut` and `MinFramesBetweenCuts` have a second reader, and it is
+`analyze.py`.
 
 Durable mid-job resume is deliberately a from-zero relaunch: a validated
 segment checkpoint would have to carry the temporal neural state at the

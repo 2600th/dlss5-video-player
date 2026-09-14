@@ -46,11 +46,25 @@ standard criterion is scale-free. This closes two open items at once and does no
 need a second session or a second Execute.
 [NVOFA guide](https://docs.nvidia.com/video-technologies/optical-flow-sdk/nvofa-programming-guide/index.html)
 
+**Shipped 2026-09-14**, with the fallback the item did not anticipate: the engine
+is asked for both directions and global flow and gives up one capability at a
+time rather than the whole engine, because a refused `nvOFInit` cannot be
+retried in place. The resolve pass gates each vector on the round trip
+(`src/FlowGate.h`, Sundaram/Brox alpha 0.01, beta 0.5 px², literature defaults),
+so a cell the engine contradicts itself about emits no motion. Verified by
+compiling and running the pass on an Intel iGPU with synthetic fields; the NVOFA
+calls themselves are unverified until someone runs it on an RTX card.
+
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
 `NvOFExecute` ... API call". A slow pan is a large, coherent global vector the
 per-cell field agrees with; a cut is one it does not. Our cut test currently has no
 motion evidence in it at all.
+
+**Shipped 2026-09-14.** Asked for alongside both directions, on the same ladder,
+and read back as a fence-latched four-byte copy that never stalls the frame.
+Nothing consumes it yet: feeding it into the cut decision changes a shipped
+judgement, so it waits for the harness numbers rather than landing unmeasured.
 
 **3. The zero-motion SAD we already discard.** `EstimateFlow` records the
 zero-displacement cost and drops it - only `bestGlobal` escapes as `globalCost`.
@@ -71,6 +85,17 @@ already written: `tools/benchmark/corpus.py` records hard-cut frame indices in t
 manifest and `analyze.py` only uses them to exclude frames. Until this exists, every
 item below is unfalsifiable, which is also why the reference table being stale
 matters more than it looks.
+
+**Shipped 2026-09-14.** `analyze.py` now scores per-pixel temporal sigma inside a
+shot with its p99, the false-motion rate over the cells the source held static,
+the cell flip rate of the motion field, and cut precision/recall/F1 against the
+manifest's hard-cut indices at ±1 frame, plus a guide A/B table and a per-firing
+cut table carrying each decision's residual and histogram overlap. The detector
+it scores against mirrors `TemporalGuides.cpp` - same grid, same cell luma, same
+0.30/0.10/0.85 thresholds, same 0.6 s debounce - so a threshold swept here
+transfers without a second calibration, and item 3 above is now falsifiable. The
+2026-09-08 reference table predates hardware optical flow and these metrics and
+is marked stale until it is re-run.
 
 **5. Then, now that they can be measured:** re-run the reference table; A/B `IsHDR`
 on the linear FP16 input; A/B a supplied 1x1 exposure texture against auto-exposure;
@@ -218,14 +243,14 @@ after the player exits or is killed.
 > exists, and otherwise plays the original. Rendering is always an explicit
 > choice (frame, 4 s clip, marked range, whole video).
 >
-> Open gap in item 1 (found 2026-09-10 while porting PR #5): the evidence chain
-> accepts a run in which feature 18 was created and evaluated but the neural
-> pass did not execute. A worker that stopped presenting after the feature
-> recreate reported `frames=900/900 verified=900` for output that was DLAA
-> only (0.46 ms neural GPU time against 5.7 ms; 34.6 dB from the source
-> instead of 31.7). The receipt should carry the per-frame neural GPU time and
-> refuse a run whose median falls below a per-geometry floor, or compare a
-> captured frame against the DLAA-only path directly.
+> Closed 2026-09-11 (`feat(render): refuse a render that produced frames without
+> the neural pass`): the gap above was that the evidence chain accepted a run in
+> which feature 18 was created and evaluated but the neural pass did not
+> execute - `frames=900/900 verified=900` for DLAA-only output at 0.46 ms
+> neural GPU time against 5.7 ms real. The receipt now carries per-frame neural
+> GPU time and a render whose median falls below `NeuralGpuMsFloor` for its
+> geometry is refused rather than published; no samples at all is still
+> accepted, because a missing measurement is not a verdict.
 
 ### 1. Runtime preflight and exact version locking
 
