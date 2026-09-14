@@ -31,6 +31,13 @@
 // process counts as launch cost instead of vanishing. The helper's own share of
 // the cold-start timeline arrives on the returned result, whether that result
 // is the helper's or one this launcher synthesized for a crash or a cancel.
+// `helperTimeline` reports that same share the moment it arrives on the pipe,
+// which is when the helper's first output file exists - seconds before an
+// active session's playback attaches to it, and seconds before this function
+// returns. A caller that only reports at the end of the job can ignore it; one
+// that reports when the first frame reaches the screen cannot, because the
+// returned result comes far too late for it. It runs on the calling thread,
+// from inside the metadata decode, exactly like `segments.onSegment`.
 inline constexpr uint32_t kDefaultCrashRelaunchLimit = 1;
 NeuralRenderResult RunNeuralWorker(
     const std::filesystem::path& executable,
@@ -39,7 +46,8 @@ NeuralRenderResult RunNeuralWorker(
     std::stop_token stop = {},
     const NeuralSegmentSink& segments = {},
     uint32_t crashRelaunchLimit = kDefaultCrashRelaunchLimit,
-    const std::function<void()>& processCreated = {});
+    const std::function<void()>& processCreated = {},
+    const NeuralColdStartCallback& helperTimeline = {});
 
 // Short Feature-18 probe run in the same isolated helper before a render. The
 // JSON receipt names GPU, driver, runtime/consumer versions and every feature

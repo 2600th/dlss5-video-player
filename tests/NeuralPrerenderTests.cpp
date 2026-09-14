@@ -2568,6 +2568,42 @@ void live_session_joins_the_render_where_its_coverage_actually_starts_test()
     CHECK_EQ(int64_t(12*kSecond),live_session::AttachPosition100ns(12*kSecond,10*kSecond,0));
 }
 
+// The third form of the same hang. A session toggled on at a playhead whose
+// render key was already published is answered by the cache in about 50 ms: the
+// job succeeds, renders no frame and appends no segment, so the index is empty
+// AND finished. Every other decision here then says "wait" - zero lead against
+// a finished session, a playhead inside the range - and the player sat behind
+// the buffering panel until the user gave up. Reproduced twice on hardware,
+// where the log showed publish (save=0) 54 ms after the cache check, no
+// segment lines at all, and `Neural cold start: total=-`.
+void live_session_with_no_published_segment_plays_the_cache_entry_test()
+{
+    using live_session::CompletedSessionPlan;
+        // The defect: a successful job, an empty index, and an entry that covers
+    // the whole range. Playback belongs on the entry, not on the index.
+    CHECK(CompletedSessionPlan::PublishedEntry==
+          live_session::PlanForCompletedSession({.covered=false,.ok=true,.publishedEntry=true}));
+    // No entry either: there is nothing to show, so the session must end and
+    // hand the original stream back rather than wait.
+    CHECK(CompletedSessionPlan::Stop==
+          live_session::PlanForCompletedSession({.covered=false,.ok=true,.publishedEntry=false}));
+    CHECK(CompletedSessionPlan::Stop==
+          live_session::PlanForCompletedSession({.covered=false,.ok=false,.publishedEntry=true}));
+    // Coverage outranks the verdict: a job that failed partway still left
+    // seconds of picture on screen, and those keep playing.
+    CHECK(CompletedSessionPlan::Segments==
+          live_session::PlanForCompletedSession({.covered=true,.ok=false,.publishedEntry=false}));
+    CHECK(CompletedSessionPlan::Segments==
+          live_session::PlanForCompletedSession({.covered=true,.ok=true,.publishedEntry=true}));
+    // What made the hang invisible to the rest of the policy: the session the
+    // cache hit leaves behind asks for neither an attach nor a rebase.
+    const live_session::SessionView empty{.positionSec=2.56667,.rangeStartSec=2.56667,
+                                          .headSec=0.0,.attached=false,.finished=true};
+    CHECK(!live_session::ShouldAttach(empty));
+    CHECK(!live_session::NeedsRebase(empty));
+    CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
+}
+
 void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
 {
     CHECK_EQ(0.0,live_session::RealtimeRatio(3.0,4.0));           // 4 s in, still mostly startup
@@ -2836,6 +2872,7 @@ int wmain(int argc, wchar_t* argv[])
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
     live_session_joins_the_render_where_its_coverage_actually_starts_test();
+    live_session_with_no_published_segment_plays_the_cache_entry_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();

@@ -595,6 +595,9 @@ public:
         const std::lock_guard guard(mutex_);
         if(!timeline_.Phase(phase))MarkLocked(phase);
     }
+    // The helper's five phases, merged from the job thread the moment the
+    // helper reports them - which is while the UI thread may be reading this
+    // record to put the first frame on screen, so every entry point here locks.
     void Merge(const NeuralColdStartTimeline& helper){const std::lock_guard guard(mutex_);timeline_.Merge(helper);}
     // The first playable neural output is in the player's hands: segment zero
     // for an active session, the finished job for a cached or whole-file render.
@@ -613,6 +616,13 @@ public:
     // One line per render: whichever end finishes first reports, the other is
     // silent.
     bool ClaimReport(){const std::lock_guard guard(mutex_);return !std::exchange(reported_,true);}
+    // Why the helper's five phases are absent, when they are absent because no
+    // helper ran at all rather than because a measurement went missing: a
+    // render key already in the cache is answered without starting one, and
+    // five dashes beside a real total read as a broken instrument instead of as
+    // a render that never happened.
+    void NoteNoHelper(std::string_view reason){const std::lock_guard guard(mutex_);noHelper_=reason;}
+    std::string NoHelperReason()const{const std::lock_guard guard(mutex_);return noHelper_;}
 
 private:
     using Clock=std::chrono::steady_clock;
@@ -628,6 +638,7 @@ private:
     Clock::time_point origin_,mark_;
     std::optional<Clock::time_point> ready_,presented_;
     bool reported_=false;
+    std::string noHelper_;
 };
 
 struct ExportCompletion {
@@ -1480,32 +1491,98 @@ private:
         LoadRenderPace();
     }
 
-    // The steady-state neural render paces this machine measured, one per
-    // source geometry, so the live-session forecast speaks for this GPU rather
-    // than the reference. Stored as `Samples=WxH:ms;WxH:ms` for the named GPU;
-    // a different GPU starts from an empty profile.
+    // The steady-state neural render paces this machine measured, so the
+    // live-session forecast speaks for this GPU rather than the reference.
+    // Stored per source geometry as `Samples=WxH:ms,ms,...;WxH:ms` for the
+    // named GPU; a different GPU starts from an empty profile, and the
+    // single-value `WxH:ms` form earlier versions wrote still loads as a
+    // one-sample ring.
+    //
+    // One sample per geometry used to be the whole record, newest replacing
+    // oldest unconditionally. A session measured while another process
+    // saturated the CPU wrote 42.333431 ms/frame for 1920x1080 - 3.7x the
+    // 11.4222 ms mean of the eight idle sessions around it, with the GPU free -
+    // and because this record is persisted, that one number followed the user
+    // across restarts: the next sessions forecast under a third of real time
+    // and raised the "watching it live would pause to buffer almost
+    // continuously" warning on hardware that renders that clip at 2.9x real
+    // time. Contention can only ever make a render look slower, so the error is
+    // one-sided and the newest sample is not the most trustworthy one; keeping
+    // a few and taking the median lets the measurements outvote the outlier.
+    //
+    // The median rather than the minimum, which would be the fastest way to
+    // erase a contended sample: this forecast exists to refuse sessions that
+    // cannot keep up, an optimistic estimator hides exactly the warning that
+    // was missing when a 4K60 session dropped 848 of 869 frames, and one-sided
+    // error means a low quantile drifts towards the best case the machine has
+    // ever had rather than the case the user is about to get.
+    static constexpr size_t kPaceRingSamples=5;
+    struct PaceHistory{uint32_t width{},height{};std::vector<double> msPerFrame;};
+    static double MedianMsPerFrame(std::vector<double> samples){
+        if(samples.empty())return 0.0;
+        std::sort(samples.begin(),samples.end());
+        const size_t middle=samples.size()/2;
+        return samples.size()%2?samples[middle]:(samples[middle-1]+samples[middle])*0.5;
+    }
+    void RecordPaceSample(uint32_t width,uint32_t height,double msPerFrame){
+        if(!width||!height||!(msPerFrame>0.0))return;
+        for(PaceHistory& history:m_paceHistory){
+            if(history.width!=width||history.height!=height)continue;
+            history.msPerFrame.push_back(msPerFrame);
+            if(history.msPerFrame.size()>kPaceRingSamples)history.msPerFrame.erase(history.msPerFrame.begin());
+            return;
+        }
+        // Same bound as the profile the forecast reads, and the same eviction:
+        // a geometry nobody has played for six geometries is the one to lose.
+        if(m_paceHistory.size()==playback_timing::RenderPaceProfile::kMaxSamples)m_paceHistory.erase(m_paceHistory.begin());
+        m_paceHistory.push_back({width,height,{msPerFrame}});
+    }
+    // The forecast reads one number per geometry; that number is the geometry's
+    // median, recomputed whenever the history changes.
+    void RebuildRenderPace(){
+        m_renderPace={};
+        for(const PaceHistory& history:m_paceHistory)
+            m_renderPace.Record({history.width,history.height,MedianMsPerFrame(history.msPerFrame)});
+    }
     void LoadRenderPace(){
         std::wstring gpu(512,L'\0');
         DWORD length=GetPrivateProfileStringW(L"NeuralPace",L"Gpu",L"",gpu.data(),static_cast<DWORD>(gpu.size()),SettingsPath().c_str());
         gpu.resize(length);
-        std::wstring samples(1024,L'\0');
+        std::wstring samples(2048,L'\0');
         length=GetPrivateProfileStringW(L"NeuralPace",L"Samples",L"",samples.data(),static_cast<DWORD>(samples.size()),SettingsPath().c_str());
         samples.resize(length);
-        m_renderPace={};
+        m_paceHistory.clear();m_renderPace={};
         if(gpu!=m_opt.detectedGpu.description)return;
         for(size_t start=0;start<samples.size();){
             size_t end=samples.find(L';',start);if(end==std::wstring::npos)end=samples.size();
-            unsigned width=0,height=0;double ms=0.0;
-            if(swscanf_s(samples.substr(start,end-start).c_str(),L"%ux%u:%lf",&width,&height,&ms)==3)
-                m_renderPace.Record({width,height,ms});
+            const std::wstring entry=samples.substr(start,end-start);
             start=end+1;
+            const size_t cross=entry.find(L'x');if(cross==std::wstring::npos)continue;
+            const size_t colon=entry.find(L':',cross);if(colon==std::wstring::npos)continue;
+            unsigned width=0,height=0;
+            if(swscanf_s(entry.c_str(),L"%ux%u",&width,&height)!=2)continue;
+            for(size_t sample=colon+1;sample<=entry.size();){
+                size_t sampleEnd=entry.find(L',',sample);if(sampleEnd==std::wstring::npos)sampleEnd=entry.size();
+                double ms=0.0;
+                if(swscanf_s(entry.substr(sample,sampleEnd-sample).c_str(),L"%lf",&ms)==1)
+                    RecordPaceSample(width,height,ms);
+                sample=sampleEnd+1;
+            }
         }
+        RebuildRenderPace();
     }
     void SaveRenderPace()const{
         std::wstring samples;
-        for(const auto& sample:m_renderPace.samples){
-            wchar_t text[64]{};swprintf_s(text,L"%ux%u:%.6f",sample.width,sample.height,sample.msPerFrame);
-            if(!samples.empty())samples+=L';';samples+=text;
+        for(const PaceHistory& history:m_paceHistory){
+            if(history.msPerFrame.empty())continue;
+            if(!samples.empty())samples+=L';';
+            wchar_t geometry[32]{};swprintf_s(geometry,L"%ux%u:",history.width,history.height);
+            samples+=geometry;
+            for(size_t index=0;index<history.msPerFrame.size();++index){
+                wchar_t text[32]{};swprintf_s(text,L"%.6f",history.msPerFrame[index]);
+                if(index)samples+=L',';
+                samples+=text;
+            }
         }
         WritePrivateProfileStringW(L"NeuralPace",L"Gpu",m_opt.detectedGpu.description.c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"NeuralPace",L"Samples",samples.c_str(),SettingsPath().c_str());
@@ -1519,11 +1596,14 @@ private:
         if(!m_liveSegments||!m_livePaceWidth||!m_livePaceHeight)return;
         const auto pace=m_liveSegments->Pace();
         if(pace.frames<kMinPaceFrames||!(pace.wallMs>0.0))return;
-        m_renderPace.Record({m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame()});
+        RecordPaceSample(m_livePaceWidth,m_livePaceHeight,pace.MsPerFrame());
+        RebuildRenderPace();
         SaveRenderPace();
+        const size_t kept=[&]{for(const PaceHistory& history:m_paceHistory)if(history.width==m_livePaceWidth&&history.height==m_livePaceHeight)return history.msPerFrame.size();return size_t{0};}();
         LOG("Measured neural render pace: "<<m_livePaceWidth<<"x"<<m_livePaceHeight<<" at "<<pace.MsPerFrame()
             <<" ms/frame over "<<pace.frames<<" frames ("<<playback_timing::RenderPaceScale(pace.MsPerFrame(),m_livePaceWidth,m_livePaceHeight)
-            <<"x the reference GPU); "<<m_renderPace.samples.size()<<" geometries known for this GPU.");
+            <<"x the reference GPU); "<<m_renderPace.samples.size()<<" geometries known for this GPU. This geometry forecasts from the median of "
+            <<kept<<" samples: "<<playback_timing::PredictRenderMs(m_renderPace,m_livePaceWidth,m_livePaceHeight,0.0)<<" ms/frame.");
     }
 
     void SaveVideoSettings()const{
@@ -3045,11 +3125,53 @@ private:
         SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
         LOG("Active neural session stopped at "<<at<<" s; presented="<<presented<<" dropped="<<dropped);
     }
+    // Playback follows a live session's own segments, so a job that published
+    // none of them leaves nothing to follow. That happens for real: a session
+    // whose render key is already in the cache is answered with the published
+    // entry in about 50 ms, renders no frame, and appends nothing to the index.
+    // The published entry covers exactly this session's range, which makes it
+    // strictly better than what the session was going to produce, so playback
+    // moves onto it at its coverage start.
+    bool PlayPublishedEntryForLiveSession(const NeuralJobCompletion& completion){
+        std::error_code entryError;
+        if(completion.neuralPath.empty()||!std::filesystem::is_regular_file(completion.neuralPath,entryError)||entryError)return false;
+        if(completion.sourcePath.empty()||completion.range.end100ns<=completion.range.start100ns)return false;
+        const bool wasPlaying=m_playing||m_liveResumePlaying;
+        LOG("Active neural session rendered nothing because its render key was already published; moving playback to the cache entry at "
+            <<double(completion.range.start100ns)*1e-7<<" s. cacheHit="<<completion.cacheHit<<" frames="<<completion.result.frameCount
+            <<" entry="<<WideToUtf8(completion.neuralPath.wstring()));
+        // This job is finished and already joined, so the session has nothing
+        // left to do. Release it here rather than letting LoadCachedPlayback's
+        // Unload do it: that path cancels the job, and the cancel throws away
+        // the cold-start record whose total the picture below is about to end.
+        ReleaseLiveSession();
+        if(!LoadCachedPlayback(completion)){
+            LOG("Active neural session could not open the published entry it was handed; falling back to the original.");
+            return false;
+        }
+        m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);m_neuralNotice.clear();
+        if(!wasPlaying)SetPaused(true);
+        SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+        // The same sentence the segment attach logs, because it answers the
+        // same question - the neural picture is on screen at this timestamp
+        // with this much rendered video ahead of it - and every reader of this
+        // log, the field matrix and the session instrument included, asks it
+        // that way. Here the whole published range is already on disk, so the
+        // lead is everything between the playhead and the end of the entry.
+        LOG("Active neural playback attached at "<<m_currentSec<<" s with "
+            <<std::max(0.0,double(completion.range.end100ns)*1e-7-m_currentSec)<<" s buffered.");
+        return true;
+    }
     // The job ended while its output is still playing: publish or report, but
-    // never reload playback from the cache entry it just wrote.
+    // never reload playback from the cache entry it just wrote - unless there is
+    // no output, in which case that entry is the only thing there is to play.
     void CompleteLiveNeuralJob(const NeuralJobCompletion& completion){
         const bool covered=m_liveSegments&&!m_liveSegments->Empty();
         if(m_liveSegments)m_liveSegments->Finish();
+        std::error_code entryError;
+        const live_session::CompletedSession finished{covered,completion.result.ok,
+            !completion.neuralPath.empty()&&std::filesystem::is_regular_file(completion.neuralPath,entryError)&&!entryError};
+        const live_session::CompletedSessionPlan plan=live_session::PlanForCompletedSession(finished);
         if(completion.result.ok){
             m_neuralLifecycle.Transition(NeuralPlaybackState::Ready);RecordRecent(completion);m_neuralNotice.clear();
             // Playback stays on the segments, but the published entry is what
@@ -3059,7 +3181,20 @@ private:
         }else{
             TransitionToFailure(completion.result.failure);NoteNeuralFailure(completion);
             LOG("Active neural session ended early: kind="<<NeuralRenderFailureName(completion.result.failure)<<" covered="<<covered<<" detail="<<WideToUtf8(completion.result.detail));
-            if(!covered){StopLiveNeuralSession(true);return;}
+        }
+        // An empty index is the one state every other decision reads as "keep
+        // waiting": the session is finished with zero lead, so ShouldAttach and
+        // NeedsRebase are both false and the buffering panel never comes down.
+        // It is never right to leave the session standing there.
+        if(plan==live_session::CompletedSessionPlan::PublishedEntry&&PlayPublishedEntryForLiveSession(completion))return;
+        if(plan!=live_session::CompletedSessionPlan::Segments){
+            LOG("Active neural session published no playable coverage; handing the original back. ok="<<completion.result.ok
+                <<" cacheHit="<<completion.cacheHit<<" entry="<<(completion.neuralPath.empty()?std::string("(none)"):WideToUtf8(completion.neuralPath.wstring())));
+            StopLiveNeuralSession(true);
+            if(!completion.result.ok)return;
+            m_neuralNotice=T(L"neural.live.stalled");
+            UpdateCachedStatus();InvalidateControls();
+            return;
         }
         SyncFeatureMenuState();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
     }
@@ -3377,7 +3512,12 @@ private:
     // so a user's log carries the whole breakdown without the receipt file.
     void ReportNeuralColdStart(){
         if(!m_coldStart||!m_coldStart->ClaimReport())return;
-        LOG("Neural cold start: "<<SummarizeNeuralColdStartForLog(m_coldStart->Snapshot()));
+        // The helper's phases are absent whenever no helper ran, and a reader
+        // cannot tell that from a lost measurement. Name the reason when one is
+        // known; the field order the matrix tool parses is unchanged.
+        const std::string noHelper=m_coldStart->NoHelperReason();
+        LOG("Neural cold start: "<<SummarizeNeuralColdStartForLog(m_coldStart->Snapshot())
+            <<(noHelper.empty()?std::string{}:" helper=none("+noHelper+")"));
     }
     // The first neural frame of this render is on screen. Reported here rather
     // than at the completion, because an active session that is toggled off
@@ -3544,10 +3684,14 @@ private:
                         if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
                         const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cached->manifest.rangeStart100ns==range.start100ns&&cached->manifest.rangeEnd100ns==range.end100ns&&cached->manifest.guides==identity.guides&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-expectedDuration100ns)<=frameDurationTolerance;
-                        if(valid){completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->result.jobId=cached->manifest.jobId;completion->result.historyResets=cached->manifest.historyResets;completion->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;completion->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion->receiptPath=cached->directory/L"receipt.json";goto finish;}
+                        // A validated hit is answered without a helper, so the
+                        // five phases a helper measures are absent by nature.
+                        if(valid){coldStart->NoteNoHelper("cache-hit");completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->result.jobId=cached->manifest.jobId;completion->result.historyResets=cached->manifest.historyResets;completion->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;completion->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion->receiptPath=cached->directory/L"receipt.json";goto finish;}
                         if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
                     }
-                    if(prepareOnly){completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}
+                    // The cache check every open runs: no helper, and the line
+                    // it logs is not a render that failed to measure.
+                    if(prepareOnly){coldStart->NoteNoHelper("range-selection");completion->preparedOnly=true;LOG("Neural cache miss; opening the original for range selection.");goto finish;}
                     LOG("Neural cache miss or invalid entry; starting a new render.");
                     // Everything above is the player's own preparation; from
                     // here the cost belongs to the probe and the helper.
@@ -3609,10 +3753,20 @@ private:
                         sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding this job's published segments.");liveIndex->TruncateTo(liveIndexBase);};
                     }
                     completion->result=RunNeuralWorker(workerExecutable,request,postProgress,stop,sink,
-                        kDefaultCrashRelaunchLimit,[&]{coldStart->Mark(NeuralColdStartPhase::Launch);});
+                        kDefaultCrashRelaunchLimit,[&]{coldStart->Mark(NeuralColdStartPhase::Launch);},
+                        // Merged the moment the helper reports it, which is when
+                        // its first output file exists. Merging only after the
+                        // call returned put the helper's five phases seconds
+                        // behind the attach: an active session presents its
+                        // first frame while the render runs on, and the log line
+                        // written there carried five dashes in ten of ten
+                        // sessions while receipt.json for the same render
+                        // carried all five numbers.
+                        [&](const NeuralColdStartTimeline& helper){coldStart->Merge(helper);});
                     if(liveIndex)liveIndex->Finish();
-                    // The helper measured five of the nine phases; the receipt
-                    // carries one timeline, not two halves.
+                    // Again for a timeline that arrived too late to be reported
+                    // over the pipe - a crash or a cancel the launcher
+                    // synthesized a result for. Merging twice is idempotent.
                     coldStart->Merge(completion->result.coldStart);
                     completion->result.coldStart=coldStart->Snapshot();
                     receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
@@ -4493,6 +4647,9 @@ private:
     int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
     playback_timing::RenderPaceProfile m_renderPace;
+    // Every pace this GPU measured per geometry, newest last; m_renderPace
+    // carries the median of each and is what the forecast reads.
+    std::vector<PaceHistory> m_paceHistory;
     // The cold start of the newest neural job, or null when no job has run.
     std::shared_ptr<NeuralColdStartRecord> m_coldStart;
     HWND m_bufferWnd=nullptr;

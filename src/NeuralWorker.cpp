@@ -125,8 +125,10 @@ std::wstring HandleText(HANDLE handle)
 
 class MetadataReader {
 public:
-    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments)
-        : progress_(std::move(progress)), segments_(std::move(segments)) {}
+    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments,
+                   NeuralColdStartCallback timeline = {})
+        : progress_(std::move(progress)), segments_(std::move(segments)),
+          timeline_reported_(std::move(timeline)) {}
 
     bool ReadAvailable(HANDLE pipe)
     {
@@ -231,6 +233,12 @@ private:
                     auto timeline = DecodeTimeline(payload);
                     if (!timeline || !timeline_.Empty()) { malformed_ = true; return false; }
                     timeline_ = *timeline;
+                    // Reported here rather than only on the returned result:
+                    // this message arrives with the helper's first output file,
+                    // and a caller that reports its own timeline when the first
+                    // frame reaches the screen has already reported by the time
+                    // this function returns.
+                    if (timeline_reported_) timeline_reported_(timeline_);
                     break;
                 }
             }
@@ -242,6 +250,7 @@ private:
 
     OfflineNeuralRenderer::ProgressCallback progress_;
     NeuralSegmentSink segments_;
+    NeuralColdStartCallback timeline_reported_;
     std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
     NeuralColdStartTimeline timeline_;
@@ -455,14 +464,20 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
                                           const OfflineNeuralRenderer::ProgressCallback& progress,
                                           const NeuralSegmentSink& segments,
                                           std::stop_token stop, bool configurationRestarted,
-                                          const std::function<void()>& processCreated)
+                                          const std::function<void()>& processCreated,
+                                          const NeuralColdStartCallback& helperTimeline)
 {
-    MetadataReader reader(progress, segments);
+    MetadataReader reader(progress, segments, helperTimeline);
     bool restartRequested = false;
     NeuralRenderResult result = RunHelperOnce(executable, request, stop,
         configurationRestarted, reader, processCreated, restartRequested);
     if (restartRequested) {
-        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true, processCreated);
+        // The replacement helper measures its own cold start and reports it the
+        // same way; the one this reader may already have reported belongs to a
+        // process that exited before it rendered anything, and a merge of both
+        // keeps the later one, exactly as `result.coldStart` does below.
+        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true,
+                                      processCreated, helperTimeline);
     }
     // The reader outlives the judgement above, so a timeline that arrived
     // before a crash, a cancel or a rejected result is still reported: the
@@ -711,7 +726,8 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
                                    OfflineNeuralRenderer::ProgressCallback progress,
                                    std::stop_token stop, const NeuralSegmentSink& segments,
                                    uint32_t crashRelaunchLimit,
-                                   const std::function<void()>& processCreated)
+                                   const std::function<void()>& processCreated,
+                                   const NeuralColdStartCallback& helperTimeline)
 {
     NeuralRenderResult result;
     result.jobId = request.jobId;
@@ -734,7 +750,8 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
         // the previous helper published names a file that is about to be
         // rewritten.
         if (attempt && segments.onRestart) segments.onRestart();
-        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false, processCreated);
+        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false,
+                                        processCreated, helperTimeline);
         const bool relaunchable = !result.ok && !result.cancelled &&
             (result.failure == NeuralRenderFailure::WorkerCrashed ||
              result.failure == NeuralRenderFailure::DeviceRemoved ||

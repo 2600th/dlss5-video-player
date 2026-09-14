@@ -93,6 +93,41 @@ inline int64_t AttachPosition100ns(int64_t position100ns, int64_t rangeStart100n
     return coverageStart100ns > floor ? coverageStart100ns : floor;
 }
 
+// What a finished job leaves an active session to play. The question is not how
+// the job ended but whether anything reached the segment index playback is
+// bound to, because a job can succeed without appending a single segment: one
+// whose render key is already published returns that entry as a cache hit in
+// about 50 ms and renders nothing. The index then stays empty with `Finished()`
+// set, which is the one state where every other decision here says "wait" -
+// `ShouldAttach` sees a finished session with zero lead, `NeedsRebase` sees a
+// playhead inside the range, and the player sits behind the buffering panel
+// until the user gives up. The entry covers the session's whole range, so it is
+// playable immediately and better than anything the session could have done;
+// with no entry there is nothing to show and the original has to come back.
+// 0.21.2 fixed the same family for coverage that starts one frame late; this is
+// coverage that never arrives at all.
+enum class CompletedSessionPlan {
+    Segments,       // keep playing what the session published
+    PublishedEntry, // nothing was published to the index; play the cache entry instead
+    Stop,           // nothing to play: end the session and hand the original back
+};
+
+struct CompletedSession {
+    bool covered = false;        // at least one finalized segment reached the index
+    bool ok = false;             // the job reported success
+    bool publishedEntry = false; // a complete entry covering the session's range exists
+};
+
+inline CompletedSessionPlan PlanForCompletedSession(const CompletedSession& session)
+{
+    // Coverage outranks the verdict: a job that failed after publishing
+    // segments still leaves seconds of picture on screen, and taking those away
+    // is worse than keeping them.
+    if (session.covered) return CompletedSessionPlan::Segments;
+    if (session.ok && session.publishedEntry) return CompletedSessionPlan::PublishedEntry;
+    return CompletedSessionPlan::Stop;
+}
+
 // True once a rebuffer can end.
 inline bool ShouldResume(const SessionView& view, double resumeLead = kResumeLead)
 {
