@@ -42,12 +42,14 @@ and looks like a broken helper until the runtime is re-staged.
   from the render path. Honest caveat: neither is measurable at 1080p or 4K on this
   card - they are removed because a clear that writes memory the next draw fully
   overwrites is waste, not because anything got faster.
-- Not changed, and measured to stay that way: the two `[Encoding]` GPU conversion
-  defaults. Turning both on moves 2.7x fewer bytes across the decoder pipe and the
-  capture readback and is worth +7 % throughput at 4K, and it costs 0.75 dB PSNR
-  and doubles false motion on the same clip, so the shipped defaults keep the
-  slower, more faithful path. The flags remain per-render for anyone who wants the
-  other trade.
+- Not changed, and now measured to stay that way: the two `[Encoding]` GPU
+  conversion defaults, which `docs/USAGE.md` has always described as off. Turning
+  both on moves 2.7x fewer bytes across the decoder pipe and the capture readback
+  and is worth +7 % throughput at 4K; it also costs 0.75 dB PSNR and doubles false
+  motion on the same clip, and single-flag runs show neither half is free (capture
+  alone -0.79 dB, decoder alone -0.64 dB). The shipped defaults keep the slower,
+  more faithful path; the flags remain per-render for anyone who wants the other
+  trade.
 
 - A live session whose render key was already published never presented. The job
   was answered by the cache in about 50 ms, appended nothing to the segment index

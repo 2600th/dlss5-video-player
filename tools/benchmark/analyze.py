@@ -567,19 +567,21 @@ def main() -> int:
     faces = FaceEmbedder() if need_faces else None
     rows = []
     for run in dirs:
+        # Membership first, before the cache short-circuit: one runs directory can
+        # hold runs from several corpora, and a cached metrics.json from a foreign
+        # one would otherwise be pulled into this analysis while an uncached one
+        # was skipped - the same tree scoring differently depending on --force.
+        name = json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]
+        if name not in clips:
+            print(f"skipping {run.name}: clip {name!r} is not in this corpus manifest "
+                  f"(wrong --corpus, or a runs directory shared with another corpus)", flush=True)
+            continue
+        clip = clips[name]
         cached = run / "metrics.json"
         if cached.exists() and not args.force:
             rows.append(json.loads(cached.read_text(encoding="utf-8")))
             print(f"cached {run.name}", flush=True)
             continue
-        name = json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]
-        if name not in clips:
-            # One runs directory can hold runs from several corpora. A run whose
-            # clip this manifest does not describe is not scoreable here, and it
-            # is not an error either - say so and move on.
-            print(f"skipping {run.name}: clip {name!r} is not in this corpus manifest", flush=True)
-            continue
-        clip = clips[name]
         m = analyze_run(run, clip, ocr, faces, args.sample_every)
         rows.append(m)
         print(f"{run.name}: ok={m['ok']} psnr={fmt(m.get('psnr_mean'), 2)} dE={fmt(m.get('delta_e_mean'), 2)} "

@@ -12,5 +12,21 @@
       "1"
     ],
     "description": "both GPU conversion paths on: the decoder delivers NV12 (1.5 B/px over the pipe and the upload heap, converted by PSSourceNv12 on the GPU) and the capture plane is read back as NV12 (1.5 B/px). This is the audit's largest proportional item and it is a policy default, not a code change"
+  },
+  "gpu-color-only": {
+    "guides": "mv=1,depth=1",
+    "worker_flags": [
+      "--gpu-color-conversion",
+      "1"
+    ],
+    "description": "capture readback only: the rendered frame is converted to NV12 on the GPU instead of by ffmpeg on the CPU. docs/USAGE.md records this one as off because the GPU is the scarce resource under the neural pass (8.35 vs 8.66 ms on an RTX 5070 Ti)"
+  },
+  "gpu-source-only": {
+    "guides": "mv=1,depth=1",
+    "worker_flags": [
+      "--gpu-source-conversion",
+      "1"
+    ],
+    "description": "decoder side only: the source is decoded to NV12 and converted on the GPU, saving 2.6x pipe traffic. docs/USAGE.md records this one as off for correctness, not cost: the conversion assumes BT.709 limited range and nothing reads the source tags, so an SD or full-range clip renders with shifted colour"
   }
 }

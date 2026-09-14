@@ -80,7 +80,10 @@ def judge(clip: dict, run: cm.CutRun,
     """
     truth, soft = clip.get("cuts", []), clip.get("soft_cuts", [])
     scores = cm.cut_scores(run.cuts, truth, soft_cuts=soft)
-    window = cm.min_frames_between_cuts(30.0, seconds_between_cuts)
+    # The clip's own rate, not 30: the camera-original clips run at 23.976, where
+    # the shipped 0.3 s debounce is 7 frames rather than 9. Scoring them against a
+    # 30 fps window counts a second fire the mirror would actually have accepted.
+    window = cm.min_frames_between_cuts(clip["fps"], seconds_between_cuts)
     multi = sum(1 for cut in truth
                 for fire in run.cuts if 0 < fire - cut < window)
     multi += sum(max(0, sum(1 for fire in run.cuts if first <= fire <= last) - 1)

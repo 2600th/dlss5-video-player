@@ -374,10 +374,9 @@ CAMERA_SOURCES = {
                   "THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps"),
     "gtavi": (CAMERA_ORIGINAL / "gtavi-extended.webm", "uphThaa97ig", "271", None,
               "Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps"),
-    "lawrence": (CAMERA_ORIGINAL / "cand-lawrence-arabia.mp4", "HFAkWNiETrg",
-                 "bestvideo[height<=1440][ext=mp4]/bestvideo[height<=1440]", "crop=1920:884:0:76",
+    "lawrence": (CAMERA_ORIGINAL / "cand-lawrence-arabia.mp4", "HFAkWNiETrg", "399", "crop=1920:884:0:76",
                  "Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), "
-                 "1920x1038 h264, 23.976 fps, 122 s"),
+                 "1920x1038 AV1 (format 399), 23.976 fps, 122 s"),
 }
 
 

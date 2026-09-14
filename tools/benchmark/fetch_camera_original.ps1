@@ -74,7 +74,7 @@ $sources = @(
     [pscustomobject]@{
         File     = 'cand-lawrence-arabia.mp4'
         Selector = 'https://www.youtube.com/watch?v=HFAkWNiETrg'
-        Format   = 'bestvideo[height<=1440][ext=mp4]/bestvideo[height<=1440]'
+        Format   = '399'
         Width    = 1920
         Height   = 1038
         Rate     = '24000/1001'

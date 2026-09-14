@@ -39,6 +39,24 @@ decoded-frame sequence digest - so the render side of each session is not a
 source of the spread below. The toggle-to-picture side is not bit-identical and
 never has been; the two sessions per arm are the honest width of it.
 
+**And two is one short of this project's own minimum.** `player_session.ps1`'s own
+documentation says "one sample is not a measurement; the default of three is the
+minimum this project accepts". A third session per arm was attempted after the
+fact and could not run: the workstation had locked, and the harness said so
+deterministically rather than guessing -
+`SendInput refused the chord, Win32 error 5; the foreground window is none - the
+session manager reports this session locked (WTSSessionInfoEx SessionFlags =
+WTS_SESSIONSTATE_LOCK)`, exit 14 on all three sessions of both arms. So read the
+headline as **n=2 per arm**: the 361 MiB is a single deterministic reading off the
+adapter and does not need repeats, while the +0.70 s reuse cost is two samples
+against two, with the arms not overlapping (2.477-2.543 against 3.195-3.239). The
+direction is safe on that; the exact seven-tenths is not, and a third pair should
+be taken on an unlocked box before anyone quotes it to two decimals.
+
+That failure is incidentally the first live proof of the lock probe shipped the
+same day: the pre-probe harness would have reported this as an inference from a
+flapping foreground window, and it named the session flag instead.
+
 ## The instrument line
 
 ```

@@ -131,7 +131,7 @@ table has one row and one verdict.
 | 3 | `src/D3D12Renderer.cpp:755` guide grid upload | 160x90 RGBA32F, ~230 KB | NECESSARY. Not proportional to frame area in any way that matters - it is the analysis grid, not the frame. |
 | 4 | `src/D3D12Renderer.cpp:770-771`, `:782`, `:786` `CopyTextureRegion` | GPU-side copies, no CPU touch | NECESSARY. |
 | 5 | `src/OpticalFlowNvof.cpp:449` + `:452-464` `ReadbackGlobalFlow` | 4 bytes/frame out of a 1x1 surface, fence-compared, never waited on | NECESSARY as written and negligible. Backlog note: nothing consumes `LastGlobalFlow()` yet. |
-| 6 | `src/D3D12Renderer.cpp:1074` `CopyTextureRegion` capture plane -> readback buffer | THE proportional readback: 4 B/px BGRA, 1.5 B/px NV12 | **NECESSARY in kind; its SIZE is a policy - and that policy is now MEASURED: DO NOT FLIP.** The 2.7x is available today without a rebuild, since `request.gpuColorConversion` is also DEFAULT FALSE (`src/OfflineNeuralRenderer.h:49`, `src/main.cpp:1480`, `m_gpuColorConversion=false` at `main.cpp:4626`). Twin of row 1, and the row that carries the quality cost. Inferred mechanism: the NV12 readback would subsample chroma before the encoder sees it. |
+| 6 | `src/D3D12Renderer.cpp:1074` `CopyTextureRegion` capture plane -> readback buffer | THE proportional readback: 4 B/px BGRA, 1.5 B/px NV12 | **NECESSARY in kind; its SIZE is a policy - and that policy is now MEASURED: DO NOT FLIP.** The 2.7x is available today without a rebuild, since `request.gpuColorConversion` is also DEFAULT FALSE (`src/OfflineNeuralRenderer.h:49`, `src/main.cpp:1480`, `m_gpuColorConversion=false` at `main.cpp:4626`). Twin of row 1. Measured alone it costs -0.79 dB PSNR and +0.94 dE; `docs/USAGE.md:216-218` already defaults it off on GPU-time grounds that do not reproduce on this card. |
 | 7 | `src/D3D12Renderer.cpp:1112` `WaitForFenceValue(m_captureFence[slot])` | CPU stall on one slot | NECESSARY. Per-slot, not a drain; already counted as `m_captureResolveWaitNanos`, and the resolve-wait row of the stage table is what measures it. |
 | 8 | `src/D3D12Renderer.cpp:1151-1170` `CopyCaptureView` (called off-thread at `src/OfflineNeuralRenderer.cpp:1751`) | one full frame of CPU memcpy per frame | NECESSARY, for two nameable reasons: (a) the encoder is an ffmpeg child fed tightly packed rows over a pipe and readback rows are `D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`-padded - NV12 luma at 1920 wide is pitch 2048 - so writing from the mapped buffer directly means one `WriteFile` per row; (b) it must not hold a readback slot across a blocking pipe write, or ffmpeg back-pressure would stall the capture ring. Already off the render thread and overlapped with decode/guide/submit. |
 | 9 | `src/OfflineNeuralRenderer.cpp:2172` `encoder.WriteFrame` -> pipe | one full frame | NECESSARY; already on its own thread. |
@@ -183,22 +183,39 @@ one scored run per arm is sufficient and the deltas below are deterministic, not
 **That is the decision: -0.75 dB PSNR, +0.95 dE, and false motion doubled (0.0013 ->
 0.0026) for +7 % throughput. Do not flip the defaults.**
 
-The mechanism is not a transport change, it is a precision change. The BGRA readback
-carries full-resolution chroma to the encoder, while the NV12 readback would subsample
-chroma 4:2:0 before the encoder ever sees it. Mark that as **inferred**: the readback
-format is the only variable between the arms and this is the obvious candidate, but no
-measurement here localised where the precision is lost, and the honest alternative - that
-the GPU convert shader and ffmpeg's CPU conversion differ in coefficients or rounding -
-would produce the same sign. Localising it needs a per-stage comparison nobody has run. The export is 4:2:0 HEVC in the end, which is exactly why
-this is easy to get wrong: the final container's chroma format does not tell you where the
-subsampling happened. Losing chroma resolution one stage earlier costs real information
-that the encoder would otherwise have had.
+**The cause is now attributed, and it is not one flag.** The joint arm flipped two
+switches at once, which cannot say which one paid. Both single-flag arms were then
+run on the same clip, 3 repeats each, and each is bit-identical across its repeats:
 
-Of the five metrics, the false-motion doubling is the one that matters most here, and for a
-specific reason: the motion field is measured on the output that this change makes
-chroma-poorer, so the metric is reading the damage directly rather than at one remove. The
-two metrics that move the other way (flicker+ +0.002, sigma+ -0.013) are small beside
--0.75 dB and a 2x on false motion, and neither offsets a fidelity loss of that size.
+| arm | PSNR dB | dE mean | flicker+ | sigma+ | false motion | proc fps (median) | gpu_ms_p50 (median) |
+|---|---|---|---|---|---|---|---|
+| `cpu-conversion` (shipped) | 29.09 | 5.37 | 0.145 | 0.492 | 0.0013 | 31.18 | 18.051 |
+| `gpu-color-only` | 28.30 | 6.31 | 0.138 | 0.574 | 0.0017 | 32.98 | 17.849 |
+| `gpu-source-only` | 28.45 | 6.24 | 0.155 | 0.396 | 0.0019 | 32.98 | 18.249 |
+| both | 28.34 | 6.32 | 0.147 | 0.479 | 0.0026 | 33.35 | 18.355 |
+
+Each flag costs most of the quality on its own - **-0.79 dB / +0.94 dE** for the
+capture side alone, **-0.64 dB / +0.87 dE** for the decoder side alone - and the two
+together are no worse than either. So the earlier single-cause story (chroma
+subsampled in the capture readback before the encoder sees it) is **wrong as an
+explanation of the whole delta**: it can at most account for the capture arm. The
+decoder arm has its own documented mechanism, and it is a colour error rather than a
+chroma-resolution one - `docs/USAGE.md:218-221` records that `GpuSourceConversion`
+assumes BT.709 limited range and nothing reads the source's tags, so a clip whose
+tags disagree renders shifted. The only metric that is close to additive is false
+motion (0.0013 -> 0.0017 / 0.0019 -> 0.0026), which is what two independent precision
+losses in the same pipeline should look like.
+
+**This measurement is a confirmation, not a discovery, and the record already said
+so.** `docs/USAGE.md:214-221` documents both flags as deliberately off, with reasons:
+the capture side because the GPU is the scarce resource under the neural pass (8.35
+against 8.66 ms/frame on an RTX 5070 Ti), the decoder side for the colour-tag hazard
+above. One of those two reasons does not reproduce here: on this 4080 SUPER at 4K the
+capture-side flag *lowers* `gpu_ms_p50` (17.849 against 18.051). That is a
+machine-and-resolution difference, not a contradiction to assert over the shipped
+note - but it means the cost argument for that flag is card-dependent while the
+quality argument measured here is not. The decoder-side flag's real blocker remains
+the missing colour-tag probe, which is a correctness item and not a readback one.
 
 **This closes the item `GpuPath` flagged as "needs a measurement before it can be
 trusted".** The flag pair remains available per-render for anyone who wants throughput over

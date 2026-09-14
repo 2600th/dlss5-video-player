@@ -65,9 +65,14 @@ description string in `CAMERA_SOURCES` said 1920x1080 where the file measures
 1920x1038; the measured value is the right one and the string now says so. And
 this source was originally selected by search text (`ytsearch1:...`), which is
 not a pin - the top result can change. It is now pinned to video id
-`HFAkWNiETrg`, and the pin was verified rather than assumed: downloading by id
-and rebuilding the span reproduces `orig-dissolve` byte for byte, decoded-frame
-digest `81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f`.
+`HFAkWNiETrg` with format id `399`, and both halves were verified rather than
+assumed: a format *selector* was still not a pin, because the selector's choice
+moves when the site adds an encode, so the concrete format was resolved and the
+source re-downloaded from scratch under it. Rebuilding the span from that download
+reproduces `orig-dissolve` byte for byte, decoded-frame digest
+`81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f`. Format 399 is
+AV1, not h264 as the description string first said - the string is prose the
+builder never reads, but it is fixed.
 
 **Geometry** (`corpus.py:352-356`, `camera_segment` at `corpus.py:370-376`): crop to the
 active picture as measured by cropdetect - godfather `crop=2560:1384:0:28`, gtavi none,
@@ -173,6 +178,21 @@ checked on two clips:
 | `orig-faces` | `fe13589392d572a8c4561704` (all four) |
 | `orig-film-cuts-b` | `6af4435732c20474db02b8a1` (all four) |
 
+
+**The knob provably reached the runtime**, which is the half that makes byte-identity
+mean anything: four identical outputs prove inertness only if the four requests
+actually differed. Each run's `pass1-ReShade.log` carries the add-on echoing its own
+state - `[DLSS 5 Neural Rendering] DLSS5 Generic: DLSS5 active settings: upscaling=OFF
+intensity=1.000000 global_tone=1.000000 diffuse_white_nits=203.000000 preset=N style=0
+enabled=ON` - with N matching the arm on both clips: `preset=0` in the
+`shipped-depth-proxy` runs that serve as the preset-0 arm (all eight keys written,
+mask on), and `preset=1/2/3` in the three preset arms. Same check the original Q7
+used, and the reason its conclusion was citable.
+
+All four arms per clip also came from one worker build, which matters because the
+comparison is a digest equality: the preset arms and the preset-0 arm were rendered
+in the same batch against the post-integration `NeuralWorker.exe`.
+
 The earlier finding rested on four synthetic clips plus one real graded clip
 (`docs/measurements/art-defaults-20260914/REPORT.md`). It now holds on publisher footage
 too, which moves the conclusion's subject: **the knob being inert is a property of this
@@ -269,6 +289,14 @@ artifact `build-upscaling/benchmark-work/cutlab-widened.json`:
 
 The aggregate still favours the candidate, as the earlier 13-clip sweep did (F1 0.923 versus
 0.750 then). **Split by provenance it inverts:**
+
+One instrument fix landed between the first sweep and this table, and it is worth
+stating because it could have moved these numbers: `cutlab.py` scored the
+over-reset window at a hardcoded 30 fps while running the criterion at each clip's
+own rate, so the 23.976 fps camera-original clips were judged against a 9-frame
+window where the mirror uses 7. It now uses `clip["fps"]`. The bug could only
+over-count over-resets on those clips, they scored zero either way, and the sweep
+was re-run after the fix to confirm every figure below is unchanged.
 
 | criterion | camera-original (7 clips, 17 cuts) | NR-capture (4 clips, 5 cuts) | synthetic (9 clips, 7 cuts) |
 |---|---|---|---|
