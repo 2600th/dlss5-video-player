@@ -1,3 +1,4 @@
+#include "GuideControls.h"
 #include "ReShadeConfig.h"
 #include "NeuralCache.h"
 #include "NeuralSettings.h"

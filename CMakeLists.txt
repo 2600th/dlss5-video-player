@@ -114,6 +114,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/MediaPipeline.cpp
     src/MediaPipeline.h
     src/OfflineNeuralRenderer.cpp
+    src/NeuralRenderTypes.h
     src/OfflineNeuralRenderer.h
     src/NeuralWorker.cpp
     src/NeuralWorker.h
@@ -339,6 +340,7 @@ if(BUILD_TESTING)
         src/MediaPipeline.cpp
         src/MediaPipeline.h
         src/OfflineNeuralRenderer.cpp
+        src/NeuralRenderTypes.h
         src/OfflineNeuralRenderer.h
         src/SynchronizedPlayback.cpp
         src/SynchronizedPlayback.h

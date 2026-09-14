@@ -1,4 +1,5 @@
 #include "NeuralCache.h"
+#include "GuideControls.h"
 
 #include <windows.h>
 #include <bcrypt.h>

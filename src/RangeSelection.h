@@ -1,6 +1,6 @@
 #pragma once
 
-#include "OfflineNeuralRenderer.h"
+#include "NeuralRenderTypes.h"
 
 #include <cstdint>
 #include <optional>
