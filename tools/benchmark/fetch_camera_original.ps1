@@ -73,12 +73,12 @@ $sources = @(
     },
     [pscustomobject]@{
         File     = 'cand-lawrence-arabia.mp4'
-        Selector = 'ytsearch1:Lawrence of Arabia official trailer restored'
+        Selector = 'https://www.youtube.com/watch?v=HFAkWNiETrg'
         Format   = 'bestvideo[height<=1440][ext=mp4]/bestvideo[height<=1440]'
         Width    = 1920
         Height   = 1038
         Rate     = '24000/1001'
-        Why      = 'Lawrence of Arabia restored trailer (Sony/Columbia) - the only verified cross-dissolve; orig-dissolve'
+        Why      = 'Lawrence of Arabia HD restoration trailer (Park Circus) - the only verified cross-dissolve; orig-dissolve. Letterboxed 1920x1038, so this one is scaled UP to 1080 height'
     }
 )
 

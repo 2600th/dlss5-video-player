@@ -102,10 +102,24 @@ redistributed. `tools/benchmark/fetch_camera_original.ps1` fetches them by video
 id and format id into `build-upscaling/camera-original/`, verifies the geometry
 and frame rate the labels were verified against, and each `orig-*` builder skips
 itself when its source is absent - the same contract `faces` has always had.
-Nothing is SHA-pinned, because a streaming site re-encodes its own files; the
-integrity check is downstream, in the per-clip frame digests this manifest
-records, so `python tools/benchmark/corpus.py --check` is what proves a rebuild
-produced the clips the committed labels were verified against.
+Nothing is SHA-pinned, because a streaming site re-encodes its own files. The
+integrity check is downstream and it is tracked in git:
+`tools/benchmark/camera-original.digests.json` carries the expected decoded-frame
+digest, frame count and cut list for each `orig-*` clip, and
+`python tools/benchmark/corpus.py --check` compares a rebuild against it - which
+is what a clean checkout needs, since neither the sources nor the built clips nor
+the manifest beside them are in the repository. Drift there means the upstream
+re-encoded or a span moved, not that the labels are wrong; re-verify before citing
+them.
+
+One geometry caveat belongs with that promise. The scale to 1080 height is a
+*down*scale for the two 1440p sources and an *up*scale for the letterboxed
+1920x1038 trailer (884 active rows, 1.22x), so `orig-dissolve` is the one clip
+here whose fine detail is partly resampled rather than camera-native. It is kept
+that way because what the clip exists to carry is a transition's temporal
+structure, and padding to 1080 instead would put 196 static black rows into the
+static-cell denominator - but do not cite it for sharpness, grain or any
+per-pixel fidelity claim.
 
 Every `orig-*` cut index was verified the same way as the `real-*` ones: a
 detector proposes (mean |dY| ≥ 25 with histogram overlap ≤ 0.55, computed on the

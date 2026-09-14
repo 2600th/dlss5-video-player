@@ -354,16 +354,30 @@ def build_real_dissolve(corpus: Path) -> dict:
 # static-cell population that false motion is measured against. Native frame rate
 # is preserved - forcing 30 fps would duplicate frames, which is what makes
 # `real-film-cuts` 37 % motionless and its false-motion level incomparable.
+#
+# That scale is a DOWNscale for the two 1440p sources (1384 active rows -> 1080)
+# and an UPscale for the letterboxed 1920x1038 trailer (884 active rows -> 1080,
+# 1.22x). An upscale adds no information, so `orig-dissolve` is the one clip here
+# whose fine detail is partly resampled rather than camera-native. It is kept
+# because what that clip exists to carry is a transition's temporal structure,
+# which the resample does not touch, and because padding to 1080 instead would put
+# 196 static black rows into the static-cell denominator. Do not cite it for
+# sharpness, grain or any per-pixel fidelity claim.
 CAMERA_ORIGINAL = BUILD / "camera-original"
+# Tracked expectations for the clips built from those sources: the sources and the
+# built clips are both untracked, so this file is the only thing a clean checkout
+# can verify a rebuild against.
+CAMERA_ORIGINAL_DIGESTS = Path(__file__).resolve().parent / "camera-original.digests.json"
 CAMERA_SOURCES = {
     # tag: (file, youtube id, format id, active-picture crop or None, human description)
     "godfather": (CAMERA_ORIGINAL / "godfather-50th.webm", "UaVTIH8mujA", "271", "crop=2560:1384:0:28",
                   "THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps"),
     "gtavi": (CAMERA_ORIGINAL / "gtavi-extended.webm", "uphThaa97ig", "271", None,
               "Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps"),
-    "lawrence": (CAMERA_ORIGINAL / "cand-lawrence-arabia.mp4", "ytsearch1:Lawrence of Arabia official trailer "
-                 "restored", "bestvideo[height<=1440][ext=mp4]", "crop=1920:884:0:76",
-                 "Lawrence of Arabia restored trailer (Sony/Columbia), 1920x1038 h264, 23.976 fps"),
+    "lawrence": (CAMERA_ORIGINAL / "cand-lawrence-arabia.mp4", "HFAkWNiETrg",
+                 "bestvideo[height<=1440][ext=mp4]/bestvideo[height<=1440]", "crop=1920:884:0:76",
+                 "Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), "
+                 "1920x1038 h264, 23.976 fps, 122 s"),
 }
 
 
@@ -458,7 +472,10 @@ def build_orig_game_motion(corpus: Path) -> dict | None:
 def build_orig_dissolve(corpus: Path) -> dict | None:
     return build_camera_clip(corpus, "orig-dissolve", "lawrence", 2510, 71, dict(
         cuts=[], soft_cuts=[[21, 48]],
-        notes="The real cross-dissolve this corpus did not have. Neither title the demo capture filmed contains "
+        notes="The real cross-dissolve this corpus did not have. Note the geometry caveat above: this "
+              "source is letterboxed 1920x1038, so its 884 active rows are scaled UP to 1080 (1.22x) "
+              "where the other camera-original clips are scaled down - fine detail here is partly "
+              "resampled, and only the transition's temporal structure is camera-native. Neither title the demo capture filmed contains "
               "one - both were scanned end to end and every transition in them is a hard cut, a fade through "
               "black or a fade from white - so this trailer was acquired for the transition alone. Verified as "
               "a dissolve rather than a fade: across locals 21-48 the frame is a linear blend of the shots "
@@ -503,13 +520,40 @@ def main() -> int:
         print(f"unknown clips: {', '.join(unknown)}; known: {', '.join(BUILDERS)}", file=sys.stderr)
         return 1
     if args.check:
-        manifest = __import__("json").loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+        import json as _json
+        manifest = _json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
         drift = 0
         for clip in manifest["clips"]:
             digest = sequence_digest(framemd5(corpus / clip["file"]))
             same = digest == clip["digest"]
             drift += not same
             print(f"{clip['name']}: {'ok' if same else 'DIGEST DRIFT'} {digest}")
+        # The camera-original clips are also checked against the digests tracked in
+        # git, not only against the manifest that was written beside them. A local
+        # manifest agrees with itself by construction; only the tracked file can
+        # tell a clean checkout that a rebuild produced the pixels the committed
+        # labels were verified against.
+        expected = CAMERA_ORIGINAL_DIGESTS
+        if expected.exists():
+            tracked = _json.loads(expected.read_text(encoding="utf-8"))["clips"]
+            built = {c["name"]: c for c in manifest["clips"]}
+            for row in tracked:
+                have = built.get(row["name"])
+                if not have:
+                    print(f"{row['name']}: not built (source absent), tracked digest not checked")
+                    continue
+                path = corpus / row["file"]
+                digest = sequence_digest(framemd5(path))
+                if digest != row["digest"]:
+                    drift += 1
+                    print(f"{row['name']}: DRIFT AGAINST TRACKED DIGEST - the upstream re-encoded or the "
+                          f"span moved; re-verify the labels before citing them ({digest})")
+                elif have["frames"] != row["frames"] or have["cuts"] != row["cuts"]:
+                    drift += 1
+                    print(f"{row['name']}: pixels match the tracked digest but the labels do not "
+                          f"({have['frames']}/{have['cuts']} vs {row['frames']}/{row['cuts']})")
+                else:
+                    print(f"{row['name']}: matches the tracked digest and labels")
         return 0 if drift == 0 else 1
     corpus.mkdir(parents=True, exist_ok=True)
     version = subprocess.check_output([str(FFMPEG), "-version"], creationflags=FLAGS).decode().splitlines()[0]

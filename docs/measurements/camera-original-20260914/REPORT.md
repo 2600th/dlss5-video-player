@@ -56,14 +56,18 @@ releases of the same titles the demo capture filmed off the player's window.
 |---|---|---|
 | `godfather` | THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps, format 271 | `corpus.py:360-361` |
 | `gtavi` | Grand Theft Auto VI: An Extended Look (Netflix / Now Playing), 2560x1440 VP9, 30 fps, format 271 | `corpus.py:362-363` |
-| `lawrence` | Lawrence of Arabia restored trailer (Sony/Columbia), **1920x1038** h264, 23.976 fps as fetched | `corpus.py:364-366` |
+| `lawrence` | Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), **1920x1038** h264, 23.976 fps, 122 s, video id `HFAkWNiETrg` | `corpus.py:364-367` |
 
 The third source was acquired for exactly one reason: the cross-dissolve.
 
-One recording discrepancy, since this file is the record: the fetched Lawrence file measures
-1920x1038, while the human description string in `CAMERA_SOURCES` (`corpus.py:366`) reads
-1920x1080. The measured value is 1920x1038; the string is prose the builder never reads, and
-the geometry that actually governs the clip is the crop below.
+Two corrections to this record, both applied after the first commit of it. The
+description string in `CAMERA_SOURCES` said 1920x1080 where the file measures
+1920x1038; the measured value is the right one and the string now says so. And
+this source was originally selected by search text (`ytsearch1:...`), which is
+not a pin - the top result can change. It is now pinned to video id
+`HFAkWNiETrg`, and the pin was verified rather than assumed: downloading by id
+and rebuilding the span reproduces `orig-dissolve` byte for byte, decoded-frame
+digest `81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f`.
 
 **Geometry** (`corpus.py:352-356`, `camera_segment` at `corpus.py:370-376`): crop to the
 active picture as measured by cropdetect - godfather `crop=2560:1384:0:28`, gtavi none,
@@ -72,6 +76,28 @@ wide. **No padding**, so no synthetic black row enters the static-cell populatio
 motion is divided by. Native frame rate is preserved: forcing 30 fps would duplicate one
 frame in five, which is precisely what makes `real-film-cuts` 37 % motionless and its
 false-motion *level* incomparable across clips (`docs/BENCHMARK.md:83-95`).
+
+**That scale is not symmetric, and it matters for one clip.** 1384 active rows to
+1080 is a downscale for both 1440p sources; 884 active rows to 1080 is a 1.22x
+**upscale** for the letterboxed trailer. An upscale adds no information, so
+`orig-dissolve` is the one clip here whose fine detail is partly resampled rather
+than camera-native, and it should not be cited for sharpness, grain or any
+per-pixel fidelity claim. It is kept that way deliberately: what the clip exists
+to carry is a transition's temporal structure, which the resample does not touch,
+and padding to 1080 instead would have put 196 static black rows into the
+static-cell denominator that false motion is divided by - the exact artifact this
+geometry exists to avoid. The alternative worth trying if anyone needs a
+pixel-faithful dissolve is a 884-row corpus of its own, which nothing currently
+asks for.
+
+**The digests are tracked** (`tools/benchmark/camera-original.digests.json`).
+Neither the sources nor the built clips nor the manifest beside them is in the
+repository, so that file is the only thing a clean checkout can verify a rebuild
+against: it carries the expected decoded-frame digest, frame count and cut list
+per clip, and `corpus.py --check` compares a rebuild against it and fails on
+drift. Verified in both directions - it reports every clip matching today, and a
+deliberately corrupted entry produces `DRIFT AGAINST TRACKED DIGEST` and a
+separate complaint when the pixels match but the labels do not.
 
 | clip | frames | fps | labels |
 |---|---:|---:|---|

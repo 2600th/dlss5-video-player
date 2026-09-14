@@ -370,10 +370,14 @@ the ordinary `Default` desktop. Everything above about the flap stays true of th
 fallback path and is why the fallback is a five-sample any-null rule rather than a
 single poll.
 
-The measurement that most needed this shipped the same day: the P3 idle-VRAM A/B
-is a driven session pair, and a harness that cannot say whether the box was locked
-cannot say whether an arm ran. See
-[`measurements/p3-idle-vram-20260914/REPORT.md`](measurements/p3-idle-vram-20260914/REPORT.md).
+Worth being precise about what this did *not* fix, since both happened on the same
+day and the coincidence invites a wrong reading. The P3 idle-VRAM A/B was ruined
+by a different defect entirely - the harness deletes the ini that selects the
+policy when it clears the profile, so both arms silently ran the default - and a
+deterministic lock probe would not have caught it. What caught it was the helper
+printing `idleVramPolicy=keep` under the run labelled `free`. The two failures
+share only a moral: an arm needs an assertion that it took effect, not a label.
+See [`measurements/p3-idle-vram-20260914/REPORT.md`](measurements/p3-idle-vram-20260914/REPORT.md).
 
 ## What contention costs, and what one contended session costs afterwards
 

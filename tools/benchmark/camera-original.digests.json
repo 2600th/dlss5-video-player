@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "why": "Expected decoded-frame digests for the camera-original clips. Their sources are copyrighted trailers that this repository does not carry, so the built clips live only under build-upscaling/ and the manifest that describes them is not tracked either. These digests are, which is what lets a clean checkout prove that a rebuild produced the same pixels the committed labels in tools/benchmark/corpus.py were verified against. A mismatch means the upstream re-encoded, not that the labels are wrong - re-verify before citing them.",
+  "verify": "python tools/benchmark/corpus.py --check",
+  "clips": [
+    {
+      "name": "orig-film-cuts-a",
+      "file": "orig-film-cuts-a.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 131,
+      "digest": "ce648d6e9cd6868ffed5350f3cc9b7e9845e807095535783b69e13944d9d2ca3",
+      "cuts": [
+        4,
+        14,
+        24,
+        39,
+        51,
+        81,
+        105,
+        120
+      ],
+      "soft_cuts": [],
+      "source": "youtube:UaVTIH8mujA format 271 frames 2130-2260 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
+      "name": "orig-film-cuts-b",
+      "file": "orig-film-cuts-b.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 70,
+      "digest": "5818da38f557b2b634430b6c3afd5bb2596b30af6365c6362a784669c23c3b50",
+      "cuts": [
+        13,
+        41,
+        60
+      ],
+      "soft_cuts": [],
+      "source": "youtube:UaVTIH8mujA format 271 frames 2271-2340 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
+      "name": "orig-film-fade",
+      "file": "orig-film-fade.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 31,
+      "digest": "5892cfb1836a11b541b78fb2ae452f26f9f468987b7ab64fc26951f978818637",
+      "cuts": [],
+      "soft_cuts": [
+        [
+          6,
+          27
+        ]
+      ],
+      "source": "youtube:UaVTIH8mujA format 271 frames 275-305 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
+      "name": "orig-faces",
+      "file": "orig-faces.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 101,
+      "digest": "bbf47d273e49e01db226934757040553ebb5c60d7d5db68a9cd094ca19918f86",
+      "cuts": [
+        19,
+        34,
+        56,
+        83
+      ],
+      "soft_cuts": [],
+      "source": "youtube:UaVTIH8mujA format 271 frames 1160-1260 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
+      "name": "orig-game-cuts",
+      "file": "orig-game-cuts.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30.0,
+      "frames": 91,
+      "digest": "32b9388e7216ee8f081d2546f0fed0659b772c6a93c7fd2ce6ba52a58152d69a",
+      "cuts": [
+        20,
+        70
+      ],
+      "soft_cuts": [],
+      "source": "youtube:uphThaa97ig format 271 frames 40-130 (Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps)"
+    },
+    {
+      "name": "orig-game-motion",
+      "file": "orig-game-motion.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30.0,
+      "frames": 66,
+      "digest": "87afeafa1969ba472d32981942a6885dedb959ce6bb1b0e2b0f306dfbe9b57c4",
+      "cuts": [],
+      "soft_cuts": [],
+      "source": "youtube:uphThaa97ig format 271 frames 492-557 (Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps)"
+    },
+    {
+      "name": "orig-dissolve",
+      "file": "orig-dissolve.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 71,
+      "digest": "81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f",
+      "cuts": [],
+      "soft_cuts": [
+        [
+          21,
+          48
+        ]
+      ],
+      "source": "youtube:ytsearch1:Lawrence of Arabia official trailer restored format bestvideo[height<=1440][ext=mp4] frames 2510-2580 (Lawrence of Arabia restored trailer (Sony/Columbia), 1920x1080 h264, 23.976 fps)"
+    }
+  ]
+}

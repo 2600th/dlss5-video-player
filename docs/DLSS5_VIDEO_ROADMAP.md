@@ -705,8 +705,10 @@ The largest proportional item turned out not to be code at all but two policy
 defaults, `[Encoding] GpuSourceConversion` and `GpuColorConversion`, both off,
 which put 4 B/px instead of 1.5 across the decoder pipe and the capture readback.
 Turning both on is worth **+7 % processing throughput at 4K** and costs **0.75 dB
-PSNR, +0.95 dE and double the false motion**, because the NV12 readback subsamples
-chroma before the encoder sees it rather than after. So the defaults stay, the
+PSNR, +0.95 dE and double the false motion**. The cost is measured; the mechanism
+is *inferred* - the readback format is the only variable, and chroma subsampling
+moving ahead of the encoder is the obvious candidate, but nothing here measured
+where the precision is lost. So the defaults stay, the
 flags remain available per render, and the measurement is the reason rather than
 the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 

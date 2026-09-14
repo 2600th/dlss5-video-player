@@ -131,7 +131,7 @@ table has one row and one verdict.
 | 3 | `src/D3D12Renderer.cpp:755` guide grid upload | 160x90 RGBA32F, ~230 KB | NECESSARY. Not proportional to frame area in any way that matters - it is the analysis grid, not the frame. |
 | 4 | `src/D3D12Renderer.cpp:770-771`, `:782`, `:786` `CopyTextureRegion` | GPU-side copies, no CPU touch | NECESSARY. |
 | 5 | `src/OpticalFlowNvof.cpp:449` + `:452-464` `ReadbackGlobalFlow` | 4 bytes/frame out of a 1x1 surface, fence-compared, never waited on | NECESSARY as written and negligible. Backlog note: nothing consumes `LastGlobalFlow()` yet. |
-| 6 | `src/D3D12Renderer.cpp:1074` `CopyTextureRegion` capture plane -> readback buffer | THE proportional readback: 4 B/px BGRA, 1.5 B/px NV12 | **NECESSARY in kind; its SIZE is a policy - and that policy is now MEASURED: DO NOT FLIP.** The 2.7x is available today without a rebuild, since `request.gpuColorConversion` is also DEFAULT FALSE (`src/OfflineNeuralRenderer.h:49`, `src/main.cpp:1480`, `m_gpuColorConversion=false` at `main.cpp:4626`). Twin of row 1, and the row that carries the quality cost: the NV12 readback subsamples chroma before the encoder sees it. |
+| 6 | `src/D3D12Renderer.cpp:1074` `CopyTextureRegion` capture plane -> readback buffer | THE proportional readback: 4 B/px BGRA, 1.5 B/px NV12 | **NECESSARY in kind; its SIZE is a policy - and that policy is now MEASURED: DO NOT FLIP.** The 2.7x is available today without a rebuild, since `request.gpuColorConversion` is also DEFAULT FALSE (`src/OfflineNeuralRenderer.h:49`, `src/main.cpp:1480`, `m_gpuColorConversion=false` at `main.cpp:4626`). Twin of row 1, and the row that carries the quality cost. Inferred mechanism: the NV12 readback would subsample chroma before the encoder sees it. |
 | 7 | `src/D3D12Renderer.cpp:1112` `WaitForFenceValue(m_captureFence[slot])` | CPU stall on one slot | NECESSARY. Per-slot, not a drain; already counted as `m_captureResolveWaitNanos`, and the resolve-wait row of the stage table is what measures it. |
 | 8 | `src/D3D12Renderer.cpp:1151-1170` `CopyCaptureView` (called off-thread at `src/OfflineNeuralRenderer.cpp:1751`) | one full frame of CPU memcpy per frame | NECESSARY, for two nameable reasons: (a) the encoder is an ffmpeg child fed tightly packed rows over a pipe and readback rows are `D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`-padded - NV12 luma at 1920 wide is pitch 2048 - so writing from the mapped buffer directly means one `WriteFile` per row; (b) it must not hold a readback slot across a blocking pipe write, or ffmpeg back-pressure would stall the capture ring. Already off the render thread and overlapped with decode/guide/submit. |
 | 9 | `src/OfflineNeuralRenderer.cpp:2172` `encoder.WriteFrame` -> pipe | one full frame | NECESSARY; already on its own thread. |
@@ -184,8 +184,12 @@ one scored run per arm is sufficient and the deltas below are deterministic, not
 0.0026) for +7 % throughput. Do not flip the defaults.**
 
 The mechanism is not a transport change, it is a precision change. The BGRA readback
-carries full-resolution chroma to the encoder; the NV12 readback subsamples chroma 4:2:0
-before the encoder ever sees it. The export is 4:2:0 HEVC in the end, which is exactly why
+carries full-resolution chroma to the encoder, while the NV12 readback would subsample
+chroma 4:2:0 before the encoder ever sees it. Mark that as **inferred**: the readback
+format is the only variable between the arms and this is the obvious candidate, but no
+measurement here localised where the precision is lost, and the honest alternative - that
+the GPU convert shader and ffmpeg's CPU conversion differ in coefficients or rounding -
+would produce the same sign. Localising it needs a per-stage comparison nobody has run. The export is 4:2:0 HEVC in the end, which is exactly why
 this is easy to get wrong: the final container's chroma format does not tell you where the
 subsampling happened. Losing chroma resolution one stage earlier costs real information
 that the encoder would otherwise have had.
