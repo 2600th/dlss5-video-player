@@ -13,6 +13,20 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- Playback no longer collapses once a stream's source copy is in the cache. Asking
+  whether one exists went through `LookupSource`, which authenticates the copy by
+  hashing the whole payload - 60.5 MiB for a 1440p trailer, 63-86 ms - and the
+  toolbar asks that on every paint, as do the status text and the live-session
+  gates. Six answers a frame is half a second of hashing, so the UI thread ran two
+  Ticks a second and the lateness test dropped nearly every decoded frame while the
+  decoder kept handing over 29.7 fps. On the reported launch, the same clip and
+  machine: **FPS 1 rendered / 30 source with 1877 dropped** before, **30 / 30 with
+  25 dropped** after. The clock was never involved - playback position tracked the
+  audio to five decimals throughout. The verdict is memoised against the payload's
+  size and write time, for the miss as well as the hit, so only an acquisition that
+  repairs or replaces the copy pays the hash again. The first session on a stream
+  was always fast and every session after it was not, which is why this read as a
+  playback regression rather than a cache query.
 - A 1440p YouTube source plays at its own frame rate again. The decode pipe is
   sized to two frames so the child's decode overlaps our copy, but its ceiling was
   16 MiB: that is exactly two 1080p BGRA frames (15.82 MiB) and only 1.14 of a
