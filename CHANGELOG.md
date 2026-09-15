@@ -49,6 +49,35 @@ and looks like a broken helper until the runtime is re-staged.
   into the recent history for a file inside the cache, and leaves the copy
   unreferenced for the next eviction pass - the copy playback may by then be
   reading from.
+  The key is remembered with the video it was reported for, so the initial-open
+  commit - which deliberately does not go through the unload path - cannot hand
+  a second video the first one's copy. Two 1440p trailers share a geometry, so
+  the guard downstream would not have caught that.
+- The render no longer chases a playhead that is still moving. Six presses of
+  the seek key in 2.4 s used to retarget the job three times, and each retarget
+  threw away a helper that had launched under a second earlier and rendered
+  nothing: three cold starts, about 7.3 s each, spent on holes the viewer had
+  already left. Whichever hole they settle in is still there a moment later, so
+  a decision waits for the playhead to stop for a second - under the cheapest
+  thing it can buy, and over the gap between two presses of a held key. The
+  hand-back to the original still runs immediately: a viewer who is seeking is
+  never left in a buffering panel. Same six presses, driven on the same stream:
+  **0 retargets and 1 helper launch**, the hole under the settled playhead
+  rendered, attached 7 s later, then the next hole chained on and the clip
+  finished `100% rendered` in one region.
+- The speed the status line reports is the speed of the render, not of the
+  download. `0.48x real time` on a card measured at 16.3 ms/frame was the
+  session's first minute of acquisition averaged into its render: the clock now
+  starts at the first rendered segment, and the coverage it measures against is
+  the coverage the session started with, so the first segment is not subtracted
+  from every later reading. On a first watch with an empty cache the chip is now
+  absent, which is what a card holding `FPS 31 rendered / 30 source` with 24.7 s
+  buffered should report.
+- A render is no longer started once playback is on the acquired copy but its
+  key is unknown. The acquisition the job would fall back to needs the stream
+  URL, and the loaded path is a local file by then, so it earned an instant "the
+  source format or duration is unavailable" - and two of those in a row stop a
+  session. That state now reports rendering as unavailable instead.
 - A running render is no longer traded for a sliver. Moving a job costs about
   7.3 s of startup twice - once for the new hole and once to come back - so a
   hole narrower than that is left to the original, which covers it in the second

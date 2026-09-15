@@ -2322,7 +2322,7 @@ private:
         DropRetainedLiveSegments();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
-        m_jobSourcePath.clear();m_jobSourceKey.clear();
+        m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -2522,7 +2522,7 @@ private:
         // one exists - the same frames, locally, and no session torn down around
         // it. Without a copy this returns false in a few microseconds and the
         // network path runs as before.
-        if(!m_loaded)return;sec=ClampSeek(sec);if(NetworkPlayback()&&!AdoptAcquiredSourceCopyForPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
+        if(!m_loaded)return;sec=ClampSeek(sec);m_lastSeekTick=GetTickCount64();if(NetworkPlayback()&&!AdoptAcquiredSourceCopyForPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
         if(!m_seekPending) m_currentSec=Position();
         m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;Audio().Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
     }
@@ -2999,7 +2999,12 @@ private:
         // is the same key the recent history would name after the job finished,
         // and having it now is what lets a first watch reuse the copy the job
         // acquired - for a render, and for playback's own seeks.
-        if(!m_jobSourceKey.empty()&&!m_youtubePageUrl.empty())return m_jobSourceKey;
+        // Tied to the video it was reported for, not just to "some job ran": the
+        // initial-open commit does not go through Unload, so without this a
+        // second video would be handed the first one's key - and two 1440p
+        // trailers share a geometry, so the guard downstream would not catch it.
+        if(!m_jobSourceKey.empty()&&!m_youtubePageUrl.empty()&&m_jobSourcePageUrl==m_youtubePageUrl)
+            return m_jobSourceKey;
         if(!m_recent||m_youtubePageUrl.empty())return std::nullopt;
         const auto id=CanonicalYouTubeVideoId(m_youtubePageUrl);
         // The recent history outlives the cache folder: a user who clears the
@@ -3167,6 +3172,13 @@ private:
         if(m_sourceKind!=MediaSourceKind::YouTube)return true;
         // A stream is rendered from its own acquired copy: either the cached one
         // or a fresh acquisition, which needs the page URL and a real duration.
+        //
+        // Once playback itself is ON that copy, the key is the only route left:
+        // the stream URL the acquisition would need is no longer what is loaded,
+        // and handing it the local path earns an instant refusal - "the source
+        // format or duration is unavailable" - which two of in a row stops a
+        // session. Say unavailable here instead of starting a job that cannot run.
+        if(m_cachedSourceFile)return CachedYouTubeSourceKey().has_value();
         return CachedYouTubeSourceKey().has_value()||(!m_youtubePageUrl.empty()&&m_decoder.DurationSeconds()>0.0);
     }
     // Renders [start,end) of the source that is loaded now. A YouTube source
@@ -3657,6 +3669,9 @@ private:
         m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
     }
+    // Wall clock since the user last moved the playhead. Never having seeked
+    // reads as forever ago, so a session nobody has touched is never held back.
+    double SecondsSinceSeek()const{return m_lastSeekTick?double(GetTickCount64()-m_lastSeekTick)/1000.0:1e9;}
     // Keeps the render aimed at the hole the user needs: it starts the next hole
     // when a job ends, and moves the job when the playhead goes somewhere that
     // job will not reach. It never deletes coverage, which is the whole
@@ -3687,6 +3702,12 @@ private:
             }
             return;
         }
+        // Every decision below either starts a job or throws a running one away,
+        // and both are priced in cold starts. While the playhead is still moving
+        // the hole under it is not the one the viewer will be in, so acting on it
+        // buys a helper launch the next press discards. The hand-back above still
+        // runs: a viewer who is seeking must never be left in a buffering panel.
+        if(SecondsSinceSeek() < live_session::kSeekSettleSeconds)return;
         const auto wanted=WantedLiveTarget();
         if(NeuralJobActive()){
             if(!wanted)return;
@@ -3747,7 +3768,9 @@ private:
         if(revision!=m_livePaintedRevision){
             if(!m_liveStartTick){
                 m_liveStartTick=GetTickCount64();
-                m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns});
+                // Only the clock starts here. The baseline stays the coverage the
+                // session began with: this bump IS the first segment, so rebasing
+                // on it would subtract that segment from every later reading.
             }
             m_livePaintedRevision=revision;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();
         }
@@ -4343,7 +4366,7 @@ private:
         // The local copy this job renders from, its cache key, and the video it
         // belongs to - all known long before the job ends.
         if(!message->sourcePath.empty()&&message->pageUrl==m_youtubePageUrl){
-            m_jobSourcePath=message->sourcePath;m_jobSourceKey=message->sourceKey;
+            m_jobSourcePath=message->sourcePath;m_jobSourceKey=message->sourceKey;m_jobSourcePageUrl=message->pageUrl;
         }
         const NeuralPlaybackState next=StateForProgressPhase(message->progress.phase,m_neuralLifecycle.state);
         // The worker may still report a frame that was in flight when the user
@@ -4485,6 +4508,9 @@ private:
     }
     void StartYouTubeSeek(double seconds,bool resumeAfter,NetworkCommitKind commitKind=NetworkCommitKind::Seek,std::optional<std::pair<bool,NVSDK_NGX_PerfQuality_Value>> qualityOverride=std::nullopt){
         if(!m_loaded||!NetworkPlayback()||m_path.empty())return;
+        // A re-resolution is a seek too: the playhead is about to move, and the
+        // render should not chase it until the user has stopped pressing.
+        m_lastSeekTick=GetTickCount64();
         CancelYouTubeResolution();const uint64_t generation=m_youtubeLifecycle.Begin();SyncSourceActionAvailability();
         const std::wstring source=m_path,audioSource=m_youtubeAudioUrl,pageUrl=m_youtubePageUrl,title=m_displayTitle;const YouTubeSourceQuality sourceQuality=m_youtubeSourceQuality;const uint32_t maxW=m_opt.maxW,maxH=m_opt.maxH;const bool qualityExplicit=qualityOverride?qualityOverride->first:m_opt.qualityExplicit;const auto explicitQuality=qualityOverride?qualityOverride->second:m_opt.quality;const NetworkRenderConfiguration activeConfiguration=ActiveNetworkConfiguration();
         try{
@@ -4551,7 +4577,7 @@ private:
         // A different video keeps none of the last one's state: this path does not
         // go through Unload, and a copy of the previous video would otherwise
         // still be on offer to playback - same geometry, wrong film.
-        if(completion.commitKind==NetworkCommitKind::InitialOpen){m_jobSourcePath.clear();m_jobSourceKey.clear();}
+        if(completion.commitKind==NetworkCommitKind::InitialOpen){m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();}
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession(true);}
         m_synchronizedPlayback.Close();
         m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
@@ -5199,6 +5225,9 @@ private:
     // acquired copy lands here before any recent-history entry names it.
     std::filesystem::path m_jobSourcePath;
     std::string m_jobSourceKey;
+    std::wstring m_jobSourcePageUrl;
+    // Tick of the last playhead move the user asked for, local or network.
+    uint64_t m_lastSeekTick=0;
     // Coverage can change without the newest rendered timestamp moving - a run
     // filling an earlier hole does exactly that - so the repaint trigger is the
     // index's revision. The covered duration at session start is the baseline the

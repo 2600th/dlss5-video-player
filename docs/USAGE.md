@@ -55,7 +55,9 @@ into rendered frames and playback continues on them, wherever they are on the
 timeline. Seek into frames nobody has rendered yet and the original plays there
 while the render moves to that part of the video, and playback switches over
 once it has coverage. Nothing already rendered is discarded when this happens,
-so seeking back and forth costs no repeated work.
+so seeking back and forth costs no repeated work. While you are still seeking
+the render stays where it is and follows a second after you stop: starting on a
+position you are about to leave would cost the next press a fresh render start.
 
 The one place playback still waits is the stretch the render is working on right
 now: catching up with the render head inside it brings the panel back until

@@ -30,6 +30,14 @@ inline constexpr double kColdStartSeconds = 7.3;
 // A seek backwards is always out of coverage, but a tiny backwards nudge is
 // usually a rounding artifact of frame snapping rather than a real seek.
 inline constexpr double kBackwardSlack = 0.5;
+// A viewer pressing the seek key repeatedly moves the playhead several times a
+// second. Each move is a different hole, and acting on one costs a job startup
+// that the next press throws away - measured at three helper launches discarded
+// in 2.4 s across six presses. Whichever hole the viewer settles in is still
+// there a moment later, so the render waits for the playhead to stop moving.
+// Sized under the cheapest thing a decision here can buy (a `kColdStartSeconds`
+// job) and over the gap between two presses of a key held down.
+inline constexpr double kSeekSettleSeconds = 1.0;
 
 // Lead to require before the first attach, given how fast this GPU renders
 // relative to real time (`LiveRenderForecast::realtimeRatio`). The 4 s cushion
