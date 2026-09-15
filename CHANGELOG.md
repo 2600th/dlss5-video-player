@@ -13,6 +13,24 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- Seeking backwards on a YouTube stream no longer turns neural rendering off.
+  A seek on a streamed source re-resolves the stream, and rendering is
+  unavailable for that whole window - about two seconds. The session, meanwhile,
+  correctly wanted to move its render to the hole the seek had landed in, tried
+  to start a job there, and was refused twice inside 40 ms. Those refusals were
+  counted as jobs that rendered nothing, which is what the two-strike give-up
+  exists for, so the session stopped itself behind the user's seek and the
+  toolbar read `Neural Rendering - Off`. A refusal that only means "not right
+  now" no longer counts, and the session does not move its render while a
+  resolution is in flight, because the commit at the end of it releases and
+  restarts the session on its retained coverage anyway.
+  Driven on a 1440p stream with no cached copy, a session attached at 1.3 s and
+  a seek back to 0: the session retained its 6 rendered segments, restarted,
+  rendered the `[0,2.2)` hole the seek landed in, attached there with 12.7 s
+  buffered, published that entry and chained on to `[12.7,104.4)` - where before
+  it gave up after two refusals and stopped. Only a local source was exercised
+  by the earlier work on this: a cached copy makes seeks local, which is why the
+  streamed path was the one still broken.
 - An active neural session renders the whole video and stays seekable everywhere.
   It used to render one forward run from the playhead, which left everything
   before it unrendered for good: seeking back landed on frames nobody had

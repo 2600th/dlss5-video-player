@@ -3564,7 +3564,13 @@ private:
     // rendered the same seconds again.
     void MaintainLiveRenderTarget(){
         if(!m_liveSession||!m_liveSegments)return;
-        if(m_previewJob||m_seeking||m_seekPending||m_dragSeek)return;
+        // A YouTube seek re-resolves the stream, and rendering is unavailable for
+        // that whole window. Retargeting into it started nothing, twice in 40 ms,
+        // which tripped the give-up limit and turned the session off behind the
+        // user's seek - the reported "error on seeking back on a YouTube stream".
+        // The commit that ends the resolve releases and restarts the session
+        // anyway, on its retained coverage, so there is nothing to do until then.
+        if(m_previewJob||m_seeking||m_seekPending||m_dragSeek||m_youtubeLifecycle.IsResolving())return;
         if(m_liveRenderFailures>=kLiveRenderFailureLimit){
             // Nothing is going to fill the hole the viewer is in, and every other
             // decision here says "wait": ShouldAttach sees no lead, the stalled
@@ -3601,6 +3607,16 @@ private:
                     <<double(m_liveRange.end100ns)*1e-7<<") s over "<<m_liveSegments->Count()<<" segments.");
                 m_liveTarget={};UpdateCachedStatus();InvalidateControls();
             }
+            return;
+        }
+        // A render that cannot be started right now is not a job that rendered
+        // nothing: only a job that actually ran and added no coverage counts
+        // towards giving up, and the completion path is what records that. This
+        // one comes back next tick.
+        if(!RangeRenderAvailable()){
+            if(m_liveTarget.end100ns<=m_liveTarget.start100ns)
+                LOG("Active neural session is waiting to render ["<<double(wanted->start100ns)*1e-7<<","
+                    <<double(wanted->end100ns)*1e-7<<") s: rendering is unavailable right now.");
             return;
         }
         if(!StartLiveRenderTarget(*wanted)){
@@ -3657,7 +3673,9 @@ private:
                 // video, and re-rendering it is what made this loop expensive.
                 if(const auto hole=WantedLiveTarget()){
                     CancelNeuralJob(false);
-                    if(!StartLiveRenderTarget(*hole))++m_liveRenderFailures;
+                    // Same rule as above: a refusal that only means "not right
+                    // now" is not a job that rendered nothing.
+                    if(RangeRenderAvailable()&&!StartLiveRenderTarget(*hole))++m_liveRenderFailures;
                 }
             }
             return;
