@@ -1548,14 +1548,14 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     return result;
 }
 
-struct TestSourceAdapter {
+struct InjectedSourceAdapter {
     IFrameSource& source;
     bool gpuConversion{true};
     bool Open(const std::filesystem::path& path,std::stop_token stop,double seekSeconds){return source.Open(path,stop,seekSeconds);}
     void Close(){source.Close();}
-    // The test source hands out BGRA; only the production decoder can choose NV12.
+    // An injected source hands out BGRA; only the production decoder can choose NV12.
     PixelLayout Layout()const{return PixelLayout::Bgra;}
-    // BGRA needs no conversion, so the test source declares nothing and nothing
+    // BGRA needs no conversion, so an injected source declares nothing and nothing
     // reads this - the same position an undeclared real source is left in.
     SourceColorDescription ColorDescription()const{return {};}
     JobRead Read(JobFrame& frame,std::stop_token stop){
@@ -1570,10 +1570,10 @@ struct TestSourceAdapter {
         }
     }
 };
-struct TestEvaluatorAdapter {
+struct InjectedEvaluatorAdapter {
     INeuralFrameEvaluator& evaluator;
-    // The test interface stays synchronous; these shims give RunJob the same async shape
-    // the production adapter has, so the pipelined control flow is what the tests run.
+    // The injected interface stays synchronous; these shims give RunJob the same async shape
+    // the production adapter has, so the pipelined control flow is what the caller runs.
     std::deque<JobEvaluation> captured{};
     bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,
                     PixelLayout,const SourceColorDescription&){
@@ -1614,7 +1614,7 @@ struct TestEvaluatorAdapter {
     NeuralRenderFailure LastFailure()const{return evaluator.LastFailure();}
     uint64_t PeakLocalVideoMemoryMiB()const{return evaluator.PeakLocalVideoMemoryMiB();}
 };
-struct TestEncoderAdapter {
+struct InjectedEncoderAdapter {
     IFrameEncoder* encoder{};
     std::unique_ptr<IFrameEncoder> owned;
     std::function<std::unique_ptr<IFrameEncoder>()> factory;
@@ -1624,7 +1624,7 @@ struct TestEncoderAdapter {
     }
     EncodeError WriteFrame(std::span<const uint8_t> frame,std::stop_token stop){return encoder->WriteFrame(frame,stop);}
     // The single-file write path feeds the real encoder from a worker thread; the
-    // test shim writes synchronously and recycles the buffer exactly like production.
+    // injected shim writes synchronously and recycles the buffer exactly like production.
     EncodeError WriteFrameAsync(std::vector<uint8_t>&& frame,std::stop_token stop){
         const EncodeError error=encoder->WriteFrame(frame,stop);
         if(recycled.size()<2)recycled.push_back(std::move(frame));
@@ -1637,10 +1637,10 @@ struct TestEncoderAdapter {
     EncodeError Flush(std::stop_token){return EncodeError::None;}
     EncodeError Finish(std::stop_token stop){return encoder->Finish(stop);}
     void Cancel(){encoder->Cancel();}
-    std::unique_ptr<TestEncoderAdapter> Create(){
+    std::unique_ptr<InjectedEncoderAdapter> Create(){
         std::unique_ptr<IFrameEncoder> made=factory?factory():nullptr;
         if(!made)return {};
-        auto adapter=std::make_unique<TestEncoderAdapter>();
+        auto adapter=std::make_unique<InjectedEncoderAdapter>();
         adapter->encoder=made.get();adapter->owned=std::move(made);adapter->factory=factory;
         return adapter;
     }
@@ -2433,8 +2433,8 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         if(!source_||!evaluator_||!encoder_||!evidenceProvider_)
             return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
                                       .detail=L"Offline renderer was constructed with an incomplete set of collaborators."};
-        TestSourceAdapter source{*source_};TestEvaluatorAdapter evaluator{*evaluator_};
-        TestEncoderAdapter encoder{encoder_,{},encoderFactory_};
+        InjectedSourceAdapter source{*source_};InjectedEvaluatorAdapter evaluator{*evaluator_};
+        InjectedEncoderAdapter encoder{encoder_,{},encoderFactory_};
         const Clock clock=clock_?clock_:[]{return SteadyClock::now();};
         const std::function<bool()> paused=paused_?paused_:[]{return false;};
         return RunJob(request,std::move(progress),stop,source,evaluator,encoder,

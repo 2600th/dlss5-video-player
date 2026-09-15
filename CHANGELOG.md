@@ -13,6 +13,25 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- `ctest` no longer erases `DLSSVideoPlayer.log`. `Log` opens
+  `<module directory>/DLSSVideoPlayer.log` with `ios::trunc`, and
+  `NeuralPrerenderTests` ran from the player's own directory while its render loop
+  logged a stage table, so every test run wiped whatever the player had written.
+  That suite now builds and runs under `build-upscaling/neural-prerender/`.
+  `PolicyTests` still truncates the same file and is left alone on purpose: the
+  build stages `ffmpeg`, `ffprobe`, `yt-dlp` and `deno` beside the player, and its
+  YouTube bitrate test reads them from beside its own executable, so moving the
+  target would make that test skip forever while `ctest` stayed green.
+- The offline renderer's collaborators are chosen at runtime instead of by
+  `OFFLINE_NEURAL_RENDERER_TESTING`, which is now gone along with the other four
+  module macros. The macro did not add a test seam; it selected between two sets of
+  adapters, and the production set - the real decoder, evaluator and encoder, about
+  450 lines - sat behind its `#else` where no test target compiled it. Both sets now
+  compile in every build, so a `D3D12Renderer`, `VideoDecoder` or `DLSSBackend`
+  signature change breaks the test build rather than surviving to the release build,
+  and residency is assertable at all for the first time. Injecting collaborators
+  still does not execute the production adapters, and a partial injection is a
+  `Protocol` failure rather than a silent fall back to a real decoder and encoder.
 - `GpuSourceConversion` reads the source's colour description instead of assuming
   it. The decoder's existing ffprobe call also asks for `color_space`,
   `color_range`, `color_primaries` and `color_transfer`, and the GPU path is taken
