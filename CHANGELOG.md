@@ -13,6 +13,19 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- A 1440p YouTube source plays at its own frame rate again. The decode pipe is
+  sized to two frames so the child's decode overlaps our copy, but its ceiling was
+  16 MiB: that is exactly two 1080p BGRA frames (15.82 MiB) and only 1.14 of a
+  1440p one (28.12 MiB asked for). Since 0.21.0 Auto takes the tallest rung up to
+  1440p, so the sources that lost the slack are now the common case. Measured on
+  the Mafia trailer (AV1 2560x1440 30 fps, 3.68 Mbps), same 65-75 s window, same
+  machine: **28.85 fps against a 30 fps source**, 98 partial pipe reads per frame
+  and 5.23 ms of pipe read per frame. With the ceiling raised to cover two frames
+  of the largest source the player accepts (2160p BGRA, 63.28 MiB): **29.93 fps,
+  1.14 reads per frame, 1.41 ms** - identical to what the same trailer pinned to
+  1080p already did (29.93 fps, 1.00 reads, 0.84 ms). Seeking was never the
+  problem: teardown is under a millisecond and the ffmpeg respawn is 3 ms, while
+  the 0.2-2.0 s a YouTube seek takes is the HTTP re-open.
 - The **Motion vectors** guide switch changes the picture again. It only ever
   zeroed the CPU analysis grid, and from 0.20.0 the motion texture NGX reads is
   written by the hardware optical-flow resolve pass whenever the engine comes up -

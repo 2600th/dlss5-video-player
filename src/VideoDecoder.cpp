@@ -692,10 +692,19 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // let decode and copy overlap, which is what makes walking past frames a
     // cheaper answer than a restart. The read-ahead stays bounded: this is the
     // only buffer the child gets, plus the four frame queue.
+    //
+    // The ceiling has to cover two frames of the largest source the player
+    // accepts, or the slack silently collapses on exactly the sources that need
+    // it most. A 16 MiB ceiling gave 1080p BGRA its two frames (15.82 MiB) and
+    // left 1440p with 1.14 (28.12 MiB asked, 16 granted): measured on a 2560x1440
+    // YouTube source, that cost 98 partial reads per frame instead of one,
+    // 5.23 ms of pipe read per frame instead of 1.41, and 28.85 fps against a
+    // 30 fps source. 2160p BGRA - the largest geometry Super Resolution output
+    // offers - needs 63.28 MiB, so 64 covers every supported case.
     HANDLE readPipe = nullptr, writePipe = nullptr;
     const DWORD pipeBytes=static_cast<DWORD>(std::clamp<size_t>(
         2u*FrameBytes(m_layout,m_width,m_height),
-        4u<<20,16u<<20));
+        4u<<20,64u<<20));
     if (!CreatePipe(&readPipe, &writePipe, &sa, pipeBytes)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
         return false;
