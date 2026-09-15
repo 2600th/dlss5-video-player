@@ -31,9 +31,14 @@ stays at `1.0` on the letter of a rule that turned out to be arguable, not on th
 of the evidence, and the honest reading of both rounds together is that *less* local tone
 was preferred on 14 of 17 decided pairs.
 
-What reproduced independently is sharper than either tally: **all six decided pairs on
-`orig-dissolve` and `orig-game-motion` went to less tone in round 1, and all six again in
-round 2**, while faces and film cuts split or tied both times. A per-frame local tone map is
+What reproduced independently is sharper than either tally: **every decided pair on
+`orig-dissolve` and `orig-game-motion` went to less tone - 4 of 4 in round 1, 6 of 6 in
+round 2, 10 of 10 combined (P = 0.001, a post-hoc subgroup and labelled as one)**, while
+faces and film cuts split or tied both times. One caveat from round 2's own sampling: three
+of its pairs sat at frames 2, 4 and 8, inside the guide generator's reset window, and two of
+those still went to the knob-off arm - a still with no temporal history cannot show temporal
+instability, so the preference may be spatial rather than the per-frame effect the pattern
+suggests. A per-frame local tone map is
 exactly what would cost on continuous motion and a dissolve and vanish on a static shot, and
 it agrees in direction with this report's own Table B, where `shipped-tone-0` sits +4.83 dB
 and -4.02 dE closer to the source on the motion clip. So `NRLocalTone` is now a **live

@@ -110,7 +110,8 @@ def shots(clip: dict) -> list[tuple[int, int]]:
     return spans
 
 
-def candidate_stills(clip: dict, seconds: float) -> tuple[list[tuple[int, int, range]], list[str]]:
+def candidate_stills(clip: dict, seconds: float,
+                     guard_seconds: float = GUARD_SECONDS) -> tuple[list[tuple[int, int, range]], list[str]]:
     """``(first, last, candidate frames)`` per usable shot, longest shot first, and why the rest were dropped.
 
     Longest first so the earliest pairs of a clip get the longest excerpts. A
@@ -120,7 +121,7 @@ def candidate_stills(clip: dict, seconds: float) -> tuple[list[tuple[int, int, r
     excerpts must not reject the shots that can serve them.
     """
     fps = clip["fps"]
-    guard = max(1, round(GUARD_SECONDS * fps))
+    guard = max(1, round(guard_seconds * fps))
     shortest = max(2, round(min(seconds, MIN_EXCERPT_SECONDS) * fps))
     pools: list[tuple[int, int, range]] = []
     rejected: list[str] = []
@@ -147,7 +148,7 @@ def build(args) -> int:
     skipped_clips: list[dict] = []
     shortest = min(args.seconds, MIN_EXCERPT_SECONDS)
     for clip_name in sorted(runs):
-        pools, rejected = candidate_stills(clips[clip_name], args.seconds)
+        pools, rejected = candidate_stills(clips[clip_name], args.seconds, args.guard_seconds)
         # A shot the ballot cannot use is named, not quietly passed over: it is
         # coverage the judgement does not have.
         for reason in rejected:
@@ -210,7 +211,7 @@ def build(args) -> int:
             print(f"pair {pair_id}: {clip_name} frame {frame} in shot {first}-{last - 1}, {length:.2f} s",
                   flush=True)
     write_json(BLIND / "key.json", dict(seed=args.seed, single=args.single, double=args.double,
-                                        guard_seconds=GUARD_SECONDS, min_excerpt_seconds=MIN_EXCERPT_SECONDS,
+                                        guard_seconds=args.guard_seconds, min_excerpt_seconds=MIN_EXCERPT_SECONDS,
                                         skipped_clips=skipped_clips, dropped_shots=dropped_shots, pairs=key))
     with (BLIND / "ballot.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["id", "preferred", "confidence"])
@@ -323,6 +324,16 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=3.0,
                         help="longest excerpt to cut; a shot shorter than this caps its own pairs")
     parser.add_argument("--seed", type=int, default=1)
+    # The guard is how far past a cut a still has to sit. The default of 0.1 s is
+    # about two frames and was chosen to keep the corpus's 20-frame shots usable; it
+    # is too small to guarantee a still carries temporal history, which is what a
+    # ballot about a per-frame effect wants. Raising it costs candidates fast on
+    # short clips - measured on the camera-original set, 1.0 s leaves five of seven
+    # clips with none at all - so it is a per-ballot choice, recorded in key.json,
+    # rather than a constant somebody has to remember to edit.
+    parser.add_argument("--guard-seconds", type=float, default=GUARD_SECONDS,
+                        help="how far past its shot's opening cut a still must sit "
+                             f"(default {GUARD_SECONDS}; raising it drops candidates on short shots)")
     parser.add_argument("--score", type=Path, help="score a filled ballot.csv against key.json")
     parser.add_argument("--key", type=Path, help="key.json to score against; defaults to one "
                                                  "beside the ballot, else the live blind/ key")

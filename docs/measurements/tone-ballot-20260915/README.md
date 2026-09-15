@@ -281,28 +281,69 @@ different arms, on the second run:
 | `orig-faces` | 1-1 | 1 shipped, 1 less, 1 tie |
 | `orig-film-cuts-a` | 1-1 | 1 less, 2 ties |
 
-**Six of six on the moving material in ballot 1, six of six again in ballot 2, and
-nothing on the static or cut-bearing clips either time.** That is a mechanism-shaped
-result, not a preference: a local tone map that has to re-solve per frame is exactly
-the thing that would cost on continuous motion and a cross-dissolve while being
-invisible on a static shot. It also lines up with the metrics, which had
-`shipped-tone-0` closer to the source on the synthetic motion clip (+4.83 dB PSNR,
--4.02 dE) - the knob's whole effect is a departure from the source, and on moving
-footage a human dislikes that departure.
+**Four of four on the moving material in ballot 1 (two pairs per clip there, not
+three), six of six in ballot 2, ten of ten combined**, against splits or ties on the
+static and cut-bearing clips both times. As a post-hoc subgroup that is P = 0.001 and
+must be labelled as one - the subgroup was chosen after seeing round 1.
 
-## What would settle it - round 3, pre-registered properly this time
+It is also mechanism-*shaped*: a local tone map that re-solves per frame is what
+would cost on continuous motion and a cross-dissolve while being invisible on a
+static shot. It lines up with the metrics, which had `shipped-tone-0` closer to the
+source on the synthetic motion clip (+4.83 dB PSNR, -4.02 dE).
 
-1. **Ties are excluded from n.** The test is on decided pairs, one-sided, and the
-   bar is the smallest count whose binomial probability is at or below 2 %. That is
-   fixed here, before the pairs exist.
-2. **Confidence 1-5 is required.** Two ballots have arrived without it, so the
+**One observation cuts against the temporal half of that story, and it comes from
+this ballot's own sampling.** Three of ballot 2's pairs sit at frames 2, 4 and 8,
+inside the window where the guide generator has just reset its history - the guard
+is 0.1 s, about two frames, sized to keep this corpus's short shots usable at all.
+A still with no temporal history cannot show temporal instability, yet two of those
+three went to the knob-off arm (`e6281e` game-motion frame 4, `59b6f2` dissolve
+frame 8; the third, `a4059c` faces frame 2, was a tie). So the preference may be
+**spatial** - the look of the tone map itself - rather than the per-frame instability
+the pattern suggested. Round 3 has to separate those, and until it does,
+"mechanism-shaped" is as far as this evidence reaches.
+
+## Round 3, pre-registered here - and a prerequisite the corpus forces
+
+**Ballot 2 was not a null, so the earlier "a wash closes Q7" clause does not apply
+to this data and is retired.** What is on the table now is whether a shipped default
+changes, and these are the terms, fixed before any pairs exist:
+
+1. **Ties are excluded from n.** The test is one-sided on decided pairs, and the bar
+   is the smallest count whose binomial probability is at or below 2 % - for 9
+   decided pairs that is 8, for 12 it is 10.
+2. **Confidence 1-5 is required.** Two ballots have now arrived without it, so the
    "at confidence >= 3" half of every rule so far has never been checkable.
-3. **The hypothesis, not the knob.** The effect concentrates on continuous motion
-   and the dissolve; those are the clips to test, at a fresh seed, with the arms
-   still 1.0 against 0.0. A sweep there confirms a mechanism; a wash there kills it
-   and closes Q7 on two independent nulls.
+3. **What each outcome means, stated now.** A sweep on the motion clips *with* the
+   static and cut-bearing clips still splitting or tying is what would justify
+   changing the global default - the player cannot pick a tone strength per shot, so
+   a motion-only win still has to be taken globally or not at all. A wash on the
+   motion clips retires the subgroup as noise and leaves the default where it is.
 4. **A second judge if one is available.** One pair of eyes, twice, is one pair of
    eyes.
+
+**The prerequisite: this corpus cannot supply an independent motion ballot.**
+`orig-game-motion` is a single 65-frame shot of 2.2 s and `orig-dissolve` is 71
+frames; six pairs per clip would sample neighbours of frames the same judge has
+already scored. Raising the guard to give each still real temporal history makes it
+worse, measured across the camera-original set:
+
+| clip | duration | candidate frames at guard 0.1 s | 0.35 s | 0.5 s | 1.0 s |
+|---|---|---|---|---|---|
+| `orig-game-motion` | 2.20 s | 49 | 42 | 37 | 22 |
+| `orig-game-cuts` | 3.03 s | 40 | 26 | 21 | 6 |
+| `orig-faces` | 4.21 s | 36 | 11 | 4 | **0** |
+| `orig-film-cuts-a` | 5.46 s | 32 | 16 | 8 | **0** |
+| `orig-film-cuts-b` | 2.92 s | 21 | 9 | 5 | **0** |
+| `orig-dissolve` | 2.96 s | 17 | 5 | **0** | **0** |
+| `orig-film-fade` | 1.29 s | **0** | **0** | **0** | **0** |
+
+So round 3 needs **longer continuous-motion spans cut from the same publisher
+sources** - `tools/benchmark/fetch_camera_original.ps1` already fetches them, and
+`corpus.py` cuts them; what is missing is a 10-15 s motion span rather than a 2 s
+one. With that, a 0.5-1.0 s guard becomes affordable and twelve pairs are twelve
+independent samples instead of twelve views of the same two seconds. `blind.py` now
+takes `--guard-seconds` and records it in `key.json`, so whichever value round 3
+uses is part of its record rather than a constant somebody edited.
 
 Artefacts: `ballot-2/ballot.csv`, `ballot-2/key.json` (unsealed), `ballot-2/result.json`.
 
