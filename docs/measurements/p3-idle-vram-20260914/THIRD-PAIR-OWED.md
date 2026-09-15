@@ -45,10 +45,14 @@ the flag being passed and hand both arms a cold profile. Write the key in place:
 ```powershell
 function Set-IniKey([string]$path, [string]$section, [string]$key, [string]$value) {
   # Win32 writes the section and key if absent and leaves every other key alone,
-  # which is the same API the player reads them back with.
-  Add-Type -Namespace W -Name P -MemberDefinition '
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    public static extern bool WritePrivateProfileStringW(string s, string k, string v, string f);'
+  # which is the same API the player reads them back with. The guard matters: this
+  # function is called once per arm in the same session, and a second Add-Type of
+  # the same type throws.
+  if (-not ('W.P' -as [type])) {
+    Add-Type -Namespace W -Name P -MemberDefinition '
+      [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+      public static extern bool WritePrivateProfileStringW(string s, string k, string v, string f);'
+  }
   if (-not [W.P]::WritePrivateProfileStringW($section, $key, $value, (Resolve-Path $path))) {
     throw "WritePrivateProfileString failed: $([ComponentModel.Win32Exception]::new())"
   }
@@ -64,6 +68,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_se
   -SecondToggle -SecondToggleSeekBacks 7 `
   -FreshProfile Never -DropRenderCache -Sessions 3 `
   -OutJson $env:TEMP\p3-keep.json -Note 'P3 idle VRAM policy keep'
+# COPY IT NOW, before the other arm runs. `src/Log.h:33` opens the log with
+# ios::trunc, and the helper is a fresh process every session, so the next arm's
+# first helper start wipes this arm's lines. player_session.ps1's own -OutJson
+# logCopy saves the PLAYER's log only; nothing saves the helper's.
+Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
+  $env:TEMP\p3-keep.helper.log
 
 # free arm
 Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy free
@@ -73,6 +83,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_se
   -SecondToggle -SecondToggleSeekBacks 7 `
   -FreshProfile Never -DropRenderCache -Sessions 3 `
   -OutJson $env:TEMP\p3-free.json -Note 'P3 idle VRAM policy free'
+Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
+  $env:TEMP\p3-free.helper.log
 ```
 
 `-FreshProfile Never` is load-bearing and has its own section in `REPORT.md`: any
@@ -86,15 +98,19 @@ Both arms must be shown to *be* the arm they are labelled, from the helper's own
 rather than from the label:
 
 ```powershell
-# The helper's log, not the player's. `src/Log.h:28-31` names the log after the
-# RUNNING MODULE's directory, so DLSSVideoPlayer.exe writes
-# build-upscaling\Release\DLSSVideoPlayer.log (which is what player_session.ps1
-# scrapes, and what -OutJson copies as `logCopy`), while NeuralWorker.exe lives in
-# neural-runtime\ and writes its own file there. `idleVramPolicy=` is emitted by
-# NeuralWorkerMain, so it is only ever in the second one.
-Select-String -Path build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
+# The per-arm COPIES, not the live file: by the time both arms have run, the live
+# one holds only the last helper process's lines.
+Select-String -Path $env:TEMP\p3-keep.helper.log, $env:TEMP\p3-free.helper.log `
   -Pattern 'idleVramPolicy=', 'post-job VRAM'
 ```
+
+Why that file. `src/Log.h:28-31` names the log after the **running module's**
+directory, so `DLSSVideoPlayer.exe` writes
+`build-upscaling\Release\DLSSVideoPlayer.log` - the one `player_session.ps1`
+scrapes and copies as `logCopy` - while `NeuralWorker.exe` lives in
+`neural-runtime\` and writes its own file there. `idleVramPolicy=` is emitted by
+`NeuralWorkerMain`, so it is only ever in the second one, and `Log.h:33` truncates
+it on every helper start.
 
 The `keep` arm must print `idleVramPolicy=keep` and no `released=1`; the `free` arm
 must print `idleVramPolicy=free` with `observed=freed` and a `freedMiB` figure. If a
