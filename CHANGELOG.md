@@ -32,20 +32,23 @@ and looks like a broken helper until the runtime is re-staged.
   by the earlier work on this: a cached copy makes seeks local, which is why the
   streamed path was the one still broken.
 - A stream stops being a stream once its copy is on disk. A render always works
-  from a complete local copy of the source, and the job acquires one within
-  seconds of a session starting - but playback carried on reading the signed
+  from a complete local copy of the source, and a session acquires one - about a
+  minute for a 60 MB 1440p trailer - but playback carried on reading the signed
   URL, so every seek out of rendered coverage was a re-resolution: a new URL, a
   decoder and renderer swap, the session released and restarted around it, and a
   resolution that can fail outright. Playback now moves onto that copy the first
   time a seek would otherwise have gone to the network, which is also the moment
-  it is certain to exist. Seeks are local from there: measured at **298 ms to
-  first byte against 1.5-1.9 s** on the URL, with the session left alone.
-  The job reports the copy's path as soon as it has one, because the recent
-  history - the player's only other route to that path - is not written until a
-  job completes, which on a first watch is exactly too late. Rendering an
-  acquired copy also no longer asks the acquisition to download from a local
-  path, which it refused as a source whose "format or duration is unavailable" -
-  two of those refusals in 40 ms were enough to stop a session.
+  it is certain to exist. Seeks are local from there: **223-345 ms to first byte
+  against 1.2-1.9 s** on the URL, with the session left alone.
+  The job reports its local source and the cache key it lives under as soon as
+  the acquisition lands, because the recent history - the player's only other
+  route to them - is not written until a job completes, which on a first watch is
+  exactly too late. Having the key early is what lets that render reuse the copy
+  under one source identity. An earlier attempt started the copy as a plain local
+  file instead; that keys its cache entries on a path, writes a local-file entry
+  into the recent history for a file inside the cache, and leaves the copy
+  unreferenced for the next eviction pass - the copy playback may by then be
+  reading from.
 - A running render is no longer traded for a sliver. Moving a job costs about
   7.3 s of startup twice - once for the new hole and once to come back - so a
   hole narrower than that is left to the original, which covers it in the second
@@ -54,11 +57,16 @@ and looks like a broken helper until the runtime is re-staged.
   that playhead is not moving, so the frame in front of it is worth rendering
   however narrow its hole. Nothing is stranded - the hole is still the first
   thing the session starts once the running job ends.
-  Seeking into an unrendered part of a streamed video, driven end to end: the
-  original plays there at once, playback moves onto the local copy, the render
-  retargets to `[22.3,39.2)`, neural resumes **at the seek position 8 s later**,
-  and the session chains on to the rest - with zero re-resolutions, zero
-  failures, and two rendered regions on the seek bar at 47% rendered.
+  The paused exception is pinned by test, not by a driven run.
+  Seeking into an unrendered part of a streamed video, driven end to end with the
+  seek target computed from the logged attach point rather than guessed: one
+  refusal, playback moved onto the local copy, the render followed the viewer
+  down through `[22.6,40.7)`, `[12.9,40.7)`, `[3.4,40.7)`, `[0,40.7)` keeping all
+  6 rendered segments each time, and playback attached again **4 s later** at
+  2.2 s. Zero YouTube re-resolutions after the seek (four before it - the open and
+  three setup seeks, when no copy existed), zero session stops, zero give-ups,
+  zero "format or duration unavailable" refusals, and the status line reads
+  `49% rendered - FPS 30 rendered / 30 source` over two rendered regions.
 - An active neural session renders the whole video and stays seekable everywhere.
   It used to render one forward run from the playhead, which left everything
   before it unrendered for good: seeking back landed on frames nobody had

@@ -553,12 +553,19 @@ struct NeuralProgressMessage {
     NeuralRenderProgress progress;
     uint32_t width{};
     uint32_t height{};
-    // The local file this job renders from, once it has one. An acquired copy of
-    // a stream is in the cache long before the job that acquired it finishes, and
-    // the recent history - the player's only other route to that path - is not
-    // written until then. Playback needs it earlier: while a stream is loaded,
-    // every seek is a re-resolution of a signed URL.
+    // The local source this job renders from, once it has one, with the cache key
+    // it lives under and the video it belongs to.
+    //
+    // An acquired copy of a stream is in the cache long before the job that
+    // acquired it finishes, and the recent history - the player's only other
+    // route to it - is not written until then. Playback needs it earlier: while a
+    // stream is loaded, every seek is a re-resolution of a signed URL. The key
+    // comes along because it is what a later render reuses and what keeps the
+    // copy from being evicted; the page URL because a second video opened in the
+    // same session must not be handed the first one's file.
     std::filesystem::path sourcePath;
+    std::string sourceKey;
+    std::wstring pageUrl;
 };
 
 struct NeuralJobCompletion {
@@ -1380,15 +1387,19 @@ private:
             const int64_t at=static_cast<int64_t>(std::llround(Position()*1e7));
             const bool beingFilled=NeuralJobActive()&&at>=m_liveTarget.start100ns&&at<m_liveTarget.end100ns;
             if(m_liveSession&&!beingFilled){
-                const bool wasPlaying=m_playing;
-                LOG("Live playback reached unrendered video at "<<Position()<<" s, outside the render target ["
+                // Both read before the detach and the swap below: the swap stops
+                // the audio that Position() reads while playing, after which it
+                // falls back to the play-start clock and answers for the frame the
+                // last attach began on, not for where the viewer is.
+                const bool wasPlaying=m_playing;const double handBackAt=Position();
+                LOG("Live playback reached unrendered video at "<<handBackAt<<" s, outside the render target ["
                     <<double(m_liveTarget.start100ns)*1e-7<<","<<double(m_liveTarget.end100ns)*1e-7
                     <<") s; playing the original there.");
                 DetachLivePlayback();
                 // Before the seek, not after: this is what decides whether the
                 // seek is a local one or a re-resolution of the stream.
                 AdoptAcquiredSourceCopyForPlayback();
-                RequestSeek(Position(),wasPlaying);
+                RequestSeek(handBackAt,wasPlaying);
                 return false;
             }
             EnterLiveBuffering();return false;
@@ -2311,7 +2322,7 @@ private:
         DropRetainedLiveSegments();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_synchronizedPlayback.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
-        m_jobSourcePath.clear();
+        m_jobSourcePath.clear();m_jobSourceKey.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
@@ -2507,7 +2518,11 @@ private:
 
     void RequestSeek(double sec,bool resumeAfter) {
         if(m_decoder.IsStillImage()){sec=0.0;resumeAfter=false;}
-        if(!m_loaded)return;sec=ClampSeek(sec);if(NetworkPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
+        // A stream's seek is a re-resolution, so take the acquired copy first when
+        // one exists - the same frames, locally, and no session torn down around
+        // it. Without a copy this returns false in a few microseconds and the
+        // network path runs as before.
+        if(!m_loaded)return;sec=ClampSeek(sec);if(NetworkPlayback()&&!AdoptAcquiredSourceCopyForPlayback()){StartYouTubeSeek(sec,resumeAfter);return;}
         if(!m_seekPending) m_currentSec=Position();
         m_pendingSeekSec=sec;m_seekResumePlaying=resumeAfter;m_seekPending=true;m_playing=false;Audio().Pause(true);m_seekPreview=sec;InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();
     }
@@ -2980,6 +2995,11 @@ private:
     // Source-cache key of the loaded YouTube source when its owned entry is
     // still in the recent history; nullopt for a stream without one.
     std::optional<std::string> CachedYouTubeSourceKey()const{
+        // The running job's own key, when it is for the video that is loaded. It
+        // is the same key the recent history would name after the job finished,
+        // and having it now is what lets a first watch reuse the copy the job
+        // acquired - for a render, and for playback's own seeks.
+        if(!m_jobSourceKey.empty()&&!m_youtubePageUrl.empty())return m_jobSourceKey;
         if(!m_recent||m_youtubePageUrl.empty())return std::nullopt;
         const auto id=CanonicalYouTubeVideoId(m_youtubePageUrl);
         // The recent history outlives the cache folder: a user who clears the
@@ -3037,10 +3057,8 @@ private:
     // complete one. The hash this pays for is the memoised one above.
     std::optional<std::filesystem::path> AcquiredSourceCopyPath()const{
         if(m_sourceKind!=MediaSourceKind::YouTube)return std::nullopt;
-        // What the job reported is the copy it is rendering from right now, and
-        // it is known from the moment the acquisition finishes. The recent
-        // history below only names a source key once a job has COMPLETED, so on
-        // a first watch it is empty exactly when this is needed most.
+        // What the job reported is the copy it is rendering from right now, known
+        // from the moment its acquisition finished.
         if(!m_jobSourcePath.empty()){
             std::error_code ec;
             if(std::filesystem::is_regular_file(m_jobSourcePath,ec)&&!ec)return m_jobSourcePath;
@@ -3049,9 +3067,16 @@ private:
         if(!key)return std::nullopt;
         NeuralCacheManager cache(m_cacheRoot);
         if(!cache.Valid())return std::nullopt;
-        const auto entry=cache.LookupSource(*key);
-        if(!entry||entry->manifest.encoder!=kCompleteSourcePolicy)return std::nullopt;
-        return entry->payloadPath;
+        // `SourcePayloadPath`, not `LookupSource`: the latter authenticates the
+        // copy by hashing all 60-odd MiB of it, which is not a price a seek
+        // should pay. What playback needs of this file is checked directly by
+        // opening it below - it decodes, and its geometry matches what the
+        // renderer and the rendered segments were built for.
+        const auto payload=cache.SourcePayloadPath(*key);
+        if(!payload)return std::nullopt;
+        std::error_code ec;
+        if(!std::filesystem::is_regular_file(*payload,ec)||ec)return std::nullopt;
+        return *payload;
     }
     // Moves the loaded original from the live stream onto the copy the render is
     // already reading from.
@@ -3154,15 +3179,13 @@ private:
             if(const auto sourceKey=CachedYouTubeSourceKey()){
                 StartNeuralJob(page,{},title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,*sourceKey,0.0,range,false,kind);return true;
             }
-            // The loaded payload is already the acquired copy and no recent entry
-            // names it yet - the first watch of a video, where playback moved onto
-            // that copy so its seeks would stop being re-resolutions. Render THAT
-            // file: handing its path to the stream branch below asks the
-            // acquisition to download from a local path, and it refuses with
-            // "the source format or duration is unavailable".
-            if(m_cachedSourceFile&&!m_path.empty()){
-                StartNeuralJob(m_path,{},title,page,MediaSourceKind::LocalFile,m_youtubeSourceQuality,{},0.0,range,false,kind);return true;
-            }
+            // No branch here for "the payload is already a local copy": the key
+            // above is what the job reported, so a first watch takes the reuse
+            // path and the render keeps ONE source identity. Starting the copy as
+            // a local file instead would key its entries on a path, write a
+            // local-file entry into the recent history for a file inside the
+            // cache, and leave the copy unreferenced for the next eviction pass -
+            // the copy playback may by then be reading from.
             const std::wstring media=m_path,audio=m_youtubeAudioUrl;const double duration=m_decoder.DurationSeconds();
             StartNeuralJob(media,audio,title,page,MediaSourceKind::YouTube,m_youtubeSourceQuality,{},duration,range,false,kind);return true;
         }
@@ -3367,7 +3390,10 @@ private:
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
         }
         m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;m_liveRenderFailures=0;
-        m_livePaintedRevision=m_liveSegments->Revision();m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        // The pace clock starts at the first rendered segment, not here: a first
+        // watch spends a minute acquiring the source before a frame is rendered,
+        // and counting that made a GPU measured at 2x report 0.48x real time.
+        m_livePaintedRevision=m_liveSegments->Revision();m_liveStartTick=0;m_neuralRequested=true;
         m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{range.start100ns,range.end100ns});
         m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
         // A GPU that renders far faster than real time refills the buffer faster
@@ -3718,7 +3744,13 @@ private:
         // run filling an earlier hole does exactly that - so the repaint follows
         // the index's revision instead of a head.
         const uint64_t revision=m_liveSegments?m_liveSegments->Revision():0;
-        if(revision!=m_livePaintedRevision){m_livePaintedRevision=revision;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
+        if(revision!=m_livePaintedRevision){
+            if(!m_liveStartTick){
+                m_liveStartTick=GetTickCount64();
+                m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns});
+            }
+            m_livePaintedRevision=revision;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();
+        }
         const live_session::SessionView view=LiveSessionView();
         if(!m_liveAttached){
             if(live_session::ShouldAttach(view,m_liveStartLead)){
@@ -4001,7 +4033,8 @@ private:
                 // Set the moment the job knows its local source; every progress
                 // post after that carries it, so playback can leave the stream.
                 std::filesystem::path progressSourcePath;
-                auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;message->sourcePath=progressSourcePath;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
+                std::string progressSourceKey;
+                auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;message->sourcePath=progressSourcePath;message->sourceKey=progressSourceKey;message->pageUrl=pageUrl;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
                 NeuralCacheManager cache(cacheRoot);if(!cache.Valid()){completion->result.detail=cacheFailureText.DescribeRoot(cache.LastFailure());goto finish;}
                 {
                     std::filesystem::path sourcePath;
@@ -4053,7 +4086,7 @@ private:
                     completion->sourcePath=sourcePath;
                     // Published to the UI thread from here, which is what lets
                     // playback move off a stream and onto this copy.
-                    progressSourcePath=sourcePath;
+                    progressSourcePath=sourcePath;progressSourceKey=completion->sourceKey;
                     const auto sourceDigest=Sha256File(sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
                     // Metadata only: this decoder was opened and closed two lines
                     // later, and a full open paid for an ffmpeg child for nothing.
@@ -4307,8 +4340,11 @@ private:
         // A pause report that arrives after the user already resumed is stale.
         if(message->progress.phase==NeuralRenderPhase::Paused&&!NeuralJobPaused())message->progress.phase=NeuralRenderPhase::NeuralRendering;
         m_neuralProgress=message->progress;m_neuralSourceWidth=message->width;m_neuralSourceHeight=message->height;
-        // The local copy this job renders from, known long before the job ends.
-        if(!message->sourcePath.empty())m_jobSourcePath=message->sourcePath;
+        // The local copy this job renders from, its cache key, and the video it
+        // belongs to - all known long before the job ends.
+        if(!message->sourcePath.empty()&&message->pageUrl==m_youtubePageUrl){
+            m_jobSourcePath=message->sourcePath;m_jobSourceKey=message->sourceKey;
+        }
         const NeuralPlaybackState next=StateForProgressPhase(message->progress.phase,m_neuralLifecycle.state);
         // The worker may still report a frame that was in flight when the user
         // paused; the pause event, not that report, decides when rendering resumes.
@@ -4512,6 +4548,10 @@ private:
         // user's own backward seek read as "neural stopped and became
         // unavailable", which is the report this session set out to fix.
         const bool resumeLive=m_liveSession&&completion.commitKind!=NetworkCommitKind::InitialOpen;
+        // A different video keeps none of the last one's state: this path does not
+        // go through Unload, and a copy of the previous video would otherwise
+        // still be on offer to playback - same geometry, wrong film.
+        if(completion.commitKind==NetworkCommitKind::InitialOpen){m_jobSourcePath.clear();m_jobSourceKey.clear();}
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession(true);}
         m_synchronizedPlayback.Close();
         m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
@@ -5158,6 +5198,7 @@ private:
     // What the running or last job reported as its local source. A stream's
     // acquired copy lands here before any recent-history entry names it.
     std::filesystem::path m_jobSourcePath;
+    std::string m_jobSourceKey;
     // Coverage can change without the newest rendered timestamp moving - a run
     // filling an earlier hole does exactly that - so the repaint trigger is the
     // index's revision. The covered duration at session start is the baseline the
