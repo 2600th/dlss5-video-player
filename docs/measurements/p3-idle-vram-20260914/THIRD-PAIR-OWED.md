@@ -96,11 +96,16 @@ foreach ($f in Get-ChildItem $env:TEMP\p3-*.session*.helper.log | Sort-Object Na
   "{0,-34} {1}" -f $f.Name, ($hit.Line -replace '.*(idleVramPolicy=\w+).*', '$1')
 }
 # Expect six lines: p3-free.session1..3 all free, p3-keep.session1..3 all keep.
-# Fewer than six means a session started no helper - not a sample. Cross-check
-# against the JSON, where each session records its own copy or a null:
+# Fewer than six means a session started no helper - not a sample. The JSON says
+# which case each session was, so this is not inferred from a missing file:
+#   copied       - this session's helper wrote its log and it was saved
+#   staleRefused - the log was there but untouched, so it is the previous
+#                  session's and was deliberately NOT copied
+#   absent       - no helper log exists at all
+#   empty        - the log moved but read back empty
 foreach ($arm in 'keep', 'free') {
   (Get-Content $env:TEMP\p3-$arm.json -Raw | ConvertFrom-Json).sessions |
-    Select-Object index, @{n='helperLogCopy'; e={ $_.helperLogCopy }}
+    Select-Object index, @{n='outcome'; e={ $_.helperLog.outcome }}, helperLogCopy
 }
 Select-String -Path $env:TEMP\p3-*.session*.helper.log -Pattern 'post-job VRAM'
 ```

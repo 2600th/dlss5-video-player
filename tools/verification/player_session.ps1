@@ -761,11 +761,16 @@ function Invoke-PlayerSession {
     # often run to assert - idleVramPolicy, post-job VRAM - are emitted by
     # NeuralWorkerMain and appear only in that file.
     $helperLogPath = Join-Path $playerDirectory 'neural-runtime\DLSSVideoPlayer.log'
-    # Snapshot it rather than delete it: a resident helper holds the file open, so a
-    # delete would fail and be silently skipped, and the stale copy this guards
-    # against would come back. `Log.h:33` truncates on helper start, so a session
-    # that started one always moves the write time; a session whose helper never
-    # launched leaves it untouched and must not be copied as this session's sample.
+    # Snapshotted, NOT cleared like the player's log below, and the difference is
+    # deliberate. Clearing relies on the remove-or-skip pair: when the file cannot be
+    # removed, the pre-existing line count is skipped past instead. That is sound for
+    # the player's log because every parse of it also anchors on timestamps at or
+    # after launch. This copy has no such anchor, and `Log.h:33` truncates on helper
+    # start, so a remove that failed transiently followed by a helper that truncated
+    # would leave a file SHORTER than the skip count - and the session's own lines
+    # would be skipped away to nothing. The stamp test has no such hole: a helper
+    # that started always moves the write time, and an unchanged stamp means nothing
+    # wrote here, so there is nothing of this session's to copy.
     $helperLogBefore = $null
     try {
         $existing = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
@@ -829,6 +834,14 @@ function Invoke-PlayerSession {
         bytesBefore    = $logBytesBefore
         cleared        = $logCleared
         skippedLines   = $skipLines
+    }
+    # Same shape for the helper's log, so a reader does not have to infer the
+    # difference between "no helper ran" and "the copy failed" from a null path.
+    # `outcome` is settled in the finally block: copied, staleRefused or absent.
+    $record.helperLog = [ordered]@{
+        path        = $helperLogPath
+        stampBefore = $helperLogBefore
+        outcome     = 'notReached'
     }
 
     $launchAt = Get-Date
@@ -1239,15 +1252,25 @@ function Invoke-PlayerSession {
             try {
                 $after = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
                 $stamp = [string]$after.LastWriteTimeUtc.Ticks + ':' + [string]$after.Length
-                if ($stamp -ne $helperLogBefore -and $outDirectory -and $stem) {
+                if ($stamp -eq $helperLogBefore) {
+                    # Present, untouched: the previous session's file, not this one's.
+                    $record.helperLog.outcome = 'staleRefused'
+                } elseif ($outDirectory -and $stem) {
                     $helperTarget = Join-Path $outDirectory ($stem + '.session' + $Index + '.helper.log')
                     $helperText = Read-LogText $helperLogPath
                     if ($helperText) {
                         Set-Content -LiteralPath $helperTarget -Value $helperText -Encoding UTF8
                         $record.helperLogCopy = $helperTarget
+                        $record.helperLog.outcome = 'copied'
+                    } else {
+                        $record.helperLog.outcome = 'empty'
                     }
                 }
-            } catch { }
+            } catch {
+                # Get-Item threw: no helper log exists at all, so no helper has ever
+                # run in this staging directory.
+                $record.helperLog.outcome = 'absent'
+            }
         }
     }
 }
