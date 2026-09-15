@@ -1,0 +1,34 @@
+{
+  "profiles": {
+    "single": "shipped-tone-100",
+    "double": "shipped-tone-000"
+  },
+  "votes": {
+    "single": 4,
+    "double": 1,
+    "tie": 5
+  },
+  "confidence_weighted": null,
+  "confidence_missing": [
+    "8b59b8",
+    "c0ecaf",
+    "c33218",
+    "95eca5",
+    "cae21e"
+  ],
+  "confidence_invalid": [],
+  "per_clip": {
+    "orig-film-motion-a": {
+      "single": 1,
+      "double": 1,
+      "tie": 3
+    },
+    "orig-film-motion-b": {
+      "single": 3,
+      "double": 0,
+      "tie": 2
+    }
+  },
+  "unscored": [],
+  "unknown": []
+}

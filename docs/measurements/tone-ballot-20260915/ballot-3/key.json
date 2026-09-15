@@ -1,0 +1,152 @@
+{
+  "seed": 3,
+  "single": "shipped-tone-100",
+  "double": "shipped-tone-000",
+  "guard_seconds": 1.0,
+  "min_excerpt_seconds": 0.5,
+  "frame_separation_seconds": 1.5,
+  "skipped_clips": [],
+  "dropped_shots": [],
+  "pairs": [
+    {
+      "id": "8b59b8",
+      "clip": "orig-film-motion-a",
+      "frame": 256,
+      "shot": [
+        0,
+        271
+      ],
+      "seconds": 0.667,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-000__1\\output.mkv"
+    },
+    {
+      "id": "2f6d7c",
+      "clip": "orig-film-motion-a",
+      "frame": 90,
+      "shot": [
+        0,
+        271
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "0888b1",
+      "clip": "orig-film-motion-a",
+      "frame": 48,
+      "shot": [
+        0,
+        271
+      ],
+      "seconds": 1.5,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-000__1\\output.mkv"
+    },
+    {
+      "id": "f04c63",
+      "clip": "orig-film-motion-a",
+      "frame": 195,
+      "shot": [
+        0,
+        271
+      ],
+      "seconds": 1.5,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-000__1\\output.mkv"
+    },
+    {
+      "id": "c0ecaf",
+      "clip": "orig-film-motion-a",
+      "frame": 151,
+      "shot": [
+        0,
+        271
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-a__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "c33218",
+      "clip": "orig-film-motion-b",
+      "frame": 83,
+      "shot": [
+        0,
+        257
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "68c98c",
+      "clip": "orig-film-motion-b",
+      "frame": 228,
+      "shot": [
+        0,
+        257
+      ],
+      "seconds": 1.251,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-000__1\\output.mkv"
+    },
+    {
+      "id": "fecc83",
+      "clip": "orig-film-motion-b",
+      "frame": 189,
+      "shot": [
+        0,
+        257
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "95eca5",
+      "clip": "orig-film-motion-b",
+      "frame": 137,
+      "shot": [
+        0,
+        257
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "cae21e",
+      "clip": "orig-film-motion-b",
+      "frame": 29,
+      "shot": [
+        0,
+        257
+      ],
+      "seconds": 1.5,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-000__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-motion-b__shipped-tone-100__1\\output.mkv"
+    }
+  ]
+}

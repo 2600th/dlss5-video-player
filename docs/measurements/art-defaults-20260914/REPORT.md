@@ -41,9 +41,27 @@ instability, so the preference may be spatial rather than the per-frame effect t
 suggests. A per-frame local tone map is
 exactly what would cost on continuous motion and a dissolve and vanish on a static shot, and
 it agrees in direction with this report's own Table B, where `shipped-tone-0` sits +4.83 dB
-and -4.02 dE closer to the source on the motion clip. So `NRLocalTone` is now a **live
-default question on moving footage specifically**, not a closed one. Round 3 and its
-pre-registered rule: [the tone ballot](../tone-ballot-20260915/README.md).
+and -4.02 dE closer to the source on the motion clip. So a third round was cut on purpose-built material: two
+new camera-original clips of 10.8 and 11.3 s, one continuous shot each, with stills
+sampled a full second past the opening cut so they carry real temporal history.
+
+**It reversed, and that closes this item.** On the material the hypothesis said would
+show the effect most strongly, five of ten pairs were **ties** and four of the five
+decided pairs went to the **shipped** default. Five decided pairs cannot clear the 2 %
+bar in either direction, so the round is inconclusive by construction - but the
+subgroup that prompted it went from **10 of 10** for less tone on 2.2-3.0 s clips
+sampled 0.1 s past a cut to **1 of 5** on 10.8-11.3 s clips sampled 1.0 s past one.
+The sweep was an artefact of short clips and frames taken inside the guide
+generator's reset window. Pooled over all three rounds, less tone holds 15 of 22
+decided pairs at P = 0.0669, so the exploratory 14 of 17 recorded after round 2 is
+retired with it.
+
+**Verdict, final: keep `NRLocalTone` at 1.0.** Three rounds, 30 pairs, and no round
+cleared its own pre-registered bar; the one that came closest did not replicate once
+the sampling was fixed. The ties are the substance - with a guard that gives a still
+real temporal history, this knob is frequently invisible, which is this report's own
+sub-dE finding confirmed by eye. Full record and the two new clips:
+[the tone ballot](../tone-ballot-20260915/README.md).
 
 Two findings that matter more than any knob value:
 

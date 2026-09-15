@@ -422,6 +422,68 @@ The last pair is near-identical - a dim interior frame where the knob has almost
 nothing to work on - and is left in rather than dropped, because dropping the pairs
 where an effect is invisible is how a preference gets manufactured.
 
+## Result of ballot 3: the pattern did not survive better sampling, and Q7 closes
+
+Scored 2026-09-15, same judge, 10 pairs. Confidence blank for the third time, so no
+weighting again.
+
+| | pairs |
+|---|---|
+| `shipped-tone-100` (shipped 1.0) | **4** |
+| `shipped-tone-000` (knob off) | 1 |
+| ties | **5** |
+
+**Five decided pairs, so no split could clear 2 % - the round is inconclusive by
+construction, exactly as pre-registered.** And the direction reversed: on the
+material the hypothesis said would show the effect most strongly, four of the five
+decided pairs went to the *shipped* default. That reversal is not significant either
+(P = 0.1875), which is the point - nothing here is.
+
+**What actually moved between the rounds was the sampling, not the knob:**
+
+| round | arms | less tone | shipped | ties | decided | P(winner) | clips sampled |
+|---|---|---|---|---|---|---|---|
+| 1 | 1.0 / 0.5 | 6 | 2 | 0 | 8 | 0.145 | 2.2-5.5 s, guard 0.1 s |
+| 2 | 1.0 / 0.0 | 8 | 1 | 3 | 9 | 0.0195 | 2.2-5.5 s, guard 0.1 s |
+| 3 | 1.0 / 0.0 | 1 | **4** | 5 | 5 | 0.1875 | **10.8-11.3 s, guard 1.0 s** |
+
+And the subgroup that prompted round 3:
+
+| sampling regime | motion clips, less tone preferred |
+|---|---|
+| rounds 1-2: 2.2-3.0 s clips, stills 0.1 s past a cut | **10 of 10** decided |
+| round 3: 10.8-11.3 s clips, stills 1.0 s past a cut | **1 of 5** decided |
+
+So the sweep that looked mechanism-shaped lived on two-second clips sampled two
+frames past a history reset. Given shots long enough to carry temporal state and a
+guard that puts the still inside it, half the pairs became ties and the majority of
+the rest went the other way. Pooling all three rounds now gives less tone 15 of 22
+decided pairs, P = 0.0669 - so the exploratory 14 of 17 (P = 0.0064) recorded after
+round 2 is retired too, having been inflated by the same short-clip sampling.
+
+**Q7 closes: `NRLocalTone` stays at 1.0, and no default change is supportable.**
+Three rounds, 30 pairs, one judge, and not one round cleared its own pre-registered
+bar. The round that came closest (round 2, P = 0.0195 on the decided-pairs reading)
+did not replicate when the sampling was fixed, which is the only kind of evidence
+that would have justified moving a shipped default. The eight ties across rounds 2
+and 3 say the rest: at a guard that gives a still real temporal history, this knob is
+frequently invisible - which is the sub-dE metric verdict, confirmed by eye rather
+than contradicted.
+
+**What this cost and what it bought.** Three ballots settled a knob that the metrics
+had already called a wash, and the value is not the verdict - it is that four
+instrument defects were found by using the instrument on a real question: a
+frame-0 fallback, a stale-pairs directory, a zero-vote ballot exiting 0, an invented
+confidence weighting, and then two sampling defects that would each have inflated
+n. The corpus also gained its first two long continuous-motion clips.
+
+Artefacts: `ballot-3/ballot.csv`, `ballot-3/key.json` (unsealed), `ballot-3/result.json`.
+
+**Still owed, and it is not another ballot:** confidence was never recorded in any of
+the three rounds, so every rule's "at confidence >= N" clause remains untested, and
+every round was one judge. Anyone reopening this should record confidence and find a
+second pair of eyes before cutting a fourth ballot.
+
 ---
 
 The original prerequisite, for the record: round 3 needed **longer continuous-motion

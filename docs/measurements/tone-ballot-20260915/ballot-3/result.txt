@@ -1,0 +1,4 @@
+5 pair(s) carry a preference with no confidence: 8b59b8, c0ecaf, c33218, 95eca5, cae21e. The weighting is withheld, so a threshold written in terms of confidence cannot be checked against this ballot.
+4 of 10 pair(s) preferred shipped-tone-100 (role 'single') (confidence not usable)
+1 of 10 pair(s) preferred shipped-tone-000 (role 'double') (confidence not usable)
+5 tie(s)

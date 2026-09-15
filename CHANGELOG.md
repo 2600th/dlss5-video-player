@@ -52,6 +52,24 @@ and looks like a broken helper until the runtime is re-staged.
   log whose write time did not move is deliberately *not* copied: a session that
   started no helper leaves no file rather than inheriting the previous session's
   lines as its own sample.
+- The benchmark corpus gained its first two long continuous-motion clips,
+  `orig-film-motion-a` (272 frames, 11.3 s, dim interior with faces) and
+  `orig-film-motion-b` (258 frames, 10.8 s, exterior tracking shot with the strongest
+  sustained motion of any camera-original clip here). Every other camera-original
+  clip is 1.3-5.5 s, which meant a still could never sit more than a fraction of a
+  second past its shot's opening cut - too close to the guide generator's history
+  reset for any judgement about a per-frame effect. Both are one continuous shot with
+  their largest internal frame pairs inspected, and both are in
+  `camera-original.digests.json`, so `corpus.py --check` now verifies nine clips.
+- `blind.py` stopped two more ways of overstating a sample. It included every clip
+  with runs on disk, so a ballot asked for two clips silently got a third from a
+  previous round; `--clips` fixes that. And it drew each pair's frame independently
+  over the whole pool, so a single-shot clip could hand the judge the same frame
+  twice - one build drew 34, 34, 50 and 51 out of 66. Frames are now drawn without
+  replacement with at least one excerpt length between them, the separation is
+  recorded in `key.json` beside the guard, and a clip that cannot supply the pairs
+  asked for says so instead of repeating itself. `--guard-seconds` makes the guard a
+  per-ballot choice for the same reason.
 - `blind.py` stopped two silent failures in the instrument that settles look
   questions. Building a ballot left the previous ballot's pairs in the directory the
   judge is told to look at, while overwriting the key that could score them - 12
