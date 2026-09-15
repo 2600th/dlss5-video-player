@@ -756,6 +756,21 @@ function Invoke-PlayerSession {
 
     $playerDirectory = Split-Path -Parent $PlayerPath
     $logPath = Join-Path $playerDirectory 'DLSSVideoPlayer.log'
+    # The helper is a separate process in its own directory, so `src/Log.h:28-31`
+    # gives it its own DLSSVideoPlayer.log there. The policy lines this harness is
+    # often run to assert - idleVramPolicy, post-job VRAM - are emitted by
+    # NeuralWorkerMain and appear only in that file.
+    $helperLogPath = Join-Path $playerDirectory 'neural-runtime\DLSSVideoPlayer.log'
+    # Snapshot it rather than delete it: a resident helper holds the file open, so a
+    # delete would fail and be silently skipped, and the stale copy this guards
+    # against would come back. `Log.h:33` truncates on helper start, so a session
+    # that started one always moves the write time; a session whose helper never
+    # launched leaves it untouched and must not be copied as this session's sample.
+    $helperLogBefore = $null
+    try {
+        $existing = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
+        $helperLogBefore = [string]$existing.LastWriteTimeUtc.Ticks + ':' + [string]$existing.Length
+    } catch { }
     $iniPath = Join-Path $playerDirectory 'DLSSVideoPlayer.ini'
     $cachePath = Join-Path $playerDirectory 'cache'
 
@@ -1200,17 +1215,38 @@ function Invoke-PlayerSession {
             cleanExit = $shutdown.Clean
             exitCode  = $shutdown.ExitCode
         }
-        # The log is truncated by the next launch, so this session's copy is
+        # Both logs are truncated by the next launch, so this session's copies are
         # kept beside the JSON rather than left to be overwritten. Bookkeeping
         # must never be what loses a measured session, so it cannot throw.
         $record.logCopy = $null
+        $record.helperLogCopy = $null
         if ($OutJson) {
+            $outDirectory = $null
+            $stem = $null
             try {
                 $outDirectory = Split-Path -Parent $OutJson
                 if (-not $outDirectory) { $outDirectory = (Get-Location).ProviderPath }
-                $target = Join-Path $outDirectory ([System.IO.Path]::GetFileNameWithoutExtension($OutJson) + '.session' + $Index + '.log')
+                $stem = [System.IO.Path]::GetFileNameWithoutExtension($OutJson)
+                $target = Join-Path $outDirectory ($stem + '.session' + $Index + '.log')
                 $text = Read-LogText $logPath
                 if ($text) { Set-Content -LiteralPath $target -Value $text -Encoding UTF8; $record.logCopy = $target }
+            } catch { }
+            # The helper's own log, and only if this session's helper actually wrote
+            # it: an unchanged write time means no helper started here, and copying
+            # it anyway would hand the next reader the previous session's lines as
+            # this session's sample - the look-alike that a per-arm copy already
+            # produced once.
+            try {
+                $after = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
+                $stamp = [string]$after.LastWriteTimeUtc.Ticks + ':' + [string]$after.Length
+                if ($stamp -ne $helperLogBefore -and $outDirectory -and $stem) {
+                    $helperTarget = Join-Path $outDirectory ($stem + '.session' + $Index + '.helper.log')
+                    $helperText = Read-LogText $helperLogPath
+                    if ($helperText) {
+                        Set-Content -LiteralPath $helperTarget -Value $helperText -Encoding UTF8
+                        $record.helperLogCopy = $helperTarget
+                    }
+                }
             } catch { }
         }
     }

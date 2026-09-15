@@ -35,6 +35,16 @@ and looks like a broken helper until the runtime is re-staged.
   machine" and written into two documents before a real session disproved it. The
   expected probe is now labelled as routine and the load that decides the outcome is
   copied either way.
+- `player_session.ps1` now keeps each session's *helper* log, not just the player's.
+  `src/Log.h:28-31` names a log after the running module's directory, so
+  `NeuralWorker.exe` writes its own `DLSSVideoPlayer.log` inside `neural-runtime/`,
+  and `Log.h:33` truncates it on every helper start - which is where
+  `idleVramPolicy=` and the post-job VRAM lines live. A three-session run therefore
+  left only the last session's helper lines, so a policy A/B could assert one sample
+  of three. Each session now records a `helperLogCopy` beside its JSON, and a helper
+  log whose write time did not move is deliberately *not* copied: a session that
+  started no helper leaves no file rather than inheriting the previous session's
+  lines as its own sample.
 - `blind.py` stopped two silent failures in the instrument that settles look
   questions. Building a ballot left the previous ballot's pairs in the directory the
   judge is told to look at, while overwriting the key that could score them - 12

@@ -60,28 +60,21 @@ function Set-IniKey([string]$path, [string]$section, [string]$key, [string]$valu
 ```
 
 ```powershell
-# One session per invocation, three per arm, and the helper log copied after each.
-# This is NOT -Sessions 3, deliberately: the helper is a fresh process per session
-# and `src/Log.h:33` opens its log with ios::trunc, so -Sessions 3 would leave only
-# session 3's lines and the per-arm assertion would cover one of the three samples.
-# player_session.ps1's own -OutJson logCopy does not fill the gap - it saves the
-# PLAYER's log, and `idleVramPolicy=` is only ever in the helper's.
-#
-# The cost of splitting: the harness's own summary block reports the spread within
-# one invocation, so with three invocations you read the three -OutJson files and
-# take the spread yourself. That is the trade for being able to assert every sample.
+# One invocation per arm, three sessions each, which keeps the harness's own spread
+# summary. Every session's helper log is saved by the harness itself as
+# <OutJson>.sessionN.helper.log - added 2026-09-15 for exactly this measurement,
+# because `src/Log.h:33` truncates the helper's log on every helper start and the
+# existing per-session copy covered only the player's. The harness refuses to copy a
+# helper log whose write time did not move, so a session that never started a helper
+# leaves no file instead of inheriting the previous session's lines.
 foreach ($arm in 'keep', 'free') {
   Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy $arm
-  foreach ($n in 1, 2, 3) {
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
-      -Player build-upscaling\Release\DLSSVideoPlayer.exe `
-      -Media <a clip of 90 s or more; the same clip for both arms> `
-      -SecondToggle -SecondToggleSeekBacks 7 `
-      -FreshProfile Never -DropRenderCache -Sessions 1 `
-      -OutJson $env:TEMP\p3-$arm.$n.json -Note "P3 idle VRAM policy $arm session $n"
-    Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
-      $env:TEMP\p3-$arm.$n.helper.log
-  }
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
+    -Player build-upscaling\Release\DLSSVideoPlayer.exe `
+    -Media <a clip of 90 s or more; the same clip for both arms> `
+    -SecondToggle -SecondToggleSeekBacks 7 `
+    -FreshProfile Never -DropRenderCache -Sessions 3 `
+    -OutJson $env:TEMP\p3-$arm.json -Note "P3 idle VRAM policy $arm"
 }
 ```
 
@@ -96,24 +89,30 @@ Every session must be shown to *be* the arm it is labelled, from the helper's ow
 rather than from the label. Six copies, six answers - not one per arm:
 
 ```powershell
-# The per-session COPIES, never the live file: it holds only the last helper
-# process's lines, whichever session that was.
-foreach ($f in Get-ChildItem $env:TEMP\p3-*.helper.log | Sort-Object Name) {
+# The harness's own per-session helper copies, never the live file: that holds only
+# the last helper process's lines, whichever session wrote them last.
+foreach ($f in Get-ChildItem $env:TEMP\p3-*.session*.helper.log | Sort-Object Name) {
   $hit = Select-String -Path $f -Pattern 'idleVramPolicy=' | Select-Object -First 1
-  "{0,-28} {1}" -f $f.Name, ($hit.Line -replace '.*(idleVramPolicy=\w+).*', '$1')
+  "{0,-34} {1}" -f $f.Name, ($hit.Line -replace '.*(idleVramPolicy=\w+).*', '$1')
 }
-# Expect six lines: p3-free.1..3 all saying free, p3-keep.1..3 all saying keep.
-# A missing file is a session whose helper never started - not a sample.
-Select-String -Path $env:TEMP\p3-*.helper.log -Pattern 'post-job VRAM'
+# Expect six lines: p3-free.session1..3 all free, p3-keep.session1..3 all keep.
+# Fewer than six means a session started no helper - not a sample. Cross-check
+# against the JSON, where each session records its own copy or a null:
+foreach ($arm in 'keep', 'free') {
+  (Get-Content $env:TEMP\p3-$arm.json -Raw | ConvertFrom-Json).sessions |
+    Select-Object index, @{n='helperLogCopy'; e={ $_.helperLogCopy }}
+}
+Select-String -Path $env:TEMP\p3-*.session*.helper.log -Pattern 'post-job VRAM'
 ```
 
 Why that file. `src/Log.h:28-31` names the log after the **running module's**
 directory, so `DLSSVideoPlayer.exe` writes
-`build-upscaling\Release\DLSSVideoPlayer.log` - the one `player_session.ps1`
-scrapes and copies as `logCopy` - while `NeuralWorker.exe` lives in
-`neural-runtime\` and writes its own file there. `idleVramPolicy=` is emitted by
-`NeuralWorkerMain`, so it is only ever in the second one, and `Log.h:33` truncates
-it on every helper start.
+`build-upscaling\Release\DLSSVideoPlayer.log` - the one the harness has always
+copied as `logCopy` - while `NeuralWorker.exe` lives in `neural-runtime\` and
+writes its own file there. `idleVramPolicy=` is emitted by `NeuralWorkerMain`, so it
+is only ever in the second one, and `Log.h:33` truncates it on every helper start -
+which is why the harness now copies it per session as `helperLogCopy` rather than
+leaving the operator to do it per arm and assert one sample of three.
 
 The `keep` arm must print `idleVramPolicy=keep` and no `released=1`; the `free` arm
 must print `idleVramPolicy=free` with `observed=freed` and a `freedMiB` figure. If a
