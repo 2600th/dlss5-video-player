@@ -35,6 +35,13 @@ and looks like a broken helper until the runtime is re-staged.
   machine" and written into two documents before a real session disproved it. The
   expected probe is now labelled as routine and the load that decides the outcome is
   copied either way.
+- The idle-VRAM trade has its third sample pair, so it is a figure rather than a
+  direction: releasing the feature while idle hands back **361 MiB of 1061** and
+  costs **+0.604 s on every reuse** (2.400 s median against 3.004 s, +25.2 %, three
+  sessions per arm, ranges not overlapping). The two-sample pair had read +0.70 s;
+  the direction held and the size came down. `keep` still ships - reuse latency is
+  the persistent helper's whole purpose - and `free` remains one ini key away for a
+  card where 361 MiB decides whether a second application fits.
 - `player_session.ps1` now keeps each session's *helper* log, not just the player's.
   `src/Log.h:28-31` names a log after the running module's directory, so
   `NeuralWorker.exe` writes its own `DLSSVideoPlayer.log` inside `neural-runtime/`,

@@ -39,19 +39,32 @@ decoded-frame sequence digest - so the render side of each session is not a
 source of the spread below. The toggle-to-picture side is not bit-identical and
 never has been; the two sessions per arm are the honest width of it.
 
-**And two is one short of this project's own minimum.** `player_session.ps1`'s own
-documentation says "one sample is not a measurement; the default of three is the
-minimum this project accepts". A third session per arm was attempted after the
-fact and could not run: the workstation had locked, and the harness said so
-deterministically rather than guessing -
-`SendInput refused the chord, Win32 error 5; the foreground window is none - the
-session manager reports this session locked (WTSSessionInfoEx SessionFlags =
-WTS_SESSIONSTATE_LOCK)`, exit 14 on all three sessions of both arms. So read the
-headline as **n=2 per arm**: the 361 MiB is a single deterministic reading off the
-adapter and does not need repeats, while the +0.70 s reuse cost is two samples
-against two, with the arms not overlapping (2.477-2.543 against 3.195-3.239). The
-direction is safe on that; the exact seven-tenths is not, and a third pair should
-be taken on an unlocked box before anyone quotes it to two decimals.
+**Third pair taken 2026-09-15: n=3 per arm, and the seven-tenths was a little
+high.** The first attempt met a locked workstation - exit 14 on every session, the
+harness naming `WTSSessionInfoEx SessionFlags = WTS_SESSIONSTATE_LOCK` rather than
+inferring it - so the headline stood at n=2 for a day. Re-run on an unlocked box
+with three sessions per arm, every session asserted from the helper's own log:
+
+| arm | reuse seconds (second toggle, plan=reuse) | median | idle VRAM |
+|---|---|---|---|
+| `keep` | 2.400, 2.326, 2.405 | **2.400** | `localVramMiB=1061 featureArmed=1`, no release |
+| `free` | 3.004, 3.089, 3.002 | **3.004** | `beforeMiB=1061 localVramMiB=700 freedMiB=361 released=1 observed=freed`, all three |
+
+So `free` costs **+0.604 s per reuse, +25.2 %**, against the +0.70 s / +28 % the two
+-sample pair reported. Ranges still do not overlap, by a wider margin than before
+(2.326-2.405 against 3.002-3.089), and the 361 MiB reproduces exactly three times
+out of three. The first toggle of each session is indistinguishable between arms
+(keep 4.896-5.080, free 4.876-5.008), which is what the mechanism predicts: the
+release is paid on the next reuse, not on the session that performs it.
+
+Every one of the six sessions was proven to be the arm it was labelled, from
+`idleVramPolicy=` in the helper's own log rather than from the run's label - the
+failure this measurement hit on its first attempt, when
+`player_session.ps1` deleted the ini that selects the policy and both arms silently
+ran `keep`. The harness now collects that evidence itself: each session records a
+`helperLogCopy`, and refuses to copy a helper log whose write time did not move, so
+a session that started no helper cannot inherit the previous one's lines. All six
+read `outcome=copied`.
 
 That failure is incidentally the first live proof of the lock probe shipped the
 same day: the pre-probe harness would have reported this as an inference from a
@@ -118,7 +131,8 @@ sessions per arm:
 | `keep` (default) | 2.477 | 2.543 | 2.510 |
 | `free` | 3.239 | 3.195 | 3.217 |
 
-**+0.70 s median on a 2.51 s baseline, +28 %, in exchange for 361 MiB - 34 % of
+**+0.604 s median on a 2.400 s baseline, +25.2 % (n=3 per arm, 2026-09-15;
+the two-sample pair read +0.70 s / +28 %), in exchange for 361 MiB - 34 % of
 the 1061 MiB an idle helper holds.** The two arms do not overlap: the slower
 `keep` session is 0.65 s faster than the faster `free` session, so with two
 sessions per arm the direction of the effect is not in question even though the
