@@ -537,9 +537,21 @@ clips, monotone, with SSIM within 0.005 and both temporal metrics within 0.31
 levels - so the tone term moves colour and buys nothing measurable in stability.
 It is NOT changed on that evidence: on fractals "closer to the source" is the only
 thing PSNR and delta-E can mean, while on graded footage a deliberate relight is
-the product. The decision is gated on the real-footage clips and on a filled
-`blind.py` ballot; the sealed pairs exist on disk and no human has scored them, so
-no blind verdict exists. [Report](measurements/art-defaults-20260914/REPORT.md)
+the product. The decision was gated on the real-footage clips and on a filled
+`blind.py` ballot, and **all three ballots have now been scored (2026-09-15): the
+knob stays at 1.0.** Round 1 (1.0 against 0.5) went 6-2 to the candidate against a
+pre-registered bar of 7; round 2 (1.0 against 0.0) went 8-1 with three ties, which
+is P = 0.0195 on decided pairs but short of its literal bar of 10; round 3, cut on
+two purpose-built 10-11 s continuous-motion clips with stills a full second past the
+opening cut, **reversed** - five ties and four of the five decided pairs to the
+shipped default. The motion subgroup that prompted round 3 went from 10 of 10 to 1
+of 5 once the clips were long enough to carry temporal history, so it is retired as
+noise rather than confirmed. Five decided pairs cannot clear 2 % in either
+direction, so round 3 proves nothing on its own - what it does is fail the
+replication test that the earlier pattern needed to survive. No round met its bar,
+and the default stands on that rather than on a technicality.
+[Report](measurements/art-defaults-20260914/REPORT.md) ·
+[Ballots](measurements/tone-ballot-20260915/README.md)
 
 Two defects that measurement found, neither fixed:
 `NRPreset` is inert here - 0/1/2/3 are bit-identical on four synthetic clips at
@@ -575,8 +587,14 @@ serve is named in `key.json` as `dropped_shots`, a clip with no usable shot as
 `skipped_clips`, and a run with nothing left to judge fails with the reason. The
 roadmap's own complaint retested with its flags now picks `cuts-motion` frames 5
 and 59 and `cuts-similar` 11 and 33, in four different shots. The tone ballot is
-therefore runnable; it still has to be scored by a human, which is what item 7
-above is waiting on.
+therefore runnable, and it was run three times and scored - the record is in
+[the ballots](measurements/tone-ballot-20260915/README.md). Using it on a real
+question found four more defects in it: a rebuild left the previous ballot's images
+in the directory the judge is told to look at, an unfilled ballot scored as a clean
+sweep of zeros and exited 0, a blank confidence column became a weighting of 1.0 that
+printed as though measured, and frames were drawn with replacement so a single-shot
+clip could hand the judge the same comparison twice. All four are fixed; the guard
+and the frame separation are now per-ballot parameters recorded in `key.json`.
 
 **Links:** [ReShadeConfig.cpp](../src/ReShadeConfig.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [video2dlssnr controls](https://github.com/DaniilSokolyuk/video2dlssnr)
 

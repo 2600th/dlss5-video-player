@@ -75,6 +75,8 @@ must never reset.
 | `orig-game-cuts` | camera-original | **Camera-original** game footage: 91 frames, hard cuts at 20 and 70 (street chase → jet skis → armoured truck) |
 | `orig-game-motion` | camera-original | **Camera-original**: 66 frames, one continuous moving shot — the only span in its 26 s source that is both cut-free and actually moving (median \|dY\| 3.9); every other cut-free span is the static end card |
 | `orig-dissolve` | camera-original | **Camera-original**, and the **real cross-dissolve** this corpus lacked: locals 21-48 are a linear blend of the shots either side, alpha sliding 1 → 0, residual 0.063 of the endpoint difference, mid-transition gradient below both ends. Both sides carry burned-in title text |
+| `orig-film-motion-a` | camera-original | **Camera-original**: 272 frames, 11.3 s, one continuous interior shot with faces and skin and a slow camera — the longest cut-free moving span in its source. Gentle motion (median \|dY\| 1.81); 33 of its 271 pairs are near-static, so read its false-motion level only against itself |
+| `orig-film-motion-b` | camera-original | **Camera-original**: 258 frames, 10.8 s, one continuous exterior tracking shot and the **strongest sustained motion** of any clip here (median \|dY\| 4.72 against 3.9 for `orig-game-motion`). Foliage streaming past with real motion blur. Two caveats: the letterbox geometry of its source (884 active rows scaled UP to 1080) and a burned-in title card over the first half |
 
 The four `real` clips are **not camera-original footage.** They are cut from
 `docs/media/neural-comparison-demo.mp4`, a screen capture of this player recorded
