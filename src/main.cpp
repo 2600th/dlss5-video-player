@@ -2494,7 +2494,18 @@ private:
             if(!m_synchronizedPlayback.SeekSeconds(sec)||!m_synchronizedPlayback.VisibleFrame()){
                 // A live pair only holds what is rendered. Outside it the
                 // original takes the frame back and the session rebases there.
-                if(m_liveSession){LOG("Live seek to "<<sec<<" s is not rendered; handing playback back to the original.");DetachLivePlayback();SetSeeking(false);RequestSeek(sec,resumeAfter);return false;}
+                // `SynchronizedPlayback` records why pairing gave up but never logs
+                // it, so this used to read as "not rendered" whatever the reason -
+                // behind the render start, a hole, a frame mismatch or a segment the
+                // render has not reached. Name it, with the coverage it was judged
+                // against, or the next report of this is unanswerable again.
+                if(m_liveSession){
+                    const std::string fault=m_synchronizedPlayback.LastFault();
+                    LOG("Live seek to "<<sec<<" s is not rendered; handing playback back to the original."
+                        <<" coverage=["<<double(m_liveRange.start100ns)*1e-7<<","<<LiveHeadSeconds()<<") s"
+                        <<" fault="<<(fault.empty()?std::string("none"):fault));
+                    DetachLivePlayback();SetSeeking(false);RequestSeek(sec,resumeAfter);return false;
+                }
                 LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;
             }
             m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
