@@ -1,0 +1,39 @@
+{
+  "profiles": {
+    "single": "shipped-tone-100",
+    "double": "shipped-tone-050"
+  },
+  "votes": {
+    "single": 2,
+    "double": 6,
+    "tie": 0
+  },
+  "confidence_weighted": {
+    "single": 2.0,
+    "double": 6.0
+  },
+  "per_clip": {
+    "orig-dissolve": {
+      "single": 0,
+      "double": 2,
+      "tie": 0
+    },
+    "orig-faces": {
+      "single": 1,
+      "double": 1,
+      "tie": 0
+    },
+    "orig-film-cuts-a": {
+      "single": 1,
+      "double": 1,
+      "tie": 0
+    },
+    "orig-game-motion": {
+      "single": 0,
+      "double": 2,
+      "tie": 0
+    }
+  },
+  "unscored": [],
+  "unknown": []
+}

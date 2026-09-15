@@ -159,5 +159,68 @@ the item - `shipped-tone-0` already exists in
 
 The key stays sealed until the ballot is filled in, either way round.
 
+## Result of ballot 1 (1.0 against 0.5): scored, and the default does not change
+
+Filled in by a human judge on 2026-09-15, all 8 pairs, no ties. Confidence was left
+blank, so the scorer counted each vote as 1; it did not matter, for the reason below.
+
+| | pairs | confidence-weighted |
+|---|---|---|
+| `shipped-tone-100` (shipped 1.0) | 2 | 2.0 |
+| `shipped-tone-050` (candidate 0.5) | **6** | 6.0 |
+
+**6 of 8 is below the pre-registered bar of 7, so the default stays at 1.0.** This is
+exactly the case the threshold was fixed in advance for: 6 of 8 looks like a 75 %
+preference and is not one. Under pure chance, 6 or more of 8 falls one way 14.5 % of
+the time one-sided, 28.9 % two-sided; the bar of 7 sits at 3.5 %. Nothing here beats
+the metric wash that the art-defaults report already recorded.
+
+Per pair, once unsealed:
+
+| pair | clip | frame | judged | that side was |
+|---|---|---|---|---|
+| `ede7a4` | `orig-dissolve` | 58 | B | candidate 0.5 |
+| `c7f2fe` | `orig-dissolve` | 5 | A | candidate 0.5 |
+| `02a108` | `orig-faces` | 65 | A | candidate 0.5 |
+| `547411` | `orig-faces` | 42 | A | **shipped 1.0** |
+| `641352` | `orig-film-cuts-a` | 53 | B | candidate 0.5 |
+| `be86c3` | `orig-film-cuts-a` | 87 | B | **shipped 1.0** |
+| `57a8cd` | `orig-game-motion` | 40 | A | candidate 0.5 |
+| `c6169a` | `orig-game-motion` | 23 | A | candidate 0.5 |
+
+**The pattern is worth more than the tally.** The candidate took both
+`orig-dissolve` pairs and both `orig-game-motion` pairs - 4 of 4 on the continuous
+motion and the cross-dissolve - and split 1-1 on `orig-faces` and
+`orig-film-cuts-a`. So the one hypothesis this ballot generated is that the local
+tone term costs something on moving material and is neutral on static or
+cut-bearing material. Eight pairs cannot test that; it is a reason to keep asking,
+not a finding.
+
+Artefacts: `ballot-1/ballot.csv`, `ballot-1/key.json` (now unsealed),
+`ballot-1/result.json` and `result.txt`. The pair media is not committed - it is
+renders, and `--seed 1` against the same two runs reproduces the frame choice.
+
+## Ballot 2 (1.0 against 0.0): built, unscored
+
+The pre-registered follow-up, because a middling result at half the range does not
+close the item while a null at the *full* range does. Same four clips, same shipped
+mask state, `shipped-tone-000` rendered 2026-09-15 and asserted the same way (the
+ini reads `NRLocalTone=0.000000` and all four clips' decoded-frame digests differ
+from the 1.0 arm).
+
+**12 pairs, and the bar is 10.** Three pairs per clip rather than two, because the
+question this time is about power: under chance, 10 or more of 12 falls one way
+1.9 % of the time, 9 or more 7.3 %. So 10 decides it either way, and anything below
+means the knob is indistinguishable across its whole range on real footage - which
+closes Q7 for good rather than leaving it open.
+
+The differences are larger than ballot 1's, as the full range should be: mean
+absolute 1.82-7.58 eight-bit levels against 1.63-4.45, up to 98.5 % of the frame
+moving.
+
+**Please record confidence 1-5 this time.** With the bar at 10 of 12 the
+confidence-weighted figure is what separates a reluctant sweep from a confident
+one, and ballot 1 arrived without it.
+
 Unscored as of 2026-09-15. The instrument is built, asserted and sealed; the judgement
 is owed.

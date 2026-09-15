@@ -26,5 +26,19 @@
       "NRAutoMask": "1"
     },
     "description": "the candidate: local tone halved, every other key at the shipped value"
+  },
+  "shipped-tone-000": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "0.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "the knob at zero: maximum signal arm for the follow-up ballot the 0.5 result prescribes"
   }
 }

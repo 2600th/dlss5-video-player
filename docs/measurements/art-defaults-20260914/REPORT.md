@@ -14,8 +14,17 @@ the synthetic clips - and the NVENC carrier alone accounts for 1.26 dE of the 2.
 whole model contributes 1.22 dE above the floor and the tone term is 0.77 of that. There is
 no default change worth making for a sub-dE effect that no metric here distinguishes from the
 carrier, which is exactly the magnitude-non-transfer this report warns about twice over. A
-human blind A/B remains the only instrument that could overturn a *look* decision, and none
-was run.
+human blind A/B remains the only instrument that could overturn a *look* decision.
+
+**That ballot was run on 2026-09-15, and it did not overturn it.** Eight sealed pairs on
+camera-original footage, one judge, no ties: the candidate `NRLocalTone=0.5` was preferred on
+**6 of 8** pairs. The bar fixed before scoring was 7 of 8, because 6 of 8 falls one way 14.5 %
+of the time under pure chance against 3.5 % for 7. So the default stays at `1.0` and this
+verdict stands - on a human's eye now, not only on dE. The ballot did generate one hypothesis
+worth a measurement: the candidate took 4 of 4 pairs on the continuous-motion and
+cross-dissolve clips and split 1-1 on faces and film cuts. A follow-up at the knob's full
+range (1.0 against 0.0, 12 pairs, bar of 10) is built and awaiting a judge, and a null there
+closes the knob entirely. See [the tone ballot](../tone-ballot-20260915/README.md).
 
 Two findings that matter more than any knob value:
 

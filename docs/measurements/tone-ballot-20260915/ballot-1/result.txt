@@ -1,0 +1,3 @@
+2 of 8 pair(s) preferred shipped-tone-100 (role 'single'), confidence-weighted 2.0
+6 of 8 pair(s) preferred shipped-tone-050 (role 'double'), confidence-weighted 6.0
+0 tie(s)

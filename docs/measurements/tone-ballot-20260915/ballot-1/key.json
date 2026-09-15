@@ -1,0 +1,144 @@
+{
+  "seed": 1,
+  "single": "shipped-tone-100",
+  "double": "shipped-tone-050",
+  "guard_seconds": 0.1,
+  "min_excerpt_seconds": 0.5,
+  "skipped_clips": [],
+  "dropped_shots": [
+    {
+      "clip": "orig-film-cuts-a",
+      "reason": "shot 0-3 is 4 frames, short of the 2 guard plus 12 excerpt frames it would need"
+    },
+    {
+      "clip": "orig-film-cuts-a",
+      "reason": "shot 4-13 is 10 frames, short of the 2 guard plus 12 excerpt frames it would need"
+    },
+    {
+      "clip": "orig-film-cuts-a",
+      "reason": "shot 14-23 is 10 frames, short of the 2 guard plus 12 excerpt frames it would need"
+    },
+    {
+      "clip": "orig-film-cuts-a",
+      "reason": "shot 39-50 is 12 frames, short of the 2 guard plus 12 excerpt frames it would need"
+    },
+    {
+      "clip": "orig-film-cuts-a",
+      "reason": "shot 120-130 is 11 frames, short of the 2 guard plus 12 excerpt frames it would need"
+    }
+  ],
+  "pairs": [
+    {
+      "id": "ede7a4",
+      "clip": "orig-dissolve",
+      "frame": 58,
+      "shot": [
+        49,
+        70
+      ],
+      "seconds": 0.542,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-dissolve__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-dissolve__shipped-tone-050__1\\output.mkv"
+    },
+    {
+      "id": "c7f2fe",
+      "clip": "orig-dissolve",
+      "frame": 5,
+      "shot": [
+        0,
+        20
+      ],
+      "seconds": 0.667,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-dissolve__shipped-tone-050__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-dissolve__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "02a108",
+      "clip": "orig-faces",
+      "frame": 65,
+      "shot": [
+        56,
+        82
+      ],
+      "seconds": 0.751,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-faces__shipped-tone-050__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-faces__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "547411",
+      "clip": "orig-faces",
+      "frame": 42,
+      "shot": [
+        34,
+        55
+      ],
+      "seconds": 0.584,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-faces__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-faces__shipped-tone-050__1\\output.mkv"
+    },
+    {
+      "id": "641352",
+      "clip": "orig-film-cuts-a",
+      "frame": 53,
+      "shot": [
+        51,
+        80
+      ],
+      "seconds": 1.168,
+      "A": "single",
+      "B": "double",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-cuts-a__shipped-tone-100__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-cuts-a__shipped-tone-050__1\\output.mkv"
+    },
+    {
+      "id": "be86c3",
+      "clip": "orig-film-cuts-a",
+      "frame": 87,
+      "shot": [
+        81,
+        104
+      ],
+      "seconds": 0.751,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-cuts-a__shipped-tone-050__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-film-cuts-a__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "57a8cd",
+      "clip": "orig-game-motion",
+      "frame": 40,
+      "shot": [
+        0,
+        65
+      ],
+      "seconds": 0.867,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-game-motion__shipped-tone-050__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-game-motion__shipped-tone-100__1\\output.mkv"
+    },
+    {
+      "id": "c6169a",
+      "clip": "orig-game-motion",
+      "frame": 23,
+      "shot": [
+        0,
+        65
+      ],
+      "seconds": 1.433,
+      "A": "double",
+      "B": "single",
+      "A_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-game-motion__shipped-tone-050__1\\output.mkv",
+      "B_run": "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\benchmark-work\\runs\\orig-game-motion__shipped-tone-100__1\\output.mkv"
+    }
+  ]
+}
