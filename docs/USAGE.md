@@ -142,7 +142,8 @@ target. Neural rendering itself preserves source resolution.
 resolution, the player chooses the highest advertised video bitrate across
 available codecs and containers, with the highest-bitrate separate audio stream
 when needed. Auto takes the tallest rung up to 1440p, then the highest bitrate
-inside it; 2160p is available as an explicit choice.
+inside it, and falls back to the tallest rung up to 2160p only when a source
+offers nothing at 1440p or below.
 An unavailable manual resolution reports an error instead of silently changing
 resolution. Source streams are copied into the cache without re-encoding.
 

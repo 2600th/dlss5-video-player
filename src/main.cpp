@@ -4721,7 +4721,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
         options.neuralAddonConfigured,options.outputExplicit,options.maxW,options.maxH);
     options.maxW=renderDefaults.width;options.maxH=renderDefaults.height;
     if(options.neuralAddonConfigured&&!options.outputExplicit)
-        LOG("Neural pre-render defaults active: YouTube Auto takes the tallest rung up to 1440p; local files retain native source resolution and spatial upscaling stays off.");
+        LOG("Neural pre-render defaults active: YouTube Auto takes the tallest rung up to 1440p, or up to 2160p when nothing lower exists; local files retain native source resolution and spatial upscaling stays off.");
     if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;
     if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}
 

@@ -31,7 +31,7 @@ Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
 Fresh-install defaults are Neural Rendering on, playback DLSS Upscaling off,
 1440p upscaling output selected, and YouTube Auto taking the tallest rung up to
-1440p at the highest bitrate.
+1440p at the highest bitrate, or up to 2160p when a source offers nothing lower.
 Player preferences persist after that. Manual YouTube choices are 1080p,
 1440p and 2160p; each selects the highest advertised video bitrate at that
 resolution across codecs. Source selection and playback upscaling are separate.
