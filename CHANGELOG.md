@@ -53,26 +53,40 @@ and looks like a broken helper until the runtime is re-staged.
   commit - which deliberately does not go through the unload path - cannot hand
   a second video the first one's copy. Two 1440p trailers share a geometry, so
   the guard downstream would not have caught that.
-- The render no longer chases a playhead that is still moving. Six presses of
-  the seek key in 2.4 s used to retarget the job three times, and each retarget
-  threw away a helper that had launched under a second earlier and rendered
-  nothing: three cold starts, about 7.3 s each, spent on holes the viewer had
-  already left. Whichever hole they settle in is still there a moment later, so
-  a decision waits for the playhead to stop for a second - under the cheapest
-  thing it can buy, and over the gap between two presses of a held key. The
-  hand-back to the original still runs immediately: a viewer who is seeking is
-  never left in a buffering panel. Same six presses, driven on the same stream:
-  **0 retargets and 1 helper launch**, the hole under the settled playhead
-  rendered, attached 7 s later, then the next hole chained on and the clip
-  finished `100% rendered` in one region.
+- The render no longer chases a playhead that is still moving. A viewer pressing
+  the seek key repeatedly moves it several times a second, and every move was a
+  decision: the running job was cancelled and restarted on the new hole, paying
+  the arm and preroll again for a position the next press abandoned. Whichever
+  hole they settle in is still there a moment later, so a decision waits for the
+  playhead to stop for a second - under the cheapest thing it can buy, and over
+  the gap between two presses of a held key. The hand-back to the original is
+  deliberately above that guard: a viewer who is seeking is never left in a
+  buffering panel.
+  Measured as an A/B on the same stream and the same driver, six back-seeks with
+  the job mid-range, the only difference being the settle window:
+
+  | six presses, 900 ms apart | without | with |
+  | --- | --- | --- |
+  | retargets | 5 | **1** |
+  | job restarts | 5 | **1** |
+  | helper launches | 1 | 1 |
+
+  The helper is resident and reused, so the cost of a retarget is the job
+  restart - not a process launch, as an earlier draft of this entry claimed. At
+  400 ms between presses both builds retarget once: the seeks queue, and the
+  existing "not while a seek is in flight" rule already coalesces them. The
+  window this changes is the half-second-to-second press, where each seek lands
+  before the next arrives.
 - The speed the status line reports is the speed of the render, not of the
   download. `0.48x real time` on a card measured at 16.3 ms/frame was the
   session's first minute of acquisition averaged into its render: the clock now
   starts at the first rendered segment, and the coverage it measures against is
   the coverage the session started with, so the first segment is not subtracted
-  from every later reading. On a first watch with an empty cache the chip is now
-  absent, which is what a card holding `FPS 31 rendered / 30 source` with 24.7 s
-  buffered should report.
+  from every later reading. The same first watch now logs `pace=1.86x real
+  time`, and the status line's chip - which only appears below 0.98x - is
+  correctly absent for a card holding `FPS 31 rendered / 30 source`. Each job
+  start logs the pace it measured, so the figure can be read from a log instead
+  of a screenshot.
 - A render is no longer started once playback is on the acquired copy but its
   key is unknown. The acquisition the job would fall back to needs the stream
   URL, and the loaded path is a local file by then, so it earned an instant "the

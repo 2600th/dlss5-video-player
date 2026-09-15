@@ -3372,8 +3372,11 @@ private:
         // The coverage this job started from: if it ends with the index
         // unchanged, it rendered nothing and must not be started again.
         m_liveTarget=target;m_liveTargetRevision=m_liveSegments->Revision();
+        // The pace is what the status line's chip reads, logged where it can be
+        // checked without a screenshot. Zero until the settle window passes.
         LOG("Active neural session rendering ["<<double(target.start100ns)*1e-7<<","<<double(target.end100ns)*1e-7
-            <<") s; "<<m_liveSegments->Count()<<" segments already on disk, "<<holes<<" hole(s) left in the range.");
+            <<") s; "<<m_liveSegments->Count()<<" segments already on disk, "<<holes<<" hole(s) left in the range"
+            <<"; pace="<<LiveRealtimeRatio()<<"x real time.");
         return true;
     }
     void StartLiveNeuralSession(){
@@ -4508,9 +4511,6 @@ private:
     }
     void StartYouTubeSeek(double seconds,bool resumeAfter,NetworkCommitKind commitKind=NetworkCommitKind::Seek,std::optional<std::pair<bool,NVSDK_NGX_PerfQuality_Value>> qualityOverride=std::nullopt){
         if(!m_loaded||!NetworkPlayback()||m_path.empty())return;
-        // A re-resolution is a seek too: the playhead is about to move, and the
-        // render should not chase it until the user has stopped pressing.
-        m_lastSeekTick=GetTickCount64();
         CancelYouTubeResolution();const uint64_t generation=m_youtubeLifecycle.Begin();SyncSourceActionAvailability();
         const std::wstring source=m_path,audioSource=m_youtubeAudioUrl,pageUrl=m_youtubePageUrl,title=m_displayTitle;const YouTubeSourceQuality sourceQuality=m_youtubeSourceQuality;const uint32_t maxW=m_opt.maxW,maxH=m_opt.maxH;const bool qualityExplicit=qualityOverride?qualityOverride->first:m_opt.qualityExplicit;const auto explicitQuality=qualityOverride?qualityOverride->second:m_opt.quality;const NetworkRenderConfiguration activeConfiguration=ActiveNetworkConfiguration();
         try{
