@@ -3102,32 +3102,32 @@ void live_session_retargets_the_render_to_the_hole_the_playhead_needs_test()
     // Inside that hole the render is coming this way: waiting beats restarting
     // until it falls more than the 15 s budget behind the playhead.
     view.positionSec=25.0;
-    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{250000000,400000000},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{250000000,400000000},kFrame,view.headSec));
     view.positionSec=34.9;
-    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{349000000,400000000},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{349000000,400000000},kFrame,view.headSec));
     view.positionSec=35.1;
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{351000000,400000000},kFrame));
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{351000000,400000000},kFrame,view.headSec));
     // Behind the hole being filled - the reported bug's seek - the job will never
     // reach the playhead, so it moves. Frame snapping a few milliseconds back is
     // not a seek and must not move it.
     view.positionSec=5.0;
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{50000000,100000000},kFrame));
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{50000000,100000000},kFrame,view.headSec));
     view.positionSec=9.9;
-    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{99000000,100000000},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{99000000,100000000},kFrame,view.headSec));
     // Past the hole entirely: this job is behind the viewer. Attached playback is
     // no exception - a viewer who seeks back onto rendered frames still wants the
     // render working where they are, which the old rebase refused to do.
     view.positionSec=45.0;view.headSec=40.0;
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{450000000,600000000},kFrame));
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{450000000,600000000},kFrame,view.headSec));
     live_session::SessionView attached=view;attached.attached=true;
-    CHECK(live_session::ShouldRetarget(attached,target,CoverageSpan{450000000,600000000},kFrame));
+    CHECK(live_session::ShouldRetarget(attached,target,CoverageSpan{450000000,600000000},kFrame,view.headSec));
     // A seek in flight has not committed to a position yet, and the hole the job
     // already has is never worth restarting for.
     live_session::SessionView seeking=view;seeking.seeking=true;
-    CHECK(!live_session::ShouldRetarget(seeking,target,CoverageSpan{450000000,600000000},kFrame));
-    CHECK(!live_session::ShouldRetarget(view,target,target,kFrame));
+    CHECK(!live_session::ShouldRetarget(seeking,target,CoverageSpan{450000000,600000000},kFrame,view.headSec));
+    CHECK(!live_session::ShouldRetarget(view,target,target,kFrame,view.headSec));
     // Nothing left to render: there is no hole to move to.
-    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{},kFrame,view.headSec));
 }
 
 // Measured on a driven session, and the reason this is a test: the job's range
@@ -3144,15 +3144,37 @@ void live_session_does_not_retarget_onto_the_hole_it_is_already_filling_test()
     // The viewer is at the end of the clip, inside a region rendered earlier, so
     // the only work left is the hole this job already has.
     const live_session::SessionView view{.positionSec=22.5667,.rangeStartSec=0.5,.headSec=22.6};
-    CHECK(!live_session::ShouldRetarget(view,target,wanted,kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,wanted,kFrame,view.headSec));
     // Same as the job publishes into it: the hole shrinks from the front, which
     // is still the same work and still no reason to restart the helper.
-    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{60000000,183000000},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{60000000,183000000},kFrame,view.headSec));
     // A hole outside the target is different work and does move the render.
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{183000000,226000000},kFrame));
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{183000000,226000000},kFrame,view.headSec));
     // And the slack is one frame, not unlimited: a hole starting a second early
     // is a different hole.
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{4000000,183000000},kFrame));
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{4000000,183000000},kFrame,view.headSec));
+}
+
+// The budget is measured against what the JOB has rendered, not against the
+// region around the playhead. Those differ exactly when the playhead sits in a
+// hole, where the region around it is empty: a viewer who seeks to one second
+// ahead of the render head then looked like a viewer the job would never reach,
+// and a seven-second helper restart replaced a one-second wait.
+void live_session_waits_for_a_job_whose_head_is_close_behind_the_playhead_test()
+{
+    constexpr int64_t kFrame=333333;
+    const CoverageSpan target{5000000,1000000000};                // [0.5,100) s
+    // Playhead at 41 s, inside the target and inside its hole, so the region
+    // around the playhead is empty and `headSec` is 0. The job has rendered to
+    // 40 s: one more second and it is there.
+    const live_session::SessionView view{.positionSec=41.0,.rangeStartSec=0.5,.headSec=0.0};
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{410000000,1000000000},kFrame,40.0));
+    // Without the job's own reach the same call restarts the helper, which is
+    // the defect this pins: 41 > max(0.5, 0.0) + 15.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{410000000,1000000000},kFrame,0.0));
+    // A job that really has fallen behind still moves: rendered to 20 s with the
+    // viewer at 41 is past the fifteen-second budget.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{410000000,1000000000},kFrame,20.0));
 }
 
 // A session toggled on at 12.0329 s published its first segment from 12.0662 s,
@@ -3213,7 +3235,7 @@ void live_session_with_no_published_segment_plays_the_cache_entry_test()
     const live_session::SessionView empty{.positionSec=2.56667,.rangeStartSec=2.56667,
                                           .headSec=0.0,.attached=false,.finished=true};
     CHECK(!live_session::ShouldAttach(empty));
-    CHECK(!live_session::ShouldRetarget(empty,CoverageSpan{25666700,1040000000},CoverageSpan{},333333));
+    CHECK(!live_session::ShouldRetarget(empty,CoverageSpan{25666700,1040000000},CoverageSpan{},333333,0.0));
     CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
 }
 
@@ -3595,6 +3617,7 @@ int wmain(int argc, wchar_t* argv[])
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_retargets_the_render_to_the_hole_the_playhead_needs_test();
     live_session_does_not_retarget_onto_the_hole_it_is_already_filling_test();
+    live_session_waits_for_a_job_whose_head_is_close_behind_the_playhead_test();
     live_session_joins_the_render_where_its_coverage_actually_starts_test();
     live_session_with_no_published_segment_plays_the_cache_entry_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();

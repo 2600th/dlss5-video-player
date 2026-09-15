@@ -341,13 +341,21 @@ struct SynchronizedPlayback::Impl {
     }
 
 
-    SynchronizedReadResult AdoptSegment(NeuralSegment wanted,int64_t timestamp100ns,std::stop_token stop)
+    // `allowLateStart` is for one caller: the open file ended inside its own
+    // declared window, so the playhead is still nominally in it while the frames
+    // it should have served are missing. The continuation legitimately begins
+    // AFTER the playhead there, and entering it lets the matcher walk the
+    // original forward over the missing frames - which is how a short file has
+    // always been tolerated. Refusing it stalled playback at that boundary for
+    // good, because a waiting read never advances the original either.
+    SynchronizedReadResult AdoptSegment(NeuralSegment wanted,int64_t timestamp100ns,std::stop_token stop,
+                                        bool allowLateStart=false)
     {
-        // A file that begins after the playhead cannot serve it. Reaching an
-        // earlier region from a later one used to land here with a negative
-        // entry offset, skip the seek, and pair that region's frame 0 against
-        // the original until the resync guard fired.
-        if(timestamp100ns+tolerance100ns/2<wanted.firstTimestamp100ns)
+        // Any other file that begins after the playhead cannot serve it.
+        // Reaching an earlier region from a later one used to land here with a
+        // negative entry offset, skip the seek, and pair that region's frame 0
+        // against the original until the resync guard fired.
+        if(!allowLateStart&&timestamp100ns+tolerance100ns/2<wanted.firstTimestamp100ns)
             return SynchronizedReadResult::WaitingForRender;
         // Only a disagreement between number and timestamp coverage can ask for
         // the file already open; serving it beats reopening it every frame.
@@ -414,7 +422,7 @@ struct SynchronizedPlayback::Impl {
             auto following=segments->After(segment.firstTimestamp100ns);
             if(!following||following->firstTimestamp100ns>segment.end100ns)
                 return SynchronizedReadResult::WaitingForRender;
-            covering=std::move(following);
+            return AdoptSegment(std::move(*following),timestamp100ns,stop,true);
         }
         // Nothing rendered here yet. Coverage is a set of rendered regions, and
         // the gaps between them are ordinary unrendered video that the session

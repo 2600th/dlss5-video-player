@@ -494,8 +494,12 @@ set, rebasing each segment with its own first pts and opening the next segment
 before the current one runs out. Reading video nobody has rendered returns
 `WaitingForRender`, which the player treats as "buffer" or "play the original",
 never as "stop". When a job ends the segments IT published - selected by run id,
-not by position - are concatenated (`ConcatenateMedia`) into the single
-`neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
+not by position - are concatenated (`ConcatenateMedia`) into the cache entry for
+**that job's sub-range**. A session that filled several holes therefore leaves
+several partial entries rather than one entry for the video, so reopening the
+whole source later is not a cache hit; only a session that rendered its range in
+one job produces that. Joining the union once coverage reaches the whole range is
+not implemented.
 
 Coverage is a **set of rendered regions**, not a head. A session renders the
 whole video (or the marked range) hole by hole, nearest the playhead first, and
@@ -524,10 +528,13 @@ frame duration, so at 30000/1001-style rates it lands a couple of ticks under
 the next segment's own first pts, and a playhead inside that hole used to be
 reported as a producer contract break.
 
-Entering a segment part-way is a seek inside that file, and a segment holds one
-keyframe at its own start, so the first frames it hands back are behind the
-playhead. In live mode the pair builder walks over them; in cached playback a
-numbered disagreement stays the hard identity failure it is meant to catch.
+Entering a segment part-way is a seek inside that file, and the frames it hands
+back afterwards can be behind the playhead - one measured session answered a
+seek to 5.5 s with the frame at 5.0 s, the start of the segment that covers it.
+In live mode the pair builder walks over them; in cached playback a numbered
+disagreement stays the hard identity failure it is meant to catch. A file that
+ends inside its own declared window is entered the same way, from a successor
+that legitimately begins after the playhead.
 
 Sizing follows measurement rather than preference, and the measurements moved a
 long way during the work described below. `playback_timing::ForecastLiveRender`

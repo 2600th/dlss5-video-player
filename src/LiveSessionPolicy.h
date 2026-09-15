@@ -167,8 +167,16 @@ inline bool ShouldResume(const SessionView& view, double resumeLead = kResumeLea
 // work on every tick: the driven session cancelled and relaunched its helper
 // four times in 110 ms, and one of those part-rendered jobs is where a stray
 // half-second region came from.
+//
+// `jobHeadSec` is how far the running job has actually rendered inside its own
+// target. It is deliberately NOT `view.headSec`, which is the end of the region
+// around the PLAYHEAD and therefore zero whenever the playhead sits in a hole:
+// with that, a viewer who seeks one second ahead of a render head looked like a
+// viewer the job would never reach, and the helper was restarted - seven
+// seconds of startup - instead of waited out for one.
 inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, CoverageSpan wanted,
-                           int64_t frameDuration100ns, double aheadBudget = kRebaseAhead)
+                           int64_t frameDuration100ns, double jobHeadSec,
+                           double aheadBudget = kRebaseAhead)
 {
     if (view.seeking) return false;
     if (wanted.Empty()) return false;
@@ -176,7 +184,7 @@ inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, Coverag
     // Checked before the identity test below, which would otherwise hold for
     // every hole the viewer is standing in and pin a job that cannot catch up.
     if (target.Contains(position100ns)) {
-        const double reach = std::max(double(target.start100ns) * 1e-7, view.headSec);
+        const double reach = std::max(double(target.start100ns) * 1e-7, jobHeadSec);
         return view.positionSec > reach + aheadBudget;
     }
     // The same hole, still being filled: leave the job alone.

@@ -53,20 +53,28 @@ first, until every frame of the range is rendered; the status line reports how
 much of it is done. **Seeking is not limited to what has been rendered.** Seek
 into rendered frames and playback continues on them, wherever they are on the
 timeline. Seek into frames nobody has rendered yet and the original plays there
-immediately - no waiting - while the render moves to that part of the video and
-playback switches over to it once it has coverage. Nothing already rendered is
-discarded when this happens, so seeking back and forth costs no repeated work.
+while the render moves to that part of the video, and playback switches over
+once it has coverage. Nothing already rendered is discarded when this happens,
+so seeking back and forth costs no repeated work.
+
+The one place playback still waits is the stretch the render is working on right
+now: catching up with the render head inside it brings the panel back until
+enough is buffered, because the frames you want are seconds away. A hole the
+render is not working on plays the original instead of waiting.
+
+The frames are dropped when they can no longer apply - a different video,
+changed neural settings or guides, or a YouTube quality reload, which renders at
+a different resolution.
 
 Turning the button off stops the session and hands the same frame back to the
 original, but keeps the frames it already rendered: turning it back on resumes
 on them instead of redoing that work, so playback starts again in well under a
-second. The frames are dropped when they can no longer apply - a different
-video, or changed neural settings or guides. On an RTX 5090 the render sustains
-about 120 frames per second at 1080p and 65 at 1440p; a 6.3 Mbit/s 4K30
-re-encode measured 24 and could not keep up. If the source is heavier than the
-GPU can follow the player says so with the predicted rate and asks before
-starting. Once a session has been running for a few seconds the status line
-reports the rate it is actually achieving whenever that falls behind.
+second. On an RTX 5090 the render sustains about 120 frames per second at 1080p
+and 65 at 1440p; a 6.3 Mbit/s 4K30 re-encode measured 24 and could not keep up.
+If the source is heavier than the GPU can follow the player says so with the
+predicted rate and asks before starting. Once a session has been running for a
+few seconds the status line reports the rate it is actually achieving whenever
+that falls behind.
 
 **Convert to a file** with the DLSS menu's **Convert & save** submenu:
 `Ctrl+R` converts the marked clip, **Convert whole video** the whole source,

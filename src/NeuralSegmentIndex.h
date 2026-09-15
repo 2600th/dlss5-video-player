@@ -53,6 +53,13 @@ public:
         // run can overlap what an earlier one finished, and a republished file
         // would move the timeline under a decoder that is reading it.
         if (at != segments_.begin() && segment.firstTimestamp100ns < std::prev(at)->end100ns) return;
+        // Measured from the span the producer declared, before the clamp below
+        // can shorten it: dividing a clamped end by the full frame count yields
+        // a duration too small to recognise the sub-frame seam this closes.
+        const int64_t frameDuration =
+            segment.frameCount
+                ? (segment.end100ns - segment.firstTimestamp100ns) / int64_t(segment.frameCount)
+                : 0;
         // A run filling a hole ends on a segment boundary rather than on the
         // hole's edge, so its last file can reach into the region beyond. Clamp
         // the declared end there: those frames are already served from the other
@@ -67,10 +74,6 @@ public:
         // it belongs to the earlier file, and reporting it as uncovered reads
         // as a producer contract break. A real gap - a run rebased further
         // ahead - is a frame or more wide and stays uncovered.
-        const int64_t frameDuration =
-            segment.frameCount
-                ? (segment.end100ns - segment.firstTimestamp100ns) / int64_t(segment.frameCount)
-                : 0;
         if (frameDuration > 0 && at != segments_.begin()) {
             NeuralSegment& previous = *std::prev(at);
             const int64_t hole = segment.firstTimestamp100ns - previous.end100ns;
@@ -97,6 +100,18 @@ public:
         if (!paceStart_ || totalFrames_ <= paceBaseFrames_) return {};
         return {std::chrono::duration<double, std::milli>(paceLatest_ - *paceStart_).count(),
                 totalFrames_ - paceBaseFrames_};
+    }
+
+    // A new job's pace is its own: the clock starts at its first segment. The
+    // adopted and chained cases were covered by `Unfinish` before coverage
+    // became a set; without an explicit reset the idle gap between two jobs -
+    // and every job startup while holes are being filled - counts as render
+    // time and teaches the forecast a pace no GPU achieves.
+    void ResetPace()
+    {
+        const std::lock_guard lock(mutex_);
+        paceStart_.reset();
+        paceBaseFrames_ = totalFrames_;
     }
 
     void Restart()

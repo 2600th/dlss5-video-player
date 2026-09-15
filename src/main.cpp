@@ -3145,6 +3145,20 @@ private:
         if(!m_liveSegments)return {};
         return UncoveredSpans(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns},LiveFrame100ns());
     }
+    // How far the running job has rendered inside its own target: the end of the
+    // coverage that starts where the target does, or the target's start when it
+    // has published nothing yet. This is what the retarget budget is measured
+    // against, because LivePlayableSpan() below is about the PLAYHEAD and is
+    // empty whenever the playhead sits in a hole.
+    double LiveJobReachSeconds()const{
+        const double start=double(m_liveTarget.start100ns)*1e-7;
+        if(!m_liveSegments)return start;
+        const int64_t slack=LiveFrame100ns();
+        for(const CoverageSpan& span:LiveCoverage())
+            if(span.start100ns<=m_liveTarget.start100ns+slack&&span.end100ns>m_liveTarget.start100ns)
+                return double(span.end100ns)*1e-7;
+        return start;
+    }
     // The rendered region the playhead is inside, which is the only buffer
     // playback can drain - a region on the far side of a hole is not lead, and
     // measuring against the newest rendered timestamp attached sessions with
@@ -3203,7 +3217,13 @@ private:
     std::string LiveRetentionKey()const{
         const std::wstring& identity=
             (m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty())?m_youtubePageUrl:m_path;
-        return WideToUtf8(identity)+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
+        // Geometry belongs in the key: a YouTube quality reload commits the same
+        // video at a different resolution, and segments rendered at the old one
+        // are refused by the pair on a width/height mismatch - every frame an
+        // Error rather than a picture. Retained frames must be frames this
+        // session could actually use.
+        return WideToUtf8(identity)+"|"+std::to_string(m_decoder.Width())+"x"+std::to_string(m_decoder.Height())
+               +"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
     }
     void DropRetainedLiveSegments(){
         m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
@@ -3233,6 +3253,9 @@ private:
         // A sub-frame residual is coverage, not work.
         if(RenderRangeIsCovered(target.start100ns,target.end100ns,m_decoder.FrameRate())){m_liveTarget=target;return true;}
         if(!RenderRangeOfCurrentSource(target,NeuralJobKind::Live))return false;
+        // The pace clock starts with this job's first segment: the wait between
+        // jobs, and each job's startup, are not render time.
+        m_liveSegments->ResetPace();
         // The coverage this job started from: if it ends with the index
         // unchanged, it rendered nothing and must not be started again.
         m_liveTarget=target;m_liveTargetRevision=m_liveSegments->Revision();
@@ -3265,7 +3288,7 @@ private:
             if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
         }
-        m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;
+        m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;m_liveRenderFailures=0;
         m_livePaintedRevision=m_liveSegments->Revision();m_liveStartTick=GetTickCount64();m_neuralRequested=true;
         m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{range.start100ns,range.end100ns});
         m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
@@ -3539,13 +3562,27 @@ private:
     void MaintainLiveRenderTarget(){
         if(!m_liveSession||!m_liveSegments)return;
         if(m_previewJob||m_seeking||m_seekPending||m_dragSeek)return;
-        if(m_liveRenderFailures>=kLiveRenderFailureLimit)return;
+        if(m_liveRenderFailures>=kLiveRenderFailureLimit){
+            // Nothing is going to fill the hole the viewer is in, and every other
+            // decision here says "wait": ShouldAttach sees no lead, the stalled
+            // rebase needs one, so the buffering panel would stay up for good.
+            // Hand the original back and say so, which is what the completed-job
+            // Stop plan does for a session that published nothing.
+            if(!m_liveAttached&&!LivePlayableSpan()){
+                LOG("Active neural session gave up filling holes at "<<Position()<<" s after "
+                    <<m_liveRenderFailures<<" fruitless jobs; playing the original.");
+                StopLiveNeuralSession(true);
+                m_neuralNotice=T(L"neural.live.stalled");
+                UpdateCachedStatus();InvalidateControls();
+            }
+            return;
+        }
         const auto wanted=WantedLiveTarget();
         if(NeuralJobActive()){
             if(!wanted)return;
             if(!live_session::ShouldRetarget(LiveSessionView(),
                                              CoverageSpan{m_liveTarget.start100ns,m_liveTarget.end100ns},*wanted,
-                                             LiveFrame100ns()))
+                                             LiveFrame100ns(),LiveJobReachSeconds()))
                 return;
             LOG("Active neural session retargeting from ["<<double(m_liveTarget.start100ns)*1e-7<<","
                 <<double(m_liveTarget.end100ns)*1e-7<<") to ["<<double(wanted->start100ns)*1e-7<<","
