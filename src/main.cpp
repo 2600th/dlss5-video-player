@@ -1362,15 +1362,18 @@ private:
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
         if(read==SynchronizedReadResult::PairReady){const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;m_next=*visible;m_haveNext=true;return true;}
         if(read==SynchronizedReadResult::NotReady)return false;
-        // The playhead is on video nobody has rendered. When the running job is
-        // filling exactly this hole its frames are seconds away, so waiting shows
-        // the picture the user asked for. Anywhere else - a seek back in front of
-        // the render, a hole the session has not reached yet - waiting would
-        // freeze playback for as long as a render takes, so the original comes
-        // back and the session re-attaches when its coverage reaches the playhead.
+        // The playhead is on video nobody has rendered. When a job is filling
+        // exactly this hole its frames are seconds away, so waiting shows the
+        // picture the user asked for. Anywhere else - a seek back in front of the
+        // render, a hole the session has not reached, or a target no job is
+        // working on any more because the session gave up filling holes - waiting
+        // would freeze playback for as long as a render takes, or for good. The
+        // original comes back there and the session re-attaches when its coverage
+        // reaches the playhead.
         if(read==SynchronizedReadResult::WaitingForRender){
             const int64_t at=static_cast<int64_t>(std::llround(Position()*1e7));
-            if(m_liveSession&&(at<m_liveTarget.start100ns||at>=m_liveTarget.end100ns)){
+            const bool beingFilled=NeuralJobActive()&&at>=m_liveTarget.start100ns&&at<m_liveTarget.end100ns;
+            if(m_liveSession&&!beingFilled){
                 const bool wasPlaying=m_playing;
                 LOG("Live playback reached unrendered video at "<<Position()<<" s, outside the render target ["
                     <<double(m_liveTarget.start100ns)*1e-7<<","<<double(m_liveTarget.end100ns)*1e-7

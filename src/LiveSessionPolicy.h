@@ -180,6 +180,13 @@ inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, Coverag
 {
     if (view.seeking) return false;
     if (wanted.Empty()) return false;
+    // The job has rendered its whole hole and is on its way to publishing: the
+    // completion path starts the next one a tick later. Cancelling here throws
+    // away the cache entry and receipt it was about to promote for work that is
+    // already done - one driven session did exactly that, five seconds after the
+    // job finished [100.1,113) s, because the completion message had not been
+    // processed yet and the job still counted as running.
+    if (jobHeadSec >= double(target.end100ns) * 1e-7) return false;
     const int64_t position100ns = static_cast<int64_t>(std::llround(view.positionSec * 1e7));
     // Checked before the identity test below, which would otherwise hold for
     // every hole the viewer is standing in and pin a job that cannot catch up.

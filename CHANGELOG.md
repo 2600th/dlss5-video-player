@@ -27,20 +27,26 @@ and looks like a broken helper until the runtime is re-staged.
   the gaps are visible rather than implied by one long band.
   Measured on one driven session, a 113 s 1080p clip toggled on at 60 s and then
   seeked backwards four times: **4 retargets, each keeping all 18 segments
-  rendered so far**, playback attached on the new coverage about 3 s later,
-  **2 attaches in the whole session** where an interim build oscillated 28 times,
-  a seek landing 1.73 s inside a rendered segment paired with no fault, and two
-  disjoint regions on the seek bar at 68% rendered. Seven defects were found by
-  driving the player and are fixed here, among them: a job whose range was
-  frame-snapped five ticks past its hole relaunched the helper on every tick;
-  `ShouldAttach` ignored a seek in flight and attached at the position playback
-  was leaving; a seek into the middle of a rendered segment was refused as a
-  frame mismatch, because the frames a segment hands back after such a seek can
-  be behind the playhead, and are now walked over; a file that ended inside its
-  own declared window stalled playback at that boundary; the render pace was
-  measured across the gap between two jobs; and a YouTube quality reload would
-  have adopted segments rendered at the previous resolution, which the pair
-  refuses frame by frame, so the resolution is part of the retention key now.
+  rendered so far**, **2 attaches in the whole session** where an interim build
+  oscillated 28 times, a seek landing 1.73 s inside a rendered segment paired
+  with no fault, and two disjoint regions on the seek bar at 68% rendered. A
+  later run of the same scenario finished the clip - `rendered all of [0,113) s
+  over 61 segments` - and, played rather than paused with the render still
+  filling ahead, held `FPS 30 rendered / 30 source · Dropped 0`. Nine defects
+  are fixed here, three found by driving the player and six by review, among
+  them: a job whose range was frame-snapped five ticks past its hole relaunched
+  the helper on every tick; `ShouldAttach` ignored a seek in flight and attached
+  at the position playback was leaving; a seek into the middle of a rendered
+  segment was refused as a frame mismatch, because the frames a segment hands
+  back after such a seek can be behind the playhead, and are now walked over; a
+  file that ended inside its own declared window stalled playback at that
+  boundary; the render pace was measured across the gap between two jobs; a
+  YouTube quality reload would have adopted segments rendered at the previous
+  resolution, which the pair refuses frame by frame, so the resolution is part of
+  the retention key now; a session that gave up filling holes left the buffering
+  panel up for good over the hole its dead target still named; and a job that had
+  finished its hole was cancelled before its completion was processed, throwing
+  away the cache entry it was about to publish for work already done.
   `NeuralSegmentIndex::Finished()` is gone: whether a session has more to do is a
   question about coverage, and one job ending answers only for its own hole. One
   limitation is recorded rather than fixed: each hole-filling job publishes a
