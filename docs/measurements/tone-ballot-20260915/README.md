@@ -400,10 +400,27 @@ clean 8 of 8 is needed. A sweep still clears the bar at 7 of 7 (0.0078) and 6 of
 (0.0156); at five or fewer decided pairs nothing does, which would make the round
 inconclusive by construction rather than by result.
 
-Differences span mean absolute 0.55 to 7.20 levels. One pair (`a4c357`, 0.55 mean,
-4 % of pixels) is near-identical - a dim interior frame where the knob has little to
-work on - and is left in rather than dropped, because dropping the pairs where an
-effect is invisible is how a preference gets manufactured.
+The ten pairs, largest difference first. **Pair ids are re-randomised on every
+build** (`secrets.token_hex`, deliberately not seeded, so an id carries no hint of
+its arm), so the stable identity of a pair is its clip and frame - if this table
+disagrees with `key.json`, the ballot was rebuilt and the ids moved:
+
+| pair | clip | frame | mean abs diff | pixels > 2 levels |
+|---|---|---|---|---|
+| `0888b1` | `orig-film-motion-a` | 48 | 7.20 | 85.8 % |
+| `68c98c` | `orig-film-motion-b` | 228 | 4.36 | 76.7 % |
+| `cae21e` | `orig-film-motion-b` | 29 | 3.76 | 60.9 % |
+| `c0ecaf` | `orig-film-motion-a` | 151 | 2.86 | 42.9 % |
+| `8b59b8` | `orig-film-motion-a` | 256 | 2.79 | 57.9 % |
+| `2f6d7c` | `orig-film-motion-a` | 90 | 2.43 | 58.5 % |
+| `95eca5` | `orig-film-motion-b` | 137 | 2.32 | 28.5 % |
+| `c33218` | `orig-film-motion-b` | 83 | 1.88 | 31.1 % |
+| `fecc83` | `orig-film-motion-b` | 189 | 1.71 | 41.8 % |
+| `f04c63` | `orig-film-motion-a` | 195 | 0.55 | 4.1 % |
+
+The last pair is near-identical - a dim interior frame where the knob has almost
+nothing to work on - and is left in rather than dropped, because dropping the pairs
+where an effect is invisible is how a preference gets manufactured.
 
 ---
 
