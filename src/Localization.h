@@ -5,8 +5,6 @@
 
 class Localizer {
 public:
-    void Initialize() {}
-
     std::wstring Get(const wchar_t* key) const {
         const auto& strings = EnglishDefaults();
         const auto it = strings.find(key);

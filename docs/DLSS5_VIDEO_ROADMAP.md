@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — Updated Roadmap
 
-_Current as of September 12, 2026._
+_Current as of September 15, 2026._
 
 ## Quick reality check
 
@@ -8,30 +8,26 @@ _Current as of September 12, 2026._
 - Keep the player's currently tested stack pinned: **driver 616.64 + ReShade 6.8 + RenoDX 4.70 + NR/SR 310.8**. [Runtime lock](../packaging/runtime-lock.json) · [Measured report](measurements/runtime-comparison-20260907/REPORT.md)
 - **Tested against that pin (2026-09-12):** DLSS5-Autopilot's field data reports renodx-dlss5 4.6/4.7 faulting on every evaluate from driver 616.64, which is the driver we recommend. Six live neural sessions on an RTX 5090 on 616.64 did not reproduce it: `failure=none`, `lock=ok`, every rendered frame verified. The pin stands. See item 0 below. [Session record](VERIFICATION-2026-09-12-RTX5090.md)
 
-## Next session — ordered, from the 2026-09-11 survey
+## The 2026-09-11 survey — status
 
-Written after v0.20.0 shipped hardware optical flow. Everything here was checked
-against the source or an external document on that date; the ordering is by value
-over cost, not by ambition. Items 1–4 are together about four flags and thirty
-lines, and they aim at the symptom the whole 0.20.0 cycle was chasing: motion that
-does not feel attached to the picture.
+Written after v0.20.0 shipped hardware optical flow, and kept as that survey's
+record: every item was checked against the source or an external document on that
+date, ordered by value over cost. Items 1-4 were four flags and about thirty lines
+aimed at one symptom - motion that does not feel attached to the picture. Item 0
+closed 2026-09-12; items 1, 2 and 4 shipped 2026-09-14; item 3 was measured the
+same day and not adopted; item 5 is what remains.
 
 **0. Closed 2026-09-12: it does not reproduce on this pin.** DLSS5-Autopilot's
-aggregated field data says "from 616.64 the driver routes neural rendering through
-its own runtime, and the renodx-dlss5 add-on the feeder route loads faults there -
-4.6 and 4.7 on every evaluate, 4.55 in some games". We pin renodx-dlss5 4.70 and we
-recommend 616.64, which is exactly the reported combination, and their workaround
-was a standalone route that never loads the add-on. Six live neural sessions on
-2026-09-12 answer it: one machine, RTX 5090, driver 616.64, the pinned stack
-(ReShade 6.8.0.2155, RenoDX 4.7, DLSS-NR 310.8.0, `310.8.SF-v2`). The receipts read
-`frames=2805/2805 verified=2805`, `2779/2779`, `2697/2697` and `2607/2607`,
-`failure=none`, `lock=ok`, at about 7.0 ms/frame at 1920x1080. No evaluate faulted
-in any of them.
-
-What this tree can say is that the published field report was not reproduced here,
-which is not the same as saying it was wrong: their figure aggregates machines,
-add-on builds and titles one session cannot speak for. So the pin stays, and so
-does the warning against upgrading the runtime blind - what has now been tested is
+aggregated field data reports renodx-dlss5 4.6/4.7 faulting on every evaluate from
+driver 616.64 - exactly the combination we pin and recommend, while their
+workaround was a standalone route that never loads the add-on. Six live neural
+sessions on one RTX 5090 on 616.64 with the pinned stack (ReShade 6.8.0.2155,
+RenoDX 4.7, DLSS-NR 310.8.0, `310.8.SF-v2`) answered it: `failure=none`,
+`lock=ok`, every rendered frame verified (`2805/2805`, `2779/2779`, `2697/2697`,
+`2607/2607`) at about 7.0 ms/frame at 1920x1080, and no evaluate faulted. Not
+reproduced here is not the same as wrong - their figure aggregates machines,
+add-on builds and titles one session cannot speak for - so the pin stands, and so
+does the warning against upgrading the runtime blind: what has been tested is
 616.64 with renodx-dlss5 4.70, and nothing else.
 [Autopilot v1.8.1](https://github.com/Kizzuwatnaa/DLSS5-Autopilot/releases/tag/v1.8.1) ·
 [Session record](VERIFICATION-2026-09-12-RTX5090.md)
@@ -53,64 +49,29 @@ retried in place. The resolve pass gates each vector on the round trip
 (`src/FlowGate.h`, Sundaram/Brox alpha 0.01, beta 0.5 px², literature defaults),
 so a cell the engine contradicts itself about emits no motion.
 
-**Measured on hardware 2026-09-14.** The ladder's top rung comes up on an RTX 4080
-SUPER - `direction=both, round-trip gate armed, global flow=on` - and four labelled
-clips rendered through the real neural path on the pre-gate tree and on this one
-move no metric by as much as one percentage point. The renders are bit-reproducible
-(`deterministic: true`, repeats identical to full precision), so those small deltas
-are signal rather than noise, and they do not line up behind the gate: on the one
-clip with genuine disocclusion it improves cell-flip rate and temporal sigma but
-*raises* false motion by 0.92 points, which the `intensity-0` control puts at
-13.5 % of the share attributable to the neural pass; false motion improves on one
-clip only, the fast pan. It stays because a refusal cannot invent a vector, not
-because it is a proven win; settling it needs real footage.
-[Session record](VERIFICATION-2026-09-14-RTX4080.md)
+**Then settled in three stages, and the last one reverses the first.** On four
+synthetic clips (2026-09-14, RTX 4080 SUPER) the gate moved no metric by as much
+as one percentage point and *raised* false motion by 0.92 points on the only clip
+with genuine disocclusion, so it was kept on the shape of its risk rather than on
+evidence [session record](VERIFICATION-2026-09-14-RTX4080.md). On four clips cut
+from this repository's own NR-processed demo capture it **lowered** false motion
+on all four by 4.6 to 14.4 % relative - 11.8 to 74.4 % of the share the
+`intensity-0` control attributes to the neural pass - and improved flips and
+added sigma with it on two, an outcome no synthetic clip produced
+[A/B report](measurements/gate-real-footage-20260914/REPORT.md). On 2026-09-15 it
+reproduced on the seven `orig-*` clips cut from publishers' own releases, with the
+gate isolated to its *rejection* alone: false motion better on **6 of 7** by
+2.11 % to 46.91 % relative, cell flips 7 of 7, added flicker 7 of 7, 50 renders
+each bit-reproducible within its arm to full precision. That retires the
+provenance caveat, and leaves the synthetic reversal as this project's clearest
+case that synthetic patterns can point the wrong way on direction
+[camera-original report](measurements/q1-gate-camera-original-20260915/REPORT.md).
 
-**Settled the same day on NR-processed captures, and the answer reverses the
-synthetic one.** Four labelled clips - cut from this repository's own demo
-capture, cuts verified frame by frame - were rendered on both trees. Read
-"captures", not "footage": every frame was recorded with neural rendering on, so
-the pixels are the player's own DLSS-NR output put through a screen capture, an
-h264 encode and a lanczos upscale before this pass touched them again. The
-provenance chain and its consequences are in [Benchmark](BENCHMARK.md).
-
-The gate **lowers** false motion on all four, by 4.6 to 14.4 % relative, which is
-11.8 to 74.4 % of the share the `intensity-0` control attributes to the neural
-pass, and on two of them it improves false motion, cell flips and added sigma
-together - an outcome no synthetic clip produced. Repeats are bit-identical within
-each tree and the trees differ, so the deltas are signal. The gate is kept on
-evidence now, not only on the shape of its risk. What the synthetic result was
-really measuring is fractal and cellular-automaton motion, where "false motion"
-counts pixels on cells the source held static; the reversal is the clearest case
-this project has that synthetic patterns can point the wrong way on direction.
-Two limits travel with it: the `intensity-0` control measures a carrier that
-already carries NR relighting, and `real-film-cuts` ends in 15 frozen frames,
-which makes its static-cell denominator the least comparable of the four.
-[A/B report](measurements/gate-real-footage-20260914/REPORT.md)
-
-**And it reproduces on camera-original footage (2026-09-15), which retires the
-provenance caveat above.** The WIN in the paragraph above is real but was measured
-on NR-processed captures, so what it could not say is whether the gate helps
-material that has never been through this player. Re-checked on the seven `orig-*`
-clips cut from publishers' own releases, with the gate isolated to its *rejection*
-alone - BOTH-direction flow, global flow, the backward field and the cost surface
-left exactly as shipped in both arms - false motion improves on **6 of 7** clips by
-2.11 % to 46.91 % relative, cell flips on 7 of 7 and added flicker on 7 of 7. The
-one adverse clip, `orig-game-cuts`, is +0.43 % false motion while its flips and
-sigma still favour the gate. Against the `shipped-intensity-0` carrier floor the
-gate removes 10.9-77.3 % of the false motion the neural pass itself contributes on
-the six it wins. 50 renders, every one bit-reproducible within its arm to full
-precision, four independent per-arm assertions, at the shipped mask state - so
-unlike the capture A/B this one carries no provenance asterisk.
-
-Two things it changes about how to read the gate. The estimator under test was
-NVOFA hardware flow on all seven clips, so what these numbers measure is the
-**resolve-shader** half; `kRoundTripCells` in the CPU estimator never decided a
-motion texture here, and `BuildDepthProxy` still reads the CPU flow field, which a
-depth=0 probe bounds at 0.3-1 pp relative. And the `NVOFA ready:` line could not
-serve as the per-arm assertion: it printed "gate armed" in both arms, because it
-knew only that a backward field was bound. That line now says what it knows.
-[Camera-original gate report](measurements/q1-gate-camera-original-20260915/REPORT.md)
+Two limits travel with the win. The estimator under test was NVOFA hardware flow
+on all seven clips, so what those numbers measure is the **resolve-shader** half:
+`kRoundTripCells` in the CPU estimator never decided a motion texture, and
+`BuildDepthProxy` still reads the CPU flow field, which a depth=0 probe bounds at
+0.3-1 pp relative.
 
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
@@ -227,154 +188,57 @@ after DLSS 5 launched with no NR plugin or guide. Nothing states that video is o
 not a supported use. Every ordering and threshold decision here is ours to measure;
 there is no spec to defer to.
 
-## Next after that — the persistent render helper (2026-09-12 measurement)
+## The persistent render helper — built and accepted 2026-09-14
 
-**Why.** The unreleased startup work cut the toggle from 14.71 s to 9.24 s on a
-scanned install and from 11.43 s to 5.80 s on an excluded one by deleting
-duplicated work
-([record](VERIFICATION-2026-09-12-RTX5090.md)). What is left is not duplicated;
-it is a cold process. Every session still spawns `NeuralWorker.exe` and pays,
-in order: CreateProcess plus the antivirus scan of a 98 MB tree (~0.7 s
-observed), ReShade proxy init and add-on load (0.41 s), NGX init (1.51 s, with
-model-cache misses against a `C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0`
-that the driver never created), `CreateFeature` and the first evaluate
-(0.63 s), then the first segment's preroll, encode and mux (1.78 s). The render
-inside that window is 60 frames at 7.0 ms = 0.42 s.
-
-**What to build.** One helper, started when media is opened rather than when
-the user presses the key, kept alive across sessions, fed jobs over the
-existing protocol instead of argv. It keeps its D3D12 device, its NGX instance,
-its CUDA context and its NVENC session between jobs. Steady-state target is the
-first segment plus the attach, ~1 s.
-
-**Why this is the shape.** Every amortisation the vendors document is
-process-scoped, so nothing else can reach it: DLSS's cached feature memory
-"gets released when Shutdown() is called"
+**Why it existed.** After the startup work cut the toggle from 14.71 s to 9.24 s
+on a scanned install and from 11.43 s to 5.80 s on an excluded one
+([record](VERIFICATION-2026-09-12-RTX5090.md)), what was left was not duplicated
+work but a cold process: every session spawned `NeuralWorker.exe` and paid
+CreateProcess plus the antivirus scan of a 98 MB tree, ReShade proxy init, NGX
+init against a model cache the driver never created, `CreateFeature` and the first
+evaluate, and only then the first segment's preroll, encode and mux - around a
+render of 60 frames at 7.0 ms. Every amortisation the vendors document is
+process-scoped, so no flag could reach it: DLSS's cached feature memory "gets
+released when Shutdown() is called"
 ([programming guide](https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf)),
-CUDA users measure that "it's crucial to keep the CUDA context alive to avoid
-this overhead in every new CUDA computation", and NVENC session open was
-measured at 953-1172 ms per instance on NVIDIA's own forum
+and NVENC session open was measured at 953-1172 ms per instance on NVIDIA's own
+forum
 ([thread](https://forums.developer.nvidia.com/t/nvenc-performance-issues-when-creating-multiple-encoders/44902)).
-`NvEncReconfigureEncoder` exists precisely to "change the encoder
-initialization parameters ... without closing existing encoder session and
-re-creating a new encoding session".
+Every sibling project converged on the same shape
+([Ecosystem review](ECOSYSTEM_REVIEW.md)). Instrumentation on 2026-09-14 then put
+the premise on a number: **NGX init plus feature arm is 95 % of the helper's cold
+start, and all of it is per-process**
+[session record](VERIFICATION-2026-09-14-RTX4080.md).
 
-**Every sibling converged on it.** `video2dlssnr` keeps one helper alive and
-streams raw RGBA over a pipe; Merserk's DLSS5 Visual Enhancer deleted the
-external injector entirely and runs NGX in-process, exposing segment length as
-a 1/2/4 s knob; DLSS5-Autopilot's video route installs DLSS into a long-lived
-MPC-HC and reports its live path running "about half a second behind", the only
-published live-path latency in the ecosystem.
-[video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr) ·
-[Visual Enhancer](https://github.com/Merserk/dlss5-visual-enhancer) ·
-[Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)
+**The acceptance criterion changed once, on measurement.** Ten driven sessions put
+toggle-to-first-neural-frame at 8.39-9.18 s on a cleared first toggle and
+4.88-5.16 s warm, and the phase split showed residency could only remove
+`neuralInit` plus `featureArm` - 2.10 s - leaving `firstOutput` and the attach.
+**Decision taken 2026-09-14: acceptance becomes "under 3 s for a warm toggle", and
+the first segment's preroll, encode and mux plus the original-to-neural handoff
+become a separate work item rather than part of the helper.** The "under 2 s" half
+of the original criterion was written before anything measured the phases, and is
+unreachable by making the helper resident however well it is done.
 
-**The four things that make it a real change, not a flag.**
-- *Runtime lease.* `NeuralRuntimeLease` currently spans one job, and the
-  invariant is one writer of `ReShade.ini` and `ReShade.log` per runtime
-  directory. A resident helper has to hold the lease across its idle time or
-  re-acquire it per job, and release it on crash, or a second player instance
-  waits forever.
-- *Idle VRAM.* DLSS deliberately does not free feature memory on
-  `ReleaseFeature`. An idle helper therefore parks VRAM; the documented escape
-  is `NVSDK_NGX_Parameter_FreeMemOnReleaseFeature` while idle, which trades the
-  re-allocation back on the next job. Measure both before choosing.
-- *Orphan watchdog.* A helper that outlives the player is a hidden process
-  holding the GPU and the lease. It needs the parent's process handle and a
-  death wait, not only the existing job object.
-- *Receipt and lock identity.* `receipt.json` and the runtime lock assume a
-  fresh process per render. A reused process must re-verify that no locked file
-  changed between jobs and carry its preflight evidence forward - the same
-  identity the persisted preflight verdict already uses.
+**Accepted at 2.44-2.52 s, median 2.47 s, over four driven player sessions, every
+one `plan=reuse`** - against the under-3 s criterion, and against 5.23-5.41 s for
+the first toggle in the same process. The reused job never incurs the 2.19 s of
+process start-up, and it also shortened `firstOutput` from 1.437 s to 1.058 s on
+the same clip in the same run, which the ~2.9 s floor estimate had assumed fixed;
+so that floor was right about structure and wrong to treat the phase as fixed.
+Which property of reuse shortens it - a kept NGX feature skipping a first-evaluate
+warm-up, a decoder and encoder already up, or the rewound playhead - is
+unmeasured. The shipped design, and all four of the lease, idle-VRAM, orphan and
+identity problems residency had to answer, are in
+[Architecture](ARCHITECTURE.md); the measured phases, the helper-side figures and
+the warning not to read them as toggle-to-picture are in the
+[player-session record](VERIFICATION-matrix.md).
 
-**Acceptance.** Toggle to picture under 2 s on the excluded build and under 3 s
-on a scanned install, with `dropped=0` over a full clip, a second player
-instance still refused rather than interleaved, and no helper left running
-after the player exits or is killed.
-
-**Instrumented and partly re-measured, 2026-09-14.** Every render now reports the
-phases above as a protocol v6 timeline, in the receipt and in one log line, so the
-acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
-the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
-99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
-and 1847 ms, feature 18 armed 680.5 and 641 ms. The two are not a controlled
-pair: the second came from a different build of the same instrumentation on a
-different, segmented job, and `neuralInit` brackets the source open as well as
-NGX, so the 509 ms gap is not run-to-run variance and neither figure is an
-acceptance number - that check needs several samples from one build on one clip.
-One estimate above is structurally wrong rather than merely off: the ReShade
-proxy does not cost 0.41 s beside the loader, because it *is* the loader's work -
-the proxy is the helper's `dxgi` import and resolves before the entry point,
-inside a `helperStart` that is 0.10 s in total. That 0.10 s is a warm-cache
-figure taken with the tree already executed repeatedly in the session and the
-exclusion state unreadable without administrator, so the scanned budget is
-untouched by it. The premise stands and is now a measurement: **NGX init
-plus feature arm is 95 % of the helper's cold start in both runs, and all of it is
-per-process.** Still unmeasured is the player's half - request, preflight, launch,
-attach - because that needs a driven player session rather than the harness.
-[Session record](VERIFICATION-2026-09-14-RTX4080.md)
-
-**Measured end to end, and the acceptance number above is now known to be
-unreachable, 2026-09-14.** `tools/verification/player_session.ps1` drives a real
-player, injects the toggle and scrapes the log, so the player's half is no longer
-prose. Ten sessions on an RTX 4080 SUPER at 610.47: toggle to first neural frame
-is **8.39-9.18 s on the first toggle with the preflight verdict and cache cleared** and **4.88-5.16 s on every
-later one**, the 3.8 s difference being the feature-18 preflight probe, whose
-verdict is cached per runtime identity. The nine-phase split of a warm 4.98 s
-session is request 0.077, launch 0.004, helperStart 0.101, runtimeReady 0.010,
-neuralInit 1.415, featureArm 0.689, firstOutput 1.414, attach 1.244.
-
-What a resident helper removes from that is `neuralInit` plus `featureArm`:
-**2.10 s, and per-process.** It was assumed not to remove `firstOutput` (the first
-segment's preroll, encode and mux) or the attach, which together are 2.66 s,
-putting an estimated floor near **~2.9 s** - so the **under 2 s** half of the
-acceptance criterion written above could not be reached by making the helper
-resident, however well it is done. That criterion was written before anything
-measured the phases. **Decision taken 2026-09-14: the acceptance becomes "under
-3 s for a warm toggle", and `firstOutput` plus the attach - the first segment's
-preroll, encode and mux, and the handoff from original to neural playback - are a
-separate work item, not part of the helper.** Under 2 s would require shrinking
-that first-segment path (60-frame preroll, 4 s lead-in, first mux), a different
-change with a different risk.
-
-The measurement below then beat the 2.9 s estimate at **2.47 s**, because the
-estimate's own premise was wrong: `firstOutput` is not fixed, and reuse shortened
-it from 1.437 s to 1.058 s in the same run on the same clip. So the floor should
-be read as an estimate that reuse invalidated downwards, not as a bound.
-[Player-session record](VERIFICATION-matrix.md)
-
-**Built and accepted on Ada, 2026-09-14.** The helper is resident on `main`:
-protocol v6 carries a command channel (`Hello`, `Job`, `Cancel`, `Shutdown`, plus
-an outbound `Ready`), a job is handed over as the argv the helper already
-validates, the reuse key is `(runtime directory, runtime digest, neural-settings
-digest)`, the lease is held only while a job runs, the helper exits after 30 s
-idle, and orphan safety is both the job object and a parent-handle wait. All four
-of the "real change, not a flag" problems above are answered in code, and the
-answers are in [Architecture](ARCHITECTURE.md).
-
-**The acceptance number: 2.44-2.52 s, median 2.47 s, over four driven player
-sessions, every one `plan=reuse`** - against the criterion of under 3 s, and
-against 5.23-5.41 s for the first toggle in the same process. The reused job pays
-no `helperStart`, `runtimeReady`, `neuralInit` or `featureArm`, which is 2.19 s it
-never incurs because no process starts; `firstOutput` and the attach remain, as
-predicted. The ~2.9 s floor estimated above assumed `firstOutput` would not move,
-and it did: 1.437 s on the launch job against 1.058 s on the reused one, same run
-and same clip, so it is a property of reuse and not of the media. Which property
-is unmeasured - the kept NGX feature skipping a first-evaluate warm-up, a decoder
-and encoder already up in that process, or the rewound playhead. The floor was
-right about structure and wrong to treat that phase as fixed.
-
-Helper-side, over real pipes: a warm job reports `firstOutput` only at 492-538 ms
-against a cold 2715-2751 ms, idle exit at 31.0 s, parent-handle exit, +1002 MiB
-parked while idle and released on exit. Do not quote that figure as
-toggle-to-picture; it is a phase, measured with a different instrument.
-
-Two limits. Residency is reached only when the second job's range is not already
-covered by the first one's published entry - a toggle inside that coverage is
-answered from the cache in about 0.8 s with no helper job, which is correct
+**Two limits.** Residency is reached only when the second job's range is not
+already covered by the first one's published entry - a toggle inside that coverage
+is answered from the cache in about 0.8 s with no helper job, which is correct
 behaviour and not this measurement. And per this document's own gate, **Blackwell
 is still owed**: everything above is one Ada card on driver 610.47.
-[Session record](VERIFICATION-matrix.md)
 
 ## What “2× / 3×” can mean
 
@@ -387,25 +251,19 @@ is still owed**: everything above is one Ada card on driver 610.47.
 
 ## P0 — Build first
 
-> Status (2026-09-08): items 1–7 are implemented in this tree. See
+> **Status.** Items 1-7 are implemented in this tree. See
 > [Architecture](ARCHITECTURE.md), [Usage](USAGE.md) and the measured guide
-> ablation in [Benchmark](BENCHMARK.md). Item 5's "validated segment
-> checkpoints" are realized as bounded from-zero relaunches plus exact-frame
-> retries; mid-job resume that preserves temporal state remains future work.
->
-> Item 6 is now the **open default**: opening a local file or a YouTube URL
-> acquires and identifies the source, replays a validated cache entry when one
-> exists, and otherwise plays the original. Rendering is always an explicit
-> choice (frame, 4 s clip, marked range, whole video).
->
-> Closed 2026-09-11 (`feat(render): refuse a render that produced frames without
-> the neural pass`): the gap above was that the evidence chain accepted a run in
-> which feature 18 was created and evaluated but the neural pass did not
-> execute - `frames=900/900 verified=900` for DLAA-only output at 0.46 ms
-> neural GPU time against 5.7 ms real. The receipt now carries per-frame neural
-> GPU time and a render whose median falls below `NeuralGpuMsFloor` for its
-> geometry is refused rather than published; no samples at all is still
-> accepted, because a missing measurement is not a verdict.
+> ablation in [Benchmark](BENCHMARK.md). Item 6 is the **open default**: opening a
+> local file or a YouTube URL acquires and identifies the source, replays a
+> validated cache entry when one exists, and otherwise plays the original, so
+> rendering is always an explicit choice (frame, 4 s clip, marked range, whole
+> video). Two residues are deliberate: item 5's "validated segment checkpoints"
+> are bounded from-zero relaunches plus exact-frame retries, so mid-job resume
+> that preserves temporal state remains future work; and since 2026-09-11 a render
+> whose median neural GPU time falls below `NeuralGpuMsFloor` for its geometry is
+> refused rather than published - the gap was a run reading
+> `frames=900/900 verified=900` for DLAA-only output - while no samples at all is
+> still accepted, because a missing measurement is not a verdict.
 
 ### 1. Runtime preflight and exact version locking
 

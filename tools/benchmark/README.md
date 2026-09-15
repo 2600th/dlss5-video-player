@@ -89,7 +89,7 @@ footage; `docs/BENCHMARK.md` carries the consequences, including what it does to
 clip: the capture's magnify/wipe demonstration starts one frame after
 `real-film-cuts` ends, checked frame by frame.
 
-The seven `orig-*` clips exist because of that paragraph. They are cut straight
+The nine `orig-*` clips exist because of that paragraph. They are cut straight
 from the publisher's own releases - two of them the documented upstreams of the
 demo capture itself (`docs/media/README.md`), the third a restored trailer
 acquired for the cross-dissolve neither upstream contains - so nothing in them

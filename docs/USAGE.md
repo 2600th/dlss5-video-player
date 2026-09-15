@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.20.0, including recent history, settings-aware cache identity,
+This guide covers v0.21.2, including recent history, settings-aware cache identity,
 media export and highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;
@@ -141,8 +141,8 @@ target. Neural rendering itself preserves source resolution.
 **Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across
 available codecs and containers, with the highest-bitrate separate audio stream
-when needed. Auto prefers exact 1080p; if unavailable, it chooses the highest
-available resolution up to 2160p, then the highest bitrate at that resolution.
+when needed. Auto takes the tallest rung up to 1440p, then the highest bitrate
+inside it; 2160p is available as an explicit choice.
 An unavailable manual resolution reports an error instead of silently changing
 resolution. Source streams are copied into the cache without re-encoding.
 

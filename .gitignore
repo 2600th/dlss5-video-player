@@ -33,6 +33,10 @@
 *.addon64
 ReShade.ini
 ReShadePreset.ini
+# ...except the two packaged templates, which are inputs rather than runtime output:
+# build_windows.bat and tools/package_release.ps1 both copy them out of packaging/.
+!/packaging/ReShade.ini
+!/packaging/ReShadePreset.ini
 DLSSVideoPlayer.ini
 DLSSVideoPlayer.log
 ReShade.log

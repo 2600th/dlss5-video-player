@@ -35,13 +35,6 @@ and looks like a broken helper until the runtime is re-staged.
   machine" and written into two documents before a real session disproved it. The
   expected probe is now labelled as routine and the load that decides the outcome is
   copied either way.
-- The idle-VRAM trade has its third sample pair, so it is a figure rather than a
-  direction: releasing the feature while idle hands back **361 MiB of 1061** and
-  costs **+0.604 s on every reuse** (2.400 s median against 3.004 s, +25.2 %, three
-  sessions per arm, ranges not overlapping). The two-sample pair had read +0.70 s;
-  the direction held and the size came down. `keep` still ships - reuse latency is
-  the persistent helper's whole purpose - and `free` remains one ini key away for a
-  card where 361 MiB decides whether a second application fits.
 - `player_session.ps1` now keeps each session's *helper* log, not just the player's.
   `src/Log.h:28-31` names a log after the running module's directory, so
   `NeuralWorker.exe` writes its own `DLSSVideoPlayer.log` inside `neural-runtime/`,
@@ -89,12 +82,15 @@ and looks like a broken helper until the runtime is re-staged.
   ~15 ms ticks, which is enough for a selector file rewritten in place at the same
   size to reuse a stale digest.
 - A resident helper can now be asked to give its idle feature memory back:
-  `[NeuralHelper] IdleVramPolicy=free` in `DLSSVideoPlayer.ini` returns 361 MiB of
-  the 1061 MiB an idle helper holds on this card, and costs 0.70 s on the next
-  reuse - two sessions per arm, re-measured the next day at three per arm as
-  0.604 s (entry above). The default stays `keep`, because that reuse latency is the whole point of
-  keeping a helper alive. The post-job and idle samples are in `receipt.json` under
-  `timing`, so the trade is checkable without a debugger.
+  `[NeuralHelper] IdleVramPolicy=free` in `DLSSVideoPlayer.ini` returns **361 MiB
+  of the 1061 MiB** an idle helper holds on this card, and costs **+0.604 s on
+  every reuse** (2.400 s median against 3.004 s, +25.2 %, three sessions per arm,
+  ranges not overlapping; a two-sample pair first read +0.70 s, so the direction
+  held and the size came down). The default stays `keep`, because that reuse
+  latency is the whole point of keeping a helper alive, and `free` remains one ini
+  key away for a card where 361 MiB decides whether a second application fits. The
+  post-job and idle samples are in `receipt.json` under `timing`, so the trade is
+  checkable without a debugger.
 - A helper that dies mid-job, or a device that is removed under it, now costs one
   restart instead of a lost render: the helper is relaunched once, re-preflighted
   and the job resumes. A second failure fails closed with the reason in the log,

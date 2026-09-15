@@ -148,10 +148,13 @@ cost surface beside it; `src/TemporalGuides.cpp` keeps the CPU estimator as the
 fallback for cards and builds without the engine. Two departures from the list
 below, both measured rather than assumed: grid 2 instead of the finest on offer,
 and the confidence gate bound with equal thresholds, so it does not fire
-(`src/D3D12Renderer.cpp:717-721`). `predDirection` is still
-`NV_OF_PRED_DIRECTION_FORWARD` and `enableGlobalFlow` is still `NV_OF_FALSE`
-(`src/OpticalFlowNvof.cpp:216-217`), which are items 1 and 2 of the roadmap's
-dated plan. The rest of this section is the record of what was adapted.
+`predDirection` was still `NV_OF_PRED_DIRECTION_FORWARD` and `enableGlobalFlow`
+still `NV_OF_FALSE` on the day of this review, which were items 1 and 2 of the
+roadmap's dated plan; **both shipped 2026-09-14**, so the engine is now asked for
+both directions and global flow through a capability ladder that gives up one
+capability at a time rather than the whole engine
+(`src/OpticalFlowNvof.cpp:294-295`), and the resolve pass gates each vector on the
+round trip. The rest of this section is the record of what was adapted.
 
 MIT, D3D12-native, directly adaptable to `src/TemporalGuides.cpp`:
 `video2dlssnr/src/optflow_nvof.cpp`.

@@ -1,6 +1,6 @@
 # DLSS 5 Video Player — technical overview
 
-Version 0.14.1 prepares a complete neural video, reuses the validated result,
+Version 0.21.2 prepares a complete neural video, reuses the validated result,
 and compares it with the original at the same timestamp. Start with the
 [usage guide](docs/USAGE.md) for controls, cache locations, preferences and export.
 
@@ -30,7 +30,8 @@ streams. The cache prefers
 Fullscreen hides controls until the mouse moves; see [usage](docs/USAGE.md).
 
 Fresh-install defaults are Neural Rendering on, playback DLSS Upscaling off,
-1440p upscaling output selected, and YouTube Auto preferring exact 1080p.
+1440p upscaling output selected, and YouTube Auto taking the tallest rung up to
+1440p at the highest bitrate.
 Player preferences persist after that. Manual YouTube choices are 1080p,
 1440p and 2160p; each selects the highest advertised video bitrate at that
 resolution across codecs. Source selection and playback upscaling are separate.
@@ -84,7 +85,7 @@ diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-The twelve CTest suites cover cache/history/settings, export, worker protocols,
+The thirteen CTest suites cover cache/history/settings, export, worker protocols,
 runtime policy, playback and native UI regressions. Real-media GPU checks and
 their limits are recorded in the repository's
 [verification evidence](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).

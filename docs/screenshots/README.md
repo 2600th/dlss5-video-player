@@ -41,7 +41,7 @@ retouching or color correction. [Reproduction script](../../tools/demo-video/mak
 | --- | --- |
 | `current/neural-playback.jpg` | Was this session's paused cached neural view; **replaced on 12 September 2026** by the GTA VI capture recorded below, so the Witcher IV pair is no longer in the tree |
 | `current/original-comparison.jpg` | Was the original at the identical paused moment; **replaced on 12 September 2026** the same way |
-| `current/upcoming-games.jpg` | Five official examples in the expanded File submenu |
+| `current/upcoming-games.jpg` | Was the expanded File submenu with five official examples; **removed on 15 September 2026** - the menu ships six trailers now, and no document embedded the capture |
 | `current/recent-videos.jpg` | File menu with Recent videos and Export cached video; history submenu closed to keep local paths out of the capture |
 | `current/player-start.jpg` | Retained September 3 start-screen capture from the v0.13.0 feature implementation before its version bump |
 | `current/face-comparison.png` | Unscaled matched crops from the source and render |
@@ -49,6 +49,9 @@ retouching or color correction. [Reproduction script](../../tools/demo-video/mak
 The [30-second demonstration](../media/README.md) uses the same Witcher IV
 source and actual application recordings. The toggle compares original and
 prepared cached neural video; it does not execute live neural rendering.
+The linked demonstration was itself **replaced on 12 September 2026**: it is now
+the 22.6 s / 678-frame GTA VI and Godfather video recorded below, which the later
+sections here call "the 22-second video", not the 30-second Witcher IV cut.
 
 ## September 9, 2026: faces from three more trailers
 

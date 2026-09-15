@@ -17,8 +17,8 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
-> unsigned community build. Checked on an RTX 4080 SUPER (v0.17.2) and an RTX
-> 5090 (v0.17.1). Neural rendering needs NVIDIA driver 610.47 or newer.
+> unsigned community build. Checked on an RTX 4080 SUPER (v0.21.2+) and an RTX
+> 5090 (v0.20.0). Neural rendering needs NVIDIA driver 610.47 or newer.
 > Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
@@ -347,7 +347,7 @@ separate helper process; playback upscaling runs in the player.
 - [Build and test](docs/BUILDING.md)
 - [Architecture](docs/ARCHITECTURE.md), [technical overview](TECHNICAL_OVERVIEW.md)
 - [Runtime setup](docs/DLSS5_SETUP.md)
-- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md), [RTX 5090 on 0.17.0](docs/VERIFICATION-2026-09-10-RTX5090.md), [RTX 4080 SUPER on 0.21.2+](docs/VERIFICATION-2026-09-14-RTX4080.md)
+- Hardware records: [2026-09-02](docs/VERIFICATION-2026-09-02.md), [RTX 4080 SUPER](docs/VERIFICATION-2026-09-09-RTX4080.md), [RTX 5090](docs/VERIFICATION-2026-09-09-RTX5090.md), [RTX 5090 on 0.17.0](docs/VERIFICATION-2026-09-10-RTX5090.md), [RTX 5090 on 0.20.0](docs/VERIFICATION-2026-09-12-RTX5090.md), [RTX 4080 SUPER on 0.21.2+](docs/VERIFICATION-2026-09-14-RTX4080.md), [RTX 4080 SUPER driven player session](docs/VERIFICATION-matrix.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md), [issues](https://github.com/2600th/dlss5-video-player/issues)
 
 Bug report: build or commit, GPU, driver, source size and frame rate, steps,

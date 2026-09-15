@@ -1011,7 +1011,6 @@ public:
     ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
 
     bool Create(HINSTANCE hi) {
-        m_loc.Initialize();
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
         LoadVideoSettings();
         NeuralCacheManager historyCache(m_cacheRoot);
@@ -4722,7 +4721,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
         options.neuralAddonConfigured,options.outputExplicit,options.maxW,options.maxH);
     options.maxW=renderDefaults.width;options.maxH=renderDefaults.height;
     if(options.neuralAddonConfigured&&!options.outputExplicit)
-        LOG("Neural pre-render defaults active: YouTube Auto prefers exact 1080p; local files retain native source resolution and spatial upscaling stays off.");
+        LOG("Neural pre-render defaults active: YouTube Auto takes the tallest rung up to 1440p; local files retain native source resolution and spatial upscaling stays off.");
     if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return 1;
     if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return 1;}
 

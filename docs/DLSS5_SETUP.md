@@ -67,9 +67,9 @@ quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile
 
-When the complete experimental layout is active, v0.20.0 defaults to
-exact 1080p for YouTube Auto and native-resolution DLAA. If exact 1080p is not
-available, Auto uses the highest compatible source up to 4K. Manual source
+When the complete experimental layout is active, the current release takes the
+tallest rung up to 1440p for YouTube Auto, then the highest bitrate inside it,
+and uses native-resolution DLAA. Manual source
 choices are 1080p, 1440p, and 2160p; 480p and 720p are automatic fallbacks only.
 Within the selected resolution, acquisition prefers the highest advertised
 video bitrate across codecs. Offline DLSS upscaling and RenoDX neural upscaling

@@ -73,6 +73,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/resources.h
     src/resources.rc
     src/VersionData.h.in
+    src/RuntimeLockData.h.in
     src/AppMenu.cpp
     src/AppMenu.h
     src/UiLayout.cpp

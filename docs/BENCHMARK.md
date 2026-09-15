@@ -408,7 +408,9 @@ families share.
 **Settled 2026-09-14 on a corpus with more real boundaries, and the answer is that
 the criterion stays.** The corpus grew from thirteen clips to twenty: seven
 camera-original clips carrying 17 frame-verified hard cuts joined the four
-NR-processed captures, which is what this paragraph asked for. Re-swept over all
+NR-processed captures, which is what this paragraph asked for. (Two further
+camera-original clips, `orig-film-motion-a` and `orig-film-motion-b`, landed after
+this sweep, so `corpus.py --check` now verifies nine.) Re-swept over all
 twenty at the shipped window, the aggregate still favours the candidate - F1 0.931
 against 0.897 - and split by provenance it inverts:
 

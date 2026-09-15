@@ -1,7 +1,7 @@
 # Troubleshooting
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe v0.20.0.
+These instructions describe v0.21.2.
 
 ## The player cannot find the neural runtime
 
@@ -177,8 +177,8 @@ are supported. Live/upcoming streams, private, paid, age-gated and
 cookie-dependent media are outside the resolver contract.
 Availability and regional access can change; local playback remains available.
 
-Choose **Video > YouTube source quality**. Auto prefers exact 1080p, otherwise
-selecting the highest available resolution up to 4K. Manual choices are 1080p,
+Choose **Video > YouTube source quality**. Auto takes the tallest rung up to
+1440p, then the highest bitrate inside it. Manual choices are 1080p,
 1440p and 2160p. Source quality is separate from **DLSS > Upscaling output**.
 At the chosen resolution, the resolver prefers the highest advertised video
 bitrate across codecs. That estimate can differ from the downloaded file's
