@@ -2,8 +2,9 @@
 
 **Verdict: P3 is measured and the default is chosen on evidence - keep feature
 memory. Policy B (`free`) frees 361 MiB of the 1061 MiB a resident helper holds
-while idle, and costs 0.70 s on every reuse, which is 28 % of the reuse latency
-that P1 exists to produce.** Both arms ran on a real driven player session on
+while idle, and costs 0.604 s on every reuse - 25 % of the reuse latency that P1
+exists to produce (n=3 per arm as of 2026-09-15; this verdict first shipped at
+n=2, reading 0.70 s / 28 %).** Both arms ran on a real driven player session on
 this machine, both arms printed the policy they were actually running, and the
 release genuinely happened - `released=1`, `featureArmed=0`, `observed=freed`.
 So this is a measured trade, not a failed release.
@@ -56,6 +57,13 @@ So `free` costs **+0.604 s per reuse, +25.2 %**, against the +0.70 s / +28 % the
 out of three. The first toggle of each session is indistinguishable between arms
 (keep 4.896-5.080, free 4.876-5.008), which is what the mechanism predicts: the
 release is paid on the next reuse, not on the session that performs it.
+
+The evidence is beside this file rather than in `%TEMP%`, where the first pair's
+still lived until today: `sessions/n3-{keep,free}.json` are the harness records and
+`sessions/n3-<arm>.sessionN.helper.log` the six helper logs the assertions read.
+`sessions/n2-{keep,free}.json` are the 2026-09-14 pair, kept because this report
+quotes its numbers. A `%TEMP%` path is not a record - it survives until the next
+cleanup, and the stem `p3-<arm>` would have been reused by any later run.
 
 Every one of the six sessions was proven to be the arm it was labelled, from
 `idleVramPolicy=` in the helper's own log rather than from the run's label - the
@@ -133,10 +141,10 @@ sessions per arm:
 
 **+0.604 s median on a 2.400 s baseline, +25.2 % (n=3 per arm, 2026-09-15;
 the two-sample pair read +0.70 s / +28 %), in exchange for 361 MiB - 34 % of
-the 1061 MiB an idle helper holds.** The two arms do not overlap: the slower
-`keep` session is 0.65 s faster than the faster `free` session, so with two
-sessions per arm the direction of the effect is not in question even though the
-magnitude rests on four sessions total.
+the 1061 MiB an idle helper holds.** The two arms do not overlap: the slowest
+`keep` session is 0.597 s faster than the fastest `free` session (2.405 against
+3.002), so neither the direction nor - at three sessions per arm - the magnitude
+rests on a single pair. At n=2 that same gap was 0.65 s (2.543 against 3.195).
 
 ## The conclusion in the terms the roadmap asked for
 
@@ -155,8 +163,8 @@ The key is deliberately the player's own ini and not the runtime's
 hashes - a policy change does not invalidate a cached render, and `PlanForJob`
 still answers `Reuse` across one.
 
-Not measured: whether 0.70 s is the cost on any other card, driver or clip. One
-machine, one driver, one 90 s 1080p30 clip, two sessions per arm.
+Not measured: whether 0.604 s is the cost on any other card, driver or clip. One
+machine, one driver, one 1080p30 clip, three sessions per arm.
 
 ## A trap in the instrument: the two arms were secretly the same arm
 

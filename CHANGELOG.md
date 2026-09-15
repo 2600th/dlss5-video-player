@@ -73,7 +73,8 @@ and looks like a broken helper until the runtime is re-staged.
 - A resident helper can now be asked to give its idle feature memory back:
   `[NeuralHelper] IdleVramPolicy=free` in `DLSSVideoPlayer.ini` returns 361 MiB of
   the 1061 MiB an idle helper holds on this card, and costs 0.70 s on the next
-  reuse. The default stays `keep`, because that reuse latency is the whole point of
+  reuse - two sessions per arm, re-measured the next day at three per arm as
+  0.604 s (entry above). The default stays `keep`, because that reuse latency is the whole point of
   keeping a helper alive. The post-job and idle samples are in `receipt.json` under
   `timing`, so the trade is checkable without a debugger.
 - A helper that dies mid-job, or a device that is removed under it, now costs one

@@ -1,0 +1,146 @@
+﻿[11:38:20.755] Resident helper session starting with idleVramPolicy=keep
+[11:38:20.756] Opening video. Decoder preference: FFmpeg -> Windows Media Foundation
+[11:38:20.756] FFmpeg executable detected.
+[11:38:20.795] ffprobe: 1920x1080 DAR=1.77778 @ 30 fps, duration=113, matrix=unspecified range=unspecified primaries=unspecified transfer=unspecified
+[11:38:20.797] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:38:20.797] Video decoder selected: FFmpeg
+[11:38:20.800] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:38:21.042] Seek timing: target=2.567s mode=restart teardownMs=0.014 spawnMs=2.751 firstByteMs=240.318 firstFrameMs=243.613 callMs=2.960 forwardFrames=77 drainedFrames=0
+[11:38:21.169] D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e vendor=0x10de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e that the cache identity, the receipt GPU label and the pace prior describe
+[11:38:21.496] [NGX feature 32764] [2026-09-15 11:38:21] [NGXLoadLibrary:326] error: failed to load NGXCore: 126 (C:\Users\User\Documents\GitHub\dlss5-video-player\build-upscaling\Release\neural-runtime\_nvngx.dll)  <- routine: the NGX core ships with the driver, not beside this executable; the driver-store load is logged separately
+[11:38:21.496] [NGX feature 32764] [2026-09-15 11:38:21] [NGXLoadLibrary:326] error: failed to load NGXCore: -2146885623 (C:\Users\User\Documents\GitHub\dlss5-video-player\build-upscaling\Release\neural-runtime\nvngx.dll)  <- routine: the NGX core ships with the driver, not beside this executable; the driver-store load is logged separately
+[11:38:21.513] [NGX feature 32764] [2026-09-15 11:38:21] [NGXLoadCoreLibrary:279] Loading C:\WINDOWS\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_7cc7738d8e428783\_nvngx.dll succeeded
+[11:38:21.703] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.748] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.748] [NGX feature 32765] [2026-09-15 11:38:21] [NGXSecureLoadFeature:1345] Feature dlss failed to load (cmsid 141959980) from cache (location: C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0\files, name: 160_876232C.bin)
+[11:38:21.750] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.750] [NGX feature 32765] [2026-09-15 11:38:21] [NGXSecureLoadFeature:1345] Feature dlss failed to load (cmsid 241534723) from cache (location: C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0\files, name: 160_E658703.bin)
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.874] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.875] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.876] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.876] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:21.876] [NGX feature 32765] [2026-09-15 11:38:21] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[11:38:22.096] NGX capability: SuperSampling.Available=1
+[11:38:22.096] NGX input policy: source=1920x1080 optimal=1920x1080 range=1901x1069..1920x1080 selected=1920x1080 output=1920x1080
+[11:38:22.096] NGX initialized. Deferred raw CreateFeature armed: input=1920x1080 output=1920x1080
+[11:38:22.166] NVOFA ready: 1920x1080 on a 2x2 grid (960x540 vectors, S10.5 = 1/32 px), perf=FAST, cost=on, direction=both, backward field bound for the round-trip gate, global flow=on.
+[11:38:22.166] Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame, vectors scaled by 1,1 into the 1920x1080 DLSS input.
+[11:38:22.176] DLSS resource contract ready: Color=R16G16B16A16_FLOAT 1920x1080, MV=R16G16_FLOAT 1920x1080, Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV 1920x1080, Output=R16G16B16A16_FLOAT UAV 1920x1080, CompactGrid=R32G32B32A32_FLOAT 160x90 -> GPU MV expansion + direct SV_Depth write, Reference=B8G8R8A8_UNORM 1920x1080, Source=BGRA upload, NeuralTimestamps=12 @1000000000Hz
+[11:38:22.176] V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.
+[11:38:22.180] Temporal history reset: reason=first-frame frame#77 pts=25666666 history=1 job=2
+[11:38:22.230] RAW NGX D3D12 CreateFeature SUCCESS: feature=SuperSampling input=1920x1080 output=1920x1080 flags=MVLowRes|AutoExposure; direct hook-visible contract
+[11:38:22.230] Temporal history reset: reason=feature-recreate frame#78 pts=25999999 history=1 job=2
+[11:38:22.230] NGX feature creation flushed before EvaluateFeature; temporal history reset.
+[11:38:22.426] [NGX feature 32765] [2026-09-15 11:38:22] [NVSDK_NGX_CreateFeature_Validate:710] error: required feature is not supported by NGX runtime, please update display driver
+[11:38:22.604] RAW NGX EvaluateFeature_C SUCCESS #1 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=1
+[11:38:22.850] Decoder frame queue: frames=6 wallMs=2049.0 perFrameMs: pipeRead=3.073 blockedWait=39.916 emptyPoll=0.000 emptySleep=0.000 queueFullWait=298.509 other=0.003 reads=360 polls=0 queueFullWaits=3 zeroFills=5
+[11:38:22.893] Opening video. Decoder preference: FFmpeg -> Windows Media Foundation
+[11:38:22.893] FFmpeg executable detected.
+[11:38:22.939] ffprobe: 1920x1080 DAR=1.77778 @ 30 fps, duration=113, matrix=unspecified range=unspecified primaries=unspecified transfer=unspecified
+[11:38:22.940] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:38:22.940] Video decoder selected: FFmpeg
+[11:38:22.944] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:38:23.139] Seek timing: target=0.567s mode=restart teardownMs=0.017 spawnMs=3.388 firstByteMs=195.816 firstFrameMs=199.269 callMs=3.772 forwardFrames=17 drainedFrames=0
+[11:38:23.141] Temporal history reset: reason=first-frame frame#17 pts=5666666 history=2 job=2
+[11:38:23.295] Temporal history reset: reason=cut frame#35 pts=11666666 history=3 job=2
+[11:38:23.560] Temporal history reset: reason=cut frame#62 pts=20666666 history=4 job=2
+[11:38:24.038] Temporal history reset: reason=cut frame#85 pts=28333332 history=5 job=2
+[11:38:24.233] Temporal history reset: reason=cut frame#102 pts=33999999 history=6 job=2
+[11:38:26.089] Temporal history reset: reason=cut frame#270 pts=89999999 history=7 job=2
+[11:38:26.586] RAW NGX EvaluateFeature_C SUCCESS #300 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:27.935] Temporal history reset: reason=cut frame#438 pts=145999999 history=8 job=2
+[11:38:28.275] Temporal history reset: reason=cut frame#470 pts=156666666 history=9 job=2
+[11:38:28.671] Temporal history reset: reason=cut frame#506 pts=168666666 history=10 job=2
+[11:38:29.512] Temporal history reset: reason=cut frame#582 pts=193999999 history=11 job=2
+[11:38:29.866] RAW NGX EvaluateFeature_C SUCCESS #600 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:30.703] Temporal history reset: reason=cut frame#693 pts=230999999 history=12 job=2
+[11:38:30.916] Temporal history reset: reason=cut frame#713 pts=237666666 history=13 job=2
+[11:38:31.213] Temporal history reset: reason=cut frame#740 pts=246666666 history=14 job=2
+[11:38:31.468] Temporal history reset: reason=cut frame#763 pts=254333332 history=15 job=2
+[11:38:31.652] Temporal history reset: reason=cut frame#780 pts=259999999 history=16 job=2
+[11:38:33.100] RAW NGX EvaluateFeature_C SUCCESS #900 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:33.489] Temporal history reset: reason=cut frame#948 pts=315999999 history=17 job=2
+[11:38:35.338] Temporal history reset: reason=cut frame#1116 pts=371999999 history=18 job=2
+[11:38:35.688] Temporal history reset: reason=cut frame#1148 pts=382666666 history=19 job=2
+[11:38:36.080] Temporal history reset: reason=cut frame#1184 pts=394666666 history=20 job=2
+[11:38:36.425] RAW NGX EvaluateFeature_C SUCCESS #1200 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:36.939] Temporal history reset: reason=cut frame#1260 pts=419999999 history=21 job=2
+[11:38:38.174] Temporal history reset: reason=cut frame#1371 pts=456999999 history=22 job=2
+[11:38:38.387] Temporal history reset: reason=cut frame#1391 pts=463666666 history=23 job=2
+[11:38:38.669] Temporal history reset: reason=cut frame#1418 pts=472666666 history=24 job=2
+[11:38:38.917] Temporal history reset: reason=cut frame#1441 pts=480333332 history=25 job=2
+[11:38:39.093] Temporal history reset: reason=cut frame#1458 pts=485999999 history=26 job=2
+[11:38:39.715] RAW NGX EvaluateFeature_C SUCCESS #1500 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:40.905] Temporal history reset: reason=cut frame#1626 pts=541999999 history=27 job=2
+[11:38:42.745] Temporal history reset: reason=cut frame#1794 pts=597999999 history=28 job=2
+[11:38:42.969] RAW NGX EvaluateFeature_C SUCCESS #1800 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:43.083] Temporal history reset: reason=cut frame#1826 pts=608666666 history=29 job=2
+[11:38:43.530] Temporal history reset: reason=cut frame#1862 pts=620666666 history=30 job=2
+[11:38:44.332] Temporal history reset: reason=cut frame#1938 pts=645999999 history=31 job=2
+[11:38:45.536] Temporal history reset: reason=cut frame#2049 pts=682999999 history=32 job=2
+[11:38:45.748] Temporal history reset: reason=cut frame#2069 pts=689666666 history=33 job=2
+[11:38:46.041] Temporal history reset: reason=cut frame#2096 pts=698666666 history=34 job=2
+[11:38:46.242] RAW NGX EvaluateFeature_C SUCCESS #2100 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:46.282] Temporal history reset: reason=cut frame#2119 pts=706333332 history=35 job=2
+[11:38:46.459] Temporal history reset: reason=cut frame#2136 pts=711999999 history=36 job=2
+[11:38:48.293] Temporal history reset: reason=cut frame#2304 pts=767999999 history=37 job=2
+[11:38:49.562] RAW NGX EvaluateFeature_C SUCCESS #2400 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:50.170] Temporal history reset: reason=cut frame#2472 pts=823999999 history=38 job=2
+[11:38:50.518] Temporal history reset: reason=cut frame#2504 pts=834666666 history=39 job=2
+[11:38:50.920] Temporal history reset: reason=cut frame#2540 pts=846666666 history=40 job=2
+[11:38:51.760] Temporal history reset: reason=cut frame#2616 pts=871999999 history=41 job=2
+[11:38:52.840] RAW NGX EvaluateFeature_C SUCCESS #2700 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:52.967] Temporal history reset: reason=cut frame#2727 pts=908999999 history=42 job=2
+[11:38:53.187] Temporal history reset: reason=cut frame#2747 pts=915666666 history=43 job=2
+[11:38:53.489] Temporal history reset: reason=cut frame#2774 pts=924666666 history=44 job=2
+[11:38:53.730] Temporal history reset: reason=cut frame#2797 pts=932333332 history=45 job=2
+[11:38:53.970] Temporal history reset: reason=cut frame#2814 pts=937999999 history=46 job=2
+[11:38:55.813] Temporal history reset: reason=cut frame#2982 pts=993999999 history=47 job=2
+[11:38:56.175] RAW NGX EvaluateFeature_C SUCCESS #3000 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:38:57.676] Temporal history reset: reason=cut frame#3150 pts=1049999999 history=48 job=2
+[11:38:58.040] Temporal history reset: reason=cut frame#3182 pts=1060666666 history=49 job=2
+[11:38:58.433] Temporal history reset: reason=cut frame#3218 pts=1072666666 history=50 job=2
+[11:38:58.779] Neural export stage cost per frame (hevc_nvenc, 3163 frames): total 11.20 ms = source 0.08 + submit 6.20 + resolve wait 4.91 + encoder back pressure 0.01 ms, measured loop 11.05 ms. Of that: guides 2.02 ms, GPU waits render-slot 0.00 + capture-submit 0.00 + capture-resolve 4.90 + present-slot 0.00 = total 4.90 ms, Present 0.60 ms.
+[11:38:58.779] Decoder frame queue: frames=3231 wallMs=35835.2 perFrameMs: pipeRead=3.542 blockedWait=0.123 emptyPoll=0.000 emptySleep=0.000 queueFullWait=7.424 other=0.002 reads=13243 polls=0 queueFullWaits=3211 zeroFills=6
+[11:38:58.833] Neural helper post-job VRAM: job=2 localVramMiB=1061 featureArmed=1 idleVramPolicy=keep
+[11:38:58.833] Resident helper served job 2 (1 this process) as initialized: ok=0 cancelled=1 frames=0 peakVramMiB=0
+[11:39:03.841] Resident helper idle VRAM: policy=keep localVramMiB=1061 featureArmed=1
+[11:39:07.702] Opening video. Decoder preference: FFmpeg -> Windows Media Foundation
+[11:39:07.702] FFmpeg executable detected.
+[11:39:07.749] ffprobe: 1920x1080 DAR=1.77778 @ 30 fps, duration=113, matrix=unspecified range=unspecified primaries=unspecified transfer=unspecified
+[11:39:07.750] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:39:07.751] Video decoder selected: FFmpeg
+[11:39:07.759] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:39:07.762] Opening video. Decoder preference: FFmpeg -> Windows Media Foundation
+[11:39:07.762] FFmpeg executable detected.
+[11:39:07.794] ffprobe: 1920x1080 DAR=1.77778 @ 30 fps, duration=113, matrix=unspecified range=unspecified primaries=unspecified transfer=unspecified
+[11:39:07.796] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[11:39:07.796] Video decoder selected: FFmpeg
+[11:39:07.972] Seek timing: target=0.000s mode=reuse teardownMs=0.000 spawnMs=0.000 firstByteMs=170.752 firstFrameMs=176.194 callMs=0.254 forwardFrames=0 drainedFrames=0
+[11:39:07.976] Temporal history reset: reason=first-frame frame#0 pts=0 history=1 job=4
+[11:39:08.102] Temporal history reset: reason=cut frame#15 pts=5000000 history=2 job=4
+[11:39:08.279] Temporal history reset: reason=cut frame#35 pts=11666666 history=3 job=4
+[11:39:08.560] Temporal history reset: reason=cut frame#62 pts=20666666 history=4 job=4
+[11:39:08.664] RAW NGX EvaluateFeature_C SUCCESS #3300 color=1920x1080 depth=1920x1080 mv=1920x1080 output=1920x1080 jitter=(0,0) reset=0
+[11:39:08.803] Temporal history reset: reason=cut frame#85 pts=28333333 history=5 job=4
+[11:39:08.971] Temporal history reset: reason=cut frame#102 pts=34000000 history=6 job=4
+[11:39:10.234] Neural export stage cost per frame (hevc_nvenc, 166 frames): total 14.31 ms = source 1.11 + submit 8.04 + resolve wait 5.16 + encoder back pressure 0.01 ms, measured loop 10.78 ms. Of that: guides 2.25 ms, GPU waits render-slot 0.00 + capture-submit 0.00 + capture-resolve 5.30 + present-slot 0.00 = total 5.30 ms, Present 1.65 ms.
+[11:39:10.234] Decoder frame queue: frames=218 wallMs=2437.1 perFrameMs: pipeRead=2.863 blockedWait=0.822 emptyPoll=0.000 emptySleep=0.000 queueFullWait=7.493 other=0.002 reads=829 polls=0 queueFullWaits=206 zeroFills=6
+[11:39:10.269] Neural helper post-job VRAM: job=4 localVramMiB=1061 featureArmed=1 idleVramPolicy=keep
+[11:39:10.269] Resident helper served job 4 (2 this process) as reuse: ok=0 cancelled=1 frames=0 peakVramMiB=0
+[11:39:10.551] Resident helper session ended: shutdown
+[11:39:10.562] Renderer teardown: buffers unmapped
+[11:39:10.588] Renderer teardown: NGX released
+
