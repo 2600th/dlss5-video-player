@@ -1098,7 +1098,11 @@ public:
         double due=double(m_next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
+            // Leaving a settings preview puts the cache's own render back on screen,
+            // so the notice that names it stale comes back with it.
+            const bool leftPreview=m_previewShown;
             m_previewShown=false;
+            if(leftPreview)NoteSettingsAheadOfRender();
             RememberRenderedCachedPair();
             if(m_cachedPlayback)++m_cachedPresentedFrames;
             ++m_fpsWindowFrames;
@@ -2047,14 +2051,19 @@ private:
 
     // The render the picture came from is not what the dialog now holds. Only the
     // export path noticed this before, so a settings change made during playback
-    // left the previous render on screen with nothing saying so.
+    // left the previous render on screen with nothing saying so. A shown settings
+    // preview is the one case where the frame is ahead of the cache entry rather
+    // than behind the dialog, and `CompletePausedPreview` deliberately leaves
+    // `m_cachedSettings` alone - the entry really is still the old render - so the
+    // preview flag, not that comparison, is what says the picture is current.
     bool SettingsAheadOfRender()const{
-        return m_cachedPlayback&&!m_liveSession&&
+        return m_cachedPlayback&&!m_liveSession&&!m_previewShown&&
                (m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides);
     }
-    // Raised only from the paths that cannot preview, cleared when the settings
-    // come back to what the picture was rendered with, and never over a failure
-    // notice, which says something more urgent about the same render.
+    // Raised from the paths that cannot preview, cleared when the picture catches
+    // up - by a preview or by the settings coming back to what rendered it - and
+    // never over a failure notice, which says something more urgent about the same
+    // render.
     void NoteSettingsAheadOfRender(){
         const std::wstring text=T(L"neural.settings.ahead");
         if(SettingsAheadOfRender()){
@@ -3324,7 +3333,7 @@ private:
             }else LOG("Neural settings preview could not decode its rendered frame.");
             preview.Close();
         }else LOG("Neural settings preview discarded: the paused frame moved.");
-        SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();
+        NoteSettingsAheadOfRender();SyncSourceActionAvailability();UpdateCachedStatus();InvalidateControls();
         if(m_previewQueued){m_previewQueued=false;LOG("Neural settings changed during the preview; previewing the newest settings.");StartPausedSettingsPreview();}
     }
     // Playback leaves the live pair and continues on the original decoder; the

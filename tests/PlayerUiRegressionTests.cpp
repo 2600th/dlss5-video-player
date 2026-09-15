@@ -242,6 +242,7 @@ struct PlayerAppTestAccess {
         CheckLiveBufferingPlayIntent(app);
         CheckNeuralToggleQueuedDuringSeek(app);
         CheckNeuralSettingsDialog(app);
+        CheckSettingsAheadNotice(app);
         CheckEncoderSettingsDialog(app);
 
         CheckSettingsDialogTipsSurviveASecondDialog(app);
@@ -732,6 +733,53 @@ private:
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_neuralWnd == nullptr);
         CHECK(!IsWindow(dialog));
+    }
+
+    // A settings change the player cannot preview - the picture is playing - used to
+    // leave the previous render on screen with nothing saying so. The status notice
+    // is the only thing that can say it, so its whole lifecycle is pinned here.
+    static void CheckSettingsAheadNotice(PlayerApp& app)
+    {
+        const std::wstring ahead = app.T(L"neural.settings.ahead");
+        CHECK(!ahead.empty());
+        app.m_cachedPlayback = true; app.m_liveSession = false; app.m_previewShown = false;
+        app.m_playing = true; app.m_neuralNotice.clear();
+        app.m_cachedSettings = {}; app.m_cachedGuides = {};
+        app.m_neuralSettings = {}; app.m_renderGuides = {};
+        app.NoteSettingsAheadOfRender();
+        CHECK(app.m_neuralNotice.empty());
+
+        // Apply while playing: the ini is written, no preview can run, and the
+        // picture is still the previous render.
+        app.m_neuralSettings.intensity = 1.5f;
+        app.ApplyNeuralSettings();
+        CHECK(!app.NeuralJobActive());
+        CHECK_EQ(ahead, app.m_neuralNotice);
+
+        // A shown preview is the picture catching up. The cache entry is still the
+        // old render, so the settings comparison alone would keep claiming otherwise.
+        app.m_previewShown = true;
+        app.NoteSettingsAheadOfRender();
+        CHECK(app.m_neuralNotice.empty());
+        app.m_previewShown = false;
+        app.NoteSettingsAheadOfRender();
+        CHECK_EQ(ahead, app.m_neuralNotice);
+
+        // Coming back to the settings that produced the picture clears it with no render.
+        app.m_neuralSettings = {};
+        app.NoteSettingsAheadOfRender();
+        CHECK(app.m_neuralNotice.empty());
+
+        // A guide switch counts as a change, and a failure notice outranks this one.
+        app.m_renderGuides = GuideControls{false, true};
+        app.NoteSettingsAheadOfRender();
+        CHECK_EQ(ahead, app.m_neuralNotice);
+        app.m_neuralNotice = L"driver below floor";
+        app.NoteSettingsAheadOfRender();
+        CHECK_EQ(std::wstring(L"driver below floor"), app.m_neuralNotice);
+
+        app.m_neuralNotice.clear(); app.m_renderGuides = {}; app.m_neuralSettings = {};
+        app.m_cachedPlayback = false; app.m_playing = false;
     }
 
     static void CheckEncoderSettingsDialog(PlayerApp& app)
