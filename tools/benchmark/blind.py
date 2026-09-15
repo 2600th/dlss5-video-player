@@ -236,6 +236,7 @@ def build(args) -> int:
                   flush=True)
     write_json(BLIND / "key.json", dict(seed=args.seed, single=args.single, double=args.double,
                                         guard_seconds=args.guard_seconds, min_excerpt_seconds=MIN_EXCERPT_SECONDS,
+                                        frame_separation_seconds=args.seconds,
                                         skipped_clips=skipped_clips, dropped_shots=dropped_shots, pairs=key))
     with (BLIND / "ballot.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["id", "preferred", "confidence"])

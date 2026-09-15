@@ -369,8 +369,27 @@ against:
   excerpt length between frames, and when a clip cannot supply the pairs asked for it
   says so instead of repeating itself.
 
+**Why not the unregistered sources on disk.** `build-upscaling/camera-original/`
+also holds `cand-planet-earth2.mp4` (166 s), `cand-2001-space.mp4` (143 s) and
+`cand-apocalypse-now.mp4` (100 s), any of which would give a longer and
+better-moving span than either clip above. None is usable: no video id or format is
+recorded for them in `fetch_camera_original.ps1`, in any document, or in any commit,
+and their containers carry only DASH brands and a fetch timestamp - no `purl`, no
+`comment`, no title. A clip cut from one could not be re-fetched by anybody else,
+which is the contract this corpus rests on ("sources are fetched, never committed").
+They stay unused until their provenance is recovered and added to the fetch script,
+and that is a task of its own rather than a step in a ballot.
+
+**Novelty caveat, stated because it is a real limit on this round.** Both clips come
+from sources the judge has already seen spans of - `godfather` supplied
+`orig-film-cuts-a`, `lawrence` supplied `orig-dissolve`, and both appeared in ballots
+1 and 2. The shots are different and the frames are new, but the films, their grade
+and their grain are not. Round 3 tests fresh *material*, not a fresh *look*, and only
+new provenance would give the second.
+
 Ballot 3 is therefore **10 pairs, five per clip**, 1.5 s excerpts with a 1.0 s guard,
-seed 3, frames 42-48 apart within each clip so no two excerpts overlap:
+seed 3 (`frame_separation_seconds` 1.5 recorded in `key.json` beside the guard),
+frames 39-48 apart within each clip so no two excerpts overlap:
 `orig-film-motion-a` at 48, 90, 151, 195, 256 and `orig-film-motion-b` at 29, 83,
 137, 189, 228. `orig-film-motion-b` could only supply five, and said so.
 
