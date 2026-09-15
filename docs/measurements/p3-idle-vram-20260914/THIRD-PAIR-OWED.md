@@ -60,31 +60,29 @@ function Set-IniKey([string]$path, [string]$section, [string]$key, [string]$valu
 ```
 
 ```powershell
-# keep arm - the shipped default
-Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy keep
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
-  -Player build-upscaling\Release\DLSSVideoPlayer.exe `
-  -Media <a clip of 90 s or more> `
-  -SecondToggle -SecondToggleSeekBacks 7 `
-  -FreshProfile Never -DropRenderCache -Sessions 3 `
-  -OutJson $env:TEMP\p3-keep.json -Note 'P3 idle VRAM policy keep'
-# COPY IT NOW, before the other arm runs. `src/Log.h:33` opens the log with
-# ios::trunc, and the helper is a fresh process every session, so the next arm's
-# first helper start wipes this arm's lines. player_session.ps1's own -OutJson
-# logCopy saves the PLAYER's log only; nothing saves the helper's.
-Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
-  $env:TEMP\p3-keep.helper.log
-
-# free arm
-Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy free
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
-  -Player build-upscaling\Release\DLSSVideoPlayer.exe `
-  -Media <the same clip> `
-  -SecondToggle -SecondToggleSeekBacks 7 `
-  -FreshProfile Never -DropRenderCache -Sessions 3 `
-  -OutJson $env:TEMP\p3-free.json -Note 'P3 idle VRAM policy free'
-Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
-  $env:TEMP\p3-free.helper.log
+# One session per invocation, three per arm, and the helper log copied after each.
+# This is NOT -Sessions 3, deliberately: the helper is a fresh process per session
+# and `src/Log.h:33` opens its log with ios::trunc, so -Sessions 3 would leave only
+# session 3's lines and the per-arm assertion would cover one of the three samples.
+# player_session.ps1's own -OutJson logCopy does not fill the gap - it saves the
+# PLAYER's log, and `idleVramPolicy=` is only ever in the helper's.
+#
+# The cost of splitting: the harness's own summary block reports the spread within
+# one invocation, so with three invocations you read the three -OutJson files and
+# take the spread yourself. That is the trade for being able to assert every sample.
+foreach ($arm in 'keep', 'free') {
+  Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy $arm
+  foreach ($n in 1, 2, 3) {
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
+      -Player build-upscaling\Release\DLSSVideoPlayer.exe `
+      -Media <a clip of 90 s or more; the same clip for both arms> `
+      -SecondToggle -SecondToggleSeekBacks 7 `
+      -FreshProfile Never -DropRenderCache -Sessions 1 `
+      -OutJson $env:TEMP\p3-$arm.$n.json -Note "P3 idle VRAM policy $arm session $n"
+    Copy-Item build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
+      $env:TEMP\p3-$arm.$n.helper.log
+  }
+}
 ```
 
 `-FreshProfile Never` is load-bearing and has its own section in `REPORT.md`: any
@@ -92,16 +90,21 @@ other value makes `player_session.ps1:785` delete `DLSSVideoPlayer.ini`, which i
 file that selects the policy. That is exactly how the first attempt produced two arms
 that were secretly one, both silently running `kDefaultIdleVramPolicy` (`keep`).
 
-## The per-arm assertion - check this before believing any number
+## The per-session assertion - check this before believing any number
 
-Both arms must be shown to *be* the arm they are labelled, from the helper's own log
-rather than from the label:
+Every session must be shown to *be* the arm it is labelled, from the helper's own log
+rather than from the label. Six copies, six answers - not one per arm:
 
 ```powershell
-# The per-arm COPIES, not the live file: by the time both arms have run, the live
-# one holds only the last helper process's lines.
-Select-String -Path $env:TEMP\p3-keep.helper.log, $env:TEMP\p3-free.helper.log `
-  -Pattern 'idleVramPolicy=', 'post-job VRAM'
+# The per-session COPIES, never the live file: it holds only the last helper
+# process's lines, whichever session that was.
+foreach ($f in Get-ChildItem $env:TEMP\p3-*.helper.log | Sort-Object Name) {
+  $hit = Select-String -Path $f -Pattern 'idleVramPolicy=' | Select-Object -First 1
+  "{0,-28} {1}" -f $f.Name, ($hit.Line -replace '.*(idleVramPolicy=\w+).*', '$1')
+}
+# Expect six lines: p3-free.1..3 all saying free, p3-keep.1..3 all saying keep.
+# A missing file is a session whose helper never started - not a sample.
+Select-String -Path $env:TEMP\p3-*.helper.log -Pattern 'post-job VRAM'
 ```
 
 Why that file. `src/Log.h:28-31` names the log after the **running module's**
