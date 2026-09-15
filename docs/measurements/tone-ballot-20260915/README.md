@@ -128,6 +128,13 @@ Then:
 python tools/benchmark/blind.py --score build-upscaling/benchmark-work/blind/ballot.csv
 ```
 
+**Read the roles, not the habit.** `blind.py` was written for one-pass versus
+two-pass, so its votes are keyed `single` and `double`. For this ballot
+`single` = `shipped-tone-100` (the shipped 1.0) and `double` = `shipped-tone-050`
+(the candidate) - the scorer prints that mapping with the result, in the JSON as
+`profiles` and in prose on stderr, because "double wins" read as "two-pass wins"
+would invert this verdict.
+
 ## The decision rule, fixed before anyone scores
 
 Eight pairs and one judge is a small instrument, so the threshold is pre-registered

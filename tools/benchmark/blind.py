@@ -222,7 +222,15 @@ def build(args) -> int:
 
 
 def score(ballot_path: Path) -> int:
-    key = {p["id"]: p for p in json.loads((BLIND / "key.json").read_text(encoding="utf-8"))["pairs"]}
+    sealed = json.loads((BLIND / "key.json").read_text(encoding="utf-8"))
+    key = {p["id"]: p for p in sealed["pairs"]}
+    # `single` and `double` are this script's role names, from the one-pass versus
+    # two-pass question it was written for. Any two profiles can be handed to
+    # --single/--double, and a reader of the votes below cannot know which arm a
+    # role was unless the build says so - a tone ballot scored as "double wins"
+    # reads backwards to anyone who assumes the shipped arm is always `single`.
+    # The names the ballot was built with are printed with the result.
+    profiles = {"single": sealed.get("single"), "double": sealed.get("double")}
     votes = {"single": 0, "double": 0, "tie": 0}
     weighted = {"single": 0.0, "double": 0.0}
     per_clip: dict[str, dict[str, int]] = {}
@@ -252,8 +260,16 @@ def score(ballot_path: Path) -> int:
     if unscored:
         print(f"{len(unscored)} of {len(unscored) + sum(votes.values())} pair(s) carry no "
               f"preference: {', '.join(unscored)}", file=sys.stderr)
-    print(json.dumps(dict(votes=votes, confidence_weighted=weighted, per_clip=per_clip,
-                          unscored=unscored, unknown=unknown), indent=2))
+    print(json.dumps(dict(profiles=profiles, votes=votes, confidence_weighted=weighted,
+                          per_clip=per_clip, unscored=unscored, unknown=unknown), indent=2))
+    # Spelled out in prose too, because the JSON above is the part that gets pasted
+    # into a report and the roles are meaningless without their profiles.
+    if sum(votes.values()):
+        for role in ("single", "double"):
+            print(f"{votes[role]} of {sum(votes.values())} pair(s) preferred "
+                  f"{profiles[role] or role} (role '{role}'), confidence-weighted "
+                  f"{weighted[role]:.1f}", file=sys.stderr)
+        print(f"{votes['tie']} tie(s)", file=sys.stderr)
     if unknown or not sum(votes.values()):
         print("nothing was scored" if not sum(votes.values()) else "the ballot does not match the key",
               file=sys.stderr)
