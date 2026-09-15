@@ -1,0 +1,48 @@
+{
+  "profiles": {
+    "single": "shipped-tone-100",
+    "double": "shipped-tone-000"
+  },
+  "votes": {
+    "single": 1,
+    "double": 8,
+    "tie": 3
+  },
+  "confidence_weighted": null,
+  "confidence_missing": [
+    "d12804",
+    "59b6f2",
+    "638227",
+    "0d99f4",
+    "936dc6",
+    "b0b0d2",
+    "6d6dea",
+    "d94d8f",
+    "e6281e"
+  ],
+  "confidence_invalid": [],
+  "per_clip": {
+    "orig-dissolve": {
+      "single": 0,
+      "double": 3,
+      "tie": 0
+    },
+    "orig-faces": {
+      "single": 1,
+      "double": 1,
+      "tie": 1
+    },
+    "orig-film-cuts-a": {
+      "single": 0,
+      "double": 1,
+      "tie": 2
+    },
+    "orig-game-motion": {
+      "single": 0,
+      "double": 3,
+      "tie": 0
+    }
+  },
+  "unscored": [],
+  "unknown": []
+}

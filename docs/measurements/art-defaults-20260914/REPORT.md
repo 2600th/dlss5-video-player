@@ -23,8 +23,22 @@ of the time under pure chance against 3.5 % for 7. So the default stays at `1.0`
 verdict stands - on a human's eye now, not only on dE. The ballot did generate one hypothesis
 worth a measurement: the candidate took 4 of 4 pairs on the continuous-motion and
 cross-dissolve clips and split 1-1 on faces and film cuts. A follow-up at the knob's full
-range (1.0 against 0.0, 12 pairs, bar of 10) is built and awaiting a judge, and a null there
-closes the knob entirely. See [the tone ballot](../tone-ballot-20260915/README.md).
+range was then run, and it does not leave this verdict comfortable. At 1.0 against 0.0 the
+knob-off arm was preferred on **8 of 12** pairs with 3 ties and 1 for the shipped default -
+below the literal bar of 10, but **8 of 9 decided pairs (P = 0.0195)** once ties are set
+aside, and the pre-registration never said which reading applied. The default therefore
+stays at `1.0` on the letter of a rule that turned out to be arguable, not on the strength
+of the evidence, and the honest reading of both rounds together is that *less* local tone
+was preferred on 14 of 17 decided pairs.
+
+What reproduced independently is sharper than either tally: **all six decided pairs on
+`orig-dissolve` and `orig-game-motion` went to less tone in round 1, and all six again in
+round 2**, while faces and film cuts split or tied both times. A per-frame local tone map is
+exactly what would cost on continuous motion and a dissolve and vanish on a static shot, and
+it agrees in direction with this report's own Table B, where `shipped-tone-0` sits +4.83 dB
+and -4.02 dE closer to the source on the motion clip. So `NRLocalTone` is now a **live
+default question on moving footage specifically**, not a closed one. Round 3 and its
+pre-registered rule: [the tone ballot](../tone-ballot-20260915/README.md).
 
 Two findings that matter more than any knob value:
 

@@ -239,5 +239,72 @@ moving.
 confidence-weighted figure is what separates a reluctant sweep from a confident
 one, and ballot 1 arrived without it.
 
+## Result of ballot 2 (1.0 against 0.0): the bar as written was not met, and the
+## rule as written was defective
+
+Scored 2026-09-15, same judge, 12 pairs. Confidence blank again, so the weighting is
+withheld again.
+
+| | pairs |
+|---|---|
+| `shipped-tone-100` (shipped 1.0) | 1 |
+| `shipped-tone-000` (knob off) | **8** |
+| ties | 3 |
+
+**Two readings, and I have to give both, because the pre-registration did not say
+which:**
+
+| reading | test | result |
+|---|---|---|
+| **A** - literal: "10 or more of 12" | 8 of 12 | **bar not met** (chance gives 8+ of 12 19.4 % of the time) |
+| **B** - ties carry no preference, so n is the decided pairs | 8 of 9 | **P = 0.0195**, which clears the ~2 % the bar of 10 was chosen to encode |
+
+The rule said "10 of 12" and never defined tie handling. That omission is mine, and
+it is exactly the kind of latitude a pre-registration exists to remove: reading A
+keeps the default, reading B changes it, and the honest position is that a rule
+which cannot answer its own data does not get to be read whichever way suits the
+outcome. **So the default stays at 1.0 for now** - not because the evidence is
+weak, but because the instrument that was supposed to make the decision unarguable
+turned out to be arguable, and picking reading B after seeing that it wins is the
+behaviour the whole pre-registration was set up to prevent.
+
+**What the two ballots agree on, which is more interesting than either tally.**
+Pooling the decided pairs across both rounds, *less* local tone was preferred on
+**14 of 17** (P = 0.0064 one-sided). Pooling was not pre-registered either, so that
+number is exploratory - but the per-clip pattern reproduced independently, with
+different arms, on the second run:
+
+| clip | ballot 1 (1.0 vs 0.5) | ballot 2 (1.0 vs 0.0) |
+|---|---|---|
+| `orig-dissolve` | less tone **2/2** | less tone **3/3** |
+| `orig-game-motion` | less tone **2/2** | less tone **3/3** |
+| `orig-faces` | 1-1 | 1 shipped, 1 less, 1 tie |
+| `orig-film-cuts-a` | 1-1 | 1 less, 2 ties |
+
+**Six of six on the moving material in ballot 1, six of six again in ballot 2, and
+nothing on the static or cut-bearing clips either time.** That is a mechanism-shaped
+result, not a preference: a local tone map that has to re-solve per frame is exactly
+the thing that would cost on continuous motion and a cross-dissolve while being
+invisible on a static shot. It also lines up with the metrics, which had
+`shipped-tone-0` closer to the source on the synthetic motion clip (+4.83 dB PSNR,
+-4.02 dE) - the knob's whole effect is a departure from the source, and on moving
+footage a human dislikes that departure.
+
+## What would settle it - round 3, pre-registered properly this time
+
+1. **Ties are excluded from n.** The test is on decided pairs, one-sided, and the
+   bar is the smallest count whose binomial probability is at or below 2 %. That is
+   fixed here, before the pairs exist.
+2. **Confidence 1-5 is required.** Two ballots have arrived without it, so the
+   "at confidence >= 3" half of every rule so far has never been checkable.
+3. **The hypothesis, not the knob.** The effect concentrates on continuous motion
+   and the dissolve; those are the clips to test, at a fresh seed, with the arms
+   still 1.0 against 0.0. A sweep there confirms a mechanism; a wash there kills it
+   and closes Q7 on two independent nulls.
+4. **A second judge if one is available.** One pair of eyes, twice, is one pair of
+   eyes.
+
+Artefacts: `ballot-2/ballot.csv`, `ballot-2/key.json` (unsealed), `ballot-2/result.json`.
+
 Unscored as of 2026-09-15. The instrument is built, asserted and sealed; the judgement
 is owed.
