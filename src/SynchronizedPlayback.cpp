@@ -673,9 +673,22 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
     const double start=double(impl_->range.start100ns)*1e-7;
     if(seconds<start)seconds=start;
     const int64_t target=static_cast<int64_t>(std::llround(seconds*10000000.0));
-    if(impl_->range.end100ns>0&&target>=impl_->range.end100ns)return false;
-    if(!impl_->segments||!impl_->segments->Containing(target))return false;
-    if(!impl_->original->SeekSeconds(seconds))return false;
+    // Every refusal below reached the caller as the same "not rendered", which
+    // covers four unrelated failures: a target past the range, coverage that has
+    // not reached it, the original's own seek failing - on a network source that
+    // is an HTTP re-open, measured at 0.2-2.0 s and able to fail on its own - and
+    // a pair that never assembled inside the deadline. Only the desync path set a
+    // reason, so the other three were undiagnosable after the fact. The target
+    // rides along so the reason can be read against the coverage.
+    const auto refuse=[&](const char* reason){
+        impl_->fault=Impl::Fault{};
+        impl_->fault.reason=reason;
+        impl_->fault.original100ns=target;
+        return false;
+    };
+    if(impl_->range.end100ns>0&&target>=impl_->range.end100ns)return refuse("live-seek-past-range-end");
+    if(!impl_->segments||!impl_->segments->Containing(target))return refuse("live-seek-uncovered");
+    if(!impl_->original->SeekSeconds(seconds))return refuse("live-seek-original-failed");
     impl_->pendingOriginal.reset();impl_->pendingNeural.reset();
     // Segment decoders are positioned for the old playhead; pairing is driven by
     // the original's pts, so the next read reopens whatever now covers it.
@@ -687,8 +700,15 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
         if(result==SynchronizedReadResult::PairReady){
             impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
         }
-        if(result!=SynchronizedReadResult::NotReady)return false;
-        if(stop.stop_requested()||std::chrono::steady_clock::now()>=deadline)return false;
+        if(result!=SynchronizedReadResult::NotReady){
+            // A desync already recorded which frames disagreed; the rest say only
+            // what the pair builder returned.
+            if(impl_->fault.reason)return false;
+            return refuse(result==SynchronizedReadResult::WaitingForRender?"live-seek-waiting-for-render"
+                          :result==SynchronizedReadResult::EndOfStream?"live-seek-pair-end"
+                                                                      :"live-seek-pair-failed");
+        }
+        if(stop.stop_requested()||std::chrono::steady_clock::now()>=deadline)return refuse("live-seek-deadline");
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
