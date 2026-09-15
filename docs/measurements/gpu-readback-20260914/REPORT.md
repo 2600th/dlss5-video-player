@@ -450,13 +450,18 @@ The `1,1` is the identity that shows the fast path is byte-unchanged: the scale 
 vector alone, so the emitted motion texture on that path is bit-identical to what shipped
 before.
 
-**NOT proven in an actual SR session on this machine.** Enabling `[Playback]
-SuperResolution=1` produced `failed to load NGXCore: 126` for `Release\_nvngx.dll` and
-`Release\nvngx.dll`, because the player-root Super Resolution runtime is not staged in this
-build - the player root is deliberately hook-free, and only `neural-runtime/` is staged. So
-the SR branch of `PlanHardwareFlow` is covered by unit tests and by construction, and the
-live-session evidence is **owed**. No claim is made here that an SR session was measured,
-or that NVOFA was observed selected in one.
+**Proven in a real SR session on 2026-09-15, and this paragraph's original reading was
+wrong.** What it recorded was `failed to load NGXCore: 126` for `Release\_nvngx.dll` and
+`Release\nvngx.dll`, and it concluded the player-root SR runtime was unstaged. Those two
+lines are NGX's app-local probe for the NGX *core*, which is a driver component no
+application is supposed to ship; the same `nvsdk_ngx.log` resolves it from the driver store
+four lines later and reports `NGXLoadCoreLibrary:279 ... succeeded`. Only the failures
+reached `DLSSVideoPlayer.log`, because the NGX logging callback at
+`src/DLSSBackend.cpp:49-61` forwards messages containing "error" and nothing else - so the
+benign half of the sequence was visible here and the decisive half was not. Nothing had to
+be staged: two sessions created and evaluated a SuperResolution feature at
+`input=1920x1080 output=2560x1440` for 600+ frames with NVOFA hardware flow as the motion
+guide. See [the SR session report](../p5-sr-session-20260915/REPORT.md).
 
 What would produce that evidence: stage the SR runtime beside `DLSSVideoPlayer.exe`, re-run
 one `player_session.ps1` session with that ini key set, and grep the same

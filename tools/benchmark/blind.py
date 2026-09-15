@@ -165,8 +165,18 @@ def build(args) -> int:
               f"{shortest:.2f} s",
               file=sys.stderr)
         return 1
+    # Every pair from a previous ballot is removed first. `key.json` below is
+    # overwritten, so those files are already unscoreable - `--score` only accepts
+    # ids the current key holds - and leaving them in the one directory the judge is
+    # told to look at invites scoring a retired question's images. Counted out loud
+    # rather than deleted quietly.
     pairs_dir = BLIND / "pairs"
     pairs_dir.mkdir(parents=True, exist_ok=True)
+    stale = sorted(p for p in pairs_dir.iterdir() if p.is_file())
+    for path in stale:
+        path.unlink()
+    if stale:
+        print(f"removed {len(stale)} file(s) from a previous ballot in {pairs_dir}")
     rng = random.Random(args.seed)
     key, ballot = [], []
     ids = [secrets.token_hex(3) for _ in range(len(plans) * args.pairs_per_clip)]
@@ -216,18 +226,38 @@ def score(ballot_path: Path) -> int:
     votes = {"single": 0, "double": 0, "tie": 0}
     weighted = {"single": 0.0, "double": 0.0}
     per_clip: dict[str, dict[str, int]] = {}
+    unknown, unscored = [], []
     with ballot_path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
             pair = key.get(row["id"])
             side = row["preferred"].strip().upper()
-            if not pair or side not in ("A", "B", "TIE"):
+            if not pair:
+                unknown.append(row["id"])
+                continue
+            if side not in ("A", "B", "TIE"):
+                unscored.append(row["id"])
                 continue
             role = "tie" if side == "TIE" else pair[side]
             votes[role] += 1
             if role != "tie":
                 weighted[role] += float(row["confidence"] or 1)
             per_clip.setdefault(pair["clip"], {"single": 0, "double": 0, "tie": 0})[role] += 1
-    print(json.dumps(dict(votes=votes, confidence_weighted=weighted, per_clip=per_clip), indent=2))
+    # A row this key does not know, or one with no preference in it, is reported
+    # rather than skipped. Scoring an unfilled ballot used to print a clean sweep of
+    # zeros and exit 0, which reads exactly like a measured tie; a ballot filled in
+    # against a since-rebuilt key would have read the same way. Neither is a result.
+    for ballot_id in unknown:
+        print(f"ballot row '{ballot_id}' is not in key.json - the ballot and the key are from "
+              f"different builds", file=sys.stderr)
+    if unscored:
+        print(f"{len(unscored)} of {len(unscored) + sum(votes.values())} pair(s) carry no "
+              f"preference: {', '.join(unscored)}", file=sys.stderr)
+    print(json.dumps(dict(votes=votes, confidence_weighted=weighted, per_clip=per_clip,
+                          unscored=unscored, unknown=unknown), indent=2))
+    if unknown or not sum(votes.values()):
+        print("nothing was scored" if not sum(votes.values()) else "the ballot does not match the key",
+              file=sys.stderr)
+        return 1
     return 0
 
 

@@ -45,6 +45,18 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     // goes to ngx_logs/ as before; only lines that name a problem are copied
     // beside the player's own, so a refused feature explains itself in one
     // file without the ~170 lines of startup chatter each worker emits.
+    //
+    // The core-load sequence is the exception, and filtering on "error" alone
+    // misrepresented it. NGX probes for its *core* beside the executable first -
+    // `_nvngx.dll`, then `nvngx.dll`, neither of which any application ships, both
+    // of which therefore fail with 126 - and only afterwards resolves it from the
+    // driver store. The failures matched the filter and the resolution did not, so
+    // every session's log carried two fatal-looking lines and never the one that
+    // said the core loaded. That asymmetry was read as "Super Resolution cannot
+    // start on this machine" and written into two documents before a real session
+    // disproved it (measurements/p5-sr-session-20260915). Both halves are kept now:
+    // the expected probe is copied as the routine step it is, and the load that
+    // decides the outcome is copied whether it succeeded or failed.
     static NVSDK_NGX_FeatureCommonInfo commonInfo{};
     commonInfo.LoggingInfo.LoggingCallback = [](const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature component) {
         std::string_view text = message ? message : "";
@@ -52,6 +64,18 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
         if (text.empty()) return;
         std::string lowered(text);
         std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        const bool coreProbe = lowered.find("failed to load ngxcore") != std::string::npos;
+        const bool coreLoad = lowered.find("ngxloadcorelibrary") != std::string::npos;
+        if (coreProbe) {
+            LOG("[NGX feature " << int(component) << "] " << text
+                << "  <- expected: the NGX core ships with the driver, not with this player;"
+                   " the driver-store load is reported separately");
+            return;
+        }
+        if (coreLoad) {
+            LOG("[NGX feature " << int(component) << "] " << text);
+            return;
+        }
         for (std::string_view needle : {"error", "fail", "warn", "unsupported"}) {
             if (lowered.find(needle) != std::string::npos) {
                 LOG("[NGX feature " << int(component) << "] " << text);

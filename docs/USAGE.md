@@ -216,9 +216,25 @@ cache entry:
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an
   RTX 5070 Ti.
 - `GpuSourceConversion` (default off). Decodes the source to NV12 and converts
-  it on the GPU, which saves 2.6x on pipe traffic. Off because the conversion
-  assumes BT.709 limited range and nothing reads the source's tags yet, so an
-  SD or full-range clip would render with shifted colour.
+  it on the GPU, which saves 2.6x on pipe traffic. Turning it on no longer
+  risks the source's colour: the open probe reads `color_space`,
+  `color_range`, `color_primaries` and `color_transfer` off the stream, and the
+  GPU path is taken only for a source that declares a matrix and a range the
+  conversion implements - BT.709 or BT.601 (`bt470bg`/`smpte170m`), limited or
+  full - with the shader compiled for exactly the pair the source declared.
+  Anything else, including a stream that declares nothing, falls back to
+  ffmpeg's CPU conversion and says so in the log: grep
+  `GPU source conversion` and every render answers with `accepted:`, `refused:`
+  and the four tags it read. Falling back costs pipe bandwidth, never colour,
+  and never fails a render.
+
+  Two things are still assumed rather than checked. Primaries and transfer are
+  read and logged but do not decide: the conversion produces R'G'B' from
+  Y'CbCr, which is a matrix and a range and nothing else, and the CPU fallback
+  does no better with a BT.2020-primaries or PQ source than the GPU path would.
+  And the flag remains off by default because that is a measured throughput
+  trade (`docs/measurements/gpu-readback-20260914/`), not because of the
+  colour hazard this probe removed.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

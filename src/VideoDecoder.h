@@ -199,11 +199,23 @@ public:
     // OpenFFmpeg's probe completes and unchanged by acceleration fallbacks or
     // seek restarts for the rest of the session.
     VideoPixelLayout PixelLayout() const { return m_layout; }
+    // What the source stream declared about its own colour, as read by the same
+    // ffprobe call that produced the geometry above. Every field is Unspecified
+    // for a stream that declares nothing, for a `known` open (which runs no
+    // probe), and for a Media Foundation open - MF's reader is configured for
+    // RGB32/ARGB32 output, so it hands out BGRA and is never the backend behind
+    // an NV12 layout. Unspecified is the refusal, never an assumed BT.709.
+    const SourceColorDescription& ColorDescription() const { return m_sourceColor; }
 
 private:
     // ffprobe's codec/pixel format for the open source. Hardware decode support
     // is per codec, so the memo of dead paths is keyed by this, never global.
     std::string m_hardwareProfile;
+    SourceColorDescription m_sourceColor{};
+    // The four colour entries exactly as ffprobe printed them, for the log line
+    // that refuses the GPU conversion. The mapped description is what the code
+    // gates on, but "other" is a diagnosis nobody can act on and "bt2020nc" is.
+    std::string m_colorTags;
     bool m_stillImage{false};
     bool m_gif{false};
     enum class Backend { None, FFmpeg, MediaFoundation };

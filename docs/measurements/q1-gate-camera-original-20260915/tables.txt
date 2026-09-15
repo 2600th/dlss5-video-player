@@ -1,0 +1,61 @@
+## digests
+clip                 fr           on rep1           on rep2          off rep1          off rep2   det   differ identical frames
+orig-film-cuts-a    131  b73f2d214fcd3ca9  b73f2d214fcd3ca9  722fc62efb47be58  722fc62efb47be58  True  129/131 [0, 4]
+orig-film-cuts-b     70  aad153f77c74830b  aad153f77c74830b  cf36d866cb509ab7  cf36d866cb509ab7  True   59/70  [0, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69]
+orig-film-fade       31  b8ae06f59f86be9a  b8ae06f59f86be9a  09ad6f82e0822b0a  09ad6f82e0822b0a  True   30/31  [0]
+orig-faces          101  71ca84c3db1aab69  71ca84c3db1aab69  e8ce6e65a03a9f2a  e8ce6e65a03a9f2a  True  101/101 []
+orig-game-cuts       91  ebb44bd990a5000f  ebb44bd990a5000f  2498da2526346618  2498da2526346618  True   91/91  []
+orig-game-motion     66  d2d0079d0501d3da  d2d0079d0501d3da  c4d5a398207afac3  c4d5a398207afac3  True   65/66  [0]
+orig-dissolve        71  ead6be3c37ad0fe8  ead6be3c37ad0fe8  6a335fa123b587d6  6a335fa123b587d6  True   71/71  []
+
+## tables
+clip                   fm on    fm off     delta   rel % |  flip on flip off     delta |  sig+ on sig+ off    delta |  psnr on psnr off
+orig-film-cuts-a     0.08397   0.09437  -0.01041  -11.03 |  0.22218  0.22664  -0.00446 |  -1.3767  -1.2102  -0.1664 |   30.401   30.464
+orig-film-cuts-b     0.03187   0.04378  -0.01191  -27.20 |  0.10385  0.12147  -0.01762 |  -0.9554  -0.7964  -0.1590 |   44.314   44.257
+orig-film-fade       0.14923   0.15245  -0.00321   -2.11 |  0.19369  0.21843  -0.02474 |  -2.6463  -3.1530  +0.5067 |   30.259   28.440
+orig-faces           0.03478   0.06552  -0.03074  -46.91 |  0.12110  0.15884  -0.03774 |  -2.4812  -2.0286  -0.4527 |   30.298   30.544
+orig-game-cuts       0.05563   0.05539  +0.00024   +0.43 |  0.16617  0.16917  -0.00300 |  -0.8195  -0.8094  -0.0101 |   29.788   30.078
+orig-game-motion     0.07461   0.08223  -0.00762   -9.27 |  0.18374  0.18763  -0.00388 |   0.6395   0.5850  +0.0545 |   28.052   28.155
+orig-dissolve        0.04383   0.04497  -0.00114   -2.54 |  0.12112  0.12539  -0.00427 |  -2.4117  -2.4395  +0.0278 |   29.488   29.497
+
+clip                flick+ on flick+ off     delta |  flips+ on flips+ off     delta |  flip src |  ssim on ssim off     delta |  sig src sig out on sig out off
+orig-film-cuts-a      -1.1128    -0.9507   -0.1621 |   -0.01773   -0.01327  -0.00446 |   0.23991 |  0.95591  0.95703  -0.00112 |  16.0279    14.6512     14.8176
+orig-film-cuts-b      -0.9014    -0.7641   -0.1374 |   -0.06144   -0.04382  -0.01762 |   0.16529 |  0.97047  0.97011  +0.00037 |   7.6303     6.6749      6.8340
+orig-film-fade        -0.1514    -0.1171   -0.0343 |   -0.01270    0.01204  -0.02474 |   0.20639 |  0.76470  0.68724  +0.07745 |  29.5700    26.9237     26.4170
+orig-faces            -1.8539    -1.4449   -0.4091 |   -0.09098   -0.05324  -0.03774 |   0.21208 |  0.93509  0.94169  -0.00660 |  15.1704    12.6892     13.1418
+orig-game-cuts        -0.2395    -0.2214   -0.0180 |   -0.01315   -0.01016  -0.00300 |   0.17933 |  0.94567  0.94751  -0.00185 |  10.0400     9.2205      9.2306
+orig-game-motion       0.1065     0.1454   -0.0389 |   -0.00719   -0.00330  -0.00388 |   0.19093 |  0.96132  0.96073  +0.00059 |  13.0708    13.7103     13.6558
+orig-dissolve         -0.2073    -0.1967   -0.0106 |   -0.01823   -0.01395  -0.00427 |   0.13934 |  0.96210  0.96155  +0.00056 |  29.1796    26.7680     26.7401
+
+clip                   floor     fm on    fm off     NR on    NR off  gate removes
+orig-film-cuts-a     0.05605   0.08397   0.09437  +0.02792  +0.03832        +27.2 %
+orig-film-cuts-b     0.02420   0.03187   0.04378  +0.00767  +0.01958        +60.8 %
+orig-film-fade       0.13385   0.14923   0.15245  +0.01538  +0.01859        +17.3 %
+orig-faces           0.02575   0.03478   0.06552  +0.00903  +0.03977        +77.3 %
+orig-game-cuts       0.04204   0.05563   0.05539  +0.01359  +0.01335         -1.8 %
+orig-game-motion     0.05017   0.07461   0.08223  +0.02444  +0.03206        +23.8 %
+orig-dissolve        0.03453   0.04383   0.04497  +0.00929  +0.01043        +10.9 %
+
+## cutdist
+orig-film-cuts-a (8 labelled cuts)
+   >= 0 frames from a cut: pairs=122 on=0.08397 off=0.09437 delta=-0.01041 rel=-11.03 %
+   >= 3 frames from a cut: pairs= 90 on=0.07846 off=0.08726 delta=-0.00880 rel=-10.09 %
+   >= 6 frames from a cut: pairs= 46 on=0.08036 off=0.08761 delta=-0.00725 rel=-8.27 %
+orig-film-cuts-b (3 labelled cuts)
+   >= 0 frames from a cut: pairs= 66 on=0.03187 off=0.04378 delta=-0.01191 rel=-27.20 %
+   >= 3 frames from a cut: pairs= 54 on=0.03186 off=0.04400 delta=-0.01214 rel=-27.59 %
+   >= 6 frames from a cut: pairs= 36 on=0.03111 off=0.04454 delta=-0.01343 rel=-30.16 %
+orig-faces (4 labelled cuts)
+   >= 0 frames from a cut: pairs= 96 on=0.03478 off=0.06552 delta=-0.03074 rel=-46.91 %
+   >= 3 frames from a cut: pairs= 80 on=0.03407 off=0.06285 delta=-0.02878 rel=-45.79 %
+   >= 6 frames from a cut: pairs= 56 on=0.03399 off=0.06359 delta=-0.02960 rel=-46.55 %
+orig-game-cuts (2 labelled cuts)
+   >= 0 frames from a cut: pairs= 88 on=0.05563 off=0.05539 delta=+0.00024 rel=+0.43 %
+   >= 3 frames from a cut: pairs= 80 on=0.05595 off=0.05555 delta=+0.00039 rel=+0.71 %
+   >= 6 frames from a cut: pairs= 68 on=0.05559 off=0.05518 delta=+0.00041 rel=+0.74 %
+
+## depthoff
+orig-faces         fm on=0.03451 off=0.06538 delta=-0.03087 rel=-47.21 % | flip 0.12079/0.15815 delta=-0.03736 | sig+ -2.4838/-2.0390 delta=-0.4448
+                   digest on=aec010c189a077e1 (repeats identical: True) off=7f80d8c97e6caecc (repeats identical: True) frames differing=101/101
+orig-game-cuts     fm on=0.05613 off=0.05531 delta=+0.00082 rel=+1.48 % | flip 0.16618/0.16892 delta=-0.00274 | sig+ -0.8204/-0.8103 delta=-0.0101
+                   digest on=b5209df0ef2fcd72 (repeats identical: True) off=64ee29089adcf22e (repeats identical: True) frames differing=91/91

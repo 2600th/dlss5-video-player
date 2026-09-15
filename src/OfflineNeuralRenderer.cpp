@@ -2,6 +2,7 @@
 
 #include "Log.h"
 #include "PixelLayout.h"
+#include "MediaSource.h"
 
 #include <algorithm>
 #include <array>
@@ -1009,7 +1010,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
     if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps,
-                              request.guides, source.Layout())) {
+                              request.guides, source.Layout(), source.ColorDescription())) {
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
     }
@@ -1562,6 +1563,9 @@ struct TestSourceAdapter {
     void Close(){source.Close();}
     // The test source hands out BGRA; only the production decoder can choose NV12.
     PixelLayout Layout()const{return PixelLayout::Bgra;}
+    // BGRA needs no conversion, so the test source declares nothing and nothing
+    // reads this - the same position an undeclared real source is left in.
+    SourceColorDescription ColorDescription()const{return {};}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         OfflineDecodedFrame decoded;const auto read=source.Read(decoded,stop);
         frame={std::move(decoded.bgra),decoded.timestamp100ns,decoded.discontinuity,
@@ -1579,7 +1583,8 @@ struct TestEvaluatorAdapter {
     // The test interface stays synchronous; these shims give RunJob the same async shape
     // the production adapter has, so the pipelined control flow is what the tests run.
     std::deque<JobEvaluation> captured{};
-    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,PixelLayout){
+    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,
+                    PixelLayout,const SourceColorDescription&){
         return evaluator.Initialize(window,width,height,fps,guides);
     }
     // A test evaluator owns no device and is constructed per Run, so it never
@@ -1657,9 +1662,14 @@ struct ProductionSourceAdapter {
         return seekSeconds<=0.0||decoder.SeekSeconds(seekSeconds);
     }
     void Close(){decoder.Close();}
-    // Fixed for the decoder session once Open has probed the geometry (NV12 for even
-    // sizes, BGRA otherwise), so the evaluator can be initialized for it.
+    // Fixed for the decoder session once Open has probed the source (NV12 only for
+    // even sizes that also declared a colour description the GPU conversion
+    // implements, BGRA otherwise), so the evaluator can be initialized for it.
     PixelLayout Layout()const{return decoder.PixelLayout();}
+    // What the probe read off the source. Nv12 above already implies this names a
+    // conversion the shader has; it travels on so the shader can be specialised
+    // for it instead of assuming one.
+    SourceColorDescription ColorDescription()const{return decoder.ColorDescription();}
     JobRead Read(JobFrame& frame,std::stop_token stop){
         VideoFrame decoded;
         // Whatever this frame still carries has already been rendered and written,
@@ -1776,6 +1786,11 @@ struct ProductionEvaluatorAdapter {
     bool builtGpuColorConversion{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
+    // Which conversion the live renderer's source pass was COMPILED for, which is
+    // Unsupported for a BGRA source because no such pass exists then. The program
+    // is specialised at bring-up and has no setter, so a job whose source declares
+    // a different matrix or range cannot inherit this device.
+    SourceNv12Conversion sourceConversion{SourceNv12Conversion::Unsupported};
     // True when the last Initialize kept a retained device and NGX instance
     // instead of building them. The job then paid no neural bring-up; whether
     // it also skipped the feature arm is `featureReleasedWhileIdle`.
@@ -1786,7 +1801,10 @@ struct ProductionEvaluatorAdapter {
     // is the whole trade the FreeFeature arm makes.
     bool featureReleasedWhileIdle=false;
     bool Reused()const{return reused;}
-    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,PixelLayout layout){
+    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,
+                    PixelLayout layout,const SourceColorDescription& color){
+        const SourceNv12Conversion conversion=layout==PixelLayout::Nv12
+            ?SourceNv12ConversionFor(color):SourceNv12Conversion::Unsupported;
         // Everything compared here is fixed at bring-up and has no setter: the
         // swapchain and the NGX feature are sized by Initialize, the capture
         // format picks the readback layout, and the source layout picks the
@@ -1799,7 +1817,8 @@ struct ProductionEvaluatorAdapter {
         // than rebuilding everything underneath it.
         reused=renderer&&(renderer->DLSSFeatureCreated()||featureReleasedWhileIdle)&&
                width==w&&height==h&&fps==rate&&
-               sourceLayout==layout&&builtGpuColorConversion==gpuColorConversion;
+               sourceLayout==layout&&sourceConversion==conversion&&
+               builtGpuColorConversion==gpuColorConversion;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -1810,12 +1829,14 @@ struct ProductionEvaluatorAdapter {
             guides.SetControls(controls);return true;
         }
         Release();
-        width=w;height=h;fps=rate;sourceLayout=layout;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
+        width=w;height=h;fps=rate;sourceLayout=layout;sourceConversion=conversion;
+        const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
         builtGpuColorConversion=gpuColorConversion;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetSourceLayout(layout);
+        renderer->SetSourceColor(color);
         // This swapchain is a hidden formality that exists so the neural add-on sees a
         // present per frame; no one ever looks at it, and holding presents to the display
         // refresh would cap an export that already runs below real time.

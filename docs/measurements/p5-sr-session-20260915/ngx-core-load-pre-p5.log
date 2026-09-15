@@ -1,0 +1,7 @@
+[2026-09-15 10:34:49] [ngx::util::setLogFilename:216] Logging to requested file (C:\Users\User\Documents\GitHub\dlss5-p5sr\build-pre-p5\Release\ngx_logs/nvsdk_ngx.log) enabled successfully
+[2026-09-15 10:34:49] [NGXSafeInitializeLog:148] App logging hooks successfully initialized
+[2026-09-15 10:34:49] [NGXLoadLibrary:326] error: failed to load NGXCore: 126 (C:\Users\User\Documents\GitHub\dlss5-p5sr\build-pre-p5\Release\_nvngx.dll)
+[2026-09-15 10:34:49] [NGXLoadLibrary:326] error: failed to load NGXCore: 126 (C:\Users\User\Documents\GitHub\dlss5-p5sr\build-pre-p5\Release\nvngx.dll)
+[2026-09-15 10:34:49] [NGXGetPathUsingQAI:147] Attempting to read from Parameters\NGXCore\NGXPath
+[2026-09-15 10:34:49] [NGXGetPathUsingQAI:171] Path to driverStore found using QAI: C:\WINDOWS\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_7cc7738d8e428783
+[2026-09-15 10:34:49] [NGXLoadCoreLibrary:279] Loading C:\WINDOWS\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_7cc7738d8e428783\_nvngx.dll succeeded

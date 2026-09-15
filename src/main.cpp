@@ -4635,12 +4635,13 @@ private:
     // and not what the model is asked for, so it stays out of the cache key.
     bool m_gpuColorConversion=false;
     // Source conversion: decode to NV12 and convert on the GPU instead of letting
-    // ffmpeg deliver BGRA. Off by default, and deliberately not the same kind of
-    // switch as the one above: the GPU path applies a fixed BT.709 limited-range
-    // inverse while nothing probes the source's matrix or range, so a BT.601 or
-    // full-range source would reach the model with shifted colour. Until the probe
-    // exists this stays opt-in, and because it does change the model's input it must
-    // join the cache key before it is ever defaulted on.
+    // ffmpeg deliver BGRA. Off by default on a measured throughput trade, and still
+    // deliberately not the same kind of switch as the one above: it changes the
+    // model's INPUT, so it must join the cache key before it is ever defaulted on.
+    // Its old blocker is gone - the decoder probes the source's colour tags and
+    // hands over NV12 only for a matrix and range the GPU conversion implements, so
+    // an undeclared or BT.601 source now falls back to the CPU conversion instead of
+    // reaching the model under the wrong matrix.
     bool m_gpuSourceConversion=false;
     uint32_t m_nvencPreset=7;
     NeuralSettings m_neuralSettings;

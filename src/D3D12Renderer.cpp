@@ -151,6 +151,14 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     m_preserveSource=preserveSource;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
+    // NV12 planes need even dimensions, so an odd source keeps the BGRA upload
+    // rather than losing a row or a column. Resolved here rather than with the
+    // video resources it sizes, because CreatePipelines below only compiles the
+    // source-conversion pass when the answer is NV12.
+    m_sourceLayout=(m_requestedSourceLayout==PixelLayout::Nv12&&!(m_sourceW%2)&&!(m_sourceH%2))
+        ?PixelLayout::Nv12:PixelLayout::Bgra;
+    if(m_requestedSourceLayout==PixelLayout::Nv12&&m_sourceLayout==PixelLayout::Bgra)
+        LOG("NV12 source needs even dimensions; taking BGRA at "<<m_sourceW<<"x"<<m_sourceH<<".");
     if(!CreateDeviceAndSwapchain(hwnd) || !CreateHeapsAndBackbuffers() || !CreatePipelines()) return false;
     bool gpuSynchronized=false;
     if(!InitializeDLSS(gpuSynchronized)) {
@@ -216,8 +224,10 @@ bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     return true;
 }
 
-bool D3D12Renderer::CreatePipelines(){
-    const char* hlsl=R"(
+// Every pass but the optical-flow resolve, in one translation-unit-scope string so
+// that the source conversion below can be compiled from it a second time - with a
+// different set of -D constants - without a device.
+inline constexpr char kPresentHlsl[]=R"(
 Texture2D T:register(t0); Texture2D Ref:register(t1); SamplerState S:register(s0);
 cbuffer Params:register(b0){
     float2 Reserved0;  // was sampling jitter; see the note above PSConvert
@@ -331,16 +341,33 @@ float2 PSCaptureChroma(V i):SV_Target{
     c+=CaptureChromaOf(CaptureRGB(i.uv+float2(o.x,o.y)));
     return c*0.25;
 }
-// The exact inverse of the capture conversion above, for a source that arrives as BT.709
-// limited-range NV12 (Y at t0, interleaved UV at t1, sampled bilinearly at half size).
-// It writes the same 8-bit sRGB-encoded BGRA the decoder used to upload, so every pass
-// after the decoded texture is unchanged.
+// The exact inverse of the capture conversion above, for a source that arrives as NV12
+// (Y at t0, interleaved UV at t1, sampled bilinearly at half size). It writes the same
+// 8-bit sRGB-encoded BGRA the decoder used to upload, so every pass after the decoded
+// texture is unchanged.
+//
+// SOURCE_* are supplied per renderer by CompileSourceNv12 from the colour description
+// the source declared - never from a default. They are preprocessor tokens rather than
+// constant-buffer values for one measured reason: fxc folds SOURCE_CHROMA_SCALE into
+// each coefficient and SOURCE_LUMA_SCALE into each channel's multiply-add, so with the
+// BT.709 limited-range numbers substituted this text is character for character the
+// program that shipped, and compiles to byte-identical bytecode. A cbuffer value cannot
+// be folded, so a parameterised version of this pass would move the last bits of every
+// cached render on disk.
+//
+// The guard is not decoration: HLSL compiles this whole text for every entry point in
+// it, and every other pass is compiled with no SOURCE_* defines at all. Without the
+// guard they would all fail on the undeclared identifiers - and with it, a renderer
+// that was handed no colour description has no program that could decode YUV under a
+// guessed matrix, because this function does not exist in its build of the file.
+#ifdef SOURCE_LUMA_OFFSET
 float4 PSSourceNv12(V i):SV_Target{
-    float y=(T.SampleLevel(S,i.uv,0).r*255.0-16.0)/219.0;
-    float2 c=(Ref.SampleLevel(S,i.uv,0).rg*255.0-128.0)/224.0;
-    float3 rgb=float3(y+1.5748*c.y,y-0.187324*c.x-0.468124*c.y,y+1.8556*c.x);
+    float y=(T.SampleLevel(S,i.uv,0).r*255.0-SOURCE_LUMA_OFFSET)/SOURCE_LUMA_SCALE;
+    float2 c=(Ref.SampleLevel(S,i.uv,0).rg*255.0-128.0)/SOURCE_CHROMA_SCALE;
+    float3 rgb=float3(y+SOURCE_RED_V*c.y,y-SOURCE_GREEN_U*c.x-SOURCE_GREEN_V*c.y,y+SOURCE_BLUE_U*c.x);
     return float4(saturate(rgb),1);
 }
+#endif
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
 float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(c,1);}
 float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
@@ -349,12 +376,80 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv,0).b);}
     float2 PSExpandGuides(V i):SV_Target{return T.SampleLevel(S,i.uv,0).xy;}
 )";
+
+namespace d3d12_renderer_detail {
+const SourceNv12Constants* SourceNv12ConstantsFor(SourceNv12Conversion conversion)
+{
+    // BT.709 limited range is the program every cached render on disk was made with,
+    // so its seven tokens are frozen: 2(1-Kr) and 2(1-Kb) for Kr=0.2126, Kb=0.0722,
+    // the two green terms, and the 8-bit studio-swing scalings. BT.601 is the same
+    // algebra at Kr=0.299, Kb=0.114. Full range drops the 16 offset and spans the
+    // whole byte in both planes.
+    static constexpr SourceNv12Constants kBt709Limited{
+        "16.0","219.0","224.0","1.5748","0.187324","0.468124","1.8556"};
+    static constexpr SourceNv12Constants kBt709Full{
+        "0.0","255.0","255.0","1.5748","0.187324","0.468124","1.8556"};
+    static constexpr SourceNv12Constants kBt601Limited{
+        "16.0","219.0","224.0","1.402","0.344136","0.714136","1.772"};
+    static constexpr SourceNv12Constants kBt601Full{
+        "0.0","255.0","255.0","1.402","0.344136","0.714136","1.772"};
+    switch(conversion){
+        case SourceNv12Conversion::Bt709Limited:return &kBt709Limited;
+        case SourceNv12Conversion::Bt709Full:return &kBt709Full;
+        case SourceNv12Conversion::Bt601Limited:return &kBt601Limited;
+        case SourceNv12Conversion::Bt601Full:return &kBt601Full;
+        case SourceNv12Conversion::Unsupported:break;
+    }
+    return nullptr;
+}
+} // namespace d3d12_renderer_detail
+
+bool D3D12Renderer::CompileSourceNv12(SourceNv12Conversion conversion,ComPtr<ID3DBlob>& blob)
+{
+    const auto* constants=d3d12_renderer_detail::SourceNv12ConstantsFor(conversion);
+    if(!constants){
+        LOG("NV12 source conversion has no coefficients for the source's colour description; "
+            "refusing to guess a matrix.");
+        return false;
+    }
+    const D3D_SHADER_MACRO defines[]={
+        {"SOURCE_LUMA_OFFSET",constants->lumaOffset},
+        {"SOURCE_LUMA_SCALE",constants->lumaScale},
+        {"SOURCE_CHROMA_SCALE",constants->chromaScale},
+        {"SOURCE_RED_V",constants->redV},
+        {"SOURCE_GREEN_U",constants->greenU},
+        {"SOURCE_GREEN_V",constants->greenV},
+        {"SOURCE_BLUE_U",constants->blueU},
+        {nullptr,nullptr}};
+    ComPtr<ID3DBlob>err;
+    const HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,defines,nullptr,
+                                "PSSourceNv12","ps_5_1",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&err);
+    if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}
+    return true;
+}
+
+bool D3D12Renderer::CreatePipelines(){
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
     ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12;
-    auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
+    auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
-       !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma)||
-       !C("PSSourceNv12","ps_5_1",sourceNv12))return false;
+       !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
+    // Only a renderer that will actually be handed NV12 source frames compiles the
+    // conversion, and it compiles exactly the one conversion the source's declared
+    // description names. A BGRA source never reaches that draw, so it needs no program
+    // and gets none - which is also why there is nowhere for a default matrix to live.
+    const SourceNv12Conversion conversion=SourceNv12ConversionFor(m_sourceColor);
+    if(m_sourceLayout==PixelLayout::Nv12){
+        if(!CompileSourceNv12(conversion,sourceNv12))return false;
+        // Third member of the "GPU source conversion" family the decoder's accepted
+        // and refused lines belong to, and the only one that is evidence about the
+        // program rather than the decision: it names the arm that actually compiled.
+        LOG("GPU source conversion compiled: matrix="
+            <<(conversion==SourceNv12Conversion::Bt709Limited||conversion==SourceNv12Conversion::Bt709Full?"bt709":"bt601")
+            <<" range="
+            <<(conversion==SourceNv12Conversion::Bt709Limited||conversion==SourceNv12Conversion::Bt601Limited?"limited":"full")
+            <<".");
+    }
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     for(uint32_t r=0;r<2;++r){ranges[r].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[r].NumDescriptors=1;ranges[r].BaseShaderRegister=r;}
     // The reference table is two descriptors wide so the flow resolve can read the
@@ -386,8 +481,10 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
     p.PS={captureChroma->GetBufferPointer(),captureChroma->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8G8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureChroma)),"Create NV12 chroma PSO"))return false;
-    p.PS={sourceNv12->GetBufferPointer(),sourceNv12->GetBufferSize()};
-    p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoSourceNv12)),"Create NV12 source PSO"))return false;
+    if(sourceNv12){
+        p.PS={sourceNv12->GetBufferPointer(),sourceNv12->GetBufferSize()};
+        p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoSourceNv12)),"Create NV12 source PSO"))return false;
+    }
     // The debug views draw into the backbuffer, so they take its format. They used to
     // inherit the cache target's B8G8R8A8 from the PSO created just above, which does
     // not match the R8G8B8A8 swapchain the present pass actually binds them to.
@@ -445,12 +542,8 @@ bool D3D12Renderer::CreateUploadForTexture(const D3D12_RESOURCE_DESC&desc,ComPtr
 
 bool D3D12Renderer::CreateVideoResources(){
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    // Same rule as the capture side: NV12 planes need even dimensions, so an odd source
-    // keeps the BGRA upload rather than losing a row or a column.
-    m_sourceLayout=(m_requestedSourceLayout==PixelLayout::Nv12&&!(m_sourceW%2)&&!(m_sourceH%2))
-        ?PixelLayout::Nv12:PixelLayout::Bgra;
-    if(m_requestedSourceLayout==PixelLayout::Nv12&&m_sourceLayout==PixelLayout::Bgra)
-        LOG("NV12 source needs even dimensions; taking BGRA at "<<m_sourceW<<"x"<<m_sourceH<<".");
+    // m_sourceLayout was resolved in Initialize, before the pipelines that depend
+    // on it.
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
     // The decoded texture is a render target only when the NV12 conversion draws into it.
     auto src=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_sourceW,m_sourceH,nv12Source?D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET:D3D12_RESOURCE_FLAG_NONE);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_decodedTexture)),"Create decoded texture"))return false;

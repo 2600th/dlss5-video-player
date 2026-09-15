@@ -9,6 +9,7 @@
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
 #include "PixelLayout.h"
+#include "MediaSource.h"
 #include "FrameIdentity.h"
 #include "NgxSession.h"
 #include "OpticalFlowNvof.h"
@@ -16,6 +17,31 @@
 #include <functional>
 
 struct D3D12RendererTestAccess;
+
+namespace d3d12_renderer_detail {
+// The NV12 source conversion's numbers as the tokens CreatePipelines pastes into
+// the shader text, one set per conversion SourceNv12Conversion names. They are
+// strings because a float cannot be turned back into a token, and tokens are what
+// keeps the BT.709 limited-range arm compiling to the byte-identical program that
+// every cached render on disk was made with.
+//
+// Luma is (Y*255 - lumaOffset) / lumaScale and chroma is (UV*255 - 128) /
+// chromaScale; the four coefficients are the standard inverse matrix, R from V,
+// G from U and V, B from U.
+struct SourceNv12Constants {
+    const char* lumaOffset;
+    const char* lumaScale;
+    const char* chromaScale;
+    const char* redV;
+    const char* greenU;
+    const char* greenV;
+    const char* blueU;
+};
+
+// Null for Unsupported, which is the whole gate: there is no nearest-variant
+// branch to fall into.
+const SourceNv12Constants* SourceNv12ConstantsFor(SourceNv12Conversion conversion);
+} // namespace d3d12_renderer_detail
 
 // A resource whose destruction a test wants to observe, handed to the renderer
 // so the renderer's own teardown order releases it.
@@ -180,6 +206,21 @@ public:
     PixelLayout ActiveSourceLayout() const { return m_sourceLayout; }
     size_t SourceFrameBytes() const { return PixelLayoutFrameBytes(m_sourceLayout, m_sourceW, m_sourceH); }
 
+    // What the source declared about its colour, which is what the NV12 source
+    // conversion is specialised for. Selected before Initialize like the layout
+    // above: the conversion's coefficients and range mapping are compiled into
+    // the shader as literals rather than read from a constant buffer, because
+    // fxc folds the chroma scale into each coefficient and the luma scale into
+    // each channel's multiply-add, and a constant-buffer value cannot be folded -
+    // so a parameterised pass could not be bit-identical to the BT.709
+    // limited-range program every cached render on disk was made with.
+    //
+    // A description SourceNv12ConversionFor refuses, paired with an NV12 layout,
+    // fails Initialize rather than picking the nearest matrix. That pairing is
+    // unreachable: VideoDecoder is the only producer of NV12 source frames and it
+    // asks for that layout only for a description the same function accepted.
+    void SetSourceColor(const SourceColorDescription& color) { m_sourceColor = color; }
+
     // Tearing is opt-in and belongs only to a renderer nobody watches. The offline
     // carrier presents into a hidden window purely so the neural add-on sees a present
     // per frame, and capping that at the display refresh would throttle an export that
@@ -308,6 +349,11 @@ private:
     bool CreateDeviceAndSwapchain(HWND hwnd);
     bool CreateHeapsAndBackbuffers();
     bool CreatePipelines();
+    // The one pass whose text is not the same for every renderer: the source
+    // conversion is specialised for m_sourceColor. Static, and takes no device,
+    // so a test can compile every arm without one.
+    static bool CompileSourceNv12(SourceNv12Conversion conversion,
+                                  Microsoft::WRL::ComPtr<ID3DBlob>& blob);
     bool CreateVideoResources();
     bool InitializeDLSS(bool& gpuSynchronized);
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
@@ -444,6 +490,7 @@ private:
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_sourceChromaFootprint{};
     PixelLayout m_requestedSourceLayout = PixelLayout::Bgra;
     PixelLayout m_sourceLayout = PixelLayout::Bgra;
+    SourceColorDescription m_sourceColor{};
     bool m_sourcePlanesInCopyDest = true;
     uint32_t m_numRows=0,m_guideRows=0;
     uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0;

@@ -13,6 +13,36 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- `GpuSourceConversion` reads the source's colour description instead of assuming
+  it. The decoder's existing ffprobe call also asks for `color_space`,
+  `color_range`, `color_primaries` and `color_transfer`, and the GPU path is taken
+  only for a matrix and range the conversion implements - BT.709 or BT.601, limited
+  or full - with the shader compiled for exactly that pair. Anything else, a stream
+  that declares nothing included, decodes to BGRA and ffmpeg converts it on the CPU:
+  that costs pipe bandwidth and never colour, and never fails a render. Each render's
+  log answers `GPU source conversion` with `accepted:` or `refused:` and the four
+  tags it read. What it was worth: a JPEG is BT.601 full range by convention, and
+  decoding one's NV12 with the previous hard-coded BT.709-limited coefficients lands
+  mean 5.89 and max 33.0 eight-bit levels from its true colour, against 0.40 and 2.0
+  for the program now selected. The BT.709-limited case is untouched - byte-identical
+  shader bytecode, and three identical decoded-frame digests across before, a repeat
+  of before, and after - so no cached render is re-coloured.
+- The NGX log no longer cries wolf about its own core. NGX probes for the NGX core
+  beside the executable first, a driver file no application ships, so every session
+  logged two `failed to load NGXCore: 126` lines; the callback copied anything
+  containing "error" and dropped the line four later that says the driver-store core
+  loaded. That asymmetry was read here as "Super Resolution cannot start on this
+  machine" and written into two documents before a real session disproved it. The
+  expected probe is now labelled as routine and the load that decides the outcome is
+  copied either way.
+- `blind.py` stopped two silent failures in the instrument that settles look
+  questions. Building a ballot left the previous ballot's pairs in the directory the
+  judge is told to look at, while overwriting the key that could score them - 12
+  unscoreable images from a retired question sat beside the 8 live ones. And scoring
+  an unfilled ballot printed a clean sweep of zeros and exited 0, which reads exactly
+  like a measured tie; a ballot filled in against a since-rebuilt key read the same
+  way. Stale pairs are now removed and counted out loud, and a ballot with nothing
+  scored, or rows the key does not know, says so and exits non-zero.
 - The render identity now covers what the pass actually evaluates. It carried no
   driver version, and `runtimeDigest` hashed the staged files while every run
   resolves its weights out of the driver store and `%ProgramData%\NVIDIA\NGX\models`

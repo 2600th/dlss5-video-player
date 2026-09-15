@@ -388,7 +388,15 @@ bool OpticalFlowNvof::Initialize(ID3D12Device* device, uint32_t width, uint32_t 
         << ", cost="
         << (m_cost ? "on" : "unavailable")
         << ", direction="
-        << (m_backFlow ? "both, round-trip gate armed" : "forward only, gate off")
+        // What this knows is whether a backward field exists and is bound, which is
+        // what the resolve pass needs to reject a vector on round-trip disagreement.
+        // It deliberately does not claim the rejection happened: the gate itself
+        // lives in the resolve shader, and a build with the backward field bound and
+        // the rejection removed would still print "armed" here - which is exactly
+        // what the 2026-09-15 gate A/B found when it tried to use this line as its
+        // per-arm assertion (measurements/q1-gate-camera-original-20260915).
+        << (m_backFlow ? "both, backward field bound for the round-trip gate"
+                       : "forward only, no backward field so the gate cannot run")
         << ", global flow="
         << (!m_globalSurface ? "off" : m_globalMapped ? "on" : "on but unreadable") << ".");
     return true;

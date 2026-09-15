@@ -66,6 +66,26 @@ clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
+**And it pays on camera-original footage (2026-09-15), which settles the item the
+other way.** The 2026-09-14 reading above - "does not pay yet" - was taken on
+NR-processed captures. Re-checked on the seven `orig-*` clips cut from publishers'
+own releases, with the gate isolated to its *rejection* alone (BOTH-direction flow,
+global flow, the backward field and the cost surface all left exactly as shipped in
+both arms), false motion improves on **6 of 7** clips, by 2.11 % to 46.91 %
+relative; cell flips improve on 7 of 7 and added flicker on 7 of 7. The one adverse
+clip, `orig-game-cuts`, is +0.43 % false motion while its flips and sigma still
+favour the gate. Against the `shipped-intensity-0` carrier floor the gate removes
+10.9-77.3 % of the false motion the neural pass itself contributes on the six clips
+it wins. 50 renders, every one bit-reproducible within its arm to full precision,
+four independent per-arm assertions, at the shipped mask state. So the "if real
+footage does not pay either, removing it is the honest move" clause is discharged:
+it pays, and it stays. The estimator under test was NVOFA hardware flow on all
+seven clips, so what this measured is the resolve-shader half of the gate;
+`kRoundTripCells` in the CPU estimator never decided a motion texture here, though
+`BuildDepthProxy` still reads the CPU flow field, which a depth=0 probe bounds at
+0.3-1 pp relative.
+[Camera-original gate report](measurements/q1-gate-camera-original-20260915/REPORT.md)
+
 **Settled the same day on NR-processed captures, and the answer reverses the
 synthetic one.** Four labelled clips - cut from this repository's own demo
 capture, cuts verified frame by frame - were rendered on both trees. Read
@@ -584,6 +604,25 @@ Preserve:
 
 Expose native **Tone Intensity**, including zero, which NVIDIA says preserves the rendered frame's exact colors. Add clipping and color-shift warnings.
 
+**The source's own colour description is now read, and it gates the GPU
+conversion (2026-09-15).** `VideoDecoder`'s existing ffprobe call also asks for
+`color_space`, `color_range`, `color_primaries` and `color_transfer`, and the
+description travels to the renderer, which compiles the NV12 source pass for
+exactly the pair the source declared - BT.709 or BT.601, limited or full. A source
+declaring anything else, or nothing, decodes to BGRA and ffmpeg converts it on the
+CPU: undeclared is not treated as BT.709. Every render's log answers
+`GPU source conversion` with `accepted:`/`refused:` and the four tags it read.
+What that was worth, measured on a JPEG (`pc`/`bt470bg` - BT.601 full by
+convention): decoding its NV12 with the old hard-coded BT.709-limited
+coefficients lands mean 5.89 and max 33.0 eight-bit levels from its true RGB,
+against 0.40 and max 2.0 for the program the probe now selects. That was only
+reachable with `GpuSourceConversion=1`, which is exactly why the flag was off -
+the hazard is now removed rather than documented, and the flag's default is a
+throughput question again. Primaries and transfer are read and logged but do not
+select a conversion: the pass produces R'G'B' from Y'CbCr, a matrix and a range
+and nothing else, and the CPU fallback handles a BT.2020-primaries or PQ source no
+better. 10-bit, HDR metadata and original-chroma preservation remain open.
+
 **Unmeasured, and deprioritised on 2026-09-14 - not a negative result.** The
 exposure half of this item - supplying NGX a 1x1 exposure texture and an `IsHDR`
 flag instead of the `AutoExposure` feature flag `DLSSBackend.cpp` sets
@@ -621,10 +660,34 @@ neural-size path is byte-unchanged: the scale is `1,1` there, asserted with an
 exact float compare rather than an epsilon, and a live session prints
 `Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame,
 vectors scaled by 1,1 into the 1920x1080 DLSS input`. The SR branch itself is
-unit-tested and not yet session-proven on this machine, because the player-root
-SR runtime is not staged here and `[Playback] SuperResolution=1` fails at
-`NGXLoadLibrary` - see
-[the readback report](measurements/gpu-readback-20260914/REPORT.md).
+unit-tested and **now session-proven** (2026-09-14 said otherwise and was wrong):
+two real sessions created and evaluated a SuperResolution feature at
+`input=1920x1080 output=2560x1440` for 600+ frames with NVOFA hardware flow as the
+motion guide in that renderer. The `NGXLoadLibrary: 126` line read as a blocker is
+NGX's app-local probe for the NGX *core*, which no application ships; the same log
+resolves it from the driver store four lines later and says `succeeded`. The player's
+log showed only the failure because its NGX callback forwards messages containing
+"error" and nothing else. What the ratio cannot be is anything but `1,1`: the SR path
+passes `preserveSource=true`, so the DLSS input *is* the decoded frame at all six
+renderer call sites, so the "scale other than 1,1" this item once wanted as evidence
+was unobtainable by construction - see
+[the SR session report](measurements/p5-sr-session-20260915/REPORT.md).
+
+**One thing the SR session exposed, and it is owed.** The numeric side of the
+per-axis plan is well covered - `RenderSettingsTests.cpp` drives identity,
+downscaled, 1.5x upscaled, anisotropic and zero-dimension refusal - but the *GPU
+consumer* of that number is not: `motion*MotionScale` in `src/NvofResolveShader.h:32,72`,
+fed by the constants at `src/D3D12Renderer.cpp:828-830`, has compile-only coverage
+(`tests/UpscalingTests.cpp:60-72` compiles the shader and asserts nothing about its
+arithmetic). So the shader multiply by a *non-unit* scale has never executed: not in
+a test, because no test runs that pixel shader, and not in a session, because every
+live configuration supplies `1,1`. The factor is tested; the multiply that consumes
+it is exercised only at the identity, where it is a no-op. No test is added here for
+a configuration the player cannot currently produce - that would pin unreachable
+code - but the risk is named: it becomes real with the first configuration that
+resamples the decoded frame into a differently sized DLSS input, and the way to
+retire it is a GPU test driving `RenderFrame` with `renderW != sourceW` that checks
+the emitted motion texture.
 
 The 2026-09-11 survey found the cheap route to both, and it is items 1 and 2 of
 the plan at the top of this file: `NV_OF_PRED_DIRECTION_BOTH` returns backward

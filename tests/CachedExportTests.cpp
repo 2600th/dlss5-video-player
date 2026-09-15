@@ -472,8 +472,27 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
         CHECK_EQ(decoder.DurationSeconds(), 1.0);
         VideoFrame frame;
         CHECK(decoder.ReadNext(frame));
-        // An even-sized sequential open decodes to NV12 (see PixelLayout.h).
-        CHECK(decoder.PixelLayout() == PixelLayout::Nv12);
+        // A sequential open takes NV12 only for a source that DECLARES a colour
+        // description the GPU conversion implements (see MediaSource.h), so the
+        // layout is a per-format answer here rather than a constant: measured on
+        // this ffmpeg, `color=blue` gives png `pc/gbr` and bmp/tiff
+        // `unknown/unknown` (all three refused, BGRA), while jpg is `pc/bt470bg`
+        // and webp `tv/bt470bg` (BT.601 full and limited, both converted on the
+        // GPU as NV12). Asserting the layout follows the gate is what survives a
+        // codec changing its mind; asserting a fixed layout did not.
+        //
+        // What the gate is worth, measured: a JPEG is BT.601 full range by
+        // convention (`pc/bt470bg` above), and the pre-probe shader was
+        // hard-coded to BT.709 limited. Decoding this file's NV12 with those
+        // coefficients lands mean 5.89 / max 33.0 eight-bit levels away from its
+        // true RGB, against 0.40 / max 2.0 for the BT.601-full program the probe
+        // now selects. Reachable only with `GpuSourceConversion=1`, since the one
+        // production caller of OpenSequential passes that flag as its NV12
+        // request (`src/OfflineNeuralRenderer.cpp:1661`) - which is precisely the
+        // colour hazard that kept the flag off by default.
+        const bool convertible =
+            SourceNv12ConversionFor(decoder.ColorDescription()) != SourceNv12Conversion::Unsupported;
+        CHECK((decoder.PixelLayout() == PixelLayout::Nv12) == convertible);
         CHECK_EQ(frame.bgra.size(), FrameBytes(decoder.PixelLayout(), 96, 64));
         CHECK(!decoder.ReadNext(frame));
         CHECK(decoder.SeekSeconds(0));

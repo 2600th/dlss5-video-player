@@ -1,0 +1,77 @@
+[10:29:27.078] Isolated neural helper available; player remains hook-free. GPU=NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047 generation=rtx40
+[10:29:27.091] Neural cache directory: C:\Users\User\Documents\GitHub\dlss5-p5sr\build-upscaling\Release\cache\v1
+[10:29:27.105] Overlay hotkey unavailable: Ctrl+Alt+M winerr=1409
+[10:29:27.108] Opening local file.
+[10:29:27.108] Opening video. Decoder preference: FFmpeg -> Windows Media Foundation
+[10:29:27.108] FFmpeg executable detected.
+[10:29:27.465] ffprobe: 1920x1080 DAR=1.77778 @ 30 fps, duration=135.6
+[10:29:27.707] FFmpeg raw BGRA process started with CUDA decode + GPU scale.
+[10:29:27.711] Video decoder selected: FFmpeg
+[10:29:27.991] D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e vendor=0x10de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e that the cache identity, the receipt GPU label and the pace prior describe
+[10:29:28.087] [NGX feature 32764] [2026-09-15 10:29:28] [NGXLoadLibrary:326] error: failed to load NGXCore: 126 (C:\Users\User\Documents\GitHub\dlss5-p5sr\build-upscaling\Release\_nvngx.dll)
+[10:29:28.087] [NGX feature 32764] [2026-09-15 10:29:28] [NGXLoadLibrary:326] error: failed to load NGXCore: 126 (C:\Users\User\Documents\GitHub\dlss5-p5sr\build-upscaling\Release\nvngx.dll)
+[10:29:28.297] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.410] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.410] [NGX feature 32765] [2026-09-15 10:29:28] [NGXSecureLoadFeature:1345] Feature dlss failed to load (cmsid 141959980) from cache (location: C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0\files, name: 160_876232C.bin)
+[10:29:28.411] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.411] [NGX feature 32765] [2026-09-15 10:29:28] [NGXSecureLoadFeature:1345] Feature dlss failed to load (cmsid 241534723) from cache (location: C:\ProgramData\NVIDIA\NGX\models\dlss\versions\0\files, name: 160_E658703.bin)
+[10:29:28.532] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.532] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.532] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.532] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.534] [NGX feature 32765] [2026-09-15 10:29:28] [`anonymous-namespace'::SnippetLocationInfo::load:713] NGXLoadFromPath failed: -1160773628
+[10:29:28.764] NGX capability: SuperSampling.Available=1
+[10:29:28.764] NGX input policy: source=1920x1080 optimal=1920x1080 range=1901x1069..1920x1080 selected=1920x1080 output=1920x1080
+[10:29:28.764] NGX initialized. Deferred raw CreateFeature armed: input=1920x1080 output=1920x1080
+[10:29:28.834] NVOFA ready: 1920x1080 on a 2x2 grid (960x540 vectors, S10.5 = 1/32 px), perf=FAST, cost=on, direction=both, round-trip gate armed, global flow=on.
+[10:29:28.834] Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame, vectors scaled by 1,1 into the 1920x1080 DLSS input.
+[10:29:28.852] DLSS resource contract ready: Color=R16G16B16A16_FLOAT 1920x1080, MV=R16G16_FLOAT 1920x1080, Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV 1920x1080, Output=R16G16B16A16_FLOAT UAV 1920x1080, CompactGrid=R32G32B32A32_FLOAT 160x90 -> GPU MV expansion + direct SV_Depth write, Reference=B8G8R8A8_UNORM 1920x1080, Source=BGRA upload, NeuralTimestamps=12 @1000000000Hz
+[10:29:28.852] V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.
+[10:29:28.900] Audio: FFmpeg PCM/WaveOut path started at 0 s.
+[10:29:28.903] D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e vendor=0x10de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1463e that the cache identity, the receipt GPU label and the pace prior describe
+[10:29:28.983] NGX capability: SuperSampling.Available=1
+[10:29:28.983] SR range query quality=2 result=1 optimal=1707x960 min=1280x720 max=2560x1440
+[10:29:28.983] NGX input policy: source=1920x1080 optimal=1707x960 range=1280x720..2560x1440 selected=1920x1080 output=2560x1440
+[10:29:28.983] NGX initialized. Deferred raw CreateFeature armed: input=1920x1080 output=2560x1440
+[10:29:29.040] NVOFA ready: 1920x1080 on a 2x2 grid (960x540 vectors, S10.5 = 1/32 px), perf=FAST, cost=on, direction=both, round-trip gate armed, global flow=on.
+[10:29:29.040] Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame, vectors scaled by 1,1 into the 1920x1080 DLSS input.
+[10:29:29.049] DLSS resource contract ready: Color=R16G16B16A16_FLOAT 1920x1080, MV=R16G16_FLOAT 1920x1080, Depth=R32_TYPELESS resource / D32_FLOAT DSV / R32_FLOAT SRV 1920x1080, Output=R16G16B16A16_FLOAT UAV 2560x1440, CompactGrid=R32G32B32A32_FLOAT 160x90 -> GPU MV expansion + direct SV_Depth write, Reference=B8G8R8A8_UNORM 1920x1080, Source=BGRA upload, NeuralTimestamps=12 @1000000000Hz
+[10:29:29.049] V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.
+[10:29:29.099] RAW NGX D3D12 CreateFeature SUCCESS: feature=SuperSampling input=1920x1080 output=2560x1440 flags=MVLowRes|AutoExposure; direct hook-visible contract
+[10:29:29.100] NGX feature creation flushed before EvaluateFeature; temporal history reset.
+[10:29:29.101] RAW NGX EvaluateFeature_C SUCCESS #1 color=1920x1080 depth=1920x1080 mv=1920x1080 output=2560x1440 jitter=(0,0) reset=1
+[10:29:29.116] Renderer teardown: buffers unmapped
+[10:29:29.116] Renderer teardown: NGX released
+[10:29:29.128] Playback SR enabled: 1920x1080 -> 2560x1440
+[10:29:29.142] Update check: latest release dlss5-video-player-v0.21.2; this build is 0.21.2
+[10:29:29.626] Scene cut accepted during playback: strength=histogram residual=0.102557 histogramOverlap=0.800556 pts=5000000 history=2
+[10:29:30.296] Scene cut accepted during playback: strength=histogram residual=0.189202 histogramOverlap=0.78625 pts=11666666 history=3
+[10:29:31.195] Scene cut accepted during playback: strength=histogram residual=0.173548 histogramOverlap=0.801736 pts=20666666 history=4
+[10:29:31.961] Scene cut accepted during playback: strength=histogram residual=0.138048 histogramOverlap=0.801111 pts=28333333 history=5
+[10:29:32.528] Scene cut accepted during playback: strength=histogram residual=0.165207 histogramOverlap=0.767014 pts=34000000 history=6
+[10:29:38.128] Scene cut accepted during playback: strength=histogram residual=0.101392 histogramOverlap=0.755903 pts=90000000 history=7
+[10:29:39.096] RAW NGX EvaluateFeature_C SUCCESS #300 color=1920x1080 depth=1920x1080 mv=1920x1080 output=2560x1440 jitter=(0,0) reset=0
+[10:29:43.726] Scene cut accepted during playback: strength=histogram residual=0.148431 histogramOverlap=0.757292 pts=146000000 history=8
+[10:29:44.795] Scene cut accepted during playback: strength=histogram residual=0.117459 histogramOverlap=0.846042 pts=156666666 history=9
+[10:29:45.996] Scene cut accepted during playback: strength=histogram residual=0.147841 histogramOverlap=0.830764 pts=168666666 history=10
+[10:29:48.529] Scene cut accepted during playback: strength=histogram residual=0.199486 histogramOverlap=0.43375 pts=194000000 history=11
+[10:29:49.096] RAW NGX EvaluateFeature_C SUCCESS #600 color=1920x1080 depth=1920x1080 mv=1920x1080 output=2560x1440 jitter=(0,0) reset=0
+[10:29:52.225] Scene cut accepted during playback: strength=histogram residual=0.102557 histogramOverlap=0.800556 pts=231000000 history=12
+[10:29:52.894] Scene cut accepted during playback: strength=histogram residual=0.189202 histogramOverlap=0.78625 pts=237666666 history=13
+[10:29:53.794] Scene cut accepted during playback: strength=histogram residual=0.173548 histogramOverlap=0.801736 pts=246666666 history=14
+[10:29:54.562] Scene cut accepted during playback: strength=histogram residual=0.138048 histogramOverlap=0.801111 pts=254333333 history=15
+[10:29:55.316] Renderer teardown: buffers unmapped
+[10:29:55.423] Renderer teardown: NGX released
+[10:29:55.514] Decoder frame queue: frames=785 wallMs=27802.3 perFrameMs: pipeRead=3.049 blockedWait=0.286 emptyPoll=0.000 emptySleep=0.000 queueFullWait=32.081 other=0.001 reads=1076 polls=0 queueFullWaits=782 zeroFills=785

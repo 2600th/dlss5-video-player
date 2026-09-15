@@ -51,9 +51,11 @@ struct NeuralRenderRequest {
     // attempt reads it.
     uint32_t nvencPreset{7};
     // Decode the source to NV12 and convert it to BGRA on the GPU (true) or let ffmpeg
-    // convert on the CPU (false). Default false: the GPU conversion applies a fixed
-    // BT.709 limited-range inverse and nothing probes the source's matrix or range,
-    // so a BT.601 or full-range source would reach the model with shifted colour.
+    // convert on the CPU (false). Default false on a measured throughput trade, not
+    // on a colour risk: the decoder probes the source's matrix and range and only
+    // delivers NV12 for a description the GPU conversion has coefficients for, so a
+    // BT.601, full-range, undeclared or BT.2020 source falls back to the CPU
+    // conversion with one log line rather than reaching the model mis-decoded.
     bool gpuSourceConversion{false};
 };
 

@@ -208,6 +208,8 @@ bool VideoDecoder::OpenMetadata(const std::wstring& path, MediaSourceKind source
     m_stillImage = false;
     m_gif = false;
     m_displayAspect = 0.0;
+    m_sourceColor = {};
+    m_colorTags.clear();
     m_sourceKind = sourceKind;
     m_sequentialOpen = false;
     m_sequentialNv12 = true;
@@ -249,6 +251,8 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     m_stillImage = false;
     m_gif = false;
     m_displayAspect = 0.0;
+    m_sourceColor = {};
+    m_colorTags.clear();
     m_sourceKind = sourceKind;
     // Set for the whole session here; OpenFFmpeg turns it into m_layout once the
     // probe knows the geometry, and it is untouched by any acceleration
@@ -435,9 +439,11 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
 
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_hardwareProfile.clear();
+    m_sourceColor={};
+    m_colorTags.clear();
     std::wstring args =
         L"-v error -select_streams v:0 "
-        L"-show_entries stream=width,height,codec_name,pix_fmt,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
+        L"-show_entries stream=width,height,codec_name,pix_fmt,color_space,color_range,color_primaries,color_transfer,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
         L"-of default=noprint_wrappers=1 " + Quote(path);
 
     std::string text;
@@ -452,6 +458,9 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     double avgRate = 0.0, rawRate = 0.0, duration = 0.0;
     double videoDuration = 0.0;
     std::string format,codecName,pixelFormat;
+    // ffprobe prints "unknown" for a colour entry the stream does not declare;
+    // these stay empty for that, which is what makes Unspecified reachable.
+    std::string colorSpace,colorRange,colorPrimaries,colorTransfer;
     double displayAspect = 0.0, sampleAspect = 1.0;
     std::istringstream in(text);
     std::string line;
@@ -466,6 +475,10 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             else if (key == "format_name") format = value;
             else if (key == "codec_name" && value != "N/A") codecName = value;
             else if (key == "pix_fmt" && value != "N/A") pixelFormat = value;
+            else if (key == "color_space" && value != "N/A" && value != "unknown") colorSpace = value;
+            else if (key == "color_range" && value != "N/A" && value != "unknown") colorRange = value;
+            else if (key == "color_primaries" && value != "N/A" && value != "unknown") colorPrimaries = value;
+            else if (key == "color_transfer" && value != "N/A" && value != "unknown") colorTransfer = value;
             else if (key == "height") height = static_cast<uint32_t>(std::stoul(value));
             else if (key == "display_aspect_ratio" && value != "N/A") {
                 const size_t c=value.find(':'); if(c!=std::string::npos){ double a=std::stod(value.substr(0,c)), b=std::stod(value.substr(c+1)); if(b>0) displayAspect=a/b; }
@@ -482,6 +495,28 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     // ffprobe prints stream entries in its own order, so the key is composed
     // once both fields are in hand.
     m_hardwareProfile = codecName.empty() ? pixelFormat : (pixelFormat.empty() ? codecName : codecName + "/" + pixelFormat);
+    // Same reason as the key above: the four colour entries arrive in whatever
+    // order ffprobe chose, so the description is composed once all four are in
+    // hand. An entry ffprobe printed as "unknown" left its string empty and maps
+    // to Unspecified; anything declared but outside the sets below maps to Other,
+    // so a refusal can tell "says BT.2020" from "says nothing".
+    m_sourceColor.matrix = colorSpace.empty() ? ColorMatrix::Unspecified :
+        colorSpace == "bt709" ? ColorMatrix::Bt709 :
+        (colorSpace == "bt470bg" || colorSpace == "smpte170m") ? ColorMatrix::Bt601 : ColorMatrix::Other;
+    m_sourceColor.range = colorRange == "tv" ? ColorRange::Limited :
+        colorRange == "pc" ? ColorRange::Full : ColorRange::Unspecified;
+    m_sourceColor.primaries = colorPrimaries.empty() ? ColorPrimaries::Unspecified :
+        colorPrimaries == "bt709" ? ColorPrimaries::Bt709 :
+        colorPrimaries == "bt470bg" ? ColorPrimaries::Bt470bg :
+        colorPrimaries == "smpte170m" ? ColorPrimaries::Smpte170m : ColorPrimaries::Other;
+    m_sourceColor.transfer = colorTransfer.empty() ? ColorTransfer::Unspecified :
+        colorTransfer == "bt709" ? ColorTransfer::Bt709 :
+        colorTransfer == "smpte170m" ? ColorTransfer::Smpte170m : ColorTransfer::Other;
+    // Kept verbatim for the refusal log line: "other" is a diagnosis nobody can
+    // act on, "bt2020nc" is.
+    const auto tag=[](const std::string& value){return value.empty()?std::string("unspecified"):value;};
+    m_colorTags = "matrix=" + tag(colorSpace) + " range=" + tag(colorRange) +
+                  " primaries=" + tag(colorPrimaries) + " transfer=" + tag(colorTransfer);
 
     if (!width || !height) {
         LOG("ffprobe returned no usable video dimensions.");
@@ -534,7 +569,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_fps = std::clamp(m_fps, 1.0, 240.0);
 
     LOG("ffprobe: " << m_width << "x" << m_height << " DAR=" << m_displayAspect << " @ " << m_fps
-        << " fps, duration=" << m_durationSec);
+        << " fps, duration=" << m_durationSec << ", " << m_colorTags);
     return true;
 }
 
@@ -808,9 +843,37 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     // NV12 needs even plane dimensions (the UV plane is half-resolution in
     // both axes); odd geometry stays BGRA even for a sequential/export open,
     // and so does a caller that opted out of NV12 via preferNv12=false.
+    //
+    // It also needs the source to have DECLARED a colour description the GPU
+    // conversion implements. That conversion is a matrix plus a range mapping,
+    // and an undeclared stream states neither: handing one over as NV12 is what
+    // used to decode a BT.601 or full-range source under BT.709 limited-range
+    // coefficients with nothing in the log to say so. Undeclared is not BT.709 -
+    // it is BGRA, ffmpeg converts it on the CPU from the tags it can see, and
+    // that costs pipe bandwidth rather than colour. A `known` open skips the
+    // probe entirely and so declares nothing, which lands on the same refusal.
+    //
+    // This is also what makes the renderer's matching refusal unreachable: the
+    // decoder is the only thing that ever asks for an NV12 source, and it asks
+    // only for a description SourceNv12ConversionFor already accepted.
     // Decided once here, from the probed geometry, and left alone by every
     // later StartFFmpeg call (acceleration fallback, seek restart) this session.
-    m_layout = (m_sequentialOpen && m_sequentialNv12 && m_width % 2 == 0 && m_height % 2 == 0)
+    const bool wantNv12 = m_sequentialOpen && m_sequentialNv12;
+    const bool evenGeometry = m_width % 2 == 0 && m_height % 2 == 0;
+    const bool convertible = SourceNv12ConversionFor(m_sourceColor) != SourceNv12Conversion::Unsupported;
+    // Accepted and refused are deliberately one grep away from each other - same
+    // "GPU source conversion" prefix, same four tags named either way - so a reader
+    // of one render's log gets either the path it took or the reason it did not.
+    if (wantNv12 && evenGeometry) {
+        if (convertible)
+            LOG("GPU source conversion accepted: " << m_colorTags
+                << "; decoding to NV12 and converting it on the GPU.");
+        else
+            LOG("GPU source conversion refused: " << m_colorTags
+                << "; no conversion implements that description, so the source decodes to "
+                   "BGRA and ffmpeg converts it on the CPU instead.");
+    }
+    m_layout = (wantNv12 && evenGeometry && convertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     return StartFFmpeg(0.0,initialAcceleration);
 }

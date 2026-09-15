@@ -120,6 +120,14 @@ struct D3D12RendererTestAccess {
         return *renderer.m_testHooks;
     }
 
+    // The source conversion's program, compiled the way the renderer compiles it
+    // but without a device, so every arm is checkable on any machine.
+    static bool CompileSourceNv12(SourceNv12Conversion conversion,
+                                  Microsoft::WRL::ComPtr<ID3DBlob>& blob)
+    {
+        return D3D12Renderer::CompileSourceNv12(conversion,blob);
+    }
+
     static void ConfigureWait(D3D12Renderer& renderer,
                               d3d12_renderer_detail::FenceWaitResult result,
                               int& waits)
@@ -4390,6 +4398,146 @@ void video_decoder_open_sequential_stays_bgra_for_odd_geometry_test()
     CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,3,3),frame.bgra.size());
 }
 
+// The GPU source conversion is a matrix plus a range mapping. A source that
+// declares neither, or declares a matrix the conversion has no coefficients for,
+// cannot be converted correctly - so it is never handed over as NV12, however
+// loudly the caller asked for it. Undeclared is not BT.709.
+void video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test()
+{
+    MediaFixture fixture;
+    {
+        // Declares nothing at all - the common case for a clip nobody tagged.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"colortag_none",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(decoder->ColorDescription().matrix==ColorMatrix::Unspecified);
+        CHECK(decoder->ColorDescription().range==ColorRange::Unspecified);
+        // The refusal is not a failure: the frames still arrive, converted by
+        // ffmpeg on the CPU, at BGRA's four bytes per pixel.
+        const VideoFrame frame=read_one_frame(*decoder);
+        CHECK(frame.layout==VideoPixelLayout::Bgra);
+        CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,4,2),frame.bgra.size());
+    }
+    {
+        // Declares everything, and declares BT.2020 constant luminance-free plus a
+        // PQ transfer. Declared-but-unhandled must refuse exactly like undeclared,
+        // and must not be rounded to the nearest matrix the shader does have.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"colortag_bt2020",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(decoder->ColorDescription().matrix==ColorMatrix::Other);
+        CHECK(decoder->ColorDescription().range==ColorRange::Limited);
+        CHECK(decoder->ColorDescription().transfer==ColorTransfer::Other);
+        CHECK(read_one_frame(*decoder).layout==VideoPixelLayout::Bgra);
+    }
+}
+
+// A source that does declare a description the conversion implements keeps the
+// NV12 path, and the description travels far enough out of the decoder for the
+// renderer to specialise the shader from it rather than assume BT.709.
+void video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test()
+{
+    MediaFixture fixture;
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+        const SourceColorDescription color=decoder->ColorDescription();
+        CHECK(color.matrix==ColorMatrix::Bt709);
+        CHECK(color.range==ColorRange::Limited);
+        CHECK(color.primaries==ColorPrimaries::Bt709);
+        CHECK(color.transfer==ColorTransfer::Bt709);
+        CHECK(SourceNv12ConversionFor(color)==SourceNv12Conversion::Bt709Limited);
+    }
+    {
+        // BT.601 full range, and the stub prints the colour entries before the
+        // geometry ones, so this also covers the description surviving ffprobe's
+        // own ordering.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"colortag_bt601full",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+        const SourceColorDescription color=decoder->ColorDescription();
+        CHECK(color.matrix==ColorMatrix::Bt601);
+        CHECK(color.range==ColorRange::Full);
+        CHECK(SourceNv12ConversionFor(color)==SourceNv12Conversion::Bt601Full);
+        const VideoFrame frame=read_one_frame(*decoder);
+        CHECK(frame.layout==VideoPixelLayout::Nv12);
+        CHECK_EQ(FrameBytes(VideoPixelLayout::Nv12,4,2),frame.bgra.size());
+    }
+}
+
+// The seven numbers the NV12 source pass is compiled with, per conversion. The
+// BT.709 limited-range row is frozen: it is the program every cached render on
+// disk was made with, and because the constants reach the shader as preprocessor
+// tokens, these exact strings are what make that arm's bytecode byte-identical to
+// the day it shipped. Changing one of them silently re-colours every cache hit.
+void source_nv12_conversion_constants_are_the_shipped_coefficients_test()
+{
+    using d3d12_renderer_detail::SourceNv12ConstantsFor;
+    const auto* limited709=SourceNv12ConstantsFor(SourceNv12Conversion::Bt709Limited);
+    CHECK(limited709!=nullptr);
+    if(limited709){
+        CHECK_EQ(std::string("16.0"),std::string(limited709->lumaOffset));
+        CHECK_EQ(std::string("219.0"),std::string(limited709->lumaScale));
+        CHECK_EQ(std::string("224.0"),std::string(limited709->chromaScale));
+        CHECK_EQ(std::string("1.5748"),std::string(limited709->redV));
+        CHECK_EQ(std::string("0.187324"),std::string(limited709->greenU));
+        CHECK_EQ(std::string("0.468124"),std::string(limited709->greenV));
+        CHECK_EQ(std::string("1.8556"),std::string(limited709->blueU));
+    }
+    // BT.601 selects BT.601's coefficients, not 709's, and keeps the studio-swing
+    // range mapping it shares with 709 limited.
+    const auto* limited601=SourceNv12ConstantsFor(SourceNv12Conversion::Bt601Limited);
+    CHECK(limited601!=nullptr);
+    if(limited601){
+        CHECK_EQ(std::string("1.402"),std::string(limited601->redV));
+        CHECK_EQ(std::string("0.344136"),std::string(limited601->greenU));
+        CHECK_EQ(std::string("0.714136"),std::string(limited601->greenV));
+        CHECK_EQ(std::string("1.772"),std::string(limited601->blueU));
+        CHECK_EQ(std::string("16.0"),std::string(limited601->lumaOffset));
+        CHECK_EQ(std::string("219.0"),std::string(limited601->lumaScale));
+        CHECK_EQ(std::string("224.0"),std::string(limited601->chromaScale));
+    }
+    // Full range keeps its matrix and drops the studio-swing mapping: no 16 offset
+    // and the whole byte in both planes.
+    const auto* full601=SourceNv12ConstantsFor(SourceNv12Conversion::Bt601Full);
+    CHECK(full601!=nullptr);
+    if(full601){
+        CHECK_EQ(std::string("0.0"),std::string(full601->lumaOffset));
+        CHECK_EQ(std::string("255.0"),std::string(full601->lumaScale));
+        CHECK_EQ(std::string("255.0"),std::string(full601->chromaScale));
+        CHECK_EQ(std::string("1.402"),std::string(full601->redV));
+    }
+    // No nearest variant: a description the pass cannot honour yields no constants,
+    // which is what leaves the renderer nothing to compile.
+    CHECK(SourceNv12ConstantsFor(SourceNv12Conversion::Unsupported)==nullptr);
+}
+
+// A per-arm label is not evidence that the arm took effect. Each conversion is
+// compiled here the way the renderer compiles it - same text, same flags, no
+// device - and the four programs must come out pairwise different, which is only
+// true if the constants actually reached the compiler.
+void source_nv12_conversion_compiles_a_distinct_program_per_arm_test()
+{
+    const std::array conversions{SourceNv12Conversion::Bt709Limited,SourceNv12Conversion::Bt709Full,
+                                 SourceNv12Conversion::Bt601Limited,SourceNv12Conversion::Bt601Full};
+    std::vector<std::string> programs;
+    for(const SourceNv12Conversion conversion:conversions){
+        Microsoft::WRL::ComPtr<ID3DBlob> blob;
+        CHECK(D3D12RendererTestAccess::CompileSourceNv12(conversion,blob));
+        if(!blob)continue;
+        programs.emplace_back(static_cast<const char*>(blob->GetBufferPointer()),blob->GetBufferSize());
+    }
+    CHECK_EQ(conversions.size(),programs.size());
+    for(size_t a=0;a+1<programs.size();++a)
+        for(size_t b=a+1;b<programs.size();++b)
+            CHECK(programs[a]!=programs[b]);
+    // An unsupported conversion has no program at all, so nothing can bind one.
+    Microsoft::WRL::ComPtr<ID3DBlob> refused;
+    CHECK(!D3D12RendererTestAccess::CompileSourceNv12(SourceNv12Conversion::Unsupported,refused));
+    CHECK(refused==nullptr);
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -5133,14 +5281,68 @@ int run_fake_media_child(int argc,wchar_t* argv[])
             return 0;
         }
         if(all.find(L"holdprobe")!=std::wstring::npos){Sleep(INFINITE);return 0;}
-        if(all.find(L"largeburst")!=std::wstring::npos){std::cout<<"width=1024\nheight=1024\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
-        if(all.find(L"drainexit")!=std::wstring::npos){std::cout<<"width=1920\nheight=1080\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.034\n"<<std::flush;return 0;}
-        if(all.find(L"partialend")!=std::wstring::npos){std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=0.067\n"<<std::flush;return 0;}
-        // Even geometry: OpenSequential can pick NV12 here.
-        if(all.find(L"nv12geom")!=std::wstring::npos){std::cout<<"width=4\nheight=2\ndisplay_aspect_ratio=2:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        // ffprobe prints a colour entry only when -show_entries asked for it, and this
+        // stub does the same: a scenario below whose colour decision comes out right is
+        // therefore proof that the decoder requested the four entries in the SAME
+        // invocation that produced the geometry, which is the one ffprobe child an open
+        // is allowed to spend.
+        const bool colorAsked=all.find(L"color_space")!=std::wstring::npos&&
+                              all.find(L"color_range")!=std::wstring::npos&&
+                              all.find(L"color_primaries")!=std::wstring::npos&&
+                              all.find(L"color_transfer")!=std::wstring::npos;
+        const auto color=[&](const char* space,const char* range,const char* primaries,
+                             const char* transfer){
+            if(!colorAsked)return std::string{};
+            return std::string("color_space=")+space+"\ncolor_range="+range+
+                   "\ncolor_primaries="+primaries+"\ncolor_transfer="+transfer+"\n";
+        };
+        const auto geometry=[](unsigned w,unsigned h,const char* dar,const char* duration="30"){
+            return "width="+std::to_string(w)+"\nheight="+std::to_string(h)+
+                   "\ndisplay_aspect_ratio="+dar+
+                   "\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration="+
+                   duration+"\n";
+        };
+        // largeburst and drainexit are sequential opens whose subject is the frame
+        // queue, so they declare BT.709 limited range: the frames they are about have
+        // to be the NV12 ones, and only a declared description gets those.
+        if(all.find(L"largeburst")!=std::wstring::npos){
+            std::cout<<geometry(1024,1024,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
+        }
+        if(all.find(L"drainexit")!=std::wstring::npos){
+            std::cout<<geometry(1920,1080,"16:9","0.034")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
+        }
+        if(all.find(L"partialend")!=std::wstring::npos){
+            std::cout<<geometry(2,2,"1:1","0.067")<<std::flush;return 0;
+        }
+        // Even geometry AND a declared colour description the GPU conversion implements:
+        // OpenSequential can pick NV12 here.
+        if(all.find(L"nv12geom")!=std::wstring::npos){
+            std::cout<<geometry(4,2,"2:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
+        }
+        // Even geometry, nothing declared. NV12 would hand the shader a frame whose
+        // matrix and range it would have to guess, so OpenSequential must stay BGRA.
+        if(all.find(L"colortag_none")!=std::wstring::npos){
+            std::cout<<geometry(4,2,"2:1")<<color("unknown","unknown","unknown","unknown")<<std::flush;return 0;
+        }
+        // Even geometry, BT.601 full range - a description the conversion does have
+        // coefficients for, so NV12 is allowed and the shader is specialised for it.
+        // Printed colour-first, because ffprobe emits entries in its own order and the
+        // decoder's parse composes the description only once all four are in hand.
+        if(all.find(L"colortag_bt601full")!=std::wstring::npos){
+            std::cout<<color("bt470bg","pc","bt470bg","smpte170m")<<geometry(4,2,"2:1")<<std::flush;return 0;
+        }
+        // Even geometry, fully declared, and declared as something the conversion has no
+        // coefficients for. Declared-but-unhandled refuses exactly like undeclared.
+        if(all.find(L"colortag_bt2020")!=std::wstring::npos){
+            std::cout<<color("bt2020nc","tv","bt2020","smpte2084")<<geometry(4,2,"2:1")<<std::flush;return 0;
+        }
         // Odd geometry: NV12's half-resolution UV plane needs even dimensions, so
-        // OpenSequential must stay BGRA here even though it prefers NV12.
-        if(all.find(L"oddgeom")!=std::wstring::npos){std::cout<<"width=3\nheight=3\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;}
+        // OpenSequential must stay BGRA here even though it prefers NV12 - and the
+        // colour description is the one the conversion likes best, so only the geometry
+        // can be what refused it.
+        if(all.find(L"oddgeom")!=std::wstring::npos){
+            std::cout<<geometry(3,3,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
+        }
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
@@ -5153,6 +5355,13 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     };
     if(all.find(L"nv12geom")!=std::wstring::npos){
         const std::vector<char> frame(rawFrameBytes(4,2),'n');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
+    }
+    // Every colortag_ scenario shares nv12geom's 4x2 geometry; only the declared
+    // colour differs, so the layout each one ends up with is attributable to that
+    // alone.
+    if(all.find(L"colortag_")!=std::wstring::npos){
+        const std::vector<char> frame(rawFrameBytes(4,2),'c');
         std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
     }
     if(all.find(L"oddgeom")!=std::wstring::npos){
@@ -6066,6 +6275,10 @@ int wmain(int argc, wchar_t* argv[])
     video_decoder_open_sequential_selects_nv12_for_even_geometry_test();
     video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test();
     video_decoder_open_sequential_stays_bgra_for_odd_geometry_test();
+    video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test();
+    video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test();
+    source_nv12_conversion_constants_are_the_shipped_coefficients_test();
+    source_nv12_conversion_compiles_a_distinct_program_per_arm_test();
     video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
     video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
     youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();

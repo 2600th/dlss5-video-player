@@ -5,9 +5,12 @@
 // Byte layout of a raw source frame as it travels decoder -> guides -> renderer.
 //   Bgra: 4 bytes per pixel, rows tightly packed.
 //   Nv12: full-resolution Y plane followed by a half-resolution interleaved UV plane,
-//         BT.709 limited range, exactly ffmpeg's `-pix_fmt nv12` rawvideo layout. Even
-//         dimensions only. 4.2 MB instead of 11.1 MB per 2578x1080 frame, which is why
-//         the export decodes to it.
+//         exactly ffmpeg's `-pix_fmt nv12` rawvideo layout. Even dimensions only.
+//         4.2 MB instead of 11.1 MB per 2578x1080 frame, which is why the export
+//         decodes to it. The layout says nothing about the colour encoding: on the
+//         source side that is whatever the stream declared, which is why the decoder
+//         carries a SourceColorDescription beside the layout and the GPU conversion
+//         is compiled for it.
 enum class PixelLayout { Bgra, Nv12 };
 
 inline size_t PixelLayoutFrameBytes(PixelLayout layout, uint32_t width, uint32_t height)

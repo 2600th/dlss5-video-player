@@ -1,0 +1,78 @@
+﻿{
+    "schema":  1,
+    "tool":  "tools/verification/player_session.ps1",
+    "generated":  "2026-09-15T05:01:14Z",
+    "host":  {
+                 "computer":  "-PRANSHUL-",
+                 "os":  "Microsoft Windows 11 Pro",
+                 "version":  "10.0.26200",
+                 "powershell":  "5.1.26100.9444",
+                 "adapters":  [
+                                  "Intel(R) UHD Graphics 770 driver=32.0.101.6129",
+                                  "NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047"
+                              ]
+             },
+    "player":  {
+                   "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-p5sr\\build-upscaling\\Release\\DLSSVideoPlayer.exe",
+                   "bytes":  4506624,
+                   "built":  "2026-09-15T10:28:14",
+                   "runtime":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-p5sr\\build-upscaling\\Release\\neural-runtime"
+               },
+    "media":  {
+                  "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-p5sr\\work\\demo-loop.mp4",
+                  "bytes":  32094957,
+                  "width":  1920,
+                  "height":  1080,
+                  "fps":  30,
+                  "durationSeconds":  135.6
+              },
+    "options":  {
+                    "toggleAfterSeconds":  4,
+                    "runSeconds":  15,
+                    "sessions":  1,
+                    "freshProfile":  "Never",
+                    "accelerator":  "CtrlAltD",
+                    "dropRenderCache":  true,
+                    "settleSeconds":  3,
+                    "note":  "P5 SR live-session probe; SuperResolution=1 UpscaleHeight=1440 in the ini; GPU shared with two sibling agents\u0027 work"
+                },
+    "summary":  {
+                    "sessionsRequested":  1,
+                    "sessionsPassed":  0,
+                    "toggleToFirstNeuralFrameSeconds":  null,
+                    "playerReportedTotalSeconds":  null,
+                    "paceMsPerFrame":  null,
+                    "paceReferenceScale":  null,
+                    "receiptsOnDisk":  0,
+                    "coldStartLinesObserved":  0
+                },
+    "sessions":  [
+                     {
+                         "index":  1,
+                         "cold":  false,
+                         "failure":  "the neural toggle could not be injected: SendInput refused the chord, Win32 error 5; the foreground window is none - the session manager reports this session locked (WTSSessionInfoEx SessionFlags = WTS_SESSIONSTATE_LOCK), so injected input goes nowhere",
+                         "exitCode":  14,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-p5sr\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  10851,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  2,
+                         "player":  {
+                                        "pid":  4660,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\docs\\measurements\\p5-sr-session-20260915\\session-harness.session1.log"
+                     }
+                 ],
+    "outcome":  {
+                    "ok":  false,
+                    "exitCode":  14
+                }
+}
