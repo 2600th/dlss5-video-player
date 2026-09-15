@@ -178,6 +178,11 @@ public:
 
     std::optional<NeuralCacheEntry> LookupSource(std::string_view key) const;
     std::optional<NeuralCacheEntry> LookupRender(std::string_view key) const;
+    // Where an entry's payload would be, without opening or hashing anything.
+    // `LookupSource` authenticates the copy by hashing it, which a caller polling
+    // "is there one?" cannot afford; this lets such a caller memoise the verdict
+    // against the file's own size and write time instead of re-asking.
+    std::optional<std::filesystem::path> SourcePayloadPath(std::string_view key) const;
     std::optional<std::filesystem::path> BeginSourceStaging(std::string_view key);
     std::optional<std::filesystem::path> BeginRenderStaging(std::string_view key);
     bool PromoteSource(std::string_view key, const std::filesystem::path& staging,

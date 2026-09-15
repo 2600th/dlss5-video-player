@@ -2921,8 +2921,43 @@ private:
         for(const auto& entry:m_recent->Entries()){
             if(!entry.youtube||entry.id!=id||entry.sourceQuality!=static_cast<int>(m_youtubeSourceQuality)||entry.sourceKey.empty())continue;
             if(!cache.Valid())return std::nullopt;
+            // `LookupSource` authenticates the copy by hashing the whole payload -
+            // 60.5 MiB for a 1440p trailer, measured at 63-86 ms - and this question
+            // is asked several times per Tick by the toolbar, the status text and the
+            // session gates. Asking it per paint stalled the UI thread to two Ticks a
+            // second: measured 510 ms per Tick and 29 dropped frames a second on a
+            // source whose acquired copy was already in the cache, while the decoder
+            // kept handing 29.7 fps to a queue nobody drained. The verdict is memoised
+            // against the payload's size and write time, so a copy that a later
+            // acquisition replaced is authenticated again rather than trusted.
+            if(m_sourceKeyMemo.key==entry.sourceKey&&!m_sourceKeyMemo.payload.empty()){
+                std::error_code sizeError,timeError;
+                const auto size=std::filesystem::file_size(m_sourceKeyMemo.payload,sizeError);
+                const auto written=std::filesystem::last_write_time(m_sourceKeyMemo.payload,timeError);
+                if(!sizeError&&!timeError&&size==m_sourceKeyMemo.size&&written==m_sourceKeyMemo.written)
+                    return m_sourceKeyMemo.verdict;
+            }
             const auto cached=cache.LookupSource(entry.sourceKey);
-            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy)return entry.sourceKey;
+            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
+                std::error_code sizeError,timeError;
+                const auto size=std::filesystem::file_size(cached->payloadPath,sizeError);
+                const auto written=std::filesystem::last_write_time(cached->payloadPath,timeError);
+                if(!sizeError&&!timeError)
+                    m_sourceKeyMemo={entry.sourceKey,cached->payloadPath,size,written,entry.sourceKey};
+                return entry.sourceKey;
+            }
+            // A copy whose manifest survives but whose payload no longer
+            // authenticates fails the same 60 MiB hash on every call, so the miss
+            // is memoised against that payload exactly like the hit. Only the file
+            // changing - an acquisition repairing or replacing it - asks again.
+            std::error_code sizeError,timeError;
+            const auto payload=cache.SourcePayloadPath(entry.sourceKey);
+            const auto size=payload?std::filesystem::file_size(*payload,sizeError):uintmax_t{};
+            const auto written=payload?std::filesystem::last_write_time(*payload,timeError)
+                                      :std::filesystem::file_time_type{};
+            if(payload&&!sizeError&&!timeError)
+                m_sourceKeyMemo={entry.sourceKey,*payload,size,written,std::nullopt};
+            else m_sourceKeyMemo={};
             LOG("A recent entry names a source copy that is no longer in the cache; ignoring it.");
             return std::nullopt;
         }
@@ -4652,6 +4687,18 @@ private:
     // The driver notice is a modal, so it is shown once for the whole session.
     bool m_driverNoticeShown=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
+    // Memoised verdict of `CachedYouTubeSourceKey`, which otherwise re-hashes the
+    // whole acquired copy every time the toolbar, the status text or a session gate
+    // asks whether one exists. Keyed on the payload's size and write time so a
+    // replaced copy is authenticated again.
+    struct SourceKeyMemo {
+        std::string key;
+        std::filesystem::path payload;
+        uintmax_t size{};
+        std::filesystem::file_time_type written{};
+        std::optional<std::string> verdict;
+    };
+    mutable SourceKeyMemo m_sourceKeyMemo;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
     NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
     // Progress-watchdog state: the last progress the job reported and when it

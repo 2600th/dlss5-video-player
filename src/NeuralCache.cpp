@@ -848,6 +848,15 @@ std::optional<std::filesystem::path> NeuralCacheManager::BeginSourceStaging(std:
     return BeginStaging(NeuralCacheEntryKind::Source, key);
 }
 
+std::optional<std::filesystem::path> NeuralCacheManager::SourcePayloadPath(std::string_view key) const
+{
+    if (!valid_ || !ValidKey(key)) return std::nullopt;
+    const std::filesystem::path directory = root_ / L"sources" /
+        std::wstring(key.begin(), key.end());
+    if (!OwnsPath(directory)) return std::nullopt;
+    return directory / L"source.mkv";
+}
+
 std::optional<std::filesystem::path> NeuralCacheManager::BeginRenderStaging(std::string_view key)
 {
     return BeginStaging(NeuralCacheEntryKind::Render, key);
