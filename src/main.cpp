@@ -1098,11 +1098,7 @@ public:
         double due=double(m_next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
-            // Leaving a settings preview puts the cache's own render back on screen,
-            // so the notice that names it stale comes back with it.
-            const bool leftPreview=m_previewShown;
-            m_previewShown=false;
-            if(leftPreview)NoteSettingsAheadOfRender();
+            LeaveSettingsPreviewFrame();
             RememberRenderedCachedPair();
             if(m_cachedPlayback)++m_cachedPresentedFrames;
             ++m_fpsWindowFrames;
@@ -2073,6 +2069,15 @@ private:
         else return;
         UpdateCachedStatus();InvalidateControls();
     }
+    // Every way of leaving a shown settings preview puts the cache's own render back
+    // on screen, so the notice that names it stale comes back with it. Guarded on the
+    // transition: the playback path below calls this per rendered frame, and an
+    // ordinary frame must not pay a lookup and a settings comparison.
+    void LeaveSettingsPreviewFrame(){
+        if(!m_previewShown)return;
+        m_previewShown=false;
+        NoteSettingsAheadOfRender();
+    }
     // Apply changes what the player is showing now: an active session restarts
     // at the playhead with the new settings, a paused frame is re-previewed at
     // once. Writing a converted file is a separate, explicit action.
@@ -2475,7 +2480,7 @@ private:
     }
 
     bool PerformSeek(double sec,bool resumeAfter) {
-        if(!m_loaded||m_seeking)return false;SetSeeking(true);m_previewShown=false;CancelPausedSettingsPreview();sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
+        if(!m_loaded||m_seeking)return false;SetSeeking(true);LeaveSettingsPreviewFrame();CancelPausedSettingsPreview();sec=ClampSeek(sec);LOG("Seek begin target="<<sec<<" resume="<<resumeAfter);
         // Seek is deliberately transactional and performed from Tick(), never from a mouse message.
         // Shut down the audio producer first, wait for GPU work, then restart the video decoder.
         Audio().Stop();

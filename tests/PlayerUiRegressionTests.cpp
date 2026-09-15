@@ -761,10 +761,11 @@ private:
         app.m_previewShown = true;
         app.NoteSettingsAheadOfRender();
         CHECK(app.m_neuralNotice.empty());
-        app.m_previewShown = false;
-        app.NoteSettingsAheadOfRender();
+        // Both ways out of a preview - the next played frame and a seek - go through
+        // one guard, so the notice returns with the stale render either way.
+        app.LeaveSettingsPreviewFrame();
+        CHECK(!app.m_previewShown);
         CHECK_EQ(ahead, app.m_neuralNotice);
-
         // Coming back to the settings that produced the picture clears it with no render.
         app.m_neuralSettings = {};
         app.NoteSettingsAheadOfRender();
