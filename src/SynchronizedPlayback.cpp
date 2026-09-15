@@ -680,6 +680,13 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
     // a pair that never assembled inside the deadline. Only the desync path set a
     // reason, so the other three were undiagnosable after the fact. The target
     // rides along so the reason can be read against the coverage.
+    //
+    // The fault is cleared on entry and on success because `Desync` is its only
+    // other writer: without that, a refusal here would report whatever pairing
+    // last disagreed about - a `live-frame-mismatch` from minutes ago reads as
+    // this seek's reason, which is worse than saying nothing - and the branch
+    // below that trusts a reason to already be set would trust a stale one.
+    impl_->fault=Impl::Fault{};
     const auto refuse=[&](const char* reason){
         impl_->fault=Impl::Fault{};
         impl_->fault.reason=reason;
@@ -698,7 +705,9 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
     for(;;){
         const auto result=impl_->BuildLivePair(candidate,stop);
         if(result==SynchronizedReadResult::PairReady){
-            impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
+            impl_->current=std::move(candidate);impl_->stepRequested=false;
+            impl_->fault=Impl::Fault{};
+            return true;
         }
         if(result!=SynchronizedReadResult::NotReady){
             // A desync already recorded which frames disagreed; the rest say only
