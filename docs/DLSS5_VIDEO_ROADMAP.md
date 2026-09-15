@@ -66,26 +66,6 @@ clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
-**And it pays on camera-original footage (2026-09-15), which settles the item the
-other way.** The 2026-09-14 reading above - "does not pay yet" - was taken on
-NR-processed captures. Re-checked on the seven `orig-*` clips cut from publishers'
-own releases, with the gate isolated to its *rejection* alone (BOTH-direction flow,
-global flow, the backward field and the cost surface all left exactly as shipped in
-both arms), false motion improves on **6 of 7** clips, by 2.11 % to 46.91 %
-relative; cell flips improve on 7 of 7 and added flicker on 7 of 7. The one adverse
-clip, `orig-game-cuts`, is +0.43 % false motion while its flips and sigma still
-favour the gate. Against the `shipped-intensity-0` carrier floor the gate removes
-10.9-77.3 % of the false motion the neural pass itself contributes on the six clips
-it wins. 50 renders, every one bit-reproducible within its arm to full precision,
-four independent per-arm assertions, at the shipped mask state. So the "if real
-footage does not pay either, removing it is the honest move" clause is discharged:
-it pays, and it stays. The estimator under test was NVOFA hardware flow on all
-seven clips, so what this measured is the resolve-shader half of the gate;
-`kRoundTripCells` in the CPU estimator never decided a motion texture here, though
-`BuildDepthProxy` still reads the CPU flow field, which a depth=0 probe bounds at
-0.3-1 pp relative.
-[Camera-original gate report](measurements/q1-gate-camera-original-20260915/REPORT.md)
-
 **Settled the same day on NR-processed captures, and the answer reverses the
 synthetic one.** Four labelled clips - cut from this repository's own demo
 capture, cuts verified frame by frame - were rendered on both trees. Read
@@ -107,6 +87,30 @@ Two limits travel with it: the `intensity-0` control measures a carrier that
 already carries NR relighting, and `real-film-cuts` ends in 15 frozen frames,
 which makes its static-cell denominator the least comparable of the four.
 [A/B report](measurements/gate-real-footage-20260914/REPORT.md)
+
+**And it reproduces on camera-original footage (2026-09-15), which retires the
+provenance caveat above.** The WIN in the paragraph above is real but was measured
+on NR-processed captures, so what it could not say is whether the gate helps
+material that has never been through this player. Re-checked on the seven `orig-*`
+clips cut from publishers' own releases, with the gate isolated to its *rejection*
+alone - BOTH-direction flow, global flow, the backward field and the cost surface
+left exactly as shipped in both arms - false motion improves on **6 of 7** clips by
+2.11 % to 46.91 % relative, cell flips on 7 of 7 and added flicker on 7 of 7. The
+one adverse clip, `orig-game-cuts`, is +0.43 % false motion while its flips and
+sigma still favour the gate. Against the `shipped-intensity-0` carrier floor the
+gate removes 10.9-77.3 % of the false motion the neural pass itself contributes on
+the six it wins. 50 renders, every one bit-reproducible within its arm to full
+precision, four independent per-arm assertions, at the shipped mask state - so
+unlike the capture A/B this one carries no provenance asterisk.
+
+Two things it changes about how to read the gate. The estimator under test was
+NVOFA hardware flow on all seven clips, so what these numbers measure is the
+**resolve-shader** half; `kRoundTripCells` in the CPU estimator never decided a
+motion texture here, and `BuildDepthProxy` still reads the CPU flow field, which a
+depth=0 probe bounds at 0.3-1 pp relative. And the `NVOFA ready:` line could not
+serve as the per-arm assertion: it printed "gate armed" in both arms, because it
+knew only that a backward field was bound. That line now says what it knows.
+[Camera-original gate report](measurements/q1-gate-camera-original-20260915/REPORT.md)
 
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same

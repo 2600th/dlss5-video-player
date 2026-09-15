@@ -232,9 +232,19 @@ cache entry:
   read and logged but do not decide: the conversion produces R'G'B' from
   Y'CbCr, which is a matrix and a range and nothing else, and the CPU fallback
   does no better with a BT.2020-primaries or PQ source than the GPU path would.
-  And the flag remains off by default because that is a measured throughput
-  trade (`docs/measurements/gpu-readback-20260914/`), not because of the
-  colour hazard this probe removed.
+  And the flag remains off by default because **nobody has made the call yet**, not
+  because of a measured reason to keep it off: the colour hazard was the reason, and
+  this probe removed it. On the numbers in
+  `docs/measurements/gpu-readback-20260914/` the decoder side is quality-free on
+  tagged input (+0.067 dB) and NV12 buys about 7 % throughput at 4K, so the next
+  wave should decide the default rather than inherit it.
+
+  One assumption this does not change, on either path: ffmpeg's own conversion
+  resolves an *unspecified* matrix to BT.601 whatever the resolution, so an untagged
+  HD source decodes as BT.601 on the CPU fallback exactly as it did before. Refusing
+  the GPU path keeps that behaviour identical rather than improving it - "unspecified
+  plus HD implies BT.709" would be a product decision for both paths, and nobody has
+  made it.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,

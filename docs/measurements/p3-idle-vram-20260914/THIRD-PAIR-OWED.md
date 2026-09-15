@@ -37,10 +37,27 @@ Run them at the console, signed in, screen unlocked, with nothing else contendin
 the GPU. `-Sessions 3` is deliberate: three per arm is the minimum, and the existing
 two pairs are not reusable as part of a three-sample spread taken on a different day.
 
+Set only the one key. `DLSSVideoPlayer.ini` is the player's whole profile - the eight
+`NR*` art keys, the measured render pace, the upscaling state - and `-FreshProfile
+Never` exists to preserve it, so overwriting the file to select a policy would defeat
+the flag being passed and hand both arms a cold profile. Write the key in place:
+
+```powershell
+function Set-IniKey([string]$path, [string]$section, [string]$key, [string]$value) {
+  # Win32 writes the section and key if absent and leaves every other key alone,
+  # which is the same API the player reads them back with.
+  Add-Type -Namespace W -Name P -MemberDefinition '
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern bool WritePrivateProfileStringW(string s, string k, string v, string f);'
+  if (-not [W.P]::WritePrivateProfileStringW($section, $key, $value, (Resolve-Path $path))) {
+    throw "WritePrivateProfileString failed: $([ComponentModel.Win32Exception]::new())"
+  }
+}
+```
+
 ```powershell
 # keep arm - the shipped default
-'[NeuralHelper]', 'IdleVramPolicy=keep' |
-  Set-Content build-upscaling\Release\DLSSVideoPlayer.ini
+Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy keep
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
   -Player build-upscaling\Release\DLSSVideoPlayer.exe `
   -Media <a clip of 90 s or more> `
@@ -49,8 +66,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_se
   -OutJson $env:TEMP\p3-keep.json -Note 'P3 idle VRAM policy keep'
 
 # free arm
-'[NeuralHelper]', 'IdleVramPolicy=free' |
-  Set-Content build-upscaling\Release\DLSSVideoPlayer.ini
+Set-IniKey build-upscaling\Release\DLSSVideoPlayer.ini NeuralHelper IdleVramPolicy free
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\verification\player_session.ps1 `
   -Player build-upscaling\Release\DLSSVideoPlayer.exe `
   -Media <the same clip> `
@@ -70,6 +86,12 @@ Both arms must be shown to *be* the arm they are labelled, from the helper's own
 rather than from the label:
 
 ```powershell
+# The helper's log, not the player's. `src/Log.h:28-31` names the log after the
+# RUNNING MODULE's directory, so DLSSVideoPlayer.exe writes
+# build-upscaling\Release\DLSSVideoPlayer.log (which is what player_session.ps1
+# scrapes, and what -OutJson copies as `logCopy`), while NeuralWorker.exe lives in
+# neural-runtime\ and writes its own file there. `idleVramPolicy=` is emitted by
+# NeuralWorkerMain, so it is only ever in the second one.
 Select-String -Path build-upscaling\Release\neural-runtime\DLSSVideoPlayer.log `
   -Pattern 'idleVramPolicy=', 'post-job VRAM'
 ```

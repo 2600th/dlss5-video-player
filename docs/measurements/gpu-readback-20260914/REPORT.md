@@ -463,10 +463,10 @@ be staged: two sessions created and evaluated a SuperResolution feature at
 `input=1920x1080 output=2560x1440` for 600+ frames with NVOFA hardware flow as the motion
 guide. See [the SR session report](../p5-sr-session-20260915/REPORT.md).
 
-What would produce that evidence: stage the SR runtime beside `DLSSVideoPlayer.exe`, re-run
-one `player_session.ps1` session with that ini key set, and grep the same
-`Motion guide backend:` line for a scale other than `1,1`. That is one session and one
-grep; it is not blocked by anything except the staging.
+What that session showed, against this paragraph's prediction: the line reports `1,1`, and
+no shipped configuration can report anything else - the SR path passes
+`preserveSource=true`, so the DLSS input is the decoded frame. The evidence this section
+asked for was unobtainable by construction, not blocked by staging.
 
 ## Verdict
 

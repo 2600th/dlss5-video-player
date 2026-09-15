@@ -86,15 +86,22 @@ Both arms were rendered by one worker binary, recorded here because
 `build-upscaling/Release` later the same day would otherwise make this ballot
 unreproducible without anyone noticing:
 
-| | value |
-|---|---|
-| `NeuralWorker.exe` sha256 | `729836f0ab7c866e...` |
-| built | 2026-09-15T03:53 |
-| card / driver | RTX 4080 SUPER, 610.47 (32.0.16.1047) |
+`run.py` copies a runtime per profile, lazily, so the binary that matters is the one
+inside each arm's profile clone - not the one in `build-upscaling/Release`, which was
+rebuilt twice by concurrent work after these renders finished (it now hashes
+`79dc0433...`, which is why it is the wrong file to cite):
 
-A rebuild of the worker does not invalidate the eight pairs on disk - they are
-finished files - but re-running the two `run.py` lines above against a different
-worker is a different measurement, and the digests in the table above would move.
+| arm | binary | sha256 |
+|---|---|---|
+| shipped | `benchmark-work/profiles/shipped-tone-100/neural-runtime/NeuralWorker.exe` | `729836f0ab7c866e...` |
+| candidate | `benchmark-work/profiles/shipped-tone-050/neural-runtime/NeuralWorker.exe` | `729836f0ab7c866e...` |
+
+Equal, so the two arms did share a worker build. Card and driver: RTX 4080 SUPER,
+610.47 (32.0.16.1047).
+
+A later rebuild does not invalidate the eight pairs - they are finished files - but
+re-running the two `run.py` lines above would use whatever is in `Release` then, and
+the digests in the table above would move.
 
 ## How to score it
 
@@ -104,7 +111,9 @@ not documentation):
 - `pairs/<id>-A.png`, `pairs/<id>-B.png` - matched stills, same frame index
 - `pairs/<id>-A.mp4`, `pairs/<id>-B.mp4` - the excerpt from that frame, clipped to
   the shot so it never crosses an edit. **These carry the question the stills cannot**:
-  local tone is a temporal-stability risk as much as a look choice.
+  local tone is a temporal-stability risk as much as a look choice. They run
+  0.54-1.43 s, not the 3.0 s the `--seconds` cap above asks for: every excerpt is
+  bounded by its own shot, and on this corpus the shots are shorter than the cap.
 - `pairs/<id>.txt` - what to judge, with no identities in it
 - `view/<id>-full.png`, `view/<id>-crop.png` - viewing aids added by this session: A
   left, B right, and a 2x blow-up of the 480x270 tile where the two arms differ most.
@@ -119,14 +128,29 @@ Then:
 python tools/benchmark/blind.py --score build-upscaling/benchmark-work/blind/ballot.csv
 ```
 
-## What each outcome means
+## The decision rule, fixed before anyone scores
 
-- **Shipped side wins, or a tie:** Q7 closes as it stands. The metric verdict and the
-  human verdict agree and `NRLocalTone=1.0` is the right default on real footage.
-- **Candidate side wins with confidence:** a *look* result overturns a sub-dE metric
-  wash, which is the only way this default changes. It would be the first verdict in
-  the project decided by eye, so it needs the ballot filled in blind and the key
-  opened afterwards - not the other way round.
+Eight pairs and one judge is a small instrument, so the threshold is pre-registered
+here rather than chosen once the votes are in. 5 of 8 is chance; nothing below 7 is
+worth changing a shipped default on.
+
+| Outcome | Reading |
+|---|---|
+| candidate preferred on **>= 7 of 8** pairs at confidence >= 3 | a *look* result overturns a sub-dE metric wash. The only way this default changes, and it would be the first verdict in this project decided by eye |
+| shipped preferred on **>= 7 of 8** | Q7 closes as it stands, and with a stronger reason than the metrics gave it |
+| anything between, ties included | **the knob is indistinguishable at 0.5**, which is a result about the ballot's power, not about the knob. See the note below before reaching for a bigger sample |
+
+**If it lands in the middle, do not re-run this ballot with more pairs - re-run it
+against `shipped-tone-0`.** On real footage the knob's *entire* range (1.0 -> 0.0) is
+0.77 dE, so half the range is around 0.4 dE on average - below a 1 dE just-noticeable
+difference. What makes this ballot worth scoring anyway is that the average is not
+what a judge sees: the measured per-pixel differences above reach 19-68 levels
+locally, on 30-89 % of the frame. But if the answer is "cannot tell", the honest next
+experiment is the maximum-signal pair (1.0 against 0.0), where a null *does* close
+the item - `shipped-tone-0` already exists in
+`../art-defaults-20260914/shipped-state.profile.json`.
+
+The key stays sealed until the ballot is filled in, either way round.
 
 Unscored as of 2026-09-15. The instrument is built, asserted and sealed; the judgement
 is owed.
