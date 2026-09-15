@@ -191,12 +191,43 @@ arm except `gpu-source-only`, which is n=1** - the scorer hit its 1800 s ceiling
 that arm's repeats 2 and 3 unscored, and since the renders are digest-identical the
 missing rows would repeat the first, but they were not computed and are not claimed:
 
+> **Do not cite this table's quality columns for a default decision - they are
+> superseded.** Every PSNR, dE, flicker, sigma and false-motion figure below was
+> measured on an **untagged** clip before the colour fixes of 2026-09-15, and both
+> were then shown to be tagging artefacts rather than conversion costs: with the
+> input tagged the decoder side is **+0.067 dB** (free), and once the encoder states
+> colorimetry on both paths the capture side is **0.00 dB** against the CPU path (see
+> the correction sections below). What survives from this table is the **throughput
+> pair** - `proc fps` and `gpu_ms_p50` - because those never depended on the tags.
+
 | arm | PSNR dB | dE mean | flicker+ | sigma+ | false motion | proc fps (median) | gpu_ms_p50 (median) |
 |---|---|---|---|---|---|---|---|
 | `cpu-conversion` (shipped) | 29.09 | 5.37 | 0.145 | 0.492 | 0.0013 | 31.18 | 18.051 |
 | `gpu-color-only` | 28.30 | 6.31 | 0.138 | 0.574 | 0.0017 | 32.98 | 17.849 |
 | `gpu-source-only` | 28.45 | 6.24 | 0.155 | 0.396 | 0.0019 | 32.98 | 18.249 |
 | both | 28.34 | 6.32 | 0.147 | 0.479 | 0.0026 | 33.35 | 18.355 |
+
+**What the throughput pair says, stated for whoever decides the defaults.** Both
+flags buy the same **+5.8 %** processing throughput alone (31.18 -> 32.98 fps) and
+**+7.0 %** together, which is far outside the repeat spread. The GPU-time column is
+where they differ and where the numbers are marginal: the capture side reads 0.20 ms
+*lower* than the CPU path and the decoder side 0.20 ms *higher* (+1.1 %), against a
+within-arm repeat range of 0.17 ms on the shipped arm (18.051 / 18.020 / 18.191). So
+at n=3 neither GPU-time delta is resolvable - they are the size of the spread, not
+larger than it - and the decoder side's +1.1 % is the only cost of either flag that
+survives the colour corrections at all. It is also the figure that contradicts
+`docs/USAGE.md:214-216`, where the capture side cost 8.66 against 8.35 ms/frame on an
+RTX 5070 Ti; one of the two cards is wrong about the sign, and this report cannot say
+which.
+
+**And the decoder-side flag is a no-op by construction on undeclared sources.** Since
+the 2026-09-15 probe it engages only where the stream declares a matrix and a range
+it implements, so its +5.8 % applies to tagged input and to nothing else. Measured on
+what is actually to hand: the `orig-*` camera-original clips are `tv`/`bt709` and
+engage; this repository's own `docs/media/neural-comparison-demo.mp4` is
+`unknown`/`unknown` and `build-upscaling/benchmark-corpus/fine-detail.mkv` is
+`tv`/`unknown`, and both are refused. A default of `on` is therefore worth nothing on
+an untagged source rather than worth something risky.
 
 On that untagged 4K clip each flag costs most of the quality on its own - **-0.78 dB
 / +0.94 dE** for the capture side, **-0.64 dB / +0.88 dE** for the decoder side - and
