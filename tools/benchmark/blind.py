@@ -140,6 +140,17 @@ def build(args) -> int:
     manifest = load_manifest()
     clips = {c["name"]: c for c in manifest["clips"]}
     runs = load_runs(args.single, args.double)
+    # Runs from an earlier ballot with the same two profiles are still on disk, so
+    # without this every past clip joins the new one: ballot 3 was asked for the two
+    # long motion clips and silently included orig-game-motion, whose 2.2 s single
+    # shot is exactly what the long clips were cut to replace.
+    if args.clips:
+        wanted = set(args.clips)
+        missing = sorted(wanted - set(runs))
+        if missing:
+            print(f"no run pair for: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        runs = {name: v for name, v in runs.items() if name in wanted}
     if not runs:
         print(f"no clip has both '{args.single}' and '{args.double}' runs under {RUNS}", file=sys.stderr)
         return 1
@@ -186,13 +197,26 @@ def build(args) -> int:
     for clip_name, pools in sorted(plans.items()):
         members = runs[clip_name]
         fps = clips[clip_name]["fps"]
+        # Frames already taken from this clip, so a second pair cannot land on one
+        # of them or inside its excerpt. Sampling was rng.choice over the whole pool
+        # per pair, which on a single-shot clip handed the judge the same comparison
+        # twice: ballot 3's first build drew frames 34, 34, 50, 51 out of a 66-frame
+        # shot, and two pairs at one frame are one pair counted twice in a tally the
+        # bar is set against.
+        taken: list[int] = []
+        separation = max(1, round(args.seconds * fps))
         for index in range(args.pairs_per_clip):
+            first, last, pool = pools[index % len(pools)]
+            free = [f for f in pool if all(abs(f - t) >= separation for t in taken)]
+            if not free:
+                print(f"{clip_name}: {index} pair(s) is all its shots can supply with "
+                      f"{separation} frames between them; asked for {args.pairs_per_clip}",
+                      file=sys.stderr)
+                break
             pair_id = ids[cursor]
             cursor += 1
-            # One shot per pair, round-robin, so a cut-bearing clip spreads its
-            # pairs over different shots before it repeats one.
-            first, last, pool = pools[index % len(pools)]
-            frame = rng.choice(pool)
+            frame = rng.choice(free)
+            taken.append(frame)
             length = min(args.seconds, (last - frame) / fps)
             order = ["single", "double"]
             rng.shuffle(order)
@@ -321,6 +345,8 @@ def main() -> int:
     parser.add_argument("--single", default="baseline", help="single-pass profile name")
     parser.add_argument("--double", default="two-pass", help="two-pass profile name")
     parser.add_argument("--pairs-per-clip", type=int, default=3)
+    parser.add_argument("--clips", nargs="*", help="only these clips; without it every clip with a "
+                                                   "run pair for both profiles is included")
     parser.add_argument("--seconds", type=float, default=3.0,
                         help="longest excerpt to cut; a shot shorter than this caps its own pairs")
     parser.add_argument("--seed", type=int, default=1)

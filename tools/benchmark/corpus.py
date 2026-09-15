@@ -468,6 +468,40 @@ def build_orig_game_motion(corpus: Path) -> dict | None:
               "was inspected and is the same shot. The false-motion negative for camera-original material."))
 
 
+# The two clips below exist because a ballot about a per-frame effect needs stills
+# that carry temporal history, and this corpus could not supply them: every other
+# camera-original clip is 1.3-5.5 s, so a guard of 1 s past the opening cut leaves
+# five of the seven with no usable candidate frame at all. Both spans were found the
+# same way - every span in the registered sources with no pair proposed as a cut
+# (mean |dY| >= 25 or histogram overlap <= 0.55), at least 240 frames long, and a
+# median |dY| of 1.5 or more so the span is actually moving. Three qualified; the
+# third (lawrence 1694-2159, 19.4 s) was rejected because 179 of its 465 pairs are
+# near-static, the same defect that makes `real-film-cuts` false-motion level
+# incomparable.
+def build_orig_film_motion_a(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-film-motion-a", "godfather", 205, 272, dict(
+        cuts=[],
+        notes="Camera-original, one continuous 11.3 s interior shot - the longest cut-free moving span in "
+              "this source. Subject motion and a slow camera in a dim room with faces and skin, which is "
+              "where a tone operator is judged by eye rather than by a metric. Motion is gentle: median "
+              "|dY| 1.81, and the largest internal pair is local 248 at |dY| 4.9 with histogram overlap "
+              "0.983, inspected and the same shot (a man at a table, a second figure behind him). 33 of "
+              "its 271 pairs are near-static, so quote its false-motion level only against itself."))
+
+
+def build_orig_film_motion_b(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-film-motion-b", "lawrence", 562, 258, dict(
+        cuts=[],
+        notes="Camera-original, one continuous 10.8 s exterior tracking shot and the strongest sustained "
+              "motion in any camera-original clip here: median |dY| 4.72 against 3.9 for the 2.2 s "
+              "`orig-game-motion`. A rider tracked along a road with foliage and grass streaming past, so "
+              "real motion blur and fine detail in the same frame. Its five largest internal pairs (locals "
+              "144-183, |dY| 14.5-17.4) were inspected: histogram overlap stays 0.82-0.97 across all of "
+              "them and each is the same shot in fast motion, not a cut. Two caveats travel with it: the "
+              "letterbox geometry noted above for `orig-dissolve` - 884 active rows scaled UP to 1080, so "
+              "fine detail is partly resampled - and a burned-in title card over the first half."))
+
+
 def build_orig_dissolve(corpus: Path) -> dict | None:
     return build_camera_clip(corpus, "orig-dissolve", "lawrence", 2510, 71, dict(
         cuts=[], soft_cuts=[[21, 48]],
@@ -503,7 +537,9 @@ BUILDERS = {"text-subtitles": build_text, "fine-detail": build_detail,
             "orig-film-cuts-a": build_orig_film_cuts_a, "orig-film-cuts-b": build_orig_film_cuts_b,
             "orig-film-fade": build_orig_film_fade, "orig-faces": build_orig_faces,
             "orig-game-cuts": build_orig_game_cuts, "orig-game-motion": build_orig_game_motion,
-            "orig-dissolve": build_orig_dissolve}
+            "orig-dissolve": build_orig_dissolve,
+            "orig-film-motion-a": build_orig_film_motion_a,
+            "orig-film-motion-b": build_orig_film_motion_b}
 
 
 def main() -> int:

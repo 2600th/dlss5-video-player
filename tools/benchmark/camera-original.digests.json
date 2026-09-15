@@ -4,6 +4,40 @@
   "verify": "python tools/benchmark/corpus.py --check",
   "clips": [
     {
+      "name": "orig-dissolve",
+      "file": "orig-dissolve.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 71,
+      "digest": "81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f",
+      "cuts": [],
+      "soft_cuts": [
+        [
+          21,
+          48
+        ]
+      ],
+      "source": "youtube:ytsearch1:Lawrence of Arabia official trailer restored format bestvideo[height<=1440][ext=mp4] frames 2510-2580 (Lawrence of Arabia restored trailer (Sony/Columbia), 1920x1080 h264, 23.976 fps)"
+    },
+    {
+      "name": "orig-faces",
+      "file": "orig-faces.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 101,
+      "digest": "bbf47d273e49e01db226934757040553ebb5c60d7d5db68a9cd094ca19918f86",
+      "cuts": [
+        19,
+        34,
+        56,
+        83
+      ],
+      "soft_cuts": [],
+      "source": "youtube:UaVTIH8mujA format 271 frames 1160-1260 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
       "name": "orig-film-cuts-a",
       "file": "orig-film-cuts-a.mkv",
       "width": 1920,
@@ -58,21 +92,28 @@
       "source": "youtube:UaVTIH8mujA format 271 frames 275-305 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
     },
     {
-      "name": "orig-faces",
-      "file": "orig-faces.mkv",
+      "name": "orig-film-motion-a",
+      "file": "orig-film-motion-a.mkv",
       "width": 1920,
       "height": 1080,
       "fps": 23.976023976023978,
-      "frames": 101,
-      "digest": "bbf47d273e49e01db226934757040553ebb5c60d7d5db68a9cd094ca19918f86",
-      "cuts": [
-        19,
-        34,
-        56,
-        83
-      ],
+      "frames": 272,
+      "digest": "07b5a440f59bb2681b348784501300e9035950b0883b5dbc6378747aac4358e3",
+      "cuts": [],
       "soft_cuts": [],
-      "source": "youtube:UaVTIH8mujA format 271 frames 1160-1260 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+      "source": "youtube:UaVTIH8mujA format 271 frames 205-476 (THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps)"
+    },
+    {
+      "name": "orig-film-motion-b",
+      "file": "orig-film-motion-b.mkv",
+      "width": 1920,
+      "height": 1080,
+      "fps": 23.976023976023978,
+      "frames": 258,
+      "digest": "a0053bc615ccf39571c3a06686bfa70ad3cdce95e79dfb6d9e8f961da32300a1",
+      "cuts": [],
+      "soft_cuts": [],
+      "source": "youtube:HFAkWNiETrg format 399 frames 562-819 (Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), 1920x1038 AV1 (format 399), 23.976 fps, 122 s)"
     },
     {
       "name": "orig-game-cuts",
@@ -100,23 +141,6 @@
       "cuts": [],
       "soft_cuts": [],
       "source": "youtube:uphThaa97ig format 271 frames 492-557 (Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps)"
-    },
-    {
-      "name": "orig-dissolve",
-      "file": "orig-dissolve.mkv",
-      "width": 1920,
-      "height": 1080,
-      "fps": 23.976023976023978,
-      "frames": 71,
-      "digest": "81aaa5a012891f6bfde1eb219f69fdf775987c7609ff756ec4c64e4456214e7f",
-      "cuts": [],
-      "soft_cuts": [
-        [
-          21,
-          48
-        ]
-      ],
-      "source": "youtube:ytsearch1:Lawrence of Arabia official trailer restored format bestvideo[height<=1440][ext=mp4] frames 2510-2580 (Lawrence of Arabia restored trailer (Sony/Columbia), 1920x1080 h264, 23.976 fps)"
     }
   ]
 }

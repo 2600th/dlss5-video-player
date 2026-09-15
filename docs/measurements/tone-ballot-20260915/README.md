@@ -337,8 +337,59 @@ worse, measured across the camera-original set:
 | `orig-dissolve` | 2.96 s | 17 | 5 | **0** | **0** |
 | `orig-film-fade` | 1.29 s | **0** | **0** | **0** | **0** |
 
-So round 3 needs **longer continuous-motion spans cut from the same publisher
-sources** - `tools/benchmark/fetch_camera_original.ps1` already fetches them, and
+### Round 3 as built (2026-09-15): the clips were cut, and two sampling defects fell out
+
+Two new camera-original clips now exist, found by sweeping the registered sources for
+spans with no proposed cut, at least 240 frames, and a median |dY| of 1.5 or more:
+
+| clip | source | frames | seconds | median &#124;dY&#124; | character |
+|---|---|---|---|---|---|
+| `orig-film-motion-a` | godfather | 272 | 11.3 | 1.81 | dim interior, faces and skin, gentle camera |
+| `orig-film-motion-b` | lawrence | 258 | 10.8 | **4.72** | exterior tracking shot, foliage streaming, real motion blur |
+
+`orig-film-motion-b` carries the strongest sustained motion of any camera-original
+clip here - 4.72 against 3.9 for the 2.2 s `orig-game-motion`. Both are one
+continuous shot, verified the way this corpus requires: the five largest internal
+pairs of each were inspected by eye and are the same shot in motion, histogram
+overlap never below 0.82. A third qualifying span (lawrence 1694-2159, 19.4 s) was
+rejected for being 38 % near-static. Both clips are in
+`tools/benchmark/camera-original.digests.json`, so their pixels are now load-bearing:
+`corpus.py --check` verifies nine clips, not seven.
+
+**The first build of ballot 3 was invalid and the tool now refuses to build it that
+way.** Two defects, both of which would have inflated the tally the bar is set
+against:
+
+- Runs from ballot 2 were still on disk under the same profile names, so
+  `orig-game-motion` - the 2.2 s clip these long ones were cut to replace - joined
+  the ballot uninvited. `blind.py` takes `--clips` now.
+- Frames were drawn with `rng.choice` per pair over the whole pool, so a single-shot
+  clip handed the judge the same comparison twice: the first build drew frames 34,
+  34, 50 and 51 out of 66. Sampling is now without replacement with at least one
+  excerpt length between frames, and when a clip cannot supply the pairs asked for it
+  says so instead of repeating itself.
+
+Ballot 3 is therefore **10 pairs, five per clip**, 1.5 s excerpts with a 1.0 s guard,
+seed 3, frames 42-48 apart within each clip so no two excerpts overlap:
+`orig-film-motion-a` at 48, 90, 151, 195, 256 and `orig-film-motion-b` at 29, 83,
+137, 189, 228. `orig-film-motion-b` could only supply five, and said so.
+
+**The bar, by the rule fixed above: 9 of 10 decided pairs** (P = 0.0107; 8 of 10 is
+P = 0.055 and does not qualify). If ties reduce the decided count the bar moves with
+it: 8 of 9 (P = 0.0195), and at 8 decided pairs 7 does not qualify (P = 0.035) so a
+clean 8 of 8 is needed. A sweep still clears the bar at 7 of 7 (0.0078) and 6 of 6
+(0.0156); at five or fewer decided pairs nothing does, which would make the round
+inconclusive by construction rather than by result.
+
+Differences span mean absolute 0.55 to 7.20 levels. One pair (`a4c357`, 0.55 mean,
+4 % of pixels) is near-identical - a dim interior frame where the knob has little to
+work on - and is left in rather than dropped, because dropping the pairs where an
+effect is invisible is how a preference gets manufactured.
+
+---
+
+The original prerequisite, for the record: round 3 needed **longer continuous-motion
+spans cut from the same publisher sources** - `tools/benchmark/fetch_camera_original.ps1` already fetches them, and
 `corpus.py` cuts them; what is missing is a 10-15 s motion span rather than a 2 s
 one. With that, a 0.5-1.0 s guard becomes affordable and twelve pairs are twelve
 independent samples instead of twelve views of the same two seconds. `blind.py` now
