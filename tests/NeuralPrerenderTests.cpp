@@ -3491,10 +3491,10 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
     if (_wcsicmp(name.c_str(), L"ffprobe.exe") == 0) {
         const bool cached=std::ranges::any_of(arguments,[](std::wstring_view value){return value.ends_with(L"already-validated.mkv");});
         if(cached){
-            if(std::find(arguments.begin(),arguments.end(),L"-count_frames")!=arguments.end())return 92;
+            if(std::find(arguments.begin(),arguments.end(),L"-count_packets")!=arguments.end())return 92;
             std::cout << "width=2\nheight=2\nduration=0.0333333\n";return 0;
         }
-        std::cout << "width=2\nheight=2\nnb_read_frames=1\nduration=0.0333333\n";
+        std::cout << "width=2\nheight=2\nnb_read_packets=1\nduration=0.0333333\n";
         return 0;
     }
     if (_wcsicmp(name.c_str(), L"ffmpeg.exe") != 0) return 90;

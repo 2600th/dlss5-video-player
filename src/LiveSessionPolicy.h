@@ -31,12 +31,19 @@ inline constexpr double kColdStartSeconds = 7.3;
 // usually a rounding artifact of frame snapping rather than a real seek.
 inline constexpr double kBackwardSlack = 0.5;
 // A viewer pressing the seek key repeatedly moves the playhead several times a
-// second. Each move is a different hole, and acting on one costs a job startup
-// that the next press throws away - measured at three helper launches discarded
-// in 2.4 s across six presses. Whichever hole the viewer settles in is still
-// there a moment later, so the render waits for the playhead to stop moving.
-// Sized under the cheapest thing a decision here can buy (a `kColdStartSeconds`
-// job) and over the gap between two presses of a key held down.
+// second, and each move used to cancel the running job and restart it on the
+// new hole. Measured across six presses 900 ms apart: without this, five
+// restarts and not one segment rendered during the burst; with it, the running
+// job is left alone and publishes six, and one retarget fires after the last
+// press. What it buys is render throughput while the viewer is moving.
+//
+// It is NOT free for the viewer. A restart reaches its first segment in about
+// 1.1 s, so this defers the frames at the destination by roughly the settle
+// window: measured 0.5 s after the last press without it against 2.5 s with
+// it. The original plays there in the meantime, which is why the trade is
+// worth taking - and why this is not sized "under" the restart cost, it is
+// about equal to it. Anything shorter stops coalescing presses that land a
+// second apart, which is the spacing a held key produces.
 inline constexpr double kSeekSettleSeconds = 1.0;
 
 // Lead to require before the first attach, given how fast this GPU renders

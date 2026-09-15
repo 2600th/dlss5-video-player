@@ -53,6 +53,26 @@ and looks like a broken helper until the runtime is re-staged.
   commit - which deliberately does not go through the unload path - cannot hand
   a second video the first one's copy. Two 1440p trailers share a geometry, so
   the guard downstream would not have caught that.
+- A finished render no longer holds the next hole back for 18 seconds. The
+  session filled one hole, then sat with the GPU idle and a hole left in its
+  range while playback crossed 15 seconds of video on the original - and the
+  next job started 10 ms after the previous one's cache entry was published, so
+  the publish was the wait. Timing its phases named it: joining 32 segments took
+  131 ms and promoting the entry 253 ms, while **probing the joined file took
+  27.8 s**. The probe asked FFprobe for `-count_frames`, which answers "how many
+  frames are in here" by decoding every one of them - 1440p HEVC, 1833 frames.
+  A video stream carries one packet per coded frame, so the same number can be
+  had by demuxing: measured on a published entry, 1300 either way, 23.8 s
+  against 0.05 s. The gate keeps its teeth - a 60%-truncated copy of that entry
+  reads 889 packets, and one missing its tail segment 902 and 30.1 s against
+  43.3 s, so both still fail the comparison that refuses a bad join.
+  Re-driven on the same clip: publish **28.2 s -> 0.86 s** and **17.0 s ->
+  0.73 s**, and the finished render to the next one's start **18.4 s -> 0.99 s**.
+  The B-frame case that could have made packets and frames disagree is pinned by
+  a real-media test that joins two parts, counts them both ways and requires the
+  same answer, then joins one part and requires a short count.
+  Each publish logs `concatMs`, `probeMs` and `promoteMs`, because the first
+  measurement of this cost me a driven session to attribute.
 - The render no longer chases a playhead that is still moving. A viewer pressing
   the seek key repeatedly moves it several times a second, and every move was a
   decision: the running job was cancelled and restarted on the new hole, and it
@@ -77,7 +97,14 @@ and looks like a broken helper until the runtime is re-staged.
   frames arriving 1.07 s after the last one. With the guard the running job is
   left alone and keeps publishing - six segments, about twelve seconds of video,
   while the viewer is still pressing - and the single retarget fires 1.0 s after
-  the last press. The helper stays resident across all of it (`plan=reuse`), so
+  the last press.
+  The guard is not free for the viewer, and the first draft of this entry said
+  it was sized "under" what it buys, which the same measurement contradicts: a
+  restart reaches its first segment in about 1.1 s, so waiting a second defers
+  the frames at the destination from 0.5 s after the last press to 2.5 s. The
+  original plays there in the meantime. What is bought is render throughput -
+  twelve seconds of video instead of none - not a faster picture where the
+  viewer landed. The helper stays resident across all of it (`plan=reuse`), so
   a retarget costs the job restart, not a process launch: an earlier draft of
   this entry said three cold starts, which was inferred from an uncontrolled run
   and is wrong.

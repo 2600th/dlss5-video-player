@@ -1010,11 +1010,19 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     const auto ffprobe = FindHelper(helperDirectory, L"ffprobe.exe");
     const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
     if (ffprobe.empty() || (fullValidation&&ffmpeg.empty())) { result.detail = L"FFmpeg tools are unavailable."; return result; }
+    // Counted by demuxing, not decoding. `-count_frames` decodes the whole file
+    // to answer "how many frames are in here", which on a joined 1440p render
+    // measured 23.8 s against 0.05 s for the packet count - and the publish that
+    // waits on it is what holds the next hole's render back. A video stream
+    // carries one packet per coded frame, so the count is the same number: 1300
+    // either way on that entry. What the gate is for still works, because a
+    // short join demuxes short - a 60%-truncated copy reports 889 packets, and
+    // one missing its tail segment 902 and 30.1 s against 43.3 s.
     std::vector<std::wstring> probeArguments{
         L"-v", L"error", L"-select_streams", L"v:0",
-        L"-show_entries", fullValidation?L"frame=best_effort_timestamp_time,duration_time,pkt_duration_time:stream=width,height,nb_read_frames:format=duration":L"stream=width,height:format=duration",
+        L"-show_entries", fullValidation?L"packet=pts_time,duration_time:stream=width,height,nb_read_packets:format=duration":L"stream=width,height:format=duration",
         L"-of", L"default=noprint_wrappers=1:nokey=0", media.wstring()};
-    if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_frames");
+    if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_packets");
     double durationSeconds = 0.0;
     double firstVideoTimestamp = std::numeric_limits<double>::infinity();
     double videoEnd = -std::numeric_limits<double>::infinity();
@@ -1028,11 +1036,11 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
             uint64_t integer = 0;
             if (key == "width" && ParseUnsigned(value, integer)) result.width = static_cast<uint32_t>(integer);
             else if (key == "height" && ParseUnsigned(value, integer)) result.height = static_cast<uint32_t>(integer);
-            else if (key == "nb_read_frames" && ParseUnsigned(value, integer)) result.frameCount = integer;
+            else if (key == "nb_read_packets" && ParseUnsigned(value, integer)) result.frameCount = integer;
             else if (key == "duration") {
                 try { durationSeconds = std::stod(std::string(value)); } catch (...) { durationSeconds = 0.0; }
             }
-            else if (key == "best_effort_timestamp_time") {
+            else if (key == "pts_time") {
                 try { frameTimestamp = std::stod(std::string(value)); }
                 catch (...) { frameTimestamp = std::numeric_limits<double>::quiet_NaN(); }
                 if (std::isfinite(frameTimestamp)) {
@@ -1040,7 +1048,7 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
                     videoEnd = std::max(videoEnd, frameTimestamp);
                 }
             }
-            else if ((key == "duration_time" || key == "pkt_duration_time") && std::isfinite(frameTimestamp)) {
+            else if (key == "duration_time" && std::isfinite(frameTimestamp)) {
                 double frameDuration = 0.0;
                 try { frameDuration = std::stod(std::string(value)); } catch (...) {}
                 if (std::isfinite(frameDuration) && frameDuration > 0.0)

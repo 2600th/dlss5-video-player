@@ -612,6 +612,49 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     }
 }
 
+// The publish gate compares the joined render's frame count against the frames
+// the renderer reported. That count is read by demuxing rather than decoding,
+// which is 400x cheaper and used to hold the next hole's render back by 18 s -
+// so the two counts have to agree on a stream where they could disagree: these
+// parts carry B-frames, so coded and displayed order differ.
+void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto first = fixture.path / L"part-0.mkv";
+    const auto second = fixture.path / L"part-1.mkv";
+    const auto joined = fixture.path / L"joined.mkv";
+    const auto shortJoin = fixture.path / L"short.mkv";
+    const auto log = fixture.path / L"tool.log";
+    CHECK(RunTool(helpers / L"ffmpeg.exe", {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"testsrc=s=64x48:r=10:d=2", L"-c:v", L"libx264",
+        L"-bf", L"2", L"-pix_fmt", L"yuv420p", first.wstring()}, log));
+    CHECK(RunTool(helpers / L"ffmpeg.exe", {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"testsrc=s=64x48:r=10:d=1", L"-c:v", L"libx264",
+        L"-bf", L"2", L"-pix_fmt", L"yuv420p", second.wstring()}, log));
+
+    const std::vector<std::filesystem::path> parts{first, second};
+    CHECK(ConcatenateMedia(helpers, parts, joined, {}) == EncodeError::None);
+
+    // Ground truth: every frame actually decoded out of the joined file.
+    const auto decoded = Probe(helpers, joined, log, {L"-count_frames", L"-select_streams", L"v:0",
+        L"-show_entries", L"stream=nb_read_frames", L"-of", L"default=noprint_wrappers=1"});
+    CHECK(decoded.find("nb_read_frames=30") != std::string::npos);
+
+    const auto measured = ProbeMedia(helpers, joined, {});
+    CHECK(measured.ok);
+    CHECK_EQ(uint64_t{30}, measured.frameCount);
+    CHECK_EQ(uint32_t{64}, measured.width);
+    CHECK_EQ(uint32_t{48}, measured.height);
+
+    // What the gate is for: a join that lost a part has to read short, or a
+    // truncated render would be published as a complete cache entry.
+    const std::vector<std::filesystem::path> onePart{first};
+    CHECK(ConcatenateMedia(helpers, onePart, shortJoin, {}) == EncodeError::None);
+    const auto shortMeasured = ProbeMedia(helpers, shortJoin, {});
+    CHECK(shortMeasured.ok);
+    CHECK_EQ(uint64_t{20}, shortMeasured.frameCount);
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -628,6 +671,7 @@ int wmain(int argc, wchar_t** argv)
     ExportTests(helpers);
     RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
+    JoinedFrameCountMatchesDecodedCountTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

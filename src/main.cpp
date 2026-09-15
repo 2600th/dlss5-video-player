@@ -4293,6 +4293,12 @@ private:
                     // by timestamp, so a run that filled a hole behind an earlier region is
                     // not the tail of the index, and a positional slice would take the wrong
                     // files. The scan stays in timeline order, which is what a join needs.
+                    // The next hole cannot start until this returns, so the phases
+                    // are timed: one driven session sat 18 s between a finished
+                    // render and the next one with the GPU idle and a hole left.
+                    const auto publishStart=std::chrono::steady_clock::now();
+                    const auto msSince=[](std::chrono::steady_clock::time_point from){
+                        return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
                     std::vector<std::filesystem::path> parts;
                     if(liveIndex)
                         for(size_t position=0;position<liveIndex->Count();++position)
@@ -4303,10 +4309,13 @@ private:
                         cache.MarkInvalid(*staging);completion->result.ok=false;
                         completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;
                     }
+                    const double concatMs=msSince(publishStart);
                     const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
                     const std::string receiptJson=BuildNeuralRenderReceiptJson(receipt);const auto receiptDigest=Sha256Bytes(receiptJson);
                     {std::ofstream receiptFile(*staging/L"receipt.json",std::ios::binary|std::ios::trunc);receiptFile.write(receiptJson.data(),static_cast<std::streamsize>(receiptJson.size()));if(!receiptFile||!receiptDigest){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The neural render receipt could not be staged.";goto finish;}}
+                    const auto probeStart=std::chrono::steady_clock::now();
                     const ProbeResult probe=ProbeMedia(moduleDirectory,*staging/L"neural.mkv",stop);
+                    const double probeMs=msSince(probeStart);
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
                     manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
@@ -4316,7 +4325,10 @@ private:
                     const bool manifestReusable=IsReusableNeuralCacheManifest(publishCandidate);
                     const bool gate=CanPublishNeuralCompletion(completion->result.ok,probeMatches,manifestReusable);
                     NeuralCachePromotion promotion{};
+                    const auto promoteStart=std::chrono::steady_clock::now();
                     const bool published=gate&&cache.PromoteRender(renderKey,*staging,manifest,&promotion);
+                    LOG("Neural publish timing: parts="<<joinedParts<<" concatMs="<<concatMs<<" probeMs="<<probeMs
+                        <<" promoteMs="<<msSince(promoteStart)<<" totalMs="<<msSince(publishStart)<<".");
                     if(!published){
                         // This gate discarded a finished render once and left nothing to diagnose it
                         // with; then it did it again for a rename an antivirus scan was holding, and
