@@ -1,3 +1,4 @@
-2 of 8 pair(s) preferred shipped-tone-100 (role 'single'), confidence-weighted 2.0
-6 of 8 pair(s) preferred shipped-tone-050 (role 'double'), confidence-weighted 6.0
+8 pair(s) carry a preference with no confidence: ede7a4, c7f2fe, 02a108, 547411, 641352, be86c3, 57a8cd, c6169a. The weighting is withheld, so a threshold written in terms of confidence cannot be checked against this ballot.
+2 of 8 pair(s) preferred shipped-tone-100 (role 'single') (confidence not recorded)
+6 of 8 pair(s) preferred shipped-tone-050 (role 'double') (confidence not recorded)
 0 tie(s)

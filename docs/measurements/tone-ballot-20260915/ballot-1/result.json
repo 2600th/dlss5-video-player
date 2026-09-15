@@ -8,10 +8,17 @@
     "double": 6,
     "tie": 0
   },
-  "confidence_weighted": {
-    "single": 2.0,
-    "double": 6.0
-  },
+  "confidence_weighted": null,
+  "confidence_missing": [
+    "ede7a4",
+    "c7f2fe",
+    "02a108",
+    "547411",
+    "641352",
+    "be86c3",
+    "57a8cd",
+    "c6169a"
+  ],
   "per_clip": {
     "orig-dissolve": {
       "single": 0,

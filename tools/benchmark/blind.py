@@ -221,8 +221,14 @@ def build(args) -> int:
     return 0
 
 
-def score(ballot_path: Path) -> int:
-    sealed = json.loads((BLIND / "key.json").read_text(encoding="utf-8"))
+def score(ballot_path: Path, key_path: Path | None = None) -> int:
+    # An archived ballot is scored against the key archived beside it; BLIND/key.json
+    # is whatever the last build wrote, and re-scoring an old ballot against it would
+    # report every row as unknown. Defaults to the live one.
+    if key_path is None:
+        beside = ballot_path.parent / "key.json"
+        key_path = beside if beside.exists() else BLIND / "key.json"
+    sealed = json.loads(key_path.read_text(encoding="utf-8"))
     key = {p["id"]: p for p in sealed["pairs"]}
     # `single` and `double` are this script's role names, from the one-pass versus
     # two-pass question it was written for. Any two profiles can be handed to
@@ -234,7 +240,7 @@ def score(ballot_path: Path) -> int:
     votes = {"single": 0, "double": 0, "tie": 0}
     weighted = {"single": 0.0, "double": 0.0}
     per_clip: dict[str, dict[str, int]] = {}
-    unknown, unscored = [], []
+    unknown, unscored, noConfidence = [], [], []
     with ballot_path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
             pair = key.get(row["id"])
@@ -247,9 +253,19 @@ def score(ballot_path: Path) -> int:
                 continue
             role = "tie" if side == "TIE" else pair[side]
             votes[role] += 1
+            # A blank confidence used to become 1.0 here, so a ballot with the column
+            # left empty printed a confidence-weighted total that looked measured and
+            # was arithmetic on a default. The rows are named and the weighting is
+            # withheld instead: a rule written as "N pairs at confidence >= 3" cannot
+            # be evaluated against numbers nobody supplied.
+            confidence = (row.get("confidence") or "").strip()
             if role != "tie":
-                weighted[role] += float(row["confidence"] or 1)
+                if confidence:
+                    weighted[role] += float(confidence)
+                else:
+                    noConfidence.append(row["id"])
             per_clip.setdefault(pair["clip"], {"single": 0, "double": 0, "tie": 0})[role] += 1
+    scoredWeighting = not noConfidence
     # A row this key does not know, or one with no preference in it, is reported
     # rather than skipped. Scoring an unfilled ballot used to print a clean sweep of
     # zeros and exit 0, which reads exactly like a measured tie; a ballot filled in
@@ -260,15 +276,23 @@ def score(ballot_path: Path) -> int:
     if unscored:
         print(f"{len(unscored)} of {len(unscored) + sum(votes.values())} pair(s) carry no "
               f"preference: {', '.join(unscored)}", file=sys.stderr)
-    print(json.dumps(dict(profiles=profiles, votes=votes, confidence_weighted=weighted,
+    if noConfidence:
+        print(f"{len(noConfidence)} pair(s) carry a preference with no confidence: "
+              f"{', '.join(noConfidence)}. The weighting is withheld, so a threshold "
+              f"written in terms of confidence cannot be checked against this ballot.",
+              file=sys.stderr)
+    print(json.dumps(dict(profiles=profiles, votes=votes,
+                          confidence_weighted=(weighted if scoredWeighting else None),
+                          confidence_missing=noConfidence,
                           per_clip=per_clip, unscored=unscored, unknown=unknown), indent=2))
     # Spelled out in prose too, because the JSON above is the part that gets pasted
     # into a report and the roles are meaningless without their profiles.
     if sum(votes.values()):
         for role in ("single", "double"):
+            tail = f", confidence-weighted {weighted[role]:.1f}" if scoredWeighting else \
+                   " (confidence not recorded)"
             print(f"{votes[role]} of {sum(votes.values())} pair(s) preferred "
-                  f"{profiles[role] or role} (role '{role}'), confidence-weighted "
-                  f"{weighted[role]:.1f}", file=sys.stderr)
+                  f"{profiles[role] or role} (role '{role}'){tail}", file=sys.stderr)
         print(f"{votes['tie']} tie(s)", file=sys.stderr)
     if unknown or not sum(votes.values()):
         print("nothing was scored" if not sum(votes.values()) else "the ballot does not match the key",
@@ -286,8 +310,10 @@ def main() -> int:
                         help="longest excerpt to cut; a shot shorter than this caps its own pairs")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--score", type=Path, help="score a filled ballot.csv against key.json")
+    parser.add_argument("--key", type=Path, help="key.json to score against; defaults to one "
+                                                 "beside the ballot, else the live blind/ key")
     args = parser.parse_args()
-    return score(args.score) if args.score else build(args)
+    return score(args.score, args.key) if args.score else build(args)
 
 
 if __name__ == "__main__":

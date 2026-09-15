@@ -161,13 +161,17 @@ The key stays sealed until the ballot is filled in, either way round.
 
 ## Result of ballot 1 (1.0 against 0.5): scored, and the default does not change
 
-Filled in by a human judge on 2026-09-15, all 8 pairs, no ties. Confidence was left
-blank, so the scorer counted each vote as 1; it did not matter, for the reason below.
+Filled in by a human judge on 2026-09-15, all 8 pairs, no ties. **Confidence was left
+blank on every row, so this ballot has no weighting** - the scorer used to turn a blank
+into 1.0 and print a confidence-weighted total that was arithmetic on a default; it now
+names the rows and withholds the figure. The pre-registered rule's confidence clause
+therefore cannot be checked against this ballot, and does not need to be: the vote
+count alone falls short of the bar.
 
 | | pairs | confidence-weighted |
 |---|---|---|
-| `shipped-tone-100` (shipped 1.0) | 2 | 2.0 |
-| `shipped-tone-050` (candidate 0.5) | **6** | 6.0 |
+| `shipped-tone-100` (shipped 1.0) | 2 | not recorded |
+| `shipped-tone-050` (candidate 0.5) | **6** | not recorded |
 
 **6 of 8 is below the pre-registered bar of 7, so the default stays at 1.0.** This is
 exactly the case the threshold was fixed in advance for: 6 of 8 looks like a 75 %
@@ -207,6 +211,15 @@ close the item while a null at the *full* range does. Same four clips, same ship
 mask state, `shipped-tone-000` rendered 2026-09-15 and asserted the same way (the
 ini reads `NRLocalTone=0.000000` and all four clips' decoded-frame digests differ
 from the 1.0 arm).
+
+**Both arms share one worker build, checked rather than assumed.** `run.py` clones a
+runtime per profile, so the 1.0 arm had been rendered by `729836f0` (before the
+source-tag probe landed) and the 0.0 arm by `0fc948df` (after) - two arms differing by
+the knob *and* the binary. The 1.0 arm was therefore re-rendered under `0fc948df` and
+its four decoded-frame digests reproduce the earlier ones exactly
+(`71ca84c3db1aab69`, `b73f2d214fcd3ca9`, `d2d0079d0501d3da`, `ead6be3c37ad0fe8`), so
+the worker change is pixel-neutral on the default path and the pairs already cut are
+sound. Both profile clones now hash `0fc948df03d1b967`.
 
 **12 pairs, and the bar is 10.** Three pairs per clip rather than two, because the
 question this time is about power: under chance, 10 or more of 12 falls one way
