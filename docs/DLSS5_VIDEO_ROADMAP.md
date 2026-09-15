@@ -66,6 +66,28 @@ clip only, the fast pan. It stays because a refusal cannot invent a vector, not
 because it is a proven win; settling it needs real footage.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
 
+**Settled the same day on NR-processed captures, and the answer reverses the
+synthetic one.** Four labelled clips - cut from this repository's own demo
+capture, cuts verified frame by frame - were rendered on both trees. Read
+"captures", not "footage": every frame was recorded with neural rendering on, so
+the pixels are the player's own DLSS-NR output put through a screen capture, an
+h264 encode and a lanczos upscale before this pass touched them again. The
+provenance chain and its consequences are in [Benchmark](BENCHMARK.md).
+
+The gate **lowers** false motion on all four, by 4.6 to 14.4 % relative, which is
+11.8 to 74.4 % of the share the `intensity-0` control attributes to the neural
+pass, and on two of them it improves false motion, cell flips and added sigma
+together - an outcome no synthetic clip produced. Repeats are bit-identical within
+each tree and the trees differ, so the deltas are signal. The gate is kept on
+evidence now, not only on the shape of its risk. What the synthetic result was
+really measuring is fractal and cellular-automaton motion, where "false motion"
+counts pixels on cells the source held static; the reversal is the clearest case
+this project has that synthetic patterns can point the wrong way on direction.
+Two limits travel with it: the `intensity-0` control measures a carrier that
+already carries NR relighting, and `real-film-cuts` ends in 15 frozen frames,
+which makes its static-cell denominator the least comparable of the four.
+[A/B report](measurements/gate-real-footage-20260914/REPORT.md)
+
 **2. `enableGlobalFlow`.** Also off today, also computed inside the Execute we
 already issue: "a global flow vector is estimated from forward flow in the same
 `NvOFExecute` ... API call". A slow pan is a large, coherent global vector the
@@ -247,7 +269,7 @@ instance still refused rather than interleaved, and no helper left running
 after the player exits or is killed.
 
 **Instrumented and partly re-measured, 2026-09-14.** Every render now reports the
-phases above as a protocol v5 timeline, in the receipt and in one log line, so the
+phases above as a protocol v6 timeline, in the receipt and in one log line, so the
 acceptance number stops being prose. Two renders on an RTX 4080 SUPER at 610.47 put
 the helper side at 2133.6 ms and 2597 ms: process creation to entry point 104 and
 99 ms, entry to runtime ready 10 ms in both, source open through NGX init 1338.5
@@ -267,6 +289,68 @@ plus feature arm is 95 % of the helper's cold start in both runs, and all of it 
 per-process.** Still unmeasured is the player's half - request, preflight, launch,
 attach - because that needs a driven player session rather than the harness.
 [Session record](VERIFICATION-2026-09-14-RTX4080.md)
+
+**Measured end to end, and the acceptance number above is now known to be
+unreachable, 2026-09-14.** `tools/verification/player_session.ps1` drives a real
+player, injects the toggle and scrapes the log, so the player's half is no longer
+prose. Ten sessions on an RTX 4080 SUPER at 610.47: toggle to first neural frame
+is **8.39-9.18 s on the first toggle with the preflight verdict and cache cleared** and **4.88-5.16 s on every
+later one**, the 3.8 s difference being the feature-18 preflight probe, whose
+verdict is cached per runtime identity. The nine-phase split of a warm 4.98 s
+session is request 0.077, launch 0.004, helperStart 0.101, runtimeReady 0.010,
+neuralInit 1.415, featureArm 0.689, firstOutput 1.414, attach 1.244.
+
+What a resident helper removes from that is `neuralInit` plus `featureArm`:
+**2.10 s, and per-process.** It was assumed not to remove `firstOutput` (the first
+segment's preroll, encode and mux) or the attach, which together are 2.66 s,
+putting an estimated floor near **~2.9 s** - so the **under 2 s** half of the
+acceptance criterion written above could not be reached by making the helper
+resident, however well it is done. That criterion was written before anything
+measured the phases. **Decision taken 2026-09-14: the acceptance becomes "under
+3 s for a warm toggle", and `firstOutput` plus the attach - the first segment's
+preroll, encode and mux, and the handoff from original to neural playback - are a
+separate work item, not part of the helper.** Under 2 s would require shrinking
+that first-segment path (60-frame preroll, 4 s lead-in, first mux), a different
+change with a different risk.
+
+The measurement below then beat the 2.9 s estimate at **2.47 s**, because the
+estimate's own premise was wrong: `firstOutput` is not fixed, and reuse shortened
+it from 1.437 s to 1.058 s in the same run on the same clip. So the floor should
+be read as an estimate that reuse invalidated downwards, not as a bound.
+[Player-session record](VERIFICATION-matrix.md)
+
+**Built and accepted on Ada, 2026-09-14.** The helper is resident on `main`:
+protocol v6 carries a command channel (`Hello`, `Job`, `Cancel`, `Shutdown`, plus
+an outbound `Ready`), a job is handed over as the argv the helper already
+validates, the reuse key is `(runtime directory, runtime digest, neural-settings
+digest)`, the lease is held only while a job runs, the helper exits after 30 s
+idle, and orphan safety is both the job object and a parent-handle wait. All four
+of the "real change, not a flag" problems above are answered in code, and the
+answers are in [Architecture](ARCHITECTURE.md).
+
+**The acceptance number: 2.44-2.52 s, median 2.47 s, over four driven player
+sessions, every one `plan=reuse`** - against the criterion of under 3 s, and
+against 5.23-5.41 s for the first toggle in the same process. The reused job pays
+no `helperStart`, `runtimeReady`, `neuralInit` or `featureArm`, which is 2.19 s it
+never incurs because no process starts; `firstOutput` and the attach remain, as
+predicted. The ~2.9 s floor estimated above assumed `firstOutput` would not move,
+and it did: 1.437 s on the launch job against 1.058 s on the reused one, same run
+and same clip, so it is a property of reuse and not of the media. Which property
+is unmeasured - the kept NGX feature skipping a first-evaluate warm-up, a decoder
+and encoder already up in that process, or the rewound playhead. The floor was
+right about structure and wrong to treat that phase as fixed.
+
+Helper-side, over real pipes: a warm job reports `firstOutput` only at 492-538 ms
+against a cold 2715-2751 ms, idle exit at 31.0 s, parent-handle exit, +1002 MiB
+parked while idle and released on exit. Do not quote that figure as
+toggle-to-picture; it is a phase, measured with a different instrument.
+
+Two limits. Residency is reached only when the second job's range is not already
+covered by the first one's published entry - a toggle inside that coverage is
+answered from the cache in about 0.8 s with no helper job, which is correct
+behaviour and not this measurement. And per this document's own gate, **Blackwell
+is still owed**: everything above is one Ada card on driver 610.47.
+[Session record](VERIFICATION-matrix.md)
 
 ## What “2× / 3×” can mean
 
@@ -418,6 +502,58 @@ Provide:
 
 The visual blend can be instant, but changing native model parameters may require rerendering.
 
+**Measured 2026-09-14: keep all eight art defaults; one candidate for change.**
+204 renders over four labelled clips, every group deterministic. Of the nine
+alternatives the harness can express at the shipped mask state, three are
+bit-identical to it (`NRPreset` 1/2/3), one is the carrier floor rather than an
+art option (`NRIntensity=0`), four are worse or a wash (`NRAutoMask=0`,
+`NRLocalStructure=0`, both `NRStyle` values), and exactly one points anywhere:
+`NRLocalTone`. At 0.5 it recovers 2.0-3.9 dB PSNR and 2.6-5.7 delta-E on all four
+clips, monotone, with SSIM within 0.005 and both temporal metrics within 0.31
+levels - so the tone term moves colour and buys nothing measurable in stability.
+It is NOT changed on that evidence: on fractals "closer to the source" is the only
+thing PSNR and delta-E can mean, while on graded footage a deliberate relight is
+the product. The decision is gated on the real-footage clips and on a filled
+`blind.py` ballot; the sealed pairs exist on disk and no human has scored them, so
+no blind verdict exists. [Report](measurements/art-defaults-20260914/REPORT.md)
+
+Two defects that measurement found, neither fixed:
+`NRPreset` is inert here - 0/1/2/3 are bit-identical on four synthetic clips at
+both mask states and on one real graded film clip at the shipped mask state, two
+repeats each, one output digest across all eight runs - yet it enters the render
+identity through `CanonicalNeuralSettings`, so flipping it costs a full re-render
+for byte-identical output. The knob was confirmed to reach the runtime rather than
+be silently dropped: RenoDX echoes `preset=1|2|3` back in its own preflight
+`activeSettings`, so the hint was written, read and ignored. Since the resident
+helper landed the cost is doubled: a changed settings digest also evicts a healthy
+helper, paying a cold bring-up of 2715-2751 ms against a warm 492-538 ms.
+
+Left in deliberately. A zero-difference result earns only what it measured, so
+this stays a property of DLSS-NR 310.8.0 with RenoDX 4.7 on Ada at driver
+32.0.16.1047, not a property of the preset hint; the identity also carries the
+runtime digest, so a future runtime that makes the knob live re-renders anyway.
+Anyone who does narrow the key must narrow the helper's own
+`SnapshotNeuralAddonSettings` comparison in the same change: the helper re-reads
+its INI per job and fails the job outright on any textual difference, so a key
+that treated two INI texts as equivalent while that comparison did not would turn
+a cheap relaunch into a failed job plus a relaunch. Both read the same
+canonicalisation today, which is where the single definition belongs.
+
+`blind.py`'s candidate-frame filter used to admit nothing on clips with hard cuts,
+fall back to frame 0, and hand both pairs of `cuts-motion` and `cuts-similar` the
+same frame - which made the one instrument that could settle the tone question
+useless on half the corpus. **Fixed 2026-09-14.** Shots are now derived from the
+manifest's own `cuts` and `soft_cuts`, a candidate must sit past a 0.1 s guard
+after the cut that opened its shot and leave at least 0.5 s of that shot behind
+it, and the excerpt is clipped to the shot so it never spans an edit - `--seconds`
+is a cap, not a length. There is no frame-0 fallback left: a shot too short to
+serve is named in `key.json` as `dropped_shots`, a clip with no usable shot as
+`skipped_clips`, and a run with nothing left to judge fails with the reason. The
+roadmap's own complaint retested with its flags now picks `cuts-motion` frames 5
+and 59 and `cuts-similar` 11 and 33, in four different shots. The tone ballot is
+therefore runnable; it still has to be scored by a human, which is what item 7
+above is waiting on.
+
 **Links:** [ReShadeConfig.cpp](../src/ReShadeConfig.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [video2dlssnr controls](https://github.com/DaniilSokolyuk/video2dlssnr)
 
 ## P1 — High-value quality and performance
@@ -448,6 +584,22 @@ Preserve:
 
 Expose native **Tone Intensity**, including zero, which NVIDIA says preserves the rendered frame's exact colors. Add clipping and color-shift warnings.
 
+**Unmeasured, and deprioritised on 2026-09-14 - not a negative result.** The
+exposure half of this item - supplying NGX a 1x1 exposure texture and an `IsHDR`
+flag instead of the `AutoExposure` feature flag `DLSSBackend.cpp` sets
+unconditionally - was listed as runnable once the flag reached a harness profile,
+and it still is. Nothing has measured it: that day's sweep varied the RenoDX `NR*`
+keys and never touched the NGX flag or an exposure texture, so it says nothing
+either way about this item, and an earlier draft of this note wrongly implied it
+did. The reason for deferring is ordering, not evidence - plumbing a flag to
+measure an untested suspicion while the persistent helper had a measured 2.10 s on
+the table was the wrong order of work.
+
+What would warrant it, specifically: an HDR10 or PQ source, which the corpus does
+not have and cannot synthesise honestly, or a clip where auto-exposure demonstrably
+misreads - `highlights-gradients` clips to white by construction and is the
+candidate to check first. Either gives the A/B something to be about.
+
 **Links:** [NVIDIA DLSS 5 controls](https://www.nvidia.com/en-us/geforce/news/dlss-5-3d-guided-neural-rendering/) · [neural-upstream](https://github.com/matiasLombo/neural-upstream) · [MediaPipeline.cpp](../src/MediaPipeline.cpp)
 
 ### 9. Confidence-aware optical flow
@@ -457,6 +609,22 @@ CPU estimator kept as the fallback for cards and builds without it. What that
 leaves open is the confidence half: the engine's cost surface is produced and
 bound, but the gate is off because its thresholds have not been measured, and
 nothing yet uses forward/backward disagreement.
+
+**And NVOFA now reaches playback-SR sessions too (2026-09-14).** It used to run
+only when the decoded frame already matched the DLSS input size, so turning
+runtime Super Resolution on silently dropped motion estimation to the CPU
+block matcher - a perf and quality cliff exactly where the user asked for more
+quality. The engine is now given the decoded frame's geometry and the resolve
+pass scales the vectors per axis into the DLSS input grid, which is exact because
+the convert pass is one full-screen triangle over uv 0..1 with no crop. The
+neural-size path is byte-unchanged: the scale is `1,1` there, asserted with an
+exact float compare rather than an epsilon, and a live session prints
+`Motion guide backend: NVOFA hardware flow on the decoded 1920x1080 frame,
+vectors scaled by 1,1 into the 1920x1080 DLSS input`. The SR branch itself is
+unit-tested and not yet session-proven on this machine, because the player-root
+SR runtime is not staged here and `[Playback] SuperResolution=1` fails at
+`NGXLoadLibrary` - see
+[the readback report](measurements/gpu-readback-20260914/REPORT.md).
 
 The 2026-09-11 survey found the cheap route to both, and it is items 1 and 2 of
 the plan at the top of this file: `NV_OF_PRED_DIRECTION_BOTH` returns backward
@@ -522,6 +690,58 @@ Offer two distinct modes:
 - **Experimental live mode:** bounded latency with visible dropped-frame counters
 
 Dropped frames may be acceptable for live preview, never final export.
+
+**Audited end to end 2026-09-14, and the result is mostly a refusal.** Fourteen
+CPU round-trips on the live segment-capture path were enumerated with file:line
+and each marked necessary or removable. Two removals landed - five
+`ClearRenderTargetView` calls that wrote memory the very next full-target draw
+overwrote (66 MB + 33 MB + up to 33 MB per frame of write bandwidth at 4K), and a
+per-frame Map/Unmap of the timestamp readback, now persistently mapped. Neither
+is measurable: 1080p median moved -0.8 % and 4K +0.4 % against a session spread
+three to five times larger, so **item 12's own success criterion is unmet** and
+they are kept as bandwidth hygiene with a correctness argument, not as a win.
+
+The largest proportional item turned out not to be code at all but two policy
+defaults, `[Encoding] GpuSourceConversion` and `GpuColorConversion`, both off,
+which put 4 B/px instead of 1.5 across the decoder pipe and the capture readback.
+Turning both on is worth **+7 % processing throughput at 4K** and costs **0.75 dB
+PSNR, +0.95 dE and double the false motion**, and single-flag arms attribute it:
+the capture side alone costs -0.79 dB / +0.94 dE, the decoder side alone -0.64 dB
+/ +0.88 dE on an **untagged** clip. Re-run on a `bt709`-tagged one, the two split:
+the decoder-side flag becomes **free** (+0.067 dB, +0.009 dE) while the
+capture-side flag still costs **-0.64 dB / +0.64 dE**. The source is already
+`yuv420p`, so nothing lost chroma resolution; what happened is that both shaders
+hard-code BT.709 limited range (`src/D3D12Renderer.cpp:316-341`) while swscale
+falls back to BT.601 for a stream that declares nothing. So `GpuSourceConversion`
+is a **tagging defect away from free** - exactly the hazard
+`docs/USAGE.md:219-221` already names - and its blocker is the source colour-tag
+probe, not readback cost. `GpuColorConversion`'s cost survived tagged *input* at
+both resolutions, so it was not an input-tagging artifact - it turned out to be an
+output-side colour-metadata defect instead, and it is now gone. See below.
+
+**The same audit walked into a larger defect, and fixing it was the wave's most
+user-visible change.** Every render written on the default path was **untagged and
+BT.601-converted**: the encoder stated colorimetry only when the GPU converted the
+frame, so a `bt709` source became a file that declared nothing - verified on an
+ordinary render, and the matrix measured directly (a pure-red frame returns the
+BT.601 prediction at 1080p and 480p alike, so swscale does not switch on
+resolution). Both paths now state `bt709`/`tv` and the CPU path converts with
+`out_color_matrix=bt709`; labelling without converting would have been worse than
+the ambiguity. PSNR never saw any of it, because each path round-trips under its own
+tags, which is worth remembering the next time a colour question is handed to a
+fidelity metric. All four tags land now, on both paths, via `setparams` -
+the `-color_*` output options carry only matrix and range on this FFmpeg. Stamping
+them on the NV12 path's frames also **removed the capture-side quality cost
+entirely** (0.00 dB against the CPU path, where it had been -0.64 dB), which retired
+the chroma-siting hypothesis before it was tested: the cost was frames reaching the
+encoder undescribed, not sample positions. `GpuColorConversion` is therefore a
+candidate for defaulting on - no quality cost, +5.8 % throughput at 4K, and on this
+card it lowers GPU ms where the shipped note measured the opposite on a 5070 Ti, so
+re-measure that before flipping. `GpuSourceConversion` still needs the source
+colour-tag probe, which the export fix does not provide. The defaults stay this
+wave, the
+flags remain available per render, and the measurement is the reason rather than
+the taste: [readback report](measurements/gpu-readback-20260914/REPORT.md).
 
 **Links:** [MediaPipeline.cpp](../src/MediaPipeline.cpp) · [D3D12Renderer.cpp](../src/D3D12Renderer.cpp) · [NVIDIA Video SDK samples](https://github.com/NVIDIA/video-sdk-samples) · [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)
 

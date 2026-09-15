@@ -1,0 +1,16 @@
+{
+  "shipped-defaults": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "the eight keys the shipped player writes at its own defaults (src/NeuralSettings.h NeuralSettings{} through NeuralAddonOverridesFor, main.cpp:3533); exists to prove harness `baseline`, which writes no NR* key at all, really is the shipped art configuration and not merely the add-on's internal defaults"
+  }
+}

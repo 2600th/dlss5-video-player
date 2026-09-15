@@ -1,0 +1,30 @@
+{
+  "explicit-intensity": {
+    "overrides": {"NRIntensity": "1.000000"},
+    "description": "one shipped default written explicitly: NRIntensity=1.000000 (add-on receipt already reports intensity=1.000000 without it)"
+  },
+  "explicit-localtone": {
+    "overrides": {"NRLocalTone": "1.000000"},
+    "description": "one shipped default written explicitly: NRLocalTone=1.000000"
+  },
+  "explicit-localstructure": {
+    "overrides": {"NRLocalStructure": "1.000000"},
+    "description": "one shipped default written explicitly: NRLocalStructure=1.000000"
+  },
+  "explicit-skinstructure": {
+    "overrides": {"NRSkinStructure": "-1.000000"},
+    "description": "one shipped default written explicitly: NRSkinStructure=-1.000000 (the player's 'leave skin alone' sentinel)"
+  },
+  "explicit-colorstrength": {
+    "overrides": {"NRColorStrength": "1.000000"},
+    "description": "one shipped default written explicitly: NRColorStrength=1.000000"
+  },
+  "explicit-automask": {
+    "overrides": {"NRAutoMask": "1"},
+    "description": "one shipped default written explicitly: NRAutoMask=1"
+  },
+  "explicit-preset-style": {
+    "overrides": {"NRPreset": "0", "NRStyle": "0"},
+    "description": "the two integer shipped defaults written explicitly: NRPreset=0, NRStyle=0"
+  }
+}

@@ -138,6 +138,11 @@ struct AttemptResult {
     uint64_t frames{};
     uint64_t bytes{};
     uint64_t evaluations{};
+    // Evaluate calls the neural backend itself completed during this attempt.
+    // Counted separately from `evaluations`, which is this job's own tally of
+    // captured frames: this one is the backend's, and it includes the preroll
+    // and every resubmit.
+    uint64_t neuralEvaluations{};
     uint32_t historyResets{};
     bool hasTimestamp{};
     int64_t firstTimestamp{};
@@ -1003,7 +1008,26 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     // The source open and the evaluator's own bring-up (device, NGX) are one
     // boundary: nothing between them is separately observable from here.
-    markColdStart(NeuralColdStartPhase::NeuralInit);
+    //
+    // A job served by an evaluator an earlier job left initialized did not pay
+    // that bring-up, so it reports no value for the phase rather than a zero:
+    // an absent phase did not happen, which is a different claim from one that
+    // took no time, and a cold-start table that cannot tell them apart is
+    // worthless. The mark is deliberately not advanced either, which leaves the
+    // source open this job DID pay inside the next boundary it reports instead
+    // of dropping it on the floor.
+    const bool evaluatorReused = [&] {
+        if constexpr (requires { evaluator.Reused(); }) return evaluator.Reused();
+        else return false;
+    }();
+    if (!evaluatorReused) markColdStart(NeuralColdStartPhase::NeuralInit);
+    // The neural backend's own Evaluate tally. The production evaluator reports
+    // the NGX count; a test evaluator has only its submit count, which is the
+    // same claim at the fidelity that build can make.
+    auto neuralEvaluations = [&]() -> uint64_t {
+        if constexpr (requires { evaluator.NeuralEvaluations(); }) return evaluator.NeuralEvaluations();
+        else return evaluator.EvaluationCount();
+    };
     expectedBytes = static_cast<size_t>(
         EncoderFrameBytes(evaluator.CapturePixelFormat(), request.width, request.height));
 
@@ -1075,7 +1099,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     L"Feature 18 inline interception was not armed before frame capture.");
     }
     result.feature18ArmedBeforeCapture=true;
-    markColdStart(NeuralColdStartPhase::FeatureArm);
+    // Priming is what creates feature 18 and what the add-on arms its detours
+    // on; a retained feature skips the loop above entirely, so on that path
+    // nothing this phase names happened and it reports nothing rather than a
+    // zero. A reused evaluator that still had to prime - the add-on lost the
+    // feature under us - reports the arm it really paid.
+    if (!evaluatorReused || primed > 0) markColdStart(NeuralColdStartPhase::FeatureArm);
     // Baseline read after any re-hook, so a create the add-on observed late
     // cannot be mistaken for the captured sequence's own evaluation.
     uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
@@ -1098,6 +1127,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
 
     auto runAttempt = [&](EncoderKind kind) {
+        // The backend's own evaluation count, read on entry and on every exit,
+        // so the attempt can be held to having actually evaluated the frames it
+        // claims. Sampled around the attempt rather than per frame because a
+        // retry pass re-renders everything and only its own work counts.
+        const uint64_t neuralEvaluationsBefore = neuralEvaluations();
         AttemptResult attempt;
         EncoderSpec spec{request.width, request.height, request.fps, kind,
                          evaluator.CapturePixelFormat()};
@@ -1118,6 +1152,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         if constexpr (requires { evaluator.ResetStageDetail(); }) evaluator.ResetStageDetail();
         const auto reportStages=[&]{ReportStageTimings(kind,stages,attempt,evaluator);};
         ScopeExit<decltype(reportStages)> reportOnExit{reportStages};
+        const auto recordNeuralEvaluations = [&] {
+            const uint64_t now = neuralEvaluations();
+            attempt.neuralEvaluations = now > neuralEvaluationsBefore ? now - neuralEvaluationsBefore : 0;
+        };
+        // Declared after the stage report so it runs before it: the stage table
+        // is the last thing an attempt writes.
+        ScopeExit<decltype(recordNeuralEvaluations)> recordOnExit{recordNeuralEvaluations};
         // Submission runs ahead of encoding, so frame accounting has to be tracked
         // separately from what has actually been written out.
         struct InFlightCapture {
@@ -1310,6 +1351,27 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
                 if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
                 if (pipelined) break;
+                // The add-on's log counter is a one-shot proof per PROCESS, not
+                // per job. It reports "inline feature 18 evaluation succeeded
+                // (count=N)" at N=1 and N=60 and then goes quiet: measured on
+                // this machine's RTX 4080 SUPER, a first job took the NGX
+                // evaluation count 0 -> 120 and logged exactly those two lines,
+                // and a second job in the same process took it 120 -> 240 and
+                // logged nothing at all while evaluating every frame at 5.26 ms
+                // of real GPU time. So a reused evaluator can never watch that
+                // counter advance, however many times it resubmits, and waiting
+                // for it would refuse a healthy job after 120 pointless
+                // resubmits of its first frame.
+                //
+                // What a reused job proves instead, per job and without any
+                // session high-water mark: the backend's own evaluation count
+                // advanced at least once per captured frame (checked with the
+                // verdicts below) and the neural GPU time per frame clears the
+                // floor a DLAA-only run cannot (NeuralTimingClearsFloor, which
+                // is the check that actually catches the failure this gate was
+                // built for). The session evidence itself was already verified
+                // before capture and describes the live feature this job used.
+                if (evaluatorReused) break;
                 // The runtime logs successful evaluations sparsely. Capture the
                 // first source frame until a fresh receipt exists, retaining
                 // only its latest pixels for encoding. Each retry has its own
@@ -1445,10 +1507,26 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // Summarized before the verdicts below so a refusal carries the numbers it
     // was based on into the receipt.
     result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
-    if(!result.evidence.Valid()||
+    if(!result.evidence.Valid()){
+        return fail(NeuralRenderFailure::Neural,
+                    L"Feature 18 runtime evidence was incomplete or contained a later failure.");
+    }
+    // The add-on's log counter can only be watched to advance once per process
+    // (see the receipt gate). The first job in a process is held to it exactly
+    // as a single-shot helper is; a reused evaluator is held to the backend's
+    // own count instead, which is per process, monotonic, and has to have
+    // advanced at least once for every frame this attempt captured.
+    if(!evaluatorReused&&
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
         return fail(NeuralRenderFailure::Neural,
-                    L"Feature 18 runtime evidence did not advance after captured rendering or contained a later failure.");
+                    L"Feature 18 runtime evidence did not advance after captured rendering.");
+    }
+    if(evaluatorReused&&attempt.neuralEvaluations<attempt.frames){
+        std::wostringstream detail;
+        detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
+              <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
+              <<L"are not all neural output.";
+        return fail(NeuralRenderFailure::Neural,detail.str());
     }
     if(!NeuralTimingClearsFloor(result.timing,request.width,request.height)){
         std::wostringstream detail;
@@ -1496,6 +1574,11 @@ struct TestEvaluatorAdapter {
     bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,PixelLayout){
         return evaluator.Initialize(window,width,height,fps,guides);
     }
+    // A test evaluator owns no device and is constructed per Run, so it never
+    // inherits an armed feature. Answered here rather than left to RunJob's
+    // fallback so the job's reuse branches stay runtime branches in this build
+    // too, and the tests exercise the same control flow production does.
+    bool Reused()const{return false;}
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
         OfflineEvaluation evaluation;
         if(!evaluator.Submit(OfflineDecodedFrame{frame.bgra,frame.timestamp100ns,frame.discontinuity,
@@ -1679,12 +1762,49 @@ struct ProductionEvaluatorAdapter {
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
     // Requested before Initialize; the renderer decides what it can actually deliver.
     bool gpuColorConversion{false};
+    // What the live renderer was actually built for, so Initialize can tell a
+    // retained device that still fits this job from one that does not.
+    bool builtGpuColorConversion{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
+    // True when the last Initialize kept a retained device and NGX instance
+    // instead of building them. The job then paid no neural bring-up; whether
+    // it also skipped the feature arm is `featureReleasedWhileIdle`.
+    bool reused=false;
+    // Set when the idle policy handed the feature-18 workset back between
+    // jobs. The device, the NGX instance and the negotiated sizes all survived
+    // that, so the next job keeps them and re-arms the feature alone - which
+    // is the whole trade the FreeFeature arm makes.
+    bool featureReleasedWhileIdle=false;
+    bool Reused()const{return reused;}
     bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,PixelLayout layout){
+        // Everything compared here is fixed at bring-up and has no setter: the
+        // swapchain and the NGX feature are sized by Initialize, the capture
+        // format picks the readback layout, and the source layout picks the
+        // upload path. D3D12Renderer cannot resize any of them, so a job that
+        // differs in any one of them gets the device built again - which is
+        // also the only way to release the feature the add-on holds.
+        //
+        // A feature handed back while idle is the one exception: nothing the
+        // device holds changed, only the workset, so the job re-arms it rather
+        // than rebuilding everything underneath it.
+        reused=renderer&&(renderer->DLSSFeatureCreated()||featureReleasedWhileIdle)&&
+               width==w&&height==h&&fps==rate&&
+               sourceLayout==layout&&builtGpuColorConversion==gpuColorConversion;
+        // Answered, so spent: this job either re-arms the released feature or
+        // rebuilds the device, and either way the next Initialize must judge
+        // the feature on what it can see rather than on a stale promise.
+        featureReleasedWhileIdle=false;
+        if(reused){
+            // Guide controls are pure CPU state and are the one thing a job may
+            // change without rebuilding anything.
+            guides.SetControls(controls);return true;
+        }
+        Release();
         width=w;height=h;fps=rate;sourceLayout=layout;const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
+        builtGpuColorConversion=gpuColorConversion;
         renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
         renderer->SetSourceLayout(layout);
         // This swapchain is a hidden formality that exists so the neural add-on sees a
@@ -1701,6 +1821,51 @@ struct ProductionEvaluatorAdapter {
         // render target EnqueueEvaluatedFrameCapture draws for itself - but every frame
         // still presents: the RenoDX add-on performs its feature-18 pass per present.
         guides.SetControls(controls);renderer->SetDLSS(true);return true;
+    }
+    // Drops the device, the NGX instance and the feature-18 workset the add-on
+    // holds. The readback worker is joined first: it copies out of mapped
+    // memory the renderer owns, which the reset below would unmap under it.
+    void Release(){
+        DiscardPending();deferred.Shutdown();renderer.reset();
+        successfulEvaluations=0;lastFailure=NeuralRenderFailure::None;resolveBroken=false;
+        featureReleasedWhileIdle=false;
+    }
+    // Hands the feature-18 workset back between jobs, keeping everything else
+    // this adapter retains. Only legal with no job running: the pending
+    // captures are drained first, and the renderer waits for every command
+    // list that referenced the feature before releasing it, which is what the
+    // DLSS guide S5.5 requires and what a mid-job release would break.
+    bool ReleaseFeatureForIdle(){
+        if(!renderer||!renderer->DLSSFeatureCreated())return false;
+        DiscardPending();
+        if(!renderer->ReleaseDLSSFeatureForIdle())return false;
+        featureReleasedWhileIdle=true;
+        return true;
+    }
+    // What the adapter's device is holding right now, rather than the peak it
+    // reached during a job.
+    uint64_t CurrentLocalVideoMemoryMiB()const{
+        return renderer?renderer->CurrentLocalVideoMemoryMiB():0;
+    }
+    // Per-job state on an evaluator that is about to serve another job. Each of
+    // these would otherwise describe the previous one:
+    //  - successfulEvaluations becomes result.nativeEvaluations, which a
+    //    successful result is required to have earned itself;
+    //  - TemporalGuideGenerator::Reset deliberately keeps its scene-cut tally
+    //    ("evidence about the whole job") and its history generation keeps
+    //    climbing, so the generator is replaced rather than reset;
+    //  - a posted readback copy still holds a capture slot;
+    //  - the renderer's peak local video memory is a running maximum, so the
+    //    previous job's peak would be reported as this job's.
+    // NGX temporal history needs nothing here: the job's first submit carries
+    // HistoryReset::FirstFrame, which the renderer acts on.
+    void ResetForJob(const GuideControls& controls){
+        DiscardPending();
+        successfulEvaluations=0;lastFailure=NeuralRenderFailure::None;
+        guides={};guides.SetControls(controls);
+        guideCost={};
+        captureScratch.pixels.clear();captureScratch.id={};
+        if(renderer){renderer->ResetStageCounters();renderer->ResetPeakLocalVideoMemory();}
     }
     CapturedVideoFrame captureScratch;
     // Declared after `renderer` so the worker is joined before the renderer, and with it
@@ -1859,6 +2024,11 @@ struct ProductionEvaluatorAdapter {
     }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
+    // The NGX backend's own count of Evaluate calls that returned success. Unlike
+    // the add-on's log counter this is per process and monotonic with no logging
+    // cadence in the way, so a job that reused an armed feature can still prove
+    // the neural pass ran once per frame it captured.
+    uint64_t NeuralEvaluations()const{return renderer?renderer->DLSSEvaluations():0;}
     void ResetTemporal(){guides.Reset();DiscardPending();}
     bool RequestFeatureRehook(){
         if(!renderer)return false;
@@ -2051,19 +2221,33 @@ std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& r
     return best;
 }
 
-std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory)
+namespace {
+
+// The session-log read, with the two knobs residency needs.
+//
+// `resolve` is called per attempt because a single-shot helper may start before
+// its own proxy has written anything, so which candidate is newest can change
+// while this waits. A resident helper pins its answer instead - see
+// SessionEvidence.
+//
+// `stabilize` waits for the add-on's asynchronous arming to appear and for the
+// file to stop growing. Without it the log is read once and returned as it
+// stands, which is all a job that reused an already-armed feature needs.
+template <class Resolve>
+std::string ReadSessionLog(Resolve resolve, bool stabilize)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
     uintmax_t lastSize=std::numeric_limits<uintmax_t>::max();
     int stableSamples=0;
     for(int attempt=0;attempt<20;++attempt){
-        const std::filesystem::path path=ResolveNeuralRuntimeLogPath(runtimeDirectory);
+        const std::filesystem::path path=resolve();
         std::error_code error;
         const auto size=path.empty()?uintmax_t{0}:std::filesystem::file_size(path,error);
         if(!path.empty()&&!error&&size<=Limit){
             std::ifstream input(path,std::ios::binary);
             if(input){
                 latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
+                if(!stabilize)return latest;
                 const auto evidence=ParseNeuralRuntimeEvidence(latest);
                 stableSamples=size==lastSize?stableSamples+1:1;
                 lastSize=size;
@@ -2073,6 +2257,13 @@ std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDire
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return latest;
+}
+
+} // namespace
+
+std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory)
+{
+    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},true);
 }
 
 
@@ -2097,6 +2288,108 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
     }
     evidence.highestObservedEvaluation=HighestEvaluationCount(lower);
     return evidence;
+}
+
+namespace {
+
+// The reader a job's evidence comes from, as an object rather than a free
+// function, for the two reasons residency introduces.
+//
+// The log path is pinned after the first attempt that resolves one.
+// ResolveNeuralRuntimeLogPath picks the candidate written most recently after
+// this process started, which is the right rule for a process that renders once
+// and exits. A resident helper outlives other players' helpers, and ReShade
+// rotates to ReShade.log1 while this process holds ReShade.log, so re-resolving
+// per read lets somebody else's file win a race this process cannot see. Our
+// own proxy's file does not change while we live.
+//
+// The stability wait is skipped for the first read of a job that inherited an
+// armed feature. That wait exists for the add-on's asynchronous NGX detour
+// arming, which an earlier job in this process already proved; the log is
+// append-only within a session, so a single read already contains every line
+// that job's final read saw and the baseline it yields cannot be stale-low.
+// Every later read in the job - including the one the advance check is made
+// against - still waits.
+class SessionEvidence {
+public:
+    explicit SessionEvidence(std::filesystem::path runtimeDirectory)
+        : runtimeDirectory_(std::move(runtimeDirectory)) {}
+
+    void BeginJob(bool featureAlreadyArmed) { skipStabilityOnce_ = featureAlreadyArmed; }
+
+    std::string operator()()
+    {
+        const bool stabilize = !skipStabilityOnce_;
+        skipStabilityOnce_ = false;
+        return ReadSessionLog([this] {
+            if (pinned_.empty()) pinned_ = ResolveNeuralRuntimeLogPath(runtimeDirectory_);
+            return pinned_;
+        }, stabilize);
+    }
+
+    // True once the pinned log has grown past what a read can return. Past that
+    // point every read comes back empty and every job would fail its evidence
+    // check, so the helper stops offering itself for reuse instead of failing
+    // the next job to arrive. Only a resident helper can reach it.
+    bool LogTooLargeToReuse() const
+    {
+        if (pinned_.empty()) return false;
+        std::error_code error;
+        const auto size = std::filesystem::file_size(pinned_, error);
+        return !error && size > kReuseLogLimit;
+    }
+
+private:
+    // Half the read limit, so a job that starts under it cannot grow past it
+    // and read empty before it finishes.
+    static constexpr uintmax_t kReuseLogLimit = 2u * 1024u * 1024u;
+    std::filesystem::path runtimeDirectory_;
+    std::filesystem::path pinned_;
+    bool skipStabilityOnce_{};
+};
+
+} // namespace
+
+// The production device, evaluator, encoder and session-log reader, kept across
+// Run calls. Declared in reverse teardown order: the encoder's ffmpeg child and
+// feeder thread go before the device whose readback memory they were fed from,
+// and the source decoder last.
+struct OfflineNeuralRenderer::Retained {
+    explicit Retained(std::filesystem::path runtimeDirectory)
+        : evidence(std::move(runtimeDirectory)) {}
+    ProductionSourceAdapter source;
+    ProductionEvaluatorAdapter evaluator;
+    ProductionEncoderAdapter encoder;
+    SessionEvidence evidence;
+};
+
+OfflineNeuralRenderer::OfflineNeuralRenderer() = default;
+OfflineNeuralRenderer::~OfflineNeuralRenderer() = default;
+
+bool OfflineNeuralRenderer::ReusableForAnotherJob() const
+{
+    return !retained_ || !retained_->evidence.LogTooLargeToReuse();
+}
+
+OfflineNeuralRenderer::MemoryFootprint OfflineNeuralRenderer::SampleMemoryFootprint() const
+{
+    MemoryFootprint footprint;
+    if (!retained_) return footprint;
+    footprint.localVramMiB = retained_->evaluator.CurrentLocalVideoMemoryMiB();
+    footprint.featureArmed = retained_->evaluator.FeatureCreated();
+    return footprint;
+}
+
+OfflineNeuralRenderer::IdleFeatureRelease OfflineNeuralRenderer::ReleaseIdleFeatureMemory()
+{
+    IdleFeatureRelease observed;
+    observed.before = SampleMemoryFootprint();
+    if (retained_) observed.released = retained_->evaluator.ReleaseFeatureForIdle();
+    // Sampled after the attempt either way: a release that could not drain the
+    // queue still has to report what the adapter says, because "nothing moved"
+    // is what separates a refused release from a runtime that declined to free.
+    observed.after = SampleMemoryFootprint();
+    return observed;
 }
 
 OfflineNeuralRenderer::OfflineNeuralRenderer(
@@ -2126,14 +2419,30 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
                       evidenceProvider_,clock,paused,segments,coldStart);
     }
-    const auto runtimeDirectory=ModuleDirectory();
-    ProductionSourceAdapter source;ProductionEvaluatorAdapter evaluator;ProductionEncoderAdapter encoder;
-    evaluator.gpuColorConversion=request.gpuColorConversion;
-    source.gpuConversion=request.gpuSourceConversion;
-    return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-        [runtimeDirectory]{return ReadNeuralRuntimeSessionLog(runtimeDirectory);},
+    if(!retained_)retained_=std::make_unique<Retained>(ModuleDirectory());
+    Retained& state=*retained_;
+    // A job that unwound without closing its decoder must not leave the next
+    // one an open one; every other path already closes it.
+    state.source.Close();
+    state.source.gpuConversion=request.gpuSourceConversion;
+    state.evaluator.gpuColorConversion=request.gpuColorConversion;
+    // Read before the reset, because the reset is allowed to drop the feature.
+    const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
+    state.evaluator.ResetForJob(request.guides);
+    state.evidence.BeginJob(inheritedArmedFeature);
+    NeuralRenderResult result=RunJob(request,std::move(progress),stop,state.source,
+        state.evaluator,state.encoder,std::ref(state.evidence),
         []{return SteadyClock::now();},
         [pauseEvent=request.pauseEvent]{
             return pauseEvent&&WaitForSingleObject(pauseEvent,0)==WAIT_OBJECT_0;
         },segments,coldStart);
+    // Three distinguishable outcomes, and the middle one is what the
+    // FreeFeature idle policy produces: the device and the NGX instance were
+    // inherited but the workset was not, so the job skipped neuralInit and
+    // paid featureArm. Reporting that as a reuse would hide the cost the
+    // policy is being measured for.
+    residency_=state.evaluator.Reused()
+        ?(inheritedArmedFeature?Residency::FeatureReused:Residency::FeatureRecreated)
+        :inheritedArmedFeature?Residency::FeatureRecreated:Residency::Initialized;
+    return result;
 }

@@ -1,9 +1,11 @@
 """Generates the repeatable benchmark corpus (lossless FFV1 MKV, 1920x1080, 30 fps).
 
 Every synthetic clip is produced by deterministic FFmpeg sources with explicit
-seeds; ``manifest.json`` records per-clip category, hard-cut frame indices,
-burned-in ground-truth text and an rgb24 frame-hash digest so a regenerated
-corpus can be proven identical (``--check``).
+seeds; the ``real`` clips are cut from this repository's own demo capture
+(``docs/media/neural-comparison-demo.mp4``), which is tracked in git, so they are
+reproducible from a clean checkout too. ``manifest.json`` records per-clip
+category, hard-cut frame indices, burned-in ground-truth text and an rgb24
+frame-hash digest so a regenerated corpus can be proven identical (``--check``).
 
     python tools/benchmark/corpus.py [--corpus DIR] [--check]
 """
@@ -15,14 +17,29 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import BUILD, CORPUS, FFMPEG, FLAGS, framemd5, probe, sequence_digest, write_json
+from common import BUILD, CORPUS, FFMPEG, FLAGS, REPO, framemd5, probe, sequence_digest, write_json
 
 WIDTH, HEIGHT, FPS = 1920, 1080, 30
 ENCODE = ["-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", "1", "-g", "1", "-slices", "4",
           "-pix_fmt", "yuv420p", "-r", str(FPS), "-an"]
+# Camera-original clips keep their publisher frame rate: re-timing 23.976 to 30
+# duplicates one frame in five, and a duplicate pair is motionless, which is what
+# makes real-film-cuts 37 % motionless and its false-motion level incomparable.
+ENCODE_NATIVE_RATE = ["-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", "1", "-g", "1",
+                      "-slices", "4", "-pix_fmt", "yuv420p", "-an"]
 FONT_MONO = "C\\\\:/Windows/Fonts/consola.ttf"
 FONT_UI = "C\\\\:/Windows/Fonts/segoeui.ttf"
 FACE_FIXTURE = BUILD / "runtime-comparison-20260907" / "fixtures" / "mafia-60s.mkv"
+DEMO = REPO / "docs" / "media" / "neural-comparison-demo.mp4"
+DEMO_RELATIVE = "docs/media/neural-comparison-demo.mp4"
+# The demo is a 1920x1080 screen capture of the player, so only part of each frame is
+# footage. This rectangle is that part: the columns and rows whose temporal standard
+# deviation is nonzero while the capture plays back video (501-1863 x 126-892, trimmed
+# to even sides), which is the player's video surface with its pillarbox and its
+# chrome excluded. Cropping is not cosmetic - the static chrome is 50 % of the frame,
+# and left in it would dominate the residual the cut test reads and inflate the
+# static-cell denominator false motion is measured against.
+DEMO_SURFACE = "crop=1362:766:502:126"
 
 # Ground truth for the OCR clip. Static lines drift slowly; subtitle cues are
 # burned from an SRT so the benchmark exercises real subtitle rendering.
@@ -220,6 +237,254 @@ def build_faces(corpus: Path) -> dict | None:
                       "hair). Re-encoded losslessly; the fixture itself is not redistributed.")
 
 
+def demo() -> str:
+    """The demo capture, which is tracked in git, so a missing file is a broken checkout."""
+    if not DEMO.exists():
+        raise SystemExit(f"{DEMO} is tracked in this repository and the real clips are cut from it; "
+                         f"restore it (git checkout -- {DEMO_RELATIVE}) and build again")
+    return str(DEMO)
+
+
+def real_segment(first: int, count: int) -> str:
+    """`count` frames of the demo's video surface, starting at decoded source frame `first`.
+
+    Selecting on the decoded frame index rather than seeking by time is deliberate: the
+    labelled cut indices below are decoded-frame indices, and `-ss` on an open-GOP h264
+    file resolves to a keyframe, which would shift every one of them.
+    """
+    return (f"select='between(n\\,{first}\\,{first + count - 1})',setpts=N/{FPS}/TB,"
+            f"{DEMO_SURFACE},scale={WIDTH}:{HEIGHT}:flags=lanczos,format=yuv420p")
+
+
+def build_real_film_cuts(corpus: Path) -> dict:
+    first, count = 15, 102
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-film-cuts.mkv"], corpus)
+    return dict(name="real-film-cuts", category="real", synthetic=False, cuts=[20, 47, 70, 87], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: five film shots from the demo capture (hands over a bedspread, a car on a "
+                      "road, a man in a crowd, a revolver firing, a portrait) with grain, motion blur and real "
+                      "camera motion. Cuts 20/47/70/87 (source 35/62/85/102) were proposed by FFmpeg scene "
+                      "detection on the cropped surface, which scored them 0.72/0.66/0.52/0.53, and then "
+                      "confirmed by eye: all 102 frames were extracted and inspected, those four pairs are the "
+                      "only ones where the shot changes, and the frame at each index is the first frame of the "
+                      "new shot. The eight smaller detector flags inside the clip (locals 2, 4, 7, 13, 15, 18, "
+                      "84 and 86, scoring 0.032-0.076) were checked the same way and are hand motion, a pan or "
+                      "the muzzle flash, so none is labelled: the flash at locals 84-85 is a real two-frame "
+                      "exposure spike inside one shot. Note the 70->87 gap is 17 frames, inside cutmirror's "
+                      "0.6 s weak-arm debounce - the editing rhythm no synthetic clip here has.")
+
+
+def build_real_game_cuts(corpus: Path) -> dict:
+    first, count = 438, 68
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-game-cuts.mkv"], corpus)
+    return dict(name="real-game-cuts", category="real", synthetic=False, cuts=[32], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: the demo's game-footage playback section - a dirt-bike race exterior "
+                      "(locals 0-31) hard-cut to a convenience-store interior (locals 32-67), both with the "
+                      "game's own static HUD over fast camera motion, which is where invented motion on static "
+                      "cells shows. The single cut at local 32 (source 470) was proposed at scene score 0.37 "
+                      "and confirmed by inspecting all 68 frames: 469 is the last race frame and 470 the first "
+                      "interior frame. The detector's neighbouring flags at locals 29 and 33 (0.16, 0.22) are "
+                      "camera motion and dust inside a shot - inspected, not cuts, so not labelled.")
+
+
+def build_real_game_motion(corpus: Path) -> dict:
+    first, count = 506, 76
+    ffmpeg(["-i", demo(), "-vf", real_segment(first, count), "-frames:v", str(count),
+            *ENCODE, "real-game-motion.mkv"], corpus)
+    return dict(name="real-game-motion", category="real", synthetic=False, cuts=[], text=[],
+                source=f"{DEMO_RELATIVE} frames {first}-{first + count - 1}",
+                notes="NOT synthetic: one continuous 2.5 s shot, a character running off a rooftop and falling "
+                      "towards a city, so the camera translates while the subject occludes and disoccludes "
+                      "background throughout - the real-footage negative. Nothing here is a cut: all 76 frames "
+                      "were inspected, and the strongest scene score of any pair inside the clip is 0.055 (at "
+                      "local 1, the second frame of the new shot; then 0.046, 0.045, 0.041) - far under the "
+                      "0.37-0.60 the confirmed cuts in the other real clips measure.")
+
+
+def build_real_dissolve(corpus: Path) -> dict:
+    # The demo capture contains no dissolve: across all 678 frames every transition is a
+    # single-frame jump, so there is no real fade to label. This clip therefore has real
+    # material and a synthesised transition - the honest half of what the gate question
+    # asks for - built from the two adjacent shots real-game-cuts and real-game-motion
+    # use, with the same 0.7 s fade the synthetic `dissolve` clip uses so the two are
+    # directly comparable.
+    fade, a_first, a_count, b_first, b_count = 0.7, 470, 36, 506, 51
+    fade_frames = round(fade * FPS)
+    graph = (f"[0:v]split=2[a0][b0];"
+             f"[a0]{real_segment(a_first, a_count)}[a];"
+             f"[b0]{real_segment(b_first, b_count)}[b];"
+             f"[a][b]xfade=transition=fade:duration={fade}:offset={(a_count - fade_frames) / FPS}")
+    ffmpeg(["-i", demo(), "-filter_complex", graph, "-frames:v", str(a_count + b_count - fade_frames),
+            *ENCODE, "real-dissolve.mkv"], corpus)
+    first = a_count - fade_frames
+    return dict(name="real-dissolve", category="real", synthetic=False, cuts=[],
+                soft_cuts=[[first, first + fade_frames + 1]], text=[],
+                source=f"{DEMO_RELATIVE} frames {a_first}-{a_first + a_count - 1} over "
+                       f"{b_first}-{b_first + b_count - 1}",
+                notes="Real material, synthesised transition, and the distinction matters: the demo capture "
+                      "has no dissolve anywhere in it (all 678 frames were differenced; every transition is a "
+                      "single-frame jump), so this is the store interior cross-faded into the rooftop fall over "
+                      "0.7 s, held 0.5 s before and 1.0 s after. The fade occupies frames 15-35 and is "
+                      "deliberately NOT in `cuts`: no single frame in it is where history stops being valid. At "
+                      "most one reset inside the span is correct; a second is the over-reset artifact.")
+
+
+# ---------------------------------------------------------------------------
+# Camera-original clips.
+#
+# Every `real-*` clip above is an NR-processed capture: the player's own DLSS-NR
+# output, screen-captured, h264-encoded twice and lanczos-upscaled before the pass
+# under test renders it again. Sound for an A/B where both arms see identical
+# input, and not a statement about original footage. These clips close that gap by
+# starting from the publisher's own release of the same two titles the demo capture
+# filmed, plus one trailer acquired for the transition the others do not contain.
+#
+# The sources are copyrighted trailers, so they are NOT committed and NOT
+# redistributed: `tools/benchmark/fetch_camera_original.ps1` downloads them by
+# video id and format id into `build-upscaling/camera-original/`, and each builder
+# below skips itself when its source is absent, exactly as `faces` does. What is
+# committed is the label set and the per-clip frame digest, so a rebuild is
+# provable against this manifest.
+#
+# Geometry: crop to the active picture, scale to 1080 height with lanczos, then
+# centre-crop to 1920 wide. No padding, so no synthetic black row enters the
+# static-cell population that false motion is measured against. Native frame rate
+# is preserved - forcing 30 fps would duplicate frames, which is what makes
+# `real-film-cuts` 37 % motionless and its false-motion level incomparable.
+#
+# That scale is a DOWNscale for the two 1440p sources (1384 active rows -> 1080)
+# and an UPscale for the letterboxed 1920x1038 trailer (884 active rows -> 1080,
+# 1.22x). An upscale adds no information, so `orig-dissolve` is the one clip here
+# whose fine detail is partly resampled rather than camera-native. It is kept
+# because what that clip exists to carry is a transition's temporal structure,
+# which the resample does not touch, and because padding to 1080 instead would put
+# 196 static black rows into the static-cell denominator. Do not cite it for
+# sharpness, grain or any per-pixel fidelity claim.
+CAMERA_ORIGINAL = BUILD / "camera-original"
+# Tracked expectations for the clips built from those sources: the sources and the
+# built clips are both untracked, so this file is the only thing a clean checkout
+# can verify a rebuild against.
+CAMERA_ORIGINAL_DIGESTS = Path(__file__).resolve().parent / "camera-original.digests.json"
+CAMERA_SOURCES = {
+    # tag: (file, youtube id, format id, active-picture crop or None, human description)
+    "godfather": (CAMERA_ORIGINAL / "godfather-50th.webm", "UaVTIH8mujA", "271", "crop=2560:1384:0:28",
+                  "THE GODFATHER 50th Anniversary Trailer (Paramount Pictures), 2560x1440 VP9, 23.976 fps"),
+    "gtavi": (CAMERA_ORIGINAL / "gtavi-extended.webm", "uphThaa97ig", "271", None,
+              "Grand Theft Auto VI: An Extended Look (Netflix/Now Playing), 2560x1440 VP9, 30 fps"),
+    "lawrence": (CAMERA_ORIGINAL / "cand-lawrence-arabia.mp4", "HFAkWNiETrg", "399", "crop=1920:884:0:76",
+                 "Lawrence of Arabia - official HD trailer for the new restoration (Park Circus), "
+                 "1920x1038 AV1 (format 399), 23.976 fps, 122 s"),
+}
+
+
+def camera_segment(crop: str | None, first: int, count: int) -> str:
+    """`count` frames from source frame `first`, active picture only, at native fps."""
+    chain = [f"select='between(n\\,{first}\\,{first + count - 1})'"]
+    if crop:
+        chain.append(crop)
+    chain += [f"scale=-2:{HEIGHT}:flags=lanczos", f"crop={WIDTH}:{HEIGHT}", "format=yuv420p"]
+    return ",".join(chain)
+
+
+def build_camera_clip(corpus: Path, name: str, tag: str, first: int, count: int, clip: dict) -> dict | None:
+    source, video_id, fmt, crop, described = CAMERA_SOURCES[tag]
+    if not source.exists():
+        print(f"camera-original source missing: {source}; skipping {name} "
+              f"(run tools/benchmark/fetch_camera_original.ps1)", file=sys.stderr)
+        return None
+    ffmpeg(["-i", str(source), "-vf", camera_segment(crop, first, count), "-frames:v", str(count),
+            *ENCODE_NATIVE_RATE, f"{name}.mkv"], corpus)
+    clip.update(name=name, category=clip.get("category", "camera-original"), synthetic=False,
+                camera_original=True, text=clip.get("text", []),
+                source=f"youtube:{video_id} format {fmt} frames {first}-{first + count - 1} ({described})")
+    return clip
+
+
+def build_orig_film_cuts_a(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-film-cuts-a", "godfather", 2130, 131, dict(
+        cuts=[4, 14, 24, 39, 51, 81, 105, 120],
+        notes="Camera-original, not a capture: the publisher's 1440p release of the same film the demo capture "
+              "filmed off the player's window. Eight hard cuts in 131 frames - the densest real editing rhythm "
+              "in this corpus, and the point of the clip. Every one of the eight was proposed by mean |dY| >= 25 "
+              "with histogram overlap <= 0.55 on the built 1920x1080 clip and then confirmed by inspecting the "
+              "frame pair either side; locals 4 and 51 needed the inspection, because their histograms overlap "
+              "0.65 and 0.75 and a threshold alone would have missed them. The 20 other pairs above |dY| 12 "
+              "(locals 15-17, 40-50, 121-130) were inspected the same way and are camera motion inside a shot, "
+              "so none is labelled. The frame at each index is the first frame of the new shot."))
+
+
+def build_orig_film_cuts_b(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-film-cuts-b", "godfather", 2271, 70, dict(
+        cuts=[13, 41, 60],
+        notes="Camera-original. Three hard cuts in 70 frames, all confirmed by frame-pair inspection, and the "
+              "span starts one frame later than its neighbour clip on purpose: at source 2270 the first frame "
+              "was the tail of the previous shot, which would have put a one-frame shot at the head of the clip "
+              "and given the cut test a boundary no reset policy can serve. No pair between the labelled cuts "
+              "exceeds |dY| 8.7."))
+
+
+def build_orig_film_fade(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-film-fade", "godfather", 275, 31, dict(
+        cuts=[], soft_cuts=[[6, 27]],
+        notes="Camera-original, and a REAL gradual transition rather than a synthesised one: a fade to black "
+              "cut by the trailer's own editor. Luma falls 77 -> 0 monotonically across locals 6-27 and no pair "
+              "in the clip reaches |dY| 6, so there is no frame where history stops being valid - the same "
+              "property `real-dissolve` has to synthesise. Frames 27-30 are the black hold, kept short on "
+              "purpose: a long black tail is static and would inflate the static-cell denominator the way "
+              "`real-film-cuts`' frozen tail does."))
+
+
+def build_orig_faces(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-faces", "godfather", 1160, 101, dict(
+        category="faces", cuts=[19, 34, 56, 83],
+        notes="Camera-original faces: frontal and three-quarter close-ups with skin, hair and film grain, "
+              "replacing the `faces` fixture (`mafia-60s.mkv`) that is not in this repository and cannot be "
+              "redistributed. Four hard cuts, each confirmed by frame-pair inspection, and a face is clearly "
+              "visible on at least one side of every one of them; locals 19, 34 and 83 have histogram overlap "
+              "0.67-0.71, so they are exactly the 'similar cut' case a threshold misses. This is the only clip "
+              "here whose category drives face metrics, so `analyze.py --faces` has real faces to embed for "
+              "the first time."))
+
+
+def build_orig_game_cuts(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-game-cuts", "gtavi", 40, 91, dict(
+        cuts=[20, 70],
+        notes="Camera-original game footage, the publisher's 1440p release of the same material the demo "
+              "capture filmed. Two hard cuts at locals 20 and 70, both confirmed by frame-pair inspection "
+              "(street chase -> jet skis -> armoured truck), histogram overlap 0.34 and 0.38. No other pair in "
+              "the clip exceeds |dY| 9.3."))
+
+
+def build_orig_game_motion(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-game-motion", "gtavi", 492, 66, dict(
+        cuts=[],
+        notes="Camera-original, one continuous moving shot and the hardest such span to find in this source: a "
+              "sweep of every span in the 26 s release with no pair above |dY| 12 returned exactly one that is "
+              "also actually moving (median |dY| 3.9) - this one. The only other continuous spans are the "
+              "static end card. Its strongest internal pair, local 65 at |dY| 12.4 with histogram overlap 0.99, "
+              "was inspected and is the same shot. The false-motion negative for camera-original material."))
+
+
+def build_orig_dissolve(corpus: Path) -> dict | None:
+    return build_camera_clip(corpus, "orig-dissolve", "lawrence", 2510, 71, dict(
+        cuts=[], soft_cuts=[[21, 48]],
+        notes="The real cross-dissolve this corpus did not have. Note the geometry caveat above: this "
+              "source is letterboxed 1920x1038, so its 884 active rows are scaled UP to 1080 (1.22x) "
+              "where the other camera-original clips are scaled down - fine detail here is partly "
+              "resampled, and only the transition's temporal structure is camera-native. Neither title the demo capture filmed contains "
+              "one - both were scanned end to end and every transition in them is a hard cut, a fade through "
+              "black or a fade from white - so this trailer was acquired for the transition alone. Verified as "
+              "a dissolve rather than a fade: across locals 21-48 the frame is a linear blend of the shots "
+              "either side with alpha sliding monotonically 1 -> 0 (residual 0.063 of the endpoint difference), "
+              "both endpoints are bright real shots rather than black, and mid-transition gradient energy dips "
+              "below both - the double-exposure signature. Confirmed by eye at locals 10/33/56: a title card "
+              "over white desert dissolving into a cliff shot, both visible at once in the middle. No hard cut "
+              "and no pair above |dY| 5.2 in the whole clip."))
+
+
 def describe(corpus: Path, clip: dict) -> dict:
     path = corpus / f"{clip['name']}.mkv"
     info = probe(path)
@@ -232,7 +497,13 @@ def describe(corpus: Path, clip: dict) -> dict:
 BUILDERS = {"text-subtitles": build_text, "fine-detail": build_detail,
             "highlights-gradients": build_highlights, "cuts-motion": build_cuts,
             "cuts-similar": build_similar_cuts, "pan-fast": build_pan, "zoom-fast": build_zoom,
-            "dissolve": build_dissolve, "flash-exposure": build_flash, "faces": build_faces}
+            "dissolve": build_dissolve, "flash-exposure": build_flash, "faces": build_faces,
+            "real-film-cuts": build_real_film_cuts, "real-game-cuts": build_real_game_cuts,
+            "real-game-motion": build_real_game_motion, "real-dissolve": build_real_dissolve,
+            "orig-film-cuts-a": build_orig_film_cuts_a, "orig-film-cuts-b": build_orig_film_cuts_b,
+            "orig-film-fade": build_orig_film_fade, "orig-faces": build_orig_faces,
+            "orig-game-cuts": build_orig_game_cuts, "orig-game-motion": build_orig_game_motion,
+            "orig-dissolve": build_orig_dissolve}
 
 
 def main() -> int:
@@ -248,13 +519,40 @@ def main() -> int:
         print(f"unknown clips: {', '.join(unknown)}; known: {', '.join(BUILDERS)}", file=sys.stderr)
         return 1
     if args.check:
-        manifest = __import__("json").loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+        import json as _json
+        manifest = _json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
         drift = 0
         for clip in manifest["clips"]:
             digest = sequence_digest(framemd5(corpus / clip["file"]))
             same = digest == clip["digest"]
             drift += not same
             print(f"{clip['name']}: {'ok' if same else 'DIGEST DRIFT'} {digest}")
+        # The camera-original clips are also checked against the digests tracked in
+        # git, not only against the manifest that was written beside them. A local
+        # manifest agrees with itself by construction; only the tracked file can
+        # tell a clean checkout that a rebuild produced the pixels the committed
+        # labels were verified against.
+        expected = CAMERA_ORIGINAL_DIGESTS
+        if expected.exists():
+            tracked = _json.loads(expected.read_text(encoding="utf-8"))["clips"]
+            built = {c["name"]: c for c in manifest["clips"]}
+            for row in tracked:
+                have = built.get(row["name"])
+                if not have:
+                    print(f"{row['name']}: not built (source absent), tracked digest not checked")
+                    continue
+                path = corpus / row["file"]
+                digest = sequence_digest(framemd5(path))
+                if digest != row["digest"]:
+                    drift += 1
+                    print(f"{row['name']}: DRIFT AGAINST TRACKED DIGEST - the upstream re-encoded or the "
+                          f"span moved; re-verify the labels before citing them ({digest})")
+                elif have["frames"] != row["frames"] or have["cuts"] != row["cuts"]:
+                    drift += 1
+                    print(f"{row['name']}: pixels match the tracked digest but the labels do not "
+                          f"({have['frames']}/{have['cuts']} vs {row['frames']}/{row['cuts']})")
+                else:
+                    print(f"{row['name']}: matches the tracked digest and labels")
         return 0 if drift == 0 else 1
     corpus.mkdir(parents=True, exist_ok=True)
     version = subprocess.check_output([str(FFMPEG), "-version"], creationflags=FLAGS).decode().splitlines()[0]

@@ -2527,6 +2527,56 @@ void render_pace_prior_zero_means_unmeasured_not_unsupported_test()
     }
 }
 
+// Ada's prior is one scalar that has to serve every geometry, and the driven
+// player sessions of docs/VERIFICATION-matrix.md measured what it is actually
+// standing in for on an RTX 4080 SUPER (driver 610.47, eight 1080p sessions and
+// two at 2160p, idle GPU, segment-arrival method):
+//   1920x1080  11.25-11.57 ms/frame  0.897-0.923x the reference model
+//   3840x2160  38.69-41.20 ms/frame  1.377-1.467x
+// So the one scalar is bracketed by measurement, and 1.22 sits inside the
+// bracket. That is the whole reason it was not replaced by the 1080p figure:
+// the two decisions below are the ones the user sees, and each end of the
+// bracket gets one of them wrong.
+//
+// Lowering the prior towards the measured 1080p scale makes the forecast
+// promise 4K30 - it would predict 25.6 ms against a measured 38.7-41.2 - and a
+// session started on that promise renders at 25 fps against a 30 fps playhead.
+// Raising it to the measured 4K scale makes the forecast refuse 1080p60, which
+// this machine runs at 1.45x realtime. This test pins both, so a future
+// "update the prior to the measurement" cannot quietly flip either.
+void ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test()
+{
+    const double ada = RenderPacePrior(GpuGeneration::Rtx40Ada);
+
+    // 4K30 must ask before it starts: the measured cost does not keep up.
+    const auto uhd30 = playback_timing::ForecastLiveRender(3840, 2160, 30.0, {}, ada);
+    CHECK(uhd30.measured);
+    CHECK(!uhd30.keepsUp);
+    // 1080p60 must not ask: the measured cost keeps up with room to spare.
+    const auto fhd60 = playback_timing::ForecastLiveRender(1920, 1080, 60.0, {}, ada);
+    CHECK(fhd60.measured);
+    CHECK(fhd60.keepsUp);
+
+    // The same two verdicts from the measurements themselves, so the prior is
+    // checked against the machine rather than against another constant. The
+    // slowest 1080p and fastest 4K samples are used: they are the samples that
+    // come closest to overturning each verdict.
+    playback_timing::RenderPaceProfile measured1080p;
+    measured1080p.Record({1920, 1080, 11.5734});
+    CHECK(playback_timing::ForecastLiveRender(1920, 1080, 60.0, measured1080p, ada).keepsUp);
+    playback_timing::RenderPaceProfile measured2160p;
+    measured2160p.Record({3840, 2160, 38.6853});
+    CHECK(!playback_timing::ForecastLiveRender(3840, 2160, 30.0, measured2160p, ada).keepsUp);
+
+    // One measured geometry must not be extrapolated optimistically to
+    // another: a profile holding only the 1080p sample still has to predict a
+    // 4K frame at no less than the 1080p cost per pixel, which is what kept a
+    // one-sample profile from starting a 4K session it could not follow.
+    const double uhdFrom1080p = playback_timing::PredictRenderMs(measured1080p, 3840, 2160, ada);
+    CHECK(uhdFrom1080p > 4.0 * 11.5734 * 0.99);
+    CHECK(!playback_timing::ForecastLiveRender(3840, 2160, 30.0, measured1080p, ada).keepsUp);
+}
+
 void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
 {
     const auto experimental = ResolveNeuralRenderDefaults(true, false, 3840, 2160);
@@ -6055,6 +6105,7 @@ int wmain(int argc, wchar_t* argv[])
     neural_addon_policy_test();
     neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test();
     render_pace_prior_zero_means_unmeasured_not_unsupported_test();
+    ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test();
     neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
     neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test();
     neural_playback_lifecycle_runs_render_validate_then_ready_test();

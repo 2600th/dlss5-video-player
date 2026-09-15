@@ -108,7 +108,7 @@ public:
     // because only the weak arm is debounced.
     static SceneCutStrength ClassifySceneCut(double residual, double histogramOverlap);
     // Minimum number of frames Generate() requires between two weak cuts at
-    // `fps`. 15 frames at 25 fps, 18 at 30, and never fewer than 2.
+    // `fps`. 0.3 s: 7 frames at 24, 9 at 30, 18 at 60, and never fewer than 2.
     static uint32_t MinFramesBetweenCuts(double fps);
     static float LumaHistogramIntersection(const std::vector<float>& a, const std::vector<float>& b);
 

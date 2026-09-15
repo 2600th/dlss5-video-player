@@ -266,6 +266,28 @@ bool DLSSBackend::RecreateFeature(ID3D12GraphicsCommandList* cmd) {
     return CreateFeature(cmd);
 }
 
+bool DLSSBackend::ReleaseFeatureFreeingMemory() {
+    if (!m_handle) return false;
+    // NGX pools a feature's memory across an ordinary ReleaseFeature so the
+    // next create is cheap, which is exactly wrong for a helper that is about
+    // to sit idle holding it. The parameter below is the documented way to ask
+    // for it back; it is set on this release only, so the mid-job recreate
+    // path above keeps the pooling it wants.
+    if (m_params) {
+        NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
+    }
+    m_lastResult = NVSDK_NGX_D3D12_ReleaseFeature(m_handle);
+    m_handle = nullptr;
+    m_evaluations = 0;
+    m_featureCreateGate.Reset();
+    if (m_params) {
+        NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 0);
+    }
+    LOG("NGX feature released for idle with FreeMemOnReleaseFeature result=0x"
+        << std::hex << m_lastResult << std::dec);
+    return true;
+}
+
 void DLSSBackend::FillEvaluateParameters(ID3D12Resource* color,
                                          ID3D12Resource* output,
                                          ID3D12Resource* depth,

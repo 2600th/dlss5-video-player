@@ -553,14 +553,47 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
             // converting a whole BGRA frame.
             L"-pix_fmt", (!nv12 && (spec.width % 2 || spec.height % 2)) ? L"yuv444p" : L"yuv420p"});
     }
-    // Only the GPU-converted path states its colorimetry, because only there does the
-    // player choose the matrix. The BGRA path leaves ffmpeg's own conversion, and its
-    // tagging, exactly as they were.
+    // Colorimetry is stated on BOTH paths, and the BGRA path is additionally told which
+    // matrix to convert with. Until 2026-09-15 only the GPU-converted path said
+    // anything, on the reasoning that only there does the player pick the matrix - but
+    // the consequence was that every default-path render shipped untagged, and ffmpeg's
+    // own conversion picks BT.601 for an untagged rawvideo input (measured on this
+    // build: a pure-red BGRA frame comes back Y=81 U=90 V=240, the 601 prediction, at
+    // 1080p and 480p alike). A BT.709 source therefore became a file that declared
+    // nothing and carried 601 pixels, which any consumer assuming 709 for HD decodes
+    // wrongly.
+    //
+    // Note the order of the two halves: labelling alone would be worse than the defect,
+    // because tagging 601 pixels as BT.709 turns an ambiguous file into a confidently
+    // wrong one. So the BGRA path converts with an explicit matrix and range, and only
+    // then is the result labelled.
+    //
+    // The tags themselves have to be stamped on the frames. On this FFmpeg (9.0.1) the
+    // `-color_primaries`/`-color_trc` output options below land the matrix and range and
+    // silently drop those two: tested in Matroska and MP4, with hevc_nvenc and with
+    // libx264, and with an `hevc_metadata` bitstream filter. Frame-side properties from
+    // the filter graph are what survive, which is why `setparams` carries all four on
+    // both paths.
+    //
+    // `setparams` is metadata-only and measured pixel-exact, which is what allows it on
+    // the NV12 path: through a lossless rawvideo round trip, `plain`, `null`,
+    // `setparams=range=tv`, `setparams=color_primaries/color_trc` and the full form all
+    // reproduce the input frame byte for byte. A lossy probe suggested otherwise once -
+    // that was the encoder reacting to the filter graph, not the filter touching a
+    // sample. `scale` stays off the NV12 path, because those pixels are already BT.709
+    // limited range from the capture shader and converting them again is the entire cost
+    // that path exists to avoid.
+    constexpr const wchar_t* kSetColorParams =
+        L"setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv";
     if (nv12) {
+        arguments.insert(arguments.end(), {L"-vf", kSetColorParams});
+    } else {
         arguments.insert(arguments.end(), {
-            L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
-            L"-color_trc", L"bt709", L"-color_range", L"tv"});
+            L"-vf", std::wstring(L"scale=out_color_matrix=bt709:out_range=tv,") + kSetColorParams});
     }
+    arguments.insert(arguments.end(), {
+        L"-colorspace", L"bt709", L"-color_primaries", L"bt709",
+        L"-color_trc", L"bt709", L"-color_range", L"tv"});
     arguments.insert(arguments.end(), {L"-f", L"matroska", output.wstring()});
     return arguments;
 }

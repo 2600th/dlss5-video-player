@@ -122,10 +122,30 @@ disocclusion clip it buys the two motion-field numbers (flips −20 % relative,
 sigma −0.107) that describe the field's stability. What it does not buy is less
 invented appearance: false motion rises on three of four clips, including that
 one. That is a real result and an uncomfortable one, and it is why this record
-refuses to call the gate a quality win. Settling it needs real footage - grain,
-motion blur, a real dissolve, a camera that occludes - and the corpus's only
-real-footage clip (`faces`) needs a fixture that is not on this machine. If it
-does not pay there either, the case for removing it is the honest next move.
+refuses to call the gate a quality win. Settling it needed real footage - grain,
+motion blur, a camera that occludes - which this corpus did not carry when the
+section above was written.
+
+**Answered later the same day, on NR-processed captures.** Four labelled clips
+were cut from this repository's own demo capture and the A/B was re-run against
+the pre-gate tree. The gate lowers false motion on **all four**, by 4.6 to 14.4 %
+relative, and on two of them it improves false motion, cell flips and added sigma
+together - an outcome no synthetic clip produced. Renders are bit-identical across
+repeats within each tree and differ between trees, so the deltas are signal. The
+synthetic result above stands exactly as measured; what it does not do is
+generalise. Full table in the
+[A/B report](measurements/gate-real-footage-20260914/REPORT.md).
+
+Three caveats travel with that verdict, and none of them is "real footage". The
+capture was recorded with neural rendering on, so the pixels are the player's own
+DLSS-NR output taken through a screen capture, an h264 encode and a lanczos
+upscale before this pass touched them again - sound for an A/B where both trees
+see byte-identical input, and not a statement about original footage. The
+`intensity-0` control therefore measures a carrier that already carries NR
+relighting. And `real-film-cuts` ends in 15 frozen frames, where the capture
+paused, so its static-cell denominator is the least comparable of the four.
+Camera-original material is still owed: the `faces` fixture is not on this
+machine.
 
 ## The scene-cut over-reset is real in a real render
 

@@ -1,5 +1,142 @@
 # Changelog
 
+## Unreleased
+
+One note for whoever cuts the next release, and it is now smaller than it was.
+The render cache key carries a driver version and a digest of the driver-store
+model contents, so a render no longer survives a driver update or a model refresh,
+and `NeuralWorker.exe` is hashed into the runtime digest, so rebuilding the worker
+with different guide or cut logic retires its entries by itself. The manifest
+schema moved 4 → 5, which retires every entry written before this change through
+the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
+`neural-runtime/NeuralWorker.exe` left over from a pre-v6 build is still refused
+by the parent on the version check, which is the intended fail-closed behaviour
+and looks like a broken helper until the runtime is re-staged.
+
+- The render identity now covers what the pass actually evaluates. It carried no
+  driver version, and `runtimeDigest` hashed the staged files while every run
+  resolves its weights out of the driver store and `%ProgramData%\NVIDIA\NGX\models`
+  - so a render produced on one driver was served *and* validated on a later one.
+  Both terms are in the key now, with the driver version as a fallback that the
+  preflight receipt records when a model root cannot be enumerated, rather than a
+  silent one. The model-store content hash is deliberately uncached: the memo used
+  elsewhere keys on path, size and write time, and Windows write times move in
+  ~15 ms ticks, which is enough for a selector file rewritten in place at the same
+  size to reuse a stale digest.
+- A resident helper can now be asked to give its idle feature memory back:
+  `[NeuralHelper] IdleVramPolicy=free` in `DLSSVideoPlayer.ini` returns 361 MiB of
+  the 1061 MiB an idle helper holds on this card, and costs 0.70 s on the next
+  reuse. The default stays `keep`, because that reuse latency is the whole point of
+  keeping a helper alive. The post-job and idle samples are in `receipt.json` under
+  `timing`, so the trade is checkable without a debugger.
+- A helper that dies mid-job, or a device that is removed under it, now costs one
+  restart instead of a lost render: the helper is relaunched once, re-preflighted
+  and the job resumes. A second failure fails closed with the reason in the log,
+  and neither path leaves an orphan holding VRAM.
+- Hardware optical flow now runs in playback Super Resolution sessions. It used to
+  require the decoded frame to already match the DLSS input size, so turning SR on
+  silently dropped motion estimation to the CPU block matcher - a quality and
+  performance cliff exactly where more quality was asked for. Sessions that were
+  already using hardware flow are byte-unchanged.
+- Five redundant full-target clears and a per-frame timestamp map/unmap are gone
+  from the render path. Honest caveat: neither is measurable at 1080p or 4K on this
+  card - they are removed because a clear that writes memory the next draw fully
+  overwrites is waste, not because anything got faster.
+- Not changed, and now measured to stay that way: the two `[Encoding]` GPU
+  conversion defaults, which `docs/USAGE.md` has always described as off. Turning
+  both on moves 2.7x fewer bytes across the decoder pipe and the capture readback
+  and is worth +7 % throughput at 4K; it also costs 0.75 dB PSNR and doubles false
+  motion on the same clip, and single-flag runs show neither half is free (capture
+  alone -0.78 dB, decoder alone -0.64 dB) on an untagged test clip. On a
+  `bt709`-tagged clip the decoder half is free (+0.067 dB) and only the capture
+  half still costs (-0.53 to -0.64 dB): both conversion shaders hard-code BT.709
+  while ffmpeg falls back to BT.601 for a stream that declares nothing, so most of
+  that penalty was a colour-tag mismatch rather than lost detail. The shipped
+  defaults stay until the source tags are read, which is the decoder side's blocker;
+  the capture side has no quality cost left and is held only by the GPU-time note in
+  USAGE.md, measured on a different card. The flags remain per-render either way.
+- Every neural render was written **untagged and converted with BT.601**. The
+  encoder stated colorimetry only when the GPU did the conversion, so a BT.709
+  source became a file that declared no colour space while carrying 601 pixels -
+  measured, not assumed: a pure-red frame through the shipped encoder line came back
+  Y=81 U=90 V=240, which is the BT.601 prediction, at 1080p *and* 480p. Any player
+  that assumes BT.709 for HD, which is the usual default, showed those colours
+  shifted. Both paths now state `bt709`/`tv`, and the CPU path also converts with
+  `out_color_matrix=bt709`, because tagging 601 pixels as 709 would have been worse
+  than leaving them ambiguous. It also carries `setparams`, without which this
+  FFmpeg drops the primaries and transfer tags in every container and encoder tried;
+  both paths carry it, since it is metadata-only and pixel-exact through a lossless
+  round trip. Verified on the same clip before and after: tags go from none to all
+  four, and on the CPU path the pixels move with them (mean Y 57.12 -> 58.41)
+  because that path's matrix changed too. The render identity's pipeline term moved
+  to `bt709-export-v1`, since encoder arguments are not part of the cache key and
+  renders made before this would otherwise have stayed valid hits.
+- Describing the GPU-converted path's frames properly also removed a quality gap
+  nobody had explained: with all four properties stamped, a capture converted on the
+  GPU now matches the CPU path exactly (30.10 dB either way, where the GPU path had
+  been 0.64 dB behind). The encoder had been handed frames it could not interpret,
+  and the file it wrote was read on assumptions that did not match the shader that
+  made it.
+
+- A live session whose render key was already published never presented. The job
+  was answered by the cache in about 50 ms, appended nothing to the segment index
+  playback is bound to, and left it empty *and* finished - the one state where
+  every decision said "wait": the attach saw zero lead, the rebase saw a playhead
+  inside the range, and the player sat behind the buffering panel indefinitely.
+  Coverage, not the job's verdict, now decides what a finished session plays, so a
+  cache-hit session hands playback to the published entry at its coverage start
+  and a session with nothing to show ends and returns the original. Reproduced
+  deliberately on a 1 fps clip, where the snapped playhead and so the render key
+  repeat by construction, and confirmed fixed on the same instrument.
+  `live_session::PlanForCompletedSession` decides it, so it is tested without a
+  window. This is the third form of the same family after 0.21.1 and 0.21.2.
+- One session measured under load no longer decides what the machine can do. The
+  render-pace profile kept a single sample per geometry and the newest replaced
+  the oldest unconditionally, so a session that contended for the GPU wrote
+  42.3 ms/frame - 3.7x this machine's idle mean - into `DLSSVideoPlayer.ini`, and
+  the next sessions warned that the card could not keep up with a clip it renders
+  faster than realtime. The profile now keeps the last five samples per geometry
+  and forecasts from their median. Not the minimum: contention only ever inflates
+  a measurement, and a forecast that exists to refuse sessions that cannot keep up
+  must not erase slow evidence. The old single-value `Samples=WxH:ms` form still
+  loads, as a one-sample ring.
+- The `Neural cold start:` log line now carries the helper's five phases instead
+  of five dashes. They arrive over the pipe while the render runs and the job only
+  returns seconds after the attach, so the line - written at first picture - could
+  never have held them; the receipt for the same render always did. A session that
+  never started a helper now says `helper=none(cache-hit)` rather than printing
+  dashes that read as a broken instrument.
+- A neural render whose weak-arm scene cut fell within 0.6 s of the previous one
+  was discarded, so the pass kept its accumulated history across a genuine shot
+  change. Found on real footage: a hard cut 17 frames after its predecessor fired
+  the weak arm cleanly and was suppressed by construction, because 17 is under the
+  18-frame window 0.6 s means at 30 fps. The window is now 0.3 s, which the
+  labelled corpus brackets from both sides - a transient returns 4 frames after
+  the cut that opened it, and the shortest genuine shot is 17 - and the shortened
+  window recovers that cut while leaving every synthetic score unchanged.
+- The render cache no longer serves a schema-4 render that has no receipt. The
+  receipt was verified only when the manifest carried a digest for it, so a
+  manifest that simply omitted the digest was served as a verified render out of a
+  user-writable directory. No released build ever wrote such an entry - schema 4
+  and the receipt digest landed in the same commit - so nothing legitimate is
+  invalidated. Legacy schema-3 entries and source entries keep their exemptions.
+- The neural helper can now serve many jobs from one process. Protocol v6 adds a
+  parent-to-helper command channel (`Hello`, `Job`, `Cancel`, `Shutdown`, and an
+  outbound `Ready`), and a job is handed over as the argument vector the helper
+  already validated, so nothing about what a job *is* changed. The helper is
+  reused only while the runtime directory, runtime digest and neural-settings
+  digest all match, holds the runtime lease only while a job runs, and exits
+  itself after 30 s idle so the ~1 GiB of feature memory DLSS will not release is
+  bounded in time. Toggling neural rendering on a second time in one player
+  session now reaches a picture in **2.44-2.52 s** instead of 5.23-5.41 s, over
+  four driven sessions: the reused job pays none of the process bring-up -
+  `helperStart`, `runtimeReady`, `neuralInit`, `featureArm`, 2.19 s on the machine
+  measured - and what is left is the first segment's encode and the attach, which
+  residency cannot remove. A toggle that lands inside a range the previous session
+  already rendered is still answered from the cache, in about 0.8 s, with no
+  helper job at all. Measured on one Ada card at driver 610.47;
+  `docs/VERIFICATION-matrix.md` carries the phases and the method.
+
 ## 0.21.2 - 2026-09-12
 
 - A live session whose first finalized segment starts after the playhead now

@@ -104,7 +104,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const std::wstring& error = diagnosis.cause == NeuralPreflightCause::None ? failure : diagnosis.detail;
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count();
 
-    std::string json = "{\"schema\":2,\"ok\":";
+    std::string json = "{\"schema\":3,\"ok\":";
     json += ok ? "true" : "false";
     json += ",\"workerVersion\":\"" DLSS_VIDEO_PLAYER_VERSION "\"";
     json += ",\"elapsedMilliseconds\":" + std::to_string(elapsed);
@@ -117,6 +117,12 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             "\",\"renodx\":\"" + JsonEscape(banner.renodxVersion) + "\",\"renodxBuild\":\"" +
             JsonEscape(banner.renodxBuild) + "\",\"dlssnr\":\"" + JsonEscape(banner.dlssnrRuntime) +
             "\",\"activeSettings\":\"" + JsonEscape(banner.activeSettings) + "\"}";
+    // The weights the pass evaluates are resolved outside the staged runtime,
+    // so the receipt records what the render identity's model-store term
+    // covered, and names the driver-version fallback instead of taking it
+    // silently.
+    const NeuralModelStore modelStore = ResolveNeuralModelStore(gpu.driverVersion);
+    json += ",\"modelStore\":" + NeuralModelStoreJson(modelStore);
     json += ",\"modules\":[";
     for (size_t index = 0; index < modules.size(); ++index) {
         const RuntimeModuleReceipt& module = modules[index];

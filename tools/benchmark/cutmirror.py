@@ -11,11 +11,13 @@ a bug in one of them rather than a difference of opinion.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 # --- shipped criterion (TemporalGuides.cpp ClassifySceneCut) -------------------------
 CUT_RESIDUAL_STRONG, CUT_RESIDUAL_WEAK, CUT_HISTOGRAM_OVERLAP = 0.30, 0.10, 0.85
-MIN_SECONDS_BETWEEN_CUTS = 0.6
+MIN_SECONDS_BETWEEN_CUTS = 0.3
 CUT_MATCH_FRAMES = 1
 
 # --- scale-free candidate (roadmap survey item 3) ------------------------------------
@@ -243,8 +245,10 @@ class FailedFractionCriterion(Criterion):
         return self.NONE
 
 
-def min_frames_between_cuts(fps: float) -> int:
-    return max(2, round(MIN_SECONDS_BETWEEN_CUTS * fps)) if fps > 0 else 2
+def min_frames_between_cuts(fps: float, seconds: float = MIN_SECONDS_BETWEEN_CUTS) -> int:
+    """MinFramesBetweenCuts. ``math.floor(x + 0.5)`` is what C++ ``std::lround`` does;
+    Python's ``round`` breaks ties to even and would disagree on a half-frame window."""
+    return max(2, math.floor(seconds * fps + 0.5)) if fps > 0 else 2
 
 
 class CutRun:
@@ -255,9 +259,10 @@ class CutRun:
     resets image evidence alone would produce and ``evidence`` is one row per decision.
     """
 
-    def __init__(self, fps: float, criterion: Criterion | None = None):
+    def __init__(self, fps: float, criterion: Criterion | None = None,
+                 seconds_between_cuts: float = MIN_SECONDS_BETWEEN_CUTS):
         self.criterion = criterion or ResidualCriterion()
-        self.min_frames = min_frames_between_cuts(fps)
+        self.min_frames = min_frames_between_cuts(fps, seconds_between_cuts)
         self.since_cut, self.accepted_any = 0, False
         self.cuts: list[int] = []
         self.suppressed: list[int] = []

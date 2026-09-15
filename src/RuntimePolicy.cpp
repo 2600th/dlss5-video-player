@@ -16,9 +16,15 @@ constexpr std::wstring_view kBootstrapMarkerArgument = L"--addon-bootstrap-resta
 // RTX 4080 SUPER, driver 610.47: 15.31 ms/frame over 738 frames of a 1080p30
 // live session, 1.22x the reference cost. Measured by segment arrivals, the
 // same method as the reference numbers in PlaybackTiming.h. That session ran on
-// 0.16.0; no Ada machine has measured the pipelined loop, which took 29% off
-// 1080p on Blackwell, so the prior is high until one does. It only decides the
-// first session's forecast.
+// 0.16.0, before the pipelined loop, and the same machine has now measured the
+// pipelined loop on driver 610.47: 0.897-0.923x the reference cost at 1080p
+// over eight sessions, and 1.377-1.467x at 4K over two. So one scalar cannot
+// be right at both ends - the loop bought more at 1080p than at 4K - and 1.22
+// sits between the two brackets. It stays because it is the only value in that
+// bracket that gets every keeps-up verdict on this hardware right: lower lets a
+// 4K session start that cannot keep up, higher warns about 1080p sessions that
+// render at nearly three times real time. It only decides the first session's
+// forecast, and one measured sample at the source's own geometry replaces it.
 constexpr double kAdaRenderPacePrior = 1.22;
 
 // Matroska's default timecode scale is 1 ms, so every muxed file quantises

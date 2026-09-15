@@ -80,7 +80,7 @@ behind live playback, publishing finalized segments that playback follows once
 a four-second lead exists. The player materializes a private
 local source when needed, evaluates every frame in timestamp order, reads the
 neural output back from D3D12, encodes with NVENC (or restarts from frame zero
-with software H.264), and probes the completed video. Only a complete schema-4
+with software H.264), and probes the completed video. Only a complete schema-5
 manifest with matching hashes, dimensions, frame count, monotonic source
 timing, video duration, final-frame decode, runtime digest, one captured native
 submission per source frame, the NGX-only inline interception contract armed

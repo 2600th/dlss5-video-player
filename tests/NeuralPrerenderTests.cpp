@@ -1,9 +1,11 @@
 #include "NeuralCache.h"
+#include "NeuralPreflight.h"
 #include "LiveSessionPolicy.h"
 #include "MediaPipeline.h"
 #include "PlaybackTiming.h"
 #include "NeuralSegmentIndex.h"
 #include "OfflineNeuralRenderer.h"
+#include "ResidentHelperPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "TestSupport.h"
 
@@ -214,6 +216,16 @@ void invalid_explicit_cache_root_does_not_silently_fall_back_test()
     CHECK_EQ(std::string("keep"), ReadBytes(fixture.Path() / L"chosen-cache"));
 }
 
+// The player never promotes a render without its receipt: it builds the
+// receipt JSON, writes receipt.json into staging and fails the render when it
+// cannot, so a promotable fixture stages the same sidecar.
+constexpr std::string_view kRenderReceipt = "{\"schema\":1,\"render\":\"fixture\"}\n";
+
+void StageRenderReceipt(const std::filesystem::path& staging)
+{
+    WriteBytes(staging / L"receipt.json", kRenderReceipt);
+}
+
 NeuralCacheManifest CompleteRenderManifest()
 {
     NeuralCacheManifest manifest;
@@ -232,41 +244,240 @@ NeuralCacheManifest CompleteRenderManifest()
     manifest.feature18Created = true;
     manifest.feature18ArmedBeforeCapture = true;
     manifest.upscaling = false;
+    manifest.receiptDigest = Sha256Bytes(kRenderReceipt).value_or("");
     return manifest;
 }
 
-void cache_key_changes_for_every_material_input_test()
+// The lookup is the whole reuse decision: a render is answered from the cache
+// only under the key its identity builds, so an identity term that moves is a
+// render that is re-made. The driver and model-store terms exist because
+// neither moved before: gpuPath is a generation label, so a render made on one
+// driver was served on every later one, and runtimeDigest covers the staged
+// runtime directory only, never the weights the pass resolves out of the NGX
+// core directory and the ProgramData model store.
+void published_render_is_not_reused_across_identity_changes_test()
 {
-    NeuralCacheIdentity base;
-    base.sourceDigest = std::string(64, 'a');
-    base.width = 1920;
-    base.height = 1080;
-    base.applicationVersion = "0.12.0";
-    base.gpuPath = "rtx50";
-    base.runtimeDigest = std::string(64, 'b');
-    base.quality = "DLAA";
-    base.upscaling = false;
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    CHECK(manager.Valid());
 
-    const std::string key = BuildNeuralCacheKey(base);
+    NeuralCacheIdentity identity;
+    identity.sourceDigest = std::string(64, 'a');
+    identity.width = 1920;
+    identity.height = 1080;
+    identity.applicationVersion = "0.21.2";
+    identity.gpuPath = "rtx40";
+    identity.runtimeDigest = std::string(64, 'b');
+    identity.quality = "DLAA";
+    identity.settingsDigest = std::string(64, 'c');
+    identity.driverVersion = "32.0.16.1047";
+    identity.modelStoreDigest = std::string(64, 'd');
+
+    const std::string key = BuildNeuralCacheKey(identity);
     CHECK_EQ(size_t{64}, key.size());
-    auto changed = base;
-    changed.sourceDigest = std::string(64, 'c');
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
+    const auto staging = manager.BeginRenderStaging(key);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    WriteBytes(*staging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*staging);
+    CHECK(manager.PromoteRender(key, *staging, CompleteRenderManifest()));
+    CHECK(manager.LookupRender(key).has_value());
+
+    const auto served = [&](const NeuralCacheIdentity& candidate) {
+        const std::string other = BuildNeuralCacheKey(candidate);
+        return other == key || manager.LookupRender(other).has_value();
+    };
+    auto changed = identity;
+    changed.driverVersion = "32.0.16.2001";  // a driver update on the same card
+    CHECK(!served(changed));
+    changed = identity;
+    changed.modelStoreDigest = std::string(64, 'e');  // refreshed weights, same driver
+    CHECK(!served(changed));
+    changed = identity;
+    changed.runtimeDigest = std::string(64, 'f');  // a rebuilt worker or a swapped module
+    CHECK(!served(changed));
+    changed = identity;
+    changed.sourceDigest = std::string(64, '9');
+    CHECK(!served(changed));
+    changed = identity;
     changed.width = 2560;
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.applicationVersion = "0.12.1";
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.gpuPath = "rtx40";
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
-    changed.runtimeDigest = std::string(64, 'd');
-    CHECK(key != BuildNeuralCacheKey(changed));
-    changed = base;
+    CHECK(!served(changed));
+    changed = identity;
+    changed.applicationVersion = "0.21.3";
+    CHECK(!served(changed));
+    changed = identity;
+    changed.gpuPath = "rtx50";
+    CHECK(!served(changed));
+    changed = identity;
     changed.upscaling = true;
-    CHECK(key != BuildNeuralCacheKey(changed));
+    CHECK(!served(changed));
+    changed = identity;
+    changed.settingsDigest = std::string(64, '8');
+    CHECK(!served(changed));
+    // The terms discriminate rather than refuse: the identity that produced the
+    // entry still answers from it.
+    CHECK(served(identity));
+
+    // Both terms are appended to the canonical form only when set, so a
+    // downloaded source - which carries neither - keeps the key it was
+    // published under; RenderSettingsTests pins that key's literal digest.
+}
+
+// A schema-4 entry was keyed under an identity that named neither the driver
+// nor the model store, so it has to be retired - and retired for its schema,
+// not because it is missing a field: schema 5 writes schema 4's field list, so
+// the number is the only difference between a retired manifest and a current
+// one, and it is the schema gate that refuses it.
+void schema_four_entries_are_retired_by_the_schema_gate_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    CHECK(manager.Valid());
+    const std::string key(64, '3');
+    const auto staging = manager.BeginRenderStaging(key);
+    CHECK(staging.has_value());
+    if (!staging) return;
+    WriteBytes(*staging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*staging);
+    CHECK(manager.PromoteRender(key, *staging, CompleteRenderManifest()));
+    const auto published = manager.LookupRender(key);
+    CHECK(published.has_value());
+    if (!published) return;
+    CHECK_EQ(uint32_t{5}, published->manifest.schema);
+
+    auto retired = published->manifest;
+    retired.schema = 4;
+    const std::string retiredBytes = SerializeNeuralCacheManifest(retired);
+    std::string currentBytes = SerializeNeuralCacheManifest(published->manifest);
+    CHECK(currentBytes.starts_with("{\"schema\":5,"));
+    CHECK(retiredBytes.starts_with("{\"schema\":4,"));
+    // Identical once the number is swapped: nothing but the schema refuses it.
+    const size_t number = currentBytes.find("\"schema\":5");
+    CHECK(number != std::string::npos);
+    if (number != std::string::npos)
+        CHECK_EQ(currentBytes.replace(number, 10, "\"schema\":4"), retiredBytes);
+    CHECK(!ParseNeuralCacheManifest(retiredBytes).has_value());
+    CHECK(!IsReusableNeuralCacheManifest(retired));
+
+    // The same entry on disk, as the previous release left it: not served, and
+    // the payload is untouched by the refusal.
+    WriteBytes(published->directory / L"manifest.json", retiredBytes);
+    CHECK(!manager.LookupRender(key).has_value());
+    CHECK_EQ(std::string("neural-frames"), ReadBytes(published->payloadPath));
+}
+
+// The model-store term has to move when the weights do. Every file under a
+// resolved root is listed by relative name, size and write time; the files
+// small enough to afford it - the configs and selectors that decide which
+// weights load - are hashed byte for byte as well.
+void model_store_digest_tracks_root_contents_and_names_its_fallback_test()
+{
+    TempDirectory fixture;
+    const auto models = fixture.Path() / L"models";
+    const auto files = models / L"dlssd" / L"versions" / L"20318464" / L"files";
+    std::error_code error;
+    CHECK(std::filesystem::create_directories(files, error));
+    const auto config = models / L"nvngx_config.txt";
+    WriteBytes(config, "app_id=0\n");
+    WriteBytes(files / L"160_E658700.bin", std::string((1u << 20) + 1u, 'w'));
+    const std::array<NeuralModelRoot, 1> roots{NeuralModelRoot{models, true, {}}};
+
+    const auto first = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK_EQ(size_t{64}, first.digest.size());
+    CHECK(first.source == NeuralModelStoreSource::ModelContents);
+    CHECK(first.fallbackDetail.empty());
+    CHECK_EQ(uint32_t{2}, first.files);
+    // The blob is over the content bound, so it is listed and not hashed.
+    CHECK_EQ(uint32_t{1}, first.contentHashedFiles);
+    CHECK_EQ(uint64_t{(1u << 20) + 1u + 9u}, first.bytes);
+    // Unchanged contents digest the same, or every open would miss its own
+    // cache; and the driver version is not folded in, so the receipt can say
+    // which of the two terms moved.
+    CHECK_EQ(first.digest, DigestNeuralModelStore(roots, L"32.0.16.1047").digest);
+    CHECK_EQ(first.digest, DigestNeuralModelStore(roots, L"32.0.99.9999").digest);
+
+    // An edited selector: same file, new bytes.
+    WriteBytes(config, "app_id=1\n");
+    const auto edited = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(edited.digest != first.digest);
+
+    // A grown blob: above the bound, so its size is what the listing carries.
+    WriteBytes(files / L"160_E658700.bin", std::string((1u << 20) + 2u, 'w'));
+    const auto grown = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(grown.digest != edited.digest);
+
+    // A refreshed model store: a new version directory beside the old one.
+    const auto refreshedFiles = models / L"dlssd" / L"versions" / L"20318465" / L"files";
+    CHECK(std::filesystem::create_directories(refreshedFiles, error));
+    WriteBytes(refreshedFiles / L"160_E658701.bin", "refreshed-weights");
+    const auto refreshed = DigestNeuralModelStore(roots, L"32.0.16.1047");
+    CHECK(refreshed.digest != grown.digest);
+    CHECK_EQ(uint32_t{3}, refreshed.files);
+
+    // A driver-store root is not walked: only the NGX modules beside the
+    // registered core belong in a render's identity, because the rest of that
+    // directory is the whole display driver.
+    const auto core = fixture.Path() / L"core";
+    CHECK(std::filesystem::create_directories(core / L"nested", error));
+    WriteBytes(core / L"nvngx.dll", "ngx-core");
+    WriteBytes(core / L"nvcuda.dll", "unrelated");
+    WriteBytes(core / L"nested" / L"nvngx_dlssd.dll", "nested");
+    const std::array<NeuralModelRoot, 1> coreRoot{NeuralModelRoot{core, false, L"nvngx"}};
+    const auto described = DigestNeuralModelStore(coreRoot, L"32.0.16.1047");
+    CHECK_EQ(uint32_t{1}, described.files);
+    CHECK(described.source == NeuralModelStoreSource::ModelContents);
+
+    // A root that cannot be read is named rather than skipped, and with nothing
+    // left to enumerate the driver version is the whole term - the cheap
+    // fallback, on the receipt instead of silent.
+    const std::array<NeuralModelRoot, 1> absent{
+        NeuralModelRoot{fixture.Path() / L"no-such-root", true, {}}};
+    const auto fallback = DigestNeuralModelStore(absent, L"32.0.16.1047");
+    CHECK(fallback.source == NeuralModelStoreSource::DriverVersion);
+    CHECK(!fallback.fallbackDetail.empty());
+    CHECK(fallback.enumeratedRoots.empty());
+    CHECK_EQ(size_t{64}, fallback.digest.size());
+    CHECK(fallback.digest != DigestNeuralModelStore(absent, L"32.0.99.9999").digest);
+
+    const std::string fallbackJson = NeuralModelStoreJson(fallback);
+    CHECK(fallbackJson.find("\"source\":\"driverVersion\"") != std::string::npos);
+    CHECK(fallbackJson.find(fallback.digest) != std::string::npos);
+    CHECK(fallbackJson.find("\"fallback\":\"\"") == std::string::npos);
+    const std::string contentsJson = NeuralModelStoreJson(refreshed);
+    CHECK(contentsJson.find("\"source\":\"modelContents\"") != std::string::npos);
+    CHECK(contentsJson.find("\"fallback\":\"\"") != std::string::npos);
+}
+
+// NeuralWorker.exe decides the guides and the cut classification, so a worker
+// rebuilt with different logic is a different renderer and must not be handed
+// the previous one's renders. It is hashed into the runtime digest for that
+// reason, and deliberately not lock-pinned: the lock is the vendor stack, and
+// every build of this repository changes the worker.
+void hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test()
+{
+    const auto hashed = LockedRuntimeFileNames();
+    const auto pinned = LockPinnedRuntimeFileNames();
+    CHECK_EQ(size_t{13}, hashed.size());
+    CHECK_EQ(size_t{12}, pinned.size());
+    CHECK(std::ranges::find(hashed, std::wstring_view(L"NeuralWorker.exe")) != hashed.end());
+    CHECK(std::ranges::find(pinned, std::wstring_view(L"NeuralWorker.exe")) == pinned.end());
+    for (const std::wstring_view name : pinned)
+        CHECK(std::ranges::find(hashed, name) != hashed.end());
+
+    TempDirectory fixture;
+    for (const std::wstring_view name : hashed) WriteBytes(fixture.Path() / name, "staged-module");
+    const auto staged = BuildRuntimeDigest(fixture.Path(), hashed);
+    CHECK(staged.has_value());
+    WriteBytes(fixture.Path() / L"NeuralWorker.exe", "rebuilt-worker");
+    const auto rebuilt = BuildRuntimeDigest(fixture.Path(), hashed);
+    CHECK(rebuilt.has_value());
+    CHECK(staged != rebuilt);
+    // A missing locked file still leaves no digest, which the render path
+    // reports as an incomplete runtime rather than rendering against a stack
+    // it cannot name.
+    std::error_code error;
+    CHECK(std::filesystem::remove(fixture.Path() / L"NeuralWorker.exe", error));
+    CHECK(!BuildRuntimeDigest(fixture.Path(), hashed).has_value());
 }
 
 void runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test()
@@ -324,6 +535,14 @@ void manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test()
     manifest.verifiedNeuralFrames = manifest.frameCount;
     manifest.feature18ArmedBeforeCapture = false;
     CHECK(!IsReusableNeuralCacheManifest(manifest));
+    manifest.feature18ArmedBeforeCapture = true;
+    CHECK(IsReusableNeuralCacheManifest(manifest));
+    // A render is served as verified neural output out of a user-writable
+    // directory, and no release ever wrote a schema-4 render without a receipt
+    // digest, so a manifest that simply omits one has nothing vouching for how
+    // the payload was produced and is not reusable.
+    manifest.receiptDigest.clear();
+    CHECK(!IsReusableNeuralCacheManifest(manifest));
 }
 
 void source_and_render_promotion_are_hash_validated_and_immutable_test()
@@ -357,6 +576,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(renderStaging.has_value());
     if (!renderStaging) return;
     WriteBytes(*renderStaging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*renderStaging);
     auto renderManifest = CompleteRenderManifest();
     renderManifest.sourceDigest = source->manifest.sourceDigest;
     CHECK(manager.PromoteRender(renderKey, *renderStaging, renderManifest));
@@ -383,6 +603,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(restoredStaging.has_value());
     if (!restoredStaging) return;
     WriteBytes(*restoredStaging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*restoredStaging);
     CHECK(manager.PromoteRender(renderKey, *restoredStaging, renderManifest));
     const auto restored = manager.LookupRender(renderKey);
     CHECK(restored.has_value());
@@ -392,6 +613,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(replacement.has_value());
     if (replacement) {
         WriteBytes(*replacement / L"neural.mkv", "must-not-replace-valid-cache");
+        StageRenderReceipt(*replacement);
         CHECK(manager.PromoteRender(renderKey, *replacement, renderManifest));
     }
     CHECK_EQ(std::string("neural-frames"), ReadBytes(restored->payloadPath));
@@ -403,6 +625,7 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(repairStaging.has_value());
     if(!repairStaging)return;
     WriteBytes(*repairStaging/L"neural.mkv","repaired-neural-frames");
+    StageRenderReceipt(*repairStaging);
     const std::wstring repairName=repairStaging->filename().wstring();
     const size_t repairSeparator=repairName.rfind(L'-');
     CHECK(repairSeparator!=std::wstring::npos);
@@ -418,6 +641,21 @@ void source_and_render_promotion_are_hash_validated_and_immutable_test()
     CHECK(repaired.has_value());
     if(repaired)CHECK_EQ(std::string("repaired-neural-frames"),ReadBytes(repaired->payloadPath));
     CHECK(std::filesystem::is_directory(repairCollision));
+
+    // The published directory is user-writable, so its manifest can be
+    // rewritten in place. Dropping the receipt digest, and the receipt with
+    // it, leaves every other digest matching - and must still not produce a
+    // served render.
+    if (repaired) {
+        auto stripped = repaired->manifest;
+        stripped.receiptDigest.clear();
+        WriteBytes(repaired->directory / L"manifest.json",
+                   SerializeNeuralCacheManifest(stripped));
+        std::error_code receiptRemoveError;
+        CHECK(std::filesystem::remove(repaired->directory / L"receipt.json",
+                                      receiptRemoveError));
+        CHECK(!manager.LookupRender(renderKey).has_value());
+    }
 }
 
 // A finished render used to be discarded because publishing it is a directory
@@ -437,6 +675,7 @@ void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
     if (!staging) return;
     const auto payload = *staging / L"neural.mkv";
     WriteBytes(payload, "neural-frames");
+    StageRenderReceipt(*staging);
     const auto manifest = CompleteRenderManifest();
 
     // FILE_SHARE_READ|WRITE without DELETE is what a scanner holds, and it is
@@ -465,10 +704,14 @@ void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
     CHECK(second.has_value());
     if (!second) return;
     WriteBytes(*second / L"neural.mkv", "neural-frames");
-    auto missingSidecar = manifest;
-    missingSidecar.settingsDigest = std::string(64, 'a');
+    StageRenderReceipt(*second);
+    // The receipt is staged; it is neural-settings.ini that this manifest
+    // promises and staging does not have.
+    auto missingSettingsSidecar = manifest;
+    missingSettingsSidecar.settingsDigest = std::string(64, 'a');
     NeuralCachePromotion rejected{};
-    CHECK(!manager.PromoteRender(std::string(64, '8'), *second, missingSidecar, &rejected));
+    CHECK(!manager.PromoteRender(std::string(64, '8'), *second,
+                                 missingSettingsSidecar, &rejected));
     CHECK(rejected.stage == NeuralCachePromotion::Stage::SidecarDigest);
     CHECK_EQ(0u, rejected.attempts);
 }
@@ -523,8 +766,12 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK(std::find(arguments.begin(), arguments.end(), L"pipe:0") != arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"cmd.exe") == arguments.end());
     CHECK(std::find(arguments.begin(), arguments.end(), L"powershell.exe") == arguments.end());
-    // The CPU conversion inside ffmpeg is what the BGRA path pays for; the pixel format
-    // it is given must stay BGRA in, yuv420p out, and untagged.
+    // The CPU conversion inside ffmpeg is what the BGRA path pays for, so the pixel
+    // format it is given stays BGRA in, yuv420p out. It is NOT untagged: this path used
+    // to state no colorimetry at all, which shipped every default render as an untagged
+    // file carrying ffmpeg's BT.601 default, and a BT.709 source decoded wrongly
+    // downstream. It now states BT.709 *and* converts with it - a label without the
+    // matrix would be worse than the original defect.
     const auto value = [](const std::vector<std::wstring>& list, const wchar_t* flag) {
         std::vector<std::wstring> found;
         for (size_t index = 0; index + 1 < list.size(); ++index)
@@ -532,11 +779,23 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         return found;
     };
     CHECK_EQ((std::vector<std::wstring>{L"bgra", L"yuv420p"}), value(arguments, L"-pix_fmt"));
-    CHECK(std::find(arguments.begin(), arguments.end(), L"-colorspace") == arguments.end());
+    CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-colorspace"));
+    CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(arguments, L"-color_primaries"));
+    CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(arguments, L"-color_range"));
+    // scale picks the coefficients; setparams is what makes primaries and transfer
+    // survive this FFmpeg's muxers, and it is pixel-safe here (scale-only and
+    // scale+setparams decode to identical planes).
+    CHECK_EQ((std::vector<std::wstring>{L"scale=out_color_matrix=bt709:out_range=tv,"
+                                        L"setparams=color_primaries=bt709:color_trc=bt709:"
+                                        L"colorspace=bt709:range=tv"}),
+             value(arguments, L"-vf"));
 
     // A GPU-converted capture arrives as NV12 and leaves as NV12: NVENC takes it as it
-    // stands, so no frame is converted on the CPU. Only this path states its
-    // colorimetry, because only here does the player pick the matrix.
+    // stands, so no frame is converted on the CPU. It states the same colorimetry the
+    // capture shader produced, and it carries `setparams` to do it - metadata only, and
+    // measured pixel-exact through a lossless round trip. What it must NOT carry is a
+    // `scale` filter: converting those pixels again is the entire cost this path exists
+    // to avoid.
     EncoderSpec gpuConverted = encoder;
     gpuConverted.pixelFormat = EncoderPixelFormat::Nv12;
     const std::vector<std::wstring> nv12 = BuildEncoderArguments(
@@ -544,6 +803,10 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     CHECK_EQ((std::vector<std::wstring>{L"nv12", L"nv12"}), value(nv12, L"-pix_fmt"));
     CHECK_EQ((std::vector<std::wstring>{L"bt709"}), value(nv12, L"-colorspace"));
     CHECK_EQ((std::vector<std::wstring>{L"tv"}), value(nv12, L"-color_range"));
+    CHECK_EQ((std::vector<std::wstring>{L"setparams=color_primaries=bt709:color_trc=bt709:"
+                                        L"colorspace=bt709:range=tv"}), value(nv12, L"-vf"));
+    for (const std::wstring& argument : nv12)
+        CHECK(argument.find(L"scale=") == std::wstring::npos);
     // x264 has no NV12 input, so that pairing converts one plane instead of a frame.
     EncoderSpec software = gpuConverted;
     software.kind = EncoderKind::H264Software;
@@ -2568,6 +2831,42 @@ void live_session_joins_the_render_where_its_coverage_actually_starts_test()
     CHECK_EQ(int64_t(12*kSecond),live_session::AttachPosition100ns(12*kSecond,10*kSecond,0));
 }
 
+// The third form of the same hang. A session toggled on at a playhead whose
+// render key was already published is answered by the cache in about 50 ms: the
+// job succeeds, renders no frame and appends no segment, so the index is empty
+// AND finished. Every other decision here then says "wait" - zero lead against
+// a finished session, a playhead inside the range - and the player sat behind
+// the buffering panel until the user gave up. Reproduced twice on hardware,
+// where the log showed publish (save=0) 54 ms after the cache check, no
+// segment lines at all, and `Neural cold start: total=-`.
+void live_session_with_no_published_segment_plays_the_cache_entry_test()
+{
+    using live_session::CompletedSessionPlan;
+        // The defect: a successful job, an empty index, and an entry that covers
+    // the whole range. Playback belongs on the entry, not on the index.
+    CHECK(CompletedSessionPlan::PublishedEntry==
+          live_session::PlanForCompletedSession({.covered=false,.ok=true,.publishedEntry=true}));
+    // No entry either: there is nothing to show, so the session must end and
+    // hand the original stream back rather than wait.
+    CHECK(CompletedSessionPlan::Stop==
+          live_session::PlanForCompletedSession({.covered=false,.ok=true,.publishedEntry=false}));
+    CHECK(CompletedSessionPlan::Stop==
+          live_session::PlanForCompletedSession({.covered=false,.ok=false,.publishedEntry=true}));
+    // Coverage outranks the verdict: a job that failed partway still left
+    // seconds of picture on screen, and those keep playing.
+    CHECK(CompletedSessionPlan::Segments==
+          live_session::PlanForCompletedSession({.covered=true,.ok=false,.publishedEntry=false}));
+    CHECK(CompletedSessionPlan::Segments==
+          live_session::PlanForCompletedSession({.covered=true,.ok=true,.publishedEntry=true}));
+    // What made the hang invisible to the rest of the policy: the session the
+    // cache hit leaves behind asks for neither an attach nor a rebase.
+    const live_session::SessionView empty{.positionSec=2.56667,.rangeStartSec=2.56667,
+                                          .headSec=0.0,.attached=false,.finished=true};
+    CHECK(!live_session::ShouldAttach(empty));
+    CHECK(!live_session::NeedsRebase(empty));
+    CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
+}
+
 void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
 {
     CHECK_EQ(0.0,live_session::RealtimeRatio(3.0,4.0));           // 4 s in, still mostly startup
@@ -2672,6 +2971,107 @@ void live_render_forecast_predicts_from_this_gpu_measured_geometries_test()
     CHECK_EQ(RenderPaceProfile::kMaxSamples,three.samples.size());
 }
 
+// Three fixed digests and one fixed directory: the policy never touches the
+// filesystem, so the key's parts only have to be distinguishable.
+resident_helper::HelperKey StubHelperKey(std::string settingsDigest = "settings-aaa")
+{
+    return resident_helper::MakeHelperKey(L"C:\\Player\\neural-runtime", "runtime-111",
+                                          std::move(settingsDigest));
+}
+
+resident_helper::ResidentState RunningHelper(const resident_helper::HelperKey& key)
+{
+    return resident_helper::ResidentState{true, key};
+}
+
+// The decision residency exists for. Reuse is the only answer that skips
+// neuralInit and featureArm, which on this machine is 2.10 s of a 4.88-5.16 s
+// warm toggle, so it must be reachable for the ordinary case: the same runtime,
+// the same files, the same settings, a different clip or a different range.
+// Spelling of the runtime directory is not part of the decision - a key folded
+// from a differently cased or slash-separated path is the same helper, because
+// paying 2.10 s over a backslash would be indefensible.
+void resident_helper_reuses_the_running_process_for_an_identical_key_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),StubHelperKey())==HelperPlan::Reuse);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"c:/Player/Neural-Runtime\\","runtime-111","settings-aaa"))==HelperPlan::Reuse);
+    // The job's own particulars are not in the key at all: a resident helper is
+    // reused for any job the same loaded stack can render.
+    CHECK(HelperPlanName(HelperPlan::Reuse)=="reuse");
+}
+
+// A settings change cannot be delivered to a running helper at all: ReShade and
+// RenoDX read their INI when the proxy loads, so a helper that started under the
+// old settings would render the new job with the old ones and the cache entry
+// would be keyed to settings it does not contain. This is the one relaunch that
+// is a correctness requirement rather than a cleanliness one.
+void resident_helper_relaunches_when_the_neural_settings_digest_changes_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey("settings-aaa");
+    CHECK(PlanForJob(RunningHelper(resident),StubHelperKey("settings-bbb"))==HelperPlan::Relaunch);
+    // And back again: the digest is compared, not remembered as "changed once".
+    CHECK(PlanForJob(RunningHelper(StubHelperKey("settings-bbb")),
+                     StubHelperKey("settings-aaa"))==HelperPlan::Relaunch);
+}
+
+// A runtime digest change means the hashed files under neural-runtime - the
+// twelve vendor modules and the worker beside them - are not the ones the
+// resident helper mapped. Its loaded proxy, add-on and NGX all
+// came from the old bytes, so there is nothing to reuse even though the
+// directory and the settings are unchanged.
+void resident_helper_relaunches_when_the_runtime_digest_changes_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-222","settings-aaa"))==HelperPlan::Relaunch);
+    // A different runtime directory entirely is the same answer for the same
+    // reason, and must not be mistaken for the same helper.
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"D:\\Other\\neural-runtime","runtime-111","settings-aaa"))==HelperPlan::Relaunch);
+}
+
+// Launch is not a degraded Reuse: it is what the first job of a session does,
+// and what every job does after the helper's 30 s idle timeout or its exit
+// after a job it could not finish. The player finds out by looking at the
+// process, so "gone" arrives here as `running == false` and must produce an
+// ordinary launch rather than an error - the absence of a helper is never a
+// failure to report.
+void resident_helper_launches_when_no_helper_is_running_test()
+{
+    using namespace resident_helper;
+    CHECK(PlanForJob({},StubHelperKey())==HelperPlan::Launch);
+    // The key of a helper that has gone is still remembered; it must not make
+    // the job look reusable.
+    CHECK(PlanForJob(ResidentState{false,StubHelperKey()},StubHelperKey())==HelperPlan::Launch);
+    CHECK(PlanForJob(ResidentState{false,StubHelperKey("settings-bbb")},StubHelperKey())==HelperPlan::Launch);
+}
+
+// A job that cannot be identified may not be given a process that outlives it.
+// Without all three parts of the key, two jobs whose settings differ compare
+// equal, and the second would silently reuse the first one's loaded INI - so an
+// incomplete key runs the way every job ran before residency: one process, one
+// job, exit.
+void resident_helper_refuses_residency_for_an_unidentified_job_test()
+{
+    using namespace resident_helper;
+    const HelperKey resident=StubHelperKey();
+    CHECK(PlanForJob(RunningHelper(resident),MakeHelperKey(L"","runtime-111","settings-aaa"))==HelperPlan::SingleShot);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","","settings-aaa"))==HelperPlan::SingleShot);
+    CHECK(PlanForJob(RunningHelper(resident),
+                     MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-111",""))==HelperPlan::SingleShot);
+    // Including when nothing is running: single-shot outranks launch, because
+    // the objection is to keeping this helper, not to starting one.
+    CHECK(PlanForJob({},MakeHelperKey(L"C:\\Player\\neural-runtime","runtime-111",""))==HelperPlan::SingleShot);
+    CHECK(StubHelperKey().Complete());
+    CHECK(HelperPlanName(HelperPlan::SingleShot)=="single-shot");
+}
+
 int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
 {
     const std::wstring name = CurrentExecutable().filename().wstring();
@@ -2760,7 +3160,10 @@ int wmain(int argc, wchar_t* argv[])
     default_cache_falls_back_when_portable_layout_is_unusable_test();
     explicit_cache_root_remains_authoritative_test();
     invalid_explicit_cache_root_does_not_silently_fall_back_test();
-    cache_key_changes_for_every_material_input_test();
+    published_render_is_not_reused_across_identity_changes_test();
+    schema_four_entries_are_retired_by_the_schema_gate_test();
+    model_store_digest_tracks_root_contents_and_names_its_fallback_test();
+    hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
     source_and_render_promotion_are_hash_validated_and_immutable_test();
@@ -2836,10 +3239,16 @@ int wmain(int argc, wchar_t* argv[])
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
     live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
     live_session_joins_the_render_where_its_coverage_actually_starts_test();
+    live_session_with_no_published_segment_plays_the_cache_entry_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
     neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test();
+    resident_helper_reuses_the_running_process_for_an_identical_key_test();
+    resident_helper_relaunches_when_the_neural_settings_digest_changes_test();
+    resident_helper_relaunches_when_the_runtime_digest_changes_test();
+    resident_helper_launches_when_no_helper_is_running_test();
+    resident_helper_refuses_residency_for_an_unidentified_job_test();
 
     if (test_support::failure_count != 0) return EXIT_FAILURE;
     return EXIT_SUCCESS;

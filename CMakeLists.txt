@@ -124,6 +124,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/OfflineNeuralRenderer.h
     src/NeuralWorker.cpp
     src/NeuralWorker.h
+    src/ResidentHelperPolicy.h
     src/SynchronizedPlayback.cpp
     src/SynchronizedPlayback.h
     src/NeuralSegmentIndex.h

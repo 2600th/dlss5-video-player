@@ -2,6 +2,7 @@
 #include "ReShadeConfig.h"
 #include "NeuralCache.h"
 #include "NeuralSettings.h"
+#include "OpticalFlowNvof.h"
 #include "TestSupport.h"
 
 #include <windows.h>
@@ -49,6 +50,24 @@ NeuralCacheManifest RenderManifest()
     result.feature18Created = true;
     result.feature18ArmedBeforeCapture = true;
     return result;
+}
+
+// The player never promotes a render without its receipt: it builds the
+// receipt JSON, writes receipt.json into staging and fails the render when it
+// cannot. RenderManifest() stays receipt-free for the parse-level tests, so a
+// promotable render is the same manifest plus the sidecar it has to carry.
+constexpr std::string_view kRenderReceipt = "{\"schema\":1,\"render\":\"fixture\"}\n";
+
+NeuralCacheManifest PromotableRenderManifest()
+{
+    auto result = RenderManifest();
+    result.receiptDigest = Sha256Bytes(kRenderReceipt).value_or("");
+    return result;
+}
+
+void StageRenderReceipt(const std::filesystem::path& staging)
+{
+    Write(staging / L"receipt.json", kRenderReceipt);
 }
 
 void harmless_ini_rewrites_preserve_snapshot_but_every_neural_tuning_changes_key()
@@ -119,7 +138,7 @@ void authenticated_settings_survive_promotion_and_tampering_invalidates_cache()
     TempDirectory temp;
     NeuralCacheManager cache(temp.path / L"cache");
     const std::string key(64, 'c');
-    auto manifest = RenderManifest();
+    auto manifest = PromotableRenderManifest();
     const auto snapshot = SnapshotNeuralAddonSettings(UpdateNeuralAddonIni("", true));
     manifest.settingsDigest = Sha256Bytes(snapshot).value_or("");
     CHECK_EQ(size_t{64}, manifest.settingsDigest.size());
@@ -127,6 +146,9 @@ void authenticated_settings_survive_promotion_and_tampering_invalidates_cache()
     CHECK(staging.has_value());
     if (!staging) return;
     Write(*staging / L"neural.mkv", "encoded video");
+    StageRenderReceipt(*staging);
+    // neural-settings.ini is the sidecar this manifest promises and staging
+    // does not yet have.
     CHECK(!cache.PromoteRender(key, *staging, manifest));
     Write(*staging / L"neural-settings.ini", snapshot);
     CHECK(cache.PromoteRender(key, *staging, manifest));
@@ -218,7 +240,7 @@ void schema_three_manifests_parse_with_defaults_and_stay_reusable()
     CHECK(!ParseNeuralCacheManifest(extended));
 }
 
-void schema_four_manifest_round_trips_with_receipt_digest()
+void current_schema_manifest_round_trips_with_receipt_digest()
 {
     auto manifest = RenderManifest();
     manifest.state = NeuralCacheState::Complete;
@@ -236,7 +258,7 @@ void schema_four_manifest_round_trips_with_receipt_digest()
         "\",\"rangeStart100ns\":10000000,\"rangeEnd100ns\":13333333,"
         "\"guides\":\"mv=1,depth=0\",\"jobId\":42,\"historyResets\":3,"
         "\"receiptDigest\":\"" + std::string(64, 'f') + "\"}\n";
-    CHECK(bytes.starts_with("{\"schema\":4,"));
+    CHECK(bytes.starts_with("{\"schema\":5,"));
     CHECK(bytes.ends_with(tail));
     const auto parsed = ParseNeuralCacheManifest(bytes);
     CHECK(parsed.has_value());
@@ -244,12 +266,12 @@ void schema_four_manifest_round_trips_with_receipt_digest()
         CHECK_EQ(manifest, *parsed);
         CHECK(IsReusableNeuralCacheManifest(*parsed));
     }
-    // Empty digests and a whole-source range are valid schema-4 defaults.
+    // Empty digests and a whole-source range are valid schema-5 defaults.
     auto plain = RenderManifest();
     const auto plainParsed = ParseNeuralCacheManifest(SerializeNeuralCacheManifest(plain));
     CHECK(plainParsed.has_value());
     if (plainParsed) CHECK_EQ(plain, *plainParsed);
-    // Schema 4 is fixed and ordered: a missing trailing field is rejected.
+    // Schema 5 is fixed and ordered: a missing trailing field is rejected.
     auto truncated = bytes;
     truncated.erase(truncated.find(",\"receiptDigest\""));
     truncated += "}\n";
@@ -264,7 +286,13 @@ void schema_four_manifest_round_trips_with_receipt_digest()
     CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
     manifest.rangeEnd100ns = 0;
     CHECK(ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)).has_value());
-    manifest.schema = 5;
+    // Schema 4 wrote this exact field list and is retired all the same: its
+    // entries were keyed under an identity that named neither the driver
+    // version nor the model store, so nothing recorded what produced them.
+    // The schema gate is what refuses them - not a field they are missing.
+    manifest.schema = 4;
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
+    manifest.schema = 6;
     CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest)));
 }
 
@@ -282,16 +310,20 @@ void receipt_is_authenticated_on_promotion_and_lookup()
     CHECK(staging.has_value());
     if (!staging) return;
     Write(*staging / L"neural.mkv", "encoded video");
+    // receipt.json is the sidecar this manifest promises and staging does not
+    // yet have.
     CHECK(!cache.PromoteRender(key, *staging, manifest));
     Write(*staging / L"receipt.json", receipt);
     CHECK(cache.PromoteRender(key, *staging, manifest));
     const auto found = cache.LookupRender(key);
     CHECK(found.has_value());
     if (!found) return;
-    CHECK_EQ(uint32_t{4}, found->manifest.schema);
+    CHECK_EQ(uint32_t{5}, found->manifest.schema);
     CHECK_EQ(manifest.receiptDigest, found->manifest.receiptDigest);
     CHECK_EQ(uint64_t{7}, found->manifest.jobId);
     CHECK_EQ(receipt, Read(found->directory / L"receipt.json"));
+    // One byte appended to the published receipt: the digest no longer
+    // authenticates it, so the entry is not served.
     Write(found->directory / L"receipt.json", receipt + " ");
     CHECK(!cache.LookupRender(key));
 }
@@ -413,10 +445,12 @@ void removing_one_owned_entry_preserves_other_entries_and_outside_files()
     Write(*source / L"source.mkv", "original");
     Write(*render / L"neural.mkv", "first render");
     Write(*other / L"neural.mkv", "second render");
+    StageRenderReceipt(*render);
+    StageRenderReceipt(*other);
     Write(temp.path / L"user.mkv", "user file");
     CHECK(cache.PromoteSource(first, *source, RenderManifest()));
-    CHECK(cache.PromoteRender(first, *render, RenderManifest()));
-    CHECK(cache.PromoteRender(second, *other, RenderManifest()));
+    CHECK(cache.PromoteRender(first, *render, PromotableRenderManifest()));
+    CHECK(cache.PromoteRender(second, *other, PromotableRenderManifest()));
     CHECK(cache.RemoveRender(first));
     CHECK(!cache.LookupRender(first));
     CHECK(cache.LookupSource(first).has_value());
@@ -513,6 +547,70 @@ void staging_reports_the_latest_refusal_and_keeps_an_accepted_one_in_the_root()
     CHECK_EQ(NeuralCacheFailure::Cause::InvalidKey, cache.LastFailure().cause);
 }
 
+// The motion estimator a session runs on is picked from sizes alone, before any device
+// call, so the two halves of that decision are checkable here: what geometry hardware
+// flow is asked for and how its vectors are converted (PlanHardwareFlow, called by
+// D3D12Renderer::CreateVideoResources), and the engine bound that sends a session back
+// to the CPU block matcher (FlowGeometrySupported, called by OpticalFlowNvof::Initialize).
+void hardware_flow_runs_at_the_decoded_size_and_scales_only_for_super_resolution()
+{
+    // Neural size: the decoded frame is already the DLSS input. This is the path that
+    // shipped, and the scale has to be exactly 1 rather than nearly 1, because every
+    // vector the engine produces is multiplied by it.
+    const HardwareFlowPlan neural = PlanHardwareFlow(1920, 1080, 1920, 1080);
+    CHECK(neural.attempt);
+    CHECK_EQ(uint32_t{1920}, neural.width);
+    CHECK_EQ(uint32_t{1080}, neural.height);
+    CHECK_EQ(1.0f, neural.motionScaleX);
+    CHECK_EQ(1.0f, neural.motionScaleY);
+
+    // Runtime Super Resolution, the case that used to fall back to the CPU estimator:
+    // the engine still compares the decoded frame, because that is the texture the
+    // capture copies, and the vectors are carried into DLSS input pixels afterwards.
+    const HardwareFlowPlan upscaled = PlanHardwareFlow(1920, 1080, 1280, 720);
+    CHECK(upscaled.attempt);
+    CHECK_EQ(uint32_t{1920}, upscaled.width);
+    CHECK_EQ(uint32_t{1080}, upscaled.height);
+    CHECK_EQ(1280.0f / 1920.0f, upscaled.motionScaleX);
+    CHECK_EQ(720.0f / 1080.0f, upscaled.motionScaleY);
+
+    // The other direction is a real one too: a source below the runtime's minimum input
+    // for the requested output is given a DLSS input larger than the decoded frame.
+    const HardwareFlowPlan raised = PlanHardwareFlow(1280, 720, 1920, 1080);
+    CHECK(raised.attempt);
+    CHECK_EQ(uint32_t{1280}, raised.width);
+    CHECK_EQ(1.5f, raised.motionScaleX);
+    CHECK_EQ(1.5f, raised.motionScaleY);
+
+    // Per axis, not one ratio: the conversion pass stretches each axis on its own, so a
+    // DLSS input whose aspect differs from the source's scales differently in x and y.
+    const HardwareFlowPlan stretched = PlanHardwareFlow(1920, 1080, 1280, 1080);
+    CHECK_EQ(1280.0f / 1920.0f, stretched.motionScaleX);
+    CHECK_EQ(1.0f, stretched.motionScaleY);
+
+    // A degenerate size says why and leaves the scale at 1, so a caller that used the
+    // plan without reading `attempt` would still not multiply a vector by zero.
+    const HardwareFlowPlan degenerate = PlanHardwareFlow(1920, 1080, 1920, 0);
+    CHECK(!degenerate.attempt);
+    CHECK(std::string_view(degenerate.refusal).find("zero dimension") != std::string_view::npos);
+    CHECK_EQ(1.0f, degenerate.motionScaleX);
+}
+
+void a_decoded_frame_outside_the_engine_range_keeps_the_cpu_block_matcher()
+{
+    // Asking for the decoded size rather than the DLSS input size is what makes this
+    // bound matter: a 4K source upscaled from a small DLSS input is refused by an engine
+    // that stops at 1080p, and that session keeps the CPU estimator.
+    CHECK(!FlowGeometrySupported(3840, 2160, 32, 32, 1920, 1080));
+    CHECK(FlowGeometrySupported(1920, 1080, 32, 32, 4096, 4096));
+    // Inclusive at both ends.
+    CHECK(FlowGeometrySupported(4096, 4096, 32, 32, 4096, 4096));
+    CHECK(!FlowGeometrySupported(16, 16, 32, 32, 4096, 4096));
+    // A maximum the driver did not answer cannot refuse anything; the engine's own
+    // nvOFInit is then the thing that decides.
+    CHECK(FlowGeometrySupported(3840, 2160, 0, 0, 0, 0));
+}
+
 } // namespace
 
 int main()
@@ -523,7 +621,7 @@ int main()
     manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension();
     default_identity_key_is_stable_and_range_or_guides_change_it();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
-    schema_four_manifest_round_trips_with_receipt_digest();
+    current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();
     overrides_follow_managed_keys_and_replace_existing_values();
     neural_settings_round_trip_and_format_renodx_overrides();
@@ -531,5 +629,7 @@ int main()
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
     a_cache_root_that_cannot_become_a_directory_is_invalid_and_names_the_cause();
     staging_reports_the_latest_refusal_and_keeps_an_accepted_one_in_the_root();
+    hardware_flow_runs_at_the_decoded_size_and_scales_only_for_super_resolution();
+    a_decoded_frame_outside_the_engine_range_keeps_the_cpu_block_matcher();
     return test_support::failure_count ? EXIT_FAILURE : EXIT_SUCCESS;
 }

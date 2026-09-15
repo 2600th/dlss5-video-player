@@ -31,6 +31,14 @@ namespace {
 constexpr std::wstring_view kWorkerMode = L"--neural-worker";
 constexpr std::wstring_view kPreflightMode = L"--neural-preflight";
 constexpr std::wstring_view kRestartedFlag = L"--configuration-restarted";
+constexpr std::wstring_view kIdleVramPolicyFlag = L"--idle-vram-policy";
+// Section and key of the player's own settings file - not the neural runtime's
+// ReShade.ini. The idle-VRAM policy is a resource decision, so it must stay
+// out of the settings digest the render cache key hashes: a render made while
+// the helper frees memory between jobs is the same render, and flipping this
+// must not retire a single cache entry.
+constexpr wchar_t kIdleVramPolicySection[] = L"NeuralHelper";
+constexpr wchar_t kIdleVramPolicyKey[] = L"IdleVramPolicy";
 
 std::wstring QuoteArgument(std::wstring_view value)
 {
@@ -76,15 +84,6 @@ HANDLE CreateKillOnCloseJob()
     return job;
 }
 
-void KillAndWait(HANDLE job, HANDLE process)
-{
-    if (job) TerminateJobObject(job, ERROR_PROCESS_ABORTED);
-    // The process can be suspended before assignment fails. Terminating it
-    // directly as well prevents that unassigned process from escaping.
-    if (process) TerminateProcess(process, ERROR_PROCESS_ABORTED);
-    if (process) WaitForSingleObject(process, 2000);
-}
-
 bool ParseUnsigned(std::wstring_view text, uint64_t& value)
 {
     if (text.empty()) return false;
@@ -125,8 +124,10 @@ std::wstring HandleText(HANDLE handle)
 
 class MetadataReader {
 public:
-    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments)
-        : progress_(std::move(progress)), segments_(std::move(segments)) {}
+    MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments,
+                   NeuralColdStartCallback timeline = {})
+        : progress_(std::move(progress)), segments_(std::move(segments)),
+          timeline_reported_(std::move(timeline)) {}
 
     bool ReadAvailable(HANDLE pipe)
     {
@@ -168,6 +169,17 @@ public:
     const PreflightPayload& Preflight() const { return *preflight_; }
     // Empty until the helper reports its share of the cold-start timeline.
     const NeuralColdStartTimeline& Timeline() const { return timeline_; }
+    // The two idle-VRAM samples this job saw, if the helper took them. The
+    // PostJob one belongs to this job; the Idle one arrived before it and
+    // describes the grace this job's helper spent parked beforehand, which is
+    // the cost this job's first frame just paid back.
+    const std::optional<MemorySample>& PostJobMemory() const { return postJobMemory_; }
+    const std::optional<MemorySample>& IdleMemory() const { return idleMemory_; }
+    // A resident helper answered Hello. Evidence, not a gate: the parent hands
+    // the first job over without waiting for it, because the command pipe holds
+    // the frame until the helper's runtime is up and reading, and blocking on a
+    // round trip would spend the cold start residency exists to remove.
+    bool Announced() const { return announced_; }
 
 private:
     bool Consume()
@@ -182,15 +194,26 @@ private:
                  header.kind != static_cast<uint16_t>(WireKind::Result) &&
                  header.kind != static_cast<uint16_t>(WireKind::Preflight) &&
                  header.kind != static_cast<uint16_t>(WireKind::Segment) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Timeline))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Timeline) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Ready) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Memory))) {
                 malformed_ = true;
                 return false;
             }
             const size_t messageBytes = sizeof(header) + static_cast<size_t>(header.payloadBytes);
             if (bytes_.size() - offset < messageBytes) break;
             const std::span<const std::byte> payload(bytes_.data() + offset + sizeof(header), header.payloadBytes);
-            // A terminal message (result or preflight) must be the last one.
-            if (result_.has_value() || preflight_.has_value()) { malformed_ = true; return false; }
+            // A terminal message (result or preflight) must be the last one to
+            // describe this job. Ready describes the process rather than the
+            // job and may land on either side of it: the parent buffers Hello
+            // and the first Job together, and a helper that reads commands on
+            // its own thread can answer the Hello after that job's result is
+            // already written.
+            const bool announcement = header.kind == static_cast<uint16_t>(WireKind::Ready);
+            if (!announcement && (result_.has_value() || preflight_.has_value())) {
+                malformed_ = true;
+                return false;
+            }
             switch (static_cast<WireKind>(header.kind)) {
                 case WireKind::Progress: {
                     const auto progress = DecodeProgress(payload);
@@ -226,11 +249,37 @@ private:
                     break;
                 }
                 case WireKind::Timeline: {
-                    // One cold start per helper: a second timeline would mean
-                    // the helper measured a startup it did not have.
+                    // One cold start per job: a resident helper's second job
+                    // reports firstOutput alone, because that is the only phase
+                    // it paid for. This reader is built per job, so a second
+                    // timeline inside one job still means the helper measured a
+                    // startup it did not have.
                     auto timeline = DecodeTimeline(payload);
                     if (!timeline || !timeline_.Empty()) { malformed_ = true; return false; }
                     timeline_ = *timeline;
+                    // Reported here rather than only on the returned result:
+                    // this message arrives with the helper's first output file,
+                    // and a caller that reports its own timeline when the first
+                    // frame reaches the screen has already reported by the time
+                    // this function returns.
+                    if (timeline_reported_) timeline_reported_(timeline_);
+                    break;
+                }
+                case WireKind::Ready: {
+                    // Answers Hello and carries nothing: a helper that says it
+                    // twice is not describing anything twice.
+                    if (!payload.empty() || announced_) { malformed_ = true; return false; }
+                    announced_ = true;
+                    break;
+                }
+                case WireKind::Memory: {
+                    const auto sample = DecodeMemory(payload);
+                    if (!sample) { malformed_ = true; return false; }
+                    // One of each per job at most: a second sample of the same
+                    // stage would be a second answer to a question asked once.
+                    auto& slot = sample->stage == MemoryStage::PostJob ? postJobMemory_ : idleMemory_;
+                    if (slot) { malformed_ = true; return false; }
+                    slot = *sample;
                     break;
                 }
             }
@@ -242,12 +291,16 @@ private:
 
     OfflineNeuralRenderer::ProgressCallback progress_;
     NeuralSegmentSink segments_;
+    NeuralColdStartCallback timeline_reported_;
     std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
     NeuralColdStartTimeline timeline_;
     std::optional<NeuralRenderResult> result_;
     std::optional<PreflightPayload> preflight_;
+    std::optional<MemorySample> postJobMemory_;
+    std::optional<MemorySample> idleMemory_;
     bool malformed_{};
+    bool announced_{};
 };
 
 std::wstring ErrorDetail(std::wstring_view operation)
@@ -276,43 +329,143 @@ void RemoveStaleRuntimeLogs(const std::filesystem::path& runtimeDirectory)
     std::filesystem::remove(runtimeDirectory / L"ReShade.log1", error);
 }
 
-// Launches the helper with the metadata pipe (and optional inheritable pause
-// event), pumps its messages into `reader`, and returns once it exits or the
-// caller cancels. The job object kills the whole helper tree on close.
-LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
-                           const std::function<std::vector<std::wstring>(HANDLE metadata, HANDLE pause)>& arguments,
-                           HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop,
-                           const std::function<void()>& processCreated)
+// Closes on scope exit so the eight failure paths below stop repeating the
+// cleanup of everything that succeeded before them.
+class ScopedHandle {
+public:
+    ScopedHandle() = default;
+    explicit ScopedHandle(HANDLE handle) : handle_(handle) {}
+    ScopedHandle(ScopedHandle&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    ScopedHandle& operator=(ScopedHandle&& other) noexcept
+    {
+        if (this != &other) {
+            if (handle_) CloseHandle(handle_);
+            handle_ = std::exchange(other.handle_, nullptr);
+        }
+        return *this;
+    }
+    ~ScopedHandle() { if (handle_) CloseHandle(handle_); }
+    ScopedHandle(const ScopedHandle&) = delete;
+    ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+    HANDLE Get() const noexcept { return handle_; }
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+    HANDLE* Address() noexcept { return &handle_; }
+    HANDLE Release() noexcept { return std::exchange(handle_, nullptr); }
+
+private:
+    HANDLE handle_{};
+};
+
+// One live helper process and the parent's ends of its pipes. `command` is set
+// only for a resident helper; a single-shot helper takes its one job on its
+// command line and has nothing to be told afterwards.
+struct HelperProcess {
+    HANDLE process{};
+    HANDLE job{};
+    HANDLE metadata{};
+    HANDLE command{};
+
+    bool Valid() const noexcept { return process != nullptr; }
+    bool Alive() const noexcept
+    {
+        return process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    }
+};
+
+// Ends the helper and releases every handle. `grace` is how long an orderly
+// exit is waited for after the command channel closes; whatever is left is
+// killed, because closing the job object is what guarantees nothing survives
+// this function holding the GPU.
+void EndHelper(HelperProcess& helper, DWORD grace)
 {
-    LaunchOutcome outcome;
+    if (helper.command) {
+        WriteCommand(helper.command, CommandKind::Shutdown, nullptr, 0);
+        CloseHandle(helper.command);
+    }
+    if (helper.process && grace) WaitForSingleObject(helper.process, grace);
+    if (helper.job) TerminateJobObject(helper.job, ERROR_PROCESS_ABORTED);
+    // A process that failed to be assigned to the job is not covered by it.
+    if (helper.process) {
+        TerminateProcess(helper.process, ERROR_PROCESS_ABORTED);
+        WaitForSingleObject(helper.process, 2000);
+    }
+    if (helper.metadata) CloseHandle(helper.metadata);
+    if (helper.process) CloseHandle(helper.process);
+    if (helper.job) CloseHandle(helper.job);
+    helper = {};
+}
+
+// Builds the helper's command line from the handles it will inherit. The
+// handles keep their numeric values across inheritance, which is why they can
+// be named on the command line at all.
+using HelperArgumentBuilder =
+    std::function<std::vector<std::wstring>(HANDLE metadata, HANDLE command, HANDLE pause, HANDLE parent)>;
+
+struct StartOutcome {
+    HelperProcess helper;
+    // The metadata and pause handles as the helper sees them. Inheritance
+    // preserves the numbers, which is what lets the command line name them -
+    // and what lets a later job be described by the same argument vector.
+    HANDLE helperMetadata{};
+    HANDLE helperPause{};
+    std::wstring detail;
+};
+
+// Creates the pipes, the kill-on-close job object and the process, resumes it,
+// and hands back the live handles. `commandChannel` adds the inbound pipe and
+// the parent's process handle, which together are what resident mode is.
+StartOutcome StartHelper(const std::filesystem::path& executable,
+                         const HelperArgumentBuilder& arguments, HANDLE pauseEvent,
+                         bool commandChannel, const std::function<void()>& processCreated)
+{
+    StartOutcome outcome;
     RemoveStaleRuntimeLogs(executable.parent_path());
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-    HANDLE metadataRead = nullptr;
-    HANDLE metadataWrite = nullptr;
-    if (!CreatePipe(&metadataRead, &metadataWrite, &security, 0) ||
-        !SetHandleInformation(metadataRead, HANDLE_FLAG_INHERIT, 0)) {
-        if (metadataRead) CloseHandle(metadataRead);
-        if (metadataWrite) CloseHandle(metadataWrite);
+    ScopedHandle metadataRead, metadataWrite;
+    if (!CreatePipe(metadataRead.Address(), metadataWrite.Address(), &security, 0) ||
+        !SetHandleInformation(metadataRead.Get(), HANDLE_FLAG_INHERIT, 0)) {
         outcome.detail = ErrorDetail(L"Creating the neural helper metadata pipe failed");
         return outcome;
     }
-    HANDLE inheritedPause = nullptr;
-    if (pauseEvent && !DuplicateHandle(GetCurrentProcess(), pauseEvent, GetCurrentProcess(), &inheritedPause,
-                                       SYNCHRONIZE, TRUE, 0)) {
-        CloseHandle(metadataRead); CloseHandle(metadataWrite);
+    ScopedHandle commandRead, commandWrite;
+    if (commandChannel) {
+        // Sized so Hello and the first job fit without the parent blocking on a
+        // helper that has not started reading yet: residency must not cost the
+        // cold start a round trip. A job vector is capped at 4 KiB of text.
+        if (!CreatePipe(commandRead.Address(), commandWrite.Address(), &security, 16 * 1024) ||
+            !SetHandleInformation(commandWrite.Get(), HANDLE_FLAG_INHERIT, 0)) {
+            outcome.detail = ErrorDetail(L"Creating the neural helper command pipe failed");
+            return outcome;
+        }
+    }
+    ScopedHandle inheritedPause;
+    if (pauseEvent && !DuplicateHandle(GetCurrentProcess(), pauseEvent, GetCurrentProcess(),
+                                       inheritedPause.Address(), SYNCHRONIZE, TRUE, 0)) {
         outcome.detail = ErrorDetail(L"Sharing the neural helper pause event failed");
         return outcome;
     }
-    HANDLE job = CreateKillOnCloseJob();
+    // A resident helper waits on this and exits when it signals. The job object
+    // already kills it when this process goes, but this process holds the GPU
+    // through the helper, so it gets two independent guarantees rather than one.
+    ScopedHandle inheritedParent;
+    if (commandChannel && !DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(),
+                                           inheritedParent.Address(), SYNCHRONIZE, TRUE, 0)) {
+        outcome.detail = ErrorDetail(L"Sharing the parent process handle with the neural helper failed");
+        return outcome;
+    }
+    ScopedHandle job(CreateKillOnCloseJob());
     if (!job) {
-        CloseHandle(metadataRead); CloseHandle(metadataWrite);
-        if (inheritedPause) CloseHandle(inheritedPause);
         outcome.detail = ErrorDetail(L"Creating the neural helper job failed");
         return outcome;
     }
 
-    std::array<HANDLE, 2> inherited{metadataWrite, inheritedPause};
-    const DWORD inheritedCount = inheritedPause ? 2 : 1;
+    std::array<HANDLE, 4> inherited{};
+    DWORD inheritedCount = 0;
+    inherited[inheritedCount++] = metadataWrite.Get();
+    if (commandRead) inherited[inheritedCount++] = commandRead.Get();
+    if (inheritedPause) inherited[inheritedCount++] = inheritedPause.Get();
+    if (inheritedParent) inherited[inheritedCount++] = inheritedParent.Get();
     SIZE_T attributeBytes = 0;
     InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
     std::vector<std::byte> attributes(attributeBytes);
@@ -322,13 +475,12 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     if (!attributeListInitialized || !UpdateProcThreadAttribute(attributeList, 0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited.data(), inheritedCount * sizeof(HANDLE), nullptr, nullptr)) {
         if (attributeListInitialized) DeleteProcThreadAttributeList(attributeList);
-        CloseHandle(job); CloseHandle(metadataRead); CloseHandle(metadataWrite);
-        if (inheritedPause) CloseHandle(inheritedPause);
         outcome.detail = ErrorDetail(L"Restricting neural helper handle inheritance failed");
         return outcome;
     }
 
-    std::wstring command = MakeCommandLine(executable, arguments(metadataWrite, inheritedPause));
+    std::wstring command = MakeCommandLine(executable, arguments(metadataWrite.Get(), commandRead.Get(),
+                                                                 inheritedPause.Get(), inheritedParent.Get()));
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
     startup.lpAttributeList = attributeList;
@@ -338,10 +490,7 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
         CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr,
         executable.parent_path().c_str(), &startup.StartupInfo, &process);
     DeleteProcThreadAttributeList(attributeList);
-    CloseHandle(metadataWrite);
-    if (inheritedPause) CloseHandle(inheritedPause);
     if (!created) {
-        CloseHandle(job); CloseHandle(metadataRead);
         outcome.detail = ErrorDetail(L"Starting the isolated neural helper failed");
         return outcome;
     }
@@ -349,35 +498,89 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     // player's Launch phase ends at: the process is the parent's last
     // observation before the loader window the helper measures itself.
     if (processCreated) processCreated();
-    const bool assigned = AssignProcessToJobObject(job, process.hProcess) != FALSE;
+    const bool assigned = AssignProcessToJobObject(job.Get(), process.hProcess) != FALSE;
     const DWORD resumed = assigned ? ResumeThread(process.hThread) : static_cast<DWORD>(-1);
     CloseHandle(process.hThread);
     if (!assigned || resumed == static_cast<DWORD>(-1)) {
-        KillAndWait(job, process.hProcess);
-        CloseHandle(process.hProcess); CloseHandle(job); CloseHandle(metadataRead);
         outcome.detail = assigned ? ErrorDetail(L"Resuming the isolated neural helper failed") :
                                     L"The isolated neural helper could not be assigned to its job.";
+        HelperProcess doomed{process.hProcess, job.Release(), nullptr, nullptr};
+        EndHelper(doomed, 0);
+        return outcome;
+    }
+    outcome.helper = {process.hProcess, job.Release(), metadataRead.Release(), commandWrite.Release()};
+    outcome.helperMetadata = metadataWrite.Get();
+    outcome.helperPause = inheritedPause.Get();
+    return outcome;
+}
+
+// How long a cancelled resident job is given to report the Result that says it
+// cancelled. Beyond it the helper is killed, matching the budget a single-shot
+// cancel has always had, and residency is dropped rather than trusted.
+constexpr std::chrono::milliseconds kResidentCancelGrace{2000};
+
+struct PumpOutcome {
+    bool malformed{};
+    bool exited{};
+    bool cancelled{};
+    bool completed{};   // a terminal message for this job arrived
+};
+
+// Pumps the helper's metadata pipe until this job is over. A single-shot helper
+// is followed to its exit; a resident one is followed to its terminal message,
+// because the process is meant to still be there afterwards.
+PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_token stop,
+                 bool resident)
+{
+    PumpOutcome outcome;
+    std::optional<std::chrono::steady_clock::time_point> cancelDeadline;
+    for (;;) {
+        if (!reader.ReadAvailable(helper.metadata)) { outcome.malformed = true; break; }
+        // Judged from the reader rather than from this break, because a helper
+        // that writes its result and exits in the same breath is judged below
+        // on what it said, not on the fact that it went.
+        if (resident && (reader.Complete() || reader.PreflightComplete())) break;
+        const DWORD wait = WaitForSingleObject(helper.process, 20);
+        if (wait != WAIT_TIMEOUT) { outcome.exited = true; break; }
+        if (stop.stop_requested() && !outcome.cancelled) {
+            outcome.cancelled = true;
+            // A single-shot helper is killed by the caller. A resident one is
+            // asked, because it answers with a Result that says cancelled and
+            // then goes idle: killing it would throw away both.
+            if (!resident || !WriteCommand(helper.command, CommandKind::Cancel, nullptr, 0)) break;
+            cancelDeadline = std::chrono::steady_clock::now() + kResidentCancelGrace;
+        }
+        if (cancelDeadline && std::chrono::steady_clock::now() >= *cancelDeadline) break;
+    }
+    reader.ReadAvailable(helper.metadata);
+    outcome.completed = reader.Complete() || reader.PreflightComplete();
+    return outcome;
+}
+
+// Launches a single-shot helper, pumps its messages into `reader`, and returns
+// once it exits or the caller cancels. The job object kills the whole helper
+// tree on close.
+LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
+                           const std::function<std::vector<std::wstring>(HANDLE metadata, HANDLE pause)>& arguments,
+                           HANDLE pauseEvent, MetadataReader& reader, std::stop_token stop,
+                           const std::function<void()>& processCreated)
+{
+    LaunchOutcome outcome;
+    StartOutcome started = StartHelper(executable,
+        [&](HANDLE metadata, HANDLE, HANDLE pause, HANDLE) { return arguments(metadata, pause); },
+        pauseEvent, false, processCreated);
+    if (!started.helper.Valid()) {
+        outcome.detail = std::move(started.detail);
         return outcome;
     }
     outcome.launched = true;
-
-    for (;;) {
-        if (!reader.ReadAvailable(metadataRead)) break;
-        const DWORD wait = WaitForSingleObject(process.hProcess, 20);
-        if (wait == WAIT_OBJECT_0) break;
-        if (wait != WAIT_TIMEOUT) break;
-        if (stop.stop_requested()) {
-            outcome.cancelled = true;
-            KillAndWait(job, process.hProcess);
-            break;
-        }
-    }
-    reader.ReadAvailable(metadataRead);
-    GetExitCodeProcess(process.hProcess, &outcome.exitCode);
+    const PumpOutcome pump = Pump(started.helper, reader, stop, false);
+    outcome.cancelled = pump.cancelled;
+    GetExitCodeProcess(started.helper.process, &outcome.exitCode);
     // The old process is signalled and all its handles are closed here. Waiting
     // for full exit releases ReShade.log before the next proxy loads; overlapping
     // helpers otherwise put the real evidence in ReShade.log1.
-    CloseHandle(metadataRead); CloseHandle(process.hProcess); CloseHandle(job);
+    EndHelper(started.helper, 0);
     return outcome;
 }
 
@@ -389,6 +592,70 @@ bool ValidRequest(const NeuralRenderRequest& request)
     if (request.range.start100ns < 0 || request.range.end100ns < 0) return false;
     if (request.range.end100ns && request.range.end100ns <= request.range.start100ns) return false;
     return true;
+}
+
+// Refusals that belong to the request rather than to any helper, so a resident
+// helper and a single-shot one answer them identically and neither starts a
+// process to say no.
+std::optional<NeuralRenderResult> RefuseUnrunnableJob(const std::filesystem::path& executable,
+                                                      const NeuralRenderRequest& request)
+{
+    NeuralRenderResult result;
+    result.jobId = request.jobId;
+    std::error_code fileError;
+    if (executable.empty() || !std::filesystem::is_regular_file(executable, fileError) || fileError) {
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = L"The isolated neural helper executable is unavailable.";
+        return result;
+    }
+    if (!ValidRequest(request)) {
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = L"Invalid neural helper request.";
+        return result;
+    }
+    return std::nullopt;
+}
+
+// The result a job gets when the helper reported one. Shared so a resident job
+// and a single-shot job cannot disagree about whose result they accepted.
+NeuralRenderResult AcceptResult(const MetadataReader& reader, uint64_t jobId)
+{
+    NeuralRenderResult result = reader.Result();
+    if (result.jobId == jobId) return result;
+    // A helper that refused the job it was handed has no job id to report:
+    // the id lives inside the argument vector it could not parse. Only one job
+    // is ever in flight, and this result cannot publish anything, so its
+    // diagnosis is worth more than the identity it could not state.
+    if (!result.ok && !result.jobId) {
+        result.jobId = jobId;
+        return result;
+    }
+    NeuralRenderResult mismatch;
+    mismatch.jobId = jobId;
+    mismatch.failure = NeuralRenderFailure::Identity;
+    mismatch.detail = L"The isolated neural helper reported a result for a different job.";
+    return mismatch;
+}
+
+// Everything the reader collected about the helper itself rather than about
+// the render, copied onto the result the caller will publish. It lives here
+// instead of inside the result message because WireResult is a fixed 152
+// bytes that a released Python decoder already reads by offset; the cold-start
+// timeline and the VRAM samples travel as their own messages and are rejoined
+// here, so one job produces one record whatever arrived separately.
+void StampHelperObservations(const MetadataReader& reader, NeuralRenderResult& result)
+{
+    result.coldStart = reader.Timeline();
+    // The idle sample was taken before this job by the same process, so it
+    // names the same policy; the job's own sample wins where both are present.
+    if (const auto& idle = reader.IdleMemory()) {
+        result.timing.idleLocalVramMiB = idle->localVramMiB;
+        result.timing.idleVramPolicy = idle->policy;
+    }
+    if (const auto& postJob = reader.PostJobMemory()) {
+        result.timing.postJobLocalVramMiB = postJob->localVramMiB;
+        result.timing.idleVramPolicy = postJob->policy;
+    }
 }
 
 // One helper launch, judged. `restartRequested` is set when the helper repaired
@@ -439,15 +706,7 @@ NeuralRenderResult RunHelperOnce(const std::filesystem::path& executable,
                                              L"The isolated neural helper returned incomplete metadata.";
         return result;
     }
-    result = reader.Result();
-    if (result.jobId != request.jobId) {
-        NeuralRenderResult mismatch;
-        mismatch.jobId = request.jobId;
-        mismatch.failure = NeuralRenderFailure::Identity;
-        mismatch.detail = L"The isolated neural helper reported a result for a different job.";
-        return mismatch;
-    }
-    return result;
+    return AcceptResult(reader, request.jobId);
 }
 
 NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executable,
@@ -455,21 +714,114 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
                                           const OfflineNeuralRenderer::ProgressCallback& progress,
                                           const NeuralSegmentSink& segments,
                                           std::stop_token stop, bool configurationRestarted,
-                                          const std::function<void()>& processCreated)
+                                          const std::function<void()>& processCreated,
+                                          const NeuralColdStartCallback& helperTimeline)
 {
-    MetadataReader reader(progress, segments);
+    MetadataReader reader(progress, segments, helperTimeline);
     bool restartRequested = false;
     NeuralRenderResult result = RunHelperOnce(executable, request, stop,
         configurationRestarted, reader, processCreated, restartRequested);
     if (restartRequested) {
-        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true, processCreated);
+        // The replacement helper measures its own cold start and reports it the
+        // same way; the one this reader may already have reported belongs to a
+        // process that exited before it rendered anything, and a merge of both
+        // keeps the later one, exactly as `result.coldStart` does below.
+        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, true,
+                                      processCreated, helperTimeline);
     }
-    // The reader outlives the judgement above, so a timeline that arrived
-    // before a crash, a cancel or a rejected result is still reported: the
-    // breakdown of a run that failed is the whole point of measuring it.
-    result.coldStart = reader.Timeline();
+    // The reader outlives the judgement above, so a timeline or a memory
+    // sample that arrived before a crash, a cancel or a rejected result is
+    // still reported: the breakdown of a run that failed is the whole point of
+    // measuring it.
+    StampHelperObservations(reader, result);
     return result;
 }
+
+// The bounded from-zero relaunch, shared by the single-shot launcher and the
+// resident host. A crashed helper or a removed device leaves no temporal
+// history to resume, so the whole sequence restarts in a fresh process and
+// frames are never spliced across helper instances. `attempt` is one helper
+// instance being given one job, however it got there.
+//
+// `recover` runs between the failure and the relaunch and decides whether the
+// relaunch is worth making: a helper that died took its verdict with it, and
+// after a device removal the driver has restarted underneath this process. It
+// returns a result to fail closed with, or nothing to let the relaunch happen.
+template <class Attempt, class Recover>
+NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallback& progress,
+                                     const NeuralSegmentSink& segments, uint32_t crashRelaunchLimit,
+                                     const Attempt& attempt, const Recover& recover)
+{
+    for (uint32_t tries = 0;; ++tries) {
+        // A relaunch renders the range again from frame zero, so every segment
+        // the previous helper published names a file that is about to be
+        // rewritten.
+        if (tries && segments.onRestart) segments.onRestart();
+        NeuralRenderResult result = attempt();
+        const bool relaunchable = !result.ok && !result.cancelled &&
+            (result.failure == NeuralRenderFailure::WorkerCrashed ||
+             result.failure == NeuralRenderFailure::DeviceRemoved ||
+             result.failure == NeuralRenderFailure::GpuStall);
+        if (!relaunchable) return result;
+        if (tries >= crashRelaunchLimit) {
+            result.failure = NeuralRenderFailure::RetryExhausted;
+            result.detail = L"The neural helper did not recover after " + std::to_wstring(tries + 1) +
+                            L" attempt(s): " + result.detail;
+            return result;
+        }
+        if (progress) {
+            NeuralRenderProgress recovering{};
+            recovering.phase = NeuralRenderPhase::Recovering;
+            recovering.recovering = result.failure;
+            recovering.retries = tries + 1;
+            progress(recovering);
+        }
+        // Reported as Recovering above first, so the probe that follows runs
+        // under a phase the user can already see rather than in silence.
+        if (auto refused = recover(result)) return *refused;
+    }
+}
+
+// The one controlled recovery between a helper that died and the relaunch that
+// replaces it: re-run the feature-18 probe in a fresh process, and relaunch
+// only if it still passes.
+//
+// A crash or a device removal invalidates the verdict the job was started on.
+// A TDR restarts the display driver, so the adapter this process probed is not
+// necessarily the one it now has, and spending the single relaunch on a
+// runtime that can no longer arm feature 18 buys a second identical crash
+// instead of a reason. The probe costs one process on a path that has already
+// lost a render, and it is bounded by the same relaunch limit, so there is
+// nothing here that can spin.
+std::optional<NeuralRenderResult> ProbeBeforeRelaunch(const std::filesystem::path& executable,
+                                                      std::stop_token stop,
+                                                      const NeuralRenderResult& failed)
+{
+    const NeuralPreflightResult preflight = RunNeuralPreflight(executable, stop);
+    if (preflight.ok) return std::nullopt;
+    NeuralRenderResult closed;
+    closed.jobId = failed.jobId;
+    closed.coldStart = failed.coldStart;
+    closed.timing = failed.timing;
+    if (preflight.cancelled || stop.stop_requested()) {
+        closed.cancelled = true;
+        closed.failure = NeuralRenderFailure::Cancelled;
+        closed.detail = L"Neural rendering was cancelled while the helper was recovering.";
+        return closed;
+    }
+    closed.failure = NeuralRenderFailure::Preflight;
+    closed.detail = L"The neural helper did not survive the render (" + failed.detail +
+                    L") and its runtime no longer passes preflight, so it was not restarted: " +
+                    (preflight.detail.empty() ? std::wstring(L"the probe did not arm feature 18.")
+                                              : preflight.detail);
+    return closed;
+}
+
+// How long an orderly exit is waited for after a resident helper is asked to
+// shut down. It has nothing to finish - Release is only called between jobs -
+// so this only covers the proxy's own unload, and the job object collects
+// anything slower.
+constexpr DWORD kResidentShutdownGrace = 1000;
 
 // The receipt's "diagnosis" object, read back without a JSON parser: the
 // probe wrote it, and the parent only needs the two strings out of it.
@@ -600,6 +952,31 @@ std::vector<std::wstring> neural_worker_detail::BuildPreflightArguments(HANDLE m
     return arguments;
 }
 
+std::vector<std::wstring> neural_worker_detail::BuildResidentArguments(
+    HANDLE metadata, HANDLE command, HANDLE pauseEvent, HANDLE parentProcess,
+    resident_helper::IdleVramPolicy idleVramPolicy)
+{
+    std::vector<std::wstring> arguments{std::wstring(kWorkerMode), L"--metadata-handle", HandleText(metadata),
+                                        L"--command-handle", HandleText(command)};
+    // One event for the helper's whole life: it has to be inheritable at
+    // CreateProcess, so it cannot arrive with a later job. The player resets it
+    // before every job, and the helper samples it between frames.
+    if (pauseEvent) {
+        arguments.emplace_back(L"--pause-event");
+        arguments.emplace_back(HandleText(pauseEvent));
+    }
+    if (parentProcess) {
+        arguments.emplace_back(L"--parent-process");
+        arguments.emplace_back(HandleText(parentProcess));
+    }
+    // Written for both arms, the default included. An idle VRAM figure only
+    // means something beside the policy that produced it, and a flag that is
+    // absent for one arm leaves the launch line unable to say which ran.
+    arguments.emplace_back(kIdleVramPolicyFlag);
+    arguments.emplace_back(resident_helper::IdleVramPolicyName(idleVramPolicy));
+    return arguments;
+}
+
 std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::ParseWorkerArguments(
     std::span<const std::wstring_view> arguments)
 {
@@ -616,12 +993,13 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
-               GpuSourceConversion, FirstSegmentFrames, KeyCount };
+               GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
         L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
-        L"--gpu-source-conversion", L"--first-segment-frames"};
+        L"--gpu-source-conversion", L"--first-segment-frames", L"--command-handle", L"--parent-process",
+        kIdleVramPolicyFlag};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -639,6 +1017,45 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         }
         return parsed;
     }
+    // Resident mode: the helper takes its jobs off the command channel, so its
+    // launch line describes a helper and not a job. Exactly five keys may
+    // appear, by allowlist - a job field here would be a job nobody asked for,
+    // arriving beside a channel that is about to deliver one.
+    if (values[Command]) {
+        constexpr std::array<Key, 5> permitted{Metadata, PauseEvent, Command, ParentProcess, IdleVram};
+        for (size_t key = 0; key < KeyCount; ++key) {
+            const bool allowed = std::find(permitted.begin(), permitted.end(), static_cast<Key>(key)) !=
+                                 permitted.end();
+            if (!allowed && values[key].has_value()) return std::nullopt;
+        }
+        uint64_t rawCommand = 0;
+        if (!ParseUnsigned(*values[Command], rawCommand) || !rawCommand) return std::nullopt;
+        parsed.command = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawCommand));
+        if (values[PauseEvent]) {
+            uint64_t rawPause = 0;
+            if (!ParseUnsigned(*values[PauseEvent], rawPause) || !rawPause) return std::nullopt;
+            parsed.request.pauseEvent = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawPause));
+        }
+        if (values[ParentProcess]) {
+            uint64_t rawParent = 0;
+            if (!ParseUnsigned(*values[ParentProcess], rawParent) || !rawParent) return std::nullopt;
+            parsed.parentProcess = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(rawParent));
+        }
+        // Absent is the default arm, so a parent that predates the flag still
+        // produces a helper that keeps its feature memory - which is what
+        // every helper before the flag did. A value this build cannot name is
+        // refused: a policy nobody can state makes the samples unattributable.
+        if (values[IdleVram]) {
+            const auto policy = resident_helper::ParseIdleVramPolicy(*values[IdleVram]);
+            if (!policy) return std::nullopt;
+            parsed.idleVramPolicy = *policy;
+        }
+        return parsed;
+    }
+    // The parent's process handle is only meaningful to a helper that outlives
+    // one job; on a single-shot line it is a handle nobody would wait on, and
+    // an idle policy is an instruction for an idle period that never comes.
+    if (values[ParentProcess] || values[IdleVram]) return std::nullopt;
     constexpr std::array<Key, 12> required{Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart,
                                            RangeEnd, Preroll, RetryLimit, Guides};
     for (const Key key : required) if (!values[key]) return std::nullopt;
@@ -711,48 +1128,319 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
                                    OfflineNeuralRenderer::ProgressCallback progress,
                                    std::stop_token stop, const NeuralSegmentSink& segments,
                                    uint32_t crashRelaunchLimit,
-                                   const std::function<void()>& processCreated)
+                                   const std::function<void()>& processCreated,
+                                   const NeuralColdStartCallback& helperTimeline)
 {
-    NeuralRenderResult result;
-    result.jobId = request.jobId;
-    std::error_code fileError;
-    if (executable.empty() || !std::filesystem::is_regular_file(executable, fileError) || fileError) {
-        result.failure = NeuralRenderFailure::Protocol;
-        result.detail = L"The isolated neural helper executable is unavailable.";
-        return result;
+    // Refusals every caller shares: a job the launcher cannot describe never
+    // reaches a helper, resident or not.
+    if (auto refusal = RefuseUnrunnableJob(executable, request)) return *refusal;
+    return RunWithRelaunches(progress, segments, crashRelaunchLimit, [&] {
+        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false,
+                                      processCreated, helperTimeline);
+    }, [&](const NeuralRenderResult& failed) {
+        return ProbeBeforeRelaunch(executable, stop, failed);
+    });
+}
+
+// One resident helper, its pipes and the key it was started for. Defined here
+// rather than in the header because everything in it is a handle the player
+// has no business seeing.
+struct ResidentNeuralHelper::Session {
+    HelperProcess helper;
+    resident_helper::HelperKey key;
+    // Handle values as the helper sees them. Inheritance preserves the numbers,
+    // which is what lets a job be described by the same argument vector the
+    // helper would have been given on its command line: the parent's own copies
+    // are closed, and these are what the helper must be told to write to.
+    HANDLE helperMetadata{};
+    HANDLE helperPause{};
+    // The parent-side pause event this helper was launched with. A pause event
+    // has to be inheritable at CreateProcess, so a resident helper's is fixed
+    // for its life and a job carrying a different one could not be honoured -
+    // it would be paused by an event nobody is setting. The player has exactly
+    // one, so this is a guard against a future caller rather than a case.
+    HANDLE launchPause{};
+    // Set once this helper is the replacement for one that repaired its own
+    // configuration, so it is never asked to repair it a second time.
+    bool configurationRestarted{};
+    // The helper's own path, because a job is delivered as the argv the helper
+    // would have been started with and ParseWorkerArguments reads the mode out
+    // of argv[1]. Sending the vector without argv[0] would shift every field by
+    // one and the helper would refuse a job it understood perfectly.
+    std::filesystem::path executable;
+
+    bool Alive() const { return helper.Alive(); }
+    // A Session is the only owner of its process and its pipes, so it cannot be
+    // dropped on the floor: every path that ends a session goes through one of
+    // the two below, and this catches any that ever forgets. EndHelper zeroes
+    // the handles, so running twice is a no-op rather than a double close.
+    ~Session() { Drop(); }
+    // The helper is gone, or said something this parent will not read again.
+    // Either way there is no orderly exit left to wait for.
+    void Drop() { EndHelper(helper, 0); }
+    void End() { EndHelper(helper, kResidentShutdownGrace); }
+
+    std::wstring Start(const std::filesystem::path& executablePath, HANDLE pauseEvent,
+                       resident_helper::IdleVramPolicy idleVramPolicy,
+                       const std::function<void()>& processCreated)
+    {
+        executable = executablePath;
+        StartOutcome started = StartHelper(executablePath,
+            [idleVramPolicy](HANDLE metadata, HANDLE command, HANDLE pause, HANDLE parent) {
+                return neural_worker_detail::BuildResidentArguments(metadata, command, pause, parent,
+                                                                    idleVramPolicy);
+            }, pauseEvent, true, processCreated);
+        launchPause = pauseEvent;
+        if (!started.helper.Valid()) return std::move(started.detail);
+        helper = started.helper;
+        helperMetadata = started.helperMetadata;
+        helperPause = started.helperPause;
+        // Answered with Ready whenever the helper gets to it. The first job
+        // follows immediately rather than waiting for that answer: the pipe
+        // holds both frames, and a round trip here would spend part of the cold
+        // start residency exists to remove.
+        WriteCommand(helper.command, CommandKind::Hello, nullptr, 0);
+        return {};
     }
-    if (!ValidRequest(request)) {
-        result.failure = NeuralRenderFailure::Protocol;
-        result.detail = L"Invalid neural helper request.";
-        return result;
+
+    enum class Dispatch { Sent, Gone, Unsendable };
+
+    // Hands one job over as the argument vector the helper already accepts,
+    // which keeps ParseWorkerArguments the single definition of what a job is.
+    Dispatch Send(const NeuralRenderRequest& request)
+    {
+        if (request.pauseEvent != launchPause) return Dispatch::Unsendable;
+        std::vector<std::wstring> arguments{executable.wstring()};
+        const std::vector<std::wstring> job = neural_worker_detail::BuildWorkerArguments(
+            request, helperMetadata, helperPause, configurationRestarted);
+        arguments.insert(arguments.end(), job.begin(), job.end());
+        if (arguments.size() > kMaximumJobArguments) return Dispatch::Unsendable;
+        for (const std::wstring& argument : arguments) {
+            if (argument.empty() || argument.size() * sizeof(wchar_t) > kMaximumJobArgumentBytes)
+                return Dispatch::Unsendable;
+        }
+        const std::vector<std::byte> payload = EncodeJobArguments(arguments);
+        if (payload.size() > kMaximumPayloadBytes) return Dispatch::Unsendable;
+        return WriteCommand(helper.command, CommandKind::Job, payload.data(),
+                            static_cast<uint32_t>(payload.size()))
+            ? Dispatch::Sent : Dispatch::Gone;
     }
-    // Bounded from-zero relaunch: a crashed helper or a removed device leaves
-    // no temporal history to resume, so the whole sequence restarts in a fresh
-    // process. Frames are never spliced across helper instances.
-    for (uint32_t attempt = 0;; ++attempt) {
-        // A relaunch renders the range again from frame zero, so every segment
-        // the previous helper published names a file that is about to be
-        // rewritten.
-        if (attempt && segments.onRestart) segments.onRestart();
-        result = RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false, processCreated);
-        const bool relaunchable = !result.ok && !result.cancelled &&
-            (result.failure == NeuralRenderFailure::WorkerCrashed ||
-             result.failure == NeuralRenderFailure::DeviceRemoved ||
-             result.failure == NeuralRenderFailure::GpuStall);
-        if (!relaunchable) return result;
-        if (attempt >= crashRelaunchLimit) {
-            result.failure = NeuralRenderFailure::RetryExhausted;
-            result.detail = L"The neural helper did not recover after " + std::to_wstring(attempt + 1) +
-                            L" attempt(s): " + result.detail;
+};
+
+std::filesystem::path PlayerSettingsPath()
+{
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!length || length >= path.size()) return {};
+    path.resize(length);
+    return std::filesystem::path(path).parent_path() / L"DLSSVideoPlayer.ini";
+}
+
+resident_helper::IdleVramPolicy ReadIdleVramPolicy(const std::filesystem::path& settingsIni)
+{
+    if (settingsIni.empty()) return resident_helper::kDefaultIdleVramPolicy;
+    // Longer than either name, so a longer value is read back in full and then
+    // refused rather than truncated into one that happens to match.
+    wchar_t value[32]{};
+    const DWORD length = GetPrivateProfileStringW(kIdleVramPolicySection, kIdleVramPolicyKey, L"",
+                                                  value, static_cast<DWORD>(std::size(value)),
+                                                  settingsIni.c_str());
+    const auto policy = resident_helper::ParseIdleVramPolicy(std::wstring_view(value, length));
+    return policy ? *policy : resident_helper::kDefaultIdleVramPolicy;
+}
+
+ResidentNeuralHelper::ResidentNeuralHelper()
+    : ResidentNeuralHelper(ReadIdleVramPolicy(PlayerSettingsPath())) {}
+
+ResidentNeuralHelper::ResidentNeuralHelper(resident_helper::IdleVramPolicy idleVramPolicy)
+    : idleVramPolicy_(idleVramPolicy) {}
+
+ResidentNeuralHelper::~ResidentNeuralHelper() { Release(); }
+
+bool ResidentNeuralHelper::Resident() const { return session_ && session_->Alive(); }
+
+void ResidentNeuralHelper::Release()
+{
+    if (!session_) return;
+    session_->End();
+    session_.reset();
+}
+
+NeuralRenderResult ResidentNeuralHelper::RunJob(const std::filesystem::path& executable,
+                                                const resident_helper::HelperKey& key,
+                                                const NeuralRenderRequest& request,
+                                                const NeuralJobHooks& hooks, std::stop_token stop,
+                                                resident_helper::HelperPlan* plan)
+{
+    using resident_helper::HelperPlan;
+    // Looked at, not remembered: a resident helper exits by itself after 30 s
+    // idle and after any job it could not finish, so the only trustworthy
+    // answer comes from the process.
+    resident_helper::ResidentState state;
+    state.running = Resident();
+    if (state.running) state.key = session_->key;
+    const HelperPlan chosen = resident_helper::PlanForJob(state, key);
+    if (plan) *plan = chosen;
+    if (chosen == HelperPlan::SingleShot) {
+        return RunNeuralWorker(executable, request, hooks.progress, stop, hooks.segments,
+                               hooks.crashRelaunchLimit,
+                               [&] { if (hooks.accepted) hooks.accepted(HelperPlan::SingleShot); },
+                               hooks.helperTimeline);
+    }
+    if (auto refusal = RefuseUnrunnableJob(executable, request)) return *refusal;
+    // The old helper holds the adapter and the runtime directory this job's
+    // helper needs, so it goes first and completely.
+    if (chosen == HelperPlan::Relaunch) Release();
+    // What the job's helper actually was, which is not always what the policy
+    // decided: a helper that was alive at the decision and gone by the
+    // dispatch is a launch, and so is the replacement for a crashed one.
+    bool firstAcceptance = true;
+    const std::function<void(bool)> accepted = [&](bool launched) {
+        if (hooks.accepted) {
+            hooks.accepted(!launched ? HelperPlan::Reuse
+                                     : (firstAcceptance && chosen == HelperPlan::Relaunch
+                                            ? HelperPlan::Relaunch : HelperPlan::Launch));
+        }
+        firstAcceptance = false;
+    };
+    return RunWithRelaunches(hooks.progress, hooks.segments, hooks.crashRelaunchLimit,
+        [&] { return RunAttempt(executable, key, request, hooks, stop, accepted); },
+        [&](const NeuralRenderResult& failed) {
+            // The dead helper's session is already dropped by the attempt that
+            // judged it, so the probe gets the runtime directory to itself.
+            return ProbeBeforeRelaunch(executable, stop, failed);
+        });
+}
+
+NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path& executable,
+                                                    const resident_helper::HelperKey& key,
+                                                    const NeuralRenderRequest& request,
+                                                    const NeuralJobHooks& hooks, std::stop_token stop,
+                                                    const std::function<void(bool)>& accepted)
+{
+    for (bool configurationRestarted = false;; configurationRestarted = true) {
+        NeuralRenderResult result;
+        result.jobId = request.jobId;
+        if (stop.stop_requested()) {
+            result.cancelled = true;
+            result.failure = NeuralRenderFailure::Cancelled;
+            result.detail = L"Neural rendering was cancelled before the helper started.";
             return result;
         }
-        if (progress) {
-            NeuralRenderProgress recovering{};
-            recovering.phase = NeuralRenderPhase::Recovering;
-            recovering.recovering = result.failure;
-            recovering.retries = attempt + 1;
-            progress(recovering);
+        // Per job, because a resident helper reports a timeline per job: the
+        // first one measures a process starting, every later one measures only
+        // the phase it actually paid for.
+        MetadataReader reader(hooks.progress, hooks.segments, hooks.helperTimeline);
+        // The reader outlives every judgement below, so a timeline or a VRAM
+        // sample that arrived before a crash, a cancel or a rejected result is
+        // still reported: the breakdown of a run that failed is the whole
+        // point of measuring it.
+        auto finish = [&](NeuralRenderResult judged) {
+            StampHelperObservations(reader, judged);
+            return judged;
+        };
+
+        // Two tries, because a helper that exited while idle is not an error to
+        // report: the 30 s timeout, a self-invalidating exit after a failed job
+        // and a shutdown from anywhere else all look like a closed pipe here,
+        // and all of them mean start one and try again.
+        bool dispatched = false;
+        for (int attempt = 0; attempt < 2 && !dispatched; ++attempt) {
+            const bool launching = !Resident();
+            if (launching) {
+                if (session_) session_->Drop();
+                session_ = std::make_unique<Session>();
+                session_->key = key;
+                session_->configurationRestarted = configurationRestarted;
+                std::wstring detail = session_->Start(executable, request.pauseEvent, idleVramPolicy_,
+                                                      [&] { accepted(true); });
+                if (!detail.empty()) {
+                    session_.reset();
+                    result.failure = NeuralRenderFailure::Protocol;
+                    result.detail = std::move(detail);
+                    return finish(std::move(result));
+                }
+            }
+            const Session::Dispatch sent = session_->Send(request);
+            if (sent == Session::Dispatch::Sent) {
+                dispatched = true;
+                // A reused helper's Launch phase ends here instead: handing the
+                // job over is the last thing the parent does before the
+                // helper's own clock starts.
+                if (!launching) accepted(false);
+                break;
+            }
+            if (sent == Session::Dispatch::Unsendable) {
+                // The helper is fine; this job is not describable as a command
+                // and no helper would accept it. Refuse the job, keep the helper.
+                result.failure = NeuralRenderFailure::Protocol;
+                result.detail = L"The neural render job could not be framed as a helper command.";
+                return finish(std::move(result));
+            }
+            // The write found a closed pipe: the helper went away between the
+            // decision and the dispatch.
+            session_->Drop();
+            session_.reset();
         }
+        if (!dispatched) {
+            result.failure = NeuralRenderFailure::Protocol;
+            result.detail = L"The resident neural helper would not accept the job.";
+            return finish(std::move(result));
+        }
+
+        const PumpOutcome pump = Pump(session_->helper, reader, stop, true);
+        DWORD exitCode = 0;
+        const bool exited = !session_->Alive();
+        if (exited) GetExitCodeProcess(session_->helper.process, &exitCode);
+        if (pump.malformed) {
+            // Nothing this helper says afterwards can be trusted either.
+            session_->Drop();
+            session_.reset();
+            result.failure = NeuralRenderFailure::Protocol;
+            result.detail = L"The isolated neural helper returned malformed metadata.";
+            return finish(std::move(result));
+        }
+        if (pump.completed) {
+            result = AcceptResult(reader, request.jobId);
+            // A helper that could not finish a job exits by itself: its session
+            // log now carries a failure every later job would be scanned
+            // against, and a removed device leaves it holding an unknown one.
+            // A cancelled job and a finished one stay resident.
+            const bool keep = (result.ok || result.cancelled) && session_->Alive();
+            if (!keep) {
+                session_->Drop();
+                session_.reset();
+            }
+            return finish(std::move(result));
+        }
+        if (exited && exitCode == neural_worker_detail::kConfigurationChangedExitCode &&
+            !configurationRestarted) {
+            // The helper repaired the proxy's startup settings and exited for a
+            // replacement to be launched once. The replacement measures its own
+            // cold start, so this one's timeline is discarded with it.
+            session_->Drop();
+            session_.reset();
+            continue;
+        }
+        session_->Drop();
+        session_.reset();
+        if (pump.cancelled || stop.stop_requested()) {
+            result.cancelled = true;
+            result.failure = NeuralRenderFailure::Cancelled;
+            result.detail = L"Neural rendering was cancelled.";
+            return finish(std::move(result));
+        }
+        if (exited && exitCode != 0) {
+            result.failure = NeuralRenderFailure::WorkerCrashed;
+            result.detail = L"The isolated neural helper exited with code " + std::to_wstring(exitCode) +
+                            L" before producing a result.";
+            return finish(std::move(result));
+        }
+        // An exit code of zero with no result is the helper walking away from a
+        // job it accepted, which is a broken contract rather than a crash.
+        result.failure = NeuralRenderFailure::Protocol;
+        result.detail = L"The isolated neural helper returned incomplete metadata.";
+        return finish(std::move(result));
     }
 }
 

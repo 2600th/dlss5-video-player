@@ -1,0 +1,535 @@
+﻿{
+    "schema":  1,
+    "tool":  "tools/verification/player_session.ps1",
+    "generated":  "2026-09-14T14:50:48Z",
+    "host":  {
+                 "computer":  "-PRANSHUL-",
+                 "os":  "Microsoft Windows 11 Pro",
+                 "version":  "10.0.26200",
+                 "powershell":  "5.1.26100.9444",
+                 "adapters":  [
+                                  "Intel(R) UHD Graphics 770 driver=32.0.101.6129",
+                                  "NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047"
+                              ]
+             },
+    "player":  {
+                   "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.exe",
+                   "bytes":  4466176,
+                   "built":  "2026-09-14T19:57:03",
+                   "runtime":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\neural-runtime"
+               },
+    "media":  {
+                  "path":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1media\\demo-x4.mp4",
+                  "bytes":  21397519,
+                  "width":  1920,
+                  "height":  1080,
+                  "fps":  30,
+                  "durationSeconds":  90.4
+              },
+    "options":  {
+                    "toggleAfterSeconds":  4,
+                    "runSeconds":  14,
+                    "sessions":  4,
+                    "freshProfile":  "First",
+                    "accelerator":  "CtrlAltD",
+                    "dropRenderCache":  true,
+                    "settleSeconds":  3,
+                    "note":  "P1 acceptance: reuse after rewind"
+                },
+    "summary":  {
+                    "sessionsRequested":  4,
+                    "sessionsPassed":  4,
+                    "toggleToFirstNeuralFrameSeconds":  {
+                                                            "count":  4,
+                                                            "min":  5.229,
+                                                            "median":  5.368,
+                                                            "max":  9.142,
+                                                            "mean":  6.277,
+                                                            "spread":  3.913,
+                                                            "values":  [
+                                                                           5.229,
+                                                                           5.331,
+                                                                           5.406,
+                                                                           9.142
+                                                                       ]
+                                                        },
+                    "playerReportedTotalSeconds":  {
+                                                       "count":  4,
+                                                       "min":  5.216,
+                                                       "median":  5.354,
+                                                       "max":  9.115,
+                                                       "mean":  6.26,
+                                                       "spread":  3.899,
+                                                       "values":  [
+                                                                      5.216,
+                                                                      5.318,
+                                                                      5.39,
+                                                                      9.115
+                                                                  ]
+                                                   },
+                    "paceMsPerFrame":  {
+                                           "count":  4,
+                                           "min":  12.241,
+                                           "median":  12.759,
+                                           "max":  13.524,
+                                           "mean":  12.821,
+                                           "spread":  1.283,
+                                           "values":  [
+                                                          12.241,
+                                                          12.631,
+                                                          12.887,
+                                                          13.524
+                                                      ]
+                                       },
+                    "paceReferenceScale":  {
+                                               "count":  4,
+                                               "min":  0.977,
+                                               "median":  1.018,
+                                               "max":  1.079,
+                                               "mean":  1.023,
+                                               "spread":  0.102,
+                                               "values":  [
+                                                              0.977,
+                                                              1.008,
+                                                              1.028,
+                                                              1.079
+                                                          ]
+                                           },
+                    "receiptsOnDisk":  0,
+                    "coldStartLinesObserved":  4
+                },
+    "sessions":  [
+                     {
+                         "index":  1,
+                         "cold":  true,
+                         "failure":  null,
+                         "exitCode":  0,
+                         "cleared":  [
+                                         "DLSSVideoPlayer.ini",
+                                         "cache/"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  28304,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "gpu":  {
+                                     "description":  "NVIDIA GeForce RTX 4080 SUPER",
+                                     "driver":  "32.0.16.1047",
+                                     "generation":  "rtx40"
+                                 },
+                         "timing":  {
+                                        "launchToWindowSeconds":  0.118,
+                                        "launchToRenderDeviceSeconds":  0.729,
+                                        "windowToToggleSeconds":  4.053,
+                                        "toggleToFirstNeuralFrameSeconds":  9.142,
+                                        "toggleToSessionStartSeconds":  0.027,
+                                        "toggleToAttachLineSeconds":  9.142,
+                                        "playerReportedTotalSeconds":  9.115,
+                                        "injectionCostMilliseconds":  15.721
+                                    },
+                         "coldStart":  {
+                                           "total":  9.115,
+                                           "request":  0.078,
+                                           "preflight":  3.95,
+                                           "launch":  0.009,
+                                           "helperStart":  0.101,
+                                           "runtimeReady":  0.015,
+                                           "neuralInit":  1.371,
+                                           "featureArm":  0.705,
+                                           "firstOutput":  1.437,
+                                           "attach":  1.432
+                                       },
+                         "secondToggle":  {
+                                              "toggleToFirstNeuralFrameSeconds":  2.472,
+                                              "plan":  "reuse",
+                                              "coldStartLine":  "Neural cold start: total=2.453s request=0.074s preflight=- launch=0.001s helperStart=- runtimeReady=- neuralInit=- featureArm=- firstOutput=1.058s attach=1.289s helper=reuse",
+                                              "planLine":  null
+                                          },
+                         "pace":  {
+                                      "width":  1920,
+                                      "height":  1080,
+                                      "msPerFrame":  12.6311,
+                                      "frames":  1440,
+                                      "referenceScale":  1.00774,
+                                      "geometriesKnown":  1
+                                  },
+                         "receipt":  {
+                                         "logSummary":  "gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                         "entryPath":  null,
+                                         "receiptPath":  null,
+                                         "onDisk":  false,
+                                         "bytes":  null,
+                                         "group":  [
+
+                                                   ],
+                                         "jobId":  null,
+                                         "renderKey":  null,
+                                         "lockChecks":  null,
+                                         "lockSatisfied":  null,
+                                         "frameCount":  null,
+                                         "verifiedNeuralFrames":  null,
+                                         "coldStartSeconds":  null
+                                     },
+                         "session":  {
+                                         "accelerator":  "CtrlAltD",
+                                         "acceleratorEvents":  6,
+                                         "startPositionSeconds":  2.53333,
+                                         "paceWasUnmeasured":  false,
+                                         "renderCompleted":  false,
+                                         "completionStatus":  "Timeout",
+                                         "renderCacheHit":  false,
+                                         "cacheRoot":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\cache\\v1",
+                                         "launchLocal":  "2026-09-14T20:17:57.861",
+                                         "windowLocal":  "2026-09-14T20:17:57.980",
+                                         "toggleLocal":  "2026-09-14T20:18:02.033",
+                                         "firstNeuralFrameLocal":  "2026-09-14T20:18:11.176",
+                                         "toggleOffLocal":  "2026-09-14T20:18:28.400"
+                                     },
+                         "excerpts":  {
+                                          "startup":  "[20:17:57.911] Isolated neural helper available; player remains hook-free. GPU=NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047 generation=rtx40",
+                                          "renderDevice":  "[20:17:58.591] D3D12 device adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe",
+                                          "sessionStart":  "[20:18:02.061] Active neural session started at 2.53333 s through 90.4 s.",
+                                          "coldStart":  "[20:18:11.176] Neural cold start: total=9.115s request=0.078s preflight=3.950s launch=0.009s helperStart=0.101s runtimeReady=0.015s neuralInit=1.371s featureArm=0.705s firstOutput=1.437s attach=1.432s helper=launch",
+                                          "attach":  "[20:18:11.176] Active neural playback attached at 2.53333 s with 4.49989 s buffered.",
+                                          "receipt":  "[20:18:28.618] Neural render receipt: gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                          "cacheEntry":  null,
+                                          "pace":  "[20:18:28.721] Measured neural render pace: 1920x1080 at 12.6311 ms/frame over 1440 frames (1.00774x the reference GPU); 1 geometries known for this GPU. This geometry forecasts from the median of 1 samples: 12.6311 ms/frame.",
+                                          "stopped":  "[20:18:28.729] Active neural session stopped at 19.7552 s; presented=517 dropped=3"
+                                      },
+                         "player":  {
+                                        "pid":  47172,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-final.session1.log"
+                     },
+                     {
+                         "index":  2,
+                         "cold":  false,
+                         "failure":  null,
+                         "exitCode":  0,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  27759,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "gpu":  {
+                                     "description":  "NVIDIA GeForce RTX 4080 SUPER",
+                                     "driver":  "32.0.16.1047",
+                                     "generation":  "rtx40"
+                                 },
+                         "timing":  {
+                                        "launchToWindowSeconds":  0.091,
+                                        "launchToRenderDeviceSeconds":  0.647,
+                                        "windowToToggleSeconds":  4.002,
+                                        "toggleToFirstNeuralFrameSeconds":  5.331,
+                                        "toggleToSessionStartSeconds":  0.013,
+                                        "toggleToAttachLineSeconds":  5.331,
+                                        "playerReportedTotalSeconds":  5.318,
+                                        "injectionCostMilliseconds":  4.694
+                                    },
+                         "coldStart":  {
+                                           "total":  5.318,
+                                           "request":  0.074,
+                                           "preflight":  null,
+                                           "launch":  0.004,
+                                           "helperStart":  0.102,
+                                           "runtimeReady":  0.011,
+                                           "neuralInit":  1.439,
+                                           "featureArm":  0.727,
+                                           "firstOutput":  1.54,
+                                           "attach":  1.408
+                                       },
+                         "secondToggle":  {
+                                              "toggleToFirstNeuralFrameSeconds":  2.52,
+                                              "plan":  "reuse",
+                                              "coldStartLine":  "Neural cold start: total=2.502s request=0.062s preflight=- launch=0.001s helperStart=- runtimeReady=- neuralInit=- featureArm=- firstOutput=1.059s attach=1.347s helper=reuse",
+                                              "planLine":  null
+                                          },
+                         "pace":  {
+                                      "width":  1920,
+                                      "height":  1080,
+                                      "msPerFrame":  13.5237,
+                                      "frames":  1380,
+                                      "referenceScale":  1.07896,
+                                      "geometriesKnown":  1
+                                  },
+                         "receipt":  {
+                                         "logSummary":  "gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                         "entryPath":  null,
+                                         "receiptPath":  null,
+                                         "onDisk":  false,
+                                         "bytes":  null,
+                                         "group":  [
+
+                                                   ],
+                                         "jobId":  null,
+                                         "renderKey":  null,
+                                         "lockChecks":  null,
+                                         "lockSatisfied":  null,
+                                         "frameCount":  null,
+                                         "verifiedNeuralFrames":  null,
+                                         "coldStartSeconds":  null
+                                     },
+                         "session":  {
+                                         "accelerator":  "CtrlAltD",
+                                         "acceleratorEvents":  6,
+                                         "startPositionSeconds":  2.6,
+                                         "paceWasUnmeasured":  false,
+                                         "renderCompleted":  false,
+                                         "completionStatus":  "Timeout",
+                                         "renderCacheHit":  false,
+                                         "cacheRoot":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\cache\\v1",
+                                         "launchLocal":  "2026-09-14T20:18:44.313",
+                                         "windowLocal":  "2026-09-14T20:18:44.404",
+                                         "toggleLocal":  "2026-09-14T20:18:48.406",
+                                         "firstNeuralFrameLocal":  "2026-09-14T20:18:53.738",
+                                         "toggleOffLocal":  "2026-09-14T20:19:11.041"
+                                     },
+                         "excerpts":  {
+                                          "startup":  "[20:18:44.343] Isolated neural helper available; player remains hook-free. GPU=NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047 generation=rtx40",
+                                          "renderDevice":  "[20:18:44.961] D3D12 device adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe",
+                                          "sessionStart":  "[20:18:48.420] Active neural session started at 2.6 s through 90.4 s.",
+                                          "coldStart":  "[20:18:53.738] Neural cold start: total=5.318s request=0.074s preflight=- launch=0.004s helperStart=0.102s runtimeReady=0.011s neuralInit=1.439s featureArm=0.727s firstOutput=1.540s attach=1.408s helper=launch",
+                                          "attach":  "[20:18:53.738] Active neural playback attached at 2.6 s with 2.49994 s buffered.",
+                                          "receipt":  "[20:19:11.213] Neural render receipt: gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                          "cacheEntry":  null,
+                                          "pace":  "[20:19:11.307] Measured neural render pace: 1920x1080 at 13.5237 ms/frame over 1380 frames (1.07896x the reference GPU); 1 geometries known for this GPU. This geometry forecasts from the median of 3 samples: 12.6311 ms/frame.",
+                                          "stopped":  "[20:19:11.313] Active neural session stopped at 19.9047 s; presented=520 dropped=0"
+                                      },
+                         "player":  {
+                                        "pid":  9056,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-final.session2.log"
+                     },
+                     {
+                         "index":  3,
+                         "cold":  false,
+                         "failure":  null,
+                         "exitCode":  0,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  27610,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "gpu":  {
+                                     "description":  "NVIDIA GeForce RTX 4080 SUPER",
+                                     "driver":  "32.0.16.1047",
+                                     "generation":  "rtx40"
+                                 },
+                         "timing":  {
+                                        "launchToWindowSeconds":  0.045,
+                                        "launchToRenderDeviceSeconds":  0.635,
+                                        "windowToToggleSeconds":  4.038,
+                                        "toggleToFirstNeuralFrameSeconds":  5.406,
+                                        "toggleToSessionStartSeconds":  0.016,
+                                        "toggleToAttachLineSeconds":  5.406,
+                                        "playerReportedTotalSeconds":  5.39,
+                                        "injectionCostMilliseconds":  4.51
+                                    },
+                         "coldStart":  {
+                                           "total":  5.39,
+                                           "request":  0.074,
+                                           "preflight":  null,
+                                           "launch":  0.004,
+                                           "helperStart":  0.122,
+                                           "runtimeReady":  0.011,
+                                           "neuralInit":  1.485,
+                                           "featureArm":  0.726,
+                                           "firstOutput":  1.573,
+                                           "attach":  1.374
+                                       },
+                         "secondToggle":  {
+                                              "toggleToFirstNeuralFrameSeconds":  2.439,
+                                              "plan":  "reuse",
+                                              "coldStartLine":  "Neural cold start: total=2.426s request=0.067s preflight=- launch=0.001s helperStart=- runtimeReady=- neuralInit=- featureArm=- firstOutput=1.021s attach=1.328s helper=reuse",
+                                              "planLine":  null
+                                          },
+                         "pace":  {
+                                      "width":  1920,
+                                      "height":  1080,
+                                      "msPerFrame":  12.8867,
+                                      "frames":  1440,
+                                      "referenceScale":  1.02814,
+                                      "geometriesKnown":  1
+                                  },
+                         "receipt":  {
+                                         "logSummary":  "gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                         "entryPath":  null,
+                                         "receiptPath":  null,
+                                         "onDisk":  false,
+                                         "bytes":  null,
+                                         "group":  [
+
+                                                   ],
+                                         "jobId":  null,
+                                         "renderKey":  null,
+                                         "lockChecks":  null,
+                                         "lockSatisfied":  null,
+                                         "frameCount":  null,
+                                         "verifiedNeuralFrames":  null,
+                                         "coldStartSeconds":  null
+                                     },
+                         "session":  {
+                                         "accelerator":  "CtrlAltD",
+                                         "acceleratorEvents":  6,
+                                         "startPositionSeconds":  2.6,
+                                         "paceWasUnmeasured":  false,
+                                         "renderCompleted":  false,
+                                         "completionStatus":  "Timeout",
+                                         "renderCacheHit":  false,
+                                         "cacheRoot":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\cache\\v1",
+                                         "launchLocal":  "2026-09-14T20:19:26.418",
+                                         "windowLocal":  "2026-09-14T20:19:26.464",
+                                         "toggleLocal":  "2026-09-14T20:19:30.502",
+                                         "firstNeuralFrameLocal":  "2026-09-14T20:19:35.908",
+                                         "toggleOffLocal":  "2026-09-14T20:19:53.123"
+                                     },
+                         "excerpts":  {
+                                          "startup":  "[20:19:26.440] Isolated neural helper available; player remains hook-free. GPU=NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047 generation=rtx40",
+                                          "renderDevice":  "[20:19:27.054] D3D12 device adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe",
+                                          "sessionStart":  "[20:19:30.518] Active neural session started at 2.6 s through 90.4 s.",
+                                          "coldStart":  "[20:19:35.908] Neural cold start: total=5.390s request=0.074s preflight=- launch=0.004s helperStart=0.122s runtimeReady=0.011s neuralInit=1.485s featureArm=0.726s firstOutput=1.573s attach=1.374s helper=launch",
+                                          "attach":  "[20:19:35.908] Active neural playback attached at 2.63333 s with 2.46661 s buffered.",
+                                          "receipt":  "[20:19:53.342] Neural render receipt: gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                          "cacheEntry":  null,
+                                          "pace":  "[20:19:53.441] Measured neural render pace: 1920x1080 at 12.8867 ms/frame over 1440 frames (1.02814x the reference GPU); 1 geometries known for this GPU. This geometry forecasts from the median of 5 samples: 12.6311 ms/frame.",
+                                          "stopped":  "[20:19:53.447] Active neural session stopped at 19.8492 s; presented=517 dropped=0"
+                                      },
+                         "player":  {
+                                        "pid":  47888,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-final.session3.log"
+                     },
+                     {
+                         "index":  4,
+                         "cold":  false,
+                         "failure":  null,
+                         "exitCode":  0,
+                         "cleared":  [
+                                         "cache/v1/renders",
+                                         "cache/v1/staging"
+                                     ],
+                         "log":  {
+                                     "path":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\DLSSVideoPlayer.log",
+                                     "bytesBefore":  27813,
+                                     "cleared":  true,
+                                     "skippedLines":  0
+                                 },
+                         "toggleAttempts":  1,
+                         "gpu":  {
+                                     "description":  "NVIDIA GeForce RTX 4080 SUPER",
+                                     "driver":  "32.0.16.1047",
+                                     "generation":  "rtx40"
+                                 },
+                         "timing":  {
+                                        "launchToWindowSeconds":  0.046,
+                                        "launchToRenderDeviceSeconds":  0.614,
+                                        "windowToToggleSeconds":  4.007,
+                                        "toggleToFirstNeuralFrameSeconds":  5.229,
+                                        "toggleToSessionStartSeconds":  0.012,
+                                        "toggleToAttachLineSeconds":  5.229,
+                                        "playerReportedTotalSeconds":  5.216,
+                                        "injectionCostMilliseconds":  4.512
+                                    },
+                         "coldStart":  {
+                                           "total":  5.216,
+                                           "request":  0.074,
+                                           "preflight":  null,
+                                           "launch":  0.004,
+                                           "helperStart":  0.103,
+                                           "runtimeReady":  0.014,
+                                           "neuralInit":  1.41,
+                                           "featureArm":  0.715,
+                                           "firstOutput":  1.53,
+                                           "attach":  1.35
+                                       },
+                         "secondToggle":  {
+                                              "toggleToFirstNeuralFrameSeconds":  2.46,
+                                              "plan":  "reuse",
+                                              "coldStartLine":  "Neural cold start: total=2.444s request=0.064s preflight=- launch=0.001s helperStart=- runtimeReady=- neuralInit=- featureArm=- firstOutput=1.038s attach=1.321s helper=reuse",
+                                              "planLine":  null
+                                          },
+                         "pace":  {
+                                      "width":  1920,
+                                      "height":  1080,
+                                      "msPerFrame":  12.2409,
+                                      "frames":  1500,
+                                      "referenceScale":  0.976619,
+                                      "geometriesKnown":  1
+                                  },
+                         "receipt":  {
+                                         "logSummary":  "gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                         "entryPath":  null,
+                                         "receiptPath":  null,
+                                         "onDisk":  false,
+                                         "bytes":  null,
+                                         "group":  [
+
+                                                   ],
+                                         "jobId":  null,
+                                         "renderKey":  null,
+                                         "lockChecks":  null,
+                                         "lockSatisfied":  null,
+                                         "frameCount":  null,
+                                         "verifiedNeuralFrames":  null,
+                                         "coldStartSeconds":  null
+                                     },
+                         "session":  {
+                                         "accelerator":  "CtrlAltD",
+                                         "acceleratorEvents":  6,
+                                         "startPositionSeconds":  2.56667,
+                                         "paceWasUnmeasured":  false,
+                                         "renderCompleted":  false,
+                                         "completionStatus":  "Timeout",
+                                         "renderCacheHit":  false,
+                                         "cacheRoot":  "C:\\Users\\User\\Documents\\GitHub\\dlss5-video-player\\build-upscaling\\Release\\cache\\v1",
+                                         "launchLocal":  "2026-09-14T20:20:08.594",
+                                         "windowLocal":  "2026-09-14T20:20:08.641",
+                                         "toggleLocal":  "2026-09-14T20:20:12.647",
+                                         "firstNeuralFrameLocal":  "2026-09-14T20:20:17.877",
+                                         "toggleOffLocal":  "2026-09-14T20:20:35.046"
+                                     },
+                         "excerpts":  {
+                                          "startup":  "[20:20:08.615] Isolated neural helper available; player remains hook-free. GPU=NVIDIA GeForce RTX 4080 SUPER driver=32.0.16.1047 generation=rtx40",
+                                          "renderDevice":  "[20:20:09.209] D3D12 device adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter \"NVIDIA GeForce RTX 4080 SUPER\" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe",
+                                          "sessionStart":  "[20:20:12.660] Active neural session started at 2.56667 s through 90.4 s.",
+                                          "coldStart":  "[20:20:17.877] Neural cold start: total=5.216s request=0.074s preflight=- launch=0.004s helperStart=0.103s runtimeReady=0.014s neuralInit=1.410s featureArm=0.715s firstOutput=1.530s attach=1.350s helper=launch",
+                                          "attach":  "[20:20:17.877] Active neural playback attached at 2.6 s with 2.46651 s buffered.",
+                                          "receipt":  "[20:20:35.233] Neural render receipt: gpu=\"NVIDIA GeForce RTX 4080 SUPER\" driver=32.0.16.1047 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 feature18=armed lock=ok failure=cancelled frames=0/0 verified=0 resets=0 retries=0 cuts=0 suppressed=0",
+                                          "cacheEntry":  null,
+                                          "pace":  "[20:20:35.339] Measured neural render pace: 1920x1080 at 12.2409 ms/frame over 1500 frames (0.976619x the reference GPU); 1 geometries known for this GPU. This geometry forecasts from the median of 5 samples: 12.2798 ms/frame.",
+                                          "stopped":  "[20:20:35.345] Active neural session stopped at 19.7794 s; presented=516 dropped=0"
+                                      },
+                         "player":  {
+                                        "pid":  31128,
+                                        "cleanExit":  true,
+                                        "exitCode":  0
+                                    },
+                         "logCopy":  "C:\\Users\\User\\AppData\\Local\\Temp\\p1-final.session4.log"
+                     }
+                 ],
+    "outcome":  {
+                    "ok":  true,
+                    "exitCode":  0
+                }
+}

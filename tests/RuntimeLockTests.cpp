@@ -131,14 +131,26 @@ void embedded_lock_parses_and_names_the_locked_runtime_files_test()
     const RuntimeLock& lock = EmbeddedRuntimeLock();
     CHECK_EQ(uint32_t{1}, lock.schemaVersion);
     CHECK(!lock.runtimeVersion.empty());
-    const auto names = LockedRuntimeFileNames();
-    CHECK_EQ(size_t{12}, names.size());
-    CHECK_EQ(names.size(), lock.entries.size());
-    for (const std::wstring_view name : names) {
+    // The lock pins the vendor stack; the render identity hashes that stack
+    // plus NeuralWorker.exe, which is built here and changes with every build,
+    // so the two sets are deliberately different sizes.
+    const auto pinned = LockPinnedRuntimeFileNames();
+    const auto hashed = LockedRuntimeFileNames();
+    CHECK_EQ(size_t{12}, pinned.size());
+    CHECK_EQ(size_t{13}, hashed.size());
+    CHECK_EQ(pinned.size(), lock.entries.size());
+    for (const std::wstring_view name : pinned) {
         const bool listed = std::any_of(lock.entries.begin(), lock.entries.end(),
                                         [&](const RuntimeLockEntry& entry) { return entry.destination == name; });
         CHECK(listed);
+        CHECK(std::any_of(hashed.begin(), hashed.end(),
+                          [&](const std::wstring_view hashedName) { return hashedName == name; }));
     }
+    const bool workerPinned = std::any_of(lock.entries.begin(), lock.entries.end(),
+                                          [](const RuntimeLockEntry& entry) {
+                                              return entry.destination == L"NeuralWorker.exe";
+                                          });
+    CHECK(!workerPinned);
     for (const RuntimeLockEntry& entry : lock.entries) {
         CHECK(entry.size > 0);
         CHECK_EQ(size_t{64}, entry.sha256.size());
@@ -283,6 +295,12 @@ NeuralRenderReceiptInputs SampleInputs()
     inputs.result.timing.samples = 48;
     inputs.result.timing.neuralGpuMsP50 = 4.25;
     inputs.result.timing.peakLocalVramMiB = 3072;
+    // The idle-VRAM pair and the arm that produced it. Distinct values so a
+    // receipt that transposed the two samples, or reported the default arm for
+    // a run that used the other one, reads wrong here.
+    inputs.result.timing.postJobLocalVramMiB = 1408;
+    inputs.result.timing.idleLocalVramMiB = 406;
+    inputs.result.timing.idleVramPolicy = resident_helper::IdleVramPolicy::FreeFeature;
     inputs.result.detail = L"GPU stalled after 48 frames";
     inputs.renderKey = "key";
     inputs.settingsDigest = "settings";
@@ -311,7 +329,8 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "\"historyResets\":2,\"frameRetries\":1,"
                          "\"sceneCuts\":{\"acceptedStrong\":1,\"acceptedWeak\":2,\"suppressed\":4},"
                          "\"firstTimestamp100ns\":10000000,\"timing\":{\"samples\":48,\"neuralGpuMsP50\":4.25,"));
-    CHECK(Contains(json, "\"peakLocalVramMiB\":3072}"));
+    CHECK(Contains(json, "\"peakLocalVramMiB\":3072,\"postJobLocalVramMiB\":1408,"
+                         "\"idleLocalVramMiB\":406,\"idleVramPolicy\":\"free\"}"));
     CHECK(Contains(json, "\"detail\":\"GPU stalled after 48 frames\""));
     CHECK(Contains(json, "\"evidence\":{\"upscalingOff\":false,"));
     CHECK(Contains(json, "\"valid\":false}"));
@@ -495,7 +514,7 @@ void receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test()
     inputs.result.coldStart = timeline;
 
     const std::string json = BuildNeuralRenderReceiptJson(inputs);
-    CHECK(Contains(json, "\"peakLocalVramMiB\":3072},\"coldStartMicroseconds\":{\"total\":3041000,"
+    CHECK(Contains(json, "\"idleVramPolicy\":\"free\"},\"coldStartMicroseconds\":{\"total\":3041000,"
                          "\"request\":81000,\"preflight\":null,\"launch\":12000,\"helperStart\":712000,"
                          "\"runtimeReady\":94000,\"neuralInit\":1511000,\"featureArm\":631000,"
                          "\"firstOutput\":null,\"attach\":0}"));

@@ -19,7 +19,13 @@
 
 namespace {
 
-constexpr uint32_t kSchema = 4;
+// Schema 5 has schema 4's field list; the number retires the entries written
+// before the render identity carried a driver and a model-store term. The
+// gate is the same one schema 2 and 3 pass through: ParseNeuralCacheManifest
+// accepts kSchema and kLegacySchema and refuses everything else, so a
+// schema-4 manifest on disk is rejected for its schema rather than for a
+// field it happens to be missing.
+constexpr uint32_t kSchema = 5;
 constexpr uint32_t kLegacySchema = 3;
 constexpr uint32_t kMinDimension = 64;
 constexpr uint32_t kMaxWidth = 7680;
@@ -511,9 +517,11 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, s
     auto digest = Sha256File(path, stop);
     if (!digest) return digest;
     std::lock_guard lock(mutex);
-    // The locked set is twelve files and one source at a time; a cap this size
-    // only ever drops entries a settings change made stale anyway.
-    if (memo.size() >= 32) memo.clear();
+    // The locked runtime is thirteen files and the model store adds a listing
+    // of its own, all of which the render identity hashes once per request; a
+    // cap below that set would clear the memo mid-pass and re-read every byte
+    // on the next request in the same process.
+    if (memo.size() >= 256) memo.clear();
     memo.emplace_back(key, *digest);
     return digest;
 }
@@ -532,11 +540,21 @@ std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
     AppendField(canonical, "height", std::to_string(identity.height));
     AppendField(canonical, "application", identity.applicationVersion);
     AppendField(canonical, "gpu", identity.gpuPath);
+    // The driver and model-store terms, like every term below them, are
+    // appended only when set, so a source identity - which carries none of
+    // them - keeps the key it was published under. `driver` closes the driver
+    // crossing: gpuPath is a generation label, so without it a render made on
+    // one driver was served, and validated, on every later one. `models`
+    // closes the weight crossing: runtimeDigest covers the staged runtime
+    // directory only, never the driver-store NGX core or the ProgramData model
+    // store the pass resolves its weights out of.
+    if (!identity.driverVersion.empty())
+        AppendField(canonical, "driver", identity.driverVersion);
     AppendField(canonical, "runtime", identity.runtimeDigest);
+    if (!identity.modelStoreDigest.empty())
+        AppendField(canonical, "models", identity.modelStoreDigest);
     AppendField(canonical, "quality", identity.quality);
     AppendField(canonical, "upscaling", identity.upscaling ? "1" : "0");
-    // Source identities and legacy callers retain their existing keys: every
-    // later term is appended only when it differs from the historical default.
     if (!identity.settingsDigest.empty())
         AppendField(canonical, "settings", identity.settingsDigest);
     if (!identity.range.Whole())
@@ -655,7 +673,7 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
             !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest, false))
             return std::nullopt;
     } else if (manifest.schema == kSchema) {
-        // Schema 4 is fixed and ordered; every field is required.
+        // Schema 5 is fixed and ordered; every field is required.
         if (!cursor.Expect(',') ||
             !ReadStringField(cursor, "settingsDigest", manifest.settingsDigest) ||
             !ReadIntegerField(cursor, "rangeStart100ns", manifest.rangeStart100ns) ||
@@ -666,6 +684,10 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
             !ReadStringField(cursor, "receiptDigest", manifest.receiptDigest, false))
             return std::nullopt;
     } else {
+        // Schema 4 included, whose field list schema 5 keeps: those entries are
+        // refused for their schema rather than for a field they are missing,
+        // because the identity they were keyed under named neither the driver
+        // nor the model store the render was produced against.
         return std::nullopt;
     }
     if (!cursor.Expect('}') || !cursor.Finished()) return std::nullopt;
@@ -689,9 +711,22 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
         return IsHexDigest(manifest.sourceDigest) && manifest.neuralDigest.empty() &&
                !manifest.feature18Created;
     }
+    // A render entry is handed back as verified neural output out of a
+    // directory the user can write to, and receipt.json is the only thing that
+    // vouches for how it was produced; accepting an entry without one serves a
+    // render on the strength of a manifest that merely claims to be verified.
+    // The digest was allowed to be empty because it arrived with the rest of
+    // the schema-4 field list, which schema 5 keeps, beside fields that really
+    // are optional - but no release ever wrote such a render without it: the
+    // render path builds the receipt, stages receipt.json and fails the render
+    // when it cannot, so an empty digest is a shape this player has never
+    // produced. Legacy schema-3 entries predate receipts and are required to
+    // carry no digest at all (CommonManifestFieldsValid); sources never carry
+    // one either.
     return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
            IsHexDigest(manifest.runtimeDigest) && manifest.feature18Created &&
            manifest.feature18ArmedBeforeCapture &&
+           (manifest.schema == kLegacySchema || IsHexDigest(manifest.receiptDigest)) &&
            manifest.nativeEvaluations == manifest.frameCount &&
            manifest.verifiedNeuralFrames == manifest.frameCount &&
            manifest.observedFeature18Evaluations > 0;
@@ -829,6 +864,9 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
     if (!manifest->settingsDigest.empty() &&
         Sha256File(directory / L"neural-settings.ini") != manifest->settingsDigest)
         return std::nullopt;
+    // A reusable render always has a receipt digest, so the empty case below is
+    // only ever reached by sources and legacy schema-3 entries, which have no
+    // receipt to authenticate.
     if (!manifest->receiptDigest.empty() &&
         Sha256File(directory / L"receipt.json") != manifest->receiptDigest)
         return std::nullopt;

@@ -139,6 +139,8 @@ D3D12Renderer::~D3D12Renderer() {
         if (m_cacheReadback[i] && m_cacheReadbackMapped[i]) m_cacheReadback[i]->Unmap(0,nullptr);
         m_cacheReadbackMapped[i]=nullptr;
     }
+    if (m_timestampReadback && m_timestampMapped) m_timestampReadback->Unmap(0,nullptr);
+    m_timestampMapped=nullptr;
     LOG("Renderer teardown: buffers unmapped");
     m_dlss.Shutdown();
     LOG("Renderer teardown: NGX released");
@@ -495,18 +497,23 @@ bool D3D12Renderer::CreateVideoResources(){
         }
     }
 
-    D3D12_CLEAR_VALUE cv{};cv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;auto col=Tex2D(cv.Format,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
-    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&col,D3D12_RESOURCE_STATE_RENDER_TARGET,&cv,IID_PPV_ARGS(&m_dlssColor)),"Create DLSS color"))return false;m_dlssColor->SetName(L"DLSS_Color_Input_Linear_FP16");m_device->CreateRenderTargetView(m_dlssColor.Get(),nullptr,RTV(FrameCount));
+    // No optimized clear value: nothing clears this target. The conversion pass below
+    // draws a full-screen triangle over the whole render-size viewport with blending
+    // off and the full write mask, so every texel is written every frame and a clear
+    // before it was a second full-target write of the same memory.
+    auto col=Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&col,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_dlssColor)),"Create DLSS color"))return false;m_dlssColor->SetName(L"DLSS_Color_Input_Linear_FP16");m_device->CreateRenderTargetView(m_dlssColor.Get(),nullptr,RTV(FrameCount));
     srv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;m_device->CreateShaderResourceView(m_dlssColor.Get(),&srv,SRVCPU(4));
 
     auto mot=Tex2D(DXGI_FORMAT_R16G16_FLOAT,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&mot,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_motion)),"Create motion guide"))return false;
     m_motion->SetName(L"DLSS_MotionVectors_CurrentToPrevious_RG16F");srv.Format=DXGI_FORMAT_R16G16_FLOAT;m_device->CreateShaderResourceView(m_motion.Get(),&srv,SRVCPU(2));m_device->CreateRenderTargetView(m_motion.Get(),nullptr,RTV(FrameCount+1));
 
     // Hardware optical flow replaces the CPU block matcher as the motion source when the
-    // engine is present. It is only offered when the frame handed to RenderFrame is
-    // already the DLSS input size, because the engine compares that exact texture: on
-    // every neural path renderW == sourceW, and the runtime SR toggle, which is the one
-    // case where they differ, keeps the CPU estimator.
+    // engine is present. It is asked for the decoded frame's own size, which is the
+    // texture Capture() copies: on a neural-size path that is also the DLSS input size,
+    // and on a runtime Super Resolution session it is not, so the resolve pass scales
+    // the vectors into DLSS input pixels. See PlanHardwareFlow for why that conversion
+    // is exact and why nothing else is refused here.
     m_nvofActive=false;
     // The three flow descriptors are written whether or not the engine comes up. A pass
     // that binds the reference table at the cost slot now spans the slot after it too,
@@ -517,7 +524,9 @@ bool D3D12Renderer::CreateVideoResources(){
     m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofFlowSRV));
     m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofBackFlowSRV));
     fsrv.Format=DXGI_FORMAT_R8_UINT;m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofCostSRV));
-    if(m_sourceW==m_renderW&&m_sourceH==m_renderH&&m_nvof.Initialize(m_device.Get(),m_renderW,m_renderH)){
+    const HardwareFlowPlan flowPlan=PlanHardwareFlow(m_sourceW,m_sourceH,m_renderW,m_renderH);
+    m_nvofMotionScaleX=flowPlan.motionScaleX;m_nvofMotionScaleY=flowPlan.motionScaleY;
+    if(flowPlan.attempt&&m_nvof.Initialize(m_device.Get(),flowPlan.width,flowPlan.height)){
         fsrv.Format=DXGI_FORMAT_R16G16_SINT;m_device->CreateShaderResourceView(m_nvof.Flow(),&fsrv,SRVCPU(NvofFlowSRV));
         // A device that offered no cost surface, or only the forward direction, keeps the
         // null descriptor written above: the resolve pass binds t1 and t2 either way, and
@@ -532,6 +541,17 @@ bool D3D12Renderer::CreateVideoResources(){
         }
         m_nvofActive=true;
     }
+    // One line per session, because a log that does not name the estimator cannot tell
+    // a session that ran on 1/32-pixel hardware vectors from one that ran on a 24x24
+    // CPU block match, and those are different pictures.
+    if(m_nvofActive)
+        LOG("Motion guide backend: NVOFA hardware flow on the decoded "<<m_sourceW<<"x"<<m_sourceH
+            <<" frame, vectors scaled by "<<m_nvofMotionScaleX<<","<<m_nvofMotionScaleY
+            <<" into the "<<m_renderW<<"x"<<m_renderH<<" DLSS input.");
+    else
+        LOG("Motion guide backend: CPU block matcher, because "
+            <<(flowPlan.attempt?"the flow engine did not come up for the decoded frame (see the NVOFA line above)":flowPlan.refusal)
+            <<"; decoded "<<m_sourceW<<"x"<<m_sourceH<<", DLSS input "<<m_renderW<<"x"<<m_renderH<<".");
 
     // One depth resource, two views: D32_FLOAT DSV for real depth writes / ReShade
     // discovery and R32_FLOAT SRV for debug/NGX sampling. Passing this exact resource
@@ -645,6 +665,17 @@ bool D3D12Renderer::CreateVideoResources(){
         D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_timestampReadback)),
         "Create timestamp readback"))return false;
     m_timestampReadback->SetName(L"Neural_Timestamp_Readback");
+    {
+        // Mapped once here rather than around every harvest, which is the same trade the
+        // capture readbacks above make: the buffer is written by ResolveQueryData and
+        // read only after the fence that published it, so the mapping outliving the read
+        // costs nothing and a Map/Unmap pair per frame is gone.
+        void*stamps=nullptr;
+        const D3D12_RANGE stampRange{0,static_cast<SIZE_T>(readback.Width)};
+        if(!HR(m_timestampReadback->Map(0,&stampRange,&stamps),
+            "Map persistent timestamp readback buffer"))return false;
+        m_timestampMapped=static_cast<const uint64_t*>(stamps);
+    }
 
     // Clear the reference to black before anything can sample it.
     memset(m_referenceMapped[0],0,size_t(m_uploadBytes));
@@ -785,15 +816,18 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         cmd->SetPipelineState(m_psoNvofMotion.Get());
         cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(NvofFlowSRV));
         cmd->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(NvofCostSRV));
-        // S10.5: one stored unit is 1/32 of an input pixel and the motion texture is in
-        // input pixels. The third and fourth constants are the confidence gate, left
-        // equal so it stays off until its thresholds are measured. The fifth is the flow
-        // grid's cell pitch, which the round-trip gate needs to find the cell a vector
-        // lands on; zero there is what leaves that gate out of the pass entirely on a
-        // device that gave no backward field.
+        // S10.5: one stored unit is 1/32 of an engine-input pixel. The third and fourth
+        // constants are the confidence gate, left equal so it stays off until its
+        // thresholds are measured. The fifth and sixth carry the vector out of engine
+        // pixels and into the DLSS input pixels the motion texture is in - 1,1 unless
+        // this is a Super Resolution session. The seventh is the flow grid's cell pitch,
+        // which the round-trip gate needs to find the cell a vector lands on; zero there
+        // is what leaves that gate out of the pass entirely on a device that gave no
+        // backward field.
         const float cells=m_nvof.BackwardFlow()?1.0f/float(m_nvof.Grid()):0.0f;
-        const float resolve[5]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,cells};
-        cmd->SetGraphicsRoot32BitConstants(RootConstants,5,resolve,0);
+        const float resolve[7]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,
+                                m_nvofMotionScaleX,m_nvofMotionScaleY,cells};
+        cmd->SetGraphicsRoot32BitConstants(RootConstants,7,resolve,0);
         cmd->DrawInstanced(3,1,0,0);
         m_nvof.EndRead(cmd);
     }else{
@@ -811,9 +845,17 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
 
+    // No render target in this frame is cleared. Every pass here draws the same
+    // full-screen triangle over a viewport the size of its whole target, with blending
+    // off and the full write mask, so the draw writes each texel the clear would have -
+    // and a clear in front of it is a second full-target write of the same memory,
+    // which at 4K is tens of megabytes per pass per frame for no pixel that ends up
+    // different. The depth pass above keeps its clear: it covers every texel too, but a
+    // depth clear also resets the hierarchical-Z state a later reader may take, and NGX
+    // is the reader of this one.
     if(!m_colorInRT)Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_colorInRT=true;
     D3D12_VIEWPORT vp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT sc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
-    auto crt=RTV(FrameCount);cmd->OMSetRenderTargets(1,&crt,FALSE,nullptr);const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(crt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoConvert.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(0));
+    auto crt=RTV(FrameCount);cmd->OMSetRenderTargets(1,&crt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoConvert.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(0));
     cmd->DrawInstanced(3,1,0,0);Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_colorInRT=false;
 
     ++m_framesPresented;
@@ -877,7 +919,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // skipped presents past the feature recreate rendered 900/900 "verified" frames with
     // DLAA only (0.46 ms neural GPU time against 5.7 ms), bit-for-bit non-neural.
     {
-        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
         SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
@@ -1006,8 +1048,11 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     D3D12_VIEWPORT viewport{0,0,float(m_outputW),float(m_outputH),0,1};
     D3D12_RECT scissor{0,0,LONG(m_outputW),LONG(m_outputH)};
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
+    // No clear on either capture plane, for the reason the frame pass gives: the
+    // full-screen triangle below writes every texel of the plane it is drawing into, so
+    // a clear in front of it is an extra full-plane write on the path whose cost is
+    // proportional to the frame.
     auto target=RTV(nv12?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
-    const float black[4]={0,0,0,1};cmd->ClearRenderTargetView(target,black,0,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
     cmd->SetPipelineState(nv12?m_psoCaptureLuma.Get():m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1036,7 +1081,6 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
         D3D12_RECT chromaScissor{0,0,LONG(m_outputW/2u),LONG(m_outputH/2u)};
         cmd->RSSetViewports(1,&chromaViewport);cmd->RSSetScissorRects(1,&chromaScissor);
         auto chromaTarget=RTV(FrameCount+4);cmd->OMSetRenderTargets(1,&chromaTarget,FALSE,nullptr);
-        cmd->ClearRenderTargetView(chromaTarget,black,0,nullptr);
         cmd->SetPipelineState(m_psoCaptureChroma.Get());
         cmd->DrawInstanced(3,1,0,0);
         copyPlane(m_captureLuma.Get(),m_lumaFootprint);
@@ -1148,13 +1192,12 @@ bool D3D12Renderer::PresentCurrent(){
     HarvestNeuralTimings();
     RecordReferenceUpload(cmd,slot);
 
-    const float black[4]={0,0,0,1};
     uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
     D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};
     D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};
     cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);
-    auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->ClearRenderTargetView(brt,black,0,nullptr);
+    auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const bool finalView=(m_debugView==DebugView::Final);
@@ -1190,7 +1233,7 @@ bool D3D12Renderer::PresentCurrent(){
 // GPU has already passed. Slots are ordered by fence so the newest complete
 // evaluation wins; slots still in flight are left for a later call.
 void D3D12Renderer::HarvestNeuralTimings(){
-    if(!m_timestampReadback||!m_fence||!m_timestampFrequency)return;
+    if(!m_timestampMapped||!m_fence||!m_timestampFrequency)return;
     const uint64_t completed=m_fence->GetCompletedValue();
     if(completed==UINT64_MAX)return;
     uint64_t bestFence=0;uint32_t bestSlot=FrameCount;
@@ -1199,12 +1242,7 @@ void D3D12Renderer::HarvestNeuralTimings(){
         if(m_frameFence[slot]>=bestFence){bestFence=m_frameFence[slot];bestSlot=slot;}
     }
     if(bestSlot==FrameCount)return;
-    void*mapped=nullptr;
-    const D3D12_RANGE readRange{0,static_cast<SIZE_T>(uint64_t{FrameCount}*2u*sizeof(uint64_t))};
-    if(FAILED(m_timestampReadback->Map(0,&readRange,&mapped))||!mapped)return;
-    const auto*stamps=static_cast<const uint64_t*>(mapped);
-    const uint64_t begin=stamps[bestSlot*2u],end=stamps[bestSlot*2u+1u];
-    const D3D12_RANGE writtenRange{0,0};m_timestampReadback->Unmap(0,&writtenRange);
+    const uint64_t begin=m_timestampMapped[bestSlot*2u],end=m_timestampMapped[bestSlot*2u+1u];
     if(end>begin)m_lastNeuralGpuMs=double(end-begin)*1000.0/double(m_timestampFrequency);
     for(uint32_t slot=0;slot<FrameCount;++slot)
         if(m_neuralTimingPending[slot]&&m_frameFence[slot]<=completed)m_neuralTimingPending[slot]=false;
@@ -1216,6 +1254,19 @@ void D3D12Renderer::SampleLocalVideoMemory(){
     if(FAILED(m_adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&info)))return;
     const uint64_t mib=info.CurrentUsage>>20;
     if(mib>m_peakLocalVideoMemoryMiB)m_peakLocalVideoMemoryMiB=mib;
+}
+
+uint64_t D3D12Renderer::CurrentLocalVideoMemoryMiB()const{
+    if(!m_adapter3)return 0;
+    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    if(FAILED(m_adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&info)))return 0;
+    return info.CurrentUsage>>20;
+}
+
+bool D3D12Renderer::ReleaseDLSSFeatureForIdle(){
+    if(!m_dlss.FeatureCreated())return false;
+    if(!WaitGPUForContinuedUse())return false;
+    return m_dlss.ReleaseFeatureFreeingMemory();
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}

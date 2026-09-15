@@ -269,7 +269,12 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                    guides=result.get("guides", ""))
     if not metrics["ok"]:
         return metrics
-    output = Path(result["output"])
+    # The render always writes output.mkv beside result.json, so prefer the path
+    # relative to this run directory and fall back to the absolute one recorded at
+    # render time. Moving a run between trees then just works, while a genuinely
+    # missing artifact still raises from FrameReader rather than scoring nothing.
+    beside = run / "output.mkv"
+    output = beside if beside.exists() else Path(result["output"])
     hashes = framemd5(output, run / "frames.md5")
     metrics.update(output_frames=len(hashes), output_digest=sequence_digest(hashes),
                    unique_output_frames=len(set(hashes)),
@@ -284,6 +289,7 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
     sigma_src, sigma_out = ShotSigma(), ShotSigma()
     prev_src_y = prev_out_y = None
     prev_src_emb = prev_out_emb = None
+    index = -1
     for index, (s, o) in enumerate(zip(src, out)):
         sy, oy = luma(s), luma(o)
         if index in cuts:
@@ -322,6 +328,9 @@ def analyze_run(run: Path, clip: dict, ocr: Ocr | None, faces: FaceEmbedder | No
                     face_rows.append(row)
     src.close()
     out.close()
+    if index < 0:
+        raise RuntimeError(f"{run.name}: compared no frame pairs - source {result['source']} "
+                           f"and output {output} did not both yield frames")
     rgb = np.mean(rgb_delta, axis=0) if rgb_delta else np.zeros(3)
     metrics.update(
         compared_frames=index + 1,
@@ -563,12 +572,21 @@ def main() -> int:
     faces = FaceEmbedder() if need_faces else None
     rows = []
     for run in dirs:
+        # Membership first, before the cache short-circuit: one runs directory can
+        # hold runs from several corpora, and a cached metrics.json from a foreign
+        # one would otherwise be pulled into this analysis while an uncached one
+        # was skipped - the same tree scoring differently depending on --force.
+        name = json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]
+        if name not in clips:
+            print(f"skipping {run.name}: clip {name!r} is not in this corpus manifest "
+                  f"(wrong --corpus, or a runs directory shared with another corpus)", flush=True)
+            continue
+        clip = clips[name]
         cached = run / "metrics.json"
         if cached.exists() and not args.force:
             rows.append(json.loads(cached.read_text(encoding="utf-8")))
             print(f"cached {run.name}", flush=True)
             continue
-        clip = clips[json.loads((run / "result.json").read_text(encoding="utf-8"))["clip"]]
         m = analyze_run(run, clip, ocr, faces, args.sample_every)
         rows.append(m)
         print(f"{run.name}: ok={m['ok']} psnr={fmt(m.get('psnr_mean'), 2)} dE={fmt(m.get('delta_e_mean'), 2)} "

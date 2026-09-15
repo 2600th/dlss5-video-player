@@ -175,12 +175,22 @@ public:
     virtual void Cancel() = 0;
 };
 
+// One instance may serve several jobs. A resident helper keeps one of these for
+// its process lifetime so the D3D12 device, the NGX instance, the CUDA context
+// and the feature-18 workset survive between jobs; the per-job state that would
+// otherwise describe the previous job is reset on entry to Run.
 class OfflineNeuralRenderer {
 public:
     using ProgressCallback = std::function<void(const NeuralRenderProgress&)>;
     using Clock = std::function<std::chrono::steady_clock::time_point()>;
 
-    OfflineNeuralRenderer() = default;
+    OfflineNeuralRenderer();
+    // Out of line because the retained device state is an incomplete type here,
+    // and because dropping it has to happen before the caller destroys the
+    // render window its swapchain is attached to.
+    ~OfflineNeuralRenderer();
+    OfflineNeuralRenderer(const OfflineNeuralRenderer&) = delete;
+    OfflineNeuralRenderer& operator=(const OfflineNeuralRenderer&) = delete;
     // Injects the collaborators the job would otherwise build itself. Default
     // construction is production: the real decoder, evaluator and encoder, the
     // ReShade log beside the module, and request.pauseEvent. `paused` replaces
@@ -203,6 +213,49 @@ public:
                            const NeuralSegmentSink& segments = {},
                            NeuralColdStartCallback coldStart = {});
 
+    // What the last Run did with the device, the NGX instance and the feature
+    // this object retains. FeatureReused is the case residency exists for: the
+    // job paid neither the neural bring-up nor the feature arm, and its
+    // cold-start timeline says so by reporting neither phase.
+    enum class Residency { Initialized, FeatureReused, FeatureRecreated };
+    Residency LastResidency() const noexcept { return residency_; }
+
+    // False when this instance must not serve another job. The session log the
+    // evidence chain is read from is append-only for the life of the process,
+    // and past a size a read cannot return the next job would fail its evidence
+    // check for a reason that has nothing to do with it; a caller that can
+    // relaunch should relaunch instead. Always true before the first Run.
+    bool ReusableForAnotherJob() const;
+
+    // A point sample of what this renderer's process holds on the adapter's
+    // local segment, in MiB, from IDXGIAdapter3::QueryVideoMemoryInfo - the
+    // same source as the per-frame peak in NeuralRenderTiming, asked as a
+    // point question instead of a running maximum. All zero and unarmed
+    // before the first production Run: there is no device, so nothing of ours
+    // is resident to measure.
+    struct MemoryFootprint {
+        uint64_t localVramMiB{};
+        bool featureArmed{};
+    };
+    MemoryFootprint SampleMemoryFootprint() const;
+
+    // What an idle helper's attempt to give feature memory back observed.
+    // `released` is the mechanism - the workset was handed back - and never a
+    // claim that the runtime returned anything: the difference between the two
+    // footprints is the only thing that says whether it did.
+    struct IdleFeatureRelease {
+        MemoryFootprint before;
+        MemoryFootprint after;
+        bool released{};
+    };
+    // Hands the feature-18 workset back while no job is running, keeping the
+    // device, the NGX instance and the encoder's helper lookup. The next Run
+    // re-arms the feature through the same path a job that inherited none
+    // uses, so this costs the arm and saves whatever the runtime frees.
+    // Safe to call with no retained device: it reports an unarmed footprint
+    // and no release.
+    IdleFeatureRelease ReleaseIdleFeatureMemory();
+
 private:
     // Null unless a caller injected them; Run() builds the production adapters otherwise.
     IFrameSource* source_{};
@@ -212,4 +265,10 @@ private:
     Clock clock_;
     std::function<bool()> paused_;
     std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory_;
+    // The production device, evaluator, encoder and session-log reader, kept
+    // across calls. Null until the first production Run; a renderer that was
+    // handed collaborators uses those instead and never builds one.
+    struct Retained;
+    std::unique_ptr<Retained> retained_;
+    Residency residency_{Residency::Initialized};
 };

@@ -29,12 +29,101 @@ Prerequisites: Python 3.12 with `tools/benchmark/requirements.txt`,
 to `build-upscaling/benchmark-work/runtime-snapshot/` first when a build may
 run concurrently; the runner prefers the snapshot.
 
+### The corpus, and where it stops being synthetic
+
+`corpus.py` has fourteen builders. Thirteen run from a clean checkout; the
+fourteenth, `faces`, needs an external fixture and is skipped with a warning when it
+is absent. Nine are synthetic — seeded FFmpeg sources, pinned colours, no camera —
+and carry `"synthetic": true` in `manifest.json`. Four are `"category": "real"`,
+`"synthetic": false`, and are cut from this repository's own demo capture,
+`docs/media/neural-comparison-demo.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
+git). They exist because every quality conclusion here used to rest on mandelbrot
+zooms and cellular automata, and because they need no fixture to fetch and add
+nothing to redistribute that the tree does not already carry.
+
+| clip | frames | labelled | what it is |
+|---|---:|---|---|
+| `real-film-cuts` | 102 | cuts 20, 47, 70, 87 | four trailer shots — hands over a bedspread, a car on a road, a man in a crowd, a revolver firing — with grain, motion blur and a two-frame muzzle flash inside one shot, then a **static paused player frame** from local 87 on. The cut at 87 is the demo composition's scene boundary, not a film edit |
+| `real-game-cuts` | 68 | cut 32 | a race exterior hard-cut to a store interior, both with the game's own static HUD over fast camera motion |
+| `real-game-motion` | 76 | none | one continuous shot: a character runs off a rooftop and falls, so the camera translates while the subject occludes and disoccludes background throughout |
+| `real-dissolve` | 66 | soft cut 15–37 | the two shots above cross-faded over 0.7 s, held 0.5 s before and 1.0 s after |
+
+The demo is a screen capture of the player, so only half of each frame is footage.
+The clips are cropped to the player's video surface — `crop=1362:766:502:126`,
+measured as the only region whose temporal standard deviation is nonzero while the
+capture plays video — and upscaled to 1920×1080 with lanczos so the corpus stays one
+resolution. The crop is not cosmetic: the static chrome is half the frame, and left
+in it would dominate the residual the cut test reads while inflating the static-cell
+denominator false motion is divided by. The upscale is one concession — grain and
+h264 texture survive it softened, not sharpened — and it is why these clips are
+never called pristine footage.
+
+**These are NR-processed captures, not real footage, and the difference is
+load-bearing.** Every frame of the capture was taken with neural rendering enabled -
+the toggle reads `Neural Rendering · On` and the status bar `Neural rendered · Source
+2560×1440` - so the video surface is the player's own DLSS-NR output on an RTX 5090.
+The full chain a `real` clip's pixels have been through is: source video → DLSS-NR →
+the player's 1442×932 window → `gdigrab` screen capture → an x264 re-encode at crf 17
+(`tools/demo-video/prepare-inputs.ps1`) → Remotion's own h264 encode → `crop` →
+lanczos upscale to 1920×1080 → FFV1 → **and then the neural pass again** when the
+benchmark renders it. That is two h264 generations before the corpus encode, not one.
+Re-rendering therefore measures the pass on pixels it has already touched, at a
+different resolution and on different silicon, with the grain being post-pass grain
+softened twice by resampling.
+
+For an A/B where both trees see byte-identical input this is sound, and it is what
+the gate and depth comparisons rest on. What it does not support is the phrase "real
+footage": say **NR-processed captures**. In particular the `intensity-0` control
+measures the carrier against a source that already carries NR relighting, so the
+"share attributable to the neural pass" it computes is a share of a second pass over
+a first one. The camera-original sources - 2560×1440 downloads named in
+`docs/media/README.md` - are not in the repository and the `faces` fixture is not on
+this machine, so nothing here closes that gap.
+
+**One clip is 37 % motionless, for two separate reasons.** `real-film-cuts` ends
+where the capture pauses before its magnify/wipe demonstration: source frames
+102-116, local 87-101, are a single still frame repeated (consecutive mean |ΔY| ≤
+0.02 against 67.5 at the cut into it), so its last 15 frames are a static image. The
+labelled cut at local 87 is therefore the demo composition's scene boundary rather
+than a film edit, and the fifth "shot" is a paused player frame. On top of that the
+Godfather source is a 23.976 fps trailer captured at 30 fps, so roughly one frame in
+five is a capture duplicate. Measured over the clip's 101 consecutive pairs, **37 %
+carry no motion at all** (<0.10 mean |ΔY|): 14 from the frozen tail and about 23 from
+frame-rate duplication. Both feed the static-cell population that false motion is
+divided by, which makes this clip's false-motion figures the least comparable of the
+four - it affects both trees identically, so the A/B stays valid, but the *level* is
+not comparable across clips.
+
+No split-screen, divider or UI chrome is inside any measured clip, and that was
+settled from the composition rather than inferred: `tools/demo-video/src/index.tsx`
+puts uninterrupted playback in frames 0-101 and 438-581 and the paused compare
+scenes in 102-269 and 270-437, at 30 fps. `real-film-cuts` stops at 116, one frame
+before the magnification (116→117 jumps by 25.0); both game ranges sit wholly inside
+the second playback scene, checked by eye at frames 450 and 540. The overlay chips,
+headings and progress bar all fall outside `crop=1362:766:502:126`.
+
+**Every cut index was verified, not proposed.** FFmpeg scene detection on the cropped
+surface proposed the boundaries; each one was then confirmed by extracting every frame
+of the clip and inspecting it, and each `notes` field records how. The four
+`real-film-cuts` indices scored 0.72/0.66/0.52/0.53 and are the only pairs in 102
+frames where the shot changes; the eight smaller detector flags inside that clip
+(0.032–0.076) are hand motion, a pan or the muzzle flash, and are deliberately not
+labelled. A wrong ground-truth index silently corrupts every cut precision/recall
+number computed afterwards, which is why "the detector said so" is not accepted here.
+
+**The capture contains no dissolve.** All 678 frames were differenced: every
+transition in it is a single-frame jump. `real-dissolve` therefore has real material
+and a synthesised transition, and says so in its `notes` — the fade is in `soft_cuts`,
+never in `cuts`, because no single frame of a dissolve is the one where history stops
+being valid. Real grain, real motion blur and a camera that occludes are now in the
+corpus; a real dissolve still is not.
+
 ## What is measured
 
 | Group | Metric | Source |
 |---|---|---|
 | Runtime | preflight receipt: GPU, driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, Feature 18 creation/evaluation, RenoDX active settings | `--neural-preflight` probe, once per profile |
-| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v4) |
+| Speed | end-to-end fps (frames / wall), processing fps (Rendering-phase progress records), neural GPU ms p50/p95/max, guide ms, capture ms | worker result over the metadata pipe (protocol v6) |
 | Memory | worker peak local VRAM (receipt) and NVML whole-GPU used/util/power/temperature at 2 Hz | `result.json`, `gpu.csv` |
 | Determinism | sha256 of the rgb24 per-frame MD5 sequence across repeats | `frames.md5` |
 | Temporal | added flicker = mean |ΔY| between consecutive output frames minus the same for the source, cut frames excluded; added per-pixel temporal σ and its p99 over the same shots | `analyze.py` |
@@ -44,13 +133,58 @@ run concurrently; the runner prefers the snapshot.
 | Fidelity | PSNR and SSIM vs the lossless source | `analyze.py` |
 | Text | rapidocr character-level ratio against the manifest's ground-truth strings, output and source side by side | text clip |
 | Faces | Haar-box crops; resnet18 cosine of output crop vs source crop and frame-to-frame drift | faces clip |
-| Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and 3 s excerpts | `report.md`, `blind/` |
+| Two-pass | metric deltas vs `baseline`; `blind.py` sealed A/B stills and excerpts, each clipped to the shot it starts in (`--seconds` is a cap, not a length) | `report.md`, `blind/` |
 
 Ablation profiles (`run.py --ablation`) change one factor each: motion
 vectors, depth, RenoDX automatic mask, local structure, local
 tone, intensity (control), presets 1-3, styles natural/cinematic, two-pass.
 Every profile uses the same corpus, the same worker priming/preroll and the same
 runtime files, so differences attribute to the changed factor.
+
+**`baseline` is not the shipped configuration, and art-knob ablations must be read
+against the shipped one.** `baseline` writes no `NR*` key at all, so the add-on
+applies its own defaults - and its automatic mask defaults OFF, while the player
+writes `NRAutoMask=1` on every render (`src/main.cpp`, from `NeuralSettings{}`).
+Measured 2026-09-14 on four clips, both repeats, bit-identical by output digest:
+writing all eight keys with the mask off reproduces `baseline` exactly, and
+writing the single key `NRAutoMask=1` reproduces the shipped state exactly. So the
+`automask-off` ablation row is a no-op against `baseline`, and every absolute
+`baseline` number in this document - including the reference run below - describes
+a configuration the player never ships. Relative guide comparisons are structurally
+unaffected, because both sides carry the same mask state - and on the real clips
+that was checked rather than assumed: the whole gate A/B re-rendered at
+`NRAutoMask=1` reproduces every conclusion it reached at mask-off, with false
+motion shifting by at most 0.00108 between the two states.
+
+The sign can invert on the difference: `structure-0` improves delta-E by 2.46 on
+`cuts-similar` measured against `baseline` and worsens it by 2.94 measured against
+the shipped state. Run art-knob ablations from
+`docs/measurements/art-defaults-20260914/shipped-state.profile.json`, which writes
+all eight keys and varies one. `NRAutoMask` is also the only one of the eight whose
+explicit write changes a pixel; the other seven at shipped values are bit-identical
+to writing nothing, which proves only that the add-on agrees with us about them.
+
+**Synthetic clips inflate an effect's magnitude, and can point the wrong way on its
+direction.** Three independent measurements on 2026-09-14 converged on the magnitude
+half. `NRLocalTone`'s full range moves delta-E by 0.77 on the NR-processed capture
+and 4.02-8.11 on fractals, 5-11x. The automatic mask shifts false motion by at most
+0.00108 on the real clips against ±0.0093 synthetic, one to two orders. And cut
+precision/recall goes 0.571/0.571 synthetic to 1.000/1.000 real, the same bias from
+the other end, because those synthetic clips were built adversarial on purpose. Part
+of it is the carrier: 1.26 delta-E of a shipped 2.48 is the NVENC floor before the
+model contributes anything, so effects shrink toward that floor on footage.
+
+Direction survived in the art-knob and mask cases - same sign, smaller size. It did
+**not** survive for the round-trip gate, which is the exception that sets the rule's
+strength: synthetic clips said the gate raises false motion on three of four, the
+captures said it lowers it on four of four. So a synthetic result is evidence about
+direction, not proof of it, and it is never evidence about size.
+
+The practical consequence is how to read this document. Synthetic patterns are sound
+for regression-gating a change and for forming a hypothesis about direction; they are
+unsound for **sizing** an effect, and unsound for tuning a threshold on pooled
+numbers. That is why the synthetic and real cut tables here are never pooled, and it
+is the argument against retuning the 0.30 / 0.10 / 0.85 criterion on a pooled set.
 
 The depth A/B is `run.py --profiles depth-constant depth-proxy`. Both are names for
 guide strings the matrix already carries — a disabled depth guide *is* the constant
@@ -67,7 +201,7 @@ defined by the script rather than by prose. All of them mirror
 `src/TemporalGuides.cpp`: the cell grid is `AnalysisGrid` (width/10 cells clamped to
 96–160 below 45 fps, width/14 clamped to 96–128 above it, so 160×90 cells of 12×12
 source pixels for the 30-fps 1080p corpus), a cell's value is `DownsampleLuma`'s four
-stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.6 s
+stratified samples in normalized Rec.709 luma, and the cut thresholds and the 0.3 s
 weak-arm debounce are the generator's own. A threshold swept here therefore transfers
 to the runtime unchanged.
 
@@ -203,7 +337,7 @@ neural pass. It replays `cutmirror` — the shared Python mirror of
 and matches every accepted history reset against the manifest.
 
 ```
-python tools/benchmark/corpus.py --corpus <dir>          # 9 clips, ~2 min
+python tools/benchmark/corpus.py --corpus <dir>          # 13 clips, ~2 min
 python tools/benchmark/cutlab.py --corpus <dir> --sweep  # 1212 pairs, ~30 s cached
 ```
 
@@ -215,8 +349,9 @@ which is a cut; `dissolve` cross-fades over 0.7 s, where one reset is right and 
 are not; `flash-exposure` has a four-frame flash and a sustained exposure step, and
 the scene never changes.
 
-**What the shipped 0.30 / 0.10 / 0.85 criterion does** (9 clips, 1212 consecutive
-pairs, 7 labelled hard cuts):
+**What the shipped 0.30 / 0.10 / 0.85 criterion does** (the nine synthetic clips, 1212
+consecutive pairs, 7 labelled hard cuts — the four `real` clips were added later and
+are scored separately below):
 
 | clip | truth | accepted resets | missed | false positives |
 |---|---|---|---:|---|
@@ -251,13 +386,47 @@ family's 198:
 | residual (shipped shape) | 0.875 | 2 | 2 | flash-exposure |
 | failed fraction | 0.875 | 89 | 2 | flash-exposure |
 
-**The candidate is not better, so nothing in `src/` changed.** Both families reach the
-identical best operating point — every labelled cut found, no over-reset, and the same
-two false positives on the same clip — so the extra per-cell state a fraction needs in
-`EstimateFlow` would buy nothing. Neither score even orders the set correctly: the
-weakest true cut is 0.1853 residual against a 0.3739 non-cut, and 0.5661 failed
-fraction against a 0.7297 non-cut. Both families are carried by the two-arm split and
-the debounce, not by the score.
+**On the nine synthetic clips at the 0.6 s window the candidate was not better, so
+nothing in `src/` changed.** Both families reached the identical best operating point
+— every labelled cut found, no over-reset, and the same two false positives on the
+same clip — so the extra per-cell state a fraction needs in `EstimateFlow` would have
+bought nothing. Neither score even orders that set correctly: the weakest true cut is
+0.1853 residual against a 0.3739 non-cut, and 0.5661 failed fraction against a 0.7297
+non-cut. Both families were carried by the two-arm split and the debounce, not by the
+score.
+
+**That conclusion no longer holds on the corpus as it stands, and it is recorded here
+rather than acted on.** Re-scored 2026-09-14 over all thirteen clips at the shipped
+0.3 s window, the failed-fraction family strictly dominates: **P 0.857 / R 1.000 /
+F1 0.923** (12 true, 2 false, none missed) against the shipped residual criterion's
+**0.750 / 0.750 / 0.750** (9 true, 3 false, 3 missed). It suppresses the
+`cuts-motion` frame-91 over-reset - under that criterion 91 is a *weak*-arm fire, so
+the debounce reaches it - and it catches all three `cuts-similar` cuts the residual
+arm misses entirely. Its only remaining errors are `flash-exposure`'s two, which both
+families share.
+
+**Settled 2026-09-14 on a corpus with more real boundaries, and the answer is that
+the criterion stays.** The corpus grew from thirteen clips to twenty: seven
+camera-original clips carrying 17 frame-verified hard cuts joined the four
+NR-processed captures, which is what this paragraph asked for. Re-swept over all
+twenty at the shipped window, the aggregate still favours the candidate - F1 0.931
+against 0.897 - and split by provenance it inverts:
+
+| criterion | camera-original (7 clips, 17 cuts) | NR-capture (4 clips, 5 cuts) | synthetic (9 clips, 7 cuts) |
+|---|---|---|---|
+| shipped residual | 17/17, no miss, no false positive, no over-reset | 5/5, clean | 4/7, 3 missed, 3 false positives, 1 over-reset |
+| failed fraction | 15/17, two missed on `orig-film-cuts-a` | 5/5, clean | 7/7, no miss, 2 false positives |
+
+On all 22 real labelled cuts the shipped criterion is perfect and the candidate
+misses two of them; the candidate's aggregate advantage comes entirely from the
+synthetic half. That is this document's own rule about pooled numbers, arriving as
+a worked example on the very question that produced it, so the expired conclusion
+is retired rather than acted on. For completeness, with no missed cut and no
+over-reset the residual family reaches exactly one operating point (5 false
+positives; best F1 anywhere 0.949) and the failed-fraction family reaches ten
+(fewest 2 false positives; best F1 anywhere 0.967) - it is the better family on
+the pooled set and the worse one on real footage. Full tables:
+[camera-original report](measurements/camera-original-20260914/REPORT.md).
 
 The shipped thresholds were left alone for the same reason. The residual sweep's best
 point is `residual > 0.40`, or `> 0.13` with **no** histogram gate — and the gate is
@@ -268,9 +437,76 @@ trading one documented over-reset for an unmeasured missed-cut risk on fast-cut
 footage. Seven labelled cuts over nine synthetic clips is not enough evidence to do
 either.
 
-What would settle it is footage this corpus cannot synthesize: real grain, real motion
-blur, real dissolves, and a shot-boundary set large enough that a three-parameter grid
-search is not fitting seven positives.
+### The same criterion on real footage (2026-09-14, CPU only)
+
+The four `real` clips were added afterwards and scored separately, five labelled hard
+cuts over 312 frames. Both rows below were measured at the **0.6 s** weak-arm window
+that shipped at the time; the window is now **0.3 s**, and the re-measurement follows.
+
+| criterion | P | R | F1 | false pos | missed |
+|---|---:|---:|---:|---:|---:|
+| residual (shipped shape), 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
+| failed fraction, 0.6 s window | 1.000 | 0.800 | 0.889 | 0 | 1 |
+
+| clip | truth | accepted resets | missed | false positives |
+|---|---|---|---:|---|
+| `real-film-cuts` | 20, 47, 70, 87 | 20, 47, 70 (**87 suppressed**) | 1 | – |
+| `real-game-cuts` | 32 | 32 | 0 | – |
+| `real-game-motion`, `real-dissolve` | none / soft 15–37 | none | 0 | – |
+
+**Re-measured at the 0.3 s window, which is what ships now.** `real-film-cuts` takes
+all four: 20 residual 0.3363, 47 residual 0.3114, 70 histogram 0.2504, 87 histogram
+0.2711 — accepted. Residual and overlap are bit-identical to the 0.6 s run and only
+frame 87's verdict changed, so the attribution is exact. The real four become
+**P 1.000 / R 1.000 / F1 1.000**, five of five with no false positive. The synthetic
+nine are **unchanged at 0.571/0.571/0.571**, so the shorter window costs the synthetic
+set nothing and buys the one real cut. `flash-exposure` keeps its frame-34 suppression
+(4 frames after 30, inside 9 as it was inside 18) and its two false positives at 30
+and 60; `cuts-motion` is unchanged because frame 91 fires the strong arm, which is
+never debounced at any window length.
+
+Two findings the synthetic set could not produce:
+
+- **The debounce, not a threshold, lost that cut.** Local 87 fires the weak arm at
+  residual 0.2711 with overlap 0.5294 — a clear detection — and was suppressed for
+  being 17 frames after the accepted cut at 70, inside the old 0.6 s (18-frame)
+  window. The shortest synthetic segment here is 1.0 s, so no synthetic clip can
+  exercise a gap that short. Note what the 17 frames actually are: the span runs
+  from the cut at 70 to the cut at 87, and 87 is where the capture's own scene
+  changes into the paused frame - so it is bounded above by the demo composition,
+  not by a trailer edit. It is therefore evidence that a reset must follow a
+  discontinuity 17 frames after its predecessor, and not evidence about how fast
+  film is cut. The labelled corpus brackets the replacement from both sides:
+  `flash-exposure`'s transient returns 4 frames after the cut that opened it, so the
+  window must exceed 4, and that labelled span is 17 frames, so the window must not
+  exceed 17 — suppression is `since_cut < min_frames`, so a 17-frame window still
+  accepts a cut 17 frames out. The usable range is 5–17 frames inclusive and the
+  shipped 9 sits in it, asymmetrically: 5.7x of margin at the flash end against
+  1.9x at the other, so the next clip with a shorter labelled span is what would
+  squeeze it. A label audit found no two labelled cuts anywhere in
+  the corpus closer than 9 frames (tightest gaps 17, then 23) and both soft spans 22
+  frames wide, so the new window discards no labelled cut.
+  **The lower bound is corpus-bound, not physical.** It rests on one synthetic
+  4-frame transient; the corpus contains no 6–15-frame transient, and a lightning
+  strike, a camera-flash bloom or a short exposure ramp at 30 fps is typically that
+  long. The old 18-frame window protected those cases and the shipped 9 would
+  double-reset on them. That is an accepted trade, not a measured safe margin, and a
+  `flash-exposure` variant with an 8–12-frame transient is what would close it.
+  Note also what raising the strong arm to the
+  sweep's "best" 0.40 would do to this set: `real-game-cuts` fires at 0.2174 and every
+  `real-film-cuts` cut at 0.2504–0.3363, so all five would move to the debounced weak
+  arm and the miss would get worse, not better.
+- **Precision is 1.000 on real material, dissolve included.** Grain, motion blur, a
+  muzzle flash inside a shot, a HUD over fast motion and a 0.7 s cross-fade produced
+  no false positive at all — including zero resets inside the fade, which is inside
+  the "at most one" tolerance. The two false positives in the synthetic table are both
+  `flash-exposure`, a deliberately adversarial clip.
+
+What is still missing is a real dissolve — the demo capture contains none, every
+transition in it is a single-frame jump — and a shot-boundary set large enough that a
+three-parameter grid search is not fitting twelve positives. The gate A/B these clips
+were built for is in
+[`docs/measurements/gate-real-footage-20260914/REPORT.md`](measurements/gate-real-footage-20260914/REPORT.md).
 
 ## What the harness measures now, and what it still cannot
 

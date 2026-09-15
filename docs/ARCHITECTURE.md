@@ -143,7 +143,7 @@ upscaler both ignore it (see `docs/BENCHMARK.md`).
 The criterion is validated rather than asserted. `tools/benchmark/cutmirror.py`
 mirrors the cut path in `TemporalGuides.cpp` - the analysis grid, the stratified
 cell luma, the global search with its distance penalty and its refusal to prefer
-a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.6 s
+a marginal shift, the histogram intersection, `ClassifySceneCut` and the 0.3 s
 weak-arm debounce - and `tools/benchmark/cutlab.py` replays it over a corpus
 whose cuts are labelled in the manifest, so the thresholds can be swept without a
 GPU. Measured 2026-09-14 over nine clips and 1212 consecutive pairs, the shipped
@@ -215,7 +215,12 @@ provider, clock and pause predicate the job would otherwise take from the
 ReShade log, the steady clock and `NeuralRenderRequest::pauseEvent`;
 `Run` picks between the two sets at runtime by whether anything was injected,
 and a partial injection is a Protocol failure rather than a silent fall back
-to the real decoder. Both sets compile in every build, so a change to
+to the real decoder. The production set is not rebuilt per call: it lives in
+the renderer's retained state, so a resident helper keeps the device, the NGX
+instance and the feature-18 workset across jobs - see *The helper is resident*
+below. An injected set is per-call and never builds one, which is also why an
+injected run reports no residency.
+Both sets compile in every build, so a change to
 `D3D12Renderer`, `VideoDecoder` or `DLSSBackend` that breaks the job's use of
 them breaks the test build too - which the previous
 `OFFLINE_NEURAL_RENDERER_TESTING` `#else` hid, since no test target compiled
@@ -228,17 +233,24 @@ first runs `--neural-preflight`: a synthetic Feature 18 probe whose JSON
 receipt records GPU, driver, ReShade/RenoDX/DLSS-NR banner versions, every
 locked module's hash and every feature-18 creation/evaluation observation.
 After the render, `receipt.json` (preflight, lock checks, request, result,
-timing, digests) is written beside `neural.mkv`, hashed into the schema-4
+timing, digests) is written beside `neural.mkv`, hashed into the schema-5
 manifest and summarized in one log line.
 
 The receipt also records what the scene-cut classifier did over the job: cuts
 accepted on the strong arm, cuts accepted on the weak arm, and weak cuts the
-minimum-interval debounce withheld. The debounce is a judgement about footage
-nobody has labelled yet, and a suppression is either a flicker avoided or a cut
-missed, so these are the numbers a sweep over labelled clips scores itself
-against. They count the job's guide generator over its whole life - preroll and
-every encoder attempt included - and a re-evaluated frame counts once, so they
-are not bounded by `historyResets`.
+minimum-interval debounce withheld. A suppression is either a flicker avoided or
+a cut missed, so these are the numbers a sweep over labelled clips scores itself
+against - and labelled real footage has now bracketed the window from both
+sides. The only transient in the corpus returns 4 frames after the cut that
+opened it, and the shortest genuine shot in it is 17 frames, so the window must
+exceed 4 and must not exceed 17 - suppression is `since_cut < min_frames`, so a
+17-frame window still accepts a cut 17 frames out; the shipped 0.3 s sits
+between them. It was
+0.6 s, which is 18 frames at 30 fps, and discarded a hard cut 17 frames after
+its predecessor - the neural pass then kept accumulated history across a genuine
+discontinuity. The counters count the job's guide generator over its whole life -
+preroll and every encoder attempt included - and a re-evaluated frame counts
+once, so they are not bounded by `historyResets`.
 
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
@@ -274,23 +286,122 @@ persistent-helper work is judged in wall-clock and nothing measured it before:
 the player's request, the preflight probe, the launch, then the helper's own
 boundaries (process creation to entry point, entry to runtime ready, source open
 through NGX init, feature 18 armed, first output) and finally the attach. They
-travel as a protocol v5 `Timeline` message, land in the receipt beside `timing`
+travel as a protocol v6 `Timeline` message, land in the receipt beside `timing`
 and in one log line, and a phase that did not happen is absent rather than zero -
 a cache hit, a single-file job and a refused request each report less than a
-segmented render, and that difference is information. Measured on an RTX 4080
-SUPER the helper side is 2.1-2.6 s across two renders, of which NGX init and
-feature arm are 95 % in both; the two are not a controlled pair, so the half-second
-spread in `neuralInit` is not a variance figure and an acceptance check needs
-several samples from one build (see `docs/VERIFICATION-2026-09-14-RTX4080.md`).
+segmented render, and that difference is information. The helper's five phases
+reach that line because the reader raises them the moment the helper reports
+them, not when the job returns: the job returns seconds after the attach, so a
+line written at first picture used to carry five dashes while the receipt for
+the same render carried all five numbers. A session that never started a helper
+says so - `helper=none(cache-hit)` - because five dashes beside a real total
+read as a broken instrument rather than as a render that never happened.
 
-`NeuralCacheManager` stages source and render artifacts under LocalAppData.
-Source, application version, GPU path, runtime digest, native dimensions,
-quality, upscaling state, and a canonical neural-settings digest form the render identity.
+Measured on an RTX 4080 SUPER, the helper side is 2.1-2.6 s, of which NGX init
+and feature arm are 95 %. From a driven player session the whole toggle costs
+**8.39-9.18 s on the first toggle with the preflight verdict and the cache
+cleared** and **4.88-5.16 s on every later one** over ten sessions; the 3.8 s
+difference is the feature-18 preflight probe, a second helper process whose
+verdict is cached per runtime identity. Of the warm 5 s, `neuralInit` plus
+`featureArm` is 2.10 s and per-process, so that is what a resident helper
+removes. `firstOutput` and the attach are not removable that way, which put the
+estimated floor near 2.9 s - arithmetic on measured phases, and reuse later beat
+it by also shortening `firstOutput`. See
+`docs/VERIFICATION-2026-09-14-RTX4080.md` and `docs/VERIFICATION-matrix.md`.
+
+**The helper is resident, and the protocol runs both ways to make that possible.**
+Until v6 the metadata pipe was one-way and a job could only arrive as argv, so a
+process served exactly one render. v6 adds a command channel - `Hello`, `Job`,
+`Cancel`, `Shutdown`, answered by a new outbound `Ready` - on a second inherited
+pipe passed as `--command-handle`. A `Job` carries the argument vector the helper
+already accepted on its command line, so `ParseWorkerArguments` remains the single
+definition and single validator of what a job is; residency changed how a job
+arrives, not what one means. Without `--command-handle` the helper behaves exactly
+as before, one job then exit, which is the path the benchmark harness and the
+preflight probe drive.
+
+Five decisions shape it. The helper is reused only while `(runtime directory,
+runtime digest, neural-settings digest)` matches, because ReShade and RenoDX read
+their INI at process start and there is no way to re-read it in place - a settings
+change must relaunch. The runtime lease is held only while a job runs, so an idle
+resident helper never locks a second player instance out of the runtime directory,
+and every job re-verifies the runtime lock under that lease rather than trusting
+what it checked at startup. The helper exits itself after 30 s idle, which bounds
+the ~1 GiB of feature memory DLSS deliberately does not free on
+`ReleaseFeature`; keeping that memory is the trade, and the idle timeout is what
+makes it survivable. If the next job's geometry matches, the NGX feature is kept
+and the arm is skipped too. And orphan safety is two mechanisms, not one: the job
+object still carries `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and the helper also
+waits on the parent's process handle, because the failure being prevented is a
+process holding the GPU with nobody to reap it.
+
+Re-entering a render was where the work was. State that had never outlived a job
+had to be found and reset per job: the evaluator's successful-evaluation count
+(which becomes `nativeEvaluations`, so a carried value inflates every later job),
+the guide generator's scene-cut tally and history generation - whose `Reset()`
+deliberately preserves the tally because it is evidence about a whole job, so the
+generator is replaced rather than reset - a posted readback copy still holding a
+capture slot, and `D3D12Renderer`'s peak-VRAM high-water mark, which was a running
+maximum with no reset because nothing had ever needed one. A reused job reports no
+`neuralInit` and no `featureArm` in its timeline, because it did not pay them, and
+a session answered from the cache without any helper says `helper=none(cache-hit)`.
+
+**Measured, and it pays.** The acceptance criterion is a warm toggle under 3 s in
+a driven player session. A reused helper puts a neural frame on screen in
+**2.44-2.52 s over four sessions**, median 2.47 s, every one reporting
+`plan=reuse`, against 5.23-5.41 s for the first toggle in the same process. The
+reused job's timeline carries no `helperStart`, `runtimeReady`, `neuralInit` or
+`featureArm` - 2.19 s it did not pay because no process started - leaving
+`firstOutput` at 1.06 s and the attach at 1.29 s, which are exactly the two the
+arithmetic said residency cannot remove. Residency is reached only when the
+second job's range is not already covered by the first one's published entry; a
+toggle inside that coverage is answered from the cache in about 0.8 s with no
+helper job at all, which is correct and is not this measurement. See
+`docs/VERIFICATION-matrix.md`.
+
+`NeuralCacheManager` stages source and render artifacts in `cache/v1` beside the
+executable, which is the default root; LocalAppData is the legacy fallback used
+only when the portable directory is not writable. Source, application version,
+GPU path, runtime digest, native dimensions, quality, upscaling state, and a
+canonical neural-settings digest form the render identity.
+
+**The identity covers the driver and the weights, as of 2026-09-14.** It did not,
+and the gap was a correctness defect rather than a performance rider: `gpuPath` is
+a generation label, so every Ada card on every driver shared one value, and the
+lookup's validity check tests the same terms - so a render produced on
+32.0.16.1047 was served *and* validated on any later driver. The gap was wider
+than the missing version string. `runtimeDigest` hashes staged files, but every
+run resolves its models out of the driver store (`NGXGetPathUsingQAI` →
+`...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
+`C:\ProgramData\NVIDIA\NGX\models`, neither of which was in that set and both of
+which a driver update or a model refresh can replace with the digest unchanged.
+
+Two terms close it. `driverVersion` enters the key directly, so a render cannot
+cross a driver change. `modelStoreDigest` covers the resolved model-path
+contents, so it cannot cross a model refresh on one driver either; when a root
+cannot be enumerated the digest falls back to the driver version alone, and
+`ResolveNeuralModelStore` records which of the two it got in the preflight
+receipt rather than degrading silently. The manifest schema moved 4 → 5 in the
+same change, which retires every entry written under the old identity through the
+schema gate rather than incidentally through a missing field.
+
+**Two runtime file sets exist, and they are deliberately different sizes.**
+`LockedRuntimeFileNames()` is the thirteen files hashed into `runtimeDigest` - the
+twelve vendor modules plus `NeuralWorker.exe` - and it is the set a preflight
+failure quotes. `LockPinnedRuntimeFileNames()` is the twelve that
+`packaging/runtime-lock.json` pins and `VerifyRuntimeLock` checks; the worker is
+never pinned, because every build of the player changes it. The worker joined the
+hashed set because rebuilding it with different guide or cut logic used to leave
+`runtimeDigest` unchanged, so only an `applicationVersion` bump retired the
+entries it produced, and between bumps a stale hit masked exactly the change a
+developer was trying to see. `-DropRenderCache` in the session harness remains
+the way to force the issue during a live session.
+
 The settings snapshot is saved beside the video and its hash is checked on reuse.
 Settings are checked again after rendering before publication. Network source entries
 use the canonical YouTube video ID plus stable selected-format `itag` values,
 not expiring signed stream URLs. Staging entries become reusable only after
-independent probing and atomic promotion. Schema 4 requires
+independent probing and atomic promotion. Schema 5 requires
 `nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
 interception contract armed before frame capture, a feature-18 success
 checkpoint that advances after the captured sequence, and no feature-18
@@ -355,7 +466,7 @@ A job can also run behind live playback. `NeuralRenderRequest::segmentFrames`
 makes the helper rotate its encoder every N captured frames: the next segment's
 encoder starts before the current one is finished, finalization runs on a
 private FIFO thread, and each finished file is announced over the metadata pipe
-as a protocol v5 `Segment` message (index, absolute first pts and frame number,
+as a protocol v6 `Segment` message (index, absolute first pts and frame number,
 frame count, frame duration, file name). Temporal history, priming and preroll
 are untouched — only the encoder rotates.
 
@@ -394,9 +505,15 @@ clips to **8.4 ms at 1080p, 15.4 at 1440p and 42.0 at 4K** (medians; see the
 [0.17.0 RTX 5090 record](VERIFICATION-2026-09-10-RTX5090.md)), which no longer
 fit one line: 1080p and 1440p came down 29% and 10% while the 4K figure did not
 move, because that clip is a 6.3 Mbit/s re-encode whose decode and encode, not
-the neural pass, set the pace. The player therefore keeps one measured pace per
-source geometry per GPU and predicts from those, falling back to the seed only
-until the first session has measured the machine itself.
+the neural pass, set the pace. The player therefore keeps the last five measured
+paces per source geometry per GPU and predicts from their median, falling back
+to the seed only until the first session has measured the machine itself. The
+median is what makes the record survive one bad sample: contention inflates a
+measurement and never deflates it, so a single session measured under load used
+to persist as the machine's pace and make the forecast refuse work the card does
+comfortably. Five samples and a median let the measurements outvote the outlier,
+and the minimum is deliberately not used - this forecast exists to refuse
+sessions that cannot keep up, so erasing slow evidence is the wrong failure.
 
 Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
 stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll

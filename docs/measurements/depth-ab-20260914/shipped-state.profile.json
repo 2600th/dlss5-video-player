@@ -1,0 +1,30 @@
+{
+  "shipped-depth-proxy": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "depth proxy arm at the SHIPPED mask state: all eight player keys written at src/NeuralSettings.h defaults, NRAutoMask=1 (the harness 'baseline' profile writes no NR keys at all, which leaves the add-on's automatic mask OFF)"
+  },
+  "shipped-depth-constant": {
+    "guides": "mv=1,depth=0",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1"
+    },
+    "description": "depth constant arm at the SHIPPED mask state: identical to shipped-depth-proxy except guides depth=0, which writes a uniform 0.75 depth instead of the reconstructed proxy - the only variable between the two arms"
+  }
+}
