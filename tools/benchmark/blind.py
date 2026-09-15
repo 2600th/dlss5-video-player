@@ -240,7 +240,7 @@ def score(ballot_path: Path, key_path: Path | None = None) -> int:
     votes = {"single": 0, "double": 0, "tie": 0}
     weighted = {"single": 0.0, "double": 0.0}
     per_clip: dict[str, dict[str, int]] = {}
-    unknown, unscored, noConfidence = [], [], []
+    unknown, unscored, no_confidence, bad_confidence = [], [], [], []
     with ballot_path.open(encoding="utf-8") as f:
         for row in csv.DictReader(f):
             pair = key.get(row["id"])
@@ -258,14 +258,22 @@ def score(ballot_path: Path, key_path: Path | None = None) -> int:
             # was arithmetic on a default. The rows are named and the weighting is
             # withheld instead: a rule written as "N pairs at confidence >= 3" cannot
             # be evaluated against numbers nobody supplied.
+            #
+            # A value that is not an integer in 1-5 is as unscoreable as a blank and
+            # worse than one, because `float()` accepted "0" and "9" as if the scale
+            # had them and raised on anything non-numeric, taking the whole ballot
+            # down with it. Blank is an omission and scores preference-only; a value
+            # out of range or unparseable is a data error and fails the run.
             confidence = (row.get("confidence") or "").strip()
             if role != "tie":
-                if confidence:
-                    weighted[role] += float(confidence)
+                if not confidence:
+                    no_confidence.append(row["id"])
+                elif confidence.isdigit() and 1 <= int(confidence) <= 5:
+                    weighted[role] += float(int(confidence))
                 else:
-                    noConfidence.append(row["id"])
+                    bad_confidence.append(f"{row['id']}={confidence!r}")
             per_clip.setdefault(pair["clip"], {"single": 0, "double": 0, "tie": 0})[role] += 1
-    scoredWeighting = not noConfidence
+    weighting_measured = not no_confidence and not bad_confidence
     # A row this key does not know, or one with no preference in it, is reported
     # rather than skipped. Scoring an unfilled ballot used to print a clean sweep of
     # zeros and exit 0, which reads exactly like a measured tie; a ballot filled in
@@ -276,27 +284,33 @@ def score(ballot_path: Path, key_path: Path | None = None) -> int:
     if unscored:
         print(f"{len(unscored)} of {len(unscored) + sum(votes.values())} pair(s) carry no "
               f"preference: {', '.join(unscored)}", file=sys.stderr)
-    if noConfidence:
-        print(f"{len(noConfidence)} pair(s) carry a preference with no confidence: "
-              f"{', '.join(noConfidence)}. The weighting is withheld, so a threshold "
+    if no_confidence:
+        print(f"{len(no_confidence)} pair(s) carry a preference with no confidence: "
+              f"{', '.join(no_confidence)}. The weighting is withheld, so a threshold "
               f"written in terms of confidence cannot be checked against this ballot.",
               file=sys.stderr)
+    if bad_confidence:
+        print(f"{len(bad_confidence)} pair(s) carry a confidence that is not an integer "
+              f"in 1-5: {', '.join(bad_confidence)}. The scale has five points; a value "
+              f"outside it is a data error, not a weak preference.", file=sys.stderr)
     print(json.dumps(dict(profiles=profiles, votes=votes,
-                          confidence_weighted=(weighted if scoredWeighting else None),
-                          confidence_missing=noConfidence,
+                          confidence_weighted=(weighted if weighting_measured else None),
+                          confidence_missing=no_confidence,
+                          confidence_invalid=bad_confidence,
                           per_clip=per_clip, unscored=unscored, unknown=unknown), indent=2))
     # Spelled out in prose too, because the JSON above is the part that gets pasted
     # into a report and the roles are meaningless without their profiles.
     if sum(votes.values()):
         for role in ("single", "double"):
-            tail = f", confidence-weighted {weighted[role]:.1f}" if scoredWeighting else \
-                   " (confidence not recorded)"
+            tail = f", confidence-weighted {weighted[role]:.1f}" if weighting_measured else \
+                   " (confidence not usable)"
             print(f"{votes[role]} of {sum(votes.values())} pair(s) preferred "
                   f"{profiles[role] or role} (role '{role}'){tail}", file=sys.stderr)
         print(f"{votes['tie']} tie(s)", file=sys.stderr)
-    if unknown or not sum(votes.values()):
-        print("nothing was scored" if not sum(votes.values()) else "the ballot does not match the key",
-              file=sys.stderr)
+    if unknown or bad_confidence or not sum(votes.values()):
+        print("nothing was scored" if not sum(votes.values()) else
+              "the ballot does not match the key" if unknown else
+              "the ballot carries an unusable confidence value", file=sys.stderr)
         return 1
     return 0
 

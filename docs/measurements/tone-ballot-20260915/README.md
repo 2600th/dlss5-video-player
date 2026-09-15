@@ -119,7 +119,11 @@ not documentation):
   left, B right, and a 2x blow-up of the 480x270 tile where the two arms differ most.
   The tile is chosen by difference magnitude alone, which says where to look and
   nothing about which side is better.
-- `ballot.csv` - one row per pair: `preferred` = `A`, `B` or `tie`, `confidence` 1-5
+- `ballot.csv` - one row per pair: `preferred` = `A`, `B` or `tie`, `confidence` an
+  integer 1-5. A blank confidence is accepted and scores preference-only, with the
+  weighting withheld rather than defaulted; anything that is not 1-5 fails the run,
+  because the scale has five points and `0` or `9` is a data error, not a weak
+  preference
 - `key.json` - sealed. Do not open it before the ballot is filled in.
 
 Then:
