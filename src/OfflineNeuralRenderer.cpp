@@ -21,13 +21,10 @@
 #include <thread>
 #include <vector>
 
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
-#include "Log.h"
-#endif
 
 namespace {
 
@@ -168,7 +165,6 @@ template <class Evaluator>
 void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
                         const AttemptResult& attempt, const Evaluator& evaluator)
 {
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
     const uint64_t frames = attempt.frames;
     if (!frames) return;
     std::string detail;
@@ -190,9 +186,6 @@ void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
          << " ms, measured loop " << Mean(attempt.stages.loop)
          << " ms." << detail;
     LOG(line.str());
-#else
-    (void)kind;(void)stages;(void)attempt;(void)evaluator;
-#endif
 }
 
 std::string LowerAscii(std::string_view value)
@@ -1555,7 +1548,6 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     return result;
 }
 
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
 struct TestSourceAdapter {
     IFrameSource& source;
     bool gpuConversion{true};
@@ -1653,7 +1645,6 @@ struct TestEncoderAdapter {
         return adapter;
     }
 };
-#else
 struct ProductionSourceAdapter {
     VideoDecoder decoder;
     bool gpuConversion{true};
@@ -2208,11 +2199,8 @@ std::filesystem::path ModuleDirectory()
     if(!length||length>=path.size())return {};path.resize(length);return std::filesystem::path(path).parent_path();
 }
 
-#endif
-
 } // namespace
 
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
 namespace {
 
 uint64_t FileTimeValue(const FILETIME& time)
@@ -2298,7 +2286,6 @@ std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDire
 {
     return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},true);
 }
-#endif
 
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment)
@@ -2324,7 +2311,6 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
     return evidence;
 }
 
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
 namespace {
 
 // The reader a job's evidence comes from, as an object rather than a free
@@ -2384,21 +2370,18 @@ private:
 };
 
 } // namespace
-#endif
 
 // The production device, evaluator, encoder and session-log reader, kept across
 // Run calls. Declared in reverse teardown order: the encoder's ffmpeg child and
 // feeder thread go before the device whose readback memory they were fed from,
 // and the source decoder last.
 struct OfflineNeuralRenderer::Retained {
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
     explicit Retained(std::filesystem::path runtimeDirectory)
         : evidence(std::move(runtimeDirectory)) {}
     ProductionSourceAdapter source;
     ProductionEvaluatorAdapter evaluator;
     ProductionEncoderAdapter encoder;
     SessionEvidence evidence;
-#endif
 };
 
 OfflineNeuralRenderer::OfflineNeuralRenderer() = default;
@@ -2406,64 +2389,57 @@ OfflineNeuralRenderer::~OfflineNeuralRenderer() = default;
 
 bool OfflineNeuralRenderer::ReusableForAnotherJob() const
 {
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
-    return true;
-#else
     return !retained_ || !retained_->evidence.LogTooLargeToReuse();
-#endif
 }
 
 OfflineNeuralRenderer::MemoryFootprint OfflineNeuralRenderer::SampleMemoryFootprint() const
 {
     MemoryFootprint footprint;
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
     if (!retained_) return footprint;
     footprint.localVramMiB = retained_->evaluator.CurrentLocalVideoMemoryMiB();
     footprint.featureArmed = retained_->evaluator.FeatureCreated();
-#endif
     return footprint;
 }
 
 OfflineNeuralRenderer::IdleFeatureRelease OfflineNeuralRenderer::ReleaseIdleFeatureMemory()
 {
     IdleFeatureRelease observed;
-#ifndef OFFLINE_NEURAL_RENDERER_TESTING
     observed.before = SampleMemoryFootprint();
     if (retained_) observed.released = retained_->evaluator.ReleaseFeatureForIdle();
     // Sampled after the attempt either way: a release that could not drain the
     // queue still has to report what the adapter says, because "nothing moved"
     // is what separates a refused release from a runtime that declined to free.
     observed.after = SampleMemoryFootprint();
-#endif
     return observed;
 }
 
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
 OfflineNeuralRenderer::OfflineNeuralRenderer(
     IFrameSource& source,INeuralFrameEvaluator& evaluator,IFrameEncoder& encoder,
     std::function<std::string()> evidenceProvider,Clock clock,std::function<bool()> paused,
     std::function<std::unique_ptr<IFrameEncoder>()> encoderFactory)
-    : testSource_(&source),testEvaluator_(&evaluator),testEncoder_(&encoder),
-      testEvidenceProvider_(std::move(evidenceProvider)),testClock_(std::move(clock)),
-      testPaused_(std::move(paused)),testEncoderFactory_(std::move(encoderFactory)) {}
-#endif
+    : source_(&source),evaluator_(&evaluator),encoder_(&encoder),
+      evidenceProvider_(std::move(evidenceProvider)),clock_(std::move(clock)),
+      paused_(std::move(paused)),encoderFactory_(std::move(encoderFactory)) {}
 
 NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request,
                                                ProgressCallback progress,std::stop_token stop,
                                                const NeuralSegmentSink& segments,
                                                NeuralColdStartCallback coldStart)
 {
-#ifdef OFFLINE_NEURAL_RENDERER_TESTING
-    if(!testSource_||!testEvaluator_||!testEncoder_||!testEvidenceProvider_)
-        return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
-                                  .detail=L"Offline renderer test dependencies are incomplete."};
-    TestSourceAdapter source{*testSource_};TestEvaluatorAdapter evaluator{*testEvaluator_};
-    TestEncoderAdapter encoder{testEncoder_,{},testEncoderFactory_};
-    const Clock clock=testClock_?testClock_:[]{return SteadyClock::now();};
-    const std::function<bool()> paused=testPaused_?testPaused_:[]{return false;};
-    return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
-                  testEvidenceProvider_,clock,paused,segments,coldStart);
-#else
+    if(source_||evaluator_||encoder_||evidenceProvider_)
+    {
+        // A partial injection is a programming error, not a degraded run: falling
+        // back to the production adapters here would silently ignore the fakes.
+        if(!source_||!evaluator_||!encoder_||!evidenceProvider_)
+            return NeuralRenderResult{.failure=NeuralRenderFailure::Protocol,
+                                      .detail=L"Offline renderer was constructed with an incomplete set of collaborators."};
+        TestSourceAdapter source{*source_};TestEvaluatorAdapter evaluator{*evaluator_};
+        TestEncoderAdapter encoder{encoder_,{},encoderFactory_};
+        const Clock clock=clock_?clock_:[]{return SteadyClock::now();};
+        const std::function<bool()> paused=paused_?paused_:[]{return false;};
+        return RunJob(request,std::move(progress),stop,source,evaluator,encoder,
+                      evidenceProvider_,clock,paused,segments,coldStart);
+    }
     if(!retained_)retained_=std::make_unique<Retained>(ModuleDirectory());
     Retained& state=*retained_;
     // A job that unwound without closing its decoder must not leave the next
@@ -2490,5 +2466,4 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
         ?(inheritedArmedFeature?Residency::FeatureReused:Residency::FeatureRecreated)
         :inheritedArmedFeature?Residency::FeatureRecreated:Residency::Initialized;
     return result;
-#endif
 }

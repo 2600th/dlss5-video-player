@@ -361,15 +361,30 @@ if(BUILD_TESTING)
         src/VideoDecoder.h
         src/MediaSource.cpp
         src/MediaSource.h
+        src/D3D12Renderer.cpp
+        src/DLSSBackend.cpp
+        src/TemporalGuides.cpp
+        src/OpticalFlowNvof.cpp
+        # D3D12Renderer.cpp asks RuntimePolicy which adapter to create the
+        # device on, the same reason PolicyTests and UpscalingGpuSmoke pair
+        # these two.
+        src/RuntimePolicy.cpp
     )
-    target_include_directories(NeuralPrerenderTests PRIVATE src "${GENERATED_INCLUDE_DIR}")
+    target_include_directories(NeuralPrerenderTests PRIVATE src "${DLSS_SDK}/include" "${GENERATED_INCLUDE_DIR}")
     target_compile_definitions(NeuralPrerenderTests PRIVATE
         UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        OFFLINE_NEURAL_RENDERER_TESTING
         DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(NeuralPrerenderTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(NeuralPrerenderTests PRIVATE bcrypt shell32 mfplat mfreadwrite mfuuid ole32)
+    target_link_directories(NeuralPrerenderTests PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(NeuralPrerenderTests PRIVATE ${player_libraries})
+    dlss_video_player_use_nvof(NeuralPrerenderTests)
+    # The job's stage logging has always run here, and Log opens
+    # <module directory>/DLSSVideoPlayer.log with ios::trunc, so running beside
+    # the player erased its log on every ctest run. The cache-root probe also
+    # stages a directory beside the executable. Give both their own place.
+    set_target_properties(NeuralPrerenderTests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/neural-prerender/$<CONFIG>")
     add_test(NAME NeuralPrerenderTests COMMAND NeuralPrerenderTests)
 
     # Exercise the real player completion handlers and text submitted to Win32.

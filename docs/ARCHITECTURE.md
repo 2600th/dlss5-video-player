@@ -208,6 +208,38 @@ and never skips the frame. Device removal fails the job immediately and the
 launcher relaunches the helper from zero at most once. The helper checks an
 inherited pause event between frames and resumes without a temporal reset.
 
+The job reaches the decoder, the evaluator and the encoder through three
+duck-typed adapters. A second constructor injects `IFrameSource`,
+`INeuralFrameEvaluator` and `IFrameEncoder` instead, plus the evidence
+provider, clock and pause predicate the job would otherwise take from the
+ReShade log, the steady clock and `NeuralRenderRequest::pauseEvent`;
+`Run` picks between the two sets at runtime by whether anything was injected,
+and a partial injection is a Protocol failure rather than a silent fall back
+to the real decoder. The production set is not rebuilt per call: it lives in
+the renderer's retained state, so a resident helper keeps the device, the NGX
+instance and the feature-18 workset across jobs - see *The helper is resident*
+below. An injected set is per-call and never builds one, which is also why an
+injected run reports no residency.
+Both sets compile in every build. `OFFLINE_NEURAL_RENDERER_TESTING` used to cut
+the production half out of this translation unit, and it was a link-closure tool
+rather than a testing policy: when it arrived `NeuralPrerenderTests` compiled
+three sources and linked `bcrypt shell32`, so the production adapters' references
+to `D3D12Renderer`, `DLSSBackend`, `TemporalGuides`, `OpticalFlowNvof` and `Log`
+had nowhere to resolve. Removing the macro means paying that closure instead: the
+test target compiles those four sources plus `RuntimePolicy`, links `DLSS_LIB_DIR`
+and the player's full library set, and takes the NVOF helper. That is a slower
+test build which now depends on the DLSS libraries being staged.
+
+Two things pay for it. A change to `D3D12Renderer`, `VideoDecoder` or
+`DLSSBackend` that breaks the job's use of them now breaks the test build too,
+which the `#else` hid by compiling no production adapter anywhere. And residency
+becomes assertable at all: under the macro `Retained` had no members,
+`ReusableForAnotherJob` returned a constant `true`, and both footprint calls
+reported zero, so no test could observe a resident helper. What the macro did
+guarantee, and the runtime choice does not, is that production code could not run
+inside a test binary; the Protocol failure above is what replaces it. Injecting
+fakes still does not exercise the production adapters.
+
 Before every render the player verifies the staged runtime against the
 embedded `packaging/runtime-lock.json` (size, SHA-256, file version) and
 refuses drift instead of adopting a newer stack. On a cache miss the helper
