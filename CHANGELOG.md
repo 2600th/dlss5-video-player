@@ -55,25 +55,33 @@ and looks like a broken helper until the runtime is re-staged.
   the guard downstream would not have caught that.
 - The render no longer chases a playhead that is still moving. A viewer pressing
   the seek key repeatedly moves it several times a second, and every move was a
-  decision: the running job was cancelled and restarted on the new hole, paying
-  the arm and preroll again for a position the next press abandoned. Whichever
-  hole they settle in is still there a moment later, so a decision waits for the
-  playhead to stop for a second - under the cheapest thing it can buy, and over
-  the gap between two presses of a held key. The hand-back to the original is
-  deliberately above that guard: a viewer who is seeking is never left in a
-  buffering panel.
-  Measured as an A/B on the same stream and the same driver, six back-seeks with
-  the job mid-range, the only difference being the settle window:
+  decision: the running job was cancelled and restarted on the new hole, and it
+  produced nothing in between. Whichever hole they settle in is still there a
+  moment later, so a decision waits for the playhead to stop for a second -
+  under the cheapest thing it can buy, and over the gap between two presses of a
+  held key. The hand-back to the original is deliberately above that guard: a
+  viewer who is seeking is never left in a buffering panel.
+  Measured as an A/B on the same stream and the same driver, six back-seeks
+  900 ms apart with the job mid-range, the only difference being the settle
+  window:
 
   | six presses, 900 ms apart | without | with |
   | --- | --- | --- |
   | retargets | 5 | **1** |
   | job restarts | 5 | **1** |
-  | helper launches | 1 | 1 |
+  | segments rendered during the burst | **0** | **6** |
+  | helper: launch / reuse | reuse | reuse |
 
-  The helper is resident and reused, so the cost of a retarget is the job
-  restart - not a process launch, as an earlier draft of this entry claimed. At
-  400 ms between presses both builds retarget once: the seeks queue, and the
+  Each retarget landed 90-150 ms after its press, and the restarted job was
+  cancelled before its first segment: five restarts, no output, with the first
+  frames arriving 1.07 s after the last one. With the guard the running job is
+  left alone and keeps publishing - six segments, about twelve seconds of video,
+  while the viewer is still pressing - and the single retarget fires 1.0 s after
+  the last press. The helper stays resident across all of it (`plan=reuse`), so
+  a retarget costs the job restart, not a process launch: an earlier draft of
+  this entry said three cold starts, which was inferred from an uncontrolled run
+  and is wrong.
+  At 400 ms between presses both builds retarget once: the seeks queue, and the
   existing "not while a seek is in flight" rule already coalesces them. The
   window this changes is the half-second-to-second press, where each seek lands
   before the next arrives.
