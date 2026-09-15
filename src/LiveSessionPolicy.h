@@ -23,6 +23,10 @@ inline constexpr double kResumeLead = 2.0;
 // a running job covers roughly a second of video per second, so waiting is
 // cheaper than restarting for any target the head reaches inside that budget.
 inline constexpr double kRebaseAhead = 15.0;
+// What a job costs before it renders anything: helper launch, runtime, feature
+// arm and preroll, measured at about 7.3 s across the sessions in docs. A hole
+// narrower than this is cheaper to watch on the original than to render.
+inline constexpr double kColdStartSeconds = 7.3;
 // A seek backwards is always out of coverage, but a tiny backwards nudge is
 // usually a rounding artifact of frame snapping rather than a real seek.
 inline constexpr double kBackwardSlack = 0.5;
@@ -47,6 +51,8 @@ struct SessionView {
     bool attached = false;      // playback is running on the rendered segments
     bool finished = false;      // the job published its last segment
     bool seeking = false;       // a seek is in flight or the user is scrubbing
+    bool paused = false;        // the playhead is not moving, so a narrow hole
+                                // in front of it is still worth rendering
 };
 
 // Rendered seconds sitting ahead of the playhead.
@@ -188,8 +194,8 @@ inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, Coverag
     // processed yet and the job still counted as running.
     if (jobHeadSec >= double(target.end100ns) * 1e-7) return false;
     const int64_t position100ns = static_cast<int64_t>(std::llround(view.positionSec * 1e7));
-    // Checked before the identity test below, which would otherwise hold for
-    // every hole the viewer is standing in and pin a job that cannot catch up.
+    // Checked before everything below, which would otherwise hold for every hole
+    // the viewer is standing in and pin a job that cannot catch up.
     if (target.Contains(position100ns)) {
         const double reach = std::max(double(target.start100ns) * 1e-7, jobHeadSec);
         return view.positionSec > reach + aheadBudget;
@@ -198,6 +204,17 @@ inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, Coverag
     if (wanted.start100ns + frameDuration100ns >= target.start100ns &&
         wanted.end100ns <= target.end100ns)
         return false;
+    // A hole narrower than a job startup is not worth taking a running job away
+    // for: the startup is paid twice, once for the sliver and once to come back,
+    // and by the time its first frame exists the playhead has left it - a hole is
+    // bounded by coverage, so the viewer crosses it straight onto rendered
+    // frames. One driven session traded a job rendering [38.6,104.4) for a
+    // one-second hole. A PAUSED viewer is the exception: that playhead is not
+    // going anywhere, so the frame in front of them is worth rendering however
+    // narrow the hole around it. Nothing is stranded either way - the session
+    // starts on that hole as soon as the running job ends, because this rule
+    // only governs taking a job away.
+    if (!view.paused && wanted.Width() < static_cast<int64_t>(kColdStartSeconds * 1e7)) return false;
     // A backward nudge of a frame or two is frame snapping, not a seek, and the
     // hole it lands in is the one being filled anyway; anything else is the job
     // working somewhere the playhead is not.

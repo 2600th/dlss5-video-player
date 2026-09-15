@@ -31,6 +31,34 @@ and looks like a broken helper until the runtime is re-staged.
   it gave up after two refusals and stopped. Only a local source was exercised
   by the earlier work on this: a cached copy makes seeks local, which is why the
   streamed path was the one still broken.
+- A stream stops being a stream once its copy is on disk. A render always works
+  from a complete local copy of the source, and the job acquires one within
+  seconds of a session starting - but playback carried on reading the signed
+  URL, so every seek out of rendered coverage was a re-resolution: a new URL, a
+  decoder and renderer swap, the session released and restarted around it, and a
+  resolution that can fail outright. Playback now moves onto that copy the first
+  time a seek would otherwise have gone to the network, which is also the moment
+  it is certain to exist. Seeks are local from there: measured at **298 ms to
+  first byte against 1.5-1.9 s** on the URL, with the session left alone.
+  The job reports the copy's path as soon as it has one, because the recent
+  history - the player's only other route to that path - is not written until a
+  job completes, which on a first watch is exactly too late. Rendering an
+  acquired copy also no longer asks the acquisition to download from a local
+  path, which it refused as a source whose "format or duration is unavailable" -
+  two of those refusals in 40 ms were enough to stop a session.
+- A running render is no longer traded for a sliver. Moving a job costs about
+  7.3 s of startup twice - once for the new hole and once to come back - so a
+  hole narrower than that is left to the original, which covers it in the second
+  or two it takes to cross. One driven session cancelled a job rendering
+  `[38.6,104.4)` to chase a one-second hole. A paused viewer is the exception:
+  that playhead is not moving, so the frame in front of it is worth rendering
+  however narrow its hole. Nothing is stranded - the hole is still the first
+  thing the session starts once the running job ends.
+  Seeking into an unrendered part of a streamed video, driven end to end: the
+  original plays there at once, playback moves onto the local copy, the render
+  retargets to `[22.3,39.2)`, neural resumes **at the seek position 8 s later**,
+  and the session chains on to the rest - with zero re-resolutions, zero
+  failures, and two rendered regions on the seek bar at 47% rendered.
 - An active neural session renders the whole video and stays seekable everywhere.
   It used to render one forward run from the playhead, which left everything
   before it unrendered for good: seeking back landed on frames nobody had

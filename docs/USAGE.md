@@ -103,11 +103,18 @@ teal stripes along the bottom name the parts of the source that already have
 neural frames. A session that has been seeked around shows several of them, with
 the gaps between them being what it has still to render.
 
-Marking a range on a YouTube stream starts downloading that source in the
-background, because a render always works from a local copy. Playback continues
-while it runs and the status line says so; the render then starts on the file
-instead of waiting for the whole download, and later renders of the same source
-and quality reuse it.
+Marking a range on a YouTube stream, or turning neural rendering on, starts
+downloading that source in the background, because a render always works from a
+local copy. Playback continues while it runs and the status line says so; the
+render then starts on the file instead of waiting for the whole download, and
+later renders of the same source and quality reuse it.
+
+Playback itself moves onto that copy the first time a seek would otherwise have
+gone back to the network. Seeking a stream means asking YouTube for a fresh URL
+and rebuilding the decoder around it - a second or two, and it can fail - so
+once a copy of those exact frames is on disk, seeks use it instead. It is the
+same video either way; what changes is that seeking stops depending on the
+network.
 
 ### Compare the neural result
 

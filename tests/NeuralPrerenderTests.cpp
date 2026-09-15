@@ -3114,7 +3114,14 @@ void live_session_retargets_the_render_to_the_hole_the_playhead_needs_test()
     // reach the playhead, so it moves. Frame snapping a few milliseconds back is
     // not a seek and must not move it.
     view.positionSec=5.0;
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{50000000,100000000},kFrame,jobHead));
+    // The hole is [5,10) - five seconds, less than a job startup - so a PLAYING
+    // viewer crosses it before any frame of it could exist and the running job
+    // keeps its place; a paused one is looking at that frame and gets it.
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{50000000,100000000},kFrame,jobHead));
+    live_session::SessionView held=view;held.paused=true;
+    CHECK(live_session::ShouldRetarget(held,target,CoverageSpan{50000000,100000000},kFrame,jobHead));
+    // Wide enough to pay for its own startup: the render moves either way.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{0,100000000},kFrame,jobHead));
     view.positionSec=9.9;
     CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{99000000,100000000},kFrame,jobHead));
     // Past the hole entirely: this job is behind the viewer. Attached playback is
@@ -3153,8 +3160,9 @@ void live_session_does_not_retarget_onto_the_hole_it_is_already_filling_test()
     // Same as the job publishes into it: the hole shrinks from the front, which
     // is still the same work and still no reason to restart the helper.
     CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{60000000,183000000},kFrame,jobHead));
-    // A hole outside the target is different work and does move the render.
-    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{183000000,226000000},kFrame,jobHead));
+    // A hole outside the target is different work, and this one is wide enough
+    // to be worth a job of its own.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{183000000,266000000},kFrame,jobHead));
     // And the slack is one frame, not unlimited: a hole starting a second early
     // is a different hole.
     CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{4000000,183000000},kFrame,jobHead));
@@ -3180,6 +3188,16 @@ void live_session_waits_for_a_job_whose_head_is_close_behind_the_playhead_test()
     // A job that really has fallen behind still moves: rendered to 20 s with the
     // viewer at 41 is past the fifteen-second budget.
     CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{410000000,1000000000},kFrame,20.0));
+    // A hole narrower than a job startup does not justify cancelling a job that
+    // is rendering: the startup is paid twice, once for the sliver and once to
+    // come back, while the sliver is a second of video the original covers in a
+    // second. One driven session traded a job on [38.6,104.4) for a one-second
+    // hole at the playhead, and then gave up.
+    const live_session::SessionView elsewhere{.positionSec=37.6,.rangeStartSec=38.6,.headSec=0.0};
+    const CoverageSpan big{386000000,1044000000};
+    CHECK(!live_session::ShouldRetarget(elsewhere,big,CoverageSpan{376000000,386000000},kFrame,45.0));
+    // Wide enough to pay for itself, and the job is behind the viewer: it moves.
+    CHECK(live_session::ShouldRetarget(elsewhere,big,CoverageSpan{286000000,386000000},kFrame,45.0));
     // A job that has rendered its whole hole is left to publish: the entry and
     // receipt it is about to promote are for work already done, and the next hole
     // starts from the completion path a tick later. One driven session cancelled
