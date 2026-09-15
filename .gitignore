@@ -62,3 +62,4 @@ Thumbs.db
 
 # Python bytecode from the benchmark tools
 __pycache__/
+/build-ship

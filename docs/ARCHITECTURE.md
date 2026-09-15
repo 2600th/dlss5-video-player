@@ -387,7 +387,7 @@ lookup's validity check tests the same terms - so a render produced on
 than the missing version string. `runtimeDigest` hashes staged files, but every
 run resolves its models out of the driver store (`NGXGetPathUsingQAI` →
 `...\DriverStore\FileRepository\nv_dispsi.inf_...`) and
-`C:\ProgramData\NVIDIA\NGX\models`, neither of which was in that set and both of
+`%ProgramData%\NVIDIA\NGX\models`, neither of which was in that set and both of
 which a driver update or a model refresh can replace with the digest unchanged.
 
 Two terms close it. `driverVersion` enters the key directly, so a render cannot

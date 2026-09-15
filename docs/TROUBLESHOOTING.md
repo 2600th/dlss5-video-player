@@ -125,8 +125,8 @@ exact directory, the cause, the filesystem error number and whether the
 ownership check rejected it, as
 `Neural render staging refused: cause=create-failed path=... error=5 ownershipRejected=0`.
 
-Extract the player to a folder you can write to; `C:\Program Files` and
-`C:\Program Files (x86)` are not writable without elevation, and a cache beside
+Extract the player to a folder you can write to; `%ProgramFiles%` and
+`%ProgramFiles(x86)%` are not writable without elevation, and a cache beside
 the EXE there falls back to `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1`
 only when that fallback is itself writable. Controlled Folder Access, and
 third-party antivirus with the same feature, deny directory creation under
