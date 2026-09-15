@@ -787,15 +787,22 @@ function Invoke-PlayerSession {
     }
 
     # A second instance would write the same log and the same ini, and the
-    # record would be a blend of two sessions.
+    # record would be a blend of two sessions. NeuralWorker is checked for the
+    # same reason and one more: a helper alive before launch is either P1's
+    # "helper left behind" failure or a live reuse candidate, and it writes the
+    # same neural-runtime log this session is about to copy - so its lines would
+    # be read as this session's, and a policy A/B could assert the previous arm.
+    # It is also the reason a clear of that log could not succeed.
     $strays = @()
-    foreach ($candidate in (Get-Process -Name 'DLSSVideoPlayer' -ErrorAction SilentlyContinue)) {
-        $path = $null
-        try { $path = $candidate.Path } catch { $path = '<unreadable>' }
-        $strays += ('pid ' + $candidate.Id + ' ' + $path)
+    foreach ($name in 'DLSSVideoPlayer', 'NeuralWorker') {
+        foreach ($candidate in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+            $path = $null
+            try { $path = $candidate.Path } catch { $path = '<unreadable>' }
+            $strays += ($name + ' pid ' + $candidate.Id + ' ' + $path)
+        }
     }
     if ($strays.Count -gt 0) {
-        $record.failure = 'another DLSSVideoPlayer is already running: ' + ($strays -join ', ')
+        $record.failure = 'a player or helper process is already running: ' + ($strays -join ', ')
         $record.exitCode = $EXIT_PLAYER_RUNNING
         return $record
     }
@@ -837,11 +844,13 @@ function Invoke-PlayerSession {
     }
     # Same shape for the helper's log, so a reader does not have to infer the
     # difference between "no helper ran" and "the copy failed" from a null path.
-    # `outcome` is settled in the finally block: copied, staleRefused or absent.
+    # `outcome` is settled in the finally block: copied, staleRefused, absent, empty
+    # or copyFailed. It stays 'notRequested' when -OutJson was not passed, because
+    # then nothing was ever going to be written and that is not a failed copy.
     $record.helperLog = [ordered]@{
         path        = $helperLogPath
         stampBefore = $helperLogBefore
-        outcome     = 'notReached'
+        outcome     = 'notRequested'
     }
 
     $launchAt = Get-Date
@@ -1249,27 +1258,34 @@ function Invoke-PlayerSession {
             # it anyway would hand the next reader the previous session's lines as
             # this session's sample - the look-alike that a per-arm copy already
             # produced once.
-            try {
-                $after = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
-                $stamp = [string]$after.LastWriteTimeUtc.Ticks + ':' + [string]$after.Length
-                if ($stamp -eq $helperLogBefore) {
-                    # Present, untouched: the previous session's file, not this one's.
-                    $record.helperLog.outcome = 'staleRefused'
-                } elseif ($outDirectory -and $stem) {
-                    $helperTarget = Join-Path $outDirectory ($stem + '.session' + $Index + '.helper.log')
-                    $helperText = Read-LogText $helperLogPath
-                    if ($helperText) {
-                        Set-Content -LiteralPath $helperTarget -Value $helperText -Encoding UTF8
-                        $record.helperLogCopy = $helperTarget
-                        $record.helperLog.outcome = 'copied'
-                    } else {
-                        $record.helperLog.outcome = 'empty'
-                    }
-                }
-            } catch {
-                # Get-Item threw: no helper log exists at all, so no helper has ever
-                # run in this staging directory.
+            #
+            # `absent` is decided before anything can throw. Wrapping the whole block
+            # in one catch reported an unwritable output directory as "no helper log
+            # exists", which is the opposite diagnosis and the wrong one to hand
+            # someone whose measurement just lost a sample.
+            if (-not (Test-Path -LiteralPath $helperLogPath)) {
                 $record.helperLog.outcome = 'absent'
+            } else {
+                try {
+                    $after = Get-Item -LiteralPath $helperLogPath -ErrorAction Stop
+                    $stamp = [string]$after.LastWriteTimeUtc.Ticks + ':' + [string]$after.Length
+                    if ($stamp -eq $helperLogBefore) {
+                        # Present, untouched: the previous session's file, not this one's.
+                        $record.helperLog.outcome = 'staleRefused'
+                    } else {
+                        $helperTarget = Join-Path $outDirectory ($stem + '.session' + $Index + '.helper.log')
+                        $helperText = Read-LogText $helperLogPath
+                        if ($helperText) {
+                            Set-Content -LiteralPath $helperTarget -Value $helperText -Encoding UTF8
+                            $record.helperLogCopy = $helperTarget
+                            $record.helperLog.outcome = 'copied'
+                        } else {
+                            $record.helperLog.outcome = 'empty'
+                        }
+                    }
+                } catch {
+                    $record.helperLog.outcome = 'copyFailed'
+                }
             }
         }
     }

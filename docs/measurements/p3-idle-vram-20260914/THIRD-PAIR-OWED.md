@@ -103,6 +103,8 @@ foreach ($f in Get-ChildItem $env:TEMP\p3-*.session*.helper.log | Sort-Object Na
 #                  session's and was deliberately NOT copied
 #   absent       - no helper log exists at all
 #   empty        - the log moved but read back empty
+#   copyFailed   - the log was there and moved, but reading or writing it threw
+#   notRequested - no -OutJson, so no copy was ever going to be made
 foreach ($arm in 'keep', 'free') {
   (Get-Content $env:TEMP\p3-$arm.json -Raw | ConvertFrom-Json).sessions |
     Select-Object index, @{n='outcome'; e={ $_.helperLog.outcome }}, helperLogCopy
