@@ -169,6 +169,9 @@ $EXIT_NO_PACE = 8
 $EXIT_DIALOG = 9
 $EXIT_NO_COLD_START = 10
 $EXIT_NO_FOREGROUND = 11
+# 12 also covers this staging directory's own NeuralWorker being alive at launch -
+# that helper writes the neural-runtime log the session is about to copy. A helper
+# belonging to another directory (a benchmark run's profile clone) is NOT a refusal.
 $EXIT_PLAYER_RUNNING = 12
 $EXIT_INJECTION_DENIED = 13
 $EXIT_DESKTOP_LOCKED = 14
@@ -784,25 +787,48 @@ function Invoke-PlayerSession {
         cold     = $Clear
         failure  = $null
         exitCode = $EXIT_OK
+        # Declared here so every record carries the same keys, including the ones
+        # that return before launch: a consumer reading .helperLog.outcome over all
+        # sessions should not have to know which ones got that far. `notReached` is
+        # exactly that case - the session was refused before a helper could run.
+        helperLogCopy = $null
+        helperLog     = [ordered]@{
+            path        = $helperLogPath
+            stampBefore = $helperLogBefore
+            outcome     = 'notReached'
+        }
     }
 
     # A second instance would write the same log and the same ini, and the
-    # record would be a blend of two sessions. NeuralWorker is checked for the
-    # same reason and one more: a helper alive before launch is either P1's
-    # "helper left behind" failure or a live reuse candidate, and it writes the
-    # same neural-runtime log this session is about to copy - so its lines would
-    # be read as this session's, and a policy A/B could assert the previous arm.
-    # It is also the reason a clear of that log could not succeed.
+    # record would be a blend of two sessions. A NeuralWorker counts for the same
+    # reason, and only when it is THIS staging directory's helper: that one writes
+    # the neural-runtime log this session is about to copy, so its lines would be
+    # read as this session's and a policy A/B could assert the previous arm. It is
+    # also the reason a clear of that log could not succeed.
+    #
+    # Scoped by path on purpose. `Get-Process -Name NeuralWorker` is machine-wide,
+    # and a benchmark run has its own helper under
+    # benchmark-work/profiles/*/neural-runtime/ writing its own log - refusing a
+    # session for that would widen EXIT_PLAYER_RUNNING from "the record would be a
+    # blend" into "something else is using the GPU", which is a different claim this
+    # script is not making. A helper whose path cannot be read fails closed.
+    $helperDirectory = Split-Path -Parent $helperLogPath
     $strays = @()
-    foreach ($name in 'DLSSVideoPlayer', 'NeuralWorker') {
-        foreach ($candidate in (Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-            $path = $null
-            try { $path = $candidate.Path } catch { $path = '<unreadable>' }
-            $strays += ($name + ' pid ' + $candidate.Id + ' ' + $path)
-        }
+    foreach ($candidate in (Get-Process -Name 'DLSSVideoPlayer' -ErrorAction SilentlyContinue)) {
+        $path = $null
+        try { $path = $candidate.Path } catch { $path = '<unreadable>' }
+        $strays += ('DLSSVideoPlayer pid ' + $candidate.Id + ' ' + $path)
+    }
+    foreach ($candidate in (Get-Process -Name 'NeuralWorker' -ErrorAction SilentlyContinue)) {
+        $path = $null
+        try { $path = $candidate.Path } catch { $path = $null }
+        if ($path -and (Split-Path -Parent $path) -ne $helperDirectory) { continue }
+        $shown = '<unreadable path, assumed this one>'
+        if ($path) { $shown = $path }
+        $strays += ('NeuralWorker pid ' + $candidate.Id + ' ' + $shown)
     }
     if ($strays.Count -gt 0) {
-        $record.failure = 'a player or helper process is already running: ' + ($strays -join ', ')
+        $record.failure = 'a player or this staging directory''s helper is already running: ' + ($strays -join ', ')
         $record.exitCode = $EXIT_PLAYER_RUNNING
         return $record
     }
@@ -841,16 +867,6 @@ function Invoke-PlayerSession {
         bytesBefore    = $logBytesBefore
         cleared        = $logCleared
         skippedLines   = $skipLines
-    }
-    # Same shape for the helper's log, so a reader does not have to infer the
-    # difference between "no helper ran" and "the copy failed" from a null path.
-    # `outcome` is settled in the finally block: copied, staleRefused, absent, empty
-    # or copyFailed. It stays 'notRequested' when -OutJson was not passed, because
-    # then nothing was ever going to be written and that is not a failed copy.
-    $record.helperLog = [ordered]@{
-        path        = $helperLogPath
-        stampBefore = $helperLogBefore
-        outcome     = 'notRequested'
     }
 
     $launchAt = Get-Date
@@ -1242,6 +1258,9 @@ function Invoke-PlayerSession {
         # must never be what loses a measured session, so it cannot throw.
         $record.logCopy = $null
         $record.helperLogCopy = $null
+        # Reached the launch, so it is no longer 'notReached'; without -OutJson
+        # nothing was ever going to be written, which is not a failed copy.
+        $record.helperLog.outcome = 'notRequested'
         if ($OutJson) {
             $outDirectory = $null
             $stem = $null
