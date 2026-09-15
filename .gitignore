@@ -1,6 +1,5 @@
 # Build output
-/build/
-/build-upscaling/
+/build*/
 /out/
 /CMakeFiles/
 /CMakeCache.txt

@@ -30,20 +30,23 @@ inline constexpr double kColdStartSeconds = 7.3;
 // A seek backwards is always out of coverage, but a tiny backwards nudge is
 // usually a rounding artifact of frame snapping rather than a real seek.
 inline constexpr double kBackwardSlack = 0.5;
-// A viewer pressing the seek key repeatedly moves the playhead several times a
-// second, and each move used to cancel the running job and restart it on the
-// new hole. Measured across six presses 900 ms apart: without this, five
-// restarts and not one segment rendered during the burst; with it, the running
-// job is left alone and publishes six, and one retarget fires after the last
-// press. What it buys is render throughput while the viewer is moving.
+// A viewer tapping the seek key moves the playhead about once a second, and
+// each move used to cancel the running job and restart it on the new hole.
+// Measured across six presses 900 ms apart: without this, five restarts and
+// not one segment rendered during the burst; with it, the running job is left
+// alone and publishes six, and one retarget fires after the last press. What
+// it buys is render throughput while the viewer is moving.
 //
 // It is NOT free for the viewer. A restart reaches its first segment in about
 // 1.1 s, so this defers the frames at the destination by roughly the settle
 // window: measured 0.5 s after the last press without it against 2.5 s with
 // it. The original plays there in the meantime, which is why the trade is
 // worth taking - and why this is not sized "under" the restart cost, it is
-// about equal to it. Anything shorter stops coalescing presses that land a
-// second apart, which is the spacing a held key produces.
+// about equal to it.
+//
+// A physically held key is not this case: Windows auto-repeats at about 30 Hz
+// after its half-second delay, and those seeks queue, so the in-flight rule
+// already coalesces them. This owns the tapped key and the clicked button.
 inline constexpr double kSeekSettleSeconds = 1.0;
 
 // Lead to require before the first attach, given how fast this GPU renders

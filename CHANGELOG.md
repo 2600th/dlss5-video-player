@@ -68,19 +68,28 @@ and looks like a broken helper until the runtime is re-staged.
   43.3 s, so both still fail the comparison that refuses a bad join.
   Re-driven on the same clip: publish **28.2 s -> 0.86 s** and **17.0 s ->
   0.73 s**, and the finished render to the next one's start **18.4 s -> 0.99 s**.
-  The B-frame case that could have made packets and frames disagree is pinned by
-  a real-media test that joins two parts, counts them both ways and requires the
-  same answer, then joins one part and requires a short count.
+  The same validation runs on two other files: the acquired `source.mkv` a first
+  watch downloads, and a materialized export. Both were paying a full software
+  decode of their own length for a number the container can answer, so a first
+  watch gets that time back too - the mechanism is shared, though the figures
+  above are from the publish path.
+  What could have made packets and frames disagree is pinned by a real-media
+  test: two `libx264 -bf 2` parts, so coded and presentation order differ, are
+  joined to an odd 31 frames and counted both ways; the video span is checked
+  exactly, because Matroska stores no per-packet duration and the last one is
+  derived - a tail that came back unknown would leave the span a frame short.
+  Then one part is joined alone and required to read short, which is the
+  refusal the gate exists for. Mutation-checked by dropping the tail duration:
+  the span assertions fail, and restoring them passes.
   Each publish logs `concatMs`, `probeMs` and `promoteMs`, because the first
   measurement of this cost me a driven session to attribute.
-- The render no longer chases a playhead that is still moving. A viewer pressing
-  the seek key repeatedly moves it several times a second, and every move was a
-  decision: the running job was cancelled and restarted on the new hole, and it
-  produced nothing in between. Whichever hole they settle in is still there a
-  moment later, so a decision waits for the playhead to stop for a second -
-  under the cheapest thing it can buy, and over the gap between two presses of a
-  held key. The hand-back to the original is deliberately above that guard: a
-  viewer who is seeking is never left in a buffering panel.
+- The render no longer chases a playhead that is still moving. A viewer tapping
+  the seek key moves it about once a second, and every move was a decision: the
+  running job was cancelled and restarted on the new hole, and it produced
+  nothing in between. Whichever hole they settle in is still there a moment
+  later, so a decision waits for the playhead to stop for a second. The
+  hand-back to the original is deliberately above that guard: a viewer who is
+  seeking is never left in a buffering panel.
   Measured as an A/B on the same stream and the same driver, six back-seeks
   900 ms apart with the job mid-range, the only difference being the settle
   window:
@@ -109,9 +118,11 @@ and looks like a broken helper until the runtime is re-staged.
   this entry said three cold starts, which was inferred from an uncontrolled run
   and is wrong.
   At 400 ms between presses both builds retarget once: the seeks queue, and the
-  existing "not while a seek is in flight" rule already coalesces them. The
-  window this changes is the half-second-to-second press, where each seek lands
-  before the next arrives.
+  existing "not while a seek is in flight" rule already coalesces them. That is
+  also what a physically held key produces - Windows auto-repeats at about
+  30 Hz after its half-second delay - so the window this guard owns is the
+  tapped key or the clicked button, around a second apart, where each seek
+  lands before the next arrives.
 - The speed the status line reports is the speed of the render, not of the
   download. `0.48x real time` on a card measured at 16.3 ms/frame was the
   session's first minute of acquisition averaged into its render: the clock now

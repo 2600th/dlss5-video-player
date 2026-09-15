@@ -612,11 +612,15 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     }
 }
 
-// The publish gate compares the joined render's frame count against the frames
-// the renderer reported. That count is read by demuxing rather than decoding,
-// which is 400x cheaper and used to hold the next hole's render back by 18 s -
-// so the two counts have to agree on a stream where they could disagree: these
-// parts carry B-frames, so coded and displayed order differ.
+// The publish gate compares the joined render's frame count and video span
+// against what the renderer reported. Both are read by demuxing rather than
+// decoding, which is 400x cheaper and used to hold the next hole's render back
+// by 18 s - so they have to agree with a decode on a stream where they could
+// disagree. These parts carry B-frames, so coded and presentation order differ
+// and the last packet's duration is derived rather than stored: Matroska has no
+// per-packet duration, and a tail that came back unknown would leave the span
+// one frame short of the file. The joined length is deliberately an odd number
+// of frames, so an off-by-one cannot hide in a round total.
 void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helpers)
 {
     FixtureDirectory fixture;
@@ -629,7 +633,7 @@ void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helper
         L"-f", L"lavfi", L"-i", L"testsrc=s=64x48:r=10:d=2", L"-c:v", L"libx264",
         L"-bf", L"2", L"-pix_fmt", L"yuv420p", first.wstring()}, log));
     CHECK(RunTool(helpers / L"ffmpeg.exe", {L"-v", L"error", L"-nostdin", L"-n",
-        L"-f", L"lavfi", L"-i", L"testsrc=s=64x48:r=10:d=1", L"-c:v", L"libx264",
+        L"-f", L"lavfi", L"-i", L"testsrc=s=64x48:r=10:d=1.1", L"-c:v", L"libx264",
         L"-bf", L"2", L"-pix_fmt", L"yuv420p", second.wstring()}, log));
 
     const std::vector<std::filesystem::path> parts{first, second};
@@ -638,13 +642,18 @@ void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helper
     // Ground truth: every frame actually decoded out of the joined file.
     const auto decoded = Probe(helpers, joined, log, {L"-count_frames", L"-select_streams", L"v:0",
         L"-show_entries", L"stream=nb_read_frames", L"-of", L"default=noprint_wrappers=1"});
-    CHECK(decoded.find("nb_read_frames=30") != std::string::npos);
+    CHECK(decoded.find("nb_read_frames=31") != std::string::npos);
 
     const auto measured = ProbeMedia(helpers, joined, {});
     CHECK(measured.ok);
-    CHECK_EQ(uint64_t{30}, measured.frameCount);
+    CHECK_EQ(uint64_t{31}, measured.frameCount);
     CHECK_EQ(uint32_t{64}, measured.width);
     CHECK_EQ(uint32_t{48}, measured.height);
+    // 31 frames at 10 fps, so the last frame's derived duration is inside this:
+    // drop it and the span reads 3.0 s. This is the field the publish gate's
+    // duration comparison comes from.
+    CHECK_EQ(int64_t{31000000}, measured.videoDuration100ns);
+    CHECK(measured.decodedFinalFrame);
 
     // What the gate is for: a join that lost a part has to read short, or a
     // truncated render would be published as a complete cache entry.
@@ -653,6 +662,7 @@ void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helper
     const auto shortMeasured = ProbeMedia(helpers, shortJoin, {});
     CHECK(shortMeasured.ok);
     CHECK_EQ(uint64_t{20}, shortMeasured.frameCount);
+    CHECK_EQ(int64_t{20000000}, shortMeasured.videoDuration100ns);
 }
 
 } // namespace
