@@ -20,6 +20,7 @@
 #include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
+#include "NeuralCoverage.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #ifdef small
@@ -2661,6 +2662,278 @@ void render_range_residual_below_one_frame_is_coverage_not_work_test()
     // Without a frame rate a residual of unknown length stays work.
     CHECK(!RenderRangeIsCovered(head,head+1,0.0));
     CHECK(RenderRangeIsCovered(head+1,head,0.0));
+}
+
+// 100ns source timestamps: the units the segment index, the renderer and the
+// playback clock all speak. One second, and one frame of the 30 fps clip the
+// backward-seek bug was reported against.
+constexpr int64_t kSecond100ns = 10000000;
+constexpr int64_t kFrame100ns = 333333;
+
+// CoverageSpan has no equality operator - nothing in the player compares two
+// spans - so the tests name the endpoints they mean.
+void check_span(const CoverageSpan& span, int64_t start100ns, int64_t end100ns)
+{
+    CHECK_EQ(start100ns, span.start100ns);
+    CHECK_EQ(end100ns, span.end100ns);
+}
+
+void coverage_merge_sorts_drops_degenerate_and_joins_touching_spans_test()
+{
+    // A run publishes out of order relative to earlier runs, retries overlap
+    // what they redo, and a cancelled job can leave an empty span behind.
+    const std::vector<CoverageSpan> merged = MergeSpans({
+        {40 * kSecond100ns, 50 * kSecond100ns},
+        {10 * kSecond100ns, 20 * kSecond100ns},
+        {20 * kSecond100ns, 30 * kSecond100ns},
+        {5 * kSecond100ns, 5 * kSecond100ns},
+        {9 * kSecond100ns, 3 * kSecond100ns},
+        {25 * kSecond100ns, 35 * kSecond100ns},
+    });
+    CHECK_EQ(size_t{2}, merged.size());
+    if (merged.size() == 2) {
+        check_span(merged[0], 10 * kSecond100ns, 35 * kSecond100ns);
+        check_span(merged[1], 40 * kSecond100ns, 50 * kSecond100ns);
+    }
+
+    // Two runs that meet exactly are one rendered region: the first job's last
+    // frame and the second job's first are consecutive frames of the video, so
+    // a render boundary must never be reported as a hole.
+    const std::vector<CoverageSpan> touching =
+        MergeSpans({{0, 10 * kSecond100ns}, {10 * kSecond100ns, 20 * kSecond100ns}});
+    CHECK_EQ(size_t{1}, touching.size());
+    if (touching.size() == 1) check_span(touching[0], 0, 20 * kSecond100ns);
+
+    // One tick short of touching is a real gap and must survive as two spans,
+    // otherwise an unrendered frame would be claimed as playable.
+    const std::vector<CoverageSpan> gapped =
+        MergeSpans({{0, 10 * kSecond100ns}, {10 * kSecond100ns + 1, 20 * kSecond100ns}});
+    CHECK_EQ(size_t{2}, gapped.size());
+    if (gapped.size() == 2) {
+        check_span(gapped[0], 0, 10 * kSecond100ns);
+        check_span(gapped[1], 10 * kSecond100ns + 1, 20 * kSecond100ns);
+    }
+}
+
+void uncovered_spans_of_nothing_is_everything_and_of_everything_is_nothing_test()
+{
+    const CoverageSpan range{0, 104 * kSecond100ns};
+
+    const std::vector<CoverageSpan> fresh = UncoveredSpans({}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, fresh.size());
+    if (fresh.size() == 1) check_span(fresh[0], range.start100ns, range.end100ns);
+
+    CHECK(UncoveredSpans({{0, 104 * kSecond100ns}}, range, kFrame100ns).empty());
+
+    // Two runs that meet leave nothing to render between them.
+    CHECK(UncoveredSpans({{0, 52 * kSecond100ns}, {52 * kSecond100ns, 104 * kSecond100ns}}, range,
+                         kFrame100ns)
+              .empty());
+}
+
+void uncovered_spans_find_the_hole_between_regions_and_the_lead_in_before_the_first_test()
+{
+    // The reported session: the user let it render from 20s, seeked back, and
+    // the opening twenty seconds were never rendered at all. Both the lead-in
+    // and the tail are work, and the lead-in is the one that used to be lost.
+    const CoverageSpan range{0, 104 * kSecond100ns};
+    const std::vector<CoverageSpan> holes =
+        UncoveredSpans({{20 * kSecond100ns, 60 * kSecond100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{2}, holes.size());
+    if (holes.size() == 2) {
+        check_span(holes[0], 0, 20 * kSecond100ns);
+        check_span(holes[1], 60 * kSecond100ns, 104 * kSecond100ns);
+    }
+
+    // The mirror image: the opening and the tail rendered, the middle not.
+    const std::vector<CoverageSpan> between = UncoveredSpans(
+        {{60 * kSecond100ns, 104 * kSecond100ns}, {0, 20 * kSecond100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, between.size());
+    if (between.size() == 1) check_span(between[0], 20 * kSecond100ns, 60 * kSecond100ns);
+}
+
+void uncovered_spans_clip_coverage_to_the_range_and_ignore_coverage_outside_it_test()
+{
+    // A range narrower than the coverage: a trimmed export, or a session
+    // measuring what is left of the clip from a point the user seeked to.
+    const CoverageSpan range{30 * kSecond100ns, 90 * kSecond100ns};
+
+    const std::vector<CoverageSpan> leading =
+        UncoveredSpans({{10 * kSecond100ns, 40 * kSecond100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, leading.size());
+    if (leading.size() == 1) check_span(leading[0], 40 * kSecond100ns, 90 * kSecond100ns);
+
+    const std::vector<CoverageSpan> trailing =
+        UncoveredSpans({{80 * kSecond100ns, 120 * kSecond100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, trailing.size());
+    if (trailing.size() == 1) check_span(trailing[0], 30 * kSecond100ns, 80 * kSecond100ns);
+
+    const std::vector<CoverageSpan> both = UncoveredSpans(
+        {{10 * kSecond100ns, 40 * kSecond100ns}, {80 * kSecond100ns, 120 * kSecond100ns}}, range,
+        kFrame100ns);
+    CHECK_EQ(size_t{1}, both.size());
+    if (both.size() == 1) check_span(both[0], 40 * kSecond100ns, 80 * kSecond100ns);
+
+    // Coverage that never meets the range buys nothing inside it.
+    const std::vector<CoverageSpan> outside = UncoveredSpans(
+        {{0, 5 * kSecond100ns}, {100 * kSecond100ns, 110 * kSecond100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, outside.size());
+    if (outside.size() == 1) check_span(outside[0], 30 * kSecond100ns, 90 * kSecond100ns);
+}
+
+void uncovered_spans_drop_sub_frame_holes_but_keep_a_hole_one_frame_wide_test()
+{
+    // Integer per-frame segment ends against a fractional frame rate leave a
+    // few ticks of residual that no job can render: asking for less than a
+    // frame earns a range refusal from the worker. A hole exactly one frame
+    // wide is a frame the user would watch unrendered, so it is work.
+    const CoverageSpan range{0, 10 * kSecond100ns};
+    const std::vector<CoverageSpan> covered{
+        {0, 3 * kSecond100ns},
+        {3 * kSecond100ns + kFrame100ns - 1, 6 * kSecond100ns},
+        {6 * kSecond100ns + kFrame100ns, 10 * kSecond100ns},
+    };
+
+    const std::vector<CoverageSpan> holes = UncoveredSpans(covered, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, holes.size());
+    if (holes.size() == 1)
+        check_span(holes[0], 6 * kSecond100ns, 6 * kSecond100ns + kFrame100ns);
+
+    // The sliver is only dropped by the width filter, not by the arithmetic.
+    CHECK_EQ(size_t{2}, UncoveredSpans(covered, range, 0).size());
+
+    // The same residual at the end of the range, which is where the re-toggled
+    // session found it.
+    CHECK(UncoveredSpans({{0, 10 * kSecond100ns - (kFrame100ns - 1)}}, range, kFrame100ns).empty());
+    const std::vector<CoverageSpan> tail =
+        UncoveredSpans({{0, 10 * kSecond100ns - kFrame100ns}}, range, kFrame100ns);
+    CHECK_EQ(size_t{1}, tail.size());
+    if (tail.size() == 1)
+        check_span(tail[0], 10 * kSecond100ns - kFrame100ns, 10 * kSecond100ns);
+}
+
+void next_render_target_clips_the_hole_under_the_playhead_to_the_playhead_test()
+{
+    // The user is waiting on this frame. Rendering the seconds they already
+    // passed first would make them wait for all of it before anything appears.
+    const std::vector<CoverageSpan> holes{{0, 20 * kSecond100ns},
+                                          {60 * kSecond100ns, 104 * kSecond100ns}};
+
+    const std::optional<CoverageSpan> inside = NextRenderTarget(holes, 8 * kSecond100ns);
+    CHECK(inside.has_value());
+    if (inside) check_span(*inside, 8 * kSecond100ns, 20 * kSecond100ns);
+
+    // At the first tick of a hole the whole hole is the target.
+    const std::optional<CoverageSpan> atStart = NextRenderTarget(holes, 60 * kSecond100ns);
+    CHECK(atStart.has_value());
+    if (atStart) check_span(*atStart, 60 * kSecond100ns, 104 * kSecond100ns);
+
+    // A hole is half-open: its end timestamp is rendered, so the playhead
+    // sitting exactly there is not inside it and the target is the next hole.
+    const std::optional<CoverageSpan> atEnd = NextRenderTarget(holes, 20 * kSecond100ns);
+    CHECK(atEnd.has_value());
+    if (atEnd) check_span(*atEnd, 60 * kSecond100ns, 104 * kSecond100ns);
+}
+
+void next_render_target_prefers_the_nearest_hole_ahead_then_the_earliest_behind_test()
+{
+    const std::vector<CoverageSpan> holes{{0, 20 * kSecond100ns},
+                                          {40 * kSecond100ns, 50 * kSecond100ns},
+                                          {80 * kSecond100ns, 104 * kSecond100ns}};
+
+    // Playhead on rendered video: playback is about to arrive at the nearest
+    // hole ahead, so that one is rendered before either of the others.
+    const std::optional<CoverageSpan> ahead = NextRenderTarget(holes, 30 * kSecond100ns);
+    CHECK(ahead.has_value());
+    if (ahead) check_span(*ahead, 40 * kSecond100ns, 50 * kSecond100ns);
+
+    const std::optional<CoverageSpan> next = NextRenderTarget(holes, 60 * kSecond100ns);
+    CHECK(next.has_value());
+    if (next) check_span(*next, 80 * kSecond100ns, 104 * kSecond100ns);
+
+    // Nothing left ahead: the earliest hole behind is taken, not the latest.
+    // This is how a session started mid-video eventually renders its opening.
+    const std::optional<CoverageSpan> behind = NextRenderTarget(holes, 104 * kSecond100ns);
+    CHECK(behind.has_value());
+    if (behind) check_span(*behind, 0, 20 * kSecond100ns);
+
+    const std::optional<CoverageSpan> onlyBehind =
+        NextRenderTarget({{0, 20 * kSecond100ns}, {40 * kSecond100ns, 50 * kSecond100ns}},
+                         55 * kSecond100ns);
+    CHECK(onlyBehind.has_value());
+    if (onlyBehind) check_span(*onlyBehind, 0, 20 * kSecond100ns);
+}
+
+void next_render_target_without_a_hole_has_nothing_to_render_test()
+{
+    CHECK(!NextRenderTarget({}, 12 * kSecond100ns).has_value());
+
+    // Degenerate holes are not work either: a job asked to render an empty
+    // range is refused, and a session that kept asking would never idle.
+    CHECK(!NextRenderTarget({{5 * kSecond100ns, 5 * kSecond100ns},
+                             {9 * kSecond100ns, 3 * kSecond100ns}},
+                            12 * kSecond100ns)
+               .has_value());
+}
+
+void span_containing_returns_the_playable_region_not_a_later_disjoint_one_test()
+{
+    // Two rendered regions with a hole between them, the first one built from
+    // two runs that met exactly.
+    const std::vector<CoverageSpan> covered{{20 * kSecond100ns, 40 * kSecond100ns},
+                                            {40 * kSecond100ns, 60 * kSecond100ns},
+                                            {80 * kSecond100ns, 104 * kSecond100ns}};
+
+    const std::optional<CoverageSpan> playing = SpanContaining(covered, 30 * kSecond100ns);
+    CHECK(playing.has_value());
+    if (playing) check_span(*playing, 20 * kSecond100ns, 60 * kSecond100ns);
+
+    const std::optional<CoverageSpan> later = SpanContaining(covered, 90 * kSecond100ns);
+    CHECK(later.has_value());
+    if (later) check_span(*later, 80 * kSecond100ns, 104 * kSecond100ns);
+
+    // Inside the hole there is no playable buffer. The later region is not
+    // lead: playback cannot reach it without crossing unrendered video, and a
+    // session measuring its buffer against the newest rendered timestamp would
+    // attach with nothing to show.
+    CHECK(!SpanContaining(covered, 70 * kSecond100ns).has_value());
+    // Before the first region, and at the exclusive end of a region.
+    CHECK(!SpanContaining(covered, 10 * kSecond100ns).has_value());
+    CHECK(!SpanContaining(covered, 60 * kSecond100ns).has_value());
+    CHECK(!SpanContaining(covered, 104 * kSecond100ns).has_value());
+    // The first and last rendered ticks are inside.
+    CHECK(SpanContaining(covered, 20 * kSecond100ns).has_value());
+    CHECK(SpanContaining(covered, 104 * kSecond100ns - 1).has_value());
+}
+
+void covered_duration_counts_only_rendered_video_inside_the_range_test()
+{
+    // The render pace is measured against this, so counting a hole as work
+    // done would report a session as faster than real time when it is not.
+    const CoverageSpan range{0, 104 * kSecond100ns};
+    const std::vector<CoverageSpan> covered{{20 * kSecond100ns, 60 * kSecond100ns},
+                                            {30 * kSecond100ns, 50 * kSecond100ns},
+                                            {80 * kSecond100ns, 104 * kSecond100ns},
+                                            {110 * kSecond100ns, 120 * kSecond100ns}};
+    CHECK_EQ(64 * kSecond100ns, CoveredDuration100ns(covered, range));
+    CHECK(std::abs(CoveredFraction(covered, range) - 64.0 / 104.0) < 1e-12);
+
+    // Coverage wider than the range contributes only the overlap, and a range
+    // entirely inside one rendered region is finished.
+    CHECK_EQ(10 * kSecond100ns, CoveredDuration100ns({{0, 100 * kSecond100ns}},
+                                                     {10 * kSecond100ns, 20 * kSecond100ns}));
+    CHECK_EQ(1.0, CoveredFraction({{0, 100 * kSecond100ns}},
+                                  {10 * kSecond100ns, 20 * kSecond100ns}));
+    // Two runs that meet cover the range exactly once, not twice.
+    CHECK_EQ(1.0, CoveredFraction({{0, 52 * kSecond100ns}, {52 * kSecond100ns, 104 * kSecond100ns}},
+                                  range));
+
+    // Nothing rendered, and a range with nothing in it.
+    CHECK_EQ(int64_t{0}, CoveredDuration100ns({}, range));
+    CHECK_EQ(0.0, CoveredFraction({}, range));
+    CHECK_EQ(int64_t{0}, CoveredDuration100ns(covered, {50 * kSecond100ns, 50 * kSecond100ns}));
+    CHECK_EQ(0.0, CoveredFraction(covered, {50 * kSecond100ns, 50 * kSecond100ns}));
+    CHECK_EQ(0.0, CoveredFraction(covered, {60 * kSecond100ns, 40 * kSecond100ns}));
 }
 
 void neural_cancel_and_failure_offer_original_only_without_partial_cache_test()
@@ -6324,6 +6597,16 @@ int wmain(int argc, wchar_t* argv[])
     neural_completion_publishes_only_after_probe_and_manifest_validation_test();
     neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test();
     render_range_residual_below_one_frame_is_coverage_not_work_test();
+    coverage_merge_sorts_drops_degenerate_and_joins_touching_spans_test();
+    uncovered_spans_of_nothing_is_everything_and_of_everything_is_nothing_test();
+    uncovered_spans_find_the_hole_between_regions_and_the_lead_in_before_the_first_test();
+    uncovered_spans_clip_coverage_to_the_range_and_ignore_coverage_outside_it_test();
+    uncovered_spans_drop_sub_frame_holes_but_keep_a_hole_one_frame_wide_test();
+    next_render_target_clips_the_hole_under_the_playhead_to_the_playhead_test();
+    next_render_target_prefers_the_nearest_hole_ahead_then_the_earliest_behind_test();
+    next_render_target_without_a_hole_has_nothing_to_render_test();
+    span_containing_returns_the_playable_region_not_a_later_disjoint_one_test();
+    covered_duration_counts_only_rendered_video_inside_the_range_test();
     neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
     neural_pause_suspends_rendering_and_resumes_without_advancing_test();
     neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();

@@ -491,10 +491,30 @@ having its shorter result read as a longer one.
 The player collects those messages into a `NeuralSegmentIndex` and hands it to
 `SynchronizedPlayback::OpenLive`, which pairs the original against the growing
 set, rebasing each segment with its own first pts and opening the next segment
-before the current one runs out. Reading past the render head returns
-`WaitingForRender`, which the player treats as "buffer", not "stop". When the
-job ends the segments are concatenated (`ConcatenateMedia`) into the single
+before the current one runs out. Reading video nobody has rendered returns
+`WaitingForRender`, which the player treats as "buffer" or "play the original",
+never as "stop". When a job ends the segments IT published - selected by run id,
+not by position - are concatenated (`ConcatenateMedia`) into the single
 `neural.mkv` the cache promotes, so the next open is an ordinary cache hit.
+
+Coverage is a **set of rendered regions**, not a head. A session renders the
+whole video (or the marked range) hole by hole, nearest the playhead first, and
+a viewer who seeks backwards makes the next job start behind an earlier one. So
+the index is sorted by timestamp rather than by arrival, each segment carries the
+`runId` of the job that published it, and `NeuralCoverage.h` holds the timeline
+algebra over those regions: `MergeSpans`, `UncoveredSpans`, `NextRenderTarget`
+(the hole under the playhead, else the nearest ahead, else the earliest behind),
+`SpanContaining` and `CoveredFraction`. `live_session::ShouldRetarget` decides
+when to move a running job, and it compares regions rather than endpoints -
+a frame-snap residual of five ticks between a hole's start and a job's range
+once read as different work and relaunched the helper on every tick.
+
+What replaced what: the session used to render one forward run from the playhead
+and "rebase" on a seek out of it, which stopped the session and deleted every
+rendered segment the new playhead was not inside. Retargeting keeps them. The
+index's `Finished()` flag is gone with it: whether a session has more to do is a
+question about coverage against its range, and one job ending answers only for
+its own hole.
 
 Both the coverage test and the lookup that picks a segment run on frame numbers,
 which are exact on the CFR grid, because a seeked FFmpeg source stamps its
@@ -503,6 +523,11 @@ seam would otherwise carry: a segment's exclusive end is rebuilt from an integer
 frame duration, so at 30000/1001-style rates it lands a couple of ticks under
 the next segment's own first pts, and a playhead inside that hole used to be
 reported as a producer contract break.
+
+Entering a segment part-way is a seek inside that file, and a segment holds one
+keyframe at its own start, so the first frames it hands back are behind the
+playhead. In live mode the pair builder walks over them; in cached playback a
+numbered disagreement stays the hard identity failure it is meant to catch.
 
 Sizing follows measurement rather than preference, and the measurements moved a
 long way during the work described below. `playback_timing::ForecastLiveRender`

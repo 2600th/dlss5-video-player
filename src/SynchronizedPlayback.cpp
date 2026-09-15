@@ -257,9 +257,22 @@ struct SynchronizedPlayback::Impl {
             const uint64_t originalNumber=pendingOriginal->frame.frameNumber;
             const uint64_t neuralNumber=pendingNeural->frame.frameNumber;
             if(originalNumber==neuralNumber)return Match::Pair;
-            // Never present two different source frames as one pair.
+            // Live mode enters a segment by seeking the file, and a segment holds
+            // one keyframe at its own start: a seek into the middle of it lands
+            // back on that keyframe, so the first frames it hands over are BEHIND
+            // the playhead. Walking forward over them reaches the frame the
+            // original is holding, bounded by the caller's resync guard - which
+            // is what the timestamp path below has always done. Refusing instead
+            // made every seek into the middle of a rendered segment fail: one
+            // measured session reported original=165 against neural=150, exactly
+            // the half second between the playhead and the segment's start, and
+            // handed playback back to the original over rendered frames.
+            //
+            // Cached playback keeps the hard refusal: there the two files are a
+            // published pair, and a numbered disagreement is the identity failure
+            // this check exists to catch.
             if(originalNumber<neuralNumber)pendingOriginal.reset();else pendingNeural.reset();
-            return Match::Mismatch;
+            return live?Match::Skew:Match::Mismatch;
         }
         const int64_t difference=pendingOriginal->frame.timestamp100ns-pendingNeural->frame.timestamp100ns;
         if(std::llabs(difference)<=tolerance100ns)return Match::Pair;
@@ -308,16 +321,12 @@ struct SynchronizedPlayback::Impl {
         return Desync("resync-guard");
     }
 
-    // Indices start at zero and strictly increase, so a segment never sits past
-    // its own index; the direct hit is the rule and the scan the exception.
-    std::optional<NeuralSegment> SegmentByIndex(uint64_t index)const
+    // A run numbers its own segments, so a segment's identity is the pair: two
+    // runs both publishing an index 0 is the normal case once a session has been
+    // retargeted at a hole.
+    static bool SameSegment(const NeuralSegment& a,const NeuralSegment& b)
     {
-        const size_t count=segments->Count();
-        if(index>=count)return std::nullopt;
-        if(auto direct=segments->At(static_cast<size_t>(index));direct&&direct->index==index)return direct;
-        for(size_t position=0;position<count;++position)
-            if(auto candidate=segments->At(position);candidate&&candidate->index==index)return candidate;
-        return std::nullopt;
+        return a.runId==b.runId&&a.index==b.index&&a.firstTimestamp100ns==b.firstTimestamp100ns;
     }
 
     bool SegmentCovers(const NeuralSegment& candidate,const Pending& pending)const
@@ -331,31 +340,25 @@ struct SynchronizedPlayback::Impl {
                pending.frame.timestamp100ns<candidate.end100ns;
     }
 
-    // No finalized segment covers the playhead: waiting, ending or broken.
-    SynchronizedReadResult ClassifyUncovered(int64_t timestamp100ns)
-    {
-        const bool finished=segments->Finished();
-        if(timestamp100ns>=segments->Head100ns())
-            return finished?SynchronizedReadResult::EndOfStream:SynchronizedReadResult::WaitingForRender;
-        // Behind the render start: only a relaunch from further back covers it.
-        if(timestamp100ns<segments->Start100ns())
-            return finished?Desync("behind-render-start"):SynchronizedReadResult::WaitingForRender;
-        // A hole between two finalized segments is a producer contract break.
-        return Desync("segment-hole");
-    }
 
     SynchronizedReadResult AdoptSegment(NeuralSegment wanted,int64_t timestamp100ns,std::stop_token stop)
     {
+        // A file that begins after the playhead cannot serve it. Reaching an
+        // earlier region from a later one used to land here with a negative
+        // entry offset, skip the seek, and pair that region's frame 0 against
+        // the original until the resync guard fired.
+        if(timestamp100ns+tolerance100ns/2<wanted.firstTimestamp100ns)
+            return SynchronizedReadResult::WaitingForRender;
         // Only a disagreement between number and timestamp coverage can ask for
         // the file already open; serving it beats reopening it every frame.
-        if(segmentSource&&segment.index==wanted.index)return SynchronizedReadResult::PairReady;
+        if(segmentSource&&SameSegment(segment,wanted))return SynchronizedReadResult::PairReady;
         // The boundary arrived before the background open finished: wait for it
         // rather than starting a second process for the same file.
-        if(pendingOpen&&pendingOpen->segment.index==wanted.index&&pendingOpen->future.valid())
+        if(pendingOpen&&SameSegment(pendingOpen->segment,wanted)&&pendingOpen->future.valid())
             pendingOpen->future.wait();
         HarvestAsyncOpen();
         // The boundary is free when prefetch already opened and warmed the file.
-        if(prefetchSource&&prefetchSegment.index==wanted.index){
+        if(prefetchSource&&SameSegment(prefetchSegment,wanted)){
             if(segmentSource)segmentSource->Close();
             segmentSource=std::move(prefetchSource);segment=std::move(prefetchSegment);
             pendingNeural=std::move(prefetchPending);prefetchPending.reset();
@@ -397,20 +400,29 @@ struct SynchronizedPlayback::Impl {
     {
         if(segmentSource&&!segmentExhausted&&SegmentCovers(segment,*pendingOriginal))
             return SynchronizedReadResult::PairReady;
-        if(segmentSource&&segmentExhausted){
-            auto following=SegmentByIndex(segment.index+1);
-            if(!following)
-                return segments->Finished()?SynchronizedReadResult::EndOfStream
-                                           :SynchronizedReadResult::WaitingForRender;
-            return AdoptSegment(std::move(*following),timestamp100ns,stop);
-        }
         // Coverage is decided on frame numbers, so the lookup is too; only a
         // source that does not stamp identities falls back to timestamps.
         auto covering=pendingOriginal->numbered
                           ? segments->ContainingFrame(pendingOriginal->frame.frameNumber)
                           : std::nullopt;
         if(!covering)covering=segments->Containing(timestamp100ns);
-        if(!covering)return ClassifyUncovered(timestamp100ns);
+        // The open file ended inside its own declared window and the lookup hands
+        // it straight back, so step to what follows rather than reopening it
+        // every frame. Only a file that continues this region will do: the first
+        // file of a region across a hole is not this playhead's.
+        if(segmentExhausted&&segmentSource&&covering&&SameSegment(*covering,segment)){
+            auto following=segments->After(segment.firstTimestamp100ns);
+            if(!following||following->firstTimestamp100ns>segment.end100ns)
+                return SynchronizedReadResult::WaitingForRender;
+            covering=std::move(following);
+        }
+        // Nothing rendered here yet. Coverage is a set of rendered regions, and
+        // the gaps between them are ordinary unrendered video that the session
+        // fills as the user reaches them - a wait, never a fault. Before the
+        // first region, inside a hole and past the newest region are the same
+        // answer here; where the video ENDS is the playable range's business,
+        // which is the only thing that knows it.
+        if(!covering)return SynchronizedReadResult::WaitingForRender;
         return AdoptSegment(std::move(*covering),timestamp100ns,stop);
     }
 
@@ -425,8 +437,9 @@ struct SynchronizedPlayback::Impl {
         if(!prefetchSource){
             if(pendingOpen)return;
             if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
-            auto following=SegmentByIndex(segment.index+1);
-            if(!following)return;
+            auto following=segments->After(segment.firstTimestamp100ns);
+            // Only the file that continues this region is worth a process start.
+            if(!following||following->firstTimestamp100ns>segment.end100ns)return;
             StartAsyncOpen(std::move(*following));
             return;
         }
@@ -757,10 +770,18 @@ std::string SynchronizedPlayback::LastFault()const
     if(impl_->live){
         text+=" segment="+std::to_string(fault.segmentIndex);
         text+=fault.exhausted?" exhausted=1":" exhausted=0";
-        if(impl_->segments)
-            text+=" head="+std::to_string(impl_->segments->Head100ns())+
-                  " segments="+std::to_string(impl_->segments->Count())+
-                  (impl_->segments->Finished()?" finished=1":" finished=0");
+        // A refusal is judged against coverage, and coverage is now a set: the
+        // regions themselves are printed, because "head" alone cannot say
+        // whether a target sits in a hole or beyond everything rendered.
+        if(impl_->segments){
+            const auto covered=impl_->segments->CoveredRanges();
+            text+=" segments="+std::to_string(impl_->segments->Count())+" coverage=";
+            if(covered.empty())text+="none";
+            for(size_t i=0;i<covered.size();++i){
+                if(i)text+=",";
+                text+="["+std::to_string(covered[i].start100ns)+","+std::to_string(covered[i].end100ns)+")";
+            }
+        }
     }
     return text;
 }

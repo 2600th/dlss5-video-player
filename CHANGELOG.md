@@ -13,6 +13,30 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- An active neural session renders the whole video and stays seekable everywhere.
+  It used to render one forward run from the playhead, which left everything
+  before it unrendered for good: seeking back landed on frames nobody had
+  rendered, and the session "rebased" there - stopping the render, deleting every
+  rendered segment the new playhead was not inside, and rendering the same
+  seconds again. Coverage is a set of rendered regions now. A session's job is
+  the whole source (or the marked range), filled hole by hole nearest the
+  playhead first, and the status line says how much of it is done. Seeking into
+  rendered frames plays them wherever they are; seeking into unrendered frames
+  plays the original there at once and moves the render to that part of the video
+  instead of discarding anything. The seek bar draws every rendered region, so
+  the gaps are visible rather than implied by one long band.
+  Measured on a 113 s 1080p clip, toggled on at 60 s and then seeked backwards
+  four times: **4 retargets, each keeping all 33 rendered segments**, playback
+  attached on the new coverage 3 s later, **2 attaches in the whole session**
+  where an interim build oscillated 28 times, and the clip finished fully
+  rendered. Three defects were found by driving it and are fixed here: a job
+  whose range was frame-snapped five ticks past its hole relaunched the helper on
+  every tick; `ShouldAttach` ignored a seek in flight and attached at the position
+  playback was leaving; and a seek into the middle of a rendered segment was
+  refused as a frame mismatch - the segment's own keyframe is at its start, so the
+  first frames after that seek are behind the playhead and are now walked over.
+  `NeuralSegmentIndex::Finished()` is gone: whether a session has more to do is a
+  question about coverage, and one job ending answers only for its own hole.
 - Playback no longer collapses once a stream's source copy is in the cache. Asking
   whether one exists went through `LookupSource`, which authenticates the copy by
   hashing the whole payload - 60.5 MiB for a 1440p trailer, 63-86 ms - and the

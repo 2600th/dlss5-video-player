@@ -2421,10 +2421,11 @@ private:
 };
 
 NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
-                                uint64_t frameCount)
+                                uint64_t frameCount,uint64_t runId=0)
 {
     NeuralSegment segment;
-    segment.path=std::move(path);segment.index=index;segment.firstFrameNumber=firstFrame;
+    segment.path=std::move(path);segment.runId=runId;segment.index=index;
+    segment.firstFrameNumber=firstFrame;
     segment.firstTimestamp100ns=int64_t(firstFrame)*kLiveFrame100ns;
     segment.end100ns=int64_t(firstFrame+frameCount)*kLiveFrame100ns;
     segment.frameCount=frameCount;
@@ -2435,10 +2436,11 @@ NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64
 // grid, while the exclusive end is rebuilt from the integer frame duration, so
 // a fractional frame rate leaves a sub-frame hole before the next segment.
 NeuralSegment RoundedSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
-                                   uint64_t frameCount)
+                                   uint64_t frameCount,uint64_t runId=0)
 {
     NeuralSegment segment;
-    segment.path=std::move(path);segment.index=index;segment.firstFrameNumber=firstFrame;
+    segment.path=std::move(path);segment.runId=runId;segment.index=index;
+    segment.firstFrameNumber=firstFrame;
     segment.firstTimestamp100ns=std::llround(double(firstFrame)*10000000.0/30.0);
     segment.end100ns=segment.firstTimestamp100ns+int64_t(frameCount)*kLiveFrame100ns;
     segment.frameCount=frameCount;
@@ -2450,39 +2452,91 @@ SynchronizedPlayback::SegmentSourceFactory LiveSegmentFactory(LiveFrameLibrary& 
     return [&library]{return std::make_unique<LiveLibrarySource>(library);};
 }
 
+// The library numbers every file's frames from its own zero, so a frame served
+// from the wrong rendered region carries the right number once the segment
+// record rebases it. Tagging a file's pixels names the region it really is.
+constexpr size_t kRegionTagChannel=1;
+void TagLiveStream(LiveFrameLibrary::Stream& stream,uint8_t tag)
+{
+    for(VideoFrame& frame:stream.frames)frame.bgra[kRegionTagChannel]=tag;
+}
+
+int LiveStreamTag(const VideoFrame& frame)
+{
+    return frame.bgra.size()>kRegionTagChannel?int(frame.bgra[kRegionTagChannel]):-1;
+}
+
+// The coverage a backward seek leaves behind: run 1 rendered frames 20-29, the
+// user seeked back to the start, and run 2 rendered frames 0-4 there. The two
+// regions are disjoint and both are rendered work.
+void AppendTwoDisjointRegions(NeuralSegmentIndex& index)
+{
+    index.Append(LiveSegmentRecord(L"run1/neural-00000.mkv",0,20,5,1));
+    index.Append(LiveSegmentRecord(L"run1/neural-00001.mkv",1,25,5,1));
+    index.Append(LiveSegmentRecord(L"run2/neural-00000.mkv",0,0,5,2));
+}
+
 void neural_segment_index_orders_appends_and_locates_by_timestamp_test()
 {
     NeuralSegmentIndex index;
-    CHECK(index.Empty());CHECK(!index.Finished());CHECK_EQ(size_t{0},index.Count());
+    CHECK(index.Empty());CHECK_EQ(size_t{0},index.Count());
     CHECK_EQ(int64_t{0},index.Start100ns());CHECK_EQ(int64_t{0},index.Head100ns());
     CHECK_EQ(uint64_t{0},index.TotalFrames());
     CHECK(!index.At(0).has_value());CHECK(!index.Containing(0).has_value());
 
-    index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
-    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,3));
-    // A duplicate or late index would reorder an append-only timeline.
-    index.Append(LiveSegmentRecord(L"duplicate.mkv",1,18,3));
-    index.Append(LiveSegmentRecord(L"stale.mkv",0,0,3));
+    index.Append(LiveSegmentRecord(L"run1/neural-00000.mkv",0,10,5,1));
+    index.Append(LiveSegmentRecord(L"run1/neural-00001.mkv",1,15,3,1));
+    // Ground another file already owns is never published over: two owners for
+    // one timestamp would move the timeline under a decoder reading it.
+    index.Append(LiveSegmentRecord(L"overlap.mkv",2,16,3,1));
     CHECK(!index.Empty());CHECK_EQ(size_t{2},index.Count());
     CHECK_EQ(uint64_t{8},index.TotalFrames());
-    CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
-    CHECK_EQ(int64_t{18*kLiveFrame100ns},index.Head100ns());
-    CHECK(!index.At(2).has_value());
-    if(const auto second=index.At(1))
-        CHECK_EQ(std::filesystem::path(L"neural-00001.mkv"),second->path);
 
+    // A backward seek makes the next run publish behind the first one. That
+    // earlier region is kept and sorted into place, not dropped as stale.
+    index.Append(LiveSegmentRecord(L"run2/neural-00000.mkv",0,0,3,2));
+    CHECK_EQ(size_t{3},index.Count());
+    CHECK_EQ(uint64_t{11},index.TotalFrames());
+    CHECK_EQ(int64_t{0},index.Start100ns());
+    CHECK_EQ(int64_t{18*kLiveFrame100ns},index.Head100ns());
+    if(const auto earliest=index.At(0))
+        CHECK_EQ(std::filesystem::path(L"run2/neural-00000.mkv"),earliest->path);
+    if(const auto behind=index.Containing(1*kLiveFrame100ns)){
+        CHECK_EQ(std::filesystem::path(L"run2/neural-00000.mkv"),behind->path);
+        CHECK_EQ(uint64_t{2},behind->runId);
+    }
+    CHECK(!index.At(3).has_value());
+    if(const auto second=index.At(2))
+        CHECK_EQ(std::filesystem::path(L"run1/neural-00001.mkv"),second->path);
+    // Start100ns() and Head100ns() only bound the set; the gap between the two
+    // regions is still unrendered.
+    CHECK(!index.Covered(5*kLiveFrame100ns));
     CHECK(!index.Containing(9*kLiveFrame100ns).has_value());
+
     if(const auto first=index.Containing(10*kLiveFrame100ns))CHECK_EQ(uint64_t{0},first->index);
     if(const auto beforeSeam=index.Containing(15*kLiveFrame100ns-1))CHECK_EQ(uint64_t{0},beforeSeam->index);
     if(const auto afterSeam=index.Containing(15*kLiveFrame100ns))CHECK_EQ(uint64_t{1},afterSeam->index);
     if(const auto tail=index.Containing(18*kLiveFrame100ns-1))CHECK_EQ(uint64_t{1},tail->index);
     CHECK(!index.Containing(18*kLiveFrame100ns).has_value());
 
-    index.Finish();CHECK(index.Finished());
+    // A run filling the hole ends on its own segment boundary, so its last file
+    // reaches into the region beyond. The declared end is clamped there: those
+    // frames are already served from the older file.
+    index.Append(LiveSegmentRecord(L"run3/neural-00000.mkv",0,6,6,3));
+    if(const auto filler=index.Containing(6*kLiveFrame100ns)){
+        CHECK_EQ(uint64_t{3},filler->runId);
+        CHECK_EQ(int64_t{10*kLiveFrame100ns},filler->end100ns);
+    }
+    if(const auto kept=index.Containing(10*kLiveFrame100ns))
+        CHECK_EQ(std::filesystem::path(L"run1/neural-00000.mkv"),kept->path);
+    CHECK(!index.Covered(4*kLiveFrame100ns));
+    CHECK_EQ(size_t{2},index.CoveredRanges().size());
+
     index.Restart();
-    CHECK(index.Empty());CHECK(!index.Finished());CHECK_EQ(size_t{0},index.Count());
+    CHECK(index.Empty());CHECK_EQ(size_t{0},index.Count());
     CHECK_EQ(int64_t{0},index.Start100ns());CHECK_EQ(int64_t{0},index.Head100ns());
     CHECK_EQ(uint64_t{0},index.TotalFrames());
+    CHECK(index.CoveredRanges().empty());
     CHECK(!index.Containing(10*kLiveFrame100ns).has_value());
     // A relaunched job numbers its segments from zero again.
     index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,20,4));
@@ -2493,77 +2547,81 @@ void neural_segment_index_orders_appends_and_locates_by_timestamp_test()
 
 // Turning the toggle off keeps rendered coverage so the next session resumes at
 // the head. The index therefore has to accept a second job's segments after the
-// first job's, and undo only that second job when its worker relaunches.
+// first job's, and undo only that job's own segments when its worker relaunches.
 void neural_segment_index_resumes_after_retained_coverage_test()
 {
     NeuralSegmentIndex index;
-    index.Append(LiveSegmentRecord(L"job1/neural-00000.mkv",0,10,5));
-    index.Append(LiveSegmentRecord(L"job1/neural-00001.mkv",1,15,5));
-    index.Finish();
-    CHECK(index.Finished());
+    index.Append(LiveSegmentRecord(L"job1/neural-00000.mkv",0,10,5,1));
+    index.Append(LiveSegmentRecord(L"job1/neural-00001.mkv",1,15,5,1));
+    CHECK_EQ(size_t{2},index.Count());
 
-    // The session was turned back on: there is more to render, so the coverage
-    // must stop looking like the end of the stream.
-    index.Unfinish();
-    CHECK(!index.Finished());
-    const size_t base=index.Count();
-    CHECK_EQ(size_t{2},base);
-
-    // The resumed job numbers from its own zero; the player offsets by the base.
-    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",base+0,20,5));
-    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",base+1,25,5));
+    // The resumed job numbers from its own zero and continues at the seam.
+    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",0,20,5,2));
+    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",1,25,5,2));
     CHECK_EQ(size_t{4},index.Count());
     CHECK_EQ(uint64_t{20},index.TotalFrames());
     CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
     CHECK_EQ(int64_t{30*kLiveFrame100ns},index.Head100ns());
-    // Coverage is continuous across the seam between the two jobs.
-    if(const auto beforeSeam=index.Containing(20*kLiveFrame100ns-1))CHECK_EQ(uint64_t{1},beforeSeam->index);
-    if(const auto afterSeam=index.Containing(20*kLiveFrame100ns))CHECK_EQ(uint64_t{2},afterSeam->index);
+    // Two jobs that meet leave one region, not a boundary to stall on.
+    CHECK_EQ(size_t{1},index.CoveredRanges().size());
+    if(const auto beforeSeam=index.Containing(20*kLiveFrame100ns-1))
+        CHECK_EQ(uint64_t{1},beforeSeam->runId);
+    if(const auto afterSeam=index.Containing(20*kLiveFrame100ns))
+        CHECK_EQ(uint64_t{2},afterSeam->runId);
 
-    // That job's worker crashed and relaunched: only its own segments go.
-    index.TruncateTo(base);
+    // That job's worker crashed and republishes from its own index zero, so its
+    // files are stale. Only they go; the first job's rendered seconds survive.
+    index.DropRun(2);
     CHECK_EQ(size_t{2},index.Count());
     CHECK_EQ(uint64_t{10},index.TotalFrames());
+    CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
     CHECK_EQ(int64_t{20*kLiveFrame100ns},index.Head100ns());
-    CHECK(!index.Finished());
-    CHECK(index.Containing(15*kLiveFrame100ns).has_value());
-    CHECK(!index.Containing(20*kLiveFrame100ns).has_value());
-    // Truncating to at or past the current size is a no-op, not a clear.
-    index.TruncateTo(9);
+    CHECK(index.Covered(15*kLiveFrame100ns));
+    CHECK(!index.Covered(20*kLiveFrame100ns));
+
+    // A run that published nothing is not a clear, and does not repaint.
+    const uint64_t settled=index.Revision();
+    index.DropRun(7);
     CHECK_EQ(size_t{2},index.Count());
-    index.TruncateTo(0);
+    CHECK_EQ(settled,index.Revision());
+
+    // A run that rendered behind the retained coverage is dropped the same way,
+    // wherever in the timeline its segments sit.
+    index.Append(LiveSegmentRecord(L"job3/neural-00000.mkv",0,0,5,3));
+    CHECK_EQ(int64_t{0},index.Start100ns());
+    CHECK_EQ(size_t{2},index.CoveredRanges().size());
+    index.DropRun(3);
+    CHECK_EQ(size_t{2},index.Count());
+    CHECK_EQ(uint64_t{10},index.TotalFrames());
+    CHECK_EQ(int64_t{10*kLiveFrame100ns},index.Start100ns());
+    CHECK(index.Covered(12*kLiveFrame100ns));
+
+    index.DropRun(1);
     CHECK(index.Empty());CHECK_EQ(uint64_t{0},index.TotalFrames());CHECK_EQ(int64_t{0},index.Head100ns());
 }
 
 // The pace a session reports is steady-state: it starts at the first segment
 // this job published (which absorbs helper startup) and counts only the frames
-// that arrived after it. Adopted coverage and relaunches start a new run.
+// that arrived after it. Dropping a run's segments restarts that measurement.
 void neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_test()
 {
     NeuralSegmentIndex index;
     CHECK_EQ(uint64_t{0},index.Pace().frames);
     CHECK_EQ(0.0,index.Pace().MsPerFrame());
-    index.Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,60));
+    index.Append(LiveSegmentRecord(L"job1/neural-00000.mkv",0,10,60,1));
     CHECK_EQ(uint64_t{0},index.Pace().frames);
-    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,70,60));
-    index.Append(LiveSegmentRecord(L"neural-00002.mkv",2,130,18));
+    index.Append(LiveSegmentRecord(L"job1/neural-00001.mkv",1,70,60,1));
+    index.Append(LiveSegmentRecord(L"job1/neural-00002.mkv",2,130,18,1));
     CHECK_EQ(uint64_t{78},index.Pace().frames);
     CHECK(index.Pace().wallMs>=0.0);
 
-    // A relaunch drops the second job's segments and its pace with them.
-    index.TruncateTo(1);
+    // A relaunch drops that run's segments and the pace measured from them; the
+    // relaunched worker's own first segment pays for startup again.
+    index.DropRun(1);
     CHECK_EQ(uint64_t{0},index.Pace().frames);
-    index.Append(LiveSegmentRecord(L"neural-00001.mkv",1,70,60));
+    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",0,10,60,2));
     CHECK_EQ(uint64_t{0},index.Pace().frames);
-    index.Append(LiveSegmentRecord(L"neural-00002.mkv",2,130,60));
-    CHECK_EQ(uint64_t{60},index.Pace().frames);
-
-    // Resuming on retained coverage: the next job's first segment is startup again.
-    index.Finish();index.Unfinish();
-    CHECK_EQ(uint64_t{0},index.Pace().frames);
-    index.Append(LiveSegmentRecord(L"job2/neural-00000.mkv",3,190,60));
-    CHECK_EQ(uint64_t{0},index.Pace().frames);
-    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",4,250,60));
+    index.Append(LiveSegmentRecord(L"job2/neural-00001.mkv",1,70,60,2));
     CHECK_EQ(uint64_t{60},index.Pace().frames);
     index.Restart();
     CHECK_EQ(uint64_t{0},index.Pace().frames);
@@ -2571,7 +2629,8 @@ void neural_segment_index_pace_counts_frames_after_the_first_segment_of_a_run_te
 
 void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
 {
-    LiveFrameLibrary library;library.Add(L"original.mkv",40);library.Add(L"neural-00000.mkv",5);
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);
     LiveLibrarySource original(library);
     SynchronizedPlayback playback(original,LiveSegmentFactory(library));
     const auto segments=std::make_shared<NeuralSegmentIndex>();
@@ -2599,8 +2658,15 @@ void live_playback_waits_at_the_render_head_and_resumes_on_a_new_segment_test()
     CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
     CHECK(playback.SetView(ComparisonView::Neural));
     CHECK_EQ(1,library.Opens(L"neural-00000.mkv"));
-    segments->Finish();
-    CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+    // Waiting on the render is not a fault, and it is not an end: a live read
+    // ends on the playable range's end, never on where coverage stops.
+    CHECK(playback.LastFault().empty());
+    segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,5));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    if(const auto* resumed=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{15},resumed->frameNumber);
+        CHECK_EQ(resumed->original.frameNumber,resumed->neural.frameNumber);
+    }
 }
 
 void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
@@ -2612,8 +2678,8 @@ void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
     const auto segments=std::make_shared<NeuralSegmentIndex>();
     segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
     segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,5));
-    segments->Finish();
-    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{10*kLiveFrame100ns,0},{}));
+    CHECK(playback.OpenLive(L"original.mkv",segments,
+                            SynchronizedRange{10*kLiveFrame100ns,20*kLiveFrame100ns},{}));
     std::vector<uint64_t> played;
     for(int index=0;index<10;++index){
         CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
@@ -2641,8 +2707,10 @@ void live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test()
     CHECK(library.OpenThread(L"neural-00001.mkv")!=std::this_thread::get_id());
     CHECK(library.OpenedKnown(L"neural-00001.mkv"));
     CHECK(!library.OpenedKnown(L"neural-00000.mkv"));
-    // The original runs on past the last finalized segment.
+    // The stream ends where the playable range ends - frame 20 - and not where
+    // the coverage happens to stop.
     CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+    CHECK(playback.LastFault().empty());
 }
 
 // The seam a 30000/1001-style frame duration leaves behind: segment 0 declares
@@ -2723,6 +2791,240 @@ void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
     if(const auto* forward=playback.CurrentPair())CHECK_EQ(uint64_t{12},forward->frameNumber);
 }
 
+// A session renders in runs, and a backward seek makes the next run start
+// behind an earlier one. Both rendered regions have to survive that, and each
+// one has to stay watchable from inside itself: the player used to hold a
+// single render head, so the earlier region was either unreachable or the
+// reason the later one was thrown away.
+void neural_segment_index_keeps_two_disjoint_rendered_regions_test()
+{
+    NeuralSegmentIndex index;
+    AppendTwoDisjointRegions(index);
+    CHECK_EQ(size_t{3},index.Count());
+    CHECK_EQ(uint64_t{15},index.TotalFrames());
+    // Rendered inside either region, unrendered in the hole between them.
+    CHECK(index.Covered(0));
+    CHECK(index.Covered(4*kLiveFrame100ns));
+    CHECK(index.Covered(20*kLiveFrame100ns));
+    CHECK(index.Covered(27*kLiveFrame100ns));
+    CHECK(!index.Covered(5*kLiveFrame100ns));
+    CHECK(!index.Covered(12*kLiveFrame100ns));
+    CHECK(!index.Covered(19*kLiveFrame100ns));
+    CHECK(!index.Covered(30*kLiveFrame100ns));
+
+    // Exactly two regions, the two segments of one run joined where they touch.
+    const auto ranges=index.CoveredRanges();
+    CHECK_EQ(size_t{2},ranges.size());
+    if(ranges.size()!=2)return;
+    CHECK_EQ(int64_t{0},ranges[0].start100ns);
+    CHECK_EQ(int64_t{5*kLiveFrame100ns},ranges[0].end100ns);
+    CHECK_EQ(int64_t{20*kLiveFrame100ns},ranges[1].start100ns);
+    CHECK_EQ(int64_t{30*kLiveFrame100ns},ranges[1].end100ns);
+
+    // The buffer a playhead has is its own region. Answering with the far one
+    // would attach a session that has nothing to show at the playhead.
+    const auto early=index.PlayableSpan(1*kLiveFrame100ns);
+    CHECK(early.has_value());
+    if(early){
+        CHECK_EQ(int64_t{0},early->start100ns);
+        CHECK_EQ(int64_t{5*kLiveFrame100ns},early->end100ns);
+    }
+    const auto late=index.PlayableSpan(21*kLiveFrame100ns);
+    CHECK(late.has_value());
+    if(late){
+        CHECK_EQ(int64_t{20*kLiveFrame100ns},late->start100ns);
+        CHECK_EQ(int64_t{30*kLiveFrame100ns},late->end100ns);
+    }
+    // Inside the hole there is nothing to play, however much is rendered ahead.
+    CHECK(!index.PlayableSpan(12*kLiveFrame100ns).has_value());
+}
+
+// Where a read inside a hole has to continue, and where the timeline really
+// ends. Both used to be the same question because coverage was one run.
+void neural_segment_index_after_finds_the_next_region_from_a_hole_test()
+{
+    NeuralSegmentIndex index;
+    AppendTwoDisjointRegions(index);
+    // From inside the hole: the first segment of the region that follows it.
+    if(const auto next=index.After(12*kLiveFrame100ns)){
+        CHECK_EQ(int64_t{20*kLiveFrame100ns},next->firstTimestamp100ns);
+        CHECK_EQ(uint64_t{1},next->runId);
+        CHECK_EQ(uint64_t{0},next->index);
+    }else CHECK(index.After(12*kLiveFrame100ns).has_value());
+    // From inside a region: the file that continues it, whatever run wrote it.
+    if(const auto following=index.After(21*kLiveFrame100ns)){
+        CHECK_EQ(int64_t{25*kLiveFrame100ns},following->firstTimestamp100ns);
+        CHECK_EQ(uint64_t{1},following->index);
+    }else CHECK(index.After(21*kLiveFrame100ns).has_value());
+    // Before everything: the earliest region, which a later run published.
+    if(const auto first=index.After(-1)){
+        CHECK_EQ(int64_t{0},first->firstTimestamp100ns);
+        CHECK_EQ(uint64_t{2},first->runId);
+    }else CHECK(index.After(-1).has_value());
+    // Past the last segment there is nothing to leave for: waiting, not a gap.
+    CHECK(!index.After(29*kLiveFrame100ns).has_value());
+    CHECK(!index.After(40*kLiveFrame100ns).has_value());
+}
+
+// A run that fills a hole behind the newest rendered timestamp changes what the
+// seek bar must show while leaving Head100ns() exactly where it was, so a
+// repaint driven off the head never happens and the rendered region stays
+// invisible until something else moves.
+void neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head_test()
+{
+    NeuralSegmentIndex index;
+    index.Append(LiveSegmentRecord(L"run1/neural-00000.mkv",0,20,5,1));
+    index.Append(LiveSegmentRecord(L"run1/neural-00001.mkv",1,25,5,1));
+    const int64_t head=index.Head100ns();
+    const uint64_t rendered=index.Revision();
+
+    index.Append(LiveSegmentRecord(L"run2/neural-00000.mkv",0,0,5,2));
+    CHECK_EQ(head,index.Head100ns());
+    CHECK(index.Revision()!=rendered);
+    CHECK_EQ(size_t{2},index.CoveredRanges().size());
+
+    // A refused append changed no coverage, so it must not ask for a repaint.
+    const uint64_t behind=index.Revision();
+    index.Append(LiveSegmentRecord(L"overlap.mkv",1,22,3,2));
+    CHECK_EQ(behind,index.Revision());
+
+    // Closing the hole joins the two regions: still no new head, still a change.
+    index.Append(LiveSegmentRecord(L"run2/neural-00001.mkv",1,5,15,2));
+    CHECK(index.Revision()!=behind);
+    CHECK_EQ(head,index.Head100ns());
+    CHECK_EQ(size_t{1},index.CoveredRanges().size());
+    CHECK(index.Covered(12*kLiveFrame100ns));
+}
+
+// The read that used to report "out of sync" and take the session down with it:
+// the playhead runs off the end of one rendered region into a hole the run has
+// not filled yet. A hole is work still to do, so the read waits, and it resumes
+// on real pairs the moment the covering file is published.
+void live_playback_waits_inside_a_hole_and_resumes_when_it_is_filled_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"early.mkv",5);library.Add(L"filler.mkv",5);library.Add(L"late.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"early.mkv",0,0,5,1));
+    segments->Append(LiveSegmentRecord(L"late.mkv",0,10,5,2));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+    for(uint64_t expected=0;expected<5;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+    }
+    // Frame 5 sits in the hole between the two regions, with ten rendered
+    // frames waiting beyond it. Waiting is the answer: nothing is out of sync,
+    // nothing has ended, and the session stays usable.
+    CHECK(!segments->Covered(5*kLiveFrame100ns));
+    CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
+    CHECK_EQ(SynchronizedReadResult::WaitingForRender,playback.ReadNextAvailable({}));
+    CHECK(playback.LastFault().empty());
+    CHECK(playback.Live());CHECK(playback.NeuralAvailable());
+    CHECK_EQ(size_t{2},segments->CoveredRanges().size());
+
+    // The run retargeted at the hole and published it. No frame was skipped
+    // while waiting, and playback crosses into the region that was already
+    // rendered beyond it.
+    segments->Append(LiveSegmentRecord(L"filler.mkv",0,5,5,3));
+    CHECK_EQ(size_t{1},segments->CoveredRanges().size());
+    for(uint64_t expected=5;expected<15;++expected){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        CHECK_EQ(expected,pair->frameNumber);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+        CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);
+        CHECK(!pair->neural.bgra.empty());
+    }
+    CHECK(playback.LastFault().empty());
+}
+
+// The bug this rebuild exists for. A session that had rendered part of the clip
+// was seeked backwards, the earlier rendered region was refused as "not
+// rendered", and the player then discarded the render. Seeking back into a
+// region that was rendered must succeed and must serve that region's own
+// frames: every segment file numbers its frames from its own zero, so handing
+// back the wrong region's frame 0 looks right on the numbers and wrong on
+// screen.
+void live_seek_backward_into_an_earlier_region_serves_that_regions_frames_test()
+{
+    constexpr uint8_t kEarlyTag=0x11;
+    constexpr uint8_t kLateTag=0x22;
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    TagLiveStream(library.Add(L"early.mkv",5),kEarlyTag);
+    TagLiveStream(library.Add(L"late.mkv",5),kLateTag);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"early.mkv",0,0,5,1));
+    segments->Append(LiveSegmentRecord(L"late.mkv",0,20,5,2));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+
+    // Watching the later region, which is where the run is working.
+    CHECK(playback.SeekSeconds(double(21*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* late=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{21},late->frameNumber);
+        CHECK_EQ(uint64_t{21},late->neural.frameNumber);
+        CHECK_EQ(int(kLateTag),LiveStreamTag(late->neural));
+    }
+
+    // Back into the earlier region: it is rendered, so the seek lands.
+    CHECK(playback.SeekSeconds(double(2*kLiveFrame100ns)*1e-7,{}));
+    CHECK(playback.LastFault().empty());
+    const auto* back=playback.CurrentPair();CHECK(back!=nullptr);
+    if(!back)return;
+    CHECK_EQ(uint64_t{2},back->frameNumber);
+    CHECK_EQ(uint64_t{2},back->neural.frameNumber);
+    CHECK_EQ(int64_t{2*kLiveFrame100ns},back->neural.timestamp100ns);
+    CHECK_EQ(int(kEarlyTag),LiveStreamTag(back->neural));
+
+    // And playback continues inside that region rather than in the other one.
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    if(const auto* next=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{3},next->frameNumber);
+        CHECK_EQ(int(kEarlyTag),LiveStreamTag(next->neural));
+    }
+    // Neither seek cost any rendered work.
+    CHECK_EQ(size_t{2},segments->Count());
+    CHECK_EQ(size_t{2},segments->CoveredRanges().size());
+}
+
+// A seek into a hole is the one target that cannot be served. It is refused
+// with a reason, and refusing it is all that happens: the session stays open
+// and every rendered region stays rendered, because deleting the render was
+// what made the original defect unrecoverable.
+void live_seek_into_a_hole_is_refused_without_discarding_coverage_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"early.mkv",5);library.Add(L"late.mkv",5);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"early.mkv",0,0,5,1));
+    segments->Append(LiveSegmentRecord(L"late.mkv",0,20,5,2));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{},{}));
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+
+    CHECK(!playback.SeekSeconds(double(12*kLiveFrame100ns)*1e-7,{}));
+    CHECK(playback.LastFault().find("live-seek-uncovered")!=std::string::npos);
+    CHECK(playback.Live());CHECK(playback.NeuralAvailable());
+    // The playhead did not move, and nothing was unloaded or truncated.
+    if(const auto* held=playback.CurrentPair())CHECK_EQ(uint64_t{0},held->frameNumber);
+    CHECK_EQ(size_t{2},segments->Count());
+    CHECK_EQ(size_t{2},segments->CoveredRanges().size());
+    CHECK(segments->Covered(1*kLiveFrame100ns));
+    CHECK(segments->Covered(21*kLiveFrame100ns));
+    // Both regions are still reachable after the refusal.
+    CHECK(playback.SeekSeconds(double(21*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* late=playback.CurrentPair())CHECK_EQ(uint64_t{21},late->frameNumber);
+    CHECK(playback.SeekSeconds(double(1*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* early=playback.CurrentPair())CHECK_EQ(uint64_t{1},early->frameNumber);
+}
+
 // The session's UI-thread decisions: when playback may start, when a rebuffer
 // ends, and when chasing the render head is worse than restarting it.
 void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test()
@@ -2739,6 +3041,16 @@ void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_
     tail.rangeStartSec=10.0;tail.positionSec=10.0;tail.headSec=10.5;tail.finished=true;
     CHECK(live_session::ShouldAttach(tail));
     CHECK(!live_session::ShouldAttach({.positionSec=10.0,.rangeStartSec=10.0,.headSec=10.0,.attached=false,.finished=true}));
+    // A seek in flight refuses, however much lead there is: the lead was
+    // measured against the position playback is leaving, and attaching there
+    // made the player attach, refuse the pending seek for landing in a hole,
+    // hand playback back and attach again, twenty-eight times in seventeen
+    // seconds of a driven session.
+    live_session::SessionView seekAway{};
+    seekAway.rangeStartSec=49.0;seekAway.positionSec=49.0;seekAway.headSec=113.0;
+    CHECK(live_session::ShouldAttach(seekAway));
+    seekAway.seeking=true;
+    CHECK(!live_session::ShouldAttach(seekAway));
     // Resuming after a rebuffer needs less than starting did.
     live_session::SessionView playing{};
     playing.attached=true;playing.rangeStartSec=10.0;playing.positionSec=20.0;playing.headSec=21.5;
@@ -2780,30 +3092,67 @@ void live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_
     CHECK(!live_session::ShouldRebaseStalledAttach(midSeek,live_session::kAttachFailureLimit));
 }
 
-void live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test()
+void live_session_retargets_the_render_to_the_hole_the_playhead_needs_test()
 {
+    constexpr int64_t kFrame=333333;                             // 30 fps
+    // The job is filling [10 s,40 s) and has rendered as far as 20 s.
+    const CoverageSpan target{100000000,400000000};
     live_session::SessionView view{};
     view.rangeStartSec=10.0;view.headSec=20.0;
+    // Inside that hole the render is coming this way: waiting beats restarting
+    // until it falls more than the 15 s budget behind the playhead.
     view.positionSec=25.0;
-    CHECK(!live_session::NeedsRebase(view));                      // 5 s ahead: waiting is cheaper
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{250000000,400000000},kFrame));
     view.positionSec=34.9;
-    CHECK(!live_session::NeedsRebase(view));                      // just inside the 15 s budget
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{349000000,400000000},kFrame));
     view.positionSec=35.1;
-    CHECK(live_session::NeedsRebase(view));                       // past it: restart at the playhead
-    // Backwards always leaves coverage, but frame snapping can nudge a few
-    // milliseconds behind the start without meaning a seek.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{351000000,400000000},kFrame));
+    // Behind the hole being filled - the reported bug's seek - the job will never
+    // reach the playhead, so it moves. Frame snapping a few milliseconds back is
+    // not a seek and must not move it.
+    view.positionSec=5.0;
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{50000000,100000000},kFrame));
     view.positionSec=9.9;
-    CHECK(!live_session::NeedsRebase(view));
-    view.positionSec=9.4;
-    CHECK(live_session::NeedsRebase(view));
-    // An attached session clamps seeks to the head instead, and a seek in
-    // flight has not committed to anything yet.
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{99000000,100000000},kFrame));
+    // Past the hole entirely: this job is behind the viewer. Attached playback is
+    // no exception - a viewer who seeks back onto rendered frames still wants the
+    // render working where they are, which the old rebase refused to do.
+    view.positionSec=45.0;view.headSec=40.0;
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{450000000,600000000},kFrame));
     live_session::SessionView attached=view;attached.attached=true;
-    CHECK(!live_session::NeedsRebase(attached));
+    CHECK(live_session::ShouldRetarget(attached,target,CoverageSpan{450000000,600000000},kFrame));
+    // A seek in flight has not committed to a position yet, and the hole the job
+    // already has is never worth restarting for.
     live_session::SessionView seeking=view;seeking.seeking=true;
-    CHECK(!live_session::NeedsRebase(seeking));
-    // A head that has not moved past the range start still rebases forward.
-    CHECK(live_session::NeedsRebase({.positionSec=40.0,.rangeStartSec=10.0,.headSec=0.0}));
+    CHECK(!live_session::ShouldRetarget(seeking,target,CoverageSpan{450000000,600000000},kFrame));
+    CHECK(!live_session::ShouldRetarget(view,target,target,kFrame));
+    // Nothing left to render: there is no hole to move to.
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{},kFrame));
+}
+
+// Measured on a driven session, and the reason this is a test: the job's range
+// is snapped to a frame boundary when it starts, while the hole it fills begins
+// wherever the previous segment's sub-frame residual left off - 4999995 against
+// a range starting at 5000000. Comparing the starts made those different work,
+// and the session cancelled and relaunched its helper on every tick, four times
+// in 110 ms, leaving a part-rendered half-second region behind.
+void live_session_does_not_retarget_onto_the_hole_it_is_already_filling_test()
+{
+    constexpr int64_t kFrame=333333;
+    const CoverageSpan target{5000000,183000000};                 // [0.5,18.3) s, frame-snapped
+    const CoverageSpan wanted{4999995,183000000};                 // the hole, five ticks earlier
+    // The viewer is at the end of the clip, inside a region rendered earlier, so
+    // the only work left is the hole this job already has.
+    const live_session::SessionView view{.positionSec=22.5667,.rangeStartSec=0.5,.headSec=22.6};
+    CHECK(!live_session::ShouldRetarget(view,target,wanted,kFrame));
+    // Same as the job publishes into it: the hole shrinks from the front, which
+    // is still the same work and still no reason to restart the helper.
+    CHECK(!live_session::ShouldRetarget(view,target,CoverageSpan{60000000,183000000},kFrame));
+    // A hole outside the target is different work and does move the render.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{183000000,226000000},kFrame));
+    // And the slack is one frame, not unlimited: a hole starting a second early
+    // is a different hole.
+    CHECK(live_session::ShouldRetarget(view,target,CoverageSpan{4000000,183000000},kFrame));
 }
 
 // A session toggled on at 12.0329 s published its first segment from 12.0662 s,
@@ -2859,11 +3208,12 @@ void live_session_with_no_published_segment_plays_the_cache_entry_test()
     CHECK(CompletedSessionPlan::Segments==
           live_session::PlanForCompletedSession({.covered=true,.ok=true,.publishedEntry=true}));
     // What made the hang invisible to the rest of the policy: the session the
-    // cache hit leaves behind asks for neither an attach nor a rebase.
+    // cache hit leaves behind asks for neither an attach nor a retarget - there
+    // is no hole to move the render to, because the entry covered the range.
     const live_session::SessionView empty{.positionSec=2.56667,.rangeStartSec=2.56667,
                                           .headSec=0.0,.attached=false,.finished=true};
     CHECK(!live_session::ShouldAttach(empty));
-    CHECK(!live_session::NeedsRebase(empty));
+    CHECK(!live_session::ShouldRetarget(empty,CoverageSpan{25666700,1040000000},CoverageSpan{},333333));
     CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
 }
 
@@ -3236,8 +3586,15 @@ int wmain(int argc, wchar_t* argv[])
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
     live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
+    neural_segment_index_keeps_two_disjoint_rendered_regions_test();
+    neural_segment_index_after_finds_the_next_region_from_a_hole_test();
+    neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head_test();
+    live_playback_waits_inside_a_hole_and_resumes_when_it_is_filled_test();
+    live_seek_backward_into_an_earlier_region_serves_that_regions_frames_test();
+    live_seek_into_a_hole_is_refused_without_discarding_coverage_test();
     live_session_attaches_on_lead_resumes_earlier_and_finishes_on_any_coverage_test();
-    live_session_rebases_only_for_seeks_the_head_will_not_reach_soon_test();
+    live_session_retargets_the_render_to_the_hole_the_playhead_needs_test();
+    live_session_does_not_retarget_onto_the_hole_it_is_already_filling_test();
     live_session_joins_the_render_where_its_coverage_actually_starts_test();
     live_session_with_no_published_segment_plays_the_cache_entry_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();

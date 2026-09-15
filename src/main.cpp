@@ -1362,9 +1362,25 @@ private:
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
         if(read==SynchronizedReadResult::PairReady){const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;m_next=*visible;m_haveNext=true;return true;}
         if(read==SynchronizedReadResult::NotReady)return false;
-        // The playhead reached the render head: wait for the next segment
-        // instead of ending playback.
-        if(read==SynchronizedReadResult::WaitingForRender){EnterLiveBuffering();return false;}
+        // The playhead is on video nobody has rendered. When the running job is
+        // filling exactly this hole its frames are seconds away, so waiting shows
+        // the picture the user asked for. Anywhere else - a seek back in front of
+        // the render, a hole the session has not reached yet - waiting would
+        // freeze playback for as long as a render takes, so the original comes
+        // back and the session re-attaches when its coverage reaches the playhead.
+        if(read==SynchronizedReadResult::WaitingForRender){
+            const int64_t at=static_cast<int64_t>(std::llround(Position()*1e7));
+            if(m_liveSession&&(at<m_liveTarget.start100ns||at>=m_liveTarget.end100ns)){
+                const bool wasPlaying=m_playing;
+                LOG("Live playback reached unrendered video at "<<Position()<<" s, outside the render target ["
+                    <<double(m_liveTarget.start100ns)*1e-7<<","<<double(m_liveTarget.end100ns)*1e-7
+                    <<") s; playing the original there.");
+                DetachLivePlayback();
+                RequestSeek(Position(),wasPlaying);
+                return false;
+            }
+            EnterLiveBuffering();return false;
+        }
         m_haveNext=false;m_playing=false;Audio().Pause(true);if(read==SynchronizedReadResult::EndOfStream)LOG("Cached playback completed: presented="<<m_cachedPresentedFrames<<" dropped="<<m_droppedFrames);
         if(read==SynchronizedReadResult::OutOfSync||read==SynchronizedReadResult::Error){
             LOG((read==SynchronizedReadResult::OutOfSync?"Neural playback out of sync: ":"Neural playback decode error: ")
@@ -2461,10 +2477,14 @@ private:
         // Seeking to the container end has no frame to decode: the restarted
         // decoder returns nothing and the seek pays for a second restart.
         if(const int64_t last=LastFramePts(m_decoder.FrameRate(),SourceDuration100ns());last>0)high=std::min(high,double(last)*1e-7);
-        // An active session can only serve what is rendered: seeking stops at the
-        // head, and a target past it would wait for frames that do not exist yet.
-        if(m_cachedPlayback&&m_liveSession&&m_liveSegments){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_liveSegments->Head100ns())*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
-        else if(m_cachedPlayback&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
+        // A cached entry can only serve its own range. An active session is
+        // different now: its coverage is a set of regions with holes between
+        // them, and the original plays in the holes, so every seek target in the
+        // source is legal. Clamping to the newest rendered frame is what made a
+        // seek back to an earlier rendered region impossible to even express -
+        // the target was pulled forward to the clamp before anything could
+        // answer whether it was rendered.
+        if(m_cachedPlayback&&!m_liveSession&&!m_cachedRange.Whole()){low=double(m_cachedRange.start100ns)*1e-7;high=std::max(low,double(m_cachedRange.end100ns)*1e-7-1.0/std::max(1.0,m_decoder.FrameRate()));}
         if(high>0)return std::clamp(sec,low,high);return std::max(low,sec);
     }
 
@@ -2501,9 +2521,18 @@ private:
                 // against, or the next report of this is unanswerable again.
                 if(m_liveSession){
                     const std::string fault=m_synchronizedPlayback.LastFault();
-                    LOG("Live seek to "<<sec<<" s is not rendered; handing playback back to the original."
-                        <<" coverage=["<<double(m_liveRange.start100ns)*1e-7<<","<<LiveHeadSeconds()<<") s"
-                        <<" fault="<<(fault.empty()?std::string("none"):fault));
+                    // The fault text carries the coverage set, which is the only
+                    // thing that can say whether this target sat in a hole or
+                    // past everything rendered. The session keeps its coverage
+                    // and keeps rendering; only playback moves back.
+                    LOG("Live seek to "<<sec<<" s is not rendered; playing the original there."
+                        <<" range=["<<double(m_liveRange.start100ns)*1e-7<<","<<double(m_liveRange.end100ns)*1e-7<<") s"
+                        <<" regions="<<LiveCoverage().size()<<" fault="<<(fault.empty()?std::string("none"):fault));
+                    // The playhead moves to the target before anything else can
+                    // read it: the attach test and the render-target choice both
+                    // ask where the user is, and leaving the abandoned position
+                    // in place made them answer for the frame being left behind.
+                    m_currentSec=sec;
                     DetachLivePlayback();SetSeeking(false);RequestSeek(sec,resumeAfter);return false;
                 }
                 LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;
@@ -2789,24 +2818,49 @@ private:
         // acts on), played progress in the middle, and the part of the source
         // that already has cached neural frames along the bottom (teal).
         const LONG height=tr.bottom-tr.top,coverageLane=std::max<LONG>(2,height/4);
-        // A session paints coverage up to the render head, because that is how
-        // far playback can go; a finished entry paints its whole range.
-        const int64_t liveHead=m_liveSession&&m_liveSegments?m_liveSegments->Head100ns():0;
-        RECT rendered=tr;const bool renderedSpan=m_cachedPlayback||liveHead>m_liveRange.start100ns;
+        // A session's coverage is a set of rendered regions, so each one is
+        // painted on its own. One band from the session's start to its newest
+        // frame would claim the holes between them as rendered, and those holes
+        // are precisely the part the user cannot see rendered yet. A finished
+        // cache entry still paints its single range.
+        const std::vector<CoverageSpan> coverage=m_liveSession?LiveCoverage():std::vector<CoverageSpan>{};
+        RECT rendered=tr;const bool renderedSpan=m_cachedPlayback||!coverage.empty();
         if(renderedSpan){
-            if(m_liveSession){rendered.left=markerX(m_liveRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(liveHead));}
+            if(m_liveSession){
+                if(!coverage.empty()){
+                    rendered.left=markerX(coverage.front().start100ns);
+                    rendered.right=std::max<LONG>(rendered.left+1,markerX(coverage.back().end100ns));
+                }
+            }
             else if(!m_cachedRange.Whole()){rendered.left=markerX(m_cachedRange.start100ns);rendered.right=std::max<LONG>(rendered.left+1,markerX(m_cachedRange.end100ns));}
-            RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};
-            HBRUSH nb=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&band,nb);DeleteObject(nb);
+            HBRUSH nb=CreateSolidBrush(ui_palette::NeuralCoverage);
+            if(m_liveSession)
+                for(const CoverageSpan& span:coverage){
+                    RECT band{markerX(span.start100ns),tr.bottom-coverageLane,0,tr.bottom};
+                    band.right=std::max<LONG>(band.left+1,markerX(span.end100ns));
+                    FillRect(dc,&band,nb);
+                }
+            else{RECT band{rendered.left,tr.bottom-coverageLane,rendered.right,tr.bottom};FillRect(dc,&band,nb);}
+            DeleteObject(nb);
         }
-        // Played progress is clamped to the rendered span only while playback is
-        // actually on it; a session that has not attached yet still plays the
-        // original anywhere in the source.
-        const bool clampProgress=m_cachedPlayback;
+        // A live session plays the original inside its holes, so progress is not
+        // confined to the rendered regions; a cache entry's playback is.
+        const bool clampProgress=m_cachedPlayback&&!m_liveSession;
         RECT done{clampProgress?rendered.left:tr.left,tr.top,0,renderedSpan?tr.bottom-coverageLane:tr.bottom};
         done.right=std::clamp<LONG>(static_cast<LONG>(tr.left+std::lround((tr.right-tr.left)*f)),done.left,clampProgress?rendered.right:tr.right);
         HBRUSH db=CreateSolidBrush(ui_palette::PrimaryBlue);FillRect(dc,&done,db);DeleteObject(db);
-        if(renderedSpan&&(m_liveSession||!m_cachedRange.Whole())){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);RECT startEdge{rendered.left,tr.top,rendered.left+std::max(1,Dip(1)),tr.bottom},endEdge{rendered.right-std::max(1,Dip(1)),tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
+        // One pair of edge ticks per rendered region, so a hole reads as a gap
+        // between two regions instead of being hidden inside one long band.
+        if(renderedSpan&&m_liveSession){
+            HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);
+            for(const CoverageSpan& span:coverage){
+                const LONG left=markerX(span.start100ns),right=std::max<LONG>(left+1,markerX(span.end100ns));
+                RECT startEdge{left,tr.top,left+std::max(1,Dip(1)),tr.bottom},endEdge{right-std::max(1,Dip(1)),tr.top,right,tr.bottom};
+                FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);
+            }
+            DeleteObject(eb);
+        }
+        else if(renderedSpan&&!m_cachedRange.Whole()){HBRUSH eb=CreateSolidBrush(ui_palette::NeuralCoverage);RECT startEdge{rendered.left,tr.top,rendered.left+std::max(1,Dip(1)),tr.bottom},endEdge{rendered.right-std::max(1,Dip(1)),tr.top,rendered.right,tr.bottom};FillRect(dc,&startEdge,eb);FillRect(dc,&endEdge,eb);DeleteObject(eb);}
         // The selection is drawn last and fills the track, so it reads at a
         // glance; the coverage lane stays visible beneath it.
         if(m_markers.in100ns&&m_markers.out100ns&&*m_markers.out100ns>*m_markers.in100ns){
@@ -3060,6 +3114,14 @@ private:
     static constexpr double kLiveFirstSegmentSeconds=0.5;
     static constexpr double kLiveStartLead=live_session::kStartLead;
     static constexpr double kLiveResumeLead=live_session::kResumeLead;
+    // A session now renders the whole video by default, so its range chip named
+    // the entire clip on every session - which reads as a user selection when
+    // there was none. Only a range narrower than the source is worth saying.
+    bool CachedRangeCoversSource()const{
+        if(m_cachedRange.Whole())return true;
+        const int64_t duration=SourceDuration100ns();
+        return duration>0&&m_cachedRange.start100ns<=0&&m_cachedRange.end100ns>=duration;
+    }
     bool LiveSessionAvailable()const{return RangeRenderAvailable()&&!m_cachedPlayback&&!m_decoder.IsStillImage();}
     // A photo has no timeline for a session to follow, but it can still be
     // rendered: the single-frame job is the one the frame preview already runs.
@@ -3071,9 +3133,42 @@ private:
     // One restart at the playhead is a recovery; a second means the coverage is
     // never going to reach it, and looping is worse than falling back.
     static constexpr int kLiveStalledRebaseLimit=1;
-    double LiveHeadSeconds()const{return m_liveSegments?double(m_liveSegments->Head100ns())*1e-7:0.0;}
+    // Coverage is a set of rendered regions, not a head. Everything the session
+    // decides is asked of that set.
+    std::vector<CoverageSpan> LiveCoverage()const{
+        return m_liveSegments?m_liveSegments->CoveredRanges():std::vector<CoverageSpan>{};
+    }
+    int64_t LiveFrame100ns()const{return static_cast<int64_t>(std::llround(1e7/std::max(1.0,m_decoder.FrameRate())));}
+    // What is left to render inside the session's range. A residual narrower than
+    // one frame is coverage rather than work: a job handed it refuses the range.
+    std::vector<CoverageSpan> LiveHoles()const{
+        if(!m_liveSegments)return {};
+        return UncoveredSpans(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns},LiveFrame100ns());
+    }
+    // The rendered region the playhead is inside, which is the only buffer
+    // playback can drain - a region on the far side of a hole is not lead, and
+    // measuring against the newest rendered timestamp attached sessions with
+    // nothing to show. Coverage beginning a frame or two after the playhead
+    // counts: a job starts on the next whole frame, which is what
+    // AttachPosition100ns exists for.
+    std::optional<CoverageSpan> LivePlayableSpan()const{
+        if(!m_liveSegments)return std::nullopt;
+        const auto covered=LiveCoverage();
+        const int64_t at=static_cast<int64_t>(std::llround(Position()*1e7));
+        if(const auto span=SpanContaining(covered,at))return span;
+        const int64_t slack=2*LiveFrame100ns();
+        for(const CoverageSpan& span:covered)
+            if(span.start100ns>at&&span.start100ns-at<=slack)return span;
+        return std::nullopt;
+    }
+    double LiveHeadSeconds()const{
+        const auto span=LivePlayableSpan();
+        return span?double(span->end100ns)*1e-7:0.0;
+    }
     double LiveLeadSeconds()const{return live_session::Lead(LiveSessionView());}
-    bool LiveSessionFinished()const{return m_liveSegments&&m_liveSegments->Finished();}
+    // Finished means the session's whole range is rendered, not that one job
+    // ended: a job fills one hole and the next one starts on the next hole.
+    bool LiveSessionFinished()const{return m_liveSegments&&LiveHoles().empty();}
     // Rendering is linear in pixel count, so a source too large for this GPU can
     // be recognised before a single frame is rendered. Saying so beats letting the
     // user watch a loader that will never clear.
@@ -3095,8 +3190,6 @@ private:
                    forecast.renderFps,forecast.realtimeRatio);
         return MessageBoxW(m_hwnd,text,T(L"neural.live.title").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)==IDYES;
     }
-    // One render job from the playhead: to the Out marker when the playhead sits
-    // inside a marked range, otherwise to the end of the source.
     // What makes retained coverage reusable: same source, same neural settings,
     // same guides. Anything else and the frames on disk are not the frames the
     // user would get now.
@@ -3116,26 +3209,55 @@ private:
         m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
         if(!m_retainedDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_retainedDirectory,ec);m_retainedDirectory.clear();}
     }
+    // What the session sets out to render: the marked range when the playhead is
+    // inside one, otherwise the whole video. Holes inside it are filled one job
+    // at a time in the order the user needs them, so a session toggled on at 20 s
+    // renders the opening as well - which is what makes the whole video seekable
+    // with the picture the user asked for.
+    NeuralRenderRange LiveSessionRange(int64_t at,double fps,int64_t duration)const{
+        if(const auto marked=RangeFromMarkers(m_markers,fps,duration);marked&&at>=marked->start100ns&&at<marked->end100ns)
+            return NeuralRenderRange{marked->start100ns,marked->end100ns};
+        return NeuralRenderRange{0,duration};
+    }
+    // The hole this session should be rendering, given where the user is
+    // watching: the one under the playhead, else the nearest ahead, else the
+    // earliest behind.
+    std::optional<CoverageSpan> WantedLiveTarget()const{
+        return NextRenderTarget(LiveHoles(),static_cast<int64_t>(std::llround(Position()*1e7)));
+    }
+    // Points the render at one hole. Coverage already on disk is never touched:
+    // that is the whole difference between this and the old rebase.
+    bool StartLiveRenderTarget(CoverageSpan hole){
+        const NeuralRenderRange target{SnapToFrame(hole.start100ns),hole.end100ns};
+        const size_t holes=LiveHoles().size();
+        // A sub-frame residual is coverage, not work.
+        if(RenderRangeIsCovered(target.start100ns,target.end100ns,m_decoder.FrameRate())){m_liveTarget=target;return true;}
+        if(!RenderRangeOfCurrentSource(target,NeuralJobKind::Live))return false;
+        // The coverage this job started from: if it ends with the index
+        // unchanged, it rendered nothing and must not be started again.
+        m_liveTarget=target;m_liveTargetRevision=m_liveSegments->Revision();
+        LOG("Active neural session rendering ["<<double(target.start100ns)*1e-7<<","<<double(target.end100ns)*1e-7
+            <<") s; "<<m_liveSegments->Count()<<" segments already on disk, "<<holes<<" hole(s) left in the range.");
+        return true;
+    }
     void StartLiveNeuralSession(){
         if(!LiveSessionAvailable()){LOG("Active neural session refused: loaded="<<m_loaded<<" cached="<<m_cachedPlayback<<" renderable="<<RangeRenderAvailable());return;}
         const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
         if(!(fps>0.0)||duration<=0)return;
         const int64_t at=SnapToFrame(Position100ns());
-        NeuralRenderRange range{at,duration};
-        if(const auto marked=RangeFromMarkers(m_markers,fps,duration);marked&&at>=marked->start100ns&&at<marked->end100ns)range.end100ns=marked->end100ns;
+        const NeuralRenderRange range=LiveSessionRange(at,fps,duration);
         if(range.end100ns<=range.start100ns)return;
         if(!ConfirmLiveSessionPace(fps))return;
-        // Frames rendered before the last toggle-off are still on disk. Adopting
-        // them means the render resumes at the head instead of redoing work, and
-        // playback can start on them immediately instead of buffering a lead.
+        // Frames rendered before the last toggle-off are still on disk, and they
+        // are adopted whenever they belong to this video with these settings -
+        // wherever on the timeline they sit. Requiring the playhead to be inside
+        // them is what deleted a rendered tail the moment the user seeked back in
+        // front of it, and then re-rendered ground that was already there.
         const std::string key=LiveRetentionKey();
-        const bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty()&&
-                         at>=m_retainedSegments->Start100ns()&&at<m_retainedSegments->Head100ns();
+        const bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty();
         if(!adopt)DropRetainedLiveSegments();
         if(adopt){
             m_liveSegments=m_retainedSegments;m_liveDirectory=m_retainedDirectory;
-            range.start100ns=m_retainedSegments->Start100ns();
-            if(m_retainedRange.end100ns>range.end100ns)range.end100ns=m_retainedRange.end100ns;
             m_retainedSegments.reset();m_retainedDirectory.clear();m_retainedKey.clear();m_retainedRange={};
         }else{
             m_liveDirectory=m_cacheRoot/L"live";
@@ -3143,7 +3265,9 @@ private:
             if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
         }
-        m_liveRange=range;m_liveSession=true;m_liveAttached=false;m_livePaintedHead=0;m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        m_liveRange=range;m_liveTarget={};m_liveSession=true;m_liveAttached=false;
+        m_livePaintedRevision=m_liveSegments->Revision();m_liveStartTick=GetTickCount64();m_neuralRequested=true;
+        m_liveCoveredAtStart=CoveredDuration100ns(LiveCoverage(),CoverageSpan{range.start100ns,range.end100ns});
         m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
         // A GPU that renders far faster than real time refills the buffer faster
         // than playback drains it, so the four-second cushion is only a wait.
@@ -3151,20 +3275,12 @@ private:
             playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
                                                 m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio,
             kLiveStartLead);
-        const int64_t renderFrom=std::max(range.start100ns,m_liveSegments->Head100ns());
-        // A sub-frame residual between the integer-frame head and the probed
-        // range end is coverage, not work: rendering it earns a range refusal.
-        const bool rangeCovered=RenderRangeIsCovered(renderFrom,range.end100ns,m_decoder.FrameRate());
-        if(!rangeCovered)m_liveSegments->Unfinish();
         EnterLiveBuffering();
-        if(rangeCovered){
-            // The retained coverage already reaches the end of this range: there
-            // is nothing to render, so play it and stop waiting for a head.
-            m_liveSegments->Finish();
-            LOG("Active neural session replaying "<<m_liveSegments->Count()<<" retained segments through "<<double(range.end100ns)*1e-7<<" s; nothing left to render.");
-        }else if(!RenderRangeOfCurrentSource(NeuralRenderRange{renderFrom,range.end100ns},NeuralJobKind::Live)){StopLiveNeuralSession(true);return;}
-        else LOG("Active neural session started at "<<double(renderFrom)*1e-7<<" s through "<<double(range.end100ns)*1e-7<<" s"
-                 <<(renderFrom>range.start100ns?std::string("; resumed on ")+std::to_string(m_liveSegments->Count())+" retained segments from "+std::to_string(double(range.start100ns)*1e-7)+" s":std::string{})<<".");
+        const auto target=WantedLiveTarget();
+        if(!target)
+            LOG("Active neural session replaying "<<m_liveSegments->Count()<<" retained segments; ["
+                <<double(range.start100ns)*1e-7<<","<<double(range.end100ns)*1e-7<<") s is already rendered.");
+        else if(!StartLiveRenderTarget(*target)){StopLiveNeuralSession(true);return;}
         SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
     }
     // Drops the session state. Rendered segments are kept for the next toggle
@@ -3173,10 +3289,17 @@ private:
         const bool retain=retainSegments&&m_liveSegments&&!m_liveSegments->Empty()&&!m_liveDirectory.empty();
         if(retain){
             m_retainedSegments=m_liveSegments;m_retainedDirectory=m_liveDirectory;m_retainedRange=m_liveRange;m_retainedKey=LiveRetentionKey();
-            LOG("Retained "<<m_retainedSegments->Count()<<" rendered segments covering "<<double(m_retainedSegments->Start100ns())*1e-7
-                <<"-"<<double(m_retainedSegments->Head100ns())*1e-7<<" s for the next toggle.");
+            const auto covered=m_retainedSegments->CoveredRanges();
+            std::string spans;
+            for(const CoverageSpan& span:covered){
+                if(!spans.empty())spans+=", ";
+                spans+="["+std::to_string(double(span.start100ns)*1e-7)+","+std::to_string(double(span.end100ns)*1e-7)+")";
+            }
+            LOG("Retained "<<m_retainedSegments->Count()<<" rendered segments in "<<covered.size()
+                <<" region(s) for the next toggle: "<<(spans.empty()?std::string("none"):spans)<<".");
         }
-        m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;m_livePaintedHead=0;m_liveStartTick=0;m_liveRange={};
+        m_liveSession=false;m_liveAttached=false;m_liveBuffering=false;m_liveResumePlaying=false;
+        m_livePaintedRevision=0;m_liveStartTick=0;m_liveRange={};m_liveTarget={};m_liveCoveredAtStart=0;
         HideBufferOverlay();
         RecordLiveRenderPace();
         m_liveSegments.reset();
@@ -3247,7 +3370,15 @@ private:
     // no output, in which case that entry is the only thing there is to play.
     void CompleteLiveNeuralJob(const NeuralJobCompletion& completion){
         const bool covered=m_liveSegments&&!m_liveSegments->Empty();
-        if(m_liveSegments)m_liveSegments->Finish();
+        // A job that ended without adding coverage must not be started again on
+        // the same hole forever: a cache hit that publishes an entry but no
+        // segment, and a range the worker refuses, both look like success. Two
+        // fruitless jobs stop the session filling holes; what it rendered stays.
+        const bool grew=m_liveSegments&&m_liveSegments->Revision()!=m_liveTargetRevision;
+        if(completion.result.ok&&grew)m_liveRenderFailures=0;
+        else if(++m_liveRenderFailures>=kLiveRenderFailureLimit)
+            LOG("Active neural session stopped filling holes after "<<m_liveRenderFailures
+                <<" job(s) that added no coverage; keeping "<<(m_liveSegments?m_liveSegments->Count():size_t{0})<<" segments.");
         std::error_code entryError;
         const live_session::CompletedSession finished{covered,completion.result.ok,
             !completion.neuralPath.empty()&&std::filesystem::is_regular_file(completion.neuralPath,entryError)&&!entryError};
@@ -3263,8 +3394,9 @@ private:
             LOG("Active neural session ended early: kind="<<NeuralRenderFailureName(completion.result.failure)<<" covered="<<covered<<" detail="<<WideToUtf8(completion.result.detail));
         }
         // An empty index is the one state every other decision reads as "keep
-        // waiting": the session is finished with zero lead, so ShouldAttach and
-        // NeedsRebase are both false and the buffering panel never comes down.
+        // waiting": the session is finished with zero lead, so ShouldAttach is
+        // false, there is no hole to retarget to, and the buffering panel never
+        // comes down.
         // It is never right to leave the session standing there.
         if(plan==live_session::CompletedSessionPlan::PublishedEntry&&PlayPublishedEntryForLiveSession(completion))return;
         if(plan!=live_session::CompletedSessionPlan::Segments){
@@ -3284,11 +3416,14 @@ private:
         if(!m_liveSession||m_liveAttached||!m_loaded||!m_liveSegments)return false;
         // Where to join is a policy decision, tested without a window: coverage
         // that starts after the playhead is the frame playback continues from.
+        // The region asked about is the one AROUND the playhead - the index's
+        // first segment may belong to a region elsewhere in the video entirely.
+        const auto span=LivePlayableSpan();
+        if(!span)return false;
         const int64_t at100=live_session::AttachPosition100ns(
-            static_cast<int64_t>(std::llround(Position()*1e7)),m_liveRange.start100ns,
-            m_liveSegments->Start100ns());
+            static_cast<int64_t>(std::llround(Position()*1e7)),m_liveRange.start100ns,span->start100ns);
         const double at=double(at100)*1e-7;
-        if(!m_liveSegments->Containing(at100))return false;
+        if(!m_liveSegments->Covered(at100))return false;
         const bool wasPlaying=m_playing||m_liveResumePlaying;
         Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
         if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media())){LOG("Active neural playback could not open the live pair.");return false;}
@@ -3395,26 +3530,64 @@ private:
         m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
     }
-    // A committed seek out of the rendered part restarts the session there:
-    // waiting for the head to travel to a distant playhead would take minutes.
-    bool LiveSessionNeedsRebase()const{
-        if(!m_liveSession)return false;
-        return live_session::NeedsRebase(LiveSessionView());
+    // Keeps the render aimed at the hole the user needs: it starts the next hole
+    // when a job ends, and moves the job when the playhead goes somewhere that
+    // job will not reach. It never deletes coverage, which is the whole
+    // difference from the rebase this replaces - that one stopped the session,
+    // dropped every rendered segment the new playhead was not inside, and
+    // rendered the same seconds again.
+    void MaintainLiveRenderTarget(){
+        if(!m_liveSession||!m_liveSegments)return;
+        if(m_previewJob||m_seeking||m_seekPending||m_dragSeek)return;
+        if(m_liveRenderFailures>=kLiveRenderFailureLimit)return;
+        const auto wanted=WantedLiveTarget();
+        if(NeuralJobActive()){
+            if(!wanted)return;
+            if(!live_session::ShouldRetarget(LiveSessionView(),
+                                             CoverageSpan{m_liveTarget.start100ns,m_liveTarget.end100ns},*wanted,
+                                             LiveFrame100ns()))
+                return;
+            LOG("Active neural session retargeting from ["<<double(m_liveTarget.start100ns)*1e-7<<","
+                <<double(m_liveTarget.end100ns)*1e-7<<") to ["<<double(wanted->start100ns)*1e-7<<","
+                <<double(wanted->end100ns)*1e-7<<") s for the playhead at "<<Position()<<" s; keeping "
+                <<m_liveSegments->Count()<<" rendered segments.");
+            CancelNeuralJob(false);
+        }
+        if(!wanted){
+            // Every frame of the range is rendered: nothing more to start, and
+            // the whole of it is now seekable on the render.
+            if(m_liveTarget.end100ns>m_liveTarget.start100ns){
+                LOG("Active neural session rendered all of ["<<double(m_liveRange.start100ns)*1e-7<<","
+                    <<double(m_liveRange.end100ns)*1e-7<<") s over "<<m_liveSegments->Count()<<" segments.");
+                m_liveTarget={};UpdateCachedStatus();InvalidateControls();
+            }
+            return;
+        }
+        if(!StartLiveRenderTarget(*wanted)){
+            ++m_liveRenderFailures;
+            LOG("Active neural session could not start a render for ["<<double(wanted->start100ns)*1e-7<<","
+                <<double(wanted->end100ns)*1e-7<<") s; keeping the coverage it has.");
+        }
     }
     live_session::SessionView LiveSessionView()const{
-        return {Position(),double(m_liveRange.start100ns)*1e-7,LiveHeadSeconds(),m_liveAttached,LiveSessionFinished(),
+        // What the policy measures against is the hole being rendered, not the
+        // session's whole range: attaching, resuming and moving the render all
+        // turn on where THIS job will reach.
+        return {Position(),double(m_liveTarget.start100ns)*1e-7,LiveHeadSeconds(),m_liveAttached,LiveSessionFinished(),
                 m_dragSeek||m_seeking||m_seekPending};
     }
-    // UI-thread side of the session: adopt new coverage, start playing once the
-    // lead-in is buffered, resume after a rebuffer, and rebase after a seek.
+    // UI-thread side of the session: keep the render aimed where the user is,
+    // repaint as coverage arrives, start playing once the lead-in is buffered,
+    // and resume after a rebuffer.
     void UpdateLiveSession(){
         if(!m_liveSession)return;
-        if(LiveSessionNeedsRebase()){
-            LOG("Active neural session rebased to "<<Position()<<" s after a seek out of its range.");
-            StopLiveNeuralSession(true);StartLiveNeuralSession();return;
-        }
-        const int64_t head=m_liveSegments?m_liveSegments->Head100ns():0;
-        if(head!=m_livePaintedHead){m_livePaintedHead=head;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
+        MaintainLiveRenderTarget();
+        if(!m_liveSession)return;
+        // Coverage can change without the newest rendered timestamp moving - a
+        // run filling an earlier hole does exactly that - so the repaint follows
+        // the index's revision instead of a head.
+        const uint64_t revision=m_liveSegments?m_liveSegments->Revision():0;
+        if(revision!=m_livePaintedRevision){m_livePaintedRevision=revision;InvalidatePlaybackProgress();RefreshBufferOverlay();UpdateCachedStatus();}
         const live_session::SessionView view=LiveSessionView();
         if(!m_liveAttached){
             if(live_session::ShouldAttach(view,m_liveStartLead)){
@@ -3439,7 +3612,13 @@ private:
                     UpdateCachedStatus();InvalidateControls();
                     return;
                 }
-                StopLiveNeuralSession(true);StartLiveNeuralSession();
+                // Retargeted at the playhead rather than restarting the session:
+                // the coverage on disk is still playable everywhere else in the
+                // video, and re-rendering it is what made this loop expensive.
+                if(const auto hole=WantedLiveTarget()){
+                    CancelNeuralJob(false);
+                    if(!StartLiveRenderTarget(*hole))++m_liveRenderFailures;
+                }
             }
             return;
         }
@@ -3649,14 +3828,17 @@ private:
             CompletionRegistry<NeuralProgressMessage>* progressMessages=&m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>* completions=&m_neuralCompletions;
             // An active session renders into its own directory of segment files;
             // the cache entry is the concatenation published when the job ends.
-            // A resumed session keeps the earlier job's files, so every job gets
-            // its own subdirectory and its segments are appended after the ones
-            // already published.
+            // A resumed or retargeted session keeps every earlier job's files, so
+            // each job gets its own subdirectory and its own run id. The id is
+            // what makes a relaunch discard its own segments and nobody else's:
+            // segments are sorted by timestamp now, so this job's are not
+            // necessarily the tail of the index.
             const std::shared_ptr<NeuralSegmentIndex> liveIndex=kind==NeuralJobKind::Live?m_liveSegments:nullptr;
             std::filesystem::path liveDirectory;
-            const size_t liveIndexBase=liveIndex?liveIndex->Count():0u;
+            const uint64_t liveRunId=liveIndex?uint64_t(++m_liveJobSerial):0u;
             if(liveIndex){
-                liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(++m_liveJobSerial));
+                m_liveRunId=liveRunId;
+                liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(liveRunId));
                 std::error_code ec;std::filesystem::create_directories(liveDirectory,ec);
                 if(ec){LOG("Active neural session could not create the segment directory for this job.");return;}
             }
@@ -3680,7 +3862,7 @@ private:
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveIndexBase,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 auto postProgress=[&](const NeuralRenderProgress& progress){auto message=std::make_unique<NeuralProgressMessage>();message->generation=generation;message->progress=progress;message->width=progressWidth;message->height=progressHeight;progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){return PostMessageW(target,WM_NEURAL_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});};
@@ -3845,17 +4027,17 @@ private:
                         // Every finalized segment is playable on arrival; the
                         // player reads them behind the render head.
                         sink.onSegment=[&](const NeuralRenderSegment& segment){
-                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.index=liveIndexBase+segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
-                            LOG("Neural segment "<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
+                            NeuralSegment entry{};entry.path=liveDirectory/segment.fileName;entry.runId=liveRunId;entry.index=segment.index;entry.firstFrameNumber=segment.firstFrameNumber;entry.firstTimestamp100ns=segment.firstTimestamp100ns;entry.end100ns=segment.end100ns;entry.frameCount=segment.frameCount;
+                            LOG("Neural segment run="<<liveRunId<<" index="<<entry.index<<" frames="<<segment.frameCount<<" firstFrame="<<segment.firstFrameNumber<<" span=["<<double(segment.firstTimestamp100ns)*1e-7<<","<<double(segment.end100ns)*1e-7<<") file="<<WideToUtf8(segment.fileName));
                             liveIndex->Append(std::move(entry));
                             // The first file the player can show: everything
                             // after it is the player's own attach cost.
                             coldStart->Ready();
                         };
                         // A relaunched worker republishes from its own index 0,
-                        // so only this job's segments are discarded; coverage a
-                        // previous job left behind stays valid.
-                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding this job's published segments.");liveIndex->TruncateTo(liveIndexBase);};
+                        // so only this run's segments are discarded; coverage any
+                        // other run left behind stays valid wherever it sits.
+                        sink.onRestart=[&]{LOG("Neural render restarted from zero; discarding run "<<liveRunId<<"'s published segments.");liveIndex->DropRun(liveRunId);};
                     }
                     NeuralJobHooks hooks{};
                     hooks.progress=postProgress;
@@ -3890,7 +4072,9 @@ private:
                     resident_helper::HelperPlan helperPlan=resident_helper::HelperPlan::Launch;
                     completion->result=residentHelper->RunJob(workerExecutable,helperKey,request,hooks,stop,&helperPlan);
                     LOG("Neural helper plan="<<resident_helper::HelperPlanName(helperPlan)<<" resident="<<residentHelper->Resident()<<".");
-                    if(liveIndex)liveIndex->Finish();
+                    // Nothing is marked finished here any more: one job fills one
+                    // hole, and whether the session has more to do is a question
+                    // about coverage, answered on the UI thread.
                     // Again for a timeline that arrived too late to be reported
                     // over the pipe - a crash or a cancel the launcher
                     // synthesized a result for. Merging twice is idempotent.
@@ -3899,20 +4083,27 @@ private:
                     receipt.result=completion->result;receipt.finished=std::chrono::system_clock::now();
                     LOG("Neural render receipt: "<<SummarizeNeuralReceiptForLog(receipt));
                     if(!completion->result.ok){cache.MarkInvalid(*staging);goto finish;}
-                    // The entry is keyed, labelled and proven by THIS job: its range, its
+                    // The entry is keyed, labelled and proven by THIS run: its range, its
                     // frame count, its evidence counters. So it must contain exactly the
-                    // segments this job published. A resumed session hands earlier coverage
+                    // segments this run published. A resumed session hands earlier coverage
                     // to the next job for playback to keep reading, and joining that in too
                     // produced a file longer than the label - one session joined 46 files of
                     // 2622 frames and 87.4 s against a result of 1647 frames and 54.9 s, and
                     // the gate correctly refused the render it had just finished.
-                    const size_t joinedParts=liveIndex?liveIndex->Count()-std::min(liveIndexBase,liveIndex->Count()):size_t{1};
-                    if(liveIndex){
-                        // The session's cache entry is one file, joined from the
-                        // segments playback is still reading.
-                        std::vector<std::filesystem::path> parts;parts.reserve(joinedParts);
-                        for(size_t index=liveIndexBase;index<liveIndex->Count();++index)if(const auto segment=liveIndex->At(index))parts.push_back(segment->path);
-                        if(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging/L"neural.mkv",stop)!=EncodeError::None){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;}
+                    //
+                    // Selected by run id rather than by position: segments are held sorted
+                    // by timestamp, so a run that filled a hole behind an earlier region is
+                    // not the tail of the index, and a positional slice would take the wrong
+                    // files. The scan stays in timeline order, which is what a join needs.
+                    std::vector<std::filesystem::path> parts;
+                    if(liveIndex)
+                        for(size_t position=0;position<liveIndex->Count();++position)
+                            if(const auto segment=liveIndex->At(position);segment&&segment->runId==liveRunId)
+                                parts.push_back(segment->path);
+                    const size_t joinedParts=liveIndex?parts.size():size_t{1};
+                    if(liveIndex&&(parts.empty()||ConcatenateMedia(moduleDirectory,parts,*staging/L"neural.mkv",stop)!=EncodeError::None)){
+                        cache.MarkInvalid(*staging);completion->result.ok=false;
+                        completion->result.detail=L"The rendered segments could not be joined into a cache entry.";goto finish;
                     }
                     const auto finalSettings=ReadNeuralAddonSettingsSnapshot(runtimeDirectory/L"ReShade.ini");if(!finalSettings||*finalSettings!=*settingsSnapshot){cache.MarkInvalid(*staging);completion->result.ok=false;completion->result.detail=L"Neural settings changed during rendering. Try the render again.";goto finish;}
                     const std::string receiptJson=BuildNeuralRenderReceiptJson(receipt);const auto receiptDigest=Sha256Bytes(receiptJson);
@@ -4174,6 +4365,12 @@ private:
         // point of ReleaseLiveSession(true). LiveRetentionKey() already guards adoption
         // by source, settings and guides, so a genuinely different video cannot adopt
         // them and StartLiveNeuralSession drops them itself.
+        // A seek or a quality reload re-commits the SAME video, so the session
+        // that was running belongs to it. Releasing it retains the coverage;
+        // restarting it below resumes on those regions. Without that restart the
+        // user's own backward seek read as "neural stopped and became
+        // unavailable", which is the report this session set out to fix.
+        const bool resumeLive=m_liveSession&&completion.commitKind!=NetworkCommitKind::InitialOpen;
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession(true);}
         m_synchronizedPlayback.Close();
         m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
@@ -4211,6 +4408,9 @@ private:
         RestoreUpscaling();
         UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);DrawMenuBar(m_hwnd);
         UpdateTitle();UpdateCachedStatus();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);
+        // After the swap, not before: the session opens decoders against the
+        // stream that is now loaded.
+        if(resumeLive)StartLiveNeuralSession();
         return true;
     }
     // The resolver reports what it actually selected. A 360p fallback on an
@@ -4279,8 +4479,16 @@ private:
     // is why playback is waiting.
     std::wstring LiveSessionStatusText()const{
         wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
-        std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead")+
-            L" \u00b7 head "+FormatTimecode(m_liveSegments?m_liveSegments->Head100ns():0,m_decoder.FrameRate(),true);
+        std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead");
+        // How much of the video is rendered, not where the newest frame is: a
+        // session fills holes in any order, so a single timestamp cannot say
+        // whether the part the user is about to seek back to exists.
+        if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
+            wchar_t done[48]={};
+            swprintf_s(done,L" \u00b7 %.0f%% rendered",
+                       100.0*CoveredFraction(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns}));
+            text+=done;
+        }
         // What the next buffer fill will do with the press the user already made.
         if(m_liveBuffering)text+=L" \u00b7 "+T(LiveResumePending()?L"neural.live.will_play":L"neural.live.will_stay_paused");
         // The forecast is a constant for one GPU; this is what the render is
@@ -4296,16 +4504,19 @@ private:
             text+=L" \u00b7 pace unmeasured on this GPU";
         return text;
     }
-    // Video seconds covered per second of wall clock.
+    // Video seconds covered per second of wall clock. Measured against the
+    // coverage this session added, so adopted regions and the holes between
+    // rendered ones cannot inflate it.
     double LiveRealtimeRatio()const{
         if(!m_liveSession||!m_liveSegments||!m_liveStartTick)return 0.0;
-        return live_session::RealtimeRatio(double(m_liveSegments->Head100ns()-m_liveRange.start100ns)*1e-7,
+        const int64_t covered=CoveredDuration100ns(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns});
+        return live_session::RealtimeRatio(double(std::max<int64_t>(0,covered-m_liveCoveredAtStart))*1e-7,
                                            double(GetTickCount64()-m_liveStartTick)/1000.0);
     }
     std::wstring BuildStatusText()const{
         if(m_exportWorker.joinable())return L"Exporting processed media - File > Cancel export to stop";
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
-        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!m_cachedRange.Whole())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
+        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!CachedRangeCoversSource())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
         status.upscalingStatus=UpscalingStatus();std::wstring text=BuildPlayerStatusText(status);
         // Lead with what was marked, or with how to mark, because the runtime
@@ -4775,12 +4986,24 @@ private:
     int m_liveAttachFailures=0;
     // Restarts already spent trying to put coverage under the playhead.
     int m_liveStalledRebases=0;
+    // Two jobs that add no coverage stop the session filling holes: a refused
+    // range and a cache hit that publishes an entry without a segment both look
+    // like success, and retrying either forever is a render loop.
+    static constexpr int kLiveRenderFailureLimit=2;
+    int m_liveRenderFailures=0;
+    uint64_t m_liveTargetRevision=0;
     // Turning the toggle off keeps them in the retained slot, so turning it back
-    // on resumes at the head instead of rendering the same frames again. Each
-    // job writes into its own subdirectory of m_liveDirectory.
+    // on resumes on the frames already rendered instead of rendering them again.
+    // Each job writes into its own subdirectory of m_liveDirectory.
     std::shared_ptr<NeuralSegmentIndex> m_liveSegments;
     bool m_liveSession=false,m_liveAttached=false,m_liveBuffering=false,m_liveResumePlaying=false;
-    NeuralRenderRange m_liveRange{};
+    // m_liveRange is what the session set out to render - the marked range, or
+    // the whole video - and it does not move. m_liveTarget is the one hole the
+    // running job is filling inside it, which moves as the user watches and
+    // seeks. Coverage itself lives in the index, as a set of rendered regions;
+    // these two are only the intent.
+    NeuralRenderRange m_liveRange{},m_liveTarget{};
+    uint64_t m_liveRunId=0;
     std::shared_ptr<NeuralSegmentIndex> m_retainedSegments;
     std::filesystem::path m_retainedDirectory;
     NeuralRenderRange m_retainedRange{};
@@ -4791,7 +5014,12 @@ private:
     NeuralRenderRange m_previewRange{};
     UINT_PTR m_previewTimer=0;
     std::filesystem::path m_liveDirectory;
-    int64_t m_livePaintedHead=0;ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
+    // Coverage can change without the newest rendered timestamp moving - a run
+    // filling an earlier hole does exactly that - so the repaint trigger is the
+    // index's revision. The covered duration at session start is the baseline the
+    // render pace is measured against, since adopted coverage was not rendered now.
+    uint64_t m_livePaintedRevision=0;int64_t m_liveCoveredAtStart=0;
+    ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
     playback_timing::RenderPaceProfile m_renderPace;
     // Every pace this GPU measured per geometry, newest last; m_renderPace

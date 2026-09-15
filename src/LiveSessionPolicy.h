@@ -1,7 +1,10 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+
+#include "NeuralCoverage.h"
 
 // Decisions an active neural session makes on the UI thread, separated from the
 // player so they can be tested without a window, a GPU or a render helper.
@@ -51,12 +54,18 @@ inline double Lead(const SessionView& view)
 {
     return view.headSec > 0.0 ? std::max(0.0, view.headSec - view.positionSec) : 0.0;
 }
-
 // True once the head is far enough ahead to start playing. A finished job never
 // grows again, so any coverage at all is enough to start.
+//
+// A seek in flight refuses: the playhead the lead was measured against is the
+// one playback is leaving. With coverage in regions a seek can legitimately
+// target unrendered video, and attaching at the position being abandoned made
+// the player attach, refuse the pending seek because that target is a hole,
+// hand playback back, and attach again - 28 times in seventeen seconds of a
+// driven session.
 inline bool ShouldAttach(const SessionView& view, double startLead = kStartLead)
 {
-    if (view.attached) return false;
+    if (view.attached || view.seeking) return false;
     const double lead = Lead(view);
     return lead >= startLead || (view.finished && lead > 0.0);
 }
@@ -134,13 +143,51 @@ inline bool ShouldResume(const SessionView& view, double resumeLead = kResumeLea
     return view.finished || Lead(view) >= resumeLead;
 }
 
-// True when the playhead left the part of the timeline this job will render
-// soon enough to be worth waiting for.
-inline bool NeedsRebase(const SessionView& view, double aheadBudget = kRebaseAhead)
+// Whether the running job should be pointed at a different hole. `target` is the
+// hole it is filling; `wanted` is the hole the playhead needs, which is what
+// NextRenderTarget answers.
+//
+// This replaces the rebase that used to stop the session and restart it at the
+// playhead. Coverage is a set of regions now, so moving the render is all that
+// is needed - nothing rendered is thrown away, and the user can be anywhere in
+// the video, including inside a region an earlier job already finished. Unlike
+// the rebase this also applies while playback is attached: a viewer who seeks
+// back onto rendered frames still wants the render working where they are.
+//
+// A job filling the hole the playhead is in is rendering towards the viewer, so
+// waiting beats restarting - up to the same budget: a job that has fallen more
+// than `aheadBudget` seconds behind the playhead will not catch up, and starting
+// again at the playhead costs one job startup instead of that wait.
+//
+// `frameDuration100ns` is the slack on "same hole". The two spans are never bit
+// identical: a hole shrinks as the job publishes into it, and the job's own
+// range was snapped to a frame boundary when it started. A first version
+// compared the starts for equality, and a five-tick snap residual - coverage
+// ending at 4999995 against a range starting at 5000000 - read as different
+// work on every tick: the driven session cancelled and relaunched its helper
+// four times in 110 ms, and one of those part-rendered jobs is where a stray
+// half-second region came from.
+inline bool ShouldRetarget(const SessionView& view, CoverageSpan target, CoverageSpan wanted,
+                           int64_t frameDuration100ns, double aheadBudget = kRebaseAhead)
 {
-    if (view.attached || view.seeking) return false;
-    if (view.positionSec + kBackwardSlack < view.rangeStartSec) return true;
-    return view.positionSec > std::max(view.rangeStartSec, view.headSec) + aheadBudget;
+    if (view.seeking) return false;
+    if (wanted.Empty()) return false;
+    const int64_t position100ns = static_cast<int64_t>(std::llround(view.positionSec * 1e7));
+    // Checked before the identity test below, which would otherwise hold for
+    // every hole the viewer is standing in and pin a job that cannot catch up.
+    if (target.Contains(position100ns)) {
+        const double reach = std::max(double(target.start100ns) * 1e-7, view.headSec);
+        return view.positionSec > reach + aheadBudget;
+    }
+    // The same hole, still being filled: leave the job alone.
+    if (wanted.start100ns + frameDuration100ns >= target.start100ns &&
+        wanted.end100ns <= target.end100ns)
+        return false;
+    // A backward nudge of a frame or two is frame snapping, not a seek, and the
+    // hole it lands in is the one being filled anyway; anything else is the job
+    // working somewhere the playhead is not.
+    return view.positionSec + kBackwardSlack < double(target.start100ns) * 1e-7 ||
+           view.positionSec >= double(target.end100ns) * 1e-7;
 }
 
 // Video seconds covered per second of wall clock. Meaningless until the job's

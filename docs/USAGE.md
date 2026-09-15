@@ -41,23 +41,32 @@ Out is the exclusive end, so marking Out on the last frame means "to the end"
 and renders it. A range that names no frame is refused before a render starts.
 
 Neural rendering has two shapes. **Turn it on while watching** with the
-toolbar's Neural Rendering button, the DLSS menu entry or `D`: the render
-starts at the playhead — to the Out marker when the playhead sits inside a
-marked range, otherwise to the end of the source — and a panel over the
-current frame collects a lead of four seconds before playback resumes on the
-rendered frames. Rendering keeps running behind playback; if the playhead
-reaches the render head the panel returns until the buffer refills, and `Space`
-pauses playback rather than the render. Turning the button off stops the
-session and hands the same frame back to the original, but keeps the frames it
-already rendered: turning it back on resumes at the render head instead of
-redoing that work, so playback starts again in well under a second. The frames
-are dropped when they can no longer apply - a different video, or changed
-neural settings or guides. On an RTX 5090 the render sustains about 120 frames
-per second at 1080p and 65 at 1440p, so the lead grows on those; a 6.3 Mbit/s
-4K30 re-encode measured 24 and could not keep up. If the source is heavier than
-the GPU can follow the player says so with the predicted rate and asks before
-starting. Once a session has been running for a few seconds the status
-line reports the rate it is actually achieving whenever that falls behind.
+toolbar's Neural Rendering button, the DLSS menu entry or `D`: rendering starts
+at the playhead and a panel over the current frame collects a lead of four
+seconds before playback resumes on the rendered frames. Rendering keeps running
+behind playback; `Space` pauses playback rather than the render.
+
+The session's job is the whole video — or the marked range, when the playhead
+sits inside one — not just the part after the playhead. It renders the stretch
+you are watching first and then fills what is left, nearest to the playhead
+first, until every frame of the range is rendered; the status line reports how
+much of it is done. **Seeking is not limited to what has been rendered.** Seek
+into rendered frames and playback continues on them, wherever they are on the
+timeline. Seek into frames nobody has rendered yet and the original plays there
+immediately - no waiting - while the render moves to that part of the video and
+playback switches over to it once it has coverage. Nothing already rendered is
+discarded when this happens, so seeking back and forth costs no repeated work.
+
+Turning the button off stops the session and hands the same frame back to the
+original, but keeps the frames it already rendered: turning it back on resumes
+on them instead of redoing that work, so playback starts again in well under a
+second. The frames are dropped when they can no longer apply - a different
+video, or changed neural settings or guides. On an RTX 5090 the render sustains
+about 120 frames per second at 1080p and 65 at 1440p; a 6.3 Mbit/s 4K30
+re-encode measured 24 and could not keep up. If the source is heavier than the
+GPU can follow the player says so with the predicted rate and asks before
+starting. Once a session has been running for a few seconds the status line
+reports the rate it is actually achieving whenever that falls behind.
 
 **Convert to a file** with the DLSS menu's **Convert & save** submenu:
 `Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
@@ -81,10 +90,10 @@ entry that was rendered with settings you have since changed, and offers to
 convert that range again.
 
 The timeline shows both states at once: the marked range is a solid violet block
-between a green In tick and an orange Out tick, played progress is blue, and a
-teal stripe along the bottom names the part of the source that already has
-neural frames — during an active session it grows with the render head, which
-is also how far ahead you can seek.
+between a green In tick and an orange Out tick, played progress is blue, and
+teal stripes along the bottom name the parts of the source that already have
+neural frames. A session that has been seeked around shows several of them, with
+the gaps between them being what it has still to render.
 
 Marking a range on a YouTube stream starts downloading that source in the
 background, because a render always works from a local copy. Playback continues
