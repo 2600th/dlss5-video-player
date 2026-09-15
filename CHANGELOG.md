@@ -83,6 +83,27 @@ and looks like a broken helper until the runtime is re-staged.
   the span assertions fail, and restoring them passes.
   Each publish logs `concatMs`, `probeMs` and `promoteMs`, because the first
   measurement of this cost me a driven session to attribute.
+  What is left of the publish is the join, and it is paid per segment file, so
+  it grows with how long the render is. Measured on 1440p parts, timing only
+  the two phases that remain:
+
+  | case | parts | MiB | concat | probe |
+  | --- | --- | --- | --- | --- |
+  | 2 s parts, 1 min | 30 | 66 | 0.31 s | 0.06 s |
+  | 2 s parts, 5 min | 150 | 331 | 1.33 s | 0.13 s |
+  | 2 s parts, 15 min | 450 | 994 | 4.42 s | 0.36 s |
+  | 30 s parts, 15 min | 30 | 1055 | 1.07 s | 0.28 s |
+
+  The last row isolates the cause: the same content and the same bytes in 420
+  fewer files joins 3.35 s faster, so the cost is about **9.8 ms per part**,
+  not per megabyte. A 104 s clip is some 50 parts and half a second, which is
+  why this is finished for now - but an hour-long render is ~1800 parts, about
+  18 s of join plus 1.4 s of probe, and the idle gap between holes comes back.
+  The fix for that is to stop gating the next hole on the publish at all:
+  signal coverage-final at the receipt and let the join, probe and promote
+  finish behind it, since they are FFmpeg processes and the helper is free
+  again. That is a change to the single job slot, so it wants its own session
+  and a long-content driven run to verify - not a tail-end edit to this one.
 - The render no longer chases a playhead that is still moving. A viewer tapping
   the seek key moves it about once a second, and every move was a decision: the
   running job was cancelled and restarted on the new hole, and it produced
