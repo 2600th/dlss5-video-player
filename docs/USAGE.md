@@ -240,6 +240,11 @@ cache entry:
   tagged input (+0.067 dB) and NV12 buys about 7 % throughput at 4K, so the next
   wave should decide the default rather than inherit it.
 
+  Turning it on retires nothing. The render key's pipeline term carries
+  `nv12-source-v1` only while the flag is on, so entries rendered with it off keep
+  the key they were published under, and a render made with it on gets an entry of
+  its own instead of being served for a request that wanted the other input.
+
   One assumption this does not change, on either path: ffmpeg's own conversion
   resolves an *unspecified* matrix to BT.601 whatever the resolution, so an untagged
   HD source decodes as BT.601 on the CPU fallback exactly as it did before. Refusing

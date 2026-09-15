@@ -78,7 +78,8 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                                      probeFrame, guide) ||
                     !renderer->RenderFrame(frame.data(), frame.size(), guide.guideGridRGBA32F.data(),
                                            guide.guideGridRGBA32F.size() * sizeof(float), guide.gridW, guide.gridH,
-                                           attempts == 0, static_cast<float>(1000.0 / kProbeFps))) {
+                                           attempts == 0, guide.motionVectors,
+                                           static_cast<float>(1000.0 / kProbeFps))) {
                     failure = L"The probe frame could not be evaluated.";
                     ++attempts;
                     break;

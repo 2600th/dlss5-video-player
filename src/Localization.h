@@ -111,6 +111,7 @@ private:
             {L"neural.settings.style", L"Style"}, {L"neural.settings.automask", L"Automatic mask"},
             {L"neural.settings.guides", L"Guides"}, {L"neural.settings.guide_mv", L"Motion vectors"}, {L"neural.settings.guide_depth", L"Depth"},
             {L"neural.settings.note", L"These change the neural model: they apply to the paused preview and to the next conversion; playback color adjustments are instant."},
+            {L"neural.settings.ahead", L"Settings changed - this is the previous render; pause to preview them, or convert again"},
             {L"encoder.settings.title", L"Encoder settings"},
             {L"encoder.settings.gpu_convert", L"GPU color conversion"},
             {L"encoder.settings.gpu_source", L"GPU source conversion"},

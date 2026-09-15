@@ -108,6 +108,14 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path,
                                             std::stop_token stop = {});
 std::optional<std::string> Sha256Bytes(std::string_view bytes);
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity);
+// The pipeline term of a render key: what the renderer and the encoder promise
+// about the pixels, as against the source, the geometry and the settings.
+// `gpuSourceConversion` belongs here because it changes what the model is shown -
+// NV12 converted on the GPU instead of BGRA delivered by ffmpeg - while the
+// capture-side encoder switches only change how the result is written, which is
+// why they stay out. The term is appended, never substituted, so every key
+// published before it existed keeps the key it was published under.
+std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion);
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,

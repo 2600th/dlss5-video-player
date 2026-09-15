@@ -210,6 +210,29 @@ void default_identity_key_is_stable_and_range_or_guides_change_it()
     CHECK(BuildNeuralCacheKey(identity) != rangeKey);
 }
 
+void source_conversion_changes_the_render_key_and_the_default_path_is_unchanged()
+{
+    // The capture-side encoder switches stay out of the key on purpose: they
+    // change how the result is written. This one changes what the model is shown -
+    // NV12 converted on the GPU instead of BGRA from ffmpeg - so two renders that
+    // differ in it must not share an entry.
+    const std::string shipped =
+        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
+    CHECK_EQ(shipped, NeuralRenderPipelineIdentity(false));
+    CHECK(NeuralRenderPipelineIdentity(true) != shipped);
+
+    // Byte-for-byte the term the player shipped before it was extracted into a
+    // function. A typo here would retire every cached render in the field, so the
+    // key built from the function must equal the key built from the literal.
+    NeuralCacheIdentity shippedIdentity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
+                                        std::string(64, 'b'), shipped, false};
+    NeuralCacheIdentity identity = shippedIdentity;
+    identity.quality = NeuralRenderPipelineIdentity(false);
+    CHECK_EQ(BuildNeuralCacheKey(shippedIdentity), BuildNeuralCacheKey(identity));
+    identity.quality = NeuralRenderPipelineIdentity(true);
+    CHECK(BuildNeuralCacheKey(identity) != BuildNeuralCacheKey(shippedIdentity));
+}
+
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
 {
     // Byte-exact schema-3 manifest as written by the previous release.
@@ -620,6 +643,7 @@ int main()
     authenticated_settings_survive_promotion_and_tampering_invalidates_cache();
     manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension();
     default_identity_key_is_stable_and_range_or_guides_change_it();
+    source_conversion_changes_the_render_key_and_the_default_path_is_unchanged();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

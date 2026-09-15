@@ -2045,6 +2045,25 @@ private:
             style,x,y,w,h,m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
     }
 
+    // The render the picture came from is not what the dialog now holds. Only the
+    // export path noticed this before, so a settings change made during playback
+    // left the previous render on screen with nothing saying so.
+    bool SettingsAheadOfRender()const{
+        return m_cachedPlayback&&!m_liveSession&&
+               (m_cachedSettings!=m_neuralSettings||m_cachedGuides!=m_renderGuides);
+    }
+    // Raised only from the paths that cannot preview, cleared when the settings
+    // come back to what the picture was rendered with, and never over a failure
+    // notice, which says something more urgent about the same render.
+    void NoteSettingsAheadOfRender(){
+        const std::wstring text=T(L"neural.settings.ahead");
+        if(SettingsAheadOfRender()){
+            if(!m_neuralNotice.empty())return;
+            m_neuralNotice=text;
+        }else if(m_neuralNotice==text)m_neuralNotice.clear();
+        else return;
+        UpdateCachedStatus();InvalidateControls();
+    }
     // Apply changes what the player is showing now: an active session restarts
     // at the playhead with the new settings, a paused frame is re-previewed at
     // once. Writing a converted file is a separate, explicit action.
@@ -2292,7 +2311,7 @@ private:
                     IdentityOf(m_lastPlaybackFrame,m_historyGeneration,0,HistoryReset::FirstFrame),guide)){
                     ready=candidate->renderer->RenderFrame(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
-                        true,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
+                        true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
                 }
             }
         }
@@ -2361,7 +2380,7 @@ private:
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
         bool r=m_dlssReset||!g.hasHistory;
         if(m_cachedPlayback){if(const auto* pair=m_synchronizedPlayback.CurrentPair())UploadComparisonReference(pair->original);}
-        bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,ms);
+        bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,g.motionVectors,ms);
         if(ok){
             m_lastPlaybackFrame=f;
             if(m_renderer->DLSSEnabled()&&!m_renderer->LastFrameUsedDLSS()){
@@ -3259,7 +3278,7 @@ private:
     void SchedulePausedSettingsPreview(){
         if(!m_hwnd||!m_loaded)return;
         if(m_previewTimer){KillTimer(m_hwnd,m_previewTimer);m_previewTimer=0;}
-        if(m_playing||m_liveSession)return;
+        if(m_playing||m_liveSession){NoteSettingsAheadOfRender();return;}
         m_previewTimer=SetTimer(m_hwnd,kPreviewTimerId,kPreviewSettleMs,nullptr);
     }
     // A seek or a resume makes a queued preview meaningless: it would render a
@@ -3273,7 +3292,7 @@ private:
         // A change made while a preview renders is not dropped: the newest
         // settings are previewed once the running one lands.
         if(m_previewJob){m_previewQueued=true;return;}
-        if(!PausedPreviewAvailable())return;
+        if(!PausedPreviewAvailable()){NoteSettingsAheadOfRender();return;}
         const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
         if(!(fps>0.0)||duration<=0)return;
         const NeuralRenderRange range=SingleFrameRange(SnapToFrame(Position100ns()),fps,duration);
@@ -3685,14 +3704,17 @@ private:
                     // The pass evaluates models out of the driver store, which no
                     // staged file covers: without these two terms a render made on
                     // one driver is served and validated on a later one.
-                    // The pipeline term carries `bt709-export-v1` because the encoder
-                    // arguments are deliberately not part of this key, and the export
-                    // colorimetry changed: renders written before that fix carry
-                    // BT.601 pixels with no colour tags. Without moving this term they
-                    // would stay valid hits under an unchanged VERSION.
+                    // The pipeline term carries `bt709-export-v1` because the
+                    // capture-side encoder arguments are deliberately not part of
+                    // this key and the export colorimetry changed: renders written
+                    // before that fix carry BT.601 pixels with no colour tags, and
+                    // without moving the term they would stay valid hits under an
+                    // unchanged VERSION. `GpuSourceConversion` is the one conversion
+                    // switch that does belong in the key, because it changes what the
+                    // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,"DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1",false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey)){
                         // LookupRender already verifies the full payload hash and

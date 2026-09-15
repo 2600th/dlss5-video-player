@@ -13,6 +13,29 @@ the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
 by the parent on the version check, which is the intended fail-closed behaviour
 and looks like a broken helper until the runtime is re-staged.
 
+- The **Motion vectors** guide switch changes the picture again. It only ever
+  zeroed the CPU analysis grid, and from 0.20.0 the motion texture NGX reads is
+  written by the hardware optical-flow resolve pass whenever the engine comes up -
+  a pass that never saw the switch. So on every card measured here, turning motion
+  vectors off moved the render cache key, paid a full re-render, and produced
+  identical pixels. The control now travels with the guide grid and the flow pass
+  is skipped when it is off, which is also what keeps the grid's zeros. Measured on
+  an RTX 4080 SUPER over 12 frames of DLSS-SR at 2560x1440: before, `mv=1` and
+  `mv=0` were byte-identical; after, they differ in 5.9 % of bytes, growing with
+  accumulated history from 0 % on the first frame to 8.2 % by the twelfth, and
+  `mv=1` is byte-identical to what it rendered before the fix.
+- `GpuSourceConversion` is part of the render identity. It decides whether the
+  model is shown NV12 converted on the GPU or BGRA delivered by ffmpeg - the input,
+  not the encoding - and it was the one conversion switch outside the cache key, so
+  a render made with it on could be served for a request with it off. The key's
+  pipeline term now carries `nv12-source-v1` when the flag is on, appended rather
+  than substituted, so every entry rendered on the default path keeps the key it was
+  published under. This was the blocker on deciding that default.
+- A neural-settings change made during playback says so. The picture keeps coming
+  from the render the cache holds, and until now only the export path noticed the
+  mismatch: Apply during cached playback saved the ini, could not preview a moving
+  picture, and returned silently. The status line now carries "this is the previous
+  render" until the settings match what produced it, or come back to it.
 - `ctest` no longer erases `DLSSVideoPlayer.log`. `Log` opens
   `<module directory>/DLSSVideoPlayer.log` with `ios::trunc`, and
   `NeuralPrerenderTests` ran from the player's own directory while its render loop

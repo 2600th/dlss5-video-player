@@ -663,6 +663,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     });
 
     out.hasHistory = history;
+    out.motionVectors = m_controls.motionVectors;
     out.globalMotionX = globalX * gridToRenderX;
     out.globalMotionY = globalY * gridToRenderY;
     out.globalMatchCost = globalCost;

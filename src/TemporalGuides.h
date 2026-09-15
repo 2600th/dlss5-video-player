@@ -49,6 +49,11 @@ struct GuideFrame {
     float globalMotionX = 0.0f;
     float globalMotionY = 0.0f;
     float globalMatchCost = 0.0f;
+    // What the generator was told about motion guides, carried beside the grid
+    // because the grid is not the only motion source: when hardware flow runs, the
+    // resolve pass writes the motion texture instead of the expansion pass, and
+    // without this it would overwrite the zeros `motionVectors=false` put in R and G.
+    bool motionVectors = true;
     // What the scene-cut classifier saw for this frame, so a live-playback
     // decision is inspectable instead of silent. `sceneCutSuppressed` is true
     // when a weak cut was recognised but withheld by the minimum-interval

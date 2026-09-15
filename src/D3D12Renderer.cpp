@@ -814,8 +814,8 @@ void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE
     });
 }
 
-bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs){
-    return RenderFrameInternal(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,temporalReset,frameTimeMs,nullptr);
+bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs){
+    return RenderFrameInternal(bgra,bytes,guideGridRGBA32F,guideBytes,gridW,gridH,temporalReset,motionGuides,frameTimeMs,nullptr);
 }
 
 bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,const GuideFrame&guide,float frameTimeMs){
@@ -827,10 +827,10 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
         return false;
     }
     return RenderFrameInternal(bgra,bytes,guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),
-        guide.gridW,guide.gridH,guide.id.reset!=HistoryReset::None,frameTimeMs,&guide.id);
+        guide.gridW,guide.gridH,guide.id.reset!=HistoryReset::None,guide.motionVectors,frameTimeMs,&guide.id);
 }
 
-bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs,const FrameIdentity*identity){
+bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs,const FrameIdentity*identity){
     if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
@@ -885,7 +885,11 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // field. Both waits are on the GPU. Recording the uploads into their own list is
     // what makes that possible without resetting an allocator the rest of the frame is
     // still recording into, which is the only reason the split exists.
-    const bool nvofFrame=m_nvofActive&&DLSSEnabled();
+    // Motion guides off means no motion anywhere. The CPU grid already emits zero in
+    // R and G, and skipping the engine is what keeps that true: the resolve pass below
+    // does not read the guide controls, so leaving it on made the switch move the cache
+    // key and change no pixel on any card where the engine comes up.
+    const bool nvofFrame=motionGuides&&m_nvofActive&&DLSSEnabled();
     if(nvofFrame){
         if(temporalReset)m_nvof.Reset();
         m_nvof.Capture(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);

@@ -303,6 +303,11 @@ whole reason the staleness matters.
   while motion vectors on versus off differ in 6.85 % of bytes at 43.1 dB. Two
   of the three parameter names were never SuperSampling inputs at all: they
   belong to Ray Reconstruction. The guide was deleted.
+  (That SR reading predates hardware optical flow. From 0.20.0 the resolve pass
+  wrote the motion texture whenever the engine came up, and it did not read the
+  guide switch, so `mv=0` stopped changing anything on that path until the switch
+  was wired into the pass - see the CHANGELOG. Re-measured after that fix on an
+  RTX 4080 SUPER, 12 frames at 1440p: 5.9 % of bytes.)
 - `mv-off` beating `baseline` in this table was real, and it was the motivation
   for rewriting the flow estimator. The vectors were coarse (160×90 grid, 12 px
   steps) and 60.8 % of cells on `cuts-motion` carried a vector that did not

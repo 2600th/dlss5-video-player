@@ -132,7 +132,7 @@ public:
     bool RenderFrame(const uint8_t* bgra, size_t bytes,
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
-                     bool temporalReset, float frameTimeMs);
+                     bool temporalReset, bool motionGuides, float frameTimeMs);
     // Identity-checked entry points: the guide must have been generated for
     // exactly `frame` (same source sample, same job); otherwise the frame is
     // rejected and logged. The temporal reset comes from guide.id.reset or a
@@ -373,7 +373,7 @@ private:
     bool RenderFrameInternal(const uint8_t* bgra, size_t bytes,
                              const float* guideGridRGBA32F, size_t guideBytes,
                              uint32_t gridW, uint32_t gridH,
-                             bool temporalReset, float frameTimeMs,
+                             bool temporalReset, bool motionGuides, float frameTimeMs,
                              const FrameIdentity* identity);
     // Synchronous enqueue + resolve. Kept for the first-frame evidence loop, which must
     // read a capture back before it can decide whether to submit the same frame again.

@@ -526,6 +526,14 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, s
     return digest;
 }
 
+std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion)
+{
+    std::string pipeline =
+        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
+    if (gpuSourceConversion) pipeline += "|nv12-source-v1";
+    return pipeline;
+}
+
 std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
 {
     std::string canonical;
