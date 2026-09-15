@@ -705,6 +705,15 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     const DWORD pipeBytes=static_cast<DWORD>(std::clamp<size_t>(
         2u*FrameBytes(m_layout,m_width,m_height),
         4u<<20,64u<<20));
+    // Sizing and piping have to agree on the layout: a pipe sized for NV12 cannot
+    // hold a BGRA frame, and the symptom is the partial-read storm this comment
+    // describes rather than an error anywhere.
+    LOG("FFmpeg pipe " << (pipeBytes >> 20) << " MiB for a "
+        << (m_layout == VideoPixelLayout::Nv12 ? "NV12" : "BGRA") << " "
+        << m_width << "x" << m_height << " frame of "
+        << FrameBytes(m_layout, m_width, m_height) << " bytes ("
+        << (double(pipeBytes) / double(std::max<size_t>(1, FrameBytes(m_layout, m_width, m_height))))
+        << " frames).");
     if (!CreatePipe(&readPipe, &writePipe, &sa, pipeBytes)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
         return false;
