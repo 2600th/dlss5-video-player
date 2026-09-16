@@ -3399,6 +3399,44 @@ void live_session_with_no_published_segment_plays_the_cache_entry_test()
     CHECK(!live_session::ShouldRebaseStalledAttach(empty,live_session::kAttachFailureLimit));
 }
 
+// A session fills its range one hole at a time and every job publishes a cache
+// entry of its own hole, while "Save converted video" writes the entry out
+// under the session's whole range. A session that rendered [30,60) and then
+// [0,30) exported its 30 s tail labelled as the film.
+void live_session_export_entry_needs_one_job_over_the_whole_range_test()
+{
+    using live_session::ExportableEntry;
+    const int64_t frame = 333333;                       // 30 fps
+    const CoverageSpan range{0, 600000000};             // a 60 s session
+    // The defect: two holes filled by two jobs, the last one's entry offered
+    // as the film. Neither hole's entry is the range, whichever finished last.
+    const std::vector<CoverageSpan> twoJobs{{0, 300000000}, {300000000, 600000000}};
+    CHECK(!ExportableEntry(twoJobs, range, {300000000, 600000000}, frame));
+    CHECK(!ExportableEntry(twoJobs, range, {0, 300000000}, frame));
+    // One job that rendered every frame of the range publishes the film.
+    const std::vector<CoverageSpan> oneJob{{0, 600000000}};
+    CHECK(ExportableEntry(oneJob, range, {0, 600000000}, frame));
+    // An integer-frame head lands a few ticks short of a fractional rate's
+    // declared end; that residual is coverage, the same slack the hole
+    // arithmetic applies.
+    const std::vector<CoverageSpan> shortHead{{0, 600000000 - 5}};
+    CHECK(ExportableEntry(shortHead, range, {0, 600000000 - 5}, frame));
+    // A frame or more missing is a hole, and an entry that stops a frame short
+    // of the range is not the range.
+    const std::vector<CoverageSpan> frameShort{{0, 600000000 - frame - 1}};
+    CHECK(!ExportableEntry(frameShort, range, {0, 600000000 - frame - 1}, frame));
+    // Coverage adopted from an earlier session can be wider than the range;
+    // the entry still has to be the whole of THIS range.
+    const std::vector<CoverageSpan> wider{{0, 900000000}};
+    CHECK(ExportableEntry(wider, {300000000, 600000000}, {300000000, 600000000}, frame));
+    CHECK(!ExportableEntry(wider, {300000000, 600000000}, {300000000, 450000000}, frame));
+    // A job that published no segment - a cache hit - has an entry but no
+    // coverage: the completed-session plan owns that case, not the export.
+    CHECK(!ExportableEntry({}, range, {0, 600000000}, frame));
+    CHECK(!ExportableEntry(oneJob, {}, {0, 600000000}, frame));
+    CHECK(!ExportableEntry(oneJob, range, {}, frame));
+}
+
 void live_session_pace_reports_nothing_until_startup_stops_dominating_test()
 {
     CHECK_EQ(0.0,live_session::RealtimeRatio(3.0,4.0));           // 4 s in, still mostly startup
@@ -3782,6 +3820,7 @@ int wmain(int argc, wchar_t* argv[])
     live_session_waits_for_a_job_whose_head_is_close_behind_the_playhead_test();
     live_session_joins_the_render_where_its_coverage_actually_starts_test();
     live_session_with_no_published_segment_plays_the_cache_entry_test();
+    live_session_export_entry_needs_one_job_over_the_whole_range_test();
     live_session_pace_reports_nothing_until_startup_stops_dominating_test();
     live_render_forecast_matches_the_measured_rate_and_flags_sources_that_cannot_keep_up_test();
     live_render_forecast_predicts_from_this_gpu_measured_geometries_test();
