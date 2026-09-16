@@ -161,6 +161,25 @@ inline CompletedSessionPlan PlanForCompletedSession(const CompletedSession& sess
     return CompletedSessionPlan::Stop;
 }
 
+// Whether the cache entry a finished job published can be offered as the
+// session's converted video. An entry is the join of ONE job's segments,
+// labelled with that job's range, while "Save converted video" writes the
+// entry out under the SESSION's range - so the two only agree when a single
+// job rendered every frame of that range. A session that filled its range in
+// several jobs has several entries and none of them is the film: one 90 s
+// session offered its last 12 s hole under the film's name and exported that.
+// `frameDuration100ns` is the same sub-frame slack UncoveredSpans applies: an
+// integer-frame head lands a few ticks short of a fractional rate's declared
+// end, and that residual is coverage, not a missing frame.
+inline bool ExportableEntry(const std::vector<CoverageSpan>& covered, CoverageSpan range,
+                            CoverageSpan entry, int64_t frameDuration100ns)
+{
+    if (range.Empty() || entry.Empty()) return false;
+    if (!UncoveredSpans(covered, range, frameDuration100ns).empty()) return false;
+    return entry.start100ns <= range.start100ns + frameDuration100ns &&
+           entry.end100ns + frameDuration100ns >= range.end100ns;
+}
+
 // True once a rebuffer can end.
 inline bool ShouldResume(const SessionView& view, double resumeLead = kResumeLead)
 {
