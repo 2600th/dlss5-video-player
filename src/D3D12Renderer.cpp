@@ -188,13 +188,18 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     UINT ff=0;
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> dbg; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) { dbg->EnableDebugLayer(); ff|=DXGI_CREATE_FACTORY_DEBUG; }
+#endif
     // Device Removed Extended Data, read back by LatchGpuUnusable: which command list
     // the GPU was in when it stopped, how far into it, and the page fault if there was
-    // one. Same toggle as the debug layer because it costs a breadcrumb write per
-    // command list, which the release build spends on frames instead.
-    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
-    if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))){dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);}
-#endif
+    // one. The settings are process-wide and consulted at device creation, so this is
+    // the last moment to ask, and nothing that could be asked earlier - the debug layer
+    // has no "is it on" query before a device exists - would tell us a host wants it.
+    // So it is on when a test says so and never otherwise: a production renderer has
+    // no hooks, and the breadcrumb write per command list op stays in its frames.
+    if(m_testHooks&&m_testHooks->dred){
+        ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))){dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);}
+    }
     if(!HR(CreateDXGIFactory2(ff,IID_PPV_ARGS(&m_factory)),"CreateDXGIFactory2")) return false;
     ComPtr<IDXGIAdapter1> fallback;
     for(UINT i=0;;++i){
@@ -1411,19 +1416,27 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     m_gpuUnusable=true;m_lastFenceWaitResult=result;
     if(!first||result!=d3d12_renderer_detail::FenceWaitResult::DeviceRemoved)return;
     LOG("D3D12 device removed: reason=0x"<<std::hex<<reason<<std::dec<<"; the renderer takes no further work.");
-#if defined(_DEBUG)
+    // Whatever DRED recorded - asked for by a test hook above, or turned on outside the
+    // process by the system's own device-removal policy - is worth the one query here.
+    // DXGI_ERROR_UNSUPPORTED means the settings were never on in this process. An
+    // empty list means they were and no command list was outstanding: the runtime links
+    // breadcrumbs only for work the GPU still had when it went, and an explicit
+    // RemoveDevice signals every fence first, so it always reads this way - as does a
+    // driver taking an idle device away. Each silence gets its own line so the reader
+    // of a field log knows which one they are looking at.
     ComPtr<ID3D12DeviceRemovedExtendedData> dred;
     if(!m_device||FAILED(m_device.As(&dred)))return;
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
-    if(SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))){
-        for(const D3D12_AUTO_BREADCRUMB_NODE*node=breadcrumbs.pHeadAutoBreadcrumbNode;node;node=node->pNext){
-            const UINT completed=node->pLastBreadcrumbValue?*node->pLastBreadcrumbValue:0;
-            LOG("DRED breadcrumbs: list=\""<<(node->pCommandListDebugNameA?node->pCommandListDebugNameA:"")
-                <<"\" queue=\""<<(node->pCommandQueueDebugNameA?node->pCommandQueueDebugNameA:"")
-                <<"\" completed "<<completed<<" of "<<node->BreadcrumbCount<<" ops"
-                <<(completed<node->BreadcrumbCount&&node->pCommandHistory
-                    ?"; stopped in D3D12_AUTO_BREADCRUMB_OP "+std::to_string(int(node->pCommandHistory[completed])):std::string{}));
-        }
+    const HRESULT hr=dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
+    if(FAILED(hr))LOG("DRED breadcrumbs unavailable: hr=0x"<<std::hex<<hr<<std::dec<<"; the settings were not turned on in this process.");
+    else if(!breadcrumbs.pHeadAutoBreadcrumbNode)LOG("DRED enabled; no breadcrumbs outstanding - the GPU had no command list in flight when the device went (an explicit removal or an idle device, not a fault).");
+    for(const D3D12_AUTO_BREADCRUMB_NODE*node=breadcrumbs.pHeadAutoBreadcrumbNode;node;node=node->pNext){
+        const UINT completed=node->pLastBreadcrumbValue?*node->pLastBreadcrumbValue:0;
+        LOG("DRED breadcrumbs: list=\""<<(node->pCommandListDebugNameA?node->pCommandListDebugNameA:"")
+            <<"\" queue=\""<<(node->pCommandQueueDebugNameA?node->pCommandQueueDebugNameA:"")
+            <<"\" completed "<<completed<<" of "<<node->BreadcrumbCount<<" ops"
+            <<(completed<node->BreadcrumbCount&&node->pCommandHistory
+                ?"; stopped in D3D12_AUTO_BREADCRUMB_OP "+std::to_string(int(node->pCommandHistory[completed])):std::string{}));
     }
     D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
     if(SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))&&fault.PageFaultVA){
@@ -1433,7 +1446,6 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
         for(const D3D12_DRED_ALLOCATION_NODE*node=fault.pHeadRecentFreedAllocationNode;node;node=node->pNext)
             LOG("DRED page fault: recently freed \""<<(node->ObjectNameA?node->ObjectNameA:"")<<"\" type "<<int(node->AllocationType));
     }
-#endif
 }
 bool D3D12Renderer::PresentSwapchain(const char*what){
     const auto presented=std::chrono::steady_clock::now();

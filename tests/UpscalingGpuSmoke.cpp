@@ -134,10 +134,15 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
     MFShutdown();CoUninitialize();return code;
 }
 
-// The renderer's private state this probe has to reach: the device, to remove it and
-// to read the debug layer's messages off it; the present flag, to make one Present
-// refuse; and the frame ring, to see a refused frame's slot published all the same.
+// The renderer's private state this probe has to reach: the hooks, to ask for DRED
+// before the device exists; the device, to remove it and to read the debug layer's
+// messages and DRED off it; the present flag, to make one Present refuse; and the
+// frame ring, to see a refused frame's slot published all the same.
 struct D3D12RendererTestAccess {
+    static D3D12RendererTestHooks& Hooks(D3D12Renderer& r){
+        if(!r.m_testHooks)r.m_testHooks=std::make_unique<D3D12RendererTestHooks>();
+        return *r.m_testHooks;
+    }
     static ID3D12Device* Device(D3D12Renderer& r){return r.m_device.Get();}
     // The tearing flag on a swapchain built without it makes Present answer
     // DXGI_ERROR_INVALID_CALL after the frame's command lists are already queued.
@@ -178,11 +183,14 @@ DebugLayerReport ReadDebugLayer(ID3D12Device* device,const char* stage){
     return report;
 }
 
-bool LogContains(std::string_view needle){
+// Every line of this process's log that carries `needle`. Log truncates the file at
+// start-up, so nothing an earlier run wrote can answer for this one.
+std::vector<std::string> LogLines(std::string_view needle){
     wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
     std::ifstream log(std::filesystem::path(module).parent_path()/L"DLSSVideoPlayer.log",std::ios::binary);
-    std::stringstream text;text<<log.rdbuf();
-    return text.str().find(needle)!=std::string::npos;
+    std::vector<std::string> lines;
+    for(std::string line;std::getline(log,line);)if(line.find(needle)!=std::string::npos)lines.push_back(std::move(line));
+    return lines;
 }
 
 std::string Hex(HRESULT value){std::ostringstream out;out<<std::hex<<value;return out.str();}
@@ -218,6 +226,7 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
         };
         auto makeRenderer=[&](HWND window,D3D12RendererOwner& renderer){
             renderer=MakeD3D12Renderer();
+            Access::Hooks(*renderer).dred=true;
             return renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
                 NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&renderer->DLSSAvailable();
         };
@@ -261,7 +270,14 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
         //    has no fence to wait on and the frame reaches its allocator Reset, Close
         //    and Present on the dead device - where the classification has to happen.
         //    The renderer must come out latched as DeviceRemoved, log the device's own
-        //    reason, refuse further work up front, and still tear down.
+        //    reason, refuse further work up front, and still tear down. DRED, which the
+        //    hook turned on before the device existed, has to answer this device (S_OK,
+        //    not DXGI_ERROR_UNSUPPORTED) and the renderer has to have written what it
+        //    said. An explicit removal never carries breadcrumbs: the runtime links them
+        //    only for work still outstanding, and RemoveDevice signals every fence first
+        //    - a frame parked behind an unsignalled fence comes out empty too - so the
+        //    line to expect is the "enabled, nothing outstanding" one. A GPU fault would
+        //    be the only way to see per-list breadcrumbs, and it is not provoked here.
         bool lossOk=makeRenderer(window,renderer);
         rendered=0;guides.Reset();
         for(uint32_t i=0;lossOk&&i<2;++i)lossOk=decoder.ReadNext(frame)&&render(*renderer);
@@ -273,17 +289,26 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
         const bool latched=renderer->GpuUnusable()&&renderer->LastFenceWaitResult()==d3d12_renderer_detail::FenceWaitResult::DeviceRemoved;
         const bool refusedUpFront=!render(*renderer)&&!renderer->PresentCurrent();
         const std::string expected="D3D12 device removed: reason=0x"+Hex(reason);
-        const bool logged=LogContains(expected);
+        const bool logged=!LogLines(expected).empty();
+        Microsoft::WRL::ComPtr<ID3D12DeviceRemovedExtendedData> dredData;
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+        const HRESULT dredHr=removable&&SUCCEEDED(Access::Device(*renderer)->QueryInterface(IID_PPV_ARGS(&dredData)))
+            ?dredData->GetAutoBreadcrumbsOutput(&breadcrumbs):E_FAIL;
+        const std::vector<std::string> dred=LogLines("DRED ");
+        for(const std::string& line:dred)std::cout<<"  "<<line<<"\n";
+        const bool dredLogged=!LogLines("DRED enabled;").empty();
         const DebugLayerReport afterLoss=ReadDebugLayer(Access::Device(*renderer),"device-removed");
         renderer.reset();DestroyWindow(window);
         std::cout<<"device-removed: removed="<<removable<<" reason=0x"<<Hex(reason)<<" renderRefused="<<lossRefused
             <<" gpuUnusable="<<latched<<" fenceWait="<<int(d3d12_renderer_detail::FenceWaitResult::DeviceRemoved)
             <<" refusedUpFront="<<refusedUpFront<<" logged=\""<<expected<<"\"="<<logged
+            <<" dredHr=0x"<<Hex(dredHr)<<" dredNodes="<<(breadcrumbs.pHeadAutoBreadcrumbNode?1:0)<<" dredLines="<<dred.size()<<" dredEnabledLogged="<<dredLogged
             <<" errors="<<afterLoss.errors<<" syncErrors="<<afterLoss.syncErrors<<" tornDown=1\n";
         // On the live device nothing the debug layer calls an error is tolerated; once
         // the device is gone only the reuse-under-the-GPU class is held against it.
         code=presentRefused&&framePublished&&staticRefused&&staticPublished&&wrapped==Access::FrameCount+2&&stillUsable&&
-             afterRefusal.errors==0&&removable&&FAILED(reason)&&lossRefused&&latched&&refusedUpFront&&logged&&afterLoss.syncErrors==0?0:6;
+             afterRefusal.errors==0&&removable&&FAILED(reason)&&lossRefused&&latched&&refusedUpFront&&logged&&
+             SUCCEEDED(dredHr)&&dredLogged&&afterLoss.syncErrors==0?0:6;
     }
     MFShutdown();CoUninitialize();return code;
 }
