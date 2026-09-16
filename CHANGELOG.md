@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.23.0 - 2026-09-16
 
 A verification pass over the whole tree after 0.22.0: seven audits in parallel
 (session state machine, neural pipeline, decode and media, renderer, build and

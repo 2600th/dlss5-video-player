@@ -1,6 +1,6 @@
 # Game trailer examples
 
-_Verified against 0.22.0 (da8871b) on 2026-09-16._
+_Verified against 0.23.0 (cc423d1) on 2026-09-16._
 
 The **File > Game trailers** menu contains six official trailers featuring human
 characters, selected for face, expression, hair, clothing and lighting comparisons.

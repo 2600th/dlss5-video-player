@@ -1,6 +1,6 @@
 # DLSS 5 Video Player
 
-_Verified against 0.22.0 (da8871b) on 2026-09-16._
+_Verified against 0.23.0 (cc423d1) on 2026-09-16._
 
 Run a video, photo or GIF through NVIDIA's DLSS 5 neural renderer, then look at
 the result next to the original on the same frame. Windows only. Needs an RTX
@@ -19,18 +19,18 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
-> unsigned community build. Checked on an RTX 4080 SUPER (v0.22.0) and an RTX
+> unsigned community build. Checked on an RTX 4080 SUPER (v0.23.0) and an RTX
 > 5090 (v0.20.0). Neural rendering needs NVIDIA driver 610.47 or newer.
 > Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
-**v0.22.0** (2026-09-16): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.22.0)
+**v0.23.0** (2026-09-16): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.23.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.22.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.22.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.23.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.23.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -79,6 +79,35 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.23.0** (2026-09-16). **A verification pass over the whole player**, with
+seven audits read against the source and the findings fixed rather than filed.
+Two of them a user could have met: **Save converted video** after a live session
+used to write the last rendered hole under the film's name - toggle neural on at
+0:20 and the saved file was twenty seconds long - and is now offered only when a
+single render covered the whole video; and a cancel that reached the neural
+helper just after a job had finished cancelled the *next* job before its first
+frame, which is fixed and tested with a real command channel.
+
+When the graphics device is removed or stops responding during playback, the
+player now stops, says so in the status bar and rebuilds its renderer once
+instead of freezing the picture with the audio still running; an export no
+longer retries a frame up to 120 times on a dead device. A render whose backend
+evaluated fewer frames than were captured is refused - the check that was meant
+to catch that compared a number with a copy of itself. Switching streams no
+longer leaves the player describing the previous one, a decode-thread
+allocation failure ends that playback instead of the player, every helper
+child has a wall-clock bound, and YouTube streams are fetched with certificate
+verification forced on and only `https`/`tls`/`tcp` allowed. Partial downloads
+and refused renders parked under the cache's `staging/` are reaped a few per
+launch instead of accumulating until a manual clear.
+
+Both executables ship with Control Flow Guard and CET compatibility. Releases
+are now created as drafts - so the complete package the notes name is attached
+before anything is public - with every workflow action pinned to a commit and a
+provenance attestation on the CI-built core package. Two agent-era planning
+documents are retired, the guides that ship in the package are corrected, and
+each carries a `Verified against` line that the release gate checks.
 
 **0.22.0** (2026-09-16). **A session now renders the whole video**, not one run
 forward from where you pressed `D`. Coverage is a set of rendered regions: the
