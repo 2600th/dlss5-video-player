@@ -147,15 +147,16 @@ public:
     }
 
     // Hands the running job's stop source to the reader and the parent watcher.
-    // A stop already pending - Cancel, Shutdown, a closed pipe or a dead parent
-    // seen while the loop was between jobs - is applied immediately, so the job
-    // starts already cancelled rather than ignoring a request that arrived a
-    // moment too early.
+    // A stop already pending - Shutdown, a closed pipe or a dead parent seen
+    // while the loop was between jobs, or a Cancel the reader saw after the
+    // loop dequeued this Job - is applied immediately, so the job starts
+    // already cancelled rather than ignoring a request that arrived a moment
+    // too early.
     void AttachJobStop(std::stop_source& source)
     {
         std::lock_guard lock(state_->mutex);
         state_->jobStop = &source;
-        if (state_->stopPending) source.request_stop();
+        if (state_->stopPending || state_->cancelPending) source.request_stop();
     }
 
     void DetachJobStop()
@@ -163,6 +164,19 @@ public:
         std::lock_guard lock(state_->mutex);
         state_->jobStop = nullptr;
         state_->stopPending = false;
+        state_->cancelPending = false;
+    }
+
+    // A Cancel the loop dequeues with no job in flight was sent for a job that
+    // has already reported: the parent writes it up to a pump interval after
+    // the Result it never saw in time. It must not carry over to the next Job
+    // behind it, and the pipe's order guarantees that Job is still queued.
+    // Only the cancel is forgotten: a Shutdown, a closed pipe or a dead parent
+    // still applies to whatever job comes next.
+    void DiscardPendingCancel()
+    {
+        std::lock_guard lock(state_->mutex);
+        state_->cancelPending = false;
     }
 
 private:
@@ -174,7 +188,12 @@ private:
         std::deque<Command> queue;
         // Borrowed for the length of one job by the loop that owns it.
         std::stop_source* jobStop{};
+        // Set by the terminal reasons: Shutdown, closed pipe, dead parent, a
+        // frame that cannot be resynchronized from. Never outlived by a job.
         bool stopPending{};
+        // Set by a Cancel; cleared when a job ends or when the loop dequeues a
+        // Cancel with no job running (see DiscardPendingCancel).
+        bool cancelPending{};
         bool closed{};
         bool malformed{};
         bool parentExited{};
@@ -191,6 +210,12 @@ private:
     static void RequestStop(State& state)
     {
         state.stopPending = true;
+        if (state.jobStop) state.jobStop->request_stop();
+    }
+
+    static void RequestCancel(State& state)
+    {
+        state.cancelPending = true;
         if (state.jobStop) state.jobStop->request_stop();
     }
 
@@ -255,8 +280,8 @@ private:
             }
             {
                 std::lock_guard lock(state.mutex);
-                if (command.kind == CommandKind::Cancel || command.kind == CommandKind::Shutdown)
-                    RequestStop(state);
+                if (command.kind == CommandKind::Cancel) RequestCancel(state);
+                else if (command.kind == CommandKind::Shutdown) RequestStop(state);
                 state.queue.push_back(std::move(command));
                 if (state.wake) SetEvent(state.wake);
             }
@@ -359,7 +384,9 @@ ResidentExit RunResidentLoop(CommandChannel& channel, Runner& runner,
             case CommandKind::Cancel:
                 // The reader already stopped the job this was meant for, so a
                 // Cancel that reaches the loop is one for a job that has
-                // already reported. Nothing to do, and the helper stays.
+                // already reported. The helper stays, and the cancel must not
+                // be left pending for the next Job in the queue.
+                channel.DiscardPendingCancel();
                 break;
             case CommandKind::Shutdown:
                 return ResidentExit::Shutdown;

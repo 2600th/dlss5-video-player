@@ -4340,7 +4340,7 @@ private:
                         completion->result.ok=false;completion->result.detail=L"The neural video failed final cache validation.";goto finish;
                     }
                     if(promotion.attempts>1)LOG("Neural cache entry published after "<<promotion.attempts<<" rename attempts; the entry was held by another process.");
-                    if(const auto promoted=cache.LookupRender(renderKey)){completion->neuralPath=promoted->payloadPath;completion->receiptPath=promoted->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
+                    if(promotion.entry){completion->neuralPath=promotion.entry->payloadPath;completion->receiptPath=promotion.entry->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
                 }
             finish:
                 // A cache hit, a refusal or a prepared open never reached a

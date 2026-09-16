@@ -10,8 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <charconv>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <system_error>
@@ -406,7 +408,8 @@ bool TransientRenameError(DWORD error)
 }
 
 bool RenameDirectory(const std::filesystem::path& from, const std::filesystem::path& to,
-                     DWORD* lastError = nullptr, unsigned* attempts = nullptr)
+                     DWORD* lastError = nullptr, unsigned* attempts = nullptr,
+                     const std::function<void(unsigned)>& retrying = {})
 {
     for (unsigned attempt = 1; attempt <= kRenameAttempts; ++attempt) {
         if (attempts) *attempts = attempt;
@@ -414,6 +417,7 @@ bool RenameDirectory(const std::filesystem::path& from, const std::filesystem::p
         const DWORD error = GetLastError();
         if (lastError) *lastError = error;
         if (!TransientRenameError(error) || attempt == kRenameAttempts) return false;
+        if (retrying) retrying(attempt);
         Sleep(kRenameDelayMs);
     }
     return false;
@@ -433,6 +437,46 @@ bool MoveToInvalidDirectory(const std::filesystem::path& root,
     }
     return false;
 }
+
+// The owner of a staging directory, from the "<prefix>-<pid>-<nonce>" name
+// BeginStaging and MoveToInvalidDirectory write. Anything else in staging/ was
+// not put there by this code and is left alone.
+bool ParseStagingOwner(const std::wstring& name, DWORD& pid)
+{
+    const size_t nonce = name.rfind(L'-');
+    if (nonce == std::wstring::npos || nonce == 0) return false;
+    const size_t owner = name.rfind(L'-', nonce - 1);
+    if (owner == std::wstring::npos || owner + 1 == nonce) return false;
+    uint64_t value = 0;
+    for (size_t index = owner + 1; index < nonce; ++index) {
+        const wchar_t digit = name[index];
+        if (digit < L'0' || digit > L'9') return false;
+        value = value * 10 + static_cast<uint64_t>(digit - L'0');
+        if (value > MAXDWORD) return false;
+    }
+    pid = static_cast<DWORD>(value);
+    return true;
+}
+
+// Conservative: a process this one may not open is alive, and a reused pid
+// keeps the directory of the process that had it. Only a pid the kernel does
+// not know, or one whose process has exited, frees an entry.
+bool ProcessAlive(DWORD pid)
+{
+    if (pid == GetCurrentProcessId()) return true;
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return GetLastError() != ERROR_INVALID_PARAMETER;
+    DWORD code = 0;
+    const bool alive = !GetExitCodeProcess(process, &code) || code == STILL_ACTIVE;
+    CloseHandle(process);
+    return alive;
+}
+
+// A sweep runs on every manager construction, some of which are on the UI
+// thread, so it stops after this many removals or this long, whichever comes
+// first. What it leaves behind is oldest-first the next construction's.
+constexpr size_t kSweepRemovals = 8;
+constexpr std::chrono::milliseconds kSweepBudget{100};
 
 } // namespace
 
@@ -731,11 +775,15 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
     // produced. Legacy schema-3 entries predate receipts and are required to
     // carry no digest at all (CommonManifestFieldsValid); sources never carry
     // one either.
+    // nativeEvaluations is the backend's own count of evaluations while the
+    // frames were captured - a second witness to frameCount, not a copy of it.
+    // Resubmits (the receipt gate, frame retries) evaluate a frame more than
+    // once, so it may exceed the frame count; it may never fall short of it.
     return IsHexDigest(manifest.sourceDigest) && IsHexDigest(manifest.neuralDigest) &&
            IsHexDigest(manifest.runtimeDigest) && manifest.feature18Created &&
            manifest.feature18ArmedBeforeCapture &&
            (manifest.schema == kLegacySchema || IsHexDigest(manifest.receiptDigest)) &&
-           manifest.nativeEvaluations == manifest.frameCount &&
+           manifest.nativeEvaluations >= manifest.frameCount &&
            manifest.verifiedNeuralFrames == manifest.frameCount &&
            manifest.observedFeature18Evaluations > 0;
 }
@@ -794,6 +842,50 @@ NeuralCacheManager::NeuralCacheManager(std::filesystem::path root)
     }
     root_ = *writableRoot;
     valid_ = true;
+    SweepStaging();
+}
+
+size_t NeuralCacheManager::SweepStaging()
+{
+    if (!valid_) return 0;
+    const auto started = std::chrono::steady_clock::now();
+    struct Candidate {
+        std::filesystem::path path;
+        std::filesystem::file_time_type written;
+    };
+    std::vector<Candidate> candidates;
+    std::error_code error;
+    for (std::filesystem::directory_iterator iterator(root_ / L"staging", error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        const std::wstring name = iterator->path().filename().wstring();
+        DWORD pid = 0;
+        if (!ParseStagingOwner(name, pid)) continue;
+        // An entry set aside as invalid has nothing left to reference it, so it
+        // goes whoever made it; a partial payload still being written belongs
+        // to the live process whose pid it carries.
+        if (!name.starts_with(L"invalid") && ProcessAlive(pid)) continue;
+        std::error_code timeError;
+        const auto written = iterator->last_write_time(timeError);
+        if (timeError) continue;
+        candidates.push_back({iterator->path(), written});
+    }
+    if (candidates.empty()) return 0;
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) { return a.written < b.written; });
+    size_t removed = 0;
+    for (const Candidate& candidate : candidates) {
+        if (removed >= kSweepRemovals ||
+            std::chrono::steady_clock::now() - started >= kSweepBudget) break;
+        if (!OwnsPath(candidate.path)) continue;
+        std::error_code removeError;
+        std::filesystem::remove_all(candidate.path, removeError);
+        if (!removeError) ++removed;
+    }
+    const double elapsedMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    LOG("Neural cache staging swept: removed=" << removed
+        << " remaining=" << (candidates.size() - removed) << " ms=" << elapsedMs);
+    return removed;
 }
 
 bool NeuralCacheManager::ValidKey(std::string_view key)
@@ -975,11 +1067,12 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     const auto destination = root_ /
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
-    if (Lookup(kind, key)) {
+    if (auto existing = Lookup(kind, key)) {
         std::error_code cleanupError;
         std::filesystem::remove_all(staging, cleanupError);
         if (cleanupError) return fail(NeuralCachePromotion::Stage::StagingCleanup);
-        if (diagnostic) *diagnostic = report;
+        report.entry = std::move(existing);
+        if (diagnostic) *diagnostic = std::move(report);
         return true;
     }
     std::error_code existsError;
@@ -988,10 +1081,27 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         if (!MoveToInvalidDirectory(root_, destination, L"invalid-existing"))
             return fail(NeuralCachePromotion::Stage::ExistingEntry);
     }
-    if (!RenameDirectory(staging, destination, &report.win32Error, &report.attempts))
+    if (!RenameDirectory(staging, destination, &report.win32Error, &report.attempts,
+                         publishRetryObserver_))
         return fail(NeuralCachePromotion::Stage::Move);
-    if (!Lookup(kind, key).has_value()) return fail(NeuralCachePromotion::Stage::Reopen);
-    if (diagnostic) *diagnostic = report;
+    // The payload was hashed and the manifest reread in staging a moment ago;
+    // a rename moves the directory's contents byte for byte, so the reopen
+    // only has to confirm they arrived. Hashing a multi-hundred-megabyte
+    // payload a second time here proved nothing the first pass had not.
+    const auto payloadName = payload.filename();
+    {
+        std::ifstream input(destination / L"manifest.json", std::ios::binary);
+        const std::string serialized{std::istreambuf_iterator<char>(input),
+                                     std::istreambuf_iterator<char>()};
+        const auto reopened = ParseNeuralCacheManifest(serialized);
+        std::error_code payloadError;
+        if (!reopened || *reopened != manifest ||
+            !std::filesystem::is_regular_file(destination / payloadName, payloadError) ||
+            payloadError)
+            return fail(NeuralCachePromotion::Stage::Reopen);
+    }
+    report.entry = NeuralCacheEntry{destination, destination / payloadName, std::move(manifest)};
+    if (diagnostic) *diagnostic = std::move(report);
     return true;
 }
 

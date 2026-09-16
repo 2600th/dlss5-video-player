@@ -138,11 +138,11 @@ struct AttemptResult {
     EncodeError encoderError{EncodeError::None};
     uint64_t frames{};
     uint64_t bytes{};
-    uint64_t evaluations{};
-    // Evaluate calls the neural backend itself completed during this attempt.
-    // Counted separately from `evaluations`, which is this job's own tally of
-    // captured frames: this one is the backend's, and it includes the preroll
-    // and every resubmit.
+    // Evaluate calls the neural backend itself completed while this attempt
+    // captured: sampled from the first capture, so the preroll is left out,
+    // and every resubmit counts. Published as the result's nativeEvaluations,
+    // which is what makes the cache's evidence gate a second witness rather
+    // than a copy of `frames`.
     uint64_t neuralEvaluations{};
     uint32_t historyResets{};
     bool hasTimestamp{};
@@ -1022,13 +1022,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         else return false;
     }();
     if (!evaluatorReused) markColdStart(NeuralColdStartPhase::NeuralInit);
-    // The neural backend's own Evaluate tally. The production evaluator reports
-    // the NGX count; a test evaluator has only its submit count, which is the
-    // same claim at the fidelity that build can make.
-    auto neuralEvaluations = [&]() -> uint64_t {
-        if constexpr (requires { evaluator.NeuralEvaluations(); }) return evaluator.NeuralEvaluations();
-        else return evaluator.EvaluationCount();
-    };
+    // The neural backend's own Evaluate tally: the NGX count in production, and
+    // whatever the injected evaluator vouches for in the tests.
+    auto neuralEvaluations = [&]() -> uint64_t { return evaluator.NeuralEvaluations(); };
     expectedBytes = static_cast<size_t>(
         EncoderFrameBytes(evaluator.CapturePixelFormat(), request.width, request.height));
 
@@ -1128,11 +1124,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
 
     auto runAttempt = [&](EncoderKind kind) {
-        // The backend's own evaluation count, read on entry and on every exit,
-        // so the attempt can be held to having actually evaluated the frames it
-        // claims. Sampled around the attempt rather than per frame because a
-        // retry pass re-renders everything and only its own work counts.
-        const uint64_t neuralEvaluationsBefore = neuralEvaluations();
+        // The backend's own evaluation count, read at the first capture and on
+        // every exit, so the attempt can be held to having actually evaluated
+        // the frames it claims. Sampled around the capture pass rather than
+        // per frame because a retry pass re-renders everything and only its
+        // own work counts; sampled after the preroll because those frames are
+        // evaluated without being captured.
+        uint64_t neuralEvaluationsBefore = neuralEvaluations();
         AttemptResult attempt;
         EncoderSpec spec{request.width, request.height, request.fps, kind,
                          evaluator.CapturePixelFormat()};
@@ -1213,7 +1211,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 return writeError == EncodeError::Cancelled
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder;
             }
-            ++attempt.frames;++attempt.evaluations;attempt.bytes+=written;
+            ++attempt.frames;attempt.bytes+=written;
             if (!attempt.hasTimestamp) {
                 attempt.firstTimestamp=queued.timestamp100ns;
                 attempt.hasTimestamp=true;
@@ -1342,6 +1340,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
+            if (submitted == 0) neuralEvaluationsBefore = neuralEvaluations();
             const auto evalStart = SteadyClock::now();
             JobEvaluation evaluation;
             const bool pipelined = submitted > 0;
@@ -1432,7 +1431,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     ? NeuralRenderFailure::Cancelled : NeuralRenderFailure::Encoder);
                 return attempt;
             }
-            ++attempt.frames;++attempt.evaluations;attempt.bytes+=captured;
+            ++attempt.frames;attempt.bytes+=captured;
             if (!attempt.hasTimestamp) {
                 attempt.firstTimestamp=frame.timestamp100ns;
                 attempt.hasTimestamp=true;
@@ -1514,15 +1513,16 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     // The add-on's log counter can only be watched to advance once per process
     // (see the receipt gate). The first job in a process is held to it exactly
-    // as a single-shot helper is; a reused evaluator is held to the backend's
-    // own count instead, which is per process, monotonic, and has to have
-    // advanced at least once for every frame this attempt captured.
+    // as a single-shot helper is; a reused evaluator cannot be. Every job is
+    // held to the backend's own count as well, which is per process, monotonic,
+    // and has to have advanced at least once for every frame this attempt
+    // captured - the count the cache entry then carries as its own evidence.
     if(!evaluatorReused&&
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence did not advance after captured rendering.");
     }
-    if(evaluatorReused&&attempt.neuralEvaluations<attempt.frames){
+    if(attempt.neuralEvaluations<attempt.frames){
         std::wostringstream detail;
         detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
               <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
@@ -1540,7 +1540,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(NeuralRenderFailure::Neural,detail.str());
     }
     result.ok=true;result.encoder=selected;result.frameCount=attempt.frames;
-    result.nativeEvaluations=attempt.evaluations;
+    result.nativeEvaluations=attempt.neuralEvaluations;
     result.verifiedNeuralFrames=attempt.frames;
     result.firstTimestamp100ns=attempt.firstTimestamp;
     result.duration100ns=attempt.lastTimestamp-attempt.firstTimestamp+frameDuration;
@@ -1609,6 +1609,7 @@ struct InjectedEvaluatorAdapter {
     void DiscardPending(){captured.clear();}
     bool FeatureCreated()const{return evaluator.FeatureCreated();}
     uint64_t EvaluationCount()const{return evaluator.EvaluationCount();}
+    uint64_t NeuralEvaluations()const{return evaluator.NeuralEvaluations();}
     void ResetTemporal(){evaluator.ResetTemporal();}
     bool RequestFeatureRehook(){return evaluator.RequestFeatureRehook();}
     NeuralRenderFailure LastFailure()const{return evaluator.LastFailure();}

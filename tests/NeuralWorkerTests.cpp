@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -928,7 +929,9 @@ void runtime_lease_admits_one_holder_per_directory_test()
     // The name identifies the directory, not the process or the path spelling.
     CHECK(NeuralRuntimeLease::MutexName(runtime) == NeuralRuntimeLease::MutexName(L"D:\\Example\\neural-runtime\\"));
     CHECK(NeuralRuntimeLease::MutexName(runtime) != NeuralRuntimeLease::MutexName(L"D:/example/other-runtime"));
-    CHECK(NeuralRuntimeLease::MutexName(runtime).starts_with(L"Local\\DLSSVideoPlayer.neural-runtime."));
+    // Machine-wide, not session-local: two players in two Windows sessions
+    // share one neural-runtime directory.
+    CHECK(NeuralRuntimeLease::MutexName(runtime).starts_with(L"Global\\DLSSVideoPlayer.neural-runtime."));
 
     auto heldElsewhere = [&](const std::filesystem::path& directory) {
         // Ownership is per thread, so a competing holder must be another thread.
@@ -1270,6 +1273,10 @@ struct RecordingRunner {
     JobOutcome outcome{JobOutcome::Completed};
     bool blockUntilStopped{};
     bool sawStop{};
+    // Observed from the test thread while the loop runs on another, so a job's
+    // completion can be waited for without a lock.
+    std::atomic<size_t> completedJobs{};
+    size_t stoppedJobs{};
     bool readyFails{};
     std::chrono::milliseconds jobDuration{0};
 
@@ -1293,6 +1300,8 @@ struct RecordingRunner {
         if (jobDuration.count()) std::this_thread::sleep_for(jobDuration);
         while (blockUntilStopped && !stop.stop_requested()) std::this_thread::sleep_for(1ms);
         sawStop = stop.stop_requested();
+        if (sawStop) ++stoppedJobs;
+        ++completedJobs;
         return sawStop ? JobOutcome::Cancelled : outcome;
     }
 };
@@ -1470,6 +1479,39 @@ void resident_loop_cancel_stops_the_job_and_keeps_the_helper_test()
         CHECK_EQ(size_t{1}, runner.jobs.size());
         CHECK(runner.sawStop);
     }
+}
+
+// The parent pumps the helper's pipe every 20 ms, so its Cancel can be written
+// after the helper has already reported the job's Result. That Cancel reaches
+// the loop with nothing running, and it used to leave the reader's pending
+// stop set: the next Job attached to it and started already cancelled, before
+// its first frame.
+void resident_loop_late_cancel_does_not_cancel_the_next_job_test()
+{
+    const std::vector<std::byte> payload = EncodeJobArguments(ResidentJobArguments());
+    CommandPipe pipe;
+    RecordingRunner runner;
+    CommandChannel channel(pipe.TakeRead(), nullptr);
+    ResidentExit exit = ResidentExit::Idle;
+    std::thread loop([&] { exit = RunResidentLoop(channel, runner, 10s); });
+    auto awaitCompleted = [&](size_t count) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (runner.completedJobs.load() < count && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(1ms);
+        return runner.completedJobs.load() >= count;
+    };
+    pipe.Send(CommandKind::Job, payload);
+    CHECK(awaitCompleted(1));
+    // The Result for the first job is out; only now does the parent's cancel
+    // land, followed by the job the user actually wants rendered.
+    pipe.Send(CommandKind::Cancel);
+    pipe.Send(CommandKind::Job, payload);
+    CHECK(awaitCompleted(2));
+    pipe.Send(CommandKind::Shutdown);
+    loop.join();
+    CHECK(exit == ResidentExit::Shutdown);
+    CHECK_EQ(size_t{2}, runner.jobs.size());
+    CHECK_EQ(size_t{0}, runner.stoppedJobs);
 }
 
 void resident_loop_ends_when_the_parent_dies_test()
@@ -1905,6 +1947,7 @@ int wmain(int argc, wchar_t** argv)
     resident_loop_refuses_frames_it_cannot_trust_test();
     resident_loop_exits_on_shutdown_and_on_idle_test();
     resident_loop_cancel_stops_the_job_and_keeps_the_helper_test();
+    resident_loop_late_cancel_does_not_cancel_the_next_job_test();
     resident_loop_ends_when_the_parent_dies_test();
     resident_loop_stops_serving_after_an_invalidating_job_test();
     resident_launch_line_is_a_helper_and_not_a_job_test();

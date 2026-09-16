@@ -245,7 +245,8 @@ public:
     NeuralRuntimeLease& operator=(const NeuralRuntimeLease&) = delete;
 
     bool Held() const noexcept { return held_; }
-    // Session-scoped name derived from the directory; stable across processes.
+    // Machine-wide name derived from the directory; stable across processes
+    // and sessions.
     static std::wstring MutexName(const std::filesystem::path& runtimeDirectory);
 
 private:
