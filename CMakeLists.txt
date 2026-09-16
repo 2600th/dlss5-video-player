@@ -227,13 +227,14 @@ if(BUILD_TESTING)
     add_executable(RecentMediaTests tests/RecentMediaTests.cpp src/RecentMedia.cpp)
     add_executable(RenderSettingsTests tests/RenderSettingsTests.cpp src/ReShadeConfig.cpp src/NeuralCache.cpp
         src/NeuralSettings.cpp)
-    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
+    # CachedExportTests drives SynchronizedPlayback through its owning constructor,
+    # which is the only place the decoder-backed frame sources are built, and feeds a
+    # real join's probe into the publish gate in RuntimePolicy.
+    add_executable(CachedExportTests tests/CachedExportTests.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp
+        src/MediaSource.cpp src/SynchronizedPlayback.cpp src/RuntimePolicy.cpp)
     add_executable(RuntimeLockTests tests/RuntimeLockTests.cpp src/RuntimeLock.cpp src/NeuralReceipt.cpp
         src/NeuralPreflight.cpp src/NeuralCache.cpp)
     add_executable(RangeSelectionTests tests/RangeSelectionTests.cpp src/RangeSelection.cpp)
-    # SynchronizedPlayback's DecoderFrameSource is compiled in every build now that
-    # the sources are injected rather than #ifdef-ed, so a target that links the
-    # playback also links the decoder behind it.
     add_executable(FrameIdentityTests tests/FrameIdentityTests.cpp src/TemporalGuides.cpp
         src/SynchronizedPlayback.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     foreach(test_target RecentMediaTests RenderSettingsTests CachedExportTests RuntimeLockTests
@@ -245,12 +246,15 @@ if(BUILD_TESTING)
     target_compile_definitions(RuntimeLockTests PRIVATE DLSS_VIDEO_PLAYER_VERSION="${PROJECT_VERSION}")
     target_link_libraries(RecentMediaTests PRIVATE user32)
     target_link_libraries(RenderSettingsTests PRIVATE bcrypt shell32 ole32)
-    target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)
+    target_link_libraries(CachedExportTests PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi dxguid)
     target_link_libraries(RuntimeLockTests PRIVATE bcrypt shell32 ole32 version)
     target_link_libraries(FrameIdentityTests PRIVATE mfplat mfreadwrite mfuuid ole32 shell32)
     add_test(NAME RecentMediaTests COMMAND RecentMediaTests)
     add_test(NAME RenderSettingsTests COMMAND RenderSettingsTests)
     add_test(NAME CachedExportTests COMMAND CachedExportTests "${FFMPEG_STAGED_DIR}")
+    # FFmpeg is optional at configure time (FFMPEG_STAGED_DIR above), so a tree
+    # without it reports this real-media suite as skipped rather than failed.
+    set_tests_properties(CachedExportTests PROPERTIES SKIP_RETURN_CODE 125)
     add_test(NAME RuntimeLockTests COMMAND RuntimeLockTests)
     add_test(NAME RangeSelectionTests COMMAND RangeSelectionTests)
     add_test(NAME FrameIdentityTests COMMAND FrameIdentityTests)
@@ -259,6 +263,7 @@ if(BUILD_TESTING)
         src/VideoDecoder.cpp src/MediaSource.cpp src/RuntimePolicy.cpp)
     target_include_directories(UpscalingGpuSmoke PRIVATE src "${DLSS_SDK}/include")
     target_compile_definitions(UpscalingGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(UpscalingGpuSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
     target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
     dlss_video_player_use_nvof(UpscalingGpuSmoke)
@@ -269,14 +274,24 @@ if(BUILD_TESTING)
     target_compile_options(MediaGpuSmoke PRIVATE /W4 /permissive- /EHsc)
     target_link_libraries(MediaGpuSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)
     add_dependencies(MediaGpuSmoke NeuralWorker)
+    # The hardware smokes need an RTX GPU, a display, and (MediaGpuSmoke) the neural
+    # runtime staged beside NeuralWorker.exe. They are labelled `gpu` so the portable
+    # suite is `ctest -LE gpu` and the opt-in run on such a machine is `ctest -L gpu`.
+    add_test(NAME UpscalingGpuSmoke COMMAND UpscalingGpuSmoke
+        "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4" 1440)
+    add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
+        "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
+    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke PROPERTIES LABELS gpu)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(NeuralWorkerTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_libraries(NeuralWorkerTests PRIVATE shell32)
     add_test(NAME NeuralWorkerTests COMMAND NeuralWorkerTests)
     add_executable(UpscalingTests tests/UpscalingTests.cpp)
     target_include_directories(UpscalingTests PRIVATE src)
     target_compile_definitions(UpscalingTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(UpscalingTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     # The resolve pass's HLSL is compiled headlessly by this suite, which needs no device
     # and no flow engine - only the compiler.
     target_link_libraries(UpscalingTests PRIVATE d3dcompiler)
@@ -321,7 +336,6 @@ if(BUILD_TESTING)
         src/FlowGate.h
         src/NvofResolveShader.h
         src/PixelLayout.h
-        src/ReleasePackagePolicy.h
         src/DLSSBackend.cpp
         src/DLSSBackend.h
     )
@@ -406,6 +420,32 @@ if(BUILD_TESTING)
     set_target_properties(PlayerUiRegressionTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ui-regressions/$<CONFIG>")
     add_test(NAME PlayerUiRegressionTests COMMAND PlayerUiRegressionTests)
+
+    # Every test ends: a hung helper child or a deadlocked wait fails the run
+    # instead of stalling it. Each budget is several times its measured Release
+    # run time on the reference machine; NeuralWorkerTests sleeps a child for
+    # 20 s and the hardware smokes render real frames.
+    set_tests_properties(RecentMediaTests RenderSettingsTests RuntimeLockTests RangeSelectionTests
+        UpscalingTests ReleaseApiCompileTests UpdateCheckTests PROPERTIES TIMEOUT 60)
+    set_tests_properties(FrameIdentityTests CachedExportTests PlayerUiRegressionTests PROPERTIES TIMEOUT 300)
+    set_tests_properties(NeuralWorkerTests PolicyTests NeuralPrerenderTests PROPERTIES TIMEOUT 600)
+    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke PROPERTIES TIMEOUT 900)
+
+    # A test seam (PLAYER_APP_TESTING, YOUTUBE_RESOLVER_TESTING, ...) opens a
+    # private route that only a test may take; none may be compiled into a
+    # shipped binary. The YouTube seam is proven below by compiling against the
+    # release header; this catches every seam by its name on the two targets
+    # that ship.
+    get_directory_property(shipped_directory_definitions COMPILE_DEFINITIONS)
+    foreach(shipped_target DLSSVideoPlayer NeuralWorker)
+        get_target_property(shipped_definitions ${shipped_target} COMPILE_DEFINITIONS)
+        get_target_property(shipped_options ${shipped_target} COMPILE_OPTIONS)
+        foreach(entry IN LISTS shipped_directory_definitions shipped_definitions shipped_options)
+            if(entry MATCHES "_TESTING(=|$)")
+                message(FATAL_ERROR "${shipped_target} compiles with the test seam ${entry}.")
+            endif()
+        endforeach()
+    endforeach()
 
     include(CheckCXXSourceCompiles)
     set(CMAKE_REQUIRED_INCLUDES "${CMAKE_SOURCE_DIR}/src")

@@ -1,4 +1,6 @@
-// Opt-in hardware smoke test, not part of the portable CTest suite.
+// Opt-in hardware smoke test: registered under the `gpu` CTest label, which
+// the portable suite excludes (`ctest -LE gpu`), and run on an RTX machine with
+// `ctest -L gpu` against the demo clip in docs/media.
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"

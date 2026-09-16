@@ -1,5 +1,9 @@
-// Opt-in real GPU verification; intentionally excluded from portable CTest.
-// Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <new-output-directory>
+// Opt-in real GPU verification; registered under the `gpu` CTest label, which
+// the portable suite excludes (`ctest -LE gpu`).
+// Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>
+// Every run writes its evidence into a new, time-stamped directory under the
+// output directory, so repeated runs never mix and a ctest registration can
+// name one fixed path.
 #include "MediaPipeline.h"
 #include "NeuralWorker.h"
 #include "VideoDecoder.h"
@@ -10,6 +14,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -208,13 +213,15 @@ bool VerifyInput(const fs::path& helpers, const fs::path& worker, const fs::path
 int wmain(int argc, wchar_t** argv)
 {
     if (argc != 4) {
-        std::wcerr << L"Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <new-output-directory>\n";
+        std::wcerr << L"Usage: MediaGpuSmoke <ffmpeg-directory> <NeuralWorker.exe> <output-directory>\n";
         return 2;
     }
-    const auto helpers = fs::absolute(argv[1]), worker = fs::absolute(argv[2]), root = fs::absolute(argv[3]);
+    const auto helpers = fs::absolute(argv[1]), worker = fs::absolute(argv[2]);
+    const auto root = fs::absolute(argv[3]) /
+        std::format(L"{:%Y%m%d-%H%M%S}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     if (!fs::is_regular_file(helpers / L"ffmpeg.exe") || !fs::is_regular_file(helpers / L"ffprobe.exe") ||
         !fs::is_regular_file(worker) || !fs::create_directories(root)) {
-        std::wcerr << L"Tools must exist and the output directory must be new.\n"; return 2;
+        std::wcerr << L"Tools must exist and the run directory must be new.\n"; return 2;
     }
     std::wofstream report(root / L"results.txt");
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 2;
