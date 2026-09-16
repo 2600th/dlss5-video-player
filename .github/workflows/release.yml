@@ -69,35 +69,63 @@ jobs:
           # would append CRLF and make the line unreadable to coreutils.
           [System.IO.File]::WriteAllText("$($zip[0].FullName).sha256", "$hash  $($zip[0].Name)`n")
 
-      - name: Extract release notes from CHANGELOG
+      - name: Build release notes
         shell: powershell
         run: |
-          # The release body was the generated commit list, which says what was
-          # committed rather than what changed for a user. The tagged version's
-          # own CHANGELOG section is that answer, and the tag gate above has
-          # already pinned which section to take.
+          # The body was the generated commit list, which says what was committed
+          # rather than what changed for someone installing it. The CHANGELOG
+          # section is the other extreme - 470 lines for 0.22.0, which buries the
+          # download. README's "What changed" paragraph for this version is the
+          # short version the repository already maintains, so that is the body,
+          # with the full section one link away.
           $version = (Get-Content -Raw VERSION).Trim()
-          $lines = Get-Content -LiteralPath CHANGELOG.md
+
+          # The cut still has to have happened: a tag pushed while the section is
+          # still called Unreleased is the mistake this catches.
+          if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version))( |`$)" -Quiet)) {
+            throw "CHANGELOG.md has no '## $version' section; cut it before tagging."
+          }
+
+          $lines = Get-Content -LiteralPath README.md
           $start = $null
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match "^## $([regex]::Escape($version))( |$)") { $start = $i; break }
+            if ($lines[$i] -match "^\*\*$([regex]::Escape($version))\*\* \(") { $start = $i; break }
           }
           if ($null -eq $start) {
-            throw "CHANGELOG.md has no '## $version' section; cut it before tagging."
+            throw "README.md has no '**$version** (date)' entry under What changed; write it before tagging."
           }
           $end = $lines.Count
           for ($i = $start + 1; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^## ') { $end = $i; break }
+            if ($lines[$i] -match '^\*\*[0-9]+\.[0-9]+\.[0-9]+\*\* \(') { $end = $i; break }
           }
-          $notes = $lines[$start..($end - 1)] -join "`n"
-          [System.IO.File]::WriteAllText("$PWD\release-notes.md", $notes.TrimEnd() + "`n")
-          Write-Host "Release notes: $($notes.Length) characters."
+          $summary = ($lines[$start..($end - 1)] -join "`n").TrimEnd()
+
+          $repo = $env:GITHUB_REPOSITORY
+          $tag = $env:GITHUB_REF_NAME
+          # Single quotes and -f: a here-string has to terminate at column 0,
+          # which would break out of this YAML block scalar.
+          $intro = @(
+            'Windows x64, an RTX GPU and NVIDIA driver 610.47 or newer. Community project, not an',
+            'NVIDIA product; the neural runtime is a modified, unsigned community build.',
+            '',
+            ('Download `dlss5-video-player-v{0}-win64.zip` below - player plus the pinned neural' -f $version),
+            ('runtime. `DLSSVideoPlayer-v{0}-core-win64.zip` is the player alone, with no runtime' -f $version),
+            'in it. Each has a `.sha256` beside it; GitHub''s "Source code" zip does not run.',
+            ''
+          )
+          $tail = @(
+            '',
+            ('Every detail, including what was measured: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md).' -f $version, $repo, $tag)
+          )
+          $body = (($intro + $summary + $tail) -join "`n")
+          [System.IO.File]::WriteAllText("$PWD\release-notes.md", $body.TrimEnd() + "`n")
+          Write-Host "Release notes: $($body.Length) characters from README's $version entry."
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # The CHANGELOG section is the body; the generated commit list is
-          # appended under it by the action rather than being the whole note.
+          # The body is README's short version for this release plus the download
+          # lines; the generated commit list is appended under it by the action.
           body_path: release-notes.md
           generate_release_notes: true
           prerelease: true
