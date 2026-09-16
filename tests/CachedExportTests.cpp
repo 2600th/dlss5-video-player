@@ -1,4 +1,6 @@
 #include "MediaPipeline.h"
+#include "RuntimePolicy.h"
+#include "SynchronizedPlayback.h"
 #include "VideoDecoder.h"
 #include "TestSupport.h"
 
@@ -328,7 +330,8 @@ void ExportTests(const std::filesystem::path& helpers)
     // MP4 uses compatible encodings while preserving selected tracks and chapters.
     const auto mp4Output = fixture.path / L"with-streams.mp4";
     CHECK(exporter.Run({cached, source, mp4Output}, {}).ok);
-    if (std::filesystem::exists(mp4Output)) {
+    CHECK(std::filesystem::is_regular_file(mp4Output));
+    {
         const auto info = Probe(helpers, mp4Output, log, {L"-show_streams", L"-show_chapters"});
         CHECK_EQ(size_t{1}, Count(info, "codec_name=h264"));
         CHECK_EQ(size_t{2}, Count(info, "codec_name=aac"));
@@ -345,7 +348,8 @@ void ExportTests(const std::filesystem::path& helpers)
     // A source without audio/subtitles/chapters must still export successfully.
     const auto silentOutput = fixture.path / L"silent.MKV";
     CHECK(exporter.Run({cached, cached, silentOutput}, {}).ok);
-    if (std::filesystem::exists(silentOutput)) {
+    CHECK(std::filesystem::is_regular_file(silentOutput));
+    {
         const auto info = Probe(helpers, silentOutput, log, {L"-show_streams", L"-show_chapters"});
         CHECK_EQ(size_t{1}, Count(info, "codec_type=video"));
         CHECK_EQ(size_t{0}, Count(info, "codec_type=audio"));
@@ -531,7 +535,8 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     CHECK_EQ(photoEncoder.Finish(), EncodeError::None);
     const auto photoOutput = fixture.path / L"photo-export.png";
     CHECK(exporter.Run({photoCache, oddPhoto, photoOutput}, {}).ok);
-    if (std::filesystem::exists(photoOutput)) {
+    CHECK(std::filesystem::is_regular_file(photoOutput));
+    {
         const auto info = Probe(helpers, photoOutput, log, {L"-count_frames", L"-show_streams"});
         CHECK(info.find("width=95") != std::string::npos);
         CHECK(info.find("height=65") != std::string::npos);
@@ -539,7 +544,8 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     }
     const auto photoMp4 = fixture.path / L"photo-export.mp4";
     CHECK(exporter.Run({photoCache, oddPhoto, photoMp4}, {}).ok);
-    if (std::filesystem::exists(photoMp4)) {
+    CHECK(std::filesystem::is_regular_file(photoMp4));
+    {
         const auto info = Probe(helpers, photoMp4, log, {L"-count_frames", L"-show_streams"});
         CHECK(info.find("width=95") != std::string::npos);
         CHECK(info.find("height=65") != std::string::npos);
@@ -598,7 +604,8 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     // A GIF exported directly from an animation must retain distinct visual frames.
     const auto animatedOutput = fixture.path / L"animated-export.gif";
     CHECK(exporter.Run({animation, animation, animatedOutput}, {}).ok);
-    if (std::filesystem::exists(animatedOutput)) {
+    CHECK(std::filesystem::is_regular_file(animatedOutput));
+    {
         const auto info = Probe(helpers, animatedOutput, log, {L"-count_frames", L"-show_streams", L"-show_format"});
         CHECK(info.find("nb_read_frames=50") != std::string::npos);
         CHECK(info.find("duration=1.000000") != std::string::npos);
@@ -663,6 +670,128 @@ void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helper
     CHECK(shortMeasured.ok);
     CHECK_EQ(uint64_t{20}, shortMeasured.frameCount);
     CHECK_EQ(int64_t{20000000}, shortMeasured.videoDuration100ns);
+
+    // The two probes through the gate itself, composed the way the player's
+    // publish composes it (src/main.cpp, the promote tail of the job lambda):
+    // the renderer reported 31 frames over 3.1 s for a two-part join at
+    // 10 fps. The full join is publishable; the join that lost its second
+    // part is refused on its frame count and on its span alike.
+    const uint64_t renderedFrames = 31;
+    const int64_t renderedDuration100ns = 31000000, expectedDuration100ns = 31000000;
+    const int64_t tolerance100ns = JoinedMediaDurationTolerance100ns(10.0, parts.size());
+    const auto probeMatches = [&](const ProbeResult& probe) {
+        return probe.ok && probe.width == 64u && probe.height == 48u && probe.frameCount == renderedFrames &&
+               NeuralPublishDurationsMatch(probe.duration100ns, renderedDuration100ns, expectedDuration100ns,
+                                           tolerance100ns);
+    };
+    CHECK(probeMatches(measured));
+    CHECK(CanPublishNeuralCompletion(true, probeMatches(measured), true));
+    CHECK(!probeMatches(shortMeasured));
+    CHECK(!NeuralPublishDurationsMatch(shortMeasured.duration100ns, renderedDuration100ns, expectedDuration100ns,
+                                       tolerance100ns));
+    CHECK(!CanPublishNeuralCompletion(true, probeMatches(shortMeasured), true));
+}
+
+// Cached playback builds its own decoders: nothing injects the two sources,
+// so this is the one place the decoder-backed frame source pairs real files.
+// A red original and a blue render, lossless, so a pair is checked by its
+// pixels and a frame is identified by its number on the 10 fps grid.
+void SynchronizedPlaybackPairsRealMediaTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto original = fixture.path / L"original.mkv";
+    const auto neural = fixture.path / L"neural.mkv";
+    const auto rangeRender = fixture.path / L"range-render.mkv";
+    const auto log = fixture.path / L"tool.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=red:s=64x48:r=10:d=3", L"-c:v", L"ffv1", original.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=10:d=3", L"-c:v", L"ffv1", neural.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=10:d=1", L"-c:v", L"ffv1", rangeRender.wstring()}, log));
+    if (!std::filesystem::exists(original) || !std::filesystem::exists(neural) ||
+        !std::filesystem::exists(rangeRender)) return;
+
+    // The decoders restart FFmpeg asynchronously, so NotReady is a wait, not an answer.
+    const auto next = [](SynchronizedPlayback& playback) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        for (;;) {
+            const auto result = playback.ReadNextAvailable();
+            if (result != SynchronizedReadResult::NotReady || std::chrono::steady_clock::now() >= deadline)
+                return result;
+            std::this_thread::sleep_for(5ms);
+        }
+    };
+    const auto solid = [](const VideoFrame& frame, size_t channel) {
+        if (frame.bgra.size() != FrameBytes(PixelLayout::Bgra, 64, 48)) return false;
+        for (size_t i = 0; i < frame.bgra.size(); i += 4)
+            if (frame.bgra[i + channel] < 220 || frame.bgra[i + (2 - channel)] > 30) return false;
+        return true;
+    };
+    const auto red = [&](const VideoFrame& frame) { return solid(frame, 2); };
+    const auto blue = [&](const VideoFrame& frame) { return solid(frame, 0); };
+
+    SynchronizedPlayback playback;
+    CHECK(playback.Open(original, neural));
+    CHECK(playback.NeuralAvailable());
+    size_t pairs = 0;
+    SynchronizedReadResult result = SynchronizedReadResult::NotReady;
+    while ((result = next(playback)) == SynchronizedReadResult::PairReady) {
+        const SynchronizedFramePair* pair = playback.CurrentPair();
+        CHECK(pair != nullptr);
+        if (!pair) break;
+        CHECK_EQ(uint64_t{pairs}, pair->frameNumber);
+        CHECK_EQ(int64_t{1000000} * static_cast<int64_t>(pairs), pair->timestamp100ns);
+        CHECK(red(pair->original));
+        CHECK(blue(pair->neural));
+        if (++pairs > 40) break;
+    }
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, result);
+    CHECK_EQ(size_t{30}, pairs);
+
+    // A seek lands both members on the same frame, the view switch shows the
+    // render's pixels for it, and playback continues from the frame after.
+    CHECK(playback.SeekSeconds(1.5));
+    const SynchronizedFramePair* seeked = playback.CurrentPair();
+    CHECK(seeked != nullptr);
+    if (seeked) {
+        CHECK_EQ(uint64_t{15}, seeked->frameNumber);
+        CHECK(red(seeked->original));
+        CHECK(blue(seeked->neural));
+    }
+    CHECK(playback.SetView(ComparisonView::Neural));
+    CHECK(playback.VisibleFrame() && blue(*playback.VisibleFrame()));
+    CHECK(playback.SetView(ComparisonView::Original));
+    CHECK(playback.VisibleFrame() && red(*playback.VisibleFrame()));
+    CHECK_EQ(SynchronizedReadResult::PairReady, next(playback));
+    CHECK(playback.CurrentPair() && playback.CurrentPair()->frameNumber == 16u);
+    // Past the end lands on the last frame, and the stream ends after it.
+    CHECK(playback.SeekSeconds(10.0));
+    CHECK(playback.CurrentPair() && playback.CurrentPair()->frameNumber == 29u);
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, next(playback));
+
+    // A render of [1 s, 2 s) pairs with the original's frames 10-19 and the
+    // stream ends at the range, not at the original's end.
+    SynchronizedPlayback ranged;
+    CHECK(ranged.Open(original, rangeRender, {}, SynchronizedRange{10000000, 20000000}));
+    pairs = 0;
+    while ((result = next(ranged)) == SynchronizedReadResult::PairReady) {
+        const SynchronizedFramePair* pair = ranged.CurrentPair();
+        CHECK(pair != nullptr);
+        if (!pair) break;
+        CHECK_EQ(uint64_t{10 + pairs}, pair->frameNumber);
+        CHECK(red(pair->original));
+        CHECK(blue(pair->neural));
+        if (++pairs > 40) break;
+    }
+    CHECK_EQ(SynchronizedReadResult::EndOfStream, result);
+    CHECK_EQ(size_t{10}, pairs);
+
+    // A render whose length disagrees with the span it claims is refused at Open.
+    SynchronizedPlayback mismatched;
+    CHECK(!mismatched.Open(original, rangeRender));
+    CHECK(!mismatched.NeuralAvailable());
 }
 
 } // namespace
@@ -672,9 +801,17 @@ int wmain(int argc, wchar_t** argv)
     const auto helpers = std::filesystem::absolute(argc > 1 ? std::filesystem::path(argv[1]) : ExecutableDirectory());
     if (!std::filesystem::is_regular_file(helpers / L"ffmpeg.exe") ||
         !std::filesystem::is_regular_file(helpers / L"ffprobe.exe")) {
+        // Staging FFmpeg is optional at configure time, so a tree without it
+        // skips this suite (ctest's SKIP_RETURN_CODE) rather than failing it.
         std::cerr << "FFmpeg and FFprobe are required; pass their directory as the first argument.\n";
-        return 1;
+        return 125;
     }
+    // Decoders this suite constructs itself - the photo cases' and the ones
+    // cached playback owns - look for FFmpeg beside this executable and then on
+    // PATH, so the staged helpers go first on PATH for their sake.
+    std::wstring path(32768, L'\0');
+    path.resize(GetEnvironmentVariableW(L"PATH", path.data(), static_cast<DWORD>(path.size())));
+    CHECK(SetEnvironmentVariableW(L"PATH", (helpers.wstring() + L';' + path).c_str()) != FALSE);
     MaterializationPreservesFullVideoTest(helpers);
     MaterializationRejectsShortVideoWithLongAudioTest(helpers);
     ExportArgumentTests();
@@ -682,6 +819,7 @@ int wmain(int argc, wchar_t** argv)
     RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
     JoinedFrameCountMatchesDecodedCountTest(helpers);
+    SynchronizedPlaybackPairsRealMediaTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

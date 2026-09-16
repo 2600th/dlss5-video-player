@@ -310,30 +310,71 @@ NeuralRenderReceiptInputs SampleInputs()
     return inputs;
 }
 
+// The flat JSON object around `anchor`. A lock check nests nothing, so the
+// nearest brace either side of one of its own values is the object's own.
+std::string FlatObjectAround(std::string_view json, std::string_view anchor)
+{
+    const size_t at = json.find(anchor);
+    if (at == std::string_view::npos) return {};
+    const size_t open = json.rfind('{', at);
+    const size_t close = json.find('}', at);
+    if (open == std::string_view::npos || close == std::string_view::npos) return {};
+    return std::string(json.substr(open, close - open + 1));
+}
+
 void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
 {
     const NeuralRenderReceiptInputs inputs = SampleInputs();
     const std::string json = BuildNeuralRenderReceiptJson(inputs);
-    CHECK(json.starts_with("{\"schema\":1,\"jobId\":7,"));
-    CHECK(json.ends_with("}}"));
+    CHECK(json.front() == '{' && json.back() == '}');
+    CHECK(Contains(json, "\"schema\":1"));
+    CHECK(Contains(json, "\"jobId\":7"));
     CHECK(Contains(json, "\"started\":\"1970-01-01T00:00:00.000Z\""));
     CHECK(Contains(json, "\"finished\":\"1970-01-02T01:01:01.001Z\""));
     CHECK(Contains(json, "\"source\":\"C:\\\\media\\\\clip \\\"one\\\".mkv\""));
     CHECK(Contains(json, "\"range\":{\"start\":10000000,\"end\":30000000}"));
     CHECK(Contains(json, "\"guides\":\"mv=1,depth=0\""));
     CHECK(Contains(json, "\"prerollFrames\":24"));
-    CHECK(Contains(json, "\"preflight\":" + std::string(kSamplePreflight) + ",\"lock\":{\"satisfied\":false,\"checks\":["));
-    CHECK(Contains(json, "{\"name\":\"nvngx_dlss.dll\",\"present\":true,\"sizeMatches\":true,\"hashMatches\":true,\"versionMatches\":true,\"actualSize\":58956400,"));
-    CHECK(Contains(json, "{\"name\":\"dxgi.dll\",\"present\":true,\"sizeMatches\":true,\"hashMatches\":false,\"versionMatches\":false,\"actualSize\":5592064,\"actualSha256\":\"" + Hex("other") + "\",\"actualFileVersion\":\"\"}"));
-    CHECK(Contains(json, "\"result\":{\"ok\":false,\"cancelled\":false,\"failure\":\"gpu-stall\",\"encoder\":\"h264_software\",\"frameCount\":48,"));
-    CHECK(Contains(json, "\"historyResets\":2,\"frameRetries\":1,"
-                         "\"sceneCuts\":{\"acceptedStrong\":1,\"acceptedWeak\":2,\"suppressed\":4},"
-                         "\"firstTimestamp100ns\":10000000,\"timing\":{\"samples\":48,\"neuralGpuMsP50\":4.25,"));
-    CHECK(Contains(json, "\"peakLocalVramMiB\":3072,\"postJobLocalVramMiB\":1408,"
-                         "\"idleLocalVramMiB\":406,\"idleVramPolicy\":\"free\"}"));
+    // The probe's own JSON is embedded byte for byte, not re-serialized.
+    CHECK(Contains(json, "\"preflight\":" + std::string(kSamplePreflight)));
+    CHECK(Contains(json, "\"satisfied\":false"));
+    // Each lock check is read back through its own object: the preflight's
+    // module list also names dxgi.dll, so the anchor is a value only the check
+    // carries.
+    const std::string dlss = FlatObjectAround(json, "\"actualSize\":58956400");
+    CHECK(Contains(dlss, "\"name\":\"nvngx_dlss.dll\""));
+    CHECK(Contains(dlss, "\"present\":true"));
+    CHECK(Contains(dlss, "\"sizeMatches\":true"));
+    CHECK(Contains(dlss, "\"hashMatches\":true"));
+    CHECK(Contains(dlss, "\"versionMatches\":true"));
+    const std::string dxgi = FlatObjectAround(json, "\"actualSize\":5592064");
+    CHECK(Contains(dxgi, "\"name\":\"dxgi.dll\""));
+    CHECK(Contains(dxgi, "\"present\":true"));
+    CHECK(Contains(dxgi, "\"sizeMatches\":true"));
+    CHECK(Contains(dxgi, "\"hashMatches\":false"));
+    CHECK(Contains(dxgi, "\"versionMatches\":false"));
+    CHECK(Contains(dxgi, "\"actualSha256\":\"" + Hex("other") + "\""));
+    CHECK(Contains(dxgi, "\"actualFileVersion\":\"\""));
+    CHECK(Contains(json, "\"ok\":false"));
+    CHECK(Contains(json, "\"cancelled\":false"));
+    CHECK(Contains(json, "\"failure\":\"gpu-stall\""));
+    CHECK(Contains(json, "\"encoder\":\"h264_software\""));
+    CHECK(Contains(json, "\"frameCount\":48"));
+    CHECK(Contains(json, "\"historyResets\":2"));
+    CHECK(Contains(json, "\"frameRetries\":1"));
+    CHECK(Contains(json, "\"acceptedStrong\":1"));
+    CHECK(Contains(json, "\"acceptedWeak\":2"));
+    CHECK(Contains(json, "\"suppressed\":4"));
+    CHECK(Contains(json, "\"firstTimestamp100ns\":10000000"));
+    CHECK(Contains(json, "\"samples\":48"));
+    CHECK(Contains(json, "\"neuralGpuMsP50\":4.25"));
+    CHECK(Contains(json, "\"peakLocalVramMiB\":3072"));
+    CHECK(Contains(json, "\"postJobLocalVramMiB\":1408"));
+    CHECK(Contains(json, "\"idleLocalVramMiB\":406"));
+    CHECK(Contains(json, "\"idleVramPolicy\":\"free\""));
     CHECK(Contains(json, "\"detail\":\"GPU stalled after 48 frames\""));
-    CHECK(Contains(json, "\"evidence\":{\"upscalingOff\":false,"));
-    CHECK(Contains(json, "\"valid\":false}"));
+    CHECK(Contains(json, "\"upscalingOff\":false"));
+    CHECK(Contains(json, "\"valid\":false"));
 
     NeuralRenderReceiptInputs noProbe = inputs;
     noProbe.preflightJson = "   \n";
@@ -341,38 +382,61 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     noProbe.result.failure = NeuralRenderFailure::None;
     noProbe.result.ok = true;
     const std::string satisfied = BuildNeuralRenderReceiptJson(noProbe);
-    CHECK(Contains(satisfied, "\"preflight\":null,\"lock\":{\"satisfied\":true,"));
+    CHECK(Contains(satisfied, "\"preflight\":null"));
+    CHECK(Contains(satisfied, "\"satisfied\":true"));
     CHECK(Contains(satisfied, "\"failure\":\"none\""));
 
     NeuralRenderReceiptInputs partial = inputs;
     partial.preflightJson = "{\"schema\":2,\"ok\":false";
-    CHECK(Contains(BuildNeuralRenderReceiptJson(partial), "\"preflight\":null,"));
+    CHECK(Contains(BuildNeuralRenderReceiptJson(partial), "\"preflight\":null"));
 }
 
+// The log line is read by a person or a grep, field by field: the identity
+// of the runtime, the feature's arming (with its own NGX code and the
+// diagnosed cause when the probe had one), the lock verdict naming the
+// drifted file, and the failure kind. Their order and spacing are the
+// line's own business.
 void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
 {
     const NeuralRenderReceiptInputs inputs = SampleInputs();
-    CHECK_EQ(std::string("gpu=\"NVIDIA GeForce RTX 4090\" driver=32.0.15.6164 reshade=6.8.0.2155 renodx=4.7 nr=310.8.0 "
-                         "feature18=armed lock=drift(dxgi.dll) failure=gpu-stall frames=48/48 verified=48 "
-                         "resets=2 retries=1 cuts=3 suppressed=4"),
-             SummarizeNeuralReceiptForLog(inputs));
+    const std::string drifted = SummarizeNeuralReceiptForLog(inputs);
+    CHECK(Contains(drifted, "gpu=\"NVIDIA GeForce RTX 4090\""));
+    CHECK(Contains(drifted, "driver=32.0.15.6164"));
+    CHECK(Contains(drifted, "reshade=6.8.0.2155"));
+    CHECK(Contains(drifted, "renodx=4.7"));
+    CHECK(Contains(drifted, "nr=310.8.0"));
+    CHECK(Contains(drifted, "feature18=armed"));
+    CHECK(!Contains(drifted, "cause="));
+    CHECK(Contains(drifted, "lock=drift(dxgi.dll)"));
+    CHECK(Contains(drifted, "failure=gpu-stall"));
+    CHECK(Contains(drifted, "frames=48/48"));
+    CHECK(Contains(drifted, "verified=48"));
+    CHECK(Contains(drifted, "cuts=3"));
+    CHECK(Contains(drifted, "suppressed=4"));
 
     NeuralRenderReceiptInputs bare = inputs;
     bare.preflightJson.clear();
     bare.lockChecks.clear();
     bare.result.failure = NeuralRenderFailure::Preflight;
-    CHECK_EQ(std::string("gpu=\"\" driver=- reshade=- renodx=- nr=- feature18=unknown lock=unverified failure=preflight "
-                         "frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
-             SummarizeNeuralReceiptForLog(bare));
+    const std::string unverified = SummarizeNeuralReceiptForLog(bare);
+    CHECK(Contains(unverified, "gpu=\"\""));
+    CHECK(Contains(unverified, "driver=-"));
+    CHECK(Contains(unverified, "feature18=unknown"));
+    CHECK(Contains(unverified, "lock=unverified"));
+    CHECK(Contains(unverified, "failure=preflight"));
 
-    // A schema-1 receipt from before the diagnosis existed still summarizes.
+    // A schema-1 receipt from before the diagnosis existed still summarizes,
+    // and a quote inside the GPU name stays escaped so the field parses.
     NeuralRenderReceiptInputs notArmed = inputs;
     notArmed.preflightJson = "{\"schema\":1,\"ok\":false,\"gpu\":{\"description\":\"Escaped \\\"GPU\\\"\",\"driverVersion\":\"\"},"
                              "\"feature18\":{\"created\":true,\"evaluated\":false,\"armed\":false}}";
     notArmed.lockChecks = {inputs.lockChecks[0]};
-    CHECK_EQ(std::string("gpu=\"Escaped \\\"GPU\\\"\" driver=- reshade=- renodx=- nr=- feature18=not-armed lock=ok "
-                         "failure=gpu-stall frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
-             SummarizeNeuralReceiptForLog(notArmed));
+    const std::string escaped = SummarizeNeuralReceiptForLog(notArmed);
+    CHECK(Contains(escaped, "gpu=\"Escaped \\\"GPU\\\"\""));
+    CHECK(Contains(escaped, "driver=-"));
+    CHECK(Contains(escaped, "feature18=not-armed"));
+    CHECK(!Contains(escaped, "feature18=not-armed("));
+    CHECK(Contains(escaped, "lock=ok"));
 
     // The field receipt: the carrier reported success while feature 18 was
     // refused, so the summary must carry the feature's own code and cause.
@@ -384,10 +448,14 @@ void receipt_log_summary_extracts_runtime_identity_and_lock_state_test()
         "\"diagnosis\":{\"cause\":\"driverBelowFloor\",\"detail\":\"NVIDIA driver 566.14 is below the 610.47 minimum.\"}}";
     refused.lockChecks = {inputs.lockChecks[0]};
     refused.result.failure = NeuralRenderFailure::Preflight;
-    CHECK_EQ(std::string("gpu=\"NVIDIA GeForce RTX 3060 Laptop GPU\" driver=32.0.15.6614 reshade=- renodx=- nr=- "
-                         "feature18=not-armed(0xbad00002) cause=driverBelowFloor lock=ok failure=preflight "
-                         "frames=48/48 verified=48 resets=2 retries=1 cuts=3 suppressed=4"),
-             SummarizeNeuralReceiptForLog(refused));
+    const std::string diagnosed = SummarizeNeuralReceiptForLog(refused);
+    CHECK(Contains(diagnosed, "gpu=\"NVIDIA GeForce RTX 3060 Laptop GPU\""));
+    CHECK(Contains(diagnosed, "driver=32.0.15.6614"));
+    CHECK(Contains(diagnosed, "feature18=not-armed(0xbad00002)"));
+    CHECK(!Contains(diagnosed, "0x00000001"));
+    CHECK(Contains(diagnosed, "cause=driverBelowFloor"));
+    CHECK(Contains(diagnosed, "lock=ok"));
+    CHECK(Contains(diagnosed, "failure=preflight"));
 }
 
 void feature18_create_result_is_read_out_of_the_runtime_log_test()

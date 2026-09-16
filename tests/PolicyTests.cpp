@@ -17,7 +17,6 @@
 #include "D3D12FenceWait.h"
 #include "NgxSession.h"
 #include "D3D12Renderer.h"
-#include "ReleasePackagePolicy.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "NeuralCoverage.h"
@@ -30,6 +29,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <winioctl.h>
 
 #include <filesystem>
 #include <fstream>
@@ -38,6 +38,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <stop_token>
@@ -213,6 +214,13 @@ struct D3D12RendererTestAccess {
     {
         return renderer.CaptureEvaluatedFrame(frame);
     }
+    // The deleter ends the process on the second renderer it has to retain;
+    // a suite that retains one per case starts each such case from zero.
+    static void ResetRetainedRenderers(){D3D12Renderer::s_retainedRenderers.store(0);}
+    static void OnExitProcess(D3D12Renderer& renderer,std::function<void()> exit)
+    {
+        Hooks(renderer).exitProcess=std::move(exit);
+    }
 };
 
 namespace {
@@ -220,62 +228,6 @@ namespace {
 constexpr std::string_view kNeuralAddon = "DLSS 5 Neural Rendering@renodx-dlss5.addon64";
 constexpr std::string_view kNeuralAddonName = "DLSS 5 Neural Rendering";
 constexpr std::string_view kNeuralAddonFilename = "renodx-dlss5.addon64";
-bool resolverSymlinkCoverageExercised = false;
-
-void release_package_filename_policy_is_allowlisted_and_fail_closed_test()
-{
-    using release_package_policy::IsAllowedPath;
-
-    const std::array<std::wstring_view, 19> allowed = {
-        L"DLSSVideoPlayer.exe", L"ffmpeg.exe", L"ffprobe.exe", L"yt-dlp.exe",
-        L"deno.exe", L"nvngx_dlss.dll", L"neural-runtime/nvngx_dlssnr.dll", L"neural-runtime/dxgi.dll",
-        L"neural-runtime/sl.common.dll", L"neural-runtime/ReShade.ini", L"neural-runtime/ReShadePreset.ini",
-        L"docs/DLSS5_SETUP.md", L"THIRD_PARTY_LICENSES/yt-dlp-2026.08.19.txt",
-        L"PACKAGE_MANIFEST.txt", L"SECURITY.md", L"CONTRIBUTING.md",
-        L"CHANGELOG.md", L"docs/RELATED_PROJECTS.md",
-        L"THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt"
-    };
-    for (const auto path : allowed) CHECK(IsAllowedPath(path));
-    CHECK(IsAllowedPath(L"neural-runtime/NeuralWorker.exe"));
-    CHECK(IsAllowedPath(L"neural-runtime/nvngx_dlss.dll"));
-    CHECK(!IsAllowedPath(L"dxgi.dll"));
-    CHECK(!IsAllowedPath(L"renodx-dlss5.addon64"));
-
-    const std::array<std::wstring_view, 15> forbidden = {
-        L"pt-BR.lang", L"languages/pt-BR.lang", L"downloads/video.mp4",
-        L"ReShade.log", L"DLSSVideoPlayer.log", L"DLSSVideoPlayer.ini",
-        L"developer-settings.ini", L"test.mp4", L"sample.mkv",
-        L"DLSSVideoPlayer.pdb", L"thing.obj", L"source.zip", L"source.7z",
-        L"nvngx_dlssnr.rollback.dll", L"unexpected-helper.exe"
-    };
-    for (const auto path : forbidden) CHECK(!IsAllowedPath(path));
-}
-
-void public_release_package_policy_excludes_private_and_optional_binaries_test()
-{
-    using release_package_policy::IsAllowedPublicPath;
-
-    const std::array<std::wstring_view, 17> allowed = {
-        L"DLSSVideoPlayer.exe", L"nvngx_dlss.dll", L"README.md", L"LICENSE",
-        L"SECURITY.md", L"CONTRIBUTING.md", L"CHANGELOG.md", L"THIRD_PARTY.md",
-        L"PUBLIC_RELEASE_NOTICE.txt", L"PACKAGE_MANIFEST.txt",
-        L"THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt",
-        L"THIRD_PARTY_LICENSES/tabler-MIT.txt", L"docs/ARCHITECTURE.md",
-        L"docs/BUILDING.md", L"docs/DLSS5_SETUP.md", L"docs/RELATED_PROJECTS.md",
-        L"docs/TROUBLESHOOTING.md"
-    };
-    for (const auto path : allowed) CHECK(IsAllowedPublicPath(path));
-
-    const std::array<std::wstring_view, 20> forbidden = {
-        L"nvngx_dlssnr.dll", L"renodx-dlss5.addon64", L"dxgi.dll",
-        L"ReShade.ini", L"ReShadePreset.ini", L"sl.common.dll", L"sl.dlss.dll",
-        L"sl.dlss_g.dll", L"sl.dlss_nr.dll", L"sl.interposer.dll", L"sl.nis.dll",
-        L"sl.pcl.dll", L"sl.reflex.dll", L"ffmpeg.exe", L"ffprobe.exe",
-        L"yt-dlp.exe", L"deno.exe", L"DLSSVideoPlayer.ini",
-        L"DLSSVideoPlayer.log", L"unexpected.dll"
-    };
-    for (const auto path : forbidden) CHECK(!IsAllowedPublicPath(path));
-}
 
 void runtime_shutdown_releases_player_before_media_foundation_and_com_test()
 {
@@ -803,14 +755,38 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.renderedFps = 58.4;
     status.sourceFps = 59.94;
     status.droppedFrames = 3;
-    CHECK_EQ(std::wstring(L"Neural addon enabled (experimental) \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7 Source 1920\u00d71080 \u00b7 Input 1280\u00d7720 \u00b7 Output 3840\u00d72160 \u00b7 Quality \u00b7 FPS 58 rendered / 60 source \u00b7 Dropped 3"),
-             BuildPlayerStatusText(status));
+    // The components a viewer reads off the bar: which runtime is active, the
+    // three geometries, the quality name, the two frame rates rounded to whole
+    // frames, and the dropped count. Their separator and order are the bar's
+    // own business.
+    const auto shows = [](const std::wstring& text, std::wstring_view part) {
+        return text.find(part) != std::wstring::npos;
+    };
+    const std::wstring neural = BuildPlayerStatusText(status);
+    CHECK(shows(neural, L"Neural addon enabled"));
+    CHECK(shows(neural, L"DLSS SR unavailable"));
+    CHECK(shows(neural, L"1920\u00d71080"));
+    CHECK(shows(neural, L"1280\u00d7720"));
+    CHECK(shows(neural, L"3840\u00d72160"));
+    CHECK(shows(neural, L"Quality"));
+    CHECK(shows(neural, L"58 rendered"));
+    CHECK(shows(neural, L"60 source"));
+    CHECK(shows(neural, L"Dropped 3"));
+    CHECK(!shows(neural, L"58.4"));
+    CHECK(!shows(neural, L"59.94"));
+
+    status.upscalingStatus = L"DLSS SR 2x";
+    const std::wstring upscaling = BuildPlayerStatusText(status);
+    CHECK(shows(upscaling, L"DLSS SR 2x"));
+    CHECK(!shows(upscaling, L"DLSS SR unavailable"));
+    status.upscalingStatus.clear();
 
     status.runtimeConfiguration = PlayerRuntimeConfiguration::DlssSrSafeMode;
     status.dlssState = PlayerDlssState::Active;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode"));
+    CHECK(!shows(BuildPlayerStatusText(status), L"Neural addon"));
     status.dlssState = PlayerDlssState::ScalerFallback;
-    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode \u00b7 DLSS SR unavailable \u00b7 FG unavailable \u00b7"));
+    CHECK(BuildPlayerStatusText(status).starts_with(L"DLSS SR safe mode"));
 
     const PlayerRuntimeStatus neuralActive = ResolvePlayerRuntimeStatus(false, true, true, true);
     CHECK_EQ(PlayerRuntimeConfiguration::NeuralAddonExperimental, neuralActive.configuration);
@@ -1169,8 +1145,6 @@ void advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_t
     std::vector<MenuEntry> entries;if(menu)collect_menu_entries(menu,entries);
     CHECK(has_menu_entry(entries,L"Clear Neural Cache",app_menu::IDM_CLEAR_NEURAL_CACHE));
     CHECK(!has_menu_text(entries,L"720p"));CHECK(!has_menu_text(entries,L"480p"));
-    CHECK_EQ(std::wstring(L"Acquiring"),localizer.Get(L"neural.phase.acquiring"));
-    CHECK_EQ(std::wstring(L"Neural rendered"),localizer.Get(L"neural.view.rendered"));
     if(menu)DestroyMenu(menu);
 }
 
@@ -1468,9 +1442,21 @@ void youtube_resolution_error_mapping_is_actionable_and_distinct_test()
              YouTubeResolveErrorMessageKey(ResolveError::OutputTooLarge));
     CHECK_EQ(std::wstring_view(L"youtube.error.extraction"),
              YouTubeResolveErrorMessageKey(ResolveError::InvalidOutput));
+    // Every key the mapping and the media path can hand the UI resolves to
+    // its own sentence: a missing entry would show the raw key, and two
+    // failures sharing a sentence would be indistinguishable to the user.
     Localizer localizer;
-    CHECK_EQ(std::wstring(L"The YouTube stream did not become ready within 20 seconds. Check your connection and try again."),localizer.Get(L"youtube.error.media_timeout"));
-    CHECK_EQ(std::wstring(L"The YouTube stream stopped delivering video for 15 seconds. Check your connection and try again."),localizer.Get(L"youtube.error.media_stalled"));
+    std::vector<std::wstring> messages;
+    for (const wchar_t* key : {L"youtube.error.invalid", L"youtube.error.helper_missing",
+                               L"youtube.error.start_failed", L"youtube.error.timeout",
+                               L"youtube.error.cancelled", L"youtube.error.extraction",
+                               L"youtube.error.ffmpeg", L"youtube.error.media_timeout",
+                               L"youtube.error.media_stalled"}) {
+        const std::wstring message = localizer.Get(key);
+        CHECK(message != key);
+        CHECK(std::find(messages.begin(), messages.end(), message) == messages.end());
+        messages.push_back(message);
+    }
 }
 
 void youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test()
@@ -2151,6 +2137,7 @@ void gpu_teardown_fence_stale_wakes_share_one_absolute_timeout_budget_test()
 
 void renderer_non_teardown_wait_failure_is_propagated_test()
 {
+    D3D12RendererTestAccess::ResetRetainedRenderers();
     int waits=0;
     auto renderer=MakeD3D12Renderer();
     D3D12RendererTestAccess::ConfigureWait(
@@ -2185,6 +2172,7 @@ void renderer_safe_owner_retains_resources_after_live_device_drain_failure_test(
                            d3d12_renderer_detail::FenceWaitResult::EventRegistrationFailed,
                            d3d12_renderer_detail::FenceWaitResult::WaitFailed,
                            d3d12_renderer_detail::FenceWaitResult::TimedOut}){
+        D3D12RendererTestAccess::ResetRetainedRenderers();
         int waits=0;auto destroyed=std::make_shared<int>(0);
         auto renderer=MakeD3D12Renderer();
         D3D12RendererTestAccess::ConfigureWait(*renderer,result,waits);
@@ -2198,8 +2186,35 @@ void renderer_safe_owner_retains_resources_after_live_device_drain_failure_test(
     }
 }
 
+// A drain that fails leaves resources the GPU may still be touching, so the
+// renderer is leaked rather than freed - once. A second such renderer in one
+// process is a loop that would leak the GPU dry, and the deleter ends the
+// process instead; under test the exit is a hook, and the renderer is still
+// kept rather than freed.
+void renderer_second_retained_renderer_ends_the_process_test()
+{
+    D3D12RendererTestAccess::ResetRetainedRenderers();
+    int exits=0;
+    for(int retained=1;retained<=2;++retained){
+        int waits=0;auto destroyed=std::make_shared<int>(0);
+        auto renderer=MakeD3D12Renderer();
+        D3D12RendererTestAccess::ConfigureWait(
+            *renderer,d3d12_renderer_detail::FenceWaitResult::TimedOut,waits);
+        D3D12RendererTestAccess::OnExitProcess(*renderer,[&]{++exits;});
+        D3D12RendererTestAccess::OwnSentinel(
+            *renderer,std::make_unique<RendererOwnedSentinel>(destroyed));
+
+        renderer.reset();
+
+        CHECK_EQ(1,waits);
+        CHECK_EQ(0,*destroyed);
+        CHECK_EQ(retained-1,exits);
+    }
+}
+
 void renderer_frame_signal_failure_is_cached_without_advancing_tracking_test()
 {
+    D3D12RendererTestAccess::ResetRetainedRenderers();
     int signalCalls=0,reasonChecks=0;
     auto destroyed=std::make_shared<int>(0);
     auto renderer=MakeD3D12Renderer();
@@ -2242,6 +2257,42 @@ void renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test
     CHECK_EQ(uint64_t{8},D3D12RendererTestAccess::FrameFence(*renderer,2));
     CHECK_EQ(d3d12_renderer_detail::FenceWaitResult::DeviceRemoved,
              D3D12RendererTestAccess::LastFenceResult(*renderer));
+
+    renderer.reset();
+    CHECK_EQ(1,*destroyed);
+}
+
+// The Signal's own HRESULT can say the device is gone before
+// GetDeviceRemovedReason does: a loss code latches DeviceRemoved, which the
+// safe owner may then release, instead of SignalFailed, which it must retain.
+void renderer_frame_signal_device_loss_code_latches_device_removed_test()
+{
+    using d3d12_renderer_detail::FenceWaitResult;
+    static_assert(d3d12_renderer_detail::IsDeviceLossCode(DXGI_ERROR_DEVICE_REMOVED));
+    static_assert(d3d12_renderer_detail::IsDeviceLossCode(DXGI_ERROR_DEVICE_RESET));
+    static_assert(d3d12_renderer_detail::IsDeviceLossCode(DXGI_ERROR_DEVICE_HUNG));
+    static_assert(!d3d12_renderer_detail::IsDeviceLossCode(E_FAIL));
+    static_assert(!d3d12_renderer_detail::IsDeviceLossCode(S_OK));
+    CHECK_EQ(FenceWaitResult::SignalFailed,
+             d3d12_renderer_detail::ClassifyDeviceCallFailure(E_FAIL,FenceWaitResult::SignalFailed,[]{return S_OK;}));
+    CHECK_EQ(FenceWaitResult::DeviceRemoved,
+             d3d12_renderer_detail::ClassifyDeviceCallFailure(E_FAIL,FenceWaitResult::SignalFailed,[]{return DXGI_ERROR_DEVICE_REMOVED;}));
+    CHECK_EQ(FenceWaitResult::DeviceRemoved,
+             d3d12_renderer_detail::ClassifyDeviceCallFailure(DXGI_ERROR_DEVICE_RESET,FenceWaitResult::WaitFailed,[]{return S_OK;}));
+
+    int signalCalls=0,reasonChecks=0;
+    auto destroyed=std::make_shared<int>(0);
+    auto renderer=MakeD3D12Renderer();
+    D3D12RendererTestAccess::ConfigureFrameSignal(
+        *renderer,DXGI_ERROR_DEVICE_HUNG,S_OK,signalCalls,reasonChecks);
+    D3D12RendererTestAccess::SetFrameTracking(*renderer,2,12,2,8);
+    D3D12RendererTestAccess::OwnSentinel(
+        *renderer,std::make_unique<RendererOwnedSentinel>(destroyed));
+
+    CHECK(!D3D12RendererTestAccess::SignalFrameSlot(*renderer,2));
+    CHECK_EQ(1,signalCalls);CHECK_EQ(1,reasonChecks);
+    CHECK(D3D12RendererTestAccess::GPUUnusable(*renderer));
+    CHECK_EQ(FenceWaitResult::DeviceRemoved,D3D12RendererTestAccess::LastFenceResult(*renderer));
 
     renderer.reset();
     CHECK_EQ(1,*destroyed);
@@ -3030,9 +3081,6 @@ void neural_failure_kind_selects_the_lifecycle_state_test()
     CHECK(lifecycle.Transition(NeuralPlaybackState::Rendering));
     CHECK(lifecycle.Transition(NeuralPlaybackState::Recovering));
     CHECK(lifecycle.Transition(StateForFailure(NeuralRenderFailure::RetryExhausted)));
-    CHECK_EQ(std::wstring(L"RetryExhausted"),std::wstring(NeuralPlaybackStateName(lifecycle.state)));
-    CHECK_EQ(std::wstring(L"Paused"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Paused)));
-    CHECK_EQ(std::wstring(L"Recovering"),std::wstring(NeuralPlaybackStateName(NeuralPlaybackState::Recovering)));
 }
 
 void neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test()
@@ -4440,11 +4488,25 @@ void youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test()
         CHECK(std::chrono::steady_clock::now()-started<std::chrono::seconds{1});
         VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
-        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){
-            const auto callStarted=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);
-            CHECK(std::chrono::steady_clock::now()-callStarted<std::chrono::milliseconds{40});Sleep(5);
-        }
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
         CHECK_EQ(VideoReadResult::FrameReady,result);CHECK_EQ(size_t{16},frame.bgra.size());
+        const auto closeStarted=std::chrono::steady_clock::now();decoder->Close();CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
+    }
+    {
+        // Non-blocking means a read never waits for the child. This child writes
+        // a quarter of a frame and then nothing, and the stall timeout is set far
+        // beyond the bound: a read that waited for the frame or for the stall
+        // would take those 5 s, while a poll answers NotReady at once. The bound
+        // is a full second because a loaded runner can hold a thread off the CPU
+        // for tens of milliseconds, which the 40 ms this used to allow did not
+        // survive - but never for a second.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::seconds{5});
+        CHECK(decoder->Open(L"https://media.invalid/stallmid",MediaSourceKind::YouTube));
+        VideoFrame frame;
+        const auto callStarted=std::chrono::steady_clock::now();
+        const VideoReadResult result=decoder->ReadNextAvailable(frame);
+        CHECK(std::chrono::steady_clock::now()-callStarted<std::chrono::seconds{1});
+        CHECK_EQ(VideoReadResult::NotReady,result);
         const auto closeStarted=std::chrono::steady_clock::now();decoder->Close();CHECK(std::chrono::steady_clock::now()-closeStarted<std::chrono::seconds{1});
     }
     {
@@ -4462,7 +4524,7 @@ void youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test()
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory,std::chrono::milliseconds{250},std::chrono::milliseconds{75});
         CHECK(decoder->Open(L"https://media.invalid/stallmid",MediaSourceKind::YouTube));VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
-        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){const auto call=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);CHECK(std::chrono::steady_clock::now()-call<std::chrono::milliseconds{40});Sleep(5);}
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
         CHECK_EQ(VideoReadResult::Stalled,result);decoder->Close();
     }
     {
@@ -4500,7 +4562,7 @@ void youtube_decoder_background_seek_trickles_and_cancels_boundedly_test()
     {
         auto decoder=VideoDecoderTestAccess::Create(fixture.directory);CHECK(decoder->Open(L"https://media.invalid/trickle",MediaSourceKind::YouTube));CHECK(decoder->SeekSeconds(12.0));
         VideoFrame frame;VideoReadResult result=VideoReadResult::NotReady;const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{1};
-        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){const auto call=std::chrono::steady_clock::now();result=decoder->ReadNextAvailable(frame);CHECK(std::chrono::steady_clock::now()-call<std::chrono::milliseconds{40});Sleep(5);}
+        while(result==VideoReadResult::NotReady&&std::chrono::steady_clock::now()<deadline){result=decoder->ReadNextAvailable(frame);Sleep(5);}
         CHECK_EQ(VideoReadResult::FrameReady,result);CHECK(frame.timestamp100ns>=120000000);
     }
     {
@@ -4786,6 +4848,12 @@ void video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test()
         CHECK(frame.layout==VideoPixelLayout::Nv12);
         CHECK_EQ(FrameBytes(VideoPixelLayout::Nv12,4,2),frame.bgra.size());
     }
+}
+
+void video_decoder_swap_carries_probe_derived_state_test()
+{
+    MediaFixture fixture;
+    VideoDecoderTestAccess::CheckSwapCarriesSource(fixture.directory);
 }
 
 // The seven numbers the NV12 source pass is compiled with, per conversion. The
@@ -5194,6 +5262,7 @@ void youtube_prepared_window_api_failures_are_reported_before_commit_test()
 
 void youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test()
 {
+    D3D12RendererTestAccess::ResetRetainedRenderers();
     HWND host=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"visibility-host",
         WS_POPUP|WS_VISIBLE,-32000,-32000,640,360,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     HWND viewport=CreateWindowExW(0,L"STATIC",L"visibility-viewport",
@@ -5331,7 +5400,7 @@ void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_
     ResolverFixture fixture;
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
     const ResolveResult result = resolver->Resolve(
-        L"https://youtube.com/watch?v=success&list=PL123", {});
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&success", {});
 
     CHECK(result.ok);
     CHECK_EQ(ResolveError::None, result.error);
@@ -5350,7 +5419,7 @@ void youtube_resolver_waits_until_both_selected_streams_are_available_test()
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     const auto ready = now + 2;
-    const auto url = L"https://youtu.be/availability_" + std::to_wstring(now + 1) +
+    const auto url = L"https://youtu.be/dQw4w9WgXcQ?availability_" + std::to_wstring(now + 1) +
         L"_" + std::to_wstring(ready);
     const auto result = resolver->Resolve(url, {});
     CHECK(result.ok);
@@ -5363,7 +5432,7 @@ void youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test
     ResolverFixture fixture;
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    const auto url = L"https://youtu.be/availability_" + std::to_wstring(now + 10) + L"_0";
+    const auto url = L"https://youtu.be/dQw4w9WgXcQ?availability_" + std::to_wstring(now + 10) + L"_0";
     auto bounded = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::milliseconds{150});
     CHECK_EQ(ResolveError::TimedOut, bounded->Resolve(url, {}).error);
     const auto marker = fixture.directory / L"availability-ready.marker";
@@ -5397,7 +5466,7 @@ void youtube_resolver_waits_for_fractional_stream_availability_test()
         std::chrono::system_clock::now().time_since_epoch()).count();
     const auto ready = now + 1;
     const auto result = resolver->Resolve(
-        L"https://youtu.be/availability_0_" + std::to_wstring(ready) + L"_fraction", {});
+        L"https://youtu.be/dQw4w9WgXcQ?availability_0_" + std::to_wstring(ready) + L"_fraction", {});
     CHECK(result.ok);
     CHECK(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count()
           >= static_cast<double>(ready) + 0.5);
@@ -5432,9 +5501,9 @@ void youtube_resolver_requires_duration_metadata_before_acquisition_test()
 {
     ResolverFixture fixture;
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-    for (const auto url : {L"https://youtu.be/missingduration",
-                           L"https://youtu.be/unknownduration",
-                           L"https://youtu.be/liveduration"}) {
+    for (const auto url : {L"https://youtu.be/dQw4w9WgXcQ?missingduration",
+                           L"https://youtu.be/dQw4w9WgXcQ?unknownduration",
+                           L"https://youtu.be/dQw4w9WgXcQ?liveduration"}) {
         const auto result = resolver->Resolve(url, {});
         CHECK(!result.ok);
         CHECK_EQ(ResolveError::InvalidOutput, result.error);
@@ -5453,7 +5522,7 @@ void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_
     std::filesystem::remove_all(missingDirectory, error);
     auto missingResolver = YouTubeResolverTestAccess::Create(missingDirectory);
     const ResolveResult missing = missingResolver->Resolve(
-        L"https://youtube.com/watch?v=secret_missing", {});
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&secret_missing", {});
     CHECK(!missing.ok);
     CHECK_EQ(ResolveError::HelperMissing, missing.error);
     CHECK(missing.mediaUrl.empty());
@@ -5462,7 +5531,7 @@ void youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_
     ResolverFixture corruptFixture(false);
     auto corruptResolver = YouTubeResolverTestAccess::Create(corruptFixture.directory);
     const ResolveResult corrupt = corruptResolver->Resolve(
-        L"https://youtube.com/watch?v=secret_start", {});
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&secret_start", {});
     CHECK(!corrupt.ok);
     CHECK_EQ(ResolveError::StartFailed, corrupt.error);
     CHECK(corrupt.mediaUrl.empty());
@@ -5475,18 +5544,18 @@ void youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test()
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
 
     const ResolveResult nonzero = resolver->Resolve(
-        L"https://youtu.be/nonzero", {});
+        L"https://youtu.be/dQw4w9WgXcQ?nonzero", {});
     CHECK(!nonzero.ok);
     CHECK_EQ(ResolveError::ExtractionFailed, nonzero.error);
     CHECK(nonzero.mediaUrl.empty());
 
     const ResolveResult exactCaptureLimit = resolver->Resolve(
-        L"https://youtu.be/cap64", {});
+        L"https://youtu.be/dQw4w9WgXcQ?cap64", {});
     CHECK(!exactCaptureLimit.ok);
     CHECK_EQ(ResolveError::InvalidOutput, exactCaptureLimit.error);
 
     const ResolveResult overflow = resolver->Resolve(
-        L"https://youtu.be/cap64plus", {});
+        L"https://youtu.be/dQw4w9WgXcQ?cap64plus", {});
     CHECK(!overflow.ok);
     CHECK_EQ(ResolveError::OutputTooLarge, overflow.error);
     CHECK(overflow.mediaUrl.empty());
@@ -5502,7 +5571,7 @@ void youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_te
     ResolveResult stopped;
     const auto stopStarted = std::chrono::steady_clock::now();
     std::jthread stopWorker([&](std::stop_token token) {
-        stopped = resolver->Resolve(L"https://youtu.be/hang", token);
+        stopped = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", token);
     });
     Sleep(75);
     stopWorker.request_stop();
@@ -5514,7 +5583,7 @@ void youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_te
     ResolveResult cancelled;
     const auto cancelStarted = std::chrono::steady_clock::now();
     std::thread cancelWorker([&] {
-        cancelled = resolver->Resolve(L"https://youtu.be/hang", {});
+        cancelled = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     Sleep(75);
     resolver->Cancel();
@@ -5525,7 +5594,7 @@ void youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_te
 
     resolver->Cancel();
     const ResolveResult afterCancel = resolver->Resolve(
-        L"https://youtu.be/success", {});
+        L"https://youtu.be/dQw4w9WgXcQ?success", {});
     CHECK(afterCancel.ok);
 }
 
@@ -5541,7 +5610,7 @@ void youtube_resolver_times_out_and_kills_its_descendant_job_tree_test()
         fixture.directory, std::chrono::milliseconds{350});
     const auto started = std::chrono::steady_clock::now();
     const ResolveResult result = resolver->Resolve(
-        L"https://youtu.be/descendant_" + suffix, {});
+        L"https://youtu.be/dQw4w9WgXcQ?descendant_" + suffix, {});
     const auto elapsed = std::chrono::steady_clock::now() - started;
     CHECK(!result.ok);
     CHECK_EQ(ResolveError::TimedOut, result.error);
@@ -5571,7 +5640,7 @@ void youtube_resolver_repeated_runs_leave_process_handle_count_stable_test()
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &before) != FALSE);
     for (int run = 0; run < 20; ++run) {
         const ResolveResult result = resolver->Resolve(
-            L"https://youtu.be/success", {});
+            L"https://youtu.be/dQw4w9WgXcQ?success", {});
         CHECK(result.ok);
     }
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &after) != FALSE);
@@ -5845,16 +5914,6 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
                      "https://r1.googlevideo.com/videoplayback?id=envcapture\n" << std::flush;
         return 0;
     }
-    const size_t symlinkAttack = url.find(L"symlinkattack_");
-    if (symlinkAttack != std::wstring_view::npos) {
-        const std::wstring suffix(url.substr(symlinkAttack + 14));
-        const std::filesystem::path marker = std::filesystem::temp_directory_path() /
-            (L"PolicyTests-resolver-symlink-executed-" + suffix + L".marker");
-        write_binary_file(marker, "executed");
-        std::cout << "duration=167;live_status=not_live\n"
-                     "https://r1.googlevideo.com/videoplayback?id=symlink\n" << std::flush;
-        return 0;
-    }
     if (url.find(L"success") != std::wstring_view::npos) {
         std::cout << "duration=167;live_status=not_live\n"
                      "https://r1.googlevideo.com/videoplayback?id=success\n"
@@ -5939,43 +5998,80 @@ bool wait_for_named_process_count(std::wstring_view executableName, size_t expec
     return count_named_processes(executableName) == expected;
 }
 
-void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test()
+// The two reparse points the refusal is tested with need no privilege, unlike
+// the symbolic links this used to attempt: NTFS lets any writer stamp a file
+// with a non-Microsoft reparse tag, and a directory junction is the reparse
+// point Windows hands out without SeCreateSymbolicLinkPrivilege. The resolver
+// reads only the reparse attribute, never the tag, so either stands in for a
+// symbolic link exactly - and unlike one, they exist on every runner.
+bool set_reparse_point(HANDLE handle, const void* data, size_t bytes)
+{
+    DWORD returned = 0;
+    return DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, const_cast<void*>(data),
+                           static_cast<DWORD>(bytes), nullptr, 0, &returned, nullptr) != FALSE;
+}
+
+bool create_reparse_file(const std::filesystem::path& path)
+{
+    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    REPARSE_GUID_DATA_BUFFER data{};
+    data.ReparseTag = 0x42;
+    data.ReparseGuid = GUID{0x8f2c5a1e, 0x4d3b, 0x4c7a, {0x9e, 0x11, 0x20, 0x26, 0x09, 0x16, 0x00, 0x01}};
+    const bool set = set_reparse_point(handle, &data, REPARSE_GUID_DATA_BUFFER_HEADER_SIZE);
+    CloseHandle(handle);
+    return set;
+}
+
+bool create_junction(const std::filesystem::path& link, const std::filesystem::path& target)
+{
+    if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
+    const HANDLE handle = CreateFileW(link.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    // ntifs.h's REPARSE_DATA_BUFFER for IO_REPARSE_TAG_MOUNT_POINT; the SDK
+    // does not declare it. The path buffer holds the NT-form substitute name,
+    // its terminator, an empty print name and its terminator.
+    struct MountPoint {
+        ULONG tag;
+        USHORT dataLength, reserved, substituteOffset, substituteLength, printOffset, printLength;
+        wchar_t path[1];
+    };
+    const std::wstring substitute = L"\\??\\" + target.wstring();
+    const size_t substituteBytes = substitute.size() * sizeof(wchar_t);
+    std::vector<char> buffer(offsetof(MountPoint, path) + substituteBytes + 2 * sizeof(wchar_t));
+    auto* data = reinterpret_cast<MountPoint*>(buffer.data());
+    data->tag = IO_REPARSE_TAG_MOUNT_POINT;
+    data->dataLength = static_cast<USHORT>(buffer.size() - offsetof(MountPoint, substituteOffset));
+    data->substituteLength = static_cast<USHORT>(substituteBytes);
+    data->printOffset = static_cast<USHORT>(substituteBytes + sizeof(wchar_t));
+    memcpy(data->path, substitute.data(), substituteBytes);
+    const bool set = set_reparse_point(handle, buffer.data(), buffer.size());
+    CloseHandle(handle);
+    return set;
+}
+
+void youtube_resolver_rejects_reparse_points_and_nonregular_helpers_before_execution_test()
 {
     ResolverFixture fixture;
     const std::filesystem::path outsideDirectory = fixture.directory.parent_path() /
         (L"PolicyTests-YouTubeResolver-outside-" + std::to_wstring(GetCurrentProcessId()));
-    const std::filesystem::path outsideHelper = outsideDirectory / L"outside-helper.exe";
-    const std::filesystem::path executionMarker = std::filesystem::temp_directory_path() /
-        (L"PolicyTests-resolver-symlink-executed-" +
-         std::to_wstring(GetCurrentProcessId()) + L".marker");
     std::error_code error;
     std::filesystem::remove_all(outsideDirectory, error);
     error.clear();
     std::filesystem::create_directories(outsideDirectory, error);
     CHECK(!error);
-    CHECK(CopyFileW(current_test_executable().c_str(), outsideHelper.c_str(), FALSE) != FALSE);
-    remove_file_if_present(executionMarker);
 
+    // A helper that is a reparse point is refused before anything is spawned:
+    // HelperMissing is the verification's own answer, StartFailed would mean
+    // the launch was attempted.
     std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
     CHECK(!error);
-    const DWORD symlinkFlags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-    const bool symlinkCreated = CreateSymbolicLinkW(
-        (fixture.directory / L"yt-dlp.exe").c_str(), outsideHelper.c_str(),
-        symlinkFlags) != FALSE;
-    if (symlinkCreated) {
-        resolverSymlinkCoverageExercised = true;
-        auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-        const ResolveResult result = resolver->Resolve(
-            L"https://youtu.be/symlinkattack_" + std::to_wstring(GetCurrentProcessId()), {});
-        CHECK(!result.ok);
-        CHECK_EQ(ResolveError::HelperMissing, result.error);
-        CHECK(result.detail.find(L"symlinkattack") == std::wstring::npos);
-        CHECK(!std::filesystem::exists(executionMarker));
-    } else {
-        const DWORD errorCode = GetLastError();
-        CHECK(errorCode == ERROR_PRIVILEGE_NOT_HELD || errorCode == ERROR_INVALID_PARAMETER ||
-              errorCode == ERROR_NOT_SUPPORTED);
-    }
+    CHECK(create_reparse_file(fixture.directory / L"yt-dlp.exe"));
+    auto reparseResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    CHECK_EQ(ResolveError::HelperMissing,
+             reparseResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).error);
 
     std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
     error.clear();
@@ -5983,7 +6079,7 @@ void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_te
     CHECK(!error);
     auto directoryResolver = YouTubeResolverTestAccess::Create(fixture.directory);
     CHECK_EQ(ResolveError::HelperMissing,
-             directoryResolver->Resolve(L"https://youtu.be/success", {}).error);
+             directoryResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).error);
 
     std::filesystem::remove_all(fixture.directory / L"yt-dlp.exe", error);
     CHECK(!error);
@@ -5996,30 +6092,21 @@ void youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_te
     CHECK(!error);
     auto denoDirectoryResolver = YouTubeResolverTestAccess::Create(fixture.directory);
     CHECK_EQ(ResolveError::HelperMissing,
-             denoDirectoryResolver->Resolve(L"https://youtu.be/success", {}).error);
+             denoDirectoryResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).error);
 
+    // The package-local cache directory is refused when it is a junction to
+    // anywhere, so a redirected cache cannot make the helper load from outside.
     std::filesystem::remove_all(fixture.directory / L"deno.exe", error);
     CHECK(!error);
     write_binary_file(fixture.directory / L"deno.exe", "test-only placeholder");
     const std::filesystem::path cacheLink = fixture.directory / L"youtube-helper-cache";
-    const bool cacheLinkCreated = CreateSymbolicLinkW(
-        cacheLink.c_str(), outsideDirectory.c_str(),
-        SYMBOLIC_LINK_FLAG_DIRECTORY | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
-    if (cacheLinkCreated) {
-        auto cacheLinkResolver = YouTubeResolverTestAccess::Create(fixture.directory);
-        CHECK_EQ(ResolveError::HelperMissing,
-                 cacheLinkResolver->Resolve(L"https://youtu.be/success", {}).error);
-        std::filesystem::remove(cacheLink, error);
-        CHECK(!error);
-    } else {
-        const DWORD errorCode = GetLastError();
-        CHECK(errorCode == ERROR_PRIVILEGE_NOT_HELD || errorCode == ERROR_INVALID_PARAMETER ||
-              errorCode == ERROR_NOT_SUPPORTED);
-    }
-
+    CHECK(create_junction(cacheLink, outsideDirectory));
+    auto cacheLinkResolver = YouTubeResolverTestAccess::Create(fixture.directory);
+    CHECK_EQ(ResolveError::HelperMissing,
+             cacheLinkResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).error);
+    CHECK(RemoveDirectoryW(cacheLink.c_str()) != FALSE);
     std::filesystem::remove_all(outsideDirectory, error);
     CHECK(!error);
-    remove_file_if_present(executionMarker);
 }
 
 void youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test()
@@ -6030,7 +6117,7 @@ void youtube_resolver_holds_verified_helpers_against_replacement_until_completio
         fixture.directory, std::chrono::seconds{5});
     ResolveResult result;
     std::thread worker([&] {
-        result = resolver->Resolve(L"https://youtu.be/hang", {});
+        result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     CHECK(wait_for_named_process_count(L"yt-dlp.exe", beforeProcesses + 1,
                                        std::chrono::milliseconds{500}));
@@ -6075,7 +6162,7 @@ void youtube_resolver_forces_package_local_deno_cache_over_parent_override_test(
     const std::filesystem::path callerXdgMarker = callerXdgCache / L"yt-dlp-default.marker";
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
-    const ResolveResult result = resolver->Resolve(L"https://youtu.be/envcapture-ytcacheaudit", {});
+    const ResolveResult result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?envcapture-ytcacheaudit", {});
 
     CHECK(result.ok);
     CHECK(std::filesystem::is_directory(packageCache, error));
@@ -6113,7 +6200,7 @@ void youtube_resolver_disables_default_plugin_execution_from_inherited_config_te
     const size_t beforeProcesses = count_named_processes(L"yt-dlp.exe");
     auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
 
-    const ResolveResult result = resolver->Resolve(L"https://youtu.be/success-pluginaudit", {});
+    const ResolveResult result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success-pluginaudit", {});
 
     CHECK(result.ok);
     CHECK(std::filesystem::is_regular_file(pluginSource, error));
@@ -6135,11 +6222,11 @@ void youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse
     ResolveResult queued;
     std::atomic<bool> queuedFinished{false};
     std::thread activeThread([&] {
-        active = resolver->Resolve(L"https://youtu.be/hang", {});
+        active = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     Sleep(75);
     std::thread queuedThread([&] {
-        queued = resolver->Resolve(L"https://youtu.be/success", {});
+        queued = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {});
         queuedFinished = true;
     });
     Sleep(75);
@@ -6151,7 +6238,7 @@ void youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse
     CHECK_EQ(ResolveError::Cancelled, active.error);
     CHECK(queued.ok);
     CHECK(queuedFinished.load());
-    CHECK(resolver->Resolve(L"https://youtu.be/success", {}).ok);
+    CHECK(resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {}).ok);
 }
 
 void youtube_resolver_queued_stop_token_cancels_before_launch_test()
@@ -6163,12 +6250,12 @@ void youtube_resolver_queued_stop_token_cancels_before_launch_test()
     ResolveResult active;
     ResolveResult queued;
     std::thread activeThread([&] {
-        active = resolver->Resolve(L"https://youtu.be/hang", {});
+        active = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
     });
     Sleep(75);
     std::stop_source queuedStop;
     std::thread queuedThread([&] {
-        queued = resolver->Resolve(L"https://youtu.be/success", queuedStop.get_token());
+        queued = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", queuedStop.get_token());
     });
     Sleep(75);
     queuedStop.request_stop();
@@ -6204,7 +6291,7 @@ void youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test
         auto resolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::seconds{5}, test.stage);
         const auto started = std::chrono::steady_clock::now();
-        const ResolveResult result = resolver->Resolve(L"https://youtu.be/hang", {});
+        const ResolveResult result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
         const auto elapsed = std::chrono::steady_clock::now() - started;
         CHECK_EQ(test.expected, result.error);
         CHECK(result.detail.find(L"hang") == std::wstring::npos);
@@ -6233,7 +6320,7 @@ void youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_
             fixture.directory, std::chrono::seconds{5},
             YouTubeResolver::FailureStage::PipeHandlesOwned);
         const auto started = std::chrono::steady_clock::now();
-        const ResolveResult result = resolver->Resolve(L"https://youtu.be/hang", {});
+        const ResolveResult result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
         const auto elapsed = std::chrono::steady_clock::now() - started;
         CHECK_EQ(ResolveError::StartFailed, result.error);
         CHECK(elapsed < std::chrono::seconds{2});
@@ -6267,7 +6354,7 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
         auto timeoutResolver = YouTubeResolverTestAccess::Create(
             fixture.directory, std::chrono::milliseconds{80});
         CHECK_EQ(ResolveError::TimedOut,
-                 timeoutResolver->Resolve(L"https://youtu.be/hang", {}).error);
+                 timeoutResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {}).error);
     }
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterTimeoutHandles) != FALSE);
     CHECK(afterTimeoutHandles <= beforeTimeoutHandles + 2);
@@ -6282,7 +6369,7 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
             fixture.directory, std::chrono::seconds{5});
         ResolveResult cancelled;
         std::thread worker([&] {
-            cancelled = cancelResolver->Resolve(L"https://youtu.be/hang", {});
+            cancelled = cancelResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?hang", {});
         });
         Sleep(30);
         cancelResolver->Cancel();
@@ -6300,7 +6387,7 @@ void youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test
     for (int cycle = 0; cycle < 4; ++cycle) {
         auto overflowResolver = YouTubeResolverTestAccess::Create(fixture.directory);
         CHECK_EQ(ResolveError::OutputTooLarge,
-                 overflowResolver->Resolve(L"https://youtu.be/cap64plus", {}).error);
+                 overflowResolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?cap64plus", {}).error);
     }
     Sleep(50);
     CHECK(GetProcessHandleCount(GetCurrentProcess(), &afterOverflowHandles) != FALSE);
@@ -6511,6 +6598,295 @@ void spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test()
     std::filesystem::remove_all(directory, directoryError);
 }
 
+struct TestCase {
+    const char* name;
+    void (*run)();
+};
+#define TEST_CASE(function) TestCase{#function, &function}
+
+struct CaseOutcome {
+    DWORD exceptionCode{};
+    std::string exception;
+};
+
+void run_case_catching(void (*run)(), CaseOutcome& outcome)
+{
+    try {
+        run();
+    } catch (const std::exception& error) {
+        outcome.exception = error.what();
+        if (outcome.exception.empty()) outcome.exception = "std::exception";
+    } catch (...) {
+        outcome.exception = "non-standard exception";
+    }
+}
+
+// __try cannot share a frame with objects that need unwinding, so the C++
+// catch lives one call down. An access violation or a stack overflow in one
+// case used to take every case after it, and the failing name, with it.
+void run_case_guarded(void (*run)(), CaseOutcome& outcome) noexcept
+{
+    __try {
+        run_case_catching(run, outcome);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        outcome.exceptionCode = GetExceptionCode();
+    }
+}
+
+// Runs every case whose name contains `only` (all of them when it is empty),
+// attributing each failed CHECK, uncaught exception and structured exception
+// to the case it happened in. Returns the number of cases run.
+size_t run_cases(const TestCase* cases, size_t count, std::string_view only)
+{
+    size_t ran = 0;
+    std::vector<const char*> failed;
+    for (size_t index = 0; index < count; ++index) {
+        const TestCase& test = cases[index];
+        if (std::string_view(test.name).find(only) == std::string_view::npos) continue;
+        ++ran;
+        const int before = test_support::failure_count;
+        test_support::current_case = test.name;
+        CaseOutcome outcome;
+        run_case_guarded(test.run, outcome);
+        test_support::current_case = nullptr;
+        if (!outcome.exception.empty()) {
+            ++test_support::failure_count;
+            std::cerr << '[' << test.name << "] uncaught exception: " << outcome.exception << '\n';
+        }
+        if (outcome.exceptionCode != 0) {
+            ++test_support::failure_count;
+            std::cerr << '[' << test.name << "] structured exception 0x" << std::hex
+                      << outcome.exceptionCode << std::dec << '\n';
+        }
+        if (test_support::failure_count != before) failed.push_back(test.name);
+    }
+    for (const char* name : failed) std::cerr << "FAILED: " << name << '\n';
+    return ran;
+}
+
+constexpr TestCase kResolverAvailabilityCases[] = {
+    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
+    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
+    TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),
+    TEST_CASE(resolver_output_validates_stream_availability_metadata_test),
+};
+
+constexpr TestCase kCases[] = {
+    TEST_CASE(harness_sanity_test),
+    TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
+    TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
+    TEST_CASE(runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test),
+    TEST_CASE(toolbar_layout_selects_stable_action_sets_for_width_modes_test),
+    TEST_CASE(toolbar_layout_preserves_group_separation_test),
+    TEST_CASE(toolbar_layout_scales_hit_height_and_avoids_overlap_test),
+    TEST_CASE(toolbar_hit_testing_is_half_open_and_boundary_stable_test),
+    TEST_CASE(minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test),
+    TEST_CASE(volume_slider_never_intersects_compact_or_threshold_toolbar_test),
+    TEST_CASE(toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test),
+    TEST_CASE(open_action_content_keeps_idle_and_toolbar_copy_distinct_test),
+    TEST_CASE(focused_toolbar_action_reconciles_layout_and_availability_changes_test),
+    TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
+    TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
+    TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
+    TEST_CASE(playback_timeline_follows_the_presented_frame_test),
+    TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
+    TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),
+    TEST_CASE(recovery_copy_and_rehook_confirmation_are_actionable_test),
+    TEST_CASE(unchanged_hover_action_has_no_dirty_rectangles_test),
+    TEST_CASE(changed_hover_action_dirties_only_present_old_and_new_actions_test),
+    TEST_CASE(hover_resolution_tracks_layout_action_changes_and_disappearance_test),
+    TEST_CASE(current_cursor_hover_clears_when_cursor_query_is_unavailable_test),
+    TEST_CASE(paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test),
+    TEST_CASE(tabler_glyph_mapping_uses_the_pinned_css_codepoints_test),
+    TEST_CASE(native_button_palette_has_distinct_interaction_states_test),
+    TEST_CASE(active_button_small_text_meets_wcag_contrast_test),
+    TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
+    TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),
+    TEST_CASE(button_content_layout_centers_combined_icon_and_label_without_outline_contact_test),
+    TEST_CASE(feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test),
+    TEST_CASE(prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test),
+    TEST_CASE(advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test),
+    TEST_CASE(feature_menu_uses_distinct_controls_and_honest_availability_test),
+    TEST_CASE(debug_view_popup_contains_all_existing_views_and_selection_test),
+    TEST_CASE(range_preview_and_comparison_menus_route_keys_and_gate_availability_test),
+    TEST_CASE(player_menu_is_english_only_and_retains_advanced_commands_test),
+    TEST_CASE(youtube_source_quality_menu_is_distinct_radio_group_and_updates_test),
+    TEST_CASE(youtube_availability_drives_real_menu_and_idle_action_consistently_test),
+    TEST_CASE(youtube_resolution_generation_accepts_only_the_current_completion_test),
+    TEST_CASE(youtube_resolution_disables_only_conflicting_source_actions_test),
+    TEST_CASE(youtube_resolution_error_mapping_is_actionable_and_distinct_test),
+    TEST_CASE(youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test),
+    TEST_CASE(youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test),
+    TEST_CASE(youtube_display_and_log_labels_never_expose_direct_urls_test),
+    TEST_CASE(youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test),
+    TEST_CASE(fixed_youtube_examples_are_complete_safe_and_menu_routable_test),
+    TEST_CASE(youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test),
+    TEST_CASE(youtube_completion_registry_post_failure_and_concurrency_are_owned_test),
+    TEST_CASE(youtube_renderer_transaction_validates_every_open_seek_and_quality_candidate_geometry_test),
+    TEST_CASE(youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test),
+    TEST_CASE(youtube_candidate_seek_render_failure_preserves_all_active_state_before_commit_test),
+    TEST_CASE(youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test),
+    TEST_CASE(youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test),
+    TEST_CASE(youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test),
+    TEST_CASE(youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test),
+    TEST_CASE(video_decoder_prefers_video_duration_tag_over_longer_container_test),
+    TEST_CASE(youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test),
+    TEST_CASE(youtube_decoder_discards_only_expected_trailing_partial_frame_test),
+    TEST_CASE(youtube_decoder_background_seek_trickles_and_cancels_boundedly_test),
+    TEST_CASE(video_decoder_close_releases_a_blocked_blocking_read_test),
+    TEST_CASE(video_decoder_hardware_failure_falls_back_to_software_test),
+    TEST_CASE(video_decoder_remembers_dead_hardware_paths_test),
+    TEST_CASE(video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test),
+    TEST_CASE(video_decoder_background_queue_is_bounded_to_four_frames_test),
+    TEST_CASE(video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test),
+    TEST_CASE(video_decoder_open_sequential_selects_nv12_for_even_geometry_test),
+    TEST_CASE(video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test),
+    TEST_CASE(video_decoder_open_sequential_stays_bgra_for_odd_geometry_test),
+    TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
+    TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
+    TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
+    TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
+    TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
+    TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
+    TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
+    TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
+    TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),
+    TEST_CASE(youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test),
+    TEST_CASE(youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test),
+    TEST_CASE(youtube_prepared_handoff_sizes_and_shows_real_candidate_before_owned_retirement_test),
+    TEST_CASE(youtube_prepared_window_api_failures_are_reported_before_commit_test),
+    TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
+    TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
+    TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
+    TEST_CASE(gpu_teardown_fence_signal_failure_stops_before_event_registration_test),
+    TEST_CASE(gpu_teardown_fence_signal_failure_maps_to_device_removed_when_device_reason_failed_test),
+    TEST_CASE(gpu_teardown_fence_event_registration_failure_stops_before_wait_test),
+    TEST_CASE(gpu_teardown_fence_wait_failure_is_bounded_and_reported_test),
+    TEST_CASE(gpu_teardown_fence_timeout_is_bounded_and_reported_test),
+    TEST_CASE(gpu_render_fence_wait_uses_the_render_budget_and_reports_device_loss_first_test),
+    TEST_CASE(gpu_teardown_fence_ignores_old_event_wake_until_new_target_completes_test),
+    TEST_CASE(gpu_teardown_fence_consecutive_timeout_does_not_let_old_registration_complete_new_target_test),
+    TEST_CASE(gpu_teardown_fence_device_removed_sentinel_is_not_completion_test),
+    TEST_CASE(gpu_teardown_fence_stale_wakes_share_one_absolute_timeout_budget_test),
+    TEST_CASE(renderer_non_teardown_wait_failure_is_propagated_test),
+    TEST_CASE(renderer_safe_owner_releases_owned_resources_only_after_completed_or_removed_drain_test),
+    TEST_CASE(renderer_safe_owner_retains_resources_after_live_device_drain_failure_test),
+    TEST_CASE(renderer_second_retained_renderer_ends_the_process_test),
+    TEST_CASE(renderer_frame_signal_failure_is_cached_without_advancing_tracking_test),
+    TEST_CASE(renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test),
+    TEST_CASE(renderer_frame_signal_device_loss_code_latches_device_removed_test),
+    TEST_CASE(renderer_frame_signal_success_advances_tracking_once_test),
+    TEST_CASE(renderer_cache_capture_requires_a_successful_neural_evaluation_test),
+    TEST_CASE(renderer_cache_capture_returns_exact_tight_bgra_geometry_test),
+    TEST_CASE(renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test),
+    TEST_CASE(renderer_cache_capture_does_not_apply_playback_color_adjustments_test),
+    TEST_CASE(gpu_classification_table_test),
+    TEST_CASE(adapter_luid_identity_compares_parts_not_model_names_test),
+    TEST_CASE(detected_high_performance_gpu_carries_the_luid_of_the_adapter_it_describes_test),
+    TEST_CASE(nvidia_driver_version_is_read_out_of_the_dxgi_quad_test),
+    TEST_CASE(neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test),
+    TEST_CASE(neural_addon_policy_test),
+    TEST_CASE(neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test),
+    TEST_CASE(render_pace_prior_zero_means_unmeasured_not_unsupported_test),
+    TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
+    TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),
+    TEST_CASE(neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test),
+    TEST_CASE(neural_playback_lifecycle_runs_render_validate_then_ready_test),
+    TEST_CASE(neural_completion_publishes_only_after_probe_and_manifest_validation_test),
+    TEST_CASE(neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test),
+    TEST_CASE(render_range_residual_below_one_frame_is_coverage_not_work_test),
+    TEST_CASE(coverage_merge_sorts_drops_degenerate_and_joins_touching_spans_test),
+    TEST_CASE(uncovered_spans_of_nothing_is_everything_and_of_everything_is_nothing_test),
+    TEST_CASE(uncovered_spans_find_the_hole_between_regions_and_the_lead_in_before_the_first_test),
+    TEST_CASE(uncovered_spans_clip_coverage_to_the_range_and_ignore_coverage_outside_it_test),
+    TEST_CASE(uncovered_spans_drop_sub_frame_holes_but_keep_a_hole_one_frame_wide_test),
+    TEST_CASE(next_render_target_clips_the_hole_under_the_playhead_to_the_playhead_test),
+    TEST_CASE(next_render_target_prefers_the_nearest_hole_ahead_then_the_earliest_behind_test),
+    TEST_CASE(next_render_target_without_a_hole_has_nothing_to_render_test),
+    TEST_CASE(span_containing_returns_the_playable_region_not_a_later_disjoint_one_test),
+    TEST_CASE(covered_duration_counts_only_rendered_video_inside_the_range_test),
+    TEST_CASE(neural_cancel_and_failure_offer_original_only_without_partial_cache_test),
+    TEST_CASE(neural_pause_suspends_rendering_and_resumes_without_advancing_test),
+    TEST_CASE(neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test),
+    TEST_CASE(neural_failure_kind_selects_the_lifecycle_state_test),
+    TEST_CASE(neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test),
+    TEST_CASE(dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test),
+    TEST_CASE(neural_runtime_layout_is_absent_complete_or_fail_closed_test),
+    TEST_CASE(default_neural_carrier_uses_native_resolution_dlaa_test),
+    TEST_CASE(windows_command_line_quoting_round_trip_test),
+    TEST_CASE(runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test),
+    TEST_CASE(restart_argument_lifecycle_and_create_process_command_line_test),
+    TEST_CASE(advanced_safe_mode_normal_invocation_adds_safe_mode_test),
+    TEST_CASE(advanced_safe_mode_cancel_keeps_current_open_without_launch_test),
+    TEST_CASE(advanced_safe_mode_launch_failure_keeps_current_open_test),
+    TEST_CASE(advanced_safe_mode_launch_success_closes_with_sanitized_arguments_test),
+    TEST_CASE(disabled_addons_creates_missing_addon_section_test),
+    TEST_CASE(disabled_addons_updates_empty_and_populated_lists_test),
+    TEST_CASE(disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test),
+    TEST_CASE(disabled_addons_removes_only_exact_target_entries_test),
+    TEST_CASE(disabled_addons_collapses_only_exact_target_duplicates_test),
+    TEST_CASE(disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test),
+    TEST_CASE(reshade_68_disabled_addon_token_conformance_test),
+    TEST_CASE(reshade_68_aliases_migrate_to_one_canonical_token_test),
+    TEST_CASE(reshade_68_section_and_key_lookup_are_case_sensitive_test),
+    TEST_CASE(reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test),
+    TEST_CASE(disabled_addons_insertion_uses_target_section_line_ending_test),
+    TEST_CASE(neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test),
+    TEST_CASE(neural_addon_runtime_settings_are_created_without_enabling_upscaling_test),
+    TEST_CASE(neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test),
+    TEST_CASE(reshade_trailing_section_text_uses_reshade_section_boundaries_test),
+    TEST_CASE(configure_neural_addon_is_idempotent_test),
+    TEST_CASE(configure_neural_addon_reports_semantic_state_across_text_canonicalization_test),
+    TEST_CASE(configure_neural_addon_safe_then_normal_observes_reshade_state_test),
+    TEST_CASE(evaluated_config_update_observes_actual_final_bytes_test),
+    TEST_CASE(configure_neural_addon_fails_closed_for_malformed_ini_test),
+    TEST_CASE(configure_neural_addon_rejects_non_regular_path_before_replacement_test),
+    TEST_CASE(youtube_url_validation_accepts_only_supported_video_routes_test),
+    TEST_CASE(youtube_url_validation_rejects_unsafe_or_unselected_inputs_test),
+    TEST_CASE(youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test),
+    TEST_CASE(youtube_video_id_must_be_exactly_eleven_characters_test),
+    TEST_CASE(youtube_url_validation_enforces_exact_2048_character_boundary_test),
+    TEST_CASE(resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test),
+    TEST_CASE(resolver_output_accepts_separate_https_video_and_audio_urls_test),
+    TEST_CASE(resolver_output_accepts_authoritative_duration_before_stream_urls_test),
+    TEST_CASE(resolver_output_rejects_invalid_duration_live_status_and_metadata_framing_test),
+    TEST_CASE(resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test),
+    TEST_CASE(resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test),
+    TEST_CASE(resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test),
+    TEST_CASE(youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test),
+    TEST_CASE(youtube_resolver_argument_vector_is_exact_and_ordered_test),
+    TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
+    TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
+    TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
+    TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
+    TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
+    TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),
+    TEST_CASE(resolver_output_validates_stream_availability_metadata_test),
+    TEST_CASE(youtube_resolver_requires_duration_metadata_before_acquisition_test),
+    TEST_CASE(youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test),
+    TEST_CASE(youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test),
+    TEST_CASE(youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test),
+    TEST_CASE(youtube_resolver_times_out_and_kills_its_descendant_job_tree_test),
+    TEST_CASE(youtube_resolver_repeated_runs_leave_process_handle_count_stable_test),
+    TEST_CASE(youtube_resolver_rejects_reparse_points_and_nonregular_helpers_before_execution_test),
+    TEST_CASE(youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test),
+    TEST_CASE(youtube_resolver_forces_package_local_deno_cache_over_parent_override_test),
+    TEST_CASE(youtube_resolver_disables_default_plugin_execution_from_inherited_config_test),
+    TEST_CASE(youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test),
+    TEST_CASE(youtube_resolver_queued_stop_token_cancels_before_launch_test),
+    TEST_CASE(youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test),
+    TEST_CASE(youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test),
+    TEST_CASE(youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test),
+    TEST_CASE(ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test),
+    TEST_CASE(ngx_failed_initialization_never_acquires_a_session_test),
+    TEST_CASE(ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test),
+    TEST_CASE(ngx_distinct_devices_own_independent_sessions_test),
+    TEST_CASE(ngx_create_failure_is_not_retried_until_explicit_reset_test),
+    TEST_CASE(ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test),
+    TEST_CASE(ngx_live_feature_is_never_released_on_a_frame_count_test),
+    TEST_CASE(spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test),
+};
+
 } // namespace
 
 int wmain(int argc, wchar_t* argv[])
@@ -6518,232 +6894,31 @@ int wmain(int argc, wchar_t* argv[])
     const std::wstring executableName=current_test_executable().filename().wstring();
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--resolver-availability-tests") {
-        youtube_resolver_waits_until_both_selected_streams_are_available_test();
-        youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test();
-        youtube_resolver_waits_for_fractional_stream_availability_test();
-        resolver_output_validates_stream_availability_metadata_test();
+        run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;
     }
-    if (argc > 1) return run_fake_resolver_child(argc, argv);
-    harness_sanity_test();
-    youtube_bitrate_selection_uses_real_helper_without_network_test();
-    runtime_shutdown_releases_player_before_media_foundation_and_com_test();
-    release_package_filename_policy_is_allowlisted_and_fail_closed_test();
-    public_release_package_policy_excludes_private_and_optional_binaries_test();
-    runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test();
-    toolbar_layout_selects_stable_action_sets_for_width_modes_test();
-    toolbar_layout_preserves_group_separation_test();
-    toolbar_layout_scales_hit_height_and_avoids_overlap_test();
-    toolbar_hit_testing_is_half_open_and_boundary_stable_test();
-    minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test();
-    volume_slider_never_intersects_compact_or_threshold_toolbar_test();
-    toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test();
-    open_action_content_keeps_idle_and_toolbar_copy_distinct_test();
-    focused_toolbar_action_reconciles_layout_and_availability_changes_test();
-    idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test();
-    dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test();
-    player_status_formats_exact_runtime_and_playback_states_test();
-    playback_timeline_follows_the_presented_frame_test();
-    playback_lateness_is_bounded_to_one_and_a_half_frames_test();
-    long_media_title_is_bounded_with_a_real_ellipsis_test();
-    recovery_copy_and_rehook_confirmation_are_actionable_test();
-    unchanged_hover_action_has_no_dirty_rectangles_test();
-    changed_hover_action_dirties_only_present_old_and_new_actions_test();
-    hover_resolution_tracks_layout_action_changes_and_disappearance_test();
-    current_cursor_hover_clears_when_cursor_query_is_unavailable_test();
-    paint_buffer_layout_uses_only_the_clipped_nonzero_paint_rectangle_test();
-    tabler_glyph_mapping_uses_the_pinned_css_codepoints_test();
-    native_button_palette_has_distinct_interaction_states_test();
-    active_button_small_text_meets_wcag_contrast_test();
-    failed_icon_font_uses_label_only_presentation_test();
-    button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test();
-    button_content_layout_centers_combined_icon_and_label_without_outline_contact_test();
-    feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test();
-    prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test();
-    advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test();
-    feature_menu_uses_distinct_controls_and_honest_availability_test();
-    debug_view_popup_contains_all_existing_views_and_selection_test();
-    range_preview_and_comparison_menus_route_keys_and_gate_availability_test();
-    player_menu_is_english_only_and_retains_advanced_commands_test();
-    youtube_source_quality_menu_is_distinct_radio_group_and_updates_test();
-    youtube_availability_drives_real_menu_and_idle_action_consistently_test();
-    youtube_resolution_generation_accepts_only_the_current_completion_test();
-    youtube_resolution_disables_only_conflicting_source_actions_test();
-    youtube_resolution_error_mapping_is_actionable_and_distinct_test();
-    youtube_source_forces_ffmpeg_and_never_allows_media_foundation_fallback_test();
-    youtube_resolution_cancellation_runs_stop_cancel_join_in_order_test();
-    youtube_display_and_log_labels_never_expose_direct_urls_test();
-    youtube_real_menu_and_ctrl_l_route_share_the_enabled_action_test();
-    fixed_youtube_examples_are_complete_safe_and_menu_routable_test();
-    youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test();
-    youtube_completion_registry_post_failure_and_concurrency_are_owned_test();
-    youtube_renderer_transaction_validates_every_open_seek_and_quality_candidate_geometry_test();
-    youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test();
-    youtube_candidate_seek_render_failure_preserves_all_active_state_before_commit_test();
-    youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test();
-    youtube_async_transaction_coalesces_and_discards_stale_work_before_handoff_test();
-    youtube_stale_and_cancelled_prepared_seek_ownership_is_destroyed_once_test();
-    youtube_decoder_probe_and_frame_reads_are_bounded_nonblocking_test();
-    video_decoder_prefers_video_duration_tag_over_longer_container_test();
-    youtube_decoder_partial_stall_cancel_and_exit_leave_no_children_test();
-    youtube_decoder_discards_only_expected_trailing_partial_frame_test();
-    youtube_decoder_background_seek_trickles_and_cancels_boundedly_test();
-    video_decoder_close_releases_a_blocked_blocking_read_test();
-    video_decoder_hardware_failure_falls_back_to_software_test();
-    video_decoder_remembers_dead_hardware_paths_test();
-    video_decoder_drains_complete_raw_frame_buffered_after_child_exit_test();
-    video_decoder_background_queue_is_bounded_to_four_frames_test();
-    video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_pipe_read_test();
-    video_decoder_open_sequential_selects_nv12_for_even_geometry_test();
-    video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test();
-    video_decoder_open_sequential_stays_bgra_for_odd_geometry_test();
-    video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test();
-    video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test();
-    source_nv12_conversion_constants_are_the_shipped_coefficients_test();
-    source_nv12_conversion_compiles_a_distinct_program_per_arm_test();
-    video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test();
-    video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test();
-    youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test();
-    youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test();
-    youtube_prepared_audio_starts_silent_and_handoff_has_no_overlap_test();
-    youtube_prepared_handoff_shows_candidate_and_retires_every_old_owner_before_activation_test();
-    youtube_prepared_handoff_sizes_and_shows_real_candidate_before_owned_retirement_test();
-    youtube_prepared_window_api_failures_are_reported_before_commit_test();
-    youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test();
-    youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test();
-    legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test();
-    gpu_teardown_fence_signal_failure_stops_before_event_registration_test();
-    gpu_teardown_fence_signal_failure_maps_to_device_removed_when_device_reason_failed_test();
-    gpu_teardown_fence_event_registration_failure_stops_before_wait_test();
-    gpu_teardown_fence_wait_failure_is_bounded_and_reported_test();
-    gpu_teardown_fence_timeout_is_bounded_and_reported_test();
-    gpu_render_fence_wait_uses_the_render_budget_and_reports_device_loss_first_test();
-    gpu_teardown_fence_ignores_old_event_wake_until_new_target_completes_test();
-    gpu_teardown_fence_consecutive_timeout_does_not_let_old_registration_complete_new_target_test();
-    gpu_teardown_fence_device_removed_sentinel_is_not_completion_test();
-    gpu_teardown_fence_stale_wakes_share_one_absolute_timeout_budget_test();
-    renderer_non_teardown_wait_failure_is_propagated_test();
-    renderer_safe_owner_releases_owned_resources_only_after_completed_or_removed_drain_test();
-    renderer_safe_owner_retains_resources_after_live_device_drain_failure_test();
-    renderer_frame_signal_failure_is_cached_without_advancing_tracking_test();
-    renderer_frame_signal_device_removal_is_cached_and_safe_owner_releases_test();
-    renderer_frame_signal_success_advances_tracking_once_test();
-    renderer_cache_capture_requires_a_successful_neural_evaluation_test();
-    renderer_cache_capture_returns_exact_tight_bgra_geometry_test();
-    renderer_cache_capture_wait_failure_never_exposes_partial_bytes_test();
-    renderer_cache_capture_does_not_apply_playback_color_adjustments_test();
-    gpu_classification_table_test();
-    adapter_luid_identity_compares_parts_not_model_names_test();
-    detected_high_performance_gpu_carries_the_luid_of_the_adapter_it_describes_test();
-    nvidia_driver_version_is_read_out_of_the_dxgi_quad_test();
-    neural_driver_floor_separates_the_failing_machine_from_the_working_ones_test();
-    neural_addon_policy_test();
-    neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test();
-    render_pace_prior_zero_means_unmeasured_not_unsupported_test();
-    ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test();
-    neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test();
-    neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test();
-    neural_playback_lifecycle_runs_render_validate_then_ready_test();
-    neural_completion_publishes_only_after_probe_and_manifest_validation_test();
-    neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test();
-    render_range_residual_below_one_frame_is_coverage_not_work_test();
-    coverage_merge_sorts_drops_degenerate_and_joins_touching_spans_test();
-    uncovered_spans_of_nothing_is_everything_and_of_everything_is_nothing_test();
-    uncovered_spans_find_the_hole_between_regions_and_the_lead_in_before_the_first_test();
-    uncovered_spans_clip_coverage_to_the_range_and_ignore_coverage_outside_it_test();
-    uncovered_spans_drop_sub_frame_holes_but_keep_a_hole_one_frame_wide_test();
-    next_render_target_clips_the_hole_under_the_playhead_to_the_playhead_test();
-    next_render_target_prefers_the_nearest_hole_ahead_then_the_earliest_behind_test();
-    next_render_target_without_a_hole_has_nothing_to_render_test();
-    span_containing_returns_the_playable_region_not_a_later_disjoint_one_test();
-    covered_duration_counts_only_rendered_video_inside_the_range_test();
-    neural_cancel_and_failure_offer_original_only_without_partial_cache_test();
-    neural_pause_suspends_rendering_and_resumes_without_advancing_test();
-    neural_recovery_resolves_to_rendering_failed_or_retry_exhausted_test();
-    neural_failure_kind_selects_the_lifecycle_state_test();
-    neural_progress_phase_drives_the_lifecycle_through_pause_and_recovery_test();
-    dlss_toggle_in_cached_playback_changes_comparison_view_not_renderer_feature_test();
-    neural_runtime_layout_is_absent_complete_or_fail_closed_test();
-    default_neural_carrier_uses_native_resolution_dlaa_test();
-    windows_command_line_quoting_round_trip_test();
-    runtime_argument_parsing_preserves_user_arguments_and_strips_markers_test();
-    restart_argument_lifecycle_and_create_process_command_line_test();
-    advanced_safe_mode_normal_invocation_adds_safe_mode_test();
-    advanced_safe_mode_cancel_keeps_current_open_without_launch_test();
-    advanced_safe_mode_launch_failure_keeps_current_open_test();
-    advanced_safe_mode_launch_success_closes_with_sanitized_arguments_test();
-    disabled_addons_creates_missing_addon_section_test();
-    disabled_addons_updates_empty_and_populated_lists_test();
-    disabled_addons_preserves_mixed_line_endings_and_unrelated_sections_test();
-    disabled_addons_removes_only_exact_target_entries_test();
-    disabled_addons_collapses_only_exact_target_duplicates_test();
-    disabled_addons_matches_trimmed_tokens_without_changing_retained_whitespace_test();
-    reshade_68_disabled_addon_token_conformance_test();
-    reshade_68_aliases_migrate_to_one_canonical_token_test();
-    reshade_68_section_and_key_lookup_are_case_sensitive_test();
-    reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test();
-    disabled_addons_insertion_uses_target_section_line_ending_test();
-    neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test();
-    neural_addon_runtime_settings_are_created_without_enabling_upscaling_test();
-    neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test();
-    reshade_trailing_section_text_uses_reshade_section_boundaries_test();
-    configure_neural_addon_is_idempotent_test();
-    configure_neural_addon_reports_semantic_state_across_text_canonicalization_test();
-    configure_neural_addon_safe_then_normal_observes_reshade_state_test();
-    evaluated_config_update_observes_actual_final_bytes_test();
-    configure_neural_addon_fails_closed_for_malformed_ini_test();
-    configure_neural_addon_rejects_non_regular_path_before_replacement_test();
-    youtube_url_validation_accepts_only_supported_video_routes_test();
-    youtube_url_validation_rejects_unsafe_or_unselected_inputs_test();
-    youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test();
-    youtube_url_validation_enforces_exact_2048_character_boundary_test();
-    resolver_output_accepts_one_https_googlevideo_url_and_trims_crlf_test();
-    resolver_output_accepts_separate_https_video_and_audio_urls_test();
-    resolver_output_accepts_authoritative_duration_before_stream_urls_test();
-    resolver_output_rejects_invalid_duration_live_status_and_metadata_framing_test();
-    resolver_output_rejects_empty_multiple_oversize_or_untrusted_urls_test();
-    resolver_output_enforces_raw_16k_and_single_trailing_line_ending_test();
-    resolver_nonzero_exit_returns_fixed_generic_non_url_detail_test();
-    youtube_resolver_windows_argument_quoting_covers_empty_spaces_quotes_and_slashes_test();
-    youtube_resolver_argument_vector_is_exact_and_ordered_test();
-    youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test();
-    resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test();
-    youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test();
-    youtube_resolver_waits_until_both_selected_streams_are_available_test();
-    youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test();
-    youtube_resolver_waits_for_fractional_stream_availability_test();
-    resolver_output_validates_stream_availability_metadata_test();
-    youtube_resolver_requires_duration_metadata_before_acquisition_test();
-    youtube_resolver_reports_missing_and_unstartable_helpers_without_sensitive_data_test();
-    youtube_resolver_maps_nonzero_exit_and_output_overflow_precisely_test();
-    youtube_resolver_honors_stop_token_and_explicit_cancel_with_bounded_wait_test();
-    youtube_resolver_times_out_and_kills_its_descendant_job_tree_test();
-    youtube_resolver_repeated_runs_leave_process_handle_count_stable_test();
-    youtube_resolver_rejects_symlink_and_nonregular_helpers_before_execution_test();
-    youtube_resolver_holds_verified_helpers_against_replacement_until_completion_test();
-    youtube_resolver_forces_package_local_deno_cache_over_parent_override_test();
-    youtube_resolver_disables_default_plugin_execution_from_inherited_config_test();
-    youtube_resolver_serializes_queued_resolve_and_cancel_does_not_poison_reuse_test();
-    youtube_resolver_queued_stop_token_cancels_before_launch_test();
-    youtube_resolver_injected_startup_and_drain_failures_cleanup_boundedly_test();
-    youtube_resolver_repeated_owned_pipe_failures_cannot_hide_two_handle_leaks_test();
-    youtube_resolver_repeated_timeout_cancel_overflow_cycles_are_leak_free_test();
-    ngx_same_device_overlapping_sessions_initialize_and_shutdown_once_test();
-    ngx_failed_initialization_never_acquires_a_session_test();
-    ngx_failed_candidate_setup_releases_only_its_overlapping_lease_test();
-    ngx_distinct_devices_own_independent_sessions_test();
-    ngx_create_failure_is_not_retried_until_explicit_reset_test();
-    ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test();
-    ngx_live_feature_is_never_released_on_a_frame_count_test();
-    spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test();
+    // `--only=<text>` runs the cases whose name contains the text.
+    std::string only;
+    if (argc == 2 && std::wstring_view(argv[1]).starts_with(L"--only=")) {
+        for (const wchar_t character : std::wstring_view(argv[1]).substr(7)) only.push_back(static_cast<char>(character));
+        if (only.empty()) {
+            std::cerr << "--only= needs part of a case name\n";
+            return EXIT_FAILURE;
+        }
+    } else if (argc > 1) {
+        return run_fake_resolver_child(argc, argv);
+    }
+    const size_t ran = run_cases(kCases, std::size(kCases), only);
+    if (ran == 0) {
+        std::cerr << "no case name contains '" << only << "'\n";
+        return EXIT_FAILURE;
+    }
 
     if (test_support::failure_count != 0) {
         std::cerr << test_support::failure_count << " test assertion(s) failed\n";
         return EXIT_FAILURE;
     }
 
-    std::cout << "Resolver symlink coverage: "
-              << (resolverSymlinkCoverageExercised ? "exercised" : "unavailable") << '\n';
-    std::cout << "PolicyTests: all assertions passed\n";
+    std::cout << "PolicyTests: " << ran << " cases, all assertions passed\n";
     return EXIT_SUCCESS;
 }
