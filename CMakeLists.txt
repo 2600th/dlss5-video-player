@@ -34,6 +34,12 @@ if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
 endif()
 
 set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
+# NGX ships one import library per CRT: nvsdk_ngx_d.lib is built against the release
+# CRT and nvsdk_ngx_d_dbg.lib against the debug CRT at _ITERATOR_DEBUG_LEVEL 2, which
+# is what CMAKE_MSVC_RUNTIME_LIBRARY above gives a Debug build. Linking the release
+# one there fails with LNK2038 on every NGX target, so the choice is made once here
+# and every target that names NGX links this variable.
+set(DLSS_NGX_LIBRARY "$<IF:$<CONFIG:Debug>,nvsdk_ngx_d_dbg,nvsdk_ngx_d>")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
 
@@ -172,7 +178,7 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt
-    nvsdk_ngx_d
+    ${DLSS_NGX_LIBRARY}
 )
 dlss_video_player_use_nvof(DLSSVideoPlayer)
 dlss_video_player_harden(DLSSVideoPlayer)
@@ -357,7 +363,7 @@ if(BUILD_TESTING)
     )
     target_compile_options(PolicyTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
     target_link_directories(PolicyTests PRIVATE "${DLSS_LIB_DIR}")
-    target_link_libraries(PolicyTests PRIVATE d3d12 dxgi dxguid d3dcompiler shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32 winmm nvsdk_ngx_d)
+    target_link_libraries(PolicyTests PRIVATE d3d12 dxgi dxguid d3dcompiler shlwapi shell32 winhttp mfplat mfreadwrite mfuuid ole32 winmm ${DLSS_NGX_LIBRARY})
     add_dependencies(PolicyTests DLSSVideoPlayer)
     add_test(NAME PolicyTests COMMAND PolicyTests)
 
