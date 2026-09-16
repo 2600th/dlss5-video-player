@@ -63,10 +63,16 @@ struct YouTubeResolverTestAccess {
 };
 
 struct VideoDecoderTestAccess {
+    // The defaults are for cases that need a probe and a first frame to simply
+    // arrive: the fake helpers are this binary re-entering itself, which a cold
+    // CI runner spawns in well over 250 ms, and that is how
+    // youtube_decoder_discards_only_expected_trailing_partial_frame_test failed
+    // once on GitHub while passing everywhere else. Every case that measures a
+    // timeout passes its own.
     static std::unique_ptr<VideoDecoder> Create(
         const std::filesystem::path& helperDirectory,
-        std::chrono::milliseconds probeTimeout = std::chrono::milliseconds{250},
-        std::chrono::milliseconds stallTimeout = std::chrono::milliseconds{120},
+        std::chrono::milliseconds probeTimeout = std::chrono::seconds{5},
+        std::chrono::milliseconds stallTimeout = std::chrono::seconds{2},
         VideoDecoder::FailureStage failureStage = VideoDecoder::FailureStage::None,
         bool resetAcceleration = true)
     {
