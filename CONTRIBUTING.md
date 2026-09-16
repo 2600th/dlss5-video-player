@@ -15,9 +15,11 @@ and the canonical `build-upscaling` commands.
 
 ## Before opening a pull request
 
-For code changes, build Release x64 and run the thirteen CTest suites. FFmpeg and
-FFprobe must be staged so the real-media export suite runs. Keep automated
-results separate from GPU and visual-quality claims.
+For code changes, build Release x64 and run the thirteen portable CTest suites
+(`ctest -LE gpu`). FFmpeg and FFprobe must be staged so the real-media suite runs
+rather than reporting itself skipped. For rendering, timing or decoding changes
+also run the two `gpu`-labelled smokes on an RTX card. Keep automated results
+separate from GPU and visual-quality claims.
 
 Check the behavior affected by the change: MP4/MKV playback, play/pause and
 seeks, fit/fill, adjustments, debug views, original/neural comparison, cache

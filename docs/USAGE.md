@@ -196,7 +196,11 @@ The history tracks one current source/render pair per video. Adding a sixth
 video, or replacing a tracked render with new settings, makes old unreferenced
 cache entries eligible for removal after active work finishes. Local originals
 and exported files are never deleted by this policy. Older untracked cache data
-and abandoned staging data are not swept by the five-entry history.
+is not swept by the five-entry history. Work that was abandoned or refused -
+a cancelled download, a render that failed its checks, a folder left by a
+player that was killed - is parked under `staging/` and reaped a few entries
+per launch, oldest first; a folder whose owning player is still running is
+never touched.
 
 Cache data prefers `cache\v1` beside `DLSSVideoPlayer.exe`, independent of the
 working directory. The player verifies it can write there and falls back to
@@ -303,6 +307,11 @@ in the player; the old quality arguments and 4K launch scripts are retired.
 2. Choose **DLSS > Convert & save > Save converted video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
 4. Continue playback while saving runs, or use **Cancel saving**.
+
+After a live session, the item is offered only once a single render covered the
+whole video; while coverage is still a set of regions filled by separate jobs
+it stays greyed out, because the file that would be saved is one region, not
+the film. **Convert whole video** produces an entry the item accepts.
 
 PNG is the default for photos, GIF for animation, and MKV for video. PNG and
 JPEG export the first processed frame. GIF exports animation with a generated

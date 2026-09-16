@@ -416,9 +416,12 @@ Settings are checked again after rendering before publication. Network source en
 use the canonical YouTube video ID plus stable selected-format `itag` values,
 not expiring signed stream URLs. Staging entries become reusable only after
 independent probing and atomic promotion. Schema 5 requires
-`nativeEvaluations == verifiedNeuralFrames == frameCount`, the NGX-only inline
-interception contract armed before frame capture, a feature-18 success
-checkpoint that advances after the captured sequence, and no feature-18
+`verifiedNeuralFrames == frameCount` and `nativeEvaluations >= frameCount`,
+where `nativeEvaluations` is the neural backend's own evaluation tally rather
+than a copy of the frame count - a backend that evaluated fewer frames than were
+captured is refused at render time and its entry is never reusable - plus the
+NGX-only inline interception contract armed before frame capture, a feature-18
+success checkpoint that advances after the captured sequence, and no feature-18
 failure, skip, or pass-through marker in the stabilized job log segment.
 Sequential offline decoding uses software FFmpeg to avoid competing with the
 D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache

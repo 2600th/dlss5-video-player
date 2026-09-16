@@ -1,5 +1,136 @@
 # Changelog
 
+## Unreleased
+
+A verification pass over the whole tree after 0.22.0: seven audits in parallel
+(session state machine, neural pipeline, decode and media, renderer, build and
+CI, tests, security), every finding re-read in source, three of them refuted,
+the rest fixed. Nothing here changes a cache key or retires an entry.
+
+Three claims did not survive checking and are recorded so nobody chases them
+again. Helpers are not orphaned by a force-kill: a live session with the worker
+and six `ffmpeg` children two generations deep, all in kill-on-close job
+objects, was reaped within four seconds of `Stop-Process -Force`; the earlier
+"orphans" were a driver script's own leftovers. The shipped `ffmpeg` 9.0.1
+verifies TLS certificates by default (self-signed, expired and wrong-host all
+refused), so the "certificate verification off" finding was false for the pin,
+though the flag is now passed explicitly because the pin will move. And the
+"session gives up in 0.3 s on a seek into a hole" report described the 0.21.1
+bug that 0.21.2 fixed: the lead is measured from the span around the playhead,
+which is empty in a hole, so the attach path never fires there.
+
+- Save converted video is only offered after an active session when a single
+  render covered the whole video. It used to save the last rendered hole under
+  the film's name: toggle neural on at 0:20 of a five-minute video, the session
+  renders [0:20, end) then [0, 0:20), and the file written was twenty seconds
+  long with no warning. `live_session::ExportableEntry` is the rule, and
+  `Convert whole video` produces an entry it accepts.
+- A cancel that reached the resident neural helper just after a job had
+  finished no longer cancels the next job before its first frame. The reader
+  raised one pending-stop flag for cancel, shutdown, a closed pipe and a dead
+  parent alike, and a `Cancel` dequeued between jobs never cleared it; the
+  window was the twenty milliseconds between the helper writing its result and
+  the player noticing. Cancel is now its own flag, discarded when it arrives
+  for a job that already reported; the terminal reasons still apply to the
+  next job. Tested with a real command channel: job, result, late cancel, job -
+  two served, none stopped.
+- A neural render is refused, and its cache entry never served, when the
+  backend reports fewer evaluations than frames were captured. The manifest's
+  `nativeEvaluations` was a copy of the frame count, so the reuse gate that
+  compares the two could not fail; it is now the backend's own tally, sampled
+  after preroll, and the refusal that only applied to a reused evaluator
+  applies to every job. The gate reads `>=` because a resubmitted frame
+  legitimately evaluates twice.
+- When the graphics device is removed or stops responding during playback, the
+  player stops, says so in the status bar and rebuilds its renderer once
+  instead of freezing the picture with the audio still running; if the rebuild
+  fails it unloads with an explicit message. Proven with
+  `ID3D12Device5::RemoveDevice()` while playing and while paused: rebuilt both
+  times, playback resumed, no dialog. Inside the renderer, a `Present` that
+  fails after its command list was submitted still publishes the frame slot,
+  so the next frame cannot reset an allocator the GPU may be reading, and a
+  device-loss HRESULT seen at `Present` or at any in-frame reset or close
+  latches the same device-removed state the fence path does - an export no
+  longer retries a frame up to 120 times on a dead device and reports it as a
+  neural failure. The removed reason is logged once, and debug builds record
+  DRED breadcrumbs. A second renderer that cannot drain within its budget ends
+  the helper (exit 713), which the player treats as a crash and relaunches,
+  instead of leaking a second device with its NGX lease.
+- `VideoDecoder::Swap` carries the whole probed source. Six members - the
+  hardware-decode memo key, the colour description, the raw colour tags, the
+  pixel layout and the two sequential-open flags - were left behind, so after
+  a YouTube quality reload the acceleration memo was keyed by the previous
+  stream's codec and `ColorDescription()` answered for it. The probe state is
+  one struct now, swapped as a unit.
+- A frame-buffer allocation failure on the decode thread ends that playback
+  with an error instead of terminating the player; the queue thread has the
+  same guard the audio reader always had.
+- Every `ffmpeg`/`ffprobe` child the media pipeline spawns has a wall-clock
+  bound and is killed if it hangs; `ffprobe` output is capped at 1 MiB like
+  every other capture; the probe timeout setting applies to local files too;
+  a video whose file name starts with a dash probes and opens (the path goes
+  after `-i` now).
+- Resolved YouTube streams are fetched with `-tls_verify 1` and
+  `-protocol_whitelist https,tls,tcp` in the downloader, the direct decoder and
+  the audio player. Checked against the shipped `ffmpeg` with a resolved direct
+  URL and an HLS manifest URL (both fetch), and against `file:` and `http:`
+  inputs (both refused).
+- The concat list a join writes lives in the temp directory, so a scanner
+  holding it can no longer get it renamed into the published cache entry.
+- Partial or invalidated payloads parked under `staging/` are reaped a few per
+  launch, oldest first, never one whose player is still running. They used to
+  accumulate until the whole cache was cleared by hand.
+- Publishing a finished render hashes its payload once. `Promote` returns the
+  verified entry; the post-rename check re-reads the manifest instead of
+  re-hashing, and the player uses the returned entry instead of a third lookup.
+  Reads of an ordinary cache hit still hash.
+- Cancelling a neural settings preview, or opening another file during one,
+  no longer leaves the buffering panel up and later previews refused. A neural
+  toggle pressed during a seek no longer fires on the next file's first seek.
+  A live render whose segment folder cannot be created no longer leaves the
+  spinner on and every render action greyed out. An out-of-sync live render
+  ends the session with a status-line reason instead of a dialog from inside
+  the playback loop. Seeking a YouTube video during a session no longer
+  re-asks whether to start a slow render, and declining is explained. A
+  session that gives up because its coverage never reached the playhead hands
+  the original back playing, not paused. A render that stops reporting
+  progress says so when the player ends it. Closing the player stops a
+  background download and update check. Rendered segments are removed when
+  a file is closed, because playback is now closed before the folder is.
+- The recent-videos file no longer accepts an entry whose path is a UNC share
+  (a crafted entry would have made the next click connect out), and one bad
+  record no longer discards the whole list. A YouTube video id must be exactly
+  eleven characters everywhere.
+- Both executables are built with Control Flow Guard and CET shadow-stack
+  compatibility, and start by restricting DLL search to the application and
+  system directories.
+- Releases are created as drafts. The notes name
+  `dlss5-video-player-v<version>-win64.zip`, which CI cannot build, so the
+  release was public before that file existed; the maintainer now attaches it
+  and publishes. The tag workflow can be re-run for the same tag from the
+  Actions tab. Every action is pinned to a commit, the CI-built core zip
+  carries a provenance attestation, and CI assembles and verifies that zip on
+  every push and pull request - it is the uploaded artifact - instead of first
+  exercising the packager at tag time. The packager ships the executable ctest
+  ran rather than a clean rebuild. A pull request that bumps `VERSION` fails
+  unless the changelog section and the README entry exist, through the same
+  `tools/release_notes.ps1` the release body is built from. Packaged text
+  files have a fixed line ending so the manifest hash does not depend on the
+  packaging machine's git settings.
+- Tests: every test has a time limit; the real-media suite reports itself
+  skipped rather than failed without staged FFmpeg; the two GPU smokes are
+  registered under a `gpu` label the portable run excludes; the resolver's
+  refusal of reparse-point helpers runs on every machine using unprivileged
+  reparse points instead of symlinks that needed Developer Mode; cached
+  comparison playback is driven end to end on real media through the decoders
+  it builds itself; the publish gate is fed a real joined render and a real
+  truncated one; `PolicyTests` names the failing case, survives a crash in one
+  and takes `--only=<name>`; `CHECK_EQ` prints both values; four tests that
+  pinned log wording, JSON key order or exact labels assert behaviour instead;
+  the unused `ReleasePackagePolicy.h` (a drifted copy of the packaging
+  allowlist) is gone; configure fails if a `*_TESTING` seam reaches the player
+  or the worker.
+
 ## 0.22.0 - 2026-09-16
 
 Renders made before this release are retired, and that is deliberate. The cache

@@ -58,13 +58,21 @@ Launch `build-upscaling/Release/DLSSVideoPlayer.exe`. Its neural worker is built
 as `build-upscaling/Release/neural-runtime/NeuralWorker.exe`. Without the
 experimental runtime, a source build uses the native playback path.
 
-The thirteen suites cover recent history, settings/cache integrity, real-media
-export, runtime lock and worker protocols, runtime and upscaling policy, range
-selection, frame identity, update checks, the release API surface, prerender,
-playback and native UI regressions.
-CTest does not establish GPU compatibility or visual quality. For changes to
-rendering, timing or decoding, also run applicable GPU/media smoke checks from
-the [verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).
+The thirteen portable suites cover recent history, settings/cache integrity,
+real-media export and cached comparison playback through the real decoders,
+runtime lock and worker protocols, runtime and upscaling policy, range selection,
+frame identity, update checks, the release API surface, prerender, playback and
+native UI regressions. Every test carries a time limit, and the real-media suite
+reports itself skipped rather than failed when FFmpeg is not staged.
+
+Two more are registered under the `gpu` label and need an RTX card with the
+neural runtime staged beside the executable: `UpscalingGpuSmoke` and
+`MediaGpuSmoke`. `ctest -LE gpu` is the portable run CI performs; `ctest -L gpu`
+runs the pair. `UpscalingGpuSmoke.exe <clip> 1440 device-loss` additionally
+removes the D3D12 device mid-frame and checks the renderer's recovery.
+CTest still does not establish visual quality. For changes to rendering, timing
+or decoding, also run applicable GPU/media smoke checks from the
+[verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).
 
 CMake accepts absolute `DLSS_SDK`, `FFMPEG_STAGED_DIR` and `YOUTUBE_STAGED_DIR`
 paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
@@ -143,8 +151,9 @@ CMake route above for a source build without the experimental runtime.
 
 ## Assemble a package
 
-Developer output is not a distributable folder. The assembler performs a
-fresh clean build and verifies an explicit file allowlist and manifest:
+Developer output is not a distributable folder. The assembler takes the build
+ctest ran - it checks that the executable's version resource matches `VERSION`
+rather than rebuilding - and verifies an explicit file allowlist and manifest:
 
 ```powershell
 ./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix ''
@@ -159,9 +168,13 @@ another local candidate. The published download uses the
 `package_release.bat` wraps the complete package with the default `-upscaling`
 suffix. `package_public_release.bat` creates the smaller core package:
 application, official SDK DLSS runtime, notices and documentation, without
-the neural runtime, FFmpeg or YouTube helpers. The `v*` tag workflow publishes
-this core variant; the complete experimental release is assembled and uploaded
-separately.
+the neural runtime, FFmpeg or YouTube helpers. CI assembles and verifies this
+core variant on every push and pull request. The `v*` tag workflow publishes it
+as a **draft** release with the notes and a provenance attestation; the complete
+experimental package is assembled locally, attached to the draft as
+`dlss5-video-player-v<version>-win64.zip` with its `.sha256`, and only then is
+the release published. A publish that failed can be re-run for the same tag
+from the Actions tab (`workflow_dispatch` with the tag as input).
 
 Review the applicable third-party terms before distributing any package.
 End users run the extracted player, not these build scripts.
