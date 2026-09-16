@@ -1,7 +1,8 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.21.2, including recent history, settings-aware cache identity,
-media export and highest-bitrate YouTube selection.
+This guide covers v0.22.0, including whole-video session coverage and seeking,
+recent history, settings-aware cache identity, media export and
+highest-bitrate YouTube selection.
 
 The interface is English-only. It does not load external language packs;
 legacy language settings in the INI are ignored.
@@ -233,8 +234,9 @@ to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences.
 
 **DLSS > Encoder settings** holds the three `[Encoding]` keys, kept apart from
-the model settings because they apply to the next render and never invalidate a
-cache entry:
+the model settings because they apply to the next render. Two of them never
+invalidate a cache entry; `GpuSourceConversion` does, because it changes what
+the model is shown rather than how the result is written:
 
 - `NvencPreset` (1-7, default 7). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card.
@@ -243,8 +245,11 @@ cache entry:
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an
   RTX 5070 Ti.
 - `GpuSourceConversion` (default off). Decodes the source to NV12 and converts
-  it on the GPU, which saves 2.6x on pipe traffic. Turning it on no longer
-  risks the source's colour: the open probe reads `color_space`,
+  it on the GPU, which saves 2.6x on pipe traffic. It is part of the render
+  identity - the key carries `nv12-source-v1` when it is on - so a render made
+  with it on is not served for a request with it off, and changing it re-renders.
+  Turning it on no longer risks the source's colour: the open probe reads
+  `color_space`,
   `color_range`, `color_primaries` and `color_transfer` off the stream, and the
   GPU path is taken only for a source that declares a matrix and a range the
   conversion implements - BT.709 or BT.601 (`bt470bg`/`smpte170m`), limited or

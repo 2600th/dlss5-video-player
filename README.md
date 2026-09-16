@@ -17,18 +17,18 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 > [!IMPORTANT]
 > Community project, not an NVIDIA product. The neural runtime is a modified,
-> unsigned community build. Checked on an RTX 4080 SUPER (v0.21.2+) and an RTX
+> unsigned community build. Checked on an RTX 4080 SUPER (v0.22.0) and an RTX
 > 5090 (v0.20.0). Neural rendering needs NVIDIA driver 610.47 or newer.
 > Notices: [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Download
 
-**v0.21.2** (2026-09-12): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.21.2)
+**v0.22.0** (2026-09-16): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.22.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.21.2-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.21.2-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.22.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.22.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -48,8 +48,12 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What it does
 
 - Renders while you watch. Press `D` at any point and playback continues on the
-  rendered frames a few seconds later. Turn it off and on again and it picks up
-  where it stopped instead of starting over.
+  rendered frames a few seconds later. The session's job is the whole video, so
+  it keeps filling in what is left while you watch, nearest to you first.
+- Seek anywhere, rendered or not. Rendered frames play wherever they are on the
+  timeline; somewhere nobody has rendered yet plays the original at once and the
+  render moves there. Nothing already rendered is thrown away, and turning it off
+  and on again picks up where it stopped.
 - Keeps the original and the render in step. Switching views does not move the
   playhead, and you can pause and step frames on either.
 - Remembers the last five videos and their renders. A render is reused only if
@@ -63,14 +67,70 @@ Next time, **File > Recent videos** reopens it with the render already done.
   re-rendered so you can judge on the picture. Settings are saved with each
   render and are part of its cache identity.
 - Encoder settings sit apart from the model settings. **DLSS > Encoder settings**
-  picks the NVENC preset and where colour conversion runs, and none of it
-  invalidates a cached render.
+  picks the NVENC preset and where colour conversion runs. The preset and the
+  output conversion do not invalidate a cached render; the source conversion
+  does, because it changes what the model is shown rather than how the result is
+  written.
 - Six official game trailers under **File > Game trailers**, each under three
   minutes, for a quick first test.
 
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.22.0** (2026-09-16). **A session now renders the whole video**, not one run
+forward from where you pressed `D`. Coverage is a set of rendered regions: the
+part you are watching is rendered first, then the rest, nearest the playhead,
+and the status line says how much of it is done. Seeking is no longer limited to
+what has been rendered - land in rendered frames and playback continues on them
+wherever they are on the timeline; land in frames nobody has rendered and the
+original plays there at once while the render moves to that part of the video.
+Nothing already rendered is discarded when you seek, which is what the old
+behaviour did: it deleted every segment the new playhead was not inside and
+rendered those seconds again.
+
+**Colour was wrong in every render before this.** The encoder tagged the file
+only when the GPU did the conversion, so a BT.709 source became a file that
+declared no colour space while carrying BT.601 pixels - a pure-red frame came
+back Y=81 U=90 V=240 - and any player that assumes BT.709 for HD, which is the
+usual default, showed those colours shifted. Renders now state `bt709`/`tv` and
+convert to match. The **Motion vectors** switch also changes the picture again:
+it had been zeroing the CPU grid while the hardware flow pass kept writing the
+texture NGX reads, so turning it off paid a full re-render and produced
+identical pixels.
+
+Two things that made playback stutter are gone. Asking whether a stream's cached
+copy existed hashed 60 MiB of it, six times a frame, on the thread that draws:
+the same clip and machine went from **FPS 1 rendered / 30 source with 1877
+dropped** to **30 / 30 with 25 dropped**. And the decode pipe was sized for two
+1080p frames, so a 1440p source ran at 28.85 fps against its 30; it now holds
+29.93. Turning neural rendering on a second time in one session reaches a
+picture in **2.44-2.52 s instead of 5.23-5.41 s**, because the helper stays
+alive between jobs and exits after 30 s idle.
+
+Seeking during a live render got the rest of the work. Seeking back on a YouTube
+video used to turn neural rendering off: the seek re-resolves the stream,
+rendering is unavailable for those two seconds, and two refusals in a row
+counted as a session that had failed. A stream also stops being a stream once
+its copy is on disk - a render always works from a local copy, and playback now
+moves onto that copy the first time a seek would have gone back to the network,
+so seeks take **223-345 ms instead of 1.2-1.9 s**. The render waits a second for
+you to stop moving before it follows: tapping the seek key six times used to
+restart the job five times and render nothing while you did it. You see the
+original a moment longer where you landed, and the render keeps working instead.
+
+A finished part also used to hold the next one back for 18 seconds. That was one
+call: checking the joined file asked FFprobe to decode every frame to count
+them - 23.8 s on a 1440p render - where the same count comes out of the container
+in 0.05 s. The wait is now about a second on a clip of this length, and it still
+grows with the render, so a feature-length video will want the next round of
+this. The speed on the status line is the render's speed again, not the
+download's: a first watch spends its first minute fetching the video, and that
+was being averaged in.
+
+Renders made by earlier versions are retired on purpose - the cache key now
+carries the driver version and a digest of the model files - so the first render
+of a video after upgrading is made again.
 
 **0.21.2** (2026-09-12). A live session could get stuck on one frame. If the
 render's first finished segment began a frame later than the playhead - 12.0662 s

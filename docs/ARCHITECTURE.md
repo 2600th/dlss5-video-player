@@ -422,9 +422,13 @@ checkpoint that advances after the captured sequence, and no feature-18
 failure, skip, or pass-through marker in the stabilized job log segment.
 Sequential offline decoding uses software FFmpeg to avoid competing with the
 D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache
-hits retain full content-hash verification and use header-only metadata probes;
-frame counting and final-frame decoding run once before promotion, not on every
-replay. Invalid metadata is quarantined. Cancellation and failed
+hits retain full content-hash verification and use header-only metadata probes.
+Before promotion the joined entry is counted by demuxing it - one packet per
+coded frame, so the count and the video span come out of the container rather
+than a full decode, 0.05 s against 23.8 s on a 1440 p render - and its final
+frame is still decoded. A join that lost frames demuxes short, which is what
+the publish gate compares against the render's own frame count.
+Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
 
 `RecentMediaHistory` atomically persists five distinct sources and their current

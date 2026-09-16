@@ -1,17 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.22.0 - 2026-09-16
 
-One note for whoever cuts the next release, and it is now smaller than it was.
-The render cache key carries a driver version and a digest of the driver-store
-model contents, so a render no longer survives a driver update or a model refresh,
-and `NeuralWorker.exe` is hashed into the runtime digest, so rebuilding the worker
-with different guide or cut logic retires its entries by itself. The manifest
-schema moved 4 → 5, which retires every entry written before this change through
-the schema gate. What still needs the `VERSION` bump: nothing in the cache. A
-`neural-runtime/NeuralWorker.exe` left over from a pre-v6 build is still refused
-by the parent on the version check, which is the intended fail-closed behaviour
-and looks like a broken helper until the runtime is re-staged.
+Renders made before this release are retired, and that is deliberate. The cache
+key now carries the driver version and a digest of the driver-store model
+contents, so a render cannot survive a driver update or a model refresh, and
+`NeuralWorker.exe` is hashed into the runtime digest, so a worker rebuilt with
+different guide or cut logic retires its own entries. The manifest schema moved
+4 → 5, which retires everything written before that through the schema gate.
+Nothing here needs a cache wipe by hand: the first render of a video after
+upgrading re-renders and republishes it.
+
+One upgrade note: a `neural-runtime/NeuralWorker.exe` left over from a pre-v6
+build is refused by the parent on the version check. That is the intended
+fail-closed behaviour, but it looks like a broken helper - re-stage the runtime
+from the release package rather than copying an exe over an old install.
 
 - Seeking backwards on a YouTube stream no longer turns neural rendering off.
   A seek on a streamed source re-resolves the stream, and rendering is

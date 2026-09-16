@@ -1,7 +1,8 @@
 # DLSS 5 Video Player — technical overview
 
-Version 0.21.2 prepares a complete neural video, reuses the validated result,
-and compares it with the original at the same timestamp. Start with the
+Version 0.22.0 renders a whole video while you watch it, keeps every rendered
+region seekable, reuses the validated result, and compares it with the original
+at the same timestamp. Start with the
 [usage guide](docs/USAGE.md) for controls, cache locations, preferences and export.
 
 This is an unofficial RenoDX/ReShade experiment. The source calls NVIDIA NGX
