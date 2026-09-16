@@ -53,40 +53,6 @@ The linked demonstration was itself **replaced on 12 September 2026**: it is now
 the 22.6 s / 678-frame GTA VI and Godfather video recorded below, which the later
 sections here call "the 22-second video", not the 30-second Witcher IV cut.
 
-## September 9, 2026: faces from three more trailers
-
-`current/face-hellblade.png`, `current/face-cyberpunk.png` and
-`current/face-mafia.png` were produced the same way as the Witcher IV figure and
-under the same rules: both halves are the identical source pixels of the identical
-frame, with no scaling, retouching or tonal adjustment, and the labels sit outside
-the image. The right half of each is a real render from the shipping worker
-(`NeuralWorkerTests --real-worker`, `mv=1,depth=1`, neural settings at their
-defaults), not a mock-up or a re-encode of the original.
-
-Each source is the official 1080p video-only format fetched with the bundled
-yt-dlp. Two seconds around the chosen moment were rendered, so the captured frame
-carries a full temporal history rather than being the first frame of a job. The
-crop is centred on the face and constrained to the picture area, which is why the
-Hellblade crop is 804 px tall: that trailer is letterboxed to 1920x804 and a taller
-crop would have included the black bars.
-
-| File | Trailer | Source | Frame | Crop | Source SHA-256 |
-| --- | --- | --- | --- | --- | --- |
-| `current/face-hellblade.png` | Hellblade II - Launch Trailer (XBOX) | https://www.youtube.com/watch?v=PRbOmIcVXak | 1665 (55.50 s) | 700x804 at x=821, y=138 | `63e3f42d89294071c254472a4ddf6213…` |
-| `current/face-cyberpunk.png` | Cyberpunk 2077: Phantom Liberty - Launch Trailer (Cyberpunk 2077) | https://www.youtube.com/watch?v=kfX9n_G0N2Y | 2516 (83.87 s) | 700x880 at x=523, y=0 | `916b29df704c4065d2c818279c2605d6…` |
-| `current/face-mafia.png` | Mafia: The Old Country - Family Takes Sacrifice (Mafia Game) | https://www.youtube.com/watch?v=EAEYZDgHNv8 | 1506 (50.20 s) | 700x880 at x=1104, y=200 | `86525500732b579e79e46f000a4aaae1…` |
-
-Frames were chosen by inspecting contact sheets for a large, lit, unoccluded face
-with open eyes; the selected scenes contain fully clothed characters and no sexual
-content. Death Stranding 2's accolades trailer was checked and dropped - it has no
-usable face close-up. All three are reproducible with
-[the same script](../../tools/demo-video/make-face-comparison.py), which now takes
-`--frame`, `--neural-frame`, `--crop` and `--caption`.
-
-Footage is credited to Ninja Theory/Xbox Game Studios, CD PROJEKT RED and Hangar
-13/2K respectively. Including it here documents a feature; it is not an
-endorsement, and the source-code license does not relicense it.
-
 ## September 12, 2026: GTA VI and The Godfather, live 1440p sessions
 
 Everything in this section was captured from the shipping **v0.21.0** player on
@@ -104,38 +70,6 @@ every anonymous client is refused outright, and so is the GameSpot mirror, so no
 unauthenticated session can fetch it at any resolution. Netflix's *Now Playing*
 cut is the same footage without the gate. That is the defect this version added a
 notice for, met in its strongest form.
-
-### The two face figures
-
-`current/face-gta6.png` and `current/face-godfather.png` were produced exactly
-like the September 9 set: both halves are the identical source pixels of the
-identical frame, no scaling, retouching or tonal adjustment, labels outside the
-image, and the right half is a real render from the shipping worker
-(`NeuralWorkerTests --real-worker`, `mv=1,depth=1`, neural settings at their
-defaults). Candidate frames were proposed by OpenCV's frontal-face cascade over
-every third frame and then chosen by eye for a large, lit, unoccluded face with
-open eyes; the selected scenes show fully clothed characters and no sexual
-content.
-
-Each render covers a window that **starts before the cut into the shot**, so the
-captured frame carries the temporal history a real session would have at that
-moment rather than being the first frame of a job. The neural index is the frame's
-position inside that render; it was confirmed by anchoring on the cut, which
-appears at the same place in both sequences.
-
-| Figure | Frame | Crop | Render window | Neural index | Worker result |
-| --- | --- | --- | --- | --- | --- |
-| `current/face-gta6.png` | 410 (13.67 s) | 700x880 at x=950, y=60 | 12.60-13.80 s, first frame 379 | 31 | 36/36 frames verified, neural GPU p50 5.15 ms/frame |
-| `current/face-godfather.png` | 1781 (74.28 s) | 700x880 at x=1177, y=183 | 72.30-74.40 s, first frame 1734, cut at 1757 | 47 | 51/51 frames verified, neural GPU p50 5.11 ms/frame |
-
-Reproduce with [the same script](../../tools/demo-video/make-face-comparison.py):
-
-```
-python tools/demo-video/make-face-comparison.py gta6-netflix.mp4 gta6-neural.mkv \
-    --frame 410 --neural-frame 31 --crop 950,60,700,880 --output docs/screenshots/current/face-gta6.png
-python tools/demo-video/make-face-comparison.py godfather-source.mp4 godfather-neural.mkv \
-    --frame 1781 --neural-frame 47 --crop 1177,183,700,880 --output docs/screenshots/current/face-godfather.png
-```
 
 ### The player captures
 

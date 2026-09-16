@@ -336,27 +336,6 @@ not a claim that every source gains detail.
 result, 200 % extends the change it made. It re-composes the frame already on
 screen, so it costs a present rather than a render.
 
-### Faces, original beside the neural render
-
-Same source pixels on both sides, no scaling or retouching, default settings.
-The right half of each is a real render from the shipping worker.
-
-![GTA VI close-up, original beside the neural render](docs/screenshots/current/face-gta6.png)
-
-![The Godfather close-up of Al Pacino, original beside the neural render](docs/screenshots/current/face-godfather.png)
-
-The Godfather is the interesting one: a 1972 film, so the left half is real skin
-and film grain rather than a game's shading model.
-
-![Hellblade II close-up, original beside the neural render](docs/screenshots/current/face-hellblade.png)
-
-![Cyberpunk 2077 Phantom Liberty close-up, original beside the neural render](docs/screenshots/current/face-cyberpunk.png)
-
-![Mafia The Old Country close-up, original beside the neural render](docs/screenshots/current/face-mafia.png)
-
-The change is subtle and depends on the source. Skin shading and fine texture
-move; silhouettes and framing do not. Judge your own footage on its own preview.
-
 ### Start screen
 
 ![Start screen with local file and YouTube URL actions](docs/screenshots/current/player-start.jpg)
