@@ -1196,7 +1196,7 @@ private:
         const auto entry=m_recent->Entries()[index];
         if(entry.youtube){if(NeuralPreRenderEnabled()&&!entry.sourceKey.empty())StartNeuralJob(entry.source,{},entry.title,entry.source,MediaSourceKind::YouTube,static_cast<YouTubeSourceQuality>(entry.sourceQuality),entry.sourceKey,0.0,{},true);else StartYouTubeResolution(entry.source,entry.title,static_cast<YouTubeSourceQuality>(entry.sourceQuality));return;}
         std::error_code fileError;
-        if(!std::filesystem::is_regular_file(entry.source,fileError)){MessageBoxW(m_hwnd,L"This local video has moved or is no longer available.",T(L"app.title").c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        if(!std::filesystem::is_regular_file(entry.source,fileError)){MessageBoxW(m_hwnd,T(L"recent.missing").c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONINFORMATION);return;}
         Load(entry.source,entry.title,MediaSourceKind::LocalFile);
     }
     void ExportCachedVideo(){
@@ -2505,10 +2505,7 @@ private:
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)){
             LOG("Renderer rebuild failed after the GPU became unusable; unloading.");
             Unload();
-            const std::wstring message=removed
-                ?L"The graphics device was removed or reset, and the renderer could not be rebuilt. Open the video again."
-                :L"The GPU stopped responding, and the renderer could not be rebuilt. Open the video again.";
-            MessageBoxW(m_hwnd,message.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);
+            MessageBoxW(m_hwnd,T(removed?L"renderer.removed.lost":L"renderer.stalled.lost").c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);
             return true;
         }
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
@@ -2516,9 +2513,7 @@ private:
         if(!m_lastPlaybackFrame.bgra.empty())RenderVideoFrame(m_lastPlaybackFrame,true);
         m_guideReset=false;m_dlssReset=false;
         RestoreUpscaling();
-        m_neuralNotice=removed
-            ?L"The graphics device was removed or reset; playback stopped and the renderer was rebuilt"
-            :L"The GPU stopped responding; playback stopped and the renderer was rebuilt";
+        m_neuralNotice=T(removed?L"renderer.removed.rebuilt":L"renderer.stalled.rebuilt");
         LOG("Renderer rebuilt after the GPU became unusable; playback paused at "<<m_currentSec<<" s.");
         UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
         return true;
@@ -2610,8 +2605,13 @@ private:
         // Shut down the audio producer first, wait for GPU work, then restart the video decoder.
         Audio().Stop();
         if(m_renderer&&m_renderer->WaitGPU()!=d3d12_renderer_detail::FenceWaitResult::Completed){
-            LOG("Seek aborted after GPU synchronization failure.");
-            Unload();
+            // The failed wait latched the renderer unusable, so this is the
+            // recovery a failed frame takes: the frame that was on screen comes
+            // back on a rebuilt renderer, or the media is unloaded and the
+            // reason said out loud. The seek itself is abandoned either way;
+            // it used to unload silently.
+            LOG("Seek abandoned after GPU synchronization failure.");
+            RecoverUnusableRenderer();SetSeeking(false);UpdateCachedStatus();
             return false;
         }
         if(m_cachedPlayback){
@@ -3404,7 +3404,7 @@ private:
                    forecast.renderFps,forecast.realtimeRatio);
         if(MessageBoxW(m_hwnd,text,T(L"neural.live.title").c_str(),MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES){
             LOG("Active neural session declined by the user for the forecast pace.");
-            m_neuralNotice=L"Live neural rendering declined for this video; convert it instead (DLSS > Convert & save)";
+            m_neuralNotice=T(L"neural.live.declined");
             UpdateCachedStatus();InvalidateControls();
             return false;
         }
@@ -4152,7 +4152,7 @@ private:
                     // out for the rest of the file, with nothing to say why.
                     LOG("Active neural session could not create the segment directory "<<WideToUtf8(liveDirectory.wstring())<<": "<<ec.message());
                     m_neuralLifecycle.Invalidate();m_neuralProgress={};m_pendingNeuralTitle.clear();
-                    m_neuralNotice=L"The neural segment folder could not be created; check the cache location";
+                    m_neuralNotice=T(L"neural.live.directory_failed");
                     SyncSourceActionAvailability();UpdateCachedStatus();InvalidateRect(m_hwnd,nullptr,FALSE);
                     return false;
                 }

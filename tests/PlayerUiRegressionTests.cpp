@@ -7,6 +7,8 @@ namespace {
 std::vector<std::wstring> drawnText;
 std::wstring lastMessageBox;
 int messageBoxes = 0;
+// What every captured box answers; a yes/no question reads IDYES as yes.
+int messageBoxAnswer = IDOK;
 
 int WINAPI CaptureDrawText(HDC dc, LPCWSTR text, int count, LPRECT rect, UINT format)
 {
@@ -18,7 +20,7 @@ int WINAPI CaptureMessageBox(HWND, LPCWSTR text, LPCWSTR, UINT)
 {
     lastMessageBox = text ? text : L"";
     ++messageBoxes;
-    return IDOK;
+    return messageBoxAnswer;
 }
 } // namespace
 
@@ -28,6 +30,75 @@ int WINAPI CaptureMessageBox(HWND, LPCWSTR text, LPCWSTR, UINT)
 #include "../src/main.cpp"
 #undef MessageBoxW
 #undef DrawTextW
+
+namespace {
+// Serves numbered 1x1 frames from `firstFrame` on, without end, as either
+// member of a live pair.
+class NumberedFrameSource final : public ISynchronizedFrameSource {
+public:
+    explicit NumberedFrameSource(uint64_t firstFrame) : first_(firstFrame) {}
+    bool Open(const std::filesystem::path&, std::stop_token) override { index_ = 0; return true; }
+    void Close() override {}
+    VideoReadResult Read(VideoFrame& frame, std::stop_token) override
+    {
+        frame = VideoFrame{};
+        frame.bgra = {0, 0, 0, 255};
+        frame.frameNumber = first_ + index_++;
+        frame.timestamp100ns = int64_t(frame.frameNumber) * 333333;
+        return VideoReadResult::FrameReady;
+    }
+    bool SeekSeconds(double seconds) override { index_ = uint64_t(seconds * 30.0); return true; }
+    uint32_t Width() const override { return 1; }
+    uint32_t Height() const override { return 1; }
+    double FrameRate() const override { return 30.0; }
+    double DurationSeconds() const override { return 3600.0; }
+private:
+    uint64_t first_, index_{};
+};
+
+// An uncompressed RGB32 AVI of a few frames: the smallest file Media
+// Foundation describes without a codec or a helper process, which is how a
+// test gives the player's decoder a real geometry and frame rate.
+void WriteTinyAvi(const std::filesystem::path& path, uint32_t width, uint32_t height, uint32_t fps)
+{
+    constexpr uint32_t frames = 3;
+    const uint32_t frameBytes = width * height * 4;
+    std::vector<uint8_t> file;
+    const auto put32 = [&](uint32_t value) { for (int shift = 0; shift < 32; shift += 8) file.push_back(uint8_t(value >> shift)); };
+    const auto put16 = [&](uint16_t value) { file.push_back(uint8_t(value)); file.push_back(uint8_t(value >> 8)); };
+    const auto tag = [&](const char* fourcc) { file.insert(file.end(), fourcc, fourcc + 4); };
+    const auto patch = [&](size_t at) { const uint32_t size = uint32_t(file.size() - at - 4); for (int shift = 0; shift < 32; shift += 8) file[at + size_t(shift / 8)] = uint8_t(size >> shift); };
+    tag("RIFF"); const size_t riff = file.size(); put32(0); tag("AVI ");
+    tag("LIST"); const size_t hdrl = file.size(); put32(0); tag("hdrl");
+    tag("avih"); put32(56);
+    put32(1000000 / fps); put32(frameBytes * fps); put32(0); put32(0x10 /* AVIF_HASINDEX */);
+    put32(frames); put32(0); put32(1); put32(frameBytes); put32(width); put32(height);
+    for (int reserved = 0; reserved < 4; ++reserved) put32(0);
+    tag("LIST"); const size_t strl = file.size(); put32(0); tag("strl");
+    tag("strh"); put32(56);
+    tag("vids"); tag("DIB "); put32(0); put16(0); put16(0); put32(0);
+    put32(1); put32(fps); put32(0); put32(frames); put32(frameBytes); put32(uint32_t(-1)); put32(frameBytes);
+    put16(0); put16(0); put16(uint16_t(width)); put16(uint16_t(height));
+    tag("strf"); put32(40);
+    put32(40); put32(width); put32(height); put16(1); put16(32); put32(0 /* BI_RGB */); put32(frameBytes);
+    for (int reserved = 0; reserved < 4; ++reserved) put32(0);
+    patch(strl); patch(hdrl);
+    tag("LIST"); const size_t movi = file.size(); put32(0); tag("movi");
+    const size_t moviStart = file.size() - 4;
+    std::vector<uint32_t> offsets;
+    for (uint32_t frame = 0; frame < frames; ++frame) {
+        offsets.push_back(uint32_t(file.size() - moviStart));
+        tag("00db"); put32(frameBytes);
+        file.insert(file.end(), frameBytes, uint8_t(frame));
+    }
+    patch(movi);
+    tag("idx1"); put32(16 * frames);
+    for (const uint32_t offset : offsets) { tag("00db"); put32(0x10 /* AVIIF_KEYFRAME */); put32(offset); put32(frameBytes); }
+    patch(riff);
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(file.data()), std::streamsize(file.size()));
+}
+} // namespace
 
 struct PlayerAppTestAccess {
     static void Run()
@@ -250,6 +321,8 @@ struct PlayerAppTestAccess {
         CheckLiveJobDirectoryFailure(app);
         CheckLiveRenderFailureLimit(app);
         CheckJobSourceKeyGuard(app);
+        CheckLiveOutOfSyncHandsBack(app);
+        CheckLivePaceConfirmation(app);
         app.m_seeking = false;
         app.m_cachedPlayback = false;
         app.m_havePresentedPair = false;
@@ -400,14 +473,16 @@ struct PlayerAppTestAccess {
         CHECK(DeleteDC(dc));
 
         // Cancelled and failed completions must restore the native menu, not
-        // merely make the toolbar's computed availability true again.
+        // merely make the toolbar's computed availability true again. Only the
+        // failure reports itself.
+        const int boxesBeforeTerminalJobs = messageBoxes;
         CompleteTerminalJob(app, true);
         CompleteTerminalJob(app, false);
-        CHECK_EQ(1, messageBoxes);
+        CHECK_EQ(boxesBeforeTerminalJobs + 1, messageBoxes);
         // Retry exhaustion keeps its own terminal state and the fallback
         // message names the failure kind before the helper's detail.
         CompleteTerminalJob(app, false, NeuralRenderFailure::RetryExhausted);
-        CHECK_EQ(2, messageBoxes);
+        CHECK_EQ(boxesBeforeTerminalJobs + 2, messageBoxes);
         CHECK(lastMessageBox.find(L"gave up after retrying") != std::wstring::npos);
         CHECK(lastMessageBox.find(L"Controlled render failure") != std::wstring::npos);
 
@@ -754,6 +829,109 @@ private:
         app.DropRetainedLiveSegments();
         app.m_liveRenderFailures = 0; app.m_neuralNotice.clear(); app.m_liveRange = {};
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+    }
+
+    // A live pair that fell out of sync used to put a modal up from inside
+    // Tick: it pumped the job's completion, which tore the session and its
+    // renderer down beneath the caller, and the box came back on every Play.
+    // The session ends, the original takes the same frame back with the play
+    // state the session had, and the reason goes to the status bar. The pair
+    // is the real SynchronizedPlayback over sources whose frames never match,
+    // so its own resync guard is what reports the desync.
+    static void CheckLiveOutOfSyncHandsBack(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested, seeking = app.m_seeking;
+        NumberedFrameSource original(0);
+        app.m_synchronizedPlayback = SynchronizedPlayback(original, [] {
+            return std::unique_ptr<ISynchronizedFrameSource>(std::make_unique<NumberedFrameSource>(1'000'000));
+        });
+        auto segments = std::make_shared<NeuralSegmentIndex>();
+        NeuralSegment part{}; part.path = L"segment.mkv"; part.runId = 1;
+        part.frameCount = 6000; part.end100ns = int64_t(part.frameCount) * 333333;
+        segments->Append(part);
+        CHECK(app.m_synchronizedPlayback.OpenLive(L"original.mkv", segments, SynchronizedRange{}, {},
+                                                  VideoDecoder::KnownMedia{1, 1, 30.0, 3600.0, {}}));
+        app.m_loaded = true; app.m_seeking = false; app.m_seekPending = false; app.m_sourceKind = MediaSourceKind::LocalFile;
+        app.m_liveSession = true; app.m_liveAttached = true; app.m_liveBuffering = false; app.m_liveResumePlaying = false;
+        app.m_liveSegments = segments; app.m_liveDirectory.clear(); app.m_liveRange = NeuralRenderRange{0, part.end100ns};
+        app.m_cachedPlayback = true; app.m_neuralRequested = true; app.m_haveNext = false; app.m_playing = true;
+        app.m_neuralNotice.clear();
+        const int boxes = messageBoxes;
+
+        CHECK(!app.ReadNextCachedFrame());
+        CHECK_EQ(boxes, messageBoxes);
+        CHECK(!app.m_liveSession);
+        CHECK(!app.m_liveAttached);
+        CHECK(!app.m_cachedPlayback);
+        CHECK(!app.m_neuralNotice.empty());
+        // The original takes the frame back through a seek that carries the
+        // play state the session had.
+        CHECK(app.m_seekPending);
+        CHECK(app.m_seekResumePlaying);
+
+        app.m_synchronizedPlayback = SynchronizedPlayback{};
+        app.m_seekPending = false; app.m_playing = false; app.m_neuralNotice.clear(); app.m_liveSegments.reset(); app.m_liveRange = {};
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+        app.SyncFeatureMenuState();
+    }
+
+    // The forecast question is asked once per source and geometry, not once
+    // per session start: a YouTube seek restarts the session and used to put
+    // the same question up again. A yes stands until the geometry changes or
+    // the file is unloaded; a no is not remembered and says so in the status
+    // bar. The decoder describes a tiny AVI so the forecast has a geometry to
+    // measure against.
+    static void CheckLivePaceConfirmation(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, pair = app.m_havePresentedPair, seeking = app.m_seeking;
+        const auto sd = app.SettingsPath().parent_path() / L"pace-64x48.avi";
+        const auto hd = app.SettingsPath().parent_path() / L"pace-96x64.avi";
+        WriteTinyAvi(sd, 64, 48, 30);
+        WriteTinyAvi(hd, 96, 64, 30);
+        // The source identity stays fixed while the geometry it is loaded at
+        // changes, which is what a YouTube quality reload does.
+        const auto load = [&](const std::filesystem::path& file, uint32_t width) {
+            app.m_sourceKind = MediaSourceKind::LocalFile; app.m_path = L"C:\\pace\\video.mkv";
+            CHECK(app.m_decoder.OpenMetadata(file.wstring()));
+            CHECK_EQ(width, app.m_decoder.Width());
+        };
+        // One measured pace at the smaller geometry, 100 ms a frame against a
+        // 30 fps source; the single-sample rule extrapolates the larger one
+        // as slower still.
+        app.m_renderPace = {}; app.m_renderPace.Record({64, 48, 100.0});
+        app.m_livePaceConfirmedKey.clear(); app.m_neuralNotice.clear();
+        load(sd, 64);
+        const int boxes = messageBoxes;
+        messageBoxAnswer = IDNO;
+        CHECK(!app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 1, messageBoxes);
+        CHECK(!app.m_neuralNotice.empty());
+        // A no is not remembered: the next request asks again.
+        CHECK(!app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 2, messageBoxes);
+        messageBoxAnswer = IDYES;
+        app.m_neuralNotice.clear();
+        CHECK(app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 3, messageBoxes);
+        CHECK(app.m_neuralNotice.empty());
+        // A yes stands for this source at this geometry.
+        CHECK(app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 3, messageBoxes);
+        // The same source at another geometry is another forecast.
+        load(hd, 96);
+        CHECK(app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 4, messageBoxes);
+        // Unloading forgets the answer, even for the same source at the same geometry.
+        app.Unload();
+        load(hd, 96);
+        CHECK(app.ConfirmLiveSessionPace(30.0));
+        CHECK_EQ(boxes + 5, messageBoxes);
+
+        messageBoxAnswer = IDOK;
+        app.m_decoder.Close(); app.m_path.clear(); app.m_renderPace = {}; app.m_livePaceConfirmedKey.clear(); app.m_neuralNotice.clear();
+        std::filesystem::remove(sd); std::filesystem::remove(hd);
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_havePresentedPair = pair; app.m_seeking = seeking;
+        app.m_renderer = MakeD3D12Renderer();
     }
 
     // The running job's source key is offered to playback and to the next
@@ -1446,7 +1624,16 @@ private:
 
 int main()
 {
+    // The decoder describes a file through Media Foundation when no ffprobe
+    // is beside it; the player starts both of these before its first window.
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)) ||
+        FAILED(MFStartup(MF_VERSION, MFSTARTUP_FULL))) {
+        std::cerr << "Media Foundation could not start.\n";
+        return EXIT_FAILURE;
+    }
     PlayerAppTestAccess::Run();
+    MFShutdown();
+    CoUninitialize();
     std::cout << "Player UI regression failures: " << test_support::failure_count << '\n';
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
