@@ -41,6 +41,17 @@ ExportFormat ExportFormatFor(const std::filesystem::path& output)
 
 bool ValidRangeSeconds(double value) { return std::isfinite(value) && value >= 0.0; }
 
+// Wall-clock budget for a child that works through `mediaSeconds` of media at
+// no worse than `slowdown` times real time, over a floor that covers spawn,
+// probe and short media. A child still running past it is wedged, not slow, so
+// each caller picks a slowdown its own worst case sits well inside.
+std::chrono::milliseconds MediaDeadline(double mediaSeconds, std::chrono::minutes floor, double slowdown)
+{
+    const double bounded = std::isfinite(mediaSeconds) && mediaSeconds > 0.0
+        ? std::min(mediaSeconds, 7.0 * 86400.0) : 0.0;
+    return floor + std::chrono::milliseconds(std::llround(bounded * slowdown * 1000.0));
+}
+
 std::filesystem::path ModuleDirectory()
 {
     std::wstring value(32768, L'\0');
@@ -241,13 +252,20 @@ private:
 struct CaptureResult {
     bool started{};
     bool cancelled{};
+    // The child outlived its deadline and was killed; exitCode is the kill code.
+    bool timedOut{};
     DWORD exitCode{static_cast<DWORD>(-1)};
     std::string output;
 };
 
+// `deadline` is wall-clock from spawn: a child that has not exited by then is
+// terminated with its job, the same way a cancel ends it. Every call site sets
+// one from what its child is doing, because the alternative was a hung ffmpeg
+// holding a worker thread for as long as the process lived.
 CaptureResult RunCapture(const std::filesystem::path& executable,
                          const std::vector<std::wstring>& arguments,
-                         std::stop_token stop, size_t limit = 1024 * 1024,
+                         std::stop_token stop, std::chrono::milliseconds deadline,
+                         size_t limit = 1024 * 1024,
                          const std::function<void(std::string_view)>& consume = {})
 {
     CaptureResult result;
@@ -297,6 +315,7 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
         TerminateProcess(info.hProcess, 1);
     }
     CloseHandle(info.hThread);
+    const auto expiry = std::chrono::steady_clock::now() + deadline;
     std::array<char, 4096> buffer{};
     bool done = false;
     bool captureOverflowed = false;
@@ -319,8 +338,9 @@ CaptureResult RunCapture(const std::filesystem::path& executable,
         const DWORD wait = WaitForSingleObject(info.hProcess, 10);
         if (wait == WAIT_OBJECT_0) done = true;
         else if (wait != WAIT_TIMEOUT) { TerminateJobObject(job, 1); done = true; }
-        if (stop.stop_requested()) {
-            result.cancelled = true;
+        if (stop.stop_requested() || std::chrono::steady_clock::now() >= expiry) {
+            if (stop.stop_requested()) result.cancelled = true;
+            else result.timedOut = true;
             TerminateJobObject(job, 1);
             WaitForSingleObject(info.hProcess, 2000);
             done = true;
@@ -483,7 +503,16 @@ std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& re
     const auto appendInput = [&](const std::wstring& input) {
         if (_wcsnicmp(input.c_str(), L"http://", 7) == 0 ||
             _wcsnicmp(input.c_str(), L"https://", 8) == 0) {
+            // A resolved stream is https and nothing else. The certificate is
+            // verified explicitly rather than by the build's default, which the
+            // next ffmpeg pin may change, and the whitelist is the minimal set a
+            // direct or HLS googlevideo stream reaches (https -> tls -> tcp), so a
+            // plain http:// input or a redirect to one fails in the child. Proven
+            // against the shipped ffmpeg on a live videoplayback URL and a live
+            // hls_playlist manifest; dropping tcp, or offering file:/http:, is
+            // refused with "Protocol ... not on whitelist".
             arguments.insert(arguments.end(), {
+                L"-tls_verify", L"1", L"-protocol_whitelist", L"https,tls,tcp",
                 L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
                 L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
                 L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0"});
@@ -699,7 +728,11 @@ MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std:
             diagnostic.append(line);
             diagnostic.push_back('\n');
         });
+    // A throttled stream copy runs near real time; four times that plus an
+    // hour is a child that stopped, not a slow connection (socket stalls are
+    // already cut at 10 s by -rw_timeout and the bounded reconnects).
     const CaptureResult capture = RunCapture(ffmpeg, BuildMaterializeArguments(request), stop,
+        MediaDeadline(request.expectedDurationSeconds, std::chrono::hours{1}, 4.0),
         diagnosticLimit, [&](std::string_view chunk) {
             reader.Consume(chunk, std::chrono::steady_clock::now());
         });
@@ -707,6 +740,7 @@ MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std:
     if (!capture.started)
         return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
     if (capture.cancelled) return {false, MaterializeError::Cancelled, L"Source preparation was cancelled."};
+    if (capture.timedOut) return {false, MaterializeError::ProcessFailed, L"FFmpeg did not finish preparing the source in time."};
     std::error_code error;
     if (capture.exitCode != 0 || !std::filesystem::is_regular_file(request.output, error) || error) {
         std::wstring detail = L"FFmpeg could not prepare the source (exit " + std::to_wstring(capture.exitCode) + L").";
@@ -764,14 +798,14 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::InvalidRequest, L"The export file already exists. Choose a new filename."};
     const auto ffmpeg = FindHelper(helperDirectory_, L"ffmpeg.exe");
     if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
-    bool oddDimensions = false;
-    if (format.mp4) {
-        const ProbeResult neuralMetadata = ProbeMedia(helperDirectory_, neuralVideo, stop,
-                                                       MediaProbeMode::CachedMetadata);
-        if (!neuralMetadata.ok)
-            return {false, MaterializeError::ProcessFailed, L"The cached neural media could not be inspected."};
-        oddDimensions = neuralMetadata.width % 2 || neuralMetadata.height % 2;
-    }
+    // Every format reads the cached video's length for the encode's deadline;
+    // MP4 also needs its parity for the 4:4:4 decision.
+    const ProbeResult neuralMetadata = ProbeMedia(helperDirectory_, neuralVideo, stop,
+                                                   MediaProbeMode::CachedMetadata);
+    if (stop.stop_requested()) return cancelled();
+    if (!neuralMetadata.ok)
+        return {false, MaterializeError::ProcessFailed, L"The cached neural media could not be inspected."};
+    const bool oddDimensions = neuralMetadata.width % 2 || neuralMetadata.height % 2;
 
     struct StagingFile {
         std::filesystem::path path;
@@ -800,8 +834,15 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions);
     // Attachments (such as subtitle fonts) travel with the source subtitles.
     // Unsupported codecs fail the entire export; no subtitle is burned in.
-    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
+    // A software encode of a 4K render runs at a small fraction of real time;
+    // sixty times the media plus an hour is an encoder that hung, not one that
+    // is busy.
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop,
+        MediaDeadline(double(neuralMetadata.duration100ns) / 10000000.0, std::chrono::hours{1}, 60.0),
+        64 * 1024);
     if (capture.cancelled || stop.stop_requested()) return cancelled();
+    if (capture.timedOut)
+        return {false, MaterializeError::ProcessFailed, L"FFmpeg did not finish the export in time."};
     if (!capture.started)
         return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
     const auto bytes = std::filesystem::file_size(staging.path, error);
@@ -950,21 +991,41 @@ std::string ConcatListText(std::span<const std::filesystem::path> parts)
     return text;
 }
 
-bool WriteWholeFile(const std::filesystem::path& path, std::string_view text)
+// The list goes into the user's temp directory, never beside the output: the
+// output's directory is a cache staging directory that is renamed whole into
+// the published entry, so a list whose removal failed - antivirus holding it
+// open, a crash between the two calls - used to travel into renders/<key>/.
+// The entries are absolute, so the demuxer does not care where the list is.
+std::filesystem::path WriteConcatList(std::string_view text)
 {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    size_t offset = 0;
-    bool ok = true;
-    while (ok && offset < text.size()) {
-        const DWORD wanted = static_cast<DWORD>(std::min<size_t>(text.size() - offset, 1024 * 1024));
-        DWORD written = 0;
-        ok = WriteFile(file, text.data() + offset, wanted, &written, nullptr) && written != 0;
-        offset += written;
+    std::error_code error;
+    const auto directory = std::filesystem::temp_directory_path(error);
+    if (error) return {};
+    static std::atomic_uint64_t sequence{};
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = directory / (L"dlss-concat-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
+            L"-" + std::to_wstring(sequence.fetch_add(1)) + L".txt");
+        HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS) continue;
+            return {};
+        }
+        size_t offset = 0;
+        bool ok = true;
+        while (ok && offset < text.size()) {
+            const DWORD wanted = static_cast<DWORD>(std::min<size_t>(text.size() - offset, 1024 * 1024));
+            DWORD written = 0;
+            ok = WriteFile(file, text.data() + offset, wanted, &written, nullptr) && written != 0;
+            offset += written;
+        }
+        CloseHandle(file);
+        if (ok) return candidate;
+        std::filesystem::remove(candidate, error);
+        return {};
     }
-    CloseHandle(file);
-    return ok;
+    return {};
 }
 
 } // namespace
@@ -976,27 +1037,35 @@ EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
 {
     if (parts.empty() || output.empty()) return EncodeError::InvalidSpecification;
     std::error_code error;
+    uintmax_t totalBytes = 0;
     for (const auto& part : parts) {
         if (part.empty() || !std::filesystem::is_regular_file(part, error) || error)
             return EncodeError::InvalidSpecification;
+        const auto bytes = std::filesystem::file_size(part, error);
+        if (!error) totalBytes += bytes;
     }
     const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
     if (ffmpeg.empty()) return EncodeError::HelperMissing;
     if (stop.stop_requested()) return EncodeError::Cancelled;
     const std::string text = ConcatListText(parts);
     if (text.empty()) return EncodeError::InvalidSpecification;
-    // Beside the output: the staging directory is ours and stays writable.
-    const std::filesystem::path list = output.parent_path() / (output.filename().wstring() + L".concat.txt");
-    if (!WriteWholeFile(list, text)) return EncodeError::StartFailed;
+    struct ListFile {
+        std::filesystem::path path;
+        ~ListFile() { if (!path.empty()) { std::error_code ignored; std::filesystem::remove(path, ignored); } }
+    } list{WriteConcatList(text)};
+    if (list.path.empty()) return EncodeError::StartFailed;
     const std::vector<std::wstring> arguments{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
-        L"-f", L"concat", L"-safe", L"0", L"-i", list.wstring(),
+        L"-f", L"concat", L"-safe", L"0", L"-i", list.path.wstring(),
         L"-c", L"copy", L"-f", L"matroska", output.wstring()};
-    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop, 64 * 1024);
-    std::filesystem::remove(list, error);
+    // A stream copy is bound by the disk: ten minutes plus the parts at 10 MB/s
+    // covers a 45 GB join on a spinning disk five times over.
+    const CaptureResult capture = RunCapture(ffmpeg, arguments, stop,
+        MediaDeadline(double(totalBytes) / (10.0 * 1024.0 * 1024.0), std::chrono::minutes{10}, 1.0),
+        64 * 1024);
     if (!capture.started) return EncodeError::StartFailed;
     if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
-    if (capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
+    if (capture.timedOut || capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
         return EncodeError::FinishFailed;
     return EncodeError::None;
 }
@@ -1021,7 +1090,7 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     std::vector<std::wstring> probeArguments{
         L"-v", L"error", L"-select_streams", L"v:0",
         L"-show_entries", fullValidation?L"packet=pts_time,duration_time:stream=width,height,nb_read_packets:format=duration":L"stream=width,height:format=duration",
-        L"-of", L"default=noprint_wrappers=1:nokey=0", media.wstring()};
+        L"-of", L"default=noprint_wrappers=1:nokey=0", L"-i", media.wstring()};
     if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_packets");
     double durationSeconds = 0.0;
     double firstVideoTimestamp = std::numeric_limits<double>::infinity();
@@ -1060,7 +1129,10 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     // memory buffer or hit the bounded diagnostic capture limit.
     std::string pending;
     bool oversizedLine = false;
-    const CaptureResult capture = RunCapture(ffprobe, probeArguments, stop, 64 * 1024,
+    // A header read is seconds; a packet count of a two-hour render on a
+    // spinning disk is tens of seconds. Either past its bound is a wedged child.
+    const CaptureResult capture = RunCapture(ffprobe, probeArguments, stop,
+        fullValidation ? std::chrono::minutes{10} : std::chrono::minutes{1}, 64 * 1024,
         [&](std::string_view chunk) {
             for (const char character : chunk) {
                 if (character == '\n') {
@@ -1071,8 +1143,9 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
             }
         });
     if (!pending.empty() && !oversizedLine) parseLine(pending);
-    if (!capture.started || capture.cancelled || capture.exitCode != 0) {
-        result.detail = capture.cancelled ? L"Media validation was cancelled." : L"FFprobe validation failed.";
+    if (!capture.started || capture.cancelled || capture.timedOut || capture.exitCode != 0) {
+        result.detail = capture.cancelled ? L"Media validation was cancelled." :
+            capture.timedOut ? L"FFprobe validation timed out." : L"FFprobe validation failed.";
         return result;
     }
     const double videoSeconds = videoEnd - firstVideoTimestamp;

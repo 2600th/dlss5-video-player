@@ -80,6 +80,37 @@ struct VideoDecoderTestAccess {
         settings.accelerationMemo=memo;
         return std::make_unique<VideoDecoder>(std::move(settings));
     }
+
+    // main.cpp's two Swap callers hand a stream to the decoder that then answers
+    // ColorDescription(), PixelLayout() and Media() for it, so every one of
+    // those has to follow the swap. One side is opened as a known sibling (memo
+    // key handed in, no probe: nothing declared, Bgra), the other sequentially
+    // on the fixture's declared BT.709 4x2 stream (probed, NV12); afterwards
+    // each must describe the other's stream, in both directions.
+    static void CheckSwapCarriesSource(const std::filesystem::path& helperDirectory)
+    {
+        auto known=Create(helperDirectory);
+        VideoDecoder::KnownMedia media{};
+        media.width=4;media.height=2;media.fps=30.0;media.durationSec=30.0;media.hardwareProfile="hevc/yuv420p";
+        CHECK(known->OpenKnown(L"nv12geom",media,MediaSourceKind::LocalFile));
+        CHECK(known->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(known->ColorDescription().matrix==ColorMatrix::Unspecified);
+        auto probed=Create(helperDirectory);
+        CHECK(probed->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile));
+        CHECK(probed->PixelLayout()==VideoPixelLayout::Nv12);
+        CHECK(probed->ColorDescription().matrix==ColorMatrix::Bt709);
+        known->Swap(*probed);
+        CHECK(known->PixelLayout()==VideoPixelLayout::Nv12);
+        CHECK(known->ColorDescription().matrix==ColorMatrix::Bt709);
+        CHECK(known->ColorDescription().range==ColorRange::Limited);
+        CHECK(known->Media().hardwareProfile.empty());
+        CHECK(probed->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(probed->ColorDescription().matrix==ColorMatrix::Unspecified);
+        CHECK(probed->ColorDescription().range==ColorRange::Unspecified);
+        CHECK_EQ(std::string("hevc/yuv420p"),probed->Media().hardwareProfile);
+        CHECK_EQ(uint32_t{4},probed->Width());
+        CHECK_EQ(uint32_t{2},known->Height());
+    }
 };
 
 struct AudioPlayerTestAccess {
@@ -3830,9 +3861,9 @@ void youtube_url_validation_rejects_unsafe_or_unselected_inputs_test()
     };
     rejected.push_back(L"https://youtube.com/watch?v=" + std::wstring(2049, L'a'));
 
-    std::wstring embeddedNul = L"https://youtube.com/watch?v=abc";
+    std::wstring embeddedNul = L"https://youtube.com/watch?v=dQw4w9WgXcQ";
     embeddedNul.push_back(L'\0');
-    embeddedNul.append(L"def");
+    embeddedNul.append(L"dQw4w9WgXcQ");
     rejected.push_back(std::move(embeddedNul));
 
     for (const std::wstring& value : rejected) {
@@ -3842,18 +3873,20 @@ void youtube_url_validation_rejects_unsafe_or_unselected_inputs_test()
 
 void youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test()
 {
+    // Every id below is a valid eleven-character one, so only the field rules
+    // can be what rejects these.
     const std::array rejected{
-        L"https://youtube.com/watch?v=abc&v=abc",
-        L"https://youtube.com/watch?v=abc&v=def",
-        L"https://youtube.com/watch?v=&v=abc",
-        L"https://youtube.com/watch?v=abc&v=",
-        L"https://youtube.com/watch?V=abc",
-        L"https://youtube.com/watch?V=abc&v=def",
-        L"https://youtube.com/watch?%76=abc",
-        L"https://youtube.com/watch?%56=abc&v=def",
-        L"https://youtube.com/watch?v%3Dabc",
-        L"https://youtube.com/watch?v=abc%26v%3Ddef",
-        L"https://youtube.com/watch?v=abc%26list%3DPL123",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&v=dQw4w9WgXcQ",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&v=dQw4w9WgXcR",
+        L"https://youtube.com/watch?v=&v=dQw4w9WgXcQ",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&v=",
+        L"https://youtube.com/watch?V=dQw4w9WgXcQ",
+        L"https://youtube.com/watch?V=dQw4w9WgXcQ&v=dQw4w9WgXcR",
+        L"https://youtube.com/watch?%76=dQw4w9WgXcQ",
+        L"https://youtube.com/watch?%56=dQw4w9WgXcQ&v=dQw4w9WgXcR",
+        L"https://youtube.com/watch?v%3DdQw4w9WgXcQ",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ%26v%3DdQw4w9WgXcR",
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ%26list%3DPL123",
     };
 
     for (const std::wstring_view value : rejected) {
@@ -3861,9 +3894,26 @@ void youtube_watch_query_requires_one_unambiguous_lowercase_v_field_test()
     }
 }
 
+void youtube_video_id_must_be_exactly_eleven_characters_test()
+{
+    // The alphabet was always enforced; the length is part of the format too,
+    // and a recent-history entry that is not eleven characters is not an id.
+    for (const auto* route : {L"https://youtube.com/watch?v=", L"https://youtu.be/", L"https://youtube.com/shorts/"}) {
+        CHECK(IsSupportedYouTubeUrl(std::wstring(route) + L"dQw4w9WgXcQ"));
+        CHECK(IsSupportedYouTubeUrl(std::wstring(route) + L"-_A1b2C3d4E"));
+        CHECK(!IsSupportedYouTubeUrl(std::wstring(route) + L"dQw4w9WgXc"));
+        CHECK(!IsSupportedYouTubeUrl(std::wstring(route) + L"dQw4w9WgXcQQ"));
+        CHECK(!IsSupportedYouTubeUrl(std::wstring(route) + std::wstring(2000, L'a')));
+        CHECK(CanonicalYouTubeVideoId(std::wstring(route) + L"dQw4w9WgXc").empty());
+        CHECK_EQ(std::string("dQw4w9WgXcQ"), CanonicalYouTubeVideoId(std::wstring(route) + L"dQw4w9WgXcQ"));
+    }
+}
+
 void youtube_url_validation_enforces_exact_2048_character_boundary_test()
 {
-    constexpr std::wstring_view prefix = L"https://youtu.be/";
+    // Padding goes into a playlist field the watch route ignores, so the id
+    // itself stays eleven characters and only the total length is at issue.
+    constexpr std::wstring_view prefix = L"https://youtube.com/watch?v=dQw4w9WgXcQ&list=";
     const std::wstring accepted = std::wstring(prefix) +
                                   std::wstring(2048 - prefix.size(), L'a');
     const std::wstring rejected = accepted + L'a';

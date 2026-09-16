@@ -55,8 +55,10 @@ bool Normalize(RecentMediaEntry& entry)
     if (!ValidKey(entry.sourceKey) || !ValidKey(entry.renderKey) ||
         entry.sourceQuality < 0 || entry.sourceQuality > 3 || !Utf8(entry.title)) return false;
     if (entry.youtube) {
-        // The resolver provides the canonical video ID, never a signed stream URL.
-        if (entry.id.empty() || entry.id.size() > 128 ||
+        // The resolver provides the canonical video ID, never a signed stream
+        // URL: exactly eleven characters of the URL-safe alphabet, the same
+        // shape IsSupportedYouTubeUrl accepts.
+        if (entry.id.size() != 11 ||
             !std::ranges::all_of(entry.id, [](char value) {
                 return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
                     (value >= '0' && value <= '9') || value == '-' || value == '_';
@@ -74,6 +76,20 @@ bool Normalize(RecentMediaEntry& entry)
         entry.id = std::move(*id);
     }
     return true;
+}
+
+// A local entry read back from disk may only name a drive-letter path. The
+// history file is plain text in the cache folder, and opening a recent entry
+// touches its path before anything is played; a UNC root planted there would
+// have the player authenticate to an arbitrary host on a click. An entry
+// recorded from a UNC open in this session is still offered until the player
+// exits, and dropped by the next load.
+bool DriveRooted(const std::filesystem::path& path)
+{
+    const auto root = path.root_name().wstring();
+    return root.size() == 2 && root[1] == L':' &&
+        ((root[0] >= L'A' && root[0] <= L'Z') || (root[0] >= L'a' && root[0] <= L'z')) &&
+        !path.root_directory().empty();
 }
 
 bool SameVideo(const RecentMediaEntry& left, const RecentMediaEntry& right)
@@ -109,6 +125,9 @@ bool RecentMediaHistory::Load()
     size_t count{};
     if (!std::getline(input, header) || header != kHeader || !(input >> count) ||
         count > kMaximumEntries) return false;
+    // A record the parser cannot read is a file this program did not write and
+    // the whole load fails; a record that parses but no longer passes
+    // validation is just that record, so it is dropped and the rest kept.
     std::vector<RecentMediaEntry> loaded;
     for (size_t index = 0; index < count; ++index) {
         RecentMediaEntry entry;
@@ -116,18 +135,19 @@ bool RecentMediaHistory::Load()
         std::string title, source;
         if (!(input >> youtube >> std::quoted(entry.id) >> std::quoted(title) >>
                 std::quoted(source) >> std::quoted(entry.sourceKey) >>
-                std::quoted(entry.renderKey) >> entry.sourceQuality) ||
-            (youtube != 0 && youtube != 1)) return false;
+                std::quoted(entry.renderKey) >> entry.sourceQuality)) return false;
+        if (youtube != 0 && youtube != 1) continue;
         entry.youtube = youtube != 0;
         auto wideTitle = Wide(title), wideSource = Wide(source);
-        if (!wideTitle || !wideSource) return false;
+        if (!wideTitle || !wideSource) continue;
         entry.title = std::move(*wideTitle);
         entry.source = std::move(*wideSource);
         const auto storedId = entry.id;
         const auto storedSource = entry.source;
         if (!Normalize(entry) || entry.id != storedId || entry.source != storedSource ||
+            (!entry.youtube && !DriveRooted(entry.source)) ||
             std::ranges::any_of(loaded, [&](const auto& other) { return SameVideo(entry, other); }))
-            return false;
+            continue;
         loaded.push_back(std::move(entry));
     }
     input >> std::ws;
