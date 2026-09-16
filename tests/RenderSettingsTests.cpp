@@ -34,6 +34,35 @@ std::string Read(const std::filesystem::path& path)
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+// The sweep in WriteUpdatedIni judges a temporary against this process's start in
+// FILETIME units, so the test speaks the same units rather than converting through
+// file_time_type; SetFileTime on an attribute-only handle is the write itself.
+FILETIME ProcessStart()
+{
+    FILETIME start{}, unused{};
+    CHECK(GetProcessTimes(GetCurrentProcess(), &start, &unused, &unused, &unused));
+    return start;
+}
+
+FILETIME Shifted(FILETIME time, int64_t ticks)
+{
+    LARGE_INTEGER value;
+    value.LowPart = time.dwLowDateTime;
+    value.HighPart = static_cast<LONG>(time.dwHighDateTime);
+    value.QuadPart += ticks;
+    return {value.LowPart, static_cast<DWORD>(value.HighPart)};
+}
+
+void SetLastWrite(const std::filesystem::path& path, const FILETIME& time)
+{
+    HANDLE handle = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, 0, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    CHECK(handle != INVALID_HANDLE_VALUE);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    CHECK(SetFileTime(handle, nullptr, nullptr, &time));
+    CloseHandle(handle);
+}
+
 NeuralCacheManifest RenderManifest()
 {
     NeuralCacheManifest result;
@@ -397,6 +426,47 @@ void overrides_follow_managed_keys_and_replace_existing_values()
     }
 }
 
+void writing_the_ini_sweeps_only_temporaries_older_than_this_process()
+{
+    TempDirectory temp;
+    const auto ini = temp.path / L"ReShade.ini";
+    Write(ini, "[RenoDX.DLSS5]\nNRIntensity=1.25\n");
+    // GetTempFileNameW names its files <prefix><hex>.tmp. One a process left behind
+    // when it died mid-write is older than we are; one a live writer holds is not.
+    // The boundary is inclusive: written at our own start counts as ours.
+    const auto stale = temp.path / L"RDX1234.tmp";
+    const auto fresh = temp.path / L"RDX5678.tmp";
+    const auto folder = temp.path / L"RDX9ABC.tmp";
+    const auto other = temp.path / L"NOT1234.tmp";
+    Write(stale, "half-written");
+    Write(fresh, "in flight");
+    Write(other, "somebody else's");
+    CHECK(std::filesystem::create_directory(folder));
+    const FILETIME start = ProcessStart();
+    const FILETIME earlier = Shifted(start, -10'000'000); // one second, in 100 ns
+    SetLastWrite(stale, earlier);
+    SetLastWrite(fresh, start);
+    SetLastWrite(folder, earlier);
+    SetLastWrite(other, earlier);
+
+    const ConfigUpdate configured = ConfigureNeuralAddon(ini, true);
+    CHECK(configured.ok);
+    CHECK(configured.changed);
+    CHECK(configured.addonEnabled);
+    CHECK(!std::filesystem::exists(stale));
+    CHECK_EQ(std::string("in flight"), Read(fresh));
+    CHECK(std::filesystem::is_directory(folder));
+    CHECK_EQ(std::string("somebody else's"), Read(other));
+    const auto rewritten = Read(ini);
+    CHECK(rewritten.find("NRIntensity=1.25") != std::string::npos);
+    CHECK(ReadNeuralAddonSettingsSnapshot(ini).has_value());
+    // The write's own temporary was consumed by the rename, not left for a later sweep.
+    size_t temporaries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(temp.path))
+        if (entry.is_regular_file() && entry.path().extension() == L".tmp") ++temporaries;
+    CHECK_EQ(size_t{2}, temporaries);
+}
+
 void neural_settings_round_trip_and_format_renodx_overrides()
 {
     const auto defaults = NeuralAddonOverridesFor(NeuralSettings{});
@@ -648,6 +718,7 @@ int main()
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();
     overrides_follow_managed_keys_and_replace_existing_values();
+    writing_the_ini_sweeps_only_temporaries_older_than_this_process();
     neural_settings_round_trip_and_format_renodx_overrides();
     removing_one_owned_entry_preserves_other_entries_and_outside_files();
     default_cache_root_owns_new_writes_under_windows_appdata_virtualization();
