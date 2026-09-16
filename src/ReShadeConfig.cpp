@@ -529,11 +529,38 @@ ReadResult ReadIniFile(const std::filesystem::path& iniPath)
     return {true, std::move(content), {}};
 }
 
+// GetTempFileNameW below names its file <prefix><hex>.TMP. A process killed between
+// that call and the MoveFileExW that consumes the file leaves it in the runtime
+// directory, where the package verifier lists every file and refuses one it does not
+// know. Nothing else removes it, so each write first removes the ones an earlier
+// process left. "Earlier" is judged against this process's own start: a temporary
+// last written before we existed belongs to a process that is either gone or was
+// mid-write before we started - and a live one holds its file open without sharing,
+// so the delete fails and it is left alone. Best effort throughout: a temporary that
+// cannot be removed only costs what it already cost.
+void SweepAbandonedTemporaries(const std::filesystem::path& directory, std::wstring_view prefix)
+{
+    FILETIME processStart{}, unused{};
+    if (!GetProcessTimes(GetCurrentProcess(), &processStart, &unused, &unused, &unused)) return;
+    const std::wstring pattern = (directory / (std::wstring(prefix) + L"*.TMP")).wstring();
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &found, FindExSearchNameMatch,
+                                     nullptr, 0);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (CompareFileTime(&found.ftLastWriteTime, &processStart) >= 0) continue;
+        DeleteFileW((directory / found.cFileName).c_str());
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+}
+
 WriteResult WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_view content)
 {
     const std::filesystem::path directory = iniPath.has_parent_path() ? iniPath.parent_path() : std::filesystem::current_path();
-    std::wstring temporary(MAX_PATH, L'\0');
     const std::wstring prefix = L"RDX";
+    SweepAbandonedTemporaries(directory, prefix);
+    std::wstring temporary(MAX_PATH, L'\0');
     if (GetTempFileNameW(directory.c_str(), prefix.c_str(), 0, temporary.data()) == 0) {
         return {false, Win32Error(L"Creating ReShade.ini temporary file")};
     }

@@ -33,6 +33,27 @@ FenceWaitResult ClassifyFenceWaitFailure(FenceWaitResult result,
     return FAILED(deviceRemovedReason())?FenceWaitResult::DeviceRemoved:result;
 }
 
+// The codes a call on a lost device answers with. DXGI hands these back before -
+// and on some drivers instead of - GetDeviceRemovedReason reporting the loss, so a
+// caller that only asked the device would read the first Present or Reset on a
+// removed device as that one call refusing.
+constexpr bool IsDeviceLossCode(HRESULT hr)
+{
+    return hr==DXGI_ERROR_DEVICE_REMOVED||hr==DXGI_ERROR_DEVICE_RESET||
+           hr==DXGI_ERROR_DEVICE_HUNG||hr==DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
+// A failed call on the device rather than a failed wait: DeviceRemoved when the
+// call's own code or the device's reason says so, `otherwise` when neither does -
+// a call the runtime refused is that call failing, not a device to stop using.
+template<class DeviceRemovedReason>
+FenceWaitResult ClassifyDeviceCallFailure(HRESULT hr, FenceWaitResult otherwise,
+                                          DeviceRemovedReason&& deviceRemovedReason)
+{
+    if(IsDeviceLossCode(hr)||FAILED(deviceRemovedReason()))return FenceWaitResult::DeviceRemoved;
+    return otherwise;
+}
+
 template<class CompletedValue, class RegisterEvent, class Wait>
 FenceWaitResult WaitForGPUFenceCompletion(uint64_t value,
                                           ULONGLONG started,

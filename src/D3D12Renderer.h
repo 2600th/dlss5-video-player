@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -50,25 +51,36 @@ struct D3D12RendererTestOwnedResource {
 };
 
 // Substitutes for the GPU operations a test cannot perform: the fence wait and
-// signal, the device-removed reason, and the capture readback. A renderer holds
-// one of these only when something installed it, and no production renderer
-// does, so each site below falls through to the real call. They are grouped
-// behind one pointer rather than living as five members so that the class is
-// the same size in every translation unit - the five-member form made
-// sizeof(D3D12Renderer) depend on a macro - and so the whole test surface is
-// visible in one place.
+// signal, the device-removed reason, the capture readback and the process exit a
+// second retained renderer ends in. A renderer holds one of these only when
+// something installed it, and no production renderer does, so each site below
+// falls through to the real call. They are grouped behind one pointer rather than
+// living as six members so that the class is the same size in every translation
+// unit - the five-member form made sizeof(D3D12Renderer) depend on a macro - and
+// so the whole test surface is visible in one place.
 struct D3D12RendererTestHooks {
     std::function<d3d12_renderer_detail::FenceWaitResult()> waitGPU;
     std::function<HRESULT(uint64_t)> frameSignal;
     std::function<HRESULT()> deviceRemovedReason;
     std::function<bool(std::vector<uint8_t>&)> cacheCapture;
+    std::function<void()> exitProcess;
     std::unique_ptr<D3D12RendererTestOwnedResource> ownedResource;
 };
 
 class D3D12Renderer;
+// Drains the queue within the teardown budget before deleting. A renderer whose
+// drain did not complete - and whose device is not gone - may still have command
+// lists executing, and deleting it would release their resources and the NGX
+// feature underneath them, which the DLSS guide S5.5 forbids. It is kept alive
+// instead, with everything it holds. A process is allowed one: a second means the
+// GPU stopped answering twice in this process, so every renderer built after it
+// would queue behind the same silence, and the deleter ends the process with
+// RetainedRendererExitCode. The helper's parent reads a non-zero exit as a crash
+// and answers with its bounded relaunch, the same path a removed device takes.
 struct D3D12RendererDeleter {
     void operator()(D3D12Renderer* renderer) const noexcept;
 };
+inline constexpr UINT RetainedRendererExitCode = ERROR_FATAL_APP_EXIT;
 using D3D12RendererOwner=std::unique_ptr<D3D12Renderer,D3D12RendererDeleter>;
 D3D12RendererOwner MakeD3D12Renderer();
 struct GuideFrame;
@@ -370,11 +382,33 @@ private:
     bool SignalFrameSlot(uint32_t slot);
     bool WaitGPUForContinuedUse();
     bool WaitForFenceValue(uint64_t value, uint64_t* stageWaitNanos = nullptr);
+    // HR for a call on the live device inside a frame: logged the same way, then
+    // asked whether the device is behind it. A removed device answers almost any
+    // call with a loss code, and the first call to see it is as often an allocator
+    // Reset or a Close as a Present, so a frame that fails there is a device loss
+    // to latch, not a neural failure for the caller to retry.
+    bool DeviceHR(HRESULT hr, const char* what);
+    // The test hook when one is installed, otherwise the device's answer.
+    HRESULT DeviceRemovedReason() const;
+    // The one place the renderer records that its GPU cannot be used again, so the
+    // device's reason is logged - with the DRED breadcrumbs in a debug build - once,
+    // on the transition. `reason` is what DeviceRemovedReason answered the caller
+    // that classified `result`; the caller asks once and hands it on.
+    void LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult result, HRESULT reason);
+    // Presents the current backbuffer and accounts the time; a failure is logged
+    // as `what` and classified like any other call on the device.
+    bool PresentSwapchain(const char* what);
     bool RenderFrameInternal(const uint8_t* bgra, size_t bytes,
                              const float* guideGridRGBA32F, size_t guideBytes,
                              uint32_t gridW, uint32_t gridH,
                              bool temporalReset, bool motionGuides, float frameTimeMs,
                              const FrameIdentity* identity);
+    // The rest of a frame once its upload list is on the queue: the guide and colour
+    // passes, the NGX evaluate, the backbuffer pass and the Present. Split from
+    // RenderFrameInternal at the first ExecuteCommandLists so that the caller has
+    // exactly one exit after submission, which is where the slot gets published.
+    bool RecordAndPresentFrame(uint32_t slot, ID3D12GraphicsCommandList* cmd, bool nvofFrame,
+                               bool temporalReset, float frameTimeMs, const FrameIdentity* identity);
     // Synchronous enqueue + resolve. Kept for the first-frame evidence loop, which must
     // read a capture back before it can decide whether to submit the same frame again.
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
@@ -525,6 +559,9 @@ private:
     d3d12_renderer_detail::FenceWaitResult m_lastFenceWaitResult =
         d3d12_renderer_detail::FenceWaitResult::Completed;
     DLSSBackend m_dlss;
+    // Renderers this process has kept alive after a drain that did not complete;
+    // see D3D12RendererDeleter. Process-wide because the limit is on the process.
+    static std::atomic<uint32_t> s_retainedRenderers;
 
     friend struct D3D12RendererTestAccess;
     // Null in every production renderer; see D3D12RendererTestHooks.
