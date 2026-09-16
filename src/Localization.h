@@ -82,6 +82,8 @@ private:
             {L"neural.live.will_play", L"starts when the buffer fills"},
             {L"neural.live.will_stay_paused", L"stays paused when the buffer fills"},
             {L"neural.live.slow", L"This video is %ux%u at %.6g fps. On this GPU neural rendering runs at about %.3g frames per second, which is %.2gx real time, so watching it live would pause to buffer almost continuously.\n\nConvert the clip instead (DLSS > Convert & save) to watch it smoothly afterwards.\n\nStart the live session anyway?"},
+            {L"neural.live.declined", L"Live neural rendering declined for this video; convert it instead (DLSS > Convert & save)"},
+            {L"neural.live.directory_failed", L"The neural segment folder could not be created; check the cache location"},
             {L"neural.preview.title", L"Previewing neural settings"},
             {L"neural.preview.detail", L"Rendering this frame with the new settings"},
             {L"neural.failure.gpu-stall", L"The GPU stalled during neural rendering."},
@@ -93,6 +95,12 @@ private:
             {L"neural.failure.protocol", L"The neural render helper stopped responding correctly."},
             {L"neural.view.original", L"Original"}, {L"neural.view.rendered", L"Neural rendered"},
             {L"neural.sync.warning", L"The original and neural-rendered streams are out of sync."},
+            // A renderer that latched itself unusable is rebuilt once with the
+            // frame that was on screen; only a rebuild that fails unloads.
+            {L"renderer.removed.rebuilt", L"The graphics device was removed or reset; playback stopped and the renderer was rebuilt"},
+            {L"renderer.removed.lost", L"The graphics device was removed or reset, and the renderer could not be rebuilt. Open the video again."},
+            {L"renderer.stalled.rebuilt", L"The GPU stopped responding; playback stopped and the renderer was rebuilt"},
+            {L"renderer.stalled.lost", L"The GPU stopped responding, and the renderer could not be rebuilt. Open the video again."},
             {L"safe_mode.confirm", L"Restart the player in DLSS SR safe mode?\n\nThis disables the experimental neural add-on for this launch."},
             {L"safe_mode.launch_failed", L"The player could not restart in DLSS SR safe mode.\n\nSee DLSSVideoPlayer.log for details."},
             {L"rehook.title", L"Recreate DLSS"}, {L"rehook.confirm", L"Recreate DLSS now?\n\nRenderer recreation can reset playback or hang while the experimental neural add-on is active."},
@@ -168,7 +176,8 @@ private:
             {L"error.frame", L"No video frame could be decoded. Try another file."},
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
             {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"},
-            {L"status.preparing_source", L"Downloading this source for rendering\u2026"}
+            {L"status.preparing_source", L"Downloading this source for rendering\u2026"},
+            {L"recent.missing", L"This local video has moved or is no longer available."}
         };
         return strings;
     }
