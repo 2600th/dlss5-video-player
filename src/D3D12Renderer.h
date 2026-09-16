@@ -52,7 +52,8 @@ struct D3D12RendererTestOwnedResource {
 
 // Substitutes for the GPU operations a test cannot perform: the fence wait and
 // signal, the device-removed reason, the capture readback and the process exit a
-// second retained renderer ends in. A renderer holds one of these only when
+// second retained renderer ends in - plus the one request a test makes of the real
+// device, Device Removed Extended Data. A renderer holds one of these only when
 // something installed it, and no production renderer does, so each site below
 // falls through to the real call. They are grouped behind one pointer rather than
 // living as six members so that the class is the same size in every translation
@@ -65,6 +66,12 @@ struct D3D12RendererTestHooks {
     std::function<bool(std::vector<uint8_t>&)> cacheCapture;
     std::function<void()> exitProcess;
     std::unique_ptr<D3D12RendererTestOwnedResource> ownedResource;
+    // Turn on DRED auto-breadcrumbs and page-fault reporting before the device is
+    // created, so a removal is logged with what the GPU was doing: per-list breadcrumbs
+    // after a fault, and after an explicit RemoveDevice the fact that DRED was on and
+    // nothing was outstanding. Process-wide once set; costs the driver a breadcrumb
+    // write per command list op.
+    bool dred=false;
 };
 
 class D3D12Renderer;
@@ -391,9 +398,9 @@ private:
     // The test hook when one is installed, otherwise the device's answer.
     HRESULT DeviceRemovedReason() const;
     // The one place the renderer records that its GPU cannot be used again, so the
-    // device's reason is logged - with the DRED breadcrumbs in a debug build - once,
-    // on the transition. `reason` is what DeviceRemovedReason answered the caller
-    // that classified `result`; the caller asks once and hands it on.
+    // device's reason is logged - with whatever DRED has to say, on every
+    // configuration - once, on the transition. `reason` is what DeviceRemovedReason
+    // answered the caller that classified `result`; the caller asks once and hands it on.
     void LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult result, HRESULT reason);
     // Presents the current backbuffer and accounts the time; a failure is logged
     // as `what` and classified like any other call on the device.
