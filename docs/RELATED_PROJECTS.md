@@ -1,11 +1,12 @@
 # Related DLSS 5 neural-rendering implementations
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 These projects were reviewed on September 1, 2026 to avoid duplicating solved
 integration work and to compare real-time performance strategies.
 
-The full September 10, 2026 comparison — what to build, what to fix and what to
-refuse, with the licensing boundary for each source — is
-[ECOSYSTEM_REVIEW.md](ECOSYSTEM_REVIEW.md).
+This is the maintained comparison. The longer September 2026 survey it was
+distilled from was retired once its line-number citations went stale.
 
 ## Adopted ideas
 

@@ -1,7 +1,8 @@
 # Troubleshooting
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
-These instructions describe v0.22.0.
 
 ## The player cannot find the neural runtime
 
@@ -84,7 +85,7 @@ at launch and cannot be changed by a running process.
 release exists; opening it goes to the GitHub releases page and retires that
 version until the next one ships. **Advanced > Check for updates** asks
 immediately and answers either way. The check runs at most once a day, ignores
-drafts and pre-releases, and stores its state in `[Updates]` in
+drafts (every published release is a pre-release, so those count), and stores its state in `[Updates]` in
 `DLSSVideoPlayer.ini` beside the executable; `Enabled=0` turns it off. When
 GitHub cannot be reached the player says so and keeps playing.
 

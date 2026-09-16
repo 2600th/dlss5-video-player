@@ -1,5 +1,7 @@
 # Architecture
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 ## High-level pipeline
 
 ```text
@@ -640,16 +642,15 @@ therefore update the displayed frame without starting a new neural render.
 
 ## Remaining work
 
-The shipped cache/settings/history/export work is described in [Usage](USAGE.md);
-the prioritized plan is [the roadmap](DLSS5_VIDEO_ROADMAP.md). Its P0 items
-(runtime preflight, benchmark, guide ablation, frame identity, stall
-recovery, range preview, comparison controls) are implemented; the
-measured guide ablation lives in [Benchmark](BENCHMARK.md). Of the P1 items,
-confidence-aware optical flow is implemented, buffered viewing shipped as the
-active session, and protection masks were measured and abandoned because the
-NGX mask inputs are inert on both features. The remaining P1 work is
-source-color/HDR preservation, RTX Video modes and the rest of GPU-resident
-processing.
+The shipped cache/settings/history/export work is described in [Usage](USAGE.md).
+Runtime preflight, the benchmark, the guide ablation, frame identity, stall
+recovery, range preview, comparison controls and confidence-aware optical flow
+are implemented; the measured guide ablation lives in [Benchmark](BENCHMARK.md).
+Buffered viewing shipped as the active session, and protection masks were
+measured and abandoned because the NGX mask inputs are inert on both features.
+What remains is source-color/HDR preservation, RTX Video modes and the rest of
+GPU-resident processing; the changelog's `Unreleased` section carries anything
+in flight.
 
 The harness under `tools/benchmark/` is deliberately not a second implementation
 of what it scores. Its cell grid, cell luma, scene-cut thresholds and cut

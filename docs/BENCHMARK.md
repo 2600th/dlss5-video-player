@@ -1,11 +1,13 @@
 # Neural quality benchmark
 
-Roadmap P0 items 2 and 3 ([DLSS5_VIDEO_ROADMAP.md](DLSS5_VIDEO_ROADMAP.md))
-ask for a repeatable test set, measured neural time / FPS / VRAM / flicker /
-OCR / face consistency / colour shift / determinism, blind one-pass versus
-two-pass comparison, and an ablation of every guide and control. The scripts
-under [`tools/benchmark/`](../tools/benchmark/README.md) implement that
-against the isolated `NeuralWorker.exe`; this page is the operator's summary.
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
+The benchmark exists to give quality claims a repeatable test set: measured
+neural time / FPS / VRAM / flicker / OCR / face consistency / colour shift /
+determinism, blind one-pass versus two-pass comparison, and an ablation of
+every guide and control. The scripts under
+[`tools/benchmark/`](../tools/benchmark/README.md) implement that against the
+isolated `NeuralWorker.exe`; this page is the operator's summary.
 
 ## Run it
 
@@ -31,11 +33,14 @@ run concurrently; the runner prefers the snapshot.
 
 ### The corpus, and where it stops being synthetic
 
-`corpus.py` has fourteen builders. Thirteen run from a clean checkout; the
-fourteenth, `faces`, needs an external fixture and is skipped with a warning when it
-is absent. Nine are synthetic — seeded FFmpeg sources, pinned colours, no camera —
-and carry `"synthetic": true` in `manifest.json`. Four are `"category": "real"`,
-`"synthetic": false`, and are cut from this repository's own demo capture,
+`corpus.py` carries three kinds of builder, and `manifest.json` - not this page -
+is the count that is true for a given checkout. Synthetic clips (seeded FFmpeg
+sources, pinned colours, no camera) carry `"synthetic": true` and build
+everywhere. Camera-original clips are downloaded by video id through
+`fetch_camera_original.ps1`, and each skips itself with a warning when its
+source is absent, as `faces` - which needs an external fixture - always has.
+The `"category": "real"`, `"synthetic": false` clips are cut from this
+repository's own demo capture,
 `docs/media/neural-comparison-demo.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
 git). They exist because every quality conclusion here used to rest on mandelbrot
 zooms and cellular automata, and because they need no fixture to fetch and add

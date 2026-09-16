@@ -130,6 +130,50 @@ which is empty in a hole, so the attach path never fires there.
   the unused `ReleasePackagePolicy.h` (a drifted copy of the packaging
   allowlist) is gone; configure fails if a `*_TESTING` seam reaches the player
   or the worker.
+- The residue the audit batch left is closed. Every notice it added is a
+  localized table entry (`neural.live.declined`, `neural.live.directory_failed`,
+  `renderer.removed.*`, `renderer.stalled.*`, `recent.missing`). The live
+  out-of-sync hand-back and the once-per-source pace confirmation have
+  regression tests through the real handlers - the first by replacing the
+  synchronized pair with a frame source whose numbering trips the resync guard,
+  the second with a configurable answer to the captured message box. A seek
+  whose GPU wait fails takes the same one-rebuild recovery as the tick instead
+  of unloading silently. DRED is a runtime decision through the renderer's test
+  hooks rather than a `_DEBUG` build switch, so the device-loss smoke now
+  enables it, queries it and prints what it said; on this runtime an explicit
+  `RemoveDevice()` yields no breadcrumbs because the runtime links them only
+  for work still outstanding, and the renderer's log line says so in words
+  ("DRED enabled; no breadcrumbs outstanding") rather than reading as
+  "unavailable". The Debug configuration links again - NGX's debug-CRT import
+  library is selected per configuration by one CMake variable - and the
+  `RDX*.tmp` sweep has a permanent two-sided test. The NVIDIA SDK licence is
+  normalised to CRLF (BOM stripped) as it is staged, so `PACKAGE_MANIFEST.txt`
+  is byte-identical across clones with different `core.autocrlf`, and the
+  package verifier rejects any packaged text whose line endings or BOM deviate.
+  The three release-only workflow steps were exercised for real on a throwaway
+  branch against this repository with the pinned actions: the provenance
+  attestation was signed through Sigstore and is retrievable by the artifact's
+  digest, `archive: false` uploaded the zip under its own name with the same
+  digest, and the draft was created with both files and no tag materialised;
+  the run, artifact, draft and branch were then deleted.
+- Documentation: two agent-era planning documents (`docs/ECOSYSTEM_REVIEW.md`,
+  self-dated to 0.17.1 with line-number citations into files rewritten since,
+  and `docs/DLSS5_VIDEO_ROADMAP.md`, a status-and-plan note whose content the
+  architecture and usage guides already own) are retired, along with an
+  untracked hand-off note that had been hidden by a local exclude; every
+  inbound link is rewritten and the one historical record that cited them says
+  so. Stale claims in the shipped guides are corrected: the verification links
+  that pointed at the first record only now point at the dated list, the
+  update-check paragraph no longer says pre-releases are ignored (every
+  published release is one, and the code counts them), the benchmark page no
+  longer carries builder counts that the manifest contradicts, the packaged
+  overview describes the portable suites plus the GPU label, and SECURITY.md
+  states the process, TLS, CFG/CET, DLL-search and supply-chain properties the
+  batch introduced. Every guide that describes the current tree now carries
+  `_Verified against <version> (<sha>) on <date>._` under its title, and
+  `tools/release_notes.ps1` - already the gate for a VERSION bump - fails when
+  any of the seventeen is missing its line or stamped with an older version, so
+  a release cannot ship a guide nobody re-read.
 
 ## 0.22.0 - 2026-09-16
 

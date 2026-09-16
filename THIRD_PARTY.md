@@ -1,5 +1,7 @@
 # Third-party components
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 The project source is MIT-licensed, but the release interoperates with and may
 redistribute components under separate terms. No upstream endorsement is
 claimed. Exact packaged binaries are pinned in `packaging/runtime-lock.json` and

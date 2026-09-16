@@ -1,6 +1,8 @@
 # Using DLSS 5 Video Player
 
-This guide covers v0.22.0, including whole-video session coverage and seeking,
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
+This guide covers whole-video session coverage and seeking,
 recent history, settings-aware cache identity, media export and
 highest-bitrate YouTube selection.
 
@@ -335,6 +337,6 @@ produce an explicit error instead of being silently discarded or converted.
 Failure or cancellation removes the exporter-owned temporary output and leaves
 the inputs and any existing destination intact.
 
-See [troubleshooting](TROUBLESHOOTING.md) for diagnostics and
-[verification](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md)
+See [troubleshooting](TROUBLESHOOTING.md) for diagnostics and the dated
+[hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing)
 for tested boundaries.

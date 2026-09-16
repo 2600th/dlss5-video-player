@@ -1,5 +1,7 @@
 # DLSS 5 Video Player
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 Run a video, photo or GIF through NVIDIA's DLSS 5 neural renderer, then look at
 the result next to the original on the same frame. Windows only. Needs an RTX
 card.
@@ -413,9 +415,9 @@ separate helper process; playback upscaling runs in the player.
 Bug report: build or commit, GPU, driver, source size and frame rate, steps,
 log excerpts. Strip private paths and signed media URLs from logs first.
 
-Pull request: run `ctest` green on a clean checkout of `main` before opening
-it. Renderer changes also need the GPU smoke test. Keep the source-resolution
-and neural-validation contracts intact.
+Pull request: run `ctest -LE gpu` green on a clean checkout of `main` before
+opening it. Renderer changes also need `ctest -L gpu` on an RTX card. Keep the
+source-resolution and neural-validation contracts intact.
 
 ## Credits and license
 

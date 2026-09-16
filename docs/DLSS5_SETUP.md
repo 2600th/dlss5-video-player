@@ -1,5 +1,7 @@
 # Experimental DLSS 5 neural-rendering mode
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 This is a community experiment built around a separately supplied RenoDX /
 ReShade add-on and modified neural runtime. It is not NVIDIA's official
 production DLSS 5 integration or a claim that the public NVIDIA SDK checkout
@@ -106,6 +108,9 @@ An RTX 5090 (driver 616.64) then confirmed the universal runtime at 1080p
 The same machine re-ran all three geometries on 0.17.0 at 8.4, 15.4 and
 42.0 ms/frame; see the
 [0.17.0 RTX 5090 record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-10-RTX5090.md).
+Later records - the 0.20.0 RTX 5090 session, the 0.21.x RTX 4080 gate and
+cold-stack record, and the driven-session matrix - are listed with dates under
+the README's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
 Turing and Ampere have no hardware verification in this project yet.
 
 Feature 18 is created by the driver's NGX core, so the driver is a hard

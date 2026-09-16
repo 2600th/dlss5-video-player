@@ -41,6 +41,37 @@ $end = $lines.Count
 for ($i = $start + 1; $i -lt $lines.Count; $i++) {
     if ($lines[$i] -match '^\*\*[0-9]+\.[0-9]+\.[0-9]+\*\* \(') { $end = $i; break }
 }
+
+# Every guide that describes the current tree carries one line under its title:
+#
+#     _Verified against <version> (<short sha>) on <YYYY-MM-DD>._
+#
+# It records when someone last read the document against the code, not when
+# the file was last touched, so a stamp behind VERSION is the signal that a
+# release is about to ship a guide nobody re-read. The list is fixed here so a
+# guide cannot quietly stop carrying one; records of a date (verification
+# reports, measurements, screenshots) and verbatim upstream text (licences,
+# notices) are deliberately absent because re-stamping them would claim they
+# describe the current tree, which is the opposite of what they are.
+$stampedDocs = @(
+    'README.md', 'TECHNICAL_OVERVIEW.md', 'CONTRIBUTING.md', 'SECURITY.md', 'THIRD_PARTY.md',
+    'docs/USAGE.md', 'docs/BUILDING.md', 'docs/TROUBLESHOOTING.md', 'docs/ARCHITECTURE.md',
+    'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md', 'docs/EXAMPLE_VIDEOS.md', 'docs/BENCHMARK.md',
+    'docs/media/README.md', 'tools/benchmark/README.md', 'tools/demo-video/README.md',
+    'external/youtube/README.md'
+)
+$stampPattern = '^_Verified against ([0-9]+\.[0-9]+\.[0-9]+) \(([0-9a-f]{7,40})\) on ([0-9]{4}-[0-9]{2}-[0-9]{2})\._$'
+$stale = @()
+foreach ($doc in $stampedDocs) {
+    $path = Join-Path $repositoryRoot $doc
+    $stamp = Select-String -LiteralPath $path -Pattern $stampPattern | Select-Object -First 1
+    if (-not $stamp) { $stale += "$doc has no '_Verified against <version> (<sha>) on <date>._' line"; continue }
+    $stampedVersion = $stamp.Matches[0].Groups[1].Value
+    if ($stampedVersion -ne $version) { $stale += "$doc was last verified against $stampedVersion, not $version" }
+}
+if ($stale.Count) {
+    throw ("Re-read these against the code and re-stamp them before tagging {0}:`n  {1}" -f $version, ($stale -join "`n  "))
+}
 $summary = ($lines[$start..($end - 1)] -join "`n").TrimEnd()
 
 # CI builds, tests and attests the core zip. The complete zip with the neural

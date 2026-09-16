@@ -1,7 +1,9 @@
 # Neural quality benchmark
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 Repeatable corpus, worker driver, metric analysis and blind A/B tooling for the
-isolated `NeuralWorker.exe` (roadmap P0 items 2 and 3). Everything is written
+isolated `NeuralWorker.exe`. Everything is written
 under `build-upscaling/` (already gitignored); nothing here touches the player,
 its cache or the committed runtime.
 
@@ -142,7 +144,7 @@ per-clip verdicts, and - with `--sweep` - both threshold families ranked. Cell
 features are cached under `<corpus>/cutlab-cache` on the clip's own digest, so the
 first run costs a decode pass and later sweeps cost seconds.
 
-`--sweep` compares the shipped residual criterion against roadmap survey item 3, the
+`--sweep` compares the shipped residual criterion against the
 scale-free candidate in `cutmirror.FailedFractionCriterion`: a cell's match failed
 when its winning displacement costs more than `ratio` x its standing-still cost, and
 the decision is the fraction of failed cells rather than a mean residual. As of
@@ -179,7 +181,7 @@ shipped-state arms are `--profile-file docs/measurements/depth-ab-20260914/shipp
 --profiles shipped-depth-proxy shipped-depth-constant`, which write all eight player keys
 and differ only in `guides`.
 
-The roadmap's depth A/B is `--profiles depth-constant depth-proxy`; both name guide
+The depth A/B is `--profiles depth-constant depth-proxy`; both name guide
 strings the matrix already carries (`depth=0` *is* the constant 0.75 field), so they
 resolve to `depth-off` and `baseline` and reuse their run directories rather than
 rendering the same configuration twice. `depth-of` is refused by name: `--guides`

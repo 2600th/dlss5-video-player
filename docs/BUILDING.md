@@ -1,5 +1,7 @@
 # Building and testing
 
+_Verified against 0.22.0 (da8871b) on 2026-09-16._
+
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the
 commands below from the repository root in a Developer PowerShell for that
@@ -71,8 +73,8 @@ neural runtime staged beside the executable: `UpscalingGpuSmoke` and
 runs the pair. `UpscalingGpuSmoke.exe <clip> 1440 device-loss` additionally
 removes the D3D12 device mid-frame and checks the renderer's recovery.
 CTest still does not establish visual quality. For changes to rendering, timing
-or decoding, also run applicable GPU/media smoke checks from the
-[verification record](https://github.com/2600th/dlss5-video-player/blob/main/docs/VERIFICATION-2026-09-02.md).
+or decoding, also run the applicable GPU/media checks from the most recent of
+the dated [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
 
 CMake accepts absolute `DLSS_SDK`, `FFMPEG_STAGED_DIR` and `YOUTUBE_STAGED_DIR`
 paths when verified inputs live elsewhere. Keep downloaded binaries out of Git.
@@ -157,13 +159,13 @@ rather than rebuilding - and verifies an explicit file allowlist and manifest:
 
 ```powershell
 ./tools/package_release.ps1 -BuildDirectory build-upscaling -PackageSuffix ''
-./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v0.22.0-win64.zip -PackageSuffix ''
+./tools/verify_package.ps1 -Zip dist/DLSSVideoPlayer-v<version>-win64.zip -PackageSuffix ''
 ```
 
 This complete experimental package requires the locked runtime and helpers.
 The assembler refuses to replace an existing output; select a new suffix for
 another local candidate. The published download uses the
-`dlss5-video-player-v0.22.0-win64.zip` name.
+`dlss5-video-player-v<version>-win64.zip` name.
 
 `package_release.bat` wraps the complete package with the default `-upscaling`
 suffix. `package_public_release.bat` creates the smaller core package:
