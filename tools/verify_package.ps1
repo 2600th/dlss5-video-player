@@ -115,6 +115,19 @@ function Assert-NoSensitiveText {
     }
 }
 
+# .gitattributes pins packaged Markdown to LF and every other packaged text
+# file to CRLF, none with a BOM, and package_release.ps1 normalises the text it
+# takes from outside the repository to the same shape. Anything else means the
+# manifest hash would not match another machine's.
+function Assert-PinnedLineEndings {
+    param([string]$RelativePath, [string]$Text)
+    if ($Text.Length -gt 0 -and $Text[0] -eq [char]0xFEFF) { throw "UTF-8 BOM is forbidden in packaged text: $RelativePath" }
+    if ($RelativePath.EndsWith('.md', [StringComparison]::OrdinalIgnoreCase)) {
+        if ($Text.Contains("`r")) { throw "Packaged Markdown must use LF line endings: $RelativePath" }
+    }
+    elseif ($Text -cmatch '(?<!\r)\n|\r(?!\n)') { throw "Packaged text must use CRLF line endings: $RelativePath" }
+}
+
 function Assert-ReleaseExecutableIdentity {
     param([string]$Root)
     $identity = (Get-Item -LiteralPath (Join-Path $Root 'DLSSVideoPlayer.exe')).VersionInfo
@@ -229,7 +242,8 @@ function Assert-Stage {
         }
         $path = Join-Path $resolvedRoot $relative
         if ($relative -match '(?i)(\.md|\.txt|\.ini)$' -or $relative -ceq 'LICENSE') {
-            $text = Get-Content -LiteralPath $path -Raw
+            $text = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($path))
+            Assert-PinnedLineEndings -RelativePath $relative -Text $text
             if ($text -match '(?i)\bpt-br\b|portugu[eê]s') {
                 throw "Portuguese content marker is forbidden: $relative"
             }

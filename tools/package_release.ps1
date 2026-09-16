@@ -51,6 +51,20 @@ function Get-Sha256 {
     finally { $stream.Dispose() }
 }
 
+# Text that comes from outside this repository (the NVIDIA SDK checkout) is not
+# under .gitattributes, so its line endings follow whoever cloned it and the
+# manifest hash would differ between a maintainer and CI. Every text file the
+# repository itself packages is pinned to CRLF without a BOM; stage such
+# sources the same way and leave every other byte alone.
+function Copy-NormalizedText {
+    param([string]$Path, [string]$Destination)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $start = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $text = [regex]::Replace($latin1.GetString($bytes, $start, $bytes.Length - $start), '\r?\n', "`r`n")
+    [IO.File]::WriteAllBytes($Destination, $latin1.GetBytes($text))
+}
+
 function Get-OrdinalPackageFiles {
     param([string]$Root)
     $filesByPath = @{}
@@ -203,7 +217,7 @@ if ($PublicCore) {
         @('CHANGELOG.md', (Join-Path $repositoryRoot 'CHANGELOG.md')),
         @('THIRD_PARTY.md', (Join-Path $repositoryRoot 'THIRD_PARTY.md')),
         @('PUBLIC_RELEASE_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\PUBLIC_RELEASE_NOTICE.txt')),
-        @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt')),
+        @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt'), 'NormalizeText'),
         @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
         @('THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-optical-flow-MIT.txt')),
         @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
@@ -278,7 +292,8 @@ New-Item -ItemType Directory -Path $stageFull | Out-Null
 foreach ($source in $sources) {
     $destination = Join-Path $stageFull $source[0]
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-    Copy-Item -LiteralPath $source[1] -Destination $destination
+    if ($source.Count -eq 3 -and $source[2] -ceq 'NormalizeText') { Copy-NormalizedText -Path $source[1] -Destination $destination }
+    else { Copy-Item -LiteralPath $source[1] -Destination $destination }
 }
 
 $files = @(Get-OrdinalPackageFiles -Root $stageFull)

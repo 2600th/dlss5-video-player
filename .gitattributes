@@ -10,6 +10,9 @@
 # PACKAGE_MANIFEST.txt, so their line endings cannot be left to each
 # maintainer's core.autocrlf (the *.md rule above already pins the rest of the
 # package). CRLF is what the in-tree INI writer and the manifest itself use.
+# Text staged from outside this tree (the NVIDIA SDK licence) is normalised to
+# the same shape by the packager's Copy-NormalizedText, and verify_package.ps1
+# rejects a packaged text file that deviates from these pins.
 /LICENSE text eol=crlf
 /assets/tabler/LICENSE text eol=crlf
 /packaging/*.ini text eol=crlf
