@@ -69,16 +69,44 @@ jobs:
           # would append CRLF and make the line unreadable to coreutils.
           [System.IO.File]::WriteAllText("$($zip[0].FullName).sha256", "$hash  $($zip[0].Name)`n")
 
+      - name: Extract release notes from CHANGELOG
+        shell: powershell
+        run: |
+          # The release body was the generated commit list, which says what was
+          # committed rather than what changed for a user. The tagged version's
+          # own CHANGELOG section is that answer, and the tag gate above has
+          # already pinned which section to take.
+          $version = (Get-Content -Raw VERSION).Trim()
+          $lines = Get-Content -LiteralPath CHANGELOG.md
+          $start = $null
+          for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^## $([regex]::Escape($version))( |$)") { $start = $i; break }
+          }
+          if ($null -eq $start) {
+            throw "CHANGELOG.md has no '## $version' section; cut it before tagging."
+          }
+          $end = $lines.Count
+          for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^## ') { $end = $i; break }
+          }
+          $notes = $lines[$start..($end - 1)] -join "`n"
+          [System.IO.File]::WriteAllText("$PWD\release-notes.md", $notes.TrimEnd() + "`n")
+          Write-Host "Release notes: $($notes.Length) characters."
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # The CHANGELOG section is the body; the generated commit list is
+          # appended under it by the action rather than being the whole note.
+          body_path: release-notes.md
           generate_release_notes: true
           prerelease: true
           # The packager names the zip after VERSION, which the tag gate above
           # already pinned; a missing file or checksum fails the release
-          # instead of publishing an incomplete one. The full package with the
-          # neural runtime is attached by hand, since CI never fetches that
-          # runtime.
+          # instead of publishing an incomplete one. The complete package with
+          # the neural runtime is attached by hand as
+          # `dlss5-video-player-v<version>-win64.zip` - the name the README
+          # promises - because CI never fetches that runtime.
           fail_on_unmatched_files: true
           files: |
             dist/DLSSVideoPlayer-v*-core-win64.zip
