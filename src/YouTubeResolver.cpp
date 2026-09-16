@@ -347,9 +347,13 @@ bool crack_url(std::wstring_view value, CrackedUrl& result)
     return true;
 }
 
+// A YouTube video id is exactly eleven characters of the URL-safe base64
+// alphabet; the length is part of the format, not a limit.
+constexpr size_t kVideoIdLength = 11;
+
 bool is_video_id(std::wstring_view value)
 {
-    if (value.empty()) return false;
+    if (value.size() != kVideoIdLength) return false;
     return std::all_of(value.begin(), value.end(), [](wchar_t character) {
         return (character >= L'a' && character <= L'z') ||
                (character >= L'A' && character <= L'Z') ||

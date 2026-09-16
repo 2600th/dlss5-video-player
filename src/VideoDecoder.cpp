@@ -75,6 +75,21 @@ static std::wstring Quote(const std::wstring& s) {
     return L"\"" + s + L"\"";
 }
 
+// Bytes of helper stdout a probe may hand back before it is treated as broken:
+// the same bound MediaPipeline's capture keeps.
+static constexpr size_t kCaptureLimit = 1024 * 1024;
+
+// Input-side options for a resolved YouTube stream, placed ahead of its -i. The
+// certificate is verified explicitly rather than by the build's default, which
+// the next ffmpeg pin may change, and the protocol whitelist is the minimal set
+// a direct or HLS googlevideo https stream reaches (https -> tls -> tcp):
+// anything else - file, http, concat, data - is refused by the child itself.
+// Empty for a local file, which a whitelist without "file" would refuse.
+static std::wstring NetworkInputOptions(MediaSourceKind kind) {
+    return kind == MediaSourceKind::YouTube
+        ? std::wstring(L"-tls_verify 1 -protocol_whitelist https,tls,tcp ") : std::wstring();
+}
+
 static double ElapsedMs(std::chrono::steady_clock::time_point since) {
     return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-since).count();
 }
@@ -143,9 +158,11 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     other.StopFrameQueue();
     using std::swap;
     swap(m_backend,other.m_backend);swap(m_reader,other.m_reader);swap(m_path,other.m_path);
-    swap(m_width,other.m_width);swap(m_height,other.m_height);swap(m_nativeWidth,other.m_nativeWidth);swap(m_nativeHeight,other.m_nativeHeight);swap(m_stride,other.m_stride);
-    swap(m_fps,other.m_fps);swap(m_durationSec,other.m_durationSec);swap(m_displayAspect,other.m_displayAspect);
-    swap(m_stillImage,other.m_stillImage);swap(m_gif,other.m_gif);
+    // Everything the probe (or KnownMedia, or Media Foundation) said about the
+    // stream, and the layout it decodes to, travels as one value: the colour
+    // description, the acceleration memo key and the NV12 decision used to be
+    // enumerated here one by one and were the ones left behind.
+    swap(m_source,other.m_source);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
     swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
     swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
@@ -200,20 +217,8 @@ bool VideoDecoder::OpenMetadata(const std::wstring& path, MediaSourceKind source
                                 std::stop_token stop) {
     Close();
     m_path = path;
-    m_width = m_height = 0;
-    m_nativeWidth = m_nativeHeight = 0;
-    m_stride = 0;
-    m_fps = 30.0;
-    m_durationSec = 0.0;
-    m_stillImage = false;
-    m_gif = false;
-    m_displayAspect = 0.0;
-    m_sourceColor = {};
-    m_colorTags.clear();
+    m_source = {};
     m_sourceKind = sourceKind;
-    m_sequentialOpen = false;
-    m_sequentialNv12 = true;
-    m_layout = VideoPixelLayout::Bgra;
     ++m_sourceGeneration;
     m_ffprobeExe = FindTool(L"ffprobe.exe");
     if (!m_ffprobeExe.empty() && ProbeFFmpeg(path, stop) && !stop.stop_requested()) return true;
@@ -243,24 +248,14 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
                             bool sequentialNv12, const KnownMedia* known) {
     Close();
     m_path = path;
-    m_width = m_height = 0;
-    m_nativeWidth = m_nativeHeight = 0;
-    m_stride = 0;
-    m_fps = 30.0;
-    m_durationSec = 0.0;
-    m_stillImage = false;
-    m_gif = false;
-    m_displayAspect = 0.0;
-    m_sourceColor = {};
-    m_colorTags.clear();
+    m_source = {};
     m_sourceKind = sourceKind;
-    // Set for the whole session here; OpenFFmpeg turns it into m_layout once the
-    // probe knows the geometry, and it is untouched by any acceleration
+    // Set for the whole session here; OpenFFmpeg turns it into m_source.layout
+    // once the probe knows the geometry, and it is untouched by any acceleration
     // fallback or seek restart afterwards - so a background export's frames
     // stay NV12-or-Bgra for as long as this decoder instance is open.
-    m_sequentialOpen = sequential;
-    m_sequentialNv12 = sequentialNv12;
-    m_layout = VideoPixelLayout::Bgra;
+    m_source.sequentialOpen = sequential;
+    m_source.sequentialNv12 = sequentialNv12;
     ++m_sourceGeneration;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
@@ -282,10 +277,10 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     LOG("FFmpeg backend unavailable or rejected the file; trying Media Foundation.");
     if (OpenMediaFoundation(path)) {
         m_backend = Backend::MediaFoundation;
-        // A failed OpenFFmpeg can leave m_layout at whatever its probe decided
+        // A failed OpenFFmpeg can leave m_source.layout at whatever its probe decided
         // before StartFFmpeg itself failed; Media Foundation's reader always
         // hands out BGRA, so the layout is pinned back here regardless.
-        m_layout = VideoPixelLayout::Bgra;
+        m_source.layout = VideoPixelLayout::Bgra;
         LOG("Video decoder selected: Windows Media Foundation");
         return true;
     }
@@ -399,7 +394,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         return false;
     }
     const auto deadline=std::chrono::steady_clock::now()+timeout;
-    bool cancelled=false,timedOut=false,pipeError=false;
+    bool cancelled=false,timedOut=false,pipeError=false,overflowed=false;
     char buf[8192];
     for (;;) {
         DWORD available=0;
@@ -415,9 +410,13 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         while(available>0){
             const DWORD want=std::min<DWORD>(available,sizeof(buf));DWORD got=0;
             if(!ReadFile(readPipe,buf,want,&got,nullptr)){pipeError=true;break;}
-            if(got==0)break;output.append(buf,buf+got);available-=got;
+            if(got==0)break;
+            // A probe's answer is a few hundred bytes; the cap is against a child
+            // that streams something else at us, not against any real answer.
+            if(output.size()+got>kCaptureLimit){overflowed=true;break;}
+            output.append(buf,buf+got);available-=got;
         }
-        if(pipeError)break;
+        if(pipeError||overflowed)break;
         if(WaitForSingleObject(pi.hProcess,0)==WAIT_OBJECT_0){
             DWORD remaining=0;if(!PeekNamedPipe(readPipe,nullptr,0,nullptr,&remaining,nullptr)||remaining==0)break;
         }
@@ -425,7 +424,8 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
         if(std::chrono::steady_clock::now()>=deadline){timedOut=true;break;}
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    if(cancelled||timedOut||pipeError){TerminateJobObject(job,1);WaitForSingleObject(pi.hProcess,500);}
+    if(overflowed)LOG("ffprobe output exceeded "<<(kCaptureLimit>>20)<<" MiB; discarding it.");
+    if(cancelled||timedOut||pipeError||overflowed){TerminateJobObject(job,1);WaitForSingleObject(pi.hProcess,500);}
     CloseHandle(readPipe);
 
     DWORD code = 1;
@@ -434,21 +434,23 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     CloseHandle(job);
-    return !cancelled&&!timedOut&&!pipeError&&code == 0;
+    return !cancelled&&!timedOut&&!pipeError&&!overflowed&&code == 0;
 }
 
 bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
-    m_hardwareProfile.clear();
-    m_sourceColor={};
-    m_colorTags.clear();
+    // Options that precede -i: a resolved stream is https and nothing else, so
+    // the child is told to verify the certificate and to refuse every protocol
+    // the URL cannot legitimately need. Absent for a local file, which the
+    // whitelist would refuse.
+    const std::wstring inputOptions=NetworkInputOptions(m_sourceKind);
     std::wstring args =
         L"-v error -select_streams v:0 "
         L"-show_entries stream=width,height,codec_name,pix_fmt,color_space,color_range,color_primaries,color_transfer,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
-        L"-of default=noprint_wrappers=1 " + Quote(path);
+        L"-of default=noprint_wrappers=1 " + inputOptions + L"-i " + Quote(path);
 
     std::string text;
     DWORD code = 0;
-    const auto timeout=m_sourceKind==MediaSourceKind::YouTube?m_probeTimeout:std::chrono::milliseconds(30000);
+    const auto timeout=m_probeTimeout;
     if (!RunCapture(m_ffprobeExe, args, text, &code, stop, timeout)) {
         LOG("ffprobe failed, exitCode=" << code);
         return false;
@@ -494,28 +496,28 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     }
     // ffprobe prints stream entries in its own order, so the key is composed
     // once both fields are in hand.
-    m_hardwareProfile = codecName.empty() ? pixelFormat : (pixelFormat.empty() ? codecName : codecName + "/" + pixelFormat);
+    m_source.hardwareProfile = codecName.empty() ? pixelFormat : (pixelFormat.empty() ? codecName : codecName + "/" + pixelFormat);
     // Same reason as the key above: the four colour entries arrive in whatever
     // order ffprobe chose, so the description is composed once all four are in
     // hand. An entry ffprobe printed as "unknown" left its string empty and maps
     // to Unspecified; anything declared but outside the sets below maps to Other,
     // so a refusal can tell "says BT.2020" from "says nothing".
-    m_sourceColor.matrix = colorSpace.empty() ? ColorMatrix::Unspecified :
+    m_source.color.matrix = colorSpace.empty() ? ColorMatrix::Unspecified :
         colorSpace == "bt709" ? ColorMatrix::Bt709 :
         (colorSpace == "bt470bg" || colorSpace == "smpte170m") ? ColorMatrix::Bt601 : ColorMatrix::Other;
-    m_sourceColor.range = colorRange == "tv" ? ColorRange::Limited :
+    m_source.color.range = colorRange == "tv" ? ColorRange::Limited :
         colorRange == "pc" ? ColorRange::Full : ColorRange::Unspecified;
-    m_sourceColor.primaries = colorPrimaries.empty() ? ColorPrimaries::Unspecified :
+    m_source.color.primaries = colorPrimaries.empty() ? ColorPrimaries::Unspecified :
         colorPrimaries == "bt709" ? ColorPrimaries::Bt709 :
         colorPrimaries == "bt470bg" ? ColorPrimaries::Bt470bg :
         colorPrimaries == "smpte170m" ? ColorPrimaries::Smpte170m : ColorPrimaries::Other;
-    m_sourceColor.transfer = colorTransfer.empty() ? ColorTransfer::Unspecified :
+    m_source.color.transfer = colorTransfer.empty() ? ColorTransfer::Unspecified :
         colorTransfer == "bt709" ? ColorTransfer::Bt709 :
         colorTransfer == "smpte170m" ? ColorTransfer::Smpte170m : ColorTransfer::Other;
     // Kept verbatim for the refusal log line: "other" is a diagnosis nobody can
     // act on, "bt2020nc" is.
     const auto tag=[](const std::string& value){return value.empty()?std::string("unspecified"):value;};
-    m_colorTags = "matrix=" + tag(colorSpace) + " range=" + tag(colorRange) +
+    m_source.colorTags = "matrix=" + tag(colorSpace) + " range=" + tag(colorRange) +
                   " primaries=" + tag(colorPrimaries) + " transfer=" + tag(colorTransfer);
 
     if (!width || !height) {
@@ -523,28 +525,28 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
         return false;
     }
 
-    m_nativeWidth = width;
-    m_nativeHeight = height;
-    m_width = width;
-    m_height = height;
-    m_stride = static_cast<int32_t>(m_width * 4u);
-    m_fps = avgRate > 0.0 ? avgRate : (rawRate > 0.0 ? rawRate : 30.0);
+    m_source.nativeWidth = width;
+    m_source.nativeHeight = height;
+    m_source.width = width;
+    m_source.height = height;
+    m_source.stride = static_cast<int32_t>(m_source.width * 4u);
+    m_source.fps = avgRate > 0.0 ? avgRate : (rawRate > 0.0 ? rawRate : 30.0);
     // Matroska stores per-track duration here; its container may include longer audio.
-    m_durationSec = videoDuration > 0.0 ? videoDuration :
+    m_source.durationSec = videoDuration > 0.0 ? videoDuration :
         ((std::isfinite(duration) && duration > 0.0) ? duration : 0.0);
-    m_gif = format == "gif";
-    m_stillImage = format == "image2" || format == "png_pipe" || format == "jpeg_pipe" ||
+    m_source.gif = format == "gif";
+    m_source.stillImage = format == "image2" || format == "png_pipe" || format == "jpeg_pipe" ||
         format == "bmp_pipe" || format == "tiff_pipe" || format == "webp_pipe";
     // A photo has one frame, with a finite carrier duration for the existing
     // neural cache. GIF delays are centiseconds: a 100 Hz carrier preserves
     // every delay instead of retiming variable-delay animation to its average.
-    if (m_stillImage) {
-        m_fps = 1.0; m_durationSec = 1.0;
+    if (m_source.stillImage) {
+        m_source.fps = 1.0; m_source.durationSec = 1.0;
         // JPEG EXIF orientation is frame side data, absent from stream metadata.
         // FFmpeg autorotates its output; expose matching row geometry to the GPU.
         std::string orientation;
         if (!RunCapture(m_ffprobeExe, L"-v error -select_streams v:0 -read_intervals \"%+#1\" "
-            L"-show_entries frame_side_data=rotation -of default=noprint_wrappers=1 " + Quote(path),
+            L"-show_entries frame_side_data=rotation -of default=noprint_wrappers=1 " + inputOptions + L"-i " + Quote(path),
             orientation, &code, stop, timeout)) return false;
         std::istringstream rotations(orientation);
         while (std::getline(rotations, line)) {
@@ -552,8 +554,8 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             try {
                 const double angle = std::stod(line.substr(9));
                 if (std::isfinite(angle) && std::abs(std::fmod(std::abs(angle), 180.0) - 90.0) < 0.5) {
-                    std::swap(m_width, m_height);std::swap(m_nativeWidth, m_nativeHeight);
-                    m_stride = static_cast<int32_t>(m_width * 4u);
+                    std::swap(m_source.width, m_source.height);std::swap(m_source.nativeWidth, m_source.nativeHeight);
+                    m_source.stride = static_cast<int32_t>(m_source.width * 4u);
                     if (displayAspect > 0.1) displayAspect = 1.0 / displayAspect;
                     if (sampleAspect > 0.0) sampleAspect = 1.0 / sampleAspect;
                 }
@@ -561,15 +563,15 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
             break;
         }
     }
-    else if (m_gif) m_fps = 100.0;
-    if (std::isfinite(displayAspect) && displayAspect > 0.1) m_displayAspect = displayAspect;
-    else m_displayAspect = (double(m_width) * sampleAspect) / double(m_height);
+    else if (m_source.gif) m_source.fps = 100.0;
+    if (std::isfinite(displayAspect) && displayAspect > 0.1) m_source.displayAspect = displayAspect;
+    else m_source.displayAspect = (double(m_source.width) * sampleAspect) / double(m_source.height);
 
     // Avoid pathological metadata causing gigantic pacing delays/CPU usage.
-    m_fps = std::clamp(m_fps, 1.0, 240.0);
+    m_source.fps = std::clamp(m_source.fps, 1.0, 240.0);
 
-    LOG("ffprobe: " << m_width << "x" << m_height << " DAR=" << m_displayAspect << " @ " << m_fps
-        << " fps, duration=" << m_durationSec << ", " << m_colorTags);
+    LOG("ffprobe: " << m_source.width << "x" << m_source.height << " DAR=" << m_source.displayAspect << " @ " << m_source.fps
+        << " fps, duration=" << m_source.durationSec << ", " << m_source.colorTags);
     return true;
 }
 
@@ -650,7 +652,7 @@ static void StopFFmpegChild(HANDLE process,HANDLE job,HANDLE stdoutRead,DWORD wa
 
 bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAcceleration> requested) {
     FFmpegAcceleration acceleration=requested.value_or(m_ffmpegAcceleration);
-    const unsigned unavailable=AccelerationMemory().Unavailable(m_hardwareProfile);
+    const unsigned unavailable=AccelerationMemory().Unavailable(m_source.hardwareProfile);
     if(acceleration==FFmpegAcceleration::Cuda&&(unavailable&kCudaUnavailable))
         acceleration=FFmpegAcceleration::D3D11Va;
     if(acceleration==FFmpegAcceleration::D3D11Va&&(unavailable&kD3d11Unavailable))
@@ -678,9 +680,9 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // source frames for its first output frame and duplicating one soon after,
     // which both offsets the reconstructed timeline by up to half a frame and
     // makes the first frame of a seek ambiguous.
-    if(!m_stillImage)seekSeconds=SnapToFrameGrid(seekSeconds,m_fps);
-    if (m_stillImage || m_gif) acceleration = FFmpegAcceleration::Software;
-    if (m_stillImage) seekSeconds = 0.0;
+    if(!m_source.stillImage)seekSeconds=SnapToFrameGrid(seekSeconds,m_source.fps);
+    if (m_source.stillImage || m_source.gif) acceleration = FFmpegAcceleration::Software;
+    if (m_source.stillImage) seekSeconds = 0.0;
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
@@ -703,16 +705,16 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // offers - needs 63.28 MiB, so 64 covers every supported case.
     HANDLE readPipe = nullptr, writePipe = nullptr;
     const DWORD pipeBytes=static_cast<DWORD>(std::clamp<size_t>(
-        2u*FrameBytes(m_layout,m_width,m_height),
+        2u*FrameBytes(m_source.layout,m_source.width,m_source.height),
         4u<<20,64u<<20));
     // Sizing and piping have to agree on the layout: a pipe sized for NV12 cannot
     // hold a BGRA frame, and the symptom is the partial-read storm this comment
     // describes rather than an error anywhere.
     LOG("FFmpeg pipe " << (pipeBytes >> 20) << " MiB for a "
-        << (m_layout == VideoPixelLayout::Nv12 ? "NV12" : "BGRA") << " "
-        << m_width << "x" << m_height << " frame of "
-        << FrameBytes(m_layout, m_width, m_height) << " bytes ("
-        << (double(pipeBytes) / double(std::max<size_t>(1, FrameBytes(m_layout, m_width, m_height))))
+        << (m_source.layout == VideoPixelLayout::Nv12 ? "NV12" : "BGRA") << " "
+        << m_source.width << "x" << m_source.height << " frame of "
+        << FrameBytes(m_source.layout, m_source.width, m_source.height) << " bytes ("
+        << (double(pipeBytes) / double(std::max<size_t>(1, FrameBytes(m_source.layout, m_source.width, m_source.height))))
         << " frames).");
     if (!CreatePipe(&readPipe, &writePipe, &sa, pipeBytes)) {
         LOG("CreatePipe for ffmpeg failed winerr=" << GetLastError());
@@ -740,31 +742,31 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
         args << L"-hwaccel d3d11va -hwaccel_output_format d3d11 ";
     if (seekSeconds > 0.0)
         args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
-    if (m_gif) args << L"-ignore_loop 1 ";
-    args << L"-i " << Quote(m_path)
+    if (m_source.gif) args << L"-ignore_loop 1 ";
+    args << NetworkInputOptions(m_sourceKind) << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
     // NV12 (the export's session layout, chosen in OpenFFmpeg) is already the
     // decoder's working format up to hwdownload, so it only takes dropping the
     // trailing `format=bgra` conversion and asking for `-pix_fmt nv12` below -
     // 11.1 MB BGRA -> 4.2 MB NV12 per 2578x1080 frame over the pipe.
-    const bool nv12 = m_layout == VideoPixelLayout::Nv12;
+    const bool nv12 = m_source.layout == VideoPixelLayout::Nv12;
     if (acceleration == FFmpegAcceleration::Cuda) {
-        args << L"-vf scale_cuda=" << m_width << L":" << m_height
+        args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
              << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
         if (!nv12) args << L",format=bgra";
         args << L" ";
     } else if (acceleration == FFmpegAcceleration::D3D11Va) {
-        args << L"-vf hwdownload,format=nv12,scale=" << m_width << L":" << m_height
+        args << L"-vf hwdownload,format=nv12,scale=" << m_source.width << L":" << m_source.height
              << L":flags=bicubic";
         if (!nv12) args << L",format=bgra";
         args << L" ";
-    } else if (m_nativeWidth && m_nativeHeight && (m_width != m_nativeWidth || m_height != m_nativeHeight))
-        args << L"-vf scale=" << m_width << L":" << m_height << L":flags=bicubic ";
-    if (m_stillImage) args << L"-frames:v 1 ";
-    if (m_gif && m_durationSec > seekSeconds)
-        args << L"-t " << std::fixed << std::setprecision(6) << (m_durationSec - seekSeconds) << L" ";
+    } else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight))
+        args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic ";
+    if (m_source.stillImage) args << L"-frames:v 1 ";
+    if (m_source.gif && m_source.durationSec > seekSeconds)
+        args << L"-t " << std::fixed << std::setprecision(6) << (m_source.durationSec - seekSeconds) << L" ";
     args << L"-pix_fmt " << (nv12 ? L"nv12" : L"bgra") << L" -fps_mode cfr -r "
-         << std::fixed << std::setprecision(6) << m_fps
+         << std::fixed << std::setprecision(6) << m_source.fps
          << L" -f rawvideo pipe:1";
 
     std::wstring command = Quote(m_ffmpegExe) + L" " + args.str();
@@ -813,7 +815,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     m_ffmpegJob = job;
     m_ffmpegEmittedFrames = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
-    m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_fps);
+    m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_source.fps);
     m_ffmpegAcceleration = acceleration;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     m_restartDiscontinuity = false;
@@ -849,12 +851,12 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         // A file this process produced beside one already probed: same encoder,
         // same geometry, same frame rate. Probing it again would spend a child
         // process on an answer already in hand.
-        m_width = m_nativeWidth = known->width;
-        m_height = m_nativeHeight = known->height;
-        m_fps = known->fps;
-        m_durationSec = known->durationSec;
-        m_hardwareProfile = known->hardwareProfile;
-        m_displayAspect = double(m_width) / double(m_height);
+        m_source.width = m_source.nativeWidth = known->width;
+        m_source.height = m_source.nativeHeight = known->height;
+        m_source.fps = known->fps;
+        m_source.durationSec = known->durationSec;
+        m_source.hardwareProfile = known->hardwareProfile;
+        m_source.displayAspect = double(m_source.width) / double(m_source.height);
     } else if (!ProbeFFmpeg(path,stop) || stop.stop_requested()) {
         return false;
     }
@@ -876,22 +878,22 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     // only for a description SourceNv12ConversionFor already accepted.
     // Decided once here, from the probed geometry, and left alone by every
     // later StartFFmpeg call (acceleration fallback, seek restart) this session.
-    const bool wantNv12 = m_sequentialOpen && m_sequentialNv12;
-    const bool evenGeometry = m_width % 2 == 0 && m_height % 2 == 0;
-    const bool convertible = SourceNv12ConversionFor(m_sourceColor) != SourceNv12Conversion::Unsupported;
+    const bool wantNv12 = m_source.sequentialOpen && m_source.sequentialNv12;
+    const bool evenGeometry = m_source.width % 2 == 0 && m_source.height % 2 == 0;
+    const bool convertible = SourceNv12ConversionFor(m_source.color) != SourceNv12Conversion::Unsupported;
     // Accepted and refused are deliberately one grep away from each other - same
     // "GPU source conversion" prefix, same four tags named either way - so a reader
     // of one render's log gets either the path it took or the reason it did not.
     if (wantNv12 && evenGeometry) {
         if (convertible)
-            LOG("GPU source conversion accepted: " << m_colorTags
+            LOG("GPU source conversion accepted: " << m_source.colorTags
                 << "; decoding to NV12 and converting it on the GPU.");
         else
-            LOG("GPU source conversion refused: " << m_colorTags
+            LOG("GPU source conversion refused: " << m_source.colorTags
                 << "; no conversion implements that description, so the source decodes to "
                    "BGRA and ffmpeg converts it on the CPU instead.");
     }
-    m_layout = (wantNv12 && evenGeometry && convertible)
+    m_source.layout = (wantNv12 && evenGeometry && convertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     return StartFFmpeg(0.0,initialAcceleration);
 }
@@ -903,7 +905,7 @@ double VideoDecoder::FFmpegHeadSeconds() const {
     const int64_t timelineFrame=m_ffmpegSpawnFirstFrame+
         static_cast<int64_t>(m_ffmpegEmittedFrames)-m_ffmpegFirstSourceFrame;
     return static_cast<double>(m_ffmpegSeekBase100ns)*1e-7+
-        static_cast<double>(timelineFrame)/std::max(1.0,m_fps);
+        static_cast<double>(timelineFrame)/std::max(1.0,m_source.fps);
 }
 
 bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
@@ -913,7 +915,7 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     // later opens skip it. One that fails after delivering frames is a stream or
     // position problem and must not disqualify the hardware for everything else.
     if(m_ffmpegEmittedFrames==0)
-        AccelerationMemory().Remember(m_hardwareProfile,
+        AccelerationMemory().Remember(m_source.hardwareProfile,
             m_ffmpegAcceleration==FFmpegAcceleration::Cuda?kCudaUnavailable:kD3d11Unavailable);
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
@@ -955,9 +957,9 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
 VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
     if (!m_pendingFrameBytes) return VideoReadResult::EndOfStream;
     const double completedSeconds = FFmpegHeadSeconds();
-    const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_fps));
-    if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_durationSec > 0.0 &&
-        completedSeconds + endTolerance >= m_durationSec) {
+    const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_source.fps));
+    if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_source.durationSec > 0.0 &&
+        completedSeconds + endTolerance >= m_source.durationSec) {
         LOG("Discarding an incomplete trailing raw frame after the expected YouTube duration.");
         m_pendingFrameBytes = 0;
         return VideoReadResult::EndOfStream;
@@ -969,7 +971,7 @@ VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
 
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop,bool block) {
     if (!m_ffmpegStdout) return VideoReadResult::EndOfStream;
-    const size_t frameBytes = FrameBytes(m_layout, m_width, m_height);
+    const size_t frameBytes = FrameBytes(m_source.layout, m_source.width, m_source.height);
     if (!frameBytes) return VideoReadResult::Error;
   for(;;){
     if(stop.stop_requested())return VideoReadResult::Cancelled;
@@ -1079,14 +1081,14 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if(sourceFrame<m_ffmpegFirstSourceFrame)continue;
 
     out.bgra.swap(m_pendingFrame);
-    out.layout = m_layout;
+    out.layout = m_source.layout;
     RecycleFrameBuffer(std::move(m_pendingFrame));
     m_pendingFrame.clear();
     const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
     out.timestamp100ns = m_ffmpegSeekBase100ns +
-        static_cast<int64_t>((static_cast<double>(timelineFrame) / m_fps) * 10000000.0);
+        static_cast<int64_t>((static_cast<double>(timelineFrame) / m_source.fps) * 10000000.0);
     out.discontinuity = (timelineFrame == 0 && (m_ffmpegSeekBase100ns != 0 || m_restartDiscontinuity));
-    out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(out.timestamp100ns) * m_fps * 1e-7));
+    out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(out.timestamp100ns) * m_source.fps * 1e-7));
     out.sourceGeneration = m_sourceGeneration;
     m_restartDiscontinuity = false;
     PublishSeekTiming(true);
@@ -1105,11 +1107,26 @@ void VideoDecoder::StartFrameQueue(QueueBuffer buffered) {
         m_frameQueueEnabled = true;
     }
     try {
-        m_frameThread = std::jthread([this](std::stop_token stop) { FrameQueueLoop(stop); });
+        m_frameThread = std::jthread([this](std::stop_token stop) { FrameQueueThread(stop); });
     } catch (const std::system_error& error) {
         std::lock_guard lock(m_frameMutex);
         m_frameQueueEnabled = false;
         LOG("Decoded-frame queue could not start; using synchronous reads. error=" << error.code().value());
+    }
+}
+
+// The try covers the thread body, not only its creation: a frame buffer is
+// 31 MiB at 4K and its allocation can fail, and an exception that leaves the
+// thread terminates the process. A reader parked on the queue is told Error so
+// it unwedges - unless a stop is already in flight, in which case StopFrameQueue
+// has published its own answer and this thread's failure is moot.
+void VideoDecoder::FrameQueueThread(std::stop_token stop) noexcept {
+    try { FrameQueueLoop(stop); }
+    catch (...) {
+        LOG("Decoder frame queue stopped after an unexpected exception.");
+        std::lock_guard lock(m_frameMutex);
+        if (!stop.stop_requested()) m_frameTerminal = VideoReadResult::Error;
+        m_frameCv.notify_all();
     }
 }
 
@@ -1280,29 +1297,29 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
 
     ComPtr<IMFMediaType> current;
     if (FAILED(m_reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &current))) return false;
-    MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &m_width, &m_height);
-    m_nativeWidth=m_width; m_nativeHeight=m_height;
-    m_displayAspect = m_height ? double(m_width)/double(m_height) : 16.0/9.0;
+    MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &m_source.width, &m_source.height);
+    m_source.nativeWidth=m_source.width; m_source.nativeHeight=m_source.height;
+    m_source.displayAspect = m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0;
     UINT32 frN = 0, frD = 0;
     if (SUCCEEDED(MFGetAttributeRatio(current.Get(), MF_MT_FRAME_RATE, &frN, &frD)) && frD)
-        m_fps = double(frN) / double(frD);
+        m_source.fps = double(frN) / double(frD);
 
     UINT32 strideU = 0;
     if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideU)))
-        m_stride = static_cast<int32_t>(strideU);
+        m_source.stride = static_cast<int32_t>(strideU);
     else
-        m_stride = static_cast<int32_t>(m_width * 4);
+        m_source.stride = static_cast<int32_t>(m_source.width * 4);
 
     PROPVARIANT var{};
     PropVariantInit(&var);
     if (SUCCEEDED(m_reader->GetPresentationAttribute(static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE), MF_PD_DURATION, &var))) {
         if (var.vt == VT_UI8 || var.vt == VT_I8)
-            m_durationSec = static_cast<double>(var.vt == VT_I8 ? var.hVal.QuadPart : static_cast<LONGLONG>(var.uhVal.QuadPart)) / 10000000.0;
+            m_source.durationSec = static_cast<double>(var.vt == VT_I8 ? var.hVal.QuadPart : static_cast<LONGLONG>(var.uhVal.QuadPart)) / 10000000.0;
     }
     PropVariantClear(&var);
 
-    LOG("Media Foundation: " << m_width << "x" << m_height << " @ " << m_fps << " fps, duration=" << m_durationSec);
-    return m_width > 0 && m_height > 0;
+    LOG("Media Foundation: " << m_source.width << "x" << m_source.height << " @ " << m_source.fps << " fps, duration=" << m_source.durationSec);
+    return m_source.width > 0 && m_source.height > 0;
 }
 
 bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
@@ -1332,20 +1349,20 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         DWORD maxLen = 0, curLen = 0;
         if (FAILED(buffer->Lock(&data, &maxLen, &curLen))) continue;
 
-        const size_t dstStride = static_cast<size_t>(m_width) * 4u;
-        out.bgra.resize(dstStride * m_height);
+        const size_t dstStride = static_cast<size_t>(m_source.width) * 4u;
+        out.bgra.resize(dstStride * m_source.height);
 
-        int32_t stride = m_stride;
+        int32_t stride = m_source.stride;
         size_t absStride = static_cast<size_t>(std::abs(stride));
-        if (absStride * m_height > curLen) {
+        if (absStride * m_source.height > curLen) {
             stride = static_cast<int32_t>(dstStride);
             absStride = dstStride;
         }
 
         const BYTE* firstRow = data;
-        if (stride < 0) firstRow = data + absStride * (m_height - 1);
+        if (stride < 0) firstRow = data + absStride * (m_source.height - 1);
 
-        for (uint32_t y = 0; y < m_height; ++y) {
+        for (uint32_t y = 0; y < m_source.height; ++y) {
             const BYTE* src = stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
             memcpy(out.bgra.data() + dstStride * y, src, std::min(dstStride, absStride));
         }
@@ -1353,7 +1370,7 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
 
         out.timestamp100ns = timestamp;
         out.discontinuity = (flags & MF_SOURCE_READERF_STREAMTICK) != 0;
-        out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_fps * 1e-7));
+        out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_source.fps * 1e-7));
         out.sourceGeneration = m_sourceGeneration;
         out.layout = VideoPixelLayout::Bgra; // Media Foundation's reader only ever hands out BGRA.
         return true;
@@ -1469,7 +1486,7 @@ void VideoDecoder::PublishSeekTiming(bool frameDelivered) {
 // frame the caller does get must be the one a restart would have handed out.
 VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
 {
-    if(!m_ffmpegProcess||!m_ffmpegStdout||m_stillImage||m_gif)return SeekReuse::Restart;
+    if(!m_ffmpegProcess||!m_ffmpegStdout||m_source.stillImage||m_source.gif)return SeekReuse::Restart;
     size_t buffered=0;
     {
         std::lock_guard lock(m_frameMutex);
@@ -1477,7 +1494,7 @@ VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
         if(m_frameTerminal!=VideoReadResult::NotReady)return SeekReuse::Restart;
         buffered=m_frameQueue.size();
     }
-    const int64_t target=FirstFrameAtOrAfter(seconds,m_fps);
+    const int64_t target=FirstFrameAtOrAfter(seconds,m_source.fps);
     // Everything the child has emitted was either handed out or is still
     // buffered, so this is the next frame the caller can be given.
     const int64_t nextDeliverable=m_ffmpegSpawnFirstFrame+
@@ -1516,9 +1533,9 @@ VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
         for(VideoFrame& frame:m_frameQueue){
             const int64_t timelineFrame=static_cast<int64_t>(relabeled);
             frame.timestamp100ns=m_ffmpegSeekBase100ns+
-                static_cast<int64_t>((static_cast<double>(timelineFrame)/m_fps)*10000000.0);
+                static_cast<int64_t>((static_cast<double>(timelineFrame)/m_source.fps)*10000000.0);
             frame.discontinuity=(timelineFrame==0&&m_ffmpegSeekBase100ns!=0);
-            frame.frameNumber=static_cast<uint64_t>(std::llround(static_cast<double>(frame.timestamp100ns)*m_fps*1e-7));
+            frame.frameNumber=static_cast<uint64_t>(std::llround(static_cast<double>(frame.timestamp100ns)*m_source.fps*1e-7));
             frame.sourceGeneration=m_sourceGeneration;
             ++relabeled;
         }
@@ -1533,7 +1550,7 @@ VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
 }
 
 bool VideoDecoder::SeekSeconds(double seconds) {
-    seconds = std::clamp(seconds, 0.0, std::max(0.0, m_durationSec));
+    seconds = std::clamp(seconds, 0.0, std::max(0.0, m_source.durationSec));
     if (m_backend == Backend::FFmpeg) {
         const auto seekStarted=std::chrono::steady_clock::now();
         const bool restartQueue=m_frameQueueEnabled;
@@ -1543,7 +1560,7 @@ bool VideoDecoder::SeekSeconds(double seconds) {
         // Every child is started on the frame grid, so the target is that grid
         // position: a reused seek then rebases onto exactly the timeline a
         // restarted one would have produced.
-        const double aligned=m_stillImage?seconds:SnapToFrameGrid(seconds,m_fps);
+        const double aligned=m_source.stillImage?seconds:SnapToFrameGrid(seconds,m_source.fps);
         m_seekStart=seekStarted;m_seekTargetSeconds=aligned;
         {std::scoped_lock timingLock(m_seekTimingMutex);m_seekTiming=SeekTiming{};}
         m_seekTimingPending=true;

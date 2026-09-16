@@ -88,7 +88,11 @@ public:
     struct Settings {
         // Empty: search next to the module, then PATH.
         std::wstring helperDirectory;
+        // Bounds every ffprobe child this decoder spawns, local file or stream
+        // alike: a header read that takes longer than this is a wedged child,
+        // not a slow disk (an antivirus-scanned probe measures ~0.7 s).
         std::chrono::milliseconds probeTimeout{15000};
+        // Network reads only: a local pipe waits in the kernel instead.
         std::chrono::milliseconds stallTimeout{15000};
 
         // Skipping a ResumeThread strands the spawned helper suspended, so a
@@ -143,7 +147,7 @@ public:
                    MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
                    std::stop_token stop = {});
     // What a sibling file of the one this decoder has open can be opened with.
-    KnownMedia Media() const { return {m_width, m_height, m_fps, m_durationSec, m_hardwareProfile}; }
+    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile}; }
     // Geometry, frame rate and duration only: runs the probe and starts no
     // decoder. The caller that just needs to describe a file was paying for a
     // full ffmpeg child it closed two lines later.
@@ -181,43 +185,70 @@ public:
     };
     SeekTiming LastSeekTiming() const;
 
-    uint32_t Width() const { return m_width; }
-    uint32_t Height() const { return m_height; }
-    uint32_t NativeWidth() const { return m_nativeWidth ? m_nativeWidth : m_width; }
-    uint32_t NativeHeight() const { return m_nativeHeight ? m_nativeHeight : m_height; }
-    double FrameRate() const { return m_fps; }
-    double DurationSeconds() const { return m_durationSec; }
-    bool IsStillImage() const { return m_stillImage; }
-    bool IsAnimation() const { return m_gif; }
-    double DisplayAspectRatio() const { return m_displayAspect > 0.0 ? m_displayAspect : (m_height ? double(m_width)/double(m_height) : 16.0/9.0); }
+    uint32_t Width() const { return m_source.width; }
+    uint32_t Height() const { return m_source.height; }
+    uint32_t NativeWidth() const { return m_source.nativeWidth ? m_source.nativeWidth : m_source.width; }
+    uint32_t NativeHeight() const { return m_source.nativeHeight ? m_source.nativeHeight : m_source.height; }
+    double FrameRate() const { return m_source.fps; }
+    double DurationSeconds() const { return m_source.durationSec; }
+    bool IsStillImage() const { return m_source.stillImage; }
+    bool IsAnimation() const { return m_source.gif; }
+    double DisplayAspectRatio() const { return m_source.displayAspect > 0.0 ? m_source.displayAspect : (m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0); }
     const std::wstring& Path() const { return m_path; }
-    bool Ready() const { return m_backend != Backend::None && m_width != 0 && m_height != 0; }
+    bool Ready() const { return m_backend != Backend::None && m_source.width != 0 && m_source.height != 0; }
     const wchar_t* BackendName() const;
     // Bgra for Open (always), for OpenSequential(preferNv12=false), and for
     // OpenSequential when the geometry can't take NV12 (odd width/height); Nv12
     // for OpenSequential(preferNv12=true, the default) otherwise. Fixed once
     // OpenFFmpeg's probe completes and unchanged by acceleration fallbacks or
     // seek restarts for the rest of the session.
-    VideoPixelLayout PixelLayout() const { return m_layout; }
+    VideoPixelLayout PixelLayout() const { return m_source.layout; }
     // What the source stream declared about its own colour, as read by the same
     // ffprobe call that produced the geometry above. Every field is Unspecified
     // for a stream that declares nothing, for a `known` open (which runs no
     // probe), and for a Media Foundation open - MF's reader is configured for
     // RGB32/ARGB32 output, so it hands out BGRA and is never the backend behind
     // an NV12 layout. Unspecified is the refusal, never an assumed BT.709.
-    const SourceColorDescription& ColorDescription() const { return m_sourceColor; }
+    const SourceColorDescription& ColorDescription() const { return m_source.color; }
 
 private:
-    // ffprobe's codec/pixel format for the open source. Hardware decode support
-    // is per codec, so the memo of dead paths is keyed by this, never global.
-    std::string m_hardwareProfile;
-    SourceColorDescription m_sourceColor{};
-    // The four colour entries exactly as ffprobe printed them, for the log line
-    // that refuses the GPU conversion. The mapped description is what the code
-    // gates on, but "other" is a diagnosis nobody can act on and "bt2020nc" is.
-    std::string m_colorTags;
-    bool m_stillImage{false};
-    bool m_gif{false};
+    // Everything the open source is known by - what ffprobe, a KnownMedia or
+    // Media Foundation's reader said about the stream, plus the layout this
+    // session decodes it to. One aggregate so that an Open resets it, Swap
+    // swaps it and Media() reads it as a unit: a field added here is covered by
+    // all three without anyone having to enumerate it in Swap, which is how the
+    // colour description, the memo key and the NV12 decision were left behind.
+    struct Source {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t nativeWidth = 0;
+        uint32_t nativeHeight = 0;
+        int32_t stride = 0;
+        double fps = 30.0;
+        double durationSec = 0.0;
+        double displayAspect = 0.0;
+        bool stillImage = false;
+        bool gif = false;
+        // ffprobe's codec/pixel format for the open source. Hardware decode support
+        // is per codec, so the memo of dead paths is keyed by this, never global.
+        std::string hardwareProfile;
+        SourceColorDescription color{};
+        // The four colour entries exactly as ffprobe printed them, for the log line
+        // that refuses the GPU conversion. The mapped description is what the code
+        // gates on, but "other" is a diagnosis nobody can act on and "bt2020nc" is.
+        std::string colorTags;
+        // OpenSequential(true) vs Open(false); decides layout once the probe
+        // knows the geometry. Fixed for the session: neither TryNextFFmpegAcceleration
+        // nor a seek restart re-probes, so they never revisit it.
+        bool sequentialOpen = false;
+        // OpenSequential's preferNv12 argument (irrelevant when sequentialOpen is
+        // false); false pins layout to Bgra even for even geometry. Reset with the
+        // rest on every open, so it never leaks from one OpenSequential into a
+        // later Open() or OpenSequential(preferNv12=true).
+        bool sequentialNv12 = true;
+        VideoPixelLayout layout = VideoPixelLayout::Bgra;
+    };
+    Source m_source;
     enum class Backend { None, FFmpeg, MediaFoundation };
     enum class FFmpegAcceleration { Cuda, D3D11Va, Software };
     // A restart clears every decoded frame; a seek that keeps its child must
@@ -261,6 +292,7 @@ private:
     void PublishSeekTiming(bool frameDelivered);
     void StartFrameQueue(QueueBuffer buffered = QueueBuffer::Discard);
     void StopFrameQueue(QueueBuffer buffered = QueueBuffer::Discard);
+    void FrameQueueThread(std::stop_token stop) noexcept;
     void FrameQueueLoop(std::stop_token stop);
 
     bool OpenMediaFoundation(const std::wstring& path);
@@ -274,15 +306,6 @@ private:
     Backend m_backend = Backend::None;
     Microsoft::WRL::ComPtr<IMFSourceReader> m_reader;
     std::wstring m_path;
-
-    uint32_t m_width = 0;
-    uint32_t m_height = 0;
-    uint32_t m_nativeWidth = 0;
-    uint32_t m_nativeHeight = 0;
-    int32_t m_stride = 0;
-    double m_fps = 30.0;
-    double m_durationSec = 0.0;
-    double m_displayAspect = 0.0;
 
     std::wstring m_ffmpegExe;
     std::wstring m_ffprobeExe;
@@ -313,16 +336,6 @@ private:
     bool m_seekReusedBuffered = false;
     mutable std::mutex m_seekTimingMutex;
     FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
-    // OpenSequential(true) vs Open(false); decides m_layout once the probe
-    // knows the geometry. Fixed for the session: neither TryNextFFmpegAcceleration
-    // nor a seek restart re-probes, so they never revisit it.
-    bool m_sequentialOpen = false;
-    // OpenSequential's preferNv12 argument (irrelevant when m_sequentialOpen is
-    // false); false pins m_layout to Bgra even for even geometry. Reset on every
-    // OpenImpl call the same way m_sequentialOpen is, so it never leaks from one
-    // OpenSequential into a later Open() or OpenSequential(preferNv12=true).
-    bool m_sequentialNv12 = true;
-    VideoPixelLayout m_layout = VideoPixelLayout::Bgra;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;

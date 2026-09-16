@@ -1,3 +1,5 @@
+#include "AudioPlayer.h"
+#include "VideoDecoder.h"
 #include "YouTubeResolver.h"
 
 #include <chrono>
@@ -21,7 +23,37 @@ static_assert(std::is_same_v<
 static_assert(std::is_same_v<
     decltype(std::declval<YouTubeResolver&>().Cancel()), void>);
 
+// The decoder's and the audio player's fault-injection seams compile into the
+// release unguarded: a default-constructed Settings is production, so every
+// injection has to be off by default, at compile time where the defaults are
+// literal and at run time for the Settings object itself (whose strings keep it
+// out of a constant expression).
+namespace {
+constexpr VideoDecoder::Settings::FaultInjection kVideoFaults{};
+static_assert(kVideoFaults.resume == VideoDecoder::FailureStage::None);
+
+constexpr AudioPlayer::Settings::FaultInjection kAudioFaults{};
+static_assert(!kAudioFaults.disableWaveOut);
+static_assert(!kAudioFaults.failTerminateJob);
+static_assert(!kAudioFaults.failInitialProcessWait);
+static_assert(!kAudioFaults.failGetExitCodeProcess);
+static_assert(!kAudioFaults.failFinalProcessWait);
+static_assert(!kAudioFaults.failInitialReaderWait);
+static_assert(!kAudioFaults.failFinalReaderWait);
+
+bool ProductionDefaults()
+{
+    const VideoDecoder::Settings video{};
+    const AudioPlayer::Settings audio{};
+    return video.faults.resume == VideoDecoder::FailureStage::None &&
+        !audio.faults.disableWaveOut && !audio.faults.failTerminateJob &&
+        !audio.faults.failInitialProcessWait && !audio.faults.failGetExitCodeProcess &&
+        !audio.faults.failFinalProcessWait && !audio.faults.failInitialReaderWait &&
+        !audio.faults.failFinalReaderWait;
+}
+} // namespace
+
 int main()
 {
-    return 0;
+    return ProductionDefaults() ? 0 : 1;
 }

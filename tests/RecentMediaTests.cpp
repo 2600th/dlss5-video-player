@@ -138,38 +138,79 @@ void malformed_history_does_not_replace_existing_entries()
     const auto before = history.Entries();
     CHECK(history.Save());
     const std::string valid = Read(file);
+    auto tooMany = valid;
+    tooMany[valid.find('\n') + 1] = '6';
     for (const std::string& malformed : {
              std::string{}, std::string("wrong format"), valid.substr(0, valid.size() / 2),
-             valid + "unexpected trailing content", std::string(1024 * 1024 + 1, 'x')}) {
+             valid + "unexpected trailing content", std::string(1024 * 1024 + 1, 'x'), tooMany}) {
         Write(file, malformed);
         CHECK(!history.Load());
         CHECK_EQ(before, history.Entries());
     }
-    const auto countOffset = valid.find('\n') + 1;
-    auto tooMany = valid;
-    tooMany[countOffset] = '6';
-    auto duplicate = valid;
-    duplicate[countOffset] = '2';
-    duplicate += valid.substr(valid.find('\n', countOffset) + 1);
+}
+
+void invalid_records_are_dropped_and_the_rest_kept()
+{
+    TempDirectory temp;
+    const auto file = temp.path / L"recent.dat";
+    RecentMediaHistory history(file);
+    auto middle = Video('B');
+    middle.title = L"Middle";
+    for (const auto& entry : {Video('C'), middle, Video('A')}) CHECK(history.Remember(entry).empty());
+    CHECK(history.Save());
+    const std::string valid = Read(file);
+    const auto middleLine = valid.find("1 \"BBBBBBBBBBB\"");
+    const auto middleTitle = valid.find("Middle");
+    const auto middleKey = valid.find(std::string(64, 'a'), middleLine);
+    CHECK(middleLine != std::string::npos);
+    CHECK(middleTitle != std::string::npos);
+    CHECK(middleKey != std::string::npos);
+    if (middleLine == std::string::npos || middleTitle == std::string::npos || middleKey == std::string::npos) return;
     auto badUtf8 = valid;
-    const auto titleOffset = badUtf8.find("Example");
-    CHECK(titleOffset != std::string::npos);
-    if (titleOffset != std::string::npos) badUtf8[titleOffset] = static_cast<char>(0xFF);
-    for (const auto& malformed : {tooMany, duplicate, badUtf8}) {
-        Write(file, malformed);
-        CHECK(!history.Load());
-        CHECK_EQ(before, history.Entries());
-    }
+    badUtf8[middleTitle] = static_cast<char>(0xFF);
     auto badKey = valid;
-    const auto keyOffset = badKey.find(std::string(64, 'a'));
-    CHECK(keyOffset != std::string::npos);
-    if (keyOffset != std::string::npos) {
-        badKey.replace(keyOffset, 64, "../unsafe");
-        Write(file, badKey);
-        RecentMediaHistory fresh(file);
-        CHECK(!fresh.Load());
-        CHECK(fresh.Entries().empty());
+    badKey.replace(middleKey, 64, "../unsafe");
+    auto badFlag = valid;
+    badFlag[middleLine] = '2';
+    auto shortId = valid;
+    shortId.replace(middleLine + 3, 11, std::string(10, 'B'));
+    auto duplicate = valid;
+    duplicate.replace(middleLine + 3, 11, std::string(11, 'A'));
+    for (const auto& damaged : {badUtf8, badKey, badFlag, shortId, duplicate}) {
+        Write(file, damaged);
+        RecentMediaHistory loaded(file);
+        CHECK(loaded.Load());
+        CHECK_EQ(size_t{2}, loaded.Entries().size());
+        if (loaded.Entries().size() == 2) {
+            CHECK_EQ(std::string(11, 'A'), loaded.Entries()[0].id);
+            CHECK_EQ(std::string(11, 'C'), loaded.Entries()[1].id);
+        }
     }
+}
+
+void network_paths_are_remembered_for_the_session_but_never_loaded()
+{
+    TempDirectory temp;
+    const auto file = temp.path / L"recent.dat";
+    const auto local = temp.path / L"clip.mkv";
+    Write(local, "user-owned-media");
+    RecentMediaHistory history(file);
+    for (const wchar_t* planted : {L"\\\\server\\share\\video.mkv", L"\\\\?\\UNC\\server\\share\\video.mkv"}) {
+        RecentMediaEntry entry;
+        entry.source = planted;
+        entry.title = L"Planted";
+        CHECK(history.Remember(entry).empty());
+    }
+    RecentMediaEntry kept;
+    kept.source = local.wstring();
+    kept.title = L"Local clip";
+    CHECK(history.Remember(kept).empty());
+    CHECK_EQ(size_t{3}, history.Entries().size());
+    CHECK(history.Save());
+    RecentMediaHistory loaded(file);
+    CHECK(loaded.Load());
+    CHECK_EQ(size_t{1}, loaded.Entries().size());
+    for (const auto& entry : loaded.Entries()) CHECK_EQ(L"Local clip", entry.title);
 }
 
 void failed_atomic_replace_preserves_previous_file()
@@ -204,6 +245,8 @@ int main()
     local_paths_deduplicate_without_touching_user_files();
     replaced_keys_are_reported_and_invalid_keys_are_ignored();
     malformed_history_does_not_replace_existing_entries();
+    invalid_records_are_dropped_and_the_rest_kept();
+    network_paths_are_remembered_for_the_session_but_never_loaded();
     failed_atomic_replace_preserves_previous_file();
     if (test_support::failure_count != 0) return 1;
     std::cout << "Recent media tests passed\n";

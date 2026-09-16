@@ -91,6 +91,11 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     std::wostringstream args;
     args << L"-hide_banner -loglevel error -nostdin ";
     if (seekSeconds > 0.0) args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
+    // A resolved YouTube audio stream is https and nothing else: verify the
+    // certificate explicitly and refuse every protocol the URL cannot need,
+    // the same input options VideoDecoder and MediaPipeline put ahead of theirs.
+    if (_wcsnicmp(m_path.c_str(), L"https://", 8) == 0 || _wcsnicmp(m_path.c_str(), L"http://", 7) == 0)
+        args << L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
     args << L"-i " << Q(m_path)
          << L" -map 0:a:0? -vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le -f s16le pipe:1";
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();

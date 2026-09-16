@@ -22,7 +22,11 @@ class RecentMediaHistory {
 public:
     explicit RecentMediaHistory(std::filesystem::path file);
 
-    // A malformed file leaves the current entries untouched. Missing is empty.
+    // A file this program could not have written (bad header, unreadable
+    // record, trailing bytes) leaves the current entries untouched. A record
+    // that reads but fails validation - a key that is not a hash, a local path
+    // that is not on a drive letter, a duplicate - is dropped and the rest are
+    // kept. Missing is empty.
     bool Load();
     bool Save() const;
     const std::vector<RecentMediaEntry>& Entries() const { return entries_; }
