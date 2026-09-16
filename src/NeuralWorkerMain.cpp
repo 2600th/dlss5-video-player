@@ -515,6 +515,10 @@ private:
 
 int wmain(int argc, wchar_t** argv)
 {
+    // Drops the working directory and PATH from every LoadLibrary search. The
+    // runtime set (dxgi.dll, the sl.*.dll proxies, nvngx_dlssnr.dll) lives in
+    // this executable's own directory, which stays in the default set.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     const auto entered = std::chrono::steady_clock::now();
     const auto loaderWindow = ElapsedSinceProcessStart();
     std::vector<std::wstring_view> values;

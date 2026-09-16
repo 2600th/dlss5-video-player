@@ -1631,7 +1631,10 @@ std::wstring NeuralRuntimeLease::MutexName(const std::filesystem::path& runtimeD
 {
     // FNV-1a over the normalized, lower-cased directory: every process must
     // derive the same name for the same runtime, and the name must stay well
-    // inside the kernel object-name length limit for long paths.
+    // inside the kernel object-name length limit for long paths. Global rather
+    // than session-local: the runtime directory is shared by every player on
+    // the machine, and two sessions each rewriting its ReShade.ini under a
+    // lease only their own session could see excluded nothing.
     std::wstring path = runtimeDirectory.lexically_normal().wstring();
     while (!path.empty() && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
     uint64_t hash = 1469598103934665603ull;
@@ -1640,7 +1643,7 @@ std::wstring NeuralRuntimeLease::MutexName(const std::filesystem::path& runtimeD
         if (character == L'/') character = L'\\';
         hash = (hash ^ static_cast<uint64_t>(character)) * 1099511628211ull;
     }
-    std::wstring name = L"Local\\DLSSVideoPlayer.neural-runtime.";
+    std::wstring name = L"Global\\DLSSVideoPlayer.neural-runtime.";
     for (int shift = 60; shift >= 0; shift -= 4) name.push_back(L"0123456789abcdef"[(hash >> shift) & 0xF]);
     return name;
 }
@@ -1651,7 +1654,14 @@ NeuralRuntimeLease::NeuralRuntimeLease(const std::filesystem::path& runtimeDirec
     if (runtimeDirectory.empty()) return;
     const std::wstring name = MutexName(runtimeDirectory);
     mutex_ = CreateMutexW(nullptr, FALSE, name.c_str());
-    if (!mutex_) return;
+    if (!mutex_) {
+        // A Global object another account created with a DACL this one cannot
+        // open falls back to the session-local name: exclusion within this
+        // session is worth more than none at all.
+        const std::wstring local = L"Local\\" + name.substr(name.find(L'\\') + 1);
+        mutex_ = CreateMutexW(nullptr, FALSE, local.c_str());
+        if (!mutex_) return;
+    }
     const DWORD milliseconds = wait.count() <= 0
         ? 0u : static_cast<DWORD>(std::min<long long>(wait.count(), INFINITE - 1));
     // WAIT_ABANDONED means the previous holder died without releasing it: the

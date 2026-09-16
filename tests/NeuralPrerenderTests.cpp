@@ -685,18 +685,32 @@ void promotion_waits_out_a_transient_lock_and_names_the_failing_step_test()
                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     CHECK(scanner != INVALID_HANDLE_VALUE);
     if (scanner == INVALID_HANDLE_VALUE) return;
-    std::thread release([scanner] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    // Released from the promotion's own retry hook rather than on a timer:
+    // the first attempt is then known to have met the lock, and the retry
+    // behind it is the one that publishes.
+    unsigned releasedAfter = 0;
+    manager.ObservePublishRetries([&](unsigned attempt) {
+        if (releasedAfter) return;
+        releasedAfter = attempt;
         CloseHandle(scanner);
     });
     NeuralCachePromotion promotion{};
     const bool published = manager.PromoteRender(renderKey, *staging, manifest, &promotion);
-    release.join();
     CHECK(published);
     CHECK(manager.LookupRender(renderKey).has_value());
     CHECK(promotion.stage == NeuralCachePromotion::Stage::Published);
-    // It cannot have succeeded on the first try: the file was still open then.
+    CHECK_EQ(1u, releasedAfter);
+    // The first attempt met the lock; anything past it (a real scanner on the
+    // machine can add its own) is a retry that waited it out.
     CHECK(promotion.attempts > 1);
+    // What a caller gets back is the entry it just published, without a
+    // second pass over the payload.
+    CHECK(promotion.entry.has_value());
+    if (promotion.entry) {
+        CHECK_EQ(std::string("neural-frames"), ReadBytes(promotion.entry->payloadPath));
+        CHECK(promotion.entry->manifest.neuralDigest == Sha256File(promotion.entry->payloadPath));
+    }
+    manager.ObservePublishRetries({});
     CHECK_EQ(std::string("rename"),
              std::string(NeuralCachePromotionStageName(NeuralCachePromotion::Stage::Move)));
 
@@ -739,6 +753,74 @@ void interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test()
     CHECK(!unsafe.Clear());
 }
 
+// A pid the kernel does not know, found rather than guessed: the sweep must
+// treat it as a process that is gone.
+DWORD DeadProcessId()
+{
+    for (DWORD pid = 0xFFFFFF00u; pid > 0xFFFF0000u; pid -= 4) {
+        const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (process) { CloseHandle(process); continue; }
+        if (GetLastError() == ERROR_INVALID_PARAMETER) return pid;
+    }
+    return 0;
+}
+
+// MarkInvalid and Quarantine set a directory aside under staging/ and nothing
+// ever removed it: a session's failed renders parked their partial payloads
+// until the user cleared the whole cache. The sweep reaps what nothing will
+// ever finish and leaves what a live process is still writing.
+void staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test()
+{
+    TempDirectory fixture;
+    const auto cacheRoot = fixture.Path() / L"cache";
+    const auto staging = cacheRoot / L"staging";
+    const std::wstring key(64, L'4');
+    const std::wstring ownPid = std::to_wstring(GetCurrentProcessId());
+    const DWORD deadPid = DeadProcessId();
+    CHECK(deadPid != 0);
+    if (!deadPid) return;
+    const auto invalidOwn = staging / (L"invalid-" + ownPid + L"-1");
+    const auto invalidExistingOwn = staging / (L"invalid-existing-" + ownPid + L"-2");
+    const auto invalidCacheDead = staging / (L"invalid-cache-" + std::to_wstring(deadPid) + L"-3");
+    const auto orphanRender = staging / (L"render-" + key + L"-" + std::to_wstring(deadPid) + L"-4");
+    const auto orphanSource = staging / (L"source-" + key + L"-" + std::to_wstring(deadPid) + L"-5");
+    const auto liveRender = staging / (L"render-" + key + L"-" + ownPid + L"-6");
+    const auto liveSource = staging / (L"source-" + key + L"-" + ownPid + L"-7");
+    const auto foreign = staging / L"notes";
+    for (const auto& directory : {invalidOwn, invalidExistingOwn, invalidCacheDead, orphanRender,
+                                  orphanSource, liveRender, liveSource, foreign}) {
+        std::error_code error;
+        std::filesystem::create_directories(directory, error);
+        CHECK(!error);
+        WriteBytes(directory / L"neural.mkv", "partial");
+    }
+
+    NeuralCacheManager manager(cacheRoot);
+    CHECK(manager.Valid());
+    for (const auto& gone : {invalidOwn, invalidExistingOwn, invalidCacheDead, orphanRender, orphanSource})
+        CHECK(!std::filesystem::exists(gone));
+    for (const auto& kept : {liveRender, liveSource, foreign})
+        CHECK(std::filesystem::is_directory(kept));
+    // Nothing left to reap: a second sweep is a no-op, not a second pass over
+    // the live entries.
+    CHECK_EQ(size_t{0}, manager.SweepStaging());
+    for (const auto& kept : {liveRender, liveSource, foreign})
+        CHECK(std::filesystem::is_directory(kept));
+
+    // An entry this process sets aside is reaped by the next sweep, whichever
+    // process runs it.
+    const auto parked = manager.BeginRenderStaging(std::string(64, '5'));
+    CHECK(parked.has_value());
+    if (!parked) return;
+    WriteBytes(*parked / L"neural.mkv", "partial");
+    CHECK(manager.MarkInvalid(*parked));
+    CHECK(!std::filesystem::exists(*parked));
+    CHECK_EQ(size_t{1}, manager.SweepStaging());
+    size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(staging)) { (void)entry; ++entries; }
+    CHECK_EQ(size_t{3}, entries);
+}
+
 void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
 {
     const MaterializeRequest materialize{
@@ -747,10 +829,12 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
         .output=LR"(C:\Cache Root\source.partial.mkv)"};
     const std::vector<std::wstring> expectedMaterialize{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-progress", L"pipe:1", L"-y", L"-xerror",
+        L"-tls_verify", L"1", L"-protocol_whitelist", L"https,tls,tcp",
         L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
         L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
         L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
         L"-i", materialize.videoUrl,
+        L"-tls_verify", L"1", L"-protocol_whitelist", L"https,tls,tcp",
         L"-rw_timeout", L"10000000", L"-reconnect", L"1", L"-reconnect_on_network_error", L"1",
         L"-reconnect_on_http_error", L"429,5xx", L"-reconnect_delay_max", L"2",
         L"-reconnect_max_retries", L"3", L"-reconnect_delay_total_max", L"8", L"-respect_retry_after", L"0",
@@ -1159,19 +1243,24 @@ public:
         out.id=id;
         if(id.reset!=HistoryReset::None)++historyGeneration;
         out.id.historyGeneration=historyGeneration;
-        if(!capture){if(++primeSubmissions>=requiredPrimeSubmissions)featureCreated=true;if(featureCreated)++evaluations;return true;}
+        if(!capture){if(++primeSubmissions>=requiredPrimeSubmissions)featureCreated=true;if(featureCreated){++evaluations;++backendEvaluations;}return true;}
         ++captureSubmissions;
         if((failCaptureAt&&captureSubmissions==*failCaptureAt)||
            (failCaptureFrom&&captureSubmissions>=*failCaptureFrom)){lastFailure=captureFailure;return false;}
         if(!featureCreated){lastFailure=NeuralRenderFailure::Neural;return false;}
         if(cutAtCapture&&captureSubmissions==*cutAtCapture){out.id.reset=HistoryReset::Cut;out.id.historyGeneration=++historyGeneration;}
         if(mismatchAtCapture&&captureSubmissions==*mismatchAtCapture)++out.id.frameNumber;
-        ++evaluations;out.bgra=frame.bgra;if(out.bgra.size()<expectedBytes)out.bgra.resize(expectedBytes);
+        ++evaluations;
+        // The backend's own tally: what an accepted submit is normally also
+        // counted by, unless the test says the pass silently did not run.
+        if(!(backendMissesCaptureAt&&captureSubmissions==*backendMissesCaptureAt))++backendEvaluations;
+        out.bgra=frame.bgra;if(out.bgra.size()<expectedBytes)out.bgra.resize(expectedBytes);
         if(stampCaptureCount&&!out.bgra.empty())out.bgra[0]=static_cast<uint8_t>(captureSubmissions);
         captured.push_back(frame.timestamp100ns);return true;
     }
     bool FeatureCreated() const override { return featureCreated; }
     uint64_t EvaluationCount() const override { return evaluations; }
+    uint64_t NeuralEvaluations() const override { return backendEvaluations; }
     void ResetTemporal() override { ++temporalResets; }
     NeuralRenderFailure LastFailure() const override { return lastFailure; }
     double LastNeuralGpuMs() const override { return neuralGpuMs; }
@@ -1180,7 +1269,8 @@ public:
     int requiredPrimeSubmissions{2};
     bool stampCaptureCount{};
     int captureSubmissions{};int temporalResets{};size_t expectedBytes{};
-    std::optional<int> failCaptureAt,failCaptureFrom,cutAtCapture,mismatchAtCapture;
+    std::optional<int> failCaptureAt,failCaptureFrom,cutAtCapture,mismatchAtCapture,backendMissesCaptureAt;
+    uint64_t backendEvaluations{};
     NeuralRenderFailure captureFailure{NeuralRenderFailure::Neural};
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
     // A plausible healthy 1080p median (receipts on this machine read 3.68 to
@@ -1273,6 +1363,41 @@ void offline_job_primes_feature_then_restarts_source_and_captures_every_frame_te
     CHECK_EQ(3,evidenceCalls);
 }
 
+// nativeEvaluations used to be a copy of frameCount, so the cache's
+// "every frame was evaluated" gate could not fail. It is the backend's own
+// tally now, held to the frame count by the render and by the manifest gate.
+void offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_test()
+{
+    TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
+    // The third capture is accepted by the evaluator but the backend never
+    // ran it: exactly the frame a stalled neural pass would hand back as
+    // upscaler output.
+    evaluator.backendMissesCaptureAt=3;
+    int evidenceCalls=0;
+    OfflineNeuralRenderer job(source,evaluator,encoder,[&]{
+        ++evidenceCalls;
+        return evidenceCalls==1
+            ? std::string("EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
+                          "active settings: upscaling=OFF\nfeature 18 created\n"
+                          "inline feature 18 evaluation succeeded evaluation count=1\n")
+            : ValidNeuralEvidence();
+    });
+    const NeuralRenderResult result=job.Run(OfflineRequest(fixture.Path()),{},{});
+    CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(NeuralRenderFailure::Neural,result.failure);
+    // Every frame was captured and encoded; only the backend's word is missing.
+    CHECK_EQ(size_t{5},evaluator.captured.size());
+    CHECK_EQ(size_t{1},encoder.attempts.size());
+
+    // The manifest gate is the same claim on the published side: fewer
+    // evaluations than frames is refused, more (resubmits) is not.
+    auto manifest=CompleteRenderManifest();
+    manifest.state=NeuralCacheState::Complete;manifest.neuralDigest=std::string(64,'c');
+    manifest.nativeEvaluations=manifest.frameCount+3;
+    CHECK(IsReusableNeuralCacheManifest(manifest));
+    manifest.nativeEvaluations=manifest.frameCount-1;
+    CHECK(!IsReusableNeuralCacheManifest(manifest));
+}
+
 void offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_test()
 {
     for (const bool photo : {true, false}) {
@@ -1291,7 +1416,9 @@ void offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_te
         const auto result = job.Run(request);
         CHECK(result.ok);
         CHECK_EQ(static_cast<uint64_t>(frames.size()), result.frameCount);
-        CHECK_EQ(static_cast<uint64_t>(frames.size()), result.nativeEvaluations);
+        // The backend's tally counts the receipt gate's resubmits of the first
+        // frame, which the encoded frame count does not.
+        CHECK_EQ(uint64_t{60} + frames.size() - 1, result.nativeEvaluations);
         CHECK_EQ(uint64_t{60}, result.evidence.highestObservedEvaluation);
         CHECK_EQ(2, source.opens);
         CHECK_EQ(size_t{1}, encoder.attempts.size());
@@ -3574,6 +3701,7 @@ int wmain(int argc, wchar_t* argv[])
     source_and_render_promotion_are_hash_validated_and_immutable_test();
     promotion_waits_out_a_transient_lock_and_names_the_failing_step_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
+    staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();
@@ -3586,6 +3714,7 @@ int wmain(int argc, wchar_t* argv[])
     probe_child_inherits_only_its_output_pipe_test();
     encoder_blocked_write_is_interrupted_by_stop_test();
     offline_job_primes_feature_then_restarts_source_and_captures_every_frame_test();
+    offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_test();
     offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_test();
     offline_odd_dimensions_use_geometry_preserving_software_encoder_test();
     offline_sparse_receipt_gate_restarts_independently_for_software_retry_test();

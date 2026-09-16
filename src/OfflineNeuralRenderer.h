@@ -154,6 +154,11 @@ public:
                         OfflineEvaluation& out) = 0;
     virtual bool FeatureCreated() const = 0;
     virtual uint64_t EvaluationCount() const = 0;
+    // The backend's own tally of completed neural evaluations, as against
+    // EvaluationCount, which is the evaluator's count of accepted submits. A
+    // render is refused when this advanced fewer times than frames were
+    // captured; an evaluator with no separate backend reports its submits.
+    virtual uint64_t NeuralEvaluations() const { return EvaluationCount(); }
     virtual void ResetTemporal() = 0;
     // Asks for one hook-visible CreateFeature, for the case where the neural
     // add-on missed the first one. Returns false when the evaluator cannot make

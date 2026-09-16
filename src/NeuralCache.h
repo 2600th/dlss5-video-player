@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <stop_token>
@@ -124,10 +125,11 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest);
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes);
 bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest);
 
-// Why a promotion did not publish. The publish gate reported one verdict for
-// every reason, so a rename that lost to an antivirus scan of the freshly
-// written entry was indistinguishable from a digest mismatch, and a finished
-// render was discarded with nothing to tell the two apart.
+// Why a promotion did not publish, and what it published when it did. The
+// publish gate reported one verdict for every reason, so a rename that lost to
+// an antivirus scan of the freshly written entry was indistinguishable from a
+// digest mismatch, and a finished render was discarded with nothing to tell the
+// two apart.
 struct NeuralCachePromotion {
     enum class Stage {
         Published, Rejected, PayloadDigest, ManifestRejected, SidecarDigest,
@@ -137,6 +139,9 @@ struct NeuralCachePromotion {
     // Win32 error and attempts from the rename that publishes the entry.
     unsigned long win32Error = 0;
     unsigned attempts = 0;
+    // Set when `stage` is Published: the entry as promotion verified it, so
+    // the caller does not re-read a payload that was hashed a moment ago.
+    std::optional<NeuralCacheEntry> entry;
 };
 const char* NeuralCachePromotionStageName(NeuralCachePromotion::Stage stage);
 
@@ -199,6 +204,19 @@ public:
     bool RemoveRender(std::string_view key);
     uintmax_t SizeBytes() const;
     bool Clear();
+    // Reaps staging/ entries nothing will ever finish: directories set aside
+    // as invalid, and partial payloads whose owning process is gone. Bounded
+    // per call and run by the constructor, so a litter of them is worked off
+    // oldest first across constructions. Returns the number removed.
+    size_t SweepStaging();
+    // Called after each publishing rename that failed on a transient sharing
+    // error, before the retry, with the attempt number that failed. The
+    // promotion test releases its scanner's handle from here, so the retry
+    // it then observes is the one that publishes.
+    void ObservePublishRetries(std::function<void(unsigned)> observer)
+    {
+        publishRetryObserver_ = std::move(observer);
+    }
 
 private:
     static std::optional<std::filesystem::path> DefaultRoot();
@@ -216,4 +234,5 @@ private:
     std::filesystem::path root_;
     bool valid_{false};
     NeuralCacheFailure failure_;
+    std::function<void(unsigned)> publishRetryObserver_;
 };
