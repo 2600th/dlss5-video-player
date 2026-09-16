@@ -220,7 +220,9 @@ if ($PublicCore) {
         @('THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt', (Join-Path $repositoryRoot 'external\DLSS\LICENSE.txt'), 'NormalizeText'),
         @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
         @('THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-optical-flow-MIT.txt')),
-        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
+        # Rewritten from the npm tarball (LF) by fetch_ui_assets.ps1, which CI
+        # runs before packaging, so the .gitattributes pin does not reach it.
+        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE'), 'NormalizeText'),
         @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
         @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
         @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
@@ -263,7 +265,7 @@ else {
         @('THIRD_PARTY_LICENSES/experimental-runtime.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\experimental-runtime.txt')),
         @('THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\dlss5-feeder-MIT.txt')),
         @('THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt', (Join-Path $repositoryRoot 'THIRD_PARTY_LICENSES\nvidia-optical-flow-MIT.txt')),
-        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE')),
+        @('THIRD_PARTY_LICENSES/tabler-MIT.txt', (Join-Path $repositoryRoot 'assets\tabler\LICENSE'), 'NormalizeText'),
         @('docs/ARCHITECTURE.md', (Join-Path $repositoryRoot 'docs\ARCHITECTURE.md')),
         @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
         @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
