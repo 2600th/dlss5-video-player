@@ -3,9 +3,11 @@
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "UpscalingPolicy.h"
+#include <d3d12sdklayers.h>
 #include <mfapi.h>
 #include <chrono>
 #include <iostream>
+#include <sstream>
 #include "GuideControls.h"
 #include <filesystem>
 #include <fstream>
@@ -18,6 +20,11 @@
 // neural rendering the helper drives.
 int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControls& controls,const wchar_t* rawOut,uint32_t frames);
 
+// `device-loss` as the third argument runs the renderer's failure paths on the real
+// GPU instead, which no headless test reaches: a Present that refuses a frame whose
+// command lists are already on the queue, and a device removed between frames.
+int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight);
+
 int wmain(int argc,wchar_t** argv) {
     if(argc==6){
         const std::wstring wide(argv[4]);
@@ -26,6 +33,7 @@ int wmain(int argc,wchar_t** argv) {
         if(!controls)return 2;
         return RunGuideProbe(argv[1],std::wcstoul(argv[2],nullptr,10),*controls,argv[3],std::wcstoul(argv[5],nullptr,10));
     }
+    if(argc==4&&std::wstring_view(argv[3])==L"device-loss")return RunDeviceLossProbe(argv[1],std::wcstoul(argv[2],nullptr,10));
     if(argc!=3)return 2; // source path, target height (1440 or 2160)
     CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
     int code=1;
@@ -120,6 +128,160 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
             code=ok&&count==frames?0:5;
         }else std::cout<<"SR initialization rejected; see DLSSVideoPlayer.log\n";
         renderer.reset();DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+// The renderer's private state this probe has to reach: the device, to remove it and
+// to read the debug layer's messages off it; the present flag, to make one Present
+// refuse; and the frame ring, to see a refused frame's slot published all the same.
+struct D3D12RendererTestAccess {
+    static ID3D12Device* Device(D3D12Renderer& r){return r.m_device.Get();}
+    // The tearing flag on a swapchain built without it makes Present answer
+    // DXGI_ERROR_INVALID_CALL after the frame's command lists are already queued.
+    static void PresentWithTearingFlag(D3D12Renderer& r,bool on){r.m_allowTearing=on;}
+    static uint32_t FrameSlot(const D3D12Renderer& r){return r.m_frameSlot;}
+    static uint64_t FenceValue(const D3D12Renderer& r){return r.m_fenceValue;}
+    static uint64_t FrameFence(const D3D12Renderer& r,uint32_t slot){return r.m_frameFence[slot];}
+    static constexpr uint32_t FrameCount=D3D12Renderer::FrameCount;
+};
+
+namespace {
+
+// Every ERROR-or-worse message the debug layer stored for this device, printed, and
+// the count of the ones that name an allocator or list reused while the GPU still
+// had it - which is exactly what an unpublished frame slot produces.
+struct DebugLayerReport{uint32_t errors=0,syncErrors=0;bool available=false;};
+DebugLayerReport ReadDebugLayer(ID3D12Device* device,const char* stage){
+    DebugLayerReport report;
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> queue;
+    if(!device||FAILED(device->QueryInterface(IID_PPV_ARGS(&queue))))return report;
+    report.available=true;
+    const UINT64 stored=queue->GetNumStoredMessages();
+    std::vector<char> buffer;
+    for(UINT64 index=0;index<stored;++index){
+        SIZE_T length=0;
+        if(FAILED(queue->GetMessage(index,nullptr,&length))||!length)continue;
+        buffer.resize(length);
+        auto* message=reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
+        if(FAILED(queue->GetMessage(index,message,&length)))continue;
+        if(message->Severity>D3D12_MESSAGE_SEVERITY_ERROR)continue;
+        ++report.errors;
+        const bool sync=message->ID==D3D12_MESSAGE_ID_COMMAND_ALLOCATOR_SYNC||message->ID==D3D12_MESSAGE_ID_COMMAND_LIST_SYNC||
+                        message->ID==D3D12_MESSAGE_ID_COMMAND_ALLOCATOR_CANNOT_RESET||message->ID==D3D12_MESSAGE_ID_OBJECT_DELETED_WHILE_STILL_IN_USE;
+        if(sync)++report.syncErrors;
+        std::cout<<"  debug-layer["<<stage<<"] id="<<int(message->ID)<<(sync?" SYNC ":" ")<<std::string_view(message->pDescription,message->DescriptionByteLength?message->DescriptionByteLength-1:0)<<"\n";
+    }
+    queue->ClearStoredMessages();
+    return report;
+}
+
+bool LogContains(std::string_view needle){
+    wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+    std::ifstream log(std::filesystem::path(module).parent_path()/L"DLSSVideoPlayer.log",std::ios::binary);
+    std::stringstream text;text<<log.rdbuf();
+    return text.str().find(needle)!=std::string::npos;
+}
+
+std::string Hex(HRESULT value){std::ostringstream out;out<<std::hex<<value;return out.str();}
+
+} // namespace
+
+int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
+{
+    // Process-wide, so it has to be on before the renderer creates its device. Without
+    // the SDK layers installed the probe still checks the ring bookkeeping and the
+    // classification; only the sync-error count is unavailable, and it says so.
+    Microsoft::WRL::ComPtr<ID3D12Debug> debug;
+    const bool debugLayer=SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)));
+    if(debugLayer)debug->EnableDebugLayer();
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    using Access=D3D12RendererTestAccess;
+    int code=1;
+    {
+        VideoDecoder decoder;
+        if(!decoder.Open(source,MediaSourceKind::LocalFile))return 3;
+        const auto target=UpscalingTarget(decoder.Width(),decoder.Height(),targetHeight);
+        if(!target.grows)return 4;
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(decoder.Width(),decoder.Height(),decoder.FrameRate());
+        const float frameMs=float(1000/decoder.FrameRate());
+        TemporalGuideGenerator guides;VideoFrame frame;uint32_t rendered=0;
+        auto render=[&](D3D12Renderer& renderer){
+            GuideFrame guide;
+            const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,rendered==0?HistoryReset::FirstFrame:HistoryReset::None);
+            const bool ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
+                renderer.RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs);
+            if(ok)++rendered;
+            return ok;
+        };
+        auto makeRenderer=[&](HWND window,D3D12RendererOwner& renderer){
+            renderer=MakeD3D12Renderer();
+            return renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
+                NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&renderer->DLSSAvailable();
+        };
+
+        // 1. A refused Present. Two good frames first, then one whose Present answers
+        //    DXGI_ERROR_INVALID_CALL after its lists are queued: the frame fails, the
+        //    device stays usable, and the slot is published - fence recorded, ring
+        //    advanced - exactly as if the Present had succeeded. The same for the
+        //    static present. Then enough frames to wrap the ring past both slots, so
+        //    a slot that had NOT been published would be reused here and the debug
+        //    layer would see its allocator reset under a list it still tracks.
+        HWND window=CreateWindowExW(0,L"STATIC",L"device-loss probe",WS_POPUP,0,0,100,100,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        D3D12RendererOwner renderer;
+        bool ok=makeRenderer(window,renderer);
+        if(!ok){std::cout<<"SR initialization rejected; see DLSSVideoPlayer.log\n";renderer.reset();DestroyWindow(window);MFShutdown();CoUninitialize();return 5;}
+        for(uint32_t i=0;ok&&i<2;++i)ok=decoder.ReadNext(frame)&&render(*renderer);
+        const uint32_t slotBefore=Access::FrameSlot(*renderer);const uint64_t fenceBefore=Access::FenceValue(*renderer);
+        Access::PresentWithTearingFlag(*renderer,true);
+        const bool presentRefused=ok&&decoder.ReadNext(frame)&&!render(*renderer);
+        Access::PresentWithTearingFlag(*renderer,false);
+        const bool framePublished=Access::FrameSlot(*renderer)==(slotBefore+1)%Access::FrameCount&&
+            Access::FenceValue(*renderer)==fenceBefore+1&&Access::FrameFence(*renderer,slotBefore)==fenceBefore+1&&!renderer->GpuUnusable();
+        const uint32_t staticSlot=Access::FrameSlot(*renderer);const uint64_t staticFence=Access::FenceValue(*renderer);
+        Access::PresentWithTearingFlag(*renderer,true);
+        const bool staticRefused=!renderer->PresentCurrent();
+        Access::PresentWithTearingFlag(*renderer,false);
+        const bool staticPublished=Access::FrameSlot(*renderer)==(staticSlot+1)%Access::FrameCount&&
+            Access::FenceValue(*renderer)==staticFence+1&&Access::FrameFence(*renderer,staticSlot)==staticFence+1&&!renderer->GpuUnusable();
+        uint32_t wrapped=0;
+        while(ok&&wrapped<Access::FrameCount+2&&decoder.ReadNext(frame)){ok=render(*renderer);if(ok)++wrapped;}
+        const bool stillUsable=ok&&!renderer->GpuUnusable()&&renderer->PresentCurrent();
+        const DebugLayerReport afterRefusal=ReadDebugLayer(Access::Device(*renderer),"refused-present");
+        renderer.reset();
+        std::cout<<"refused-present: presentRefused="<<presentRefused<<" framePublished="<<framePublished
+            <<" staticRefused="<<staticRefused<<" staticPublished="<<staticPublished
+            <<" wrapped="<<wrapped<<" stillUsable="<<stillUsable
+            <<" debugLayer="<<(afterRefusal.available?"on":"off")<<" errors="<<afterRefusal.errors<<" syncErrors="<<afterRefusal.syncErrors<<"\n";
+
+        // 2. A removed device. A fresh renderer, two frames, then RemoveDevice between
+        //    frames. Fewer than FrameCount frames have gone through, so the next slot
+        //    has no fence to wait on and the frame reaches its allocator Reset, Close
+        //    and Present on the dead device - where the classification has to happen.
+        //    The renderer must come out latched as DeviceRemoved, log the device's own
+        //    reason, refuse further work up front, and still tear down.
+        bool lossOk=makeRenderer(window,renderer);
+        rendered=0;guides.Reset();
+        for(uint32_t i=0;lossOk&&i<2;++i)lossOk=decoder.ReadNext(frame)&&render(*renderer);
+        Microsoft::WRL::ComPtr<ID3D12Device5> device5;
+        const bool removable=lossOk&&SUCCEEDED(Access::Device(*renderer)->QueryInterface(IID_PPV_ARGS(&device5)));
+        if(removable)device5->RemoveDevice();
+        const HRESULT reason=removable?Access::Device(*renderer)->GetDeviceRemovedReason():S_OK;
+        const bool lossRefused=removable&&!render(*renderer);
+        const bool latched=renderer->GpuUnusable()&&renderer->LastFenceWaitResult()==d3d12_renderer_detail::FenceWaitResult::DeviceRemoved;
+        const bool refusedUpFront=!render(*renderer)&&!renderer->PresentCurrent();
+        const std::string expected="D3D12 device removed: reason=0x"+Hex(reason);
+        const bool logged=LogContains(expected);
+        const DebugLayerReport afterLoss=ReadDebugLayer(Access::Device(*renderer),"device-removed");
+        renderer.reset();DestroyWindow(window);
+        std::cout<<"device-removed: removed="<<removable<<" reason=0x"<<Hex(reason)<<" renderRefused="<<lossRefused
+            <<" gpuUnusable="<<latched<<" fenceWait="<<int(d3d12_renderer_detail::FenceWaitResult::DeviceRemoved)
+            <<" refusedUpFront="<<refusedUpFront<<" logged=\""<<expected<<"\"="<<logged
+            <<" errors="<<afterLoss.errors<<" syncErrors="<<afterLoss.syncErrors<<" tornDown=1\n";
+        // On the live device nothing the debug layer calls an error is tolerated; once
+        // the device is gone only the reuse-under-the-GPU class is held against it.
+        code=presentRefused&&framePublished&&staticRefused&&staticPublished&&wrapped==Access::FrameCount+2&&stillUsable&&
+             afterRefusal.errors==0&&removable&&FAILED(reason)&&lossRefused&&latched&&refusedUpFront&&logged&&afterLoss.syncErrors==0?0:6;
     }
     MFShutdown();CoUninitialize();return code;
 }

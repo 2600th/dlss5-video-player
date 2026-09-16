@@ -7,10 +7,12 @@
 #include "GpuPreference.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "ParallelFor.h"
@@ -107,6 +109,8 @@ static D3D12_RESOURCE_BARRIER Transition(ID3D12Resource* r,D3D12_RESOURCE_STATES
 
 D3D12RendererOwner MakeD3D12Renderer(){return D3D12RendererOwner(new D3D12Renderer());}
 
+std::atomic<uint32_t> D3D12Renderer::s_retainedRenderers{0};
+
 void D3D12RendererDeleter::operator()(D3D12Renderer* renderer)const noexcept{
     if(!renderer)return;
     const auto result=renderer->DrainForRetirement();
@@ -115,7 +119,16 @@ void D3D12RendererDeleter::operator()(D3D12Renderer* renderer)const noexcept{
         delete renderer;
         return;
     }
-    LOG("Renderer retirement retained after bounded GPU drain failure.");
+    if(D3D12Renderer::s_retainedRenderers.fetch_add(1)==0){
+        LOG("Renderer retirement retained after bounded GPU drain failure.");
+        return;
+    }
+    LOG("A second renderer could not be retired after a bounded GPU drain failure; the GPU has stopped answering twice in this process, which ends with exit code "
+        <<RetainedRendererExitCode<<" rather than leak another device.");
+    if(renderer->m_testHooks&&renderer->m_testHooks->exitProcess){renderer->m_testHooks->exitProcess();return;}
+    // Not ExitProcess: that runs every loaded module's detach on the thread that just
+    // watched the driver not answer, and the point is to be gone. The log flushed per line.
+    TerminateProcess(GetCurrentProcess(),RetainedRendererExitCode);
 }
 
 D3D12Renderer::~D3D12Renderer() {
@@ -175,6 +188,12 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     UINT ff=0;
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> dbg; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) { dbg->EnableDebugLayer(); ff|=DXGI_CREATE_FACTORY_DEBUG; }
+    // Device Removed Extended Data, read back by LatchGpuUnusable: which command list
+    // the GPU was in when it stopped, how far into it, and the page fault if there was
+    // one. Same toggle as the debug layer because it costs a breadcrumb write per
+    // command list, which the release build spends on frames instead.
+    ComPtr<ID3D12DeviceRemovedExtendedDataSettings> dred;
+    if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))){dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);}
 #endif
     if(!HR(CreateDXGIFactory2(ff,IID_PPV_ARGS(&m_factory)),"CreateDXGIFactory2")) return false;
     ComPtr<IDXGIAdapter1> fallback;
@@ -846,12 +865,12 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         CopyMappedRows(m_uploadMapped[slot],m_sourceChromaFootprint,bgra+size_t(m_sourceW)*m_sourceH,size_t(m_sourceW),m_sourceH/2u);
     }else CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
-    if(!HR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
-    if(!HR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
+    if(!DeviceHR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
+    if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
     auto* pre=m_uploadCmds[slot].Get();
-    if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame command list")) return false;
-    if(!HR(pre->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset frame upload command list")) return false;
+    if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame command list")) return false;
+    if(!DeviceHR(pre->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset frame upload command list")) return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);pre->SetDescriptorHeaps(1,heaps);
     RecordReferenceUpload(pre,slot);
 
@@ -894,8 +913,20 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         if(temporalReset)m_nvof.Reset();
         m_nvof.Capture(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
-    if(!HR(pre->Close(),"Close frame upload command list")) return false;
+    if(!DeviceHR(pre->Close(),"Close frame upload command list")) return false;
     {ID3D12CommandList*uploadLists[]={pre};m_queue->ExecuteCommandLists(1,uploadLists);}
+    // From this line the slot's allocators and upload buffers are the GPU's until the
+    // fence it is about to be signalled with completes, so the slot is published on
+    // every exit - a Present that refused the frame, a Close or Reset that failed
+    // between submissions - and not only on success. Skipping it left
+    // m_frameFence[slot] at a value the GPU had long passed, and the next frame reset
+    // an allocator whose list could still be executing and overwrote the upload it
+    // was reading.
+    const bool rendered=RecordAndPresentFrame(slot,cmd,nvofFrame,temporalReset,frameTimeMs,identity);
+    return SignalFrameSlot(slot)&&rendered;
+}
+
+bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandList*cmd,bool nvofFrame,bool temporalReset,float frameTimeMs,const FrameIdentity*identity){
     // False on the first frame of a stream and on every cut: there is no previous frame
     // to compare against. The compact CPU grid is already all-zero on exactly those
     // frames, so falling back to it emits the zero motion the reset needs anyway.
@@ -986,12 +1017,12 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
             << " pts=" << identity->pts100ns << " history=" << identity->historyGeneration << " job=" << identity->jobId);
     }
     if (needFeatureFlush) {
-        if (!HR(cmd->Close(), "Close command list after NGX CreateFeature")) return false;
+        if (!DeviceHR(cmd->Close(), "Close command list after NGX CreateFeature")) return false;
         ID3D12CommandList* initLists[] = { cmd };
         m_queue->ExecuteCommandLists(1, initLists);
         if(!WaitGPUForContinuedUse())return false;
-        if (!HR(m_allocators[slot]->Reset(), "Reset allocator after NGX CreateFeature")) return false;
-        if (!HR(cmd->Reset(m_allocators[slot].Get(), nullptr), "Reset command list after NGX CreateFeature")) return false;
+        if (!DeviceHR(m_allocators[slot]->Reset(), "Reset allocator after NGX CreateFeature")) return false;
+        if (!DeviceHR(cmd->Reset(m_allocators[slot].Get(), nullptr), "Reset command list after NGX CreateFeature")) return false;
         ID3D12DescriptorHeap* postCreateHeaps[] = { m_srvHeap.Get() };
         cmd->SetDescriptorHeaps(1, postCreateHeaps);
         LOG("NGX feature creation flushed before EvaluateFeature; temporal history reset.");
@@ -1002,6 +1033,11 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         const bool timed=m_timestampHeap&&m_timestampReadback&&m_timestampFrequency;
         if(timed)cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u);
         used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),temporalReset,frameTimeMs);
+        // EvaluateFeature binds NGX's own descriptor heaps on the list and leaves them
+        // there, exactly as CreateFeature does above. The backbuffer pass below then
+        // bound tables out of m_srvHeap against a heap that was no longer current -
+        // undefined by the spec, silent on NVIDIA, and a debug-layer error per draw.
+        ID3D12DescriptorHeap*postEvaluateHeaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,postEvaluateHeaps);
         if(timed&&used){
             cmd->EndQuery(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u+1u);
             cmd->ResolveQueryData(m_timestampHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,slot*2u,2,m_timestampReadback.Get(),uint64_t{slot}*2u*sizeof(uint64_t));
@@ -1034,16 +1070,9 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
         Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     }
-    if(!HR(cmd->Close(),"Close frame command list")) return false;
+    if(!DeviceHR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    {
-        const auto presented=std::chrono::steady_clock::now();
-        HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
-        m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now()-presented).count());
-        if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
-    }
-    return SignalFrameSlot(slot);
+    return PresentSwapchain("Present");
 }
 
 bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const FrameIdentity&frame,
@@ -1136,9 +1165,9 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_captureSubmitSlotWaitNanos))return false;
-    if(!HR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
+    if(!DeviceHR(m_allocators[slot]->Reset(),"Reset cache-capture allocator"))return false;
     auto*cmd=m_cmds[slot].Get();
-    if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
+    if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset cache-capture command list"))
         return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     RecordReferenceUpload(cmd,slot);
@@ -1185,7 +1214,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     }else{
         copyPlane(m_cacheOutput.Get(),m_cacheFootprint);
     }
-    if(!HR(cmd->Close(),"Close cache-capture command list"))return false;
+    if(!DeviceHR(cmd->Close(),"Close cache-capture command list"))return false;
     ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
     // Signal only. The old code drained the entire queue here, which idled the GPU for
     // the full CPU copy and encode stage of every frame.
@@ -1282,9 +1311,9 @@ bool D3D12Renderer::PresentCurrent(){
     if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_presentSlotWaitNanos))return false;
-    if(!HR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
+    if(!DeviceHR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
     auto* cmd=m_cmds[slot].Get();
-    if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset static-present command list"))return false;
+    if(!DeviceHR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset static-present command list"))return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
     HarvestNeuralTimings();
     RecordReferenceUpload(cmd,slot);
@@ -1316,14 +1345,11 @@ bool D3D12Renderer::PresentCurrent(){
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
-    if(!HR(cmd->Close(),"Close static-present command list"))return false;
+    if(!DeviceHR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    const auto presented=std::chrono::steady_clock::now();
-    HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
-    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now()-presented).count());
-    if(FAILED(phr)){LOG("Static Present failed hr=0x"<<std::hex<<phr);return false;}
-    return SignalFrameSlot(slot);
+    // Published whether or not the Present took the frame; see RenderFrameInternal.
+    const bool presented=PresentSwapchain("Static Present");
+    return SignalFrameSlot(slot)&&presented;
 }
 
 // Reads back every slot whose DLSS timestamps were resolved by a fence value the
@@ -1367,6 +1393,55 @@ bool D3D12Renderer::ReleaseDLSSFeatureForIdle(){
 }
 
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
+bool D3D12Renderer::DeviceHR(HRESULT hr,const char*what){
+    if(SUCCEEDED(hr))return true;
+    LOG(what<<" failed hr=0x"<<std::hex<<hr);
+    const HRESULT reason=DeviceRemovedReason();
+    LatchGpuUnusable(d3d12_renderer_detail::ClassifyDeviceCallFailure(
+        hr,d3d12_renderer_detail::FenceWaitResult::Completed,[=]{return reason;}),reason);
+    return false;
+}
+HRESULT D3D12Renderer::DeviceRemovedReason()const{
+    if(m_testHooks&&m_testHooks->deviceRemovedReason)return m_testHooks->deviceRemovedReason();
+    return m_device?m_device->GetDeviceRemovedReason():S_OK;
+}
+void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult result,HRESULT reason){
+    if(result==d3d12_renderer_detail::FenceWaitResult::Completed)return;
+    const bool first=!m_gpuUnusable;
+    m_gpuUnusable=true;m_lastFenceWaitResult=result;
+    if(!first||result!=d3d12_renderer_detail::FenceWaitResult::DeviceRemoved)return;
+    LOG("D3D12 device removed: reason=0x"<<std::hex<<reason<<std::dec<<"; the renderer takes no further work.");
+#if defined(_DEBUG)
+    ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+    if(!m_device||FAILED(m_device.As(&dred)))return;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+    if(SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&breadcrumbs))){
+        for(const D3D12_AUTO_BREADCRUMB_NODE*node=breadcrumbs.pHeadAutoBreadcrumbNode;node;node=node->pNext){
+            const UINT completed=node->pLastBreadcrumbValue?*node->pLastBreadcrumbValue:0;
+            LOG("DRED breadcrumbs: list=\""<<(node->pCommandListDebugNameA?node->pCommandListDebugNameA:"")
+                <<"\" queue=\""<<(node->pCommandQueueDebugNameA?node->pCommandQueueDebugNameA:"")
+                <<"\" completed "<<completed<<" of "<<node->BreadcrumbCount<<" ops"
+                <<(completed<node->BreadcrumbCount&&node->pCommandHistory
+                    ?"; stopped in D3D12_AUTO_BREADCRUMB_OP "+std::to_string(int(node->pCommandHistory[completed])):std::string{}));
+        }
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+    if(SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))&&fault.PageFaultVA){
+        LOG("DRED page fault: va=0x"<<std::hex<<fault.PageFaultVA<<std::dec);
+        for(const D3D12_DRED_ALLOCATION_NODE*node=fault.pHeadExistingAllocationNode;node;node=node->pNext)
+            LOG("DRED page fault: live allocation \""<<(node->ObjectNameA?node->ObjectNameA:"")<<"\" type "<<int(node->AllocationType));
+        for(const D3D12_DRED_ALLOCATION_NODE*node=fault.pHeadRecentFreedAllocationNode;node;node=node->pNext)
+            LOG("DRED page fault: recently freed \""<<(node->ObjectNameA?node->ObjectNameA:"")<<"\" type "<<int(node->AllocationType));
+    }
+#endif
+}
+bool D3D12Renderer::PresentSwapchain(const char*what){
+    const auto presented=std::chrono::steady_clock::now();
+    const HRESULT hr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    m_presentNanos+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now()-presented).count());
+    return DeviceHR(hr,what);
+}
 bool D3D12Renderer::WaitForFenceValue(uint64_t value,uint64_t* stageWaitNanos){
     if(!value)return true;
     if(!m_fence||!m_fenceEvent)return false;
@@ -1382,10 +1457,10 @@ bool D3D12Renderer::WaitForFenceValue(uint64_t value,uint64_t* stageWaitNanos){
         std::chrono::steady_clock::now()-waited).count());
     m_fenceWaitNanos+=elapsed;
     if(stageWaitNanos)*stageWaitNanos+=elapsed;
-    const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(
-        waitResult,[&]{return m_device->GetDeviceRemovedReason();});
-    if(result!=d3d12_renderer_detail::FenceWaitResult::Completed){m_gpuUnusable=true;m_lastFenceWaitResult=result;}
-    return result==d3d12_renderer_detail::FenceWaitResult::Completed;
+    if(waitResult==d3d12_renderer_detail::FenceWaitResult::Completed)return true;
+    const HRESULT reason=DeviceRemovedReason();
+    LatchGpuUnusable(d3d12_renderer_detail::ClassifyFenceWaitFailure(waitResult,[=]{return reason;}),reason);
+    return false;
 }
 bool D3D12Renderer::WaitForFrameSlot(uint32_t slot,uint64_t* stageWaitNanos){
     if(slot>=FrameCount||!m_fence||!m_fenceEvent)return false;
@@ -1402,13 +1477,9 @@ bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
         signalResult=m_queue->Signal(m_fence.Get(),v);
     }
     if(FAILED(signalResult)){
-        HRESULT removedReason=S_OK;
-        if(m_testHooks&&m_testHooks->deviceRemovedReason)removedReason=m_testHooks->deviceRemovedReason();
-        else if(m_device)removedReason=m_device->GetDeviceRemovedReason();
-        m_lastFenceWaitResult=d3d12_renderer_detail::ClassifyFenceWaitFailure(
-            d3d12_renderer_detail::FenceWaitResult::SignalFailed,
-            [=]{return removedReason;});
-        m_gpuUnusable=true;
+        const HRESULT reason=DeviceRemovedReason();
+        LatchGpuUnusable(d3d12_renderer_detail::ClassifyDeviceCallFailure(
+            signalResult,d3d12_renderer_detail::FenceWaitResult::SignalFailed,[=]{return reason;}),reason);
         return false;
     }
     m_fenceValue=v;
@@ -1419,23 +1490,23 @@ bool D3D12Renderer::SignalFrameSlot(uint32_t slot){
 d3d12_renderer_detail::FenceWaitResult D3D12Renderer::WaitGPU(DWORD budgetMilliseconds){
     if(m_testHooks&&m_testHooks->waitGPU){
         const auto result=m_testHooks->waitGPU();m_lastFenceWaitResult=result;
-        if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)m_gpuUnusable=true;
+        if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)LatchGpuUnusable(result,DeviceRemovedReason());
         return result;
     }
     if(!m_queue||!m_fence||!m_fenceEvent)return d3d12_renderer_detail::FenceWaitResult::Completed;
     const uint64_t v=++m_fenceValue;
-    const auto result=d3d12_renderer_detail::WaitForGPUFenceDrain(
+    const auto waited=d3d12_renderer_detail::WaitForGPUFenceDrain(
         v,
         budgetMilliseconds,
         [&](uint64_t value){return m_queue->Signal(m_fence.Get(),value);},
         [&]{return m_fence->GetCompletedValue();},
         [&](uint64_t value){return m_fence->SetEventOnCompletion(value,m_fenceEvent);},
-        [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);},
-        [&]{return m_device->GetDeviceRemovedReason();});
-    if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)
-        LOG("GPU fence wait failed after "<<budgetMilliseconds<<" ms.");
-    m_lastFenceWaitResult=result;
-    if(result!=d3d12_renderer_detail::FenceWaitResult::Completed)m_gpuUnusable=true;
+        [&](DWORD timeout){return WaitForSingleObject(m_fenceEvent,timeout);});
+    if(waited==d3d12_renderer_detail::FenceWaitResult::Completed){m_lastFenceWaitResult=waited;return waited;}
+    LOG("GPU fence wait failed after "<<budgetMilliseconds<<" ms.");
+    const HRESULT reason=DeviceRemovedReason();
+    const auto result=d3d12_renderer_detail::ClassifyFenceWaitFailure(waited,[=]{return reason;});
+    LatchGpuUnusable(result,reason);
     return result;
 }
 bool D3D12Renderer::WaitGPUForContinuedUse(){
