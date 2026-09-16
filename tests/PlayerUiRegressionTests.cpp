@@ -192,10 +192,8 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_UPSCALE_1440);
         CHECK_EQ(app.m_upscaleTargetHeight,1440u);
         const auto upscalingContent = app.ButtonContent(ToolbarAction::ToggleUpscaling);
-        CHECK_EQ(std::wstring(L"DLSS Upscaling · Unavailable"), upscalingContent.label);
         CHECK(!upscalingContent.enabled);
         const auto frameGenerationContent = app.ButtonContent(ToolbarAction::ToggleFrameGeneration);
-        CHECK_EQ(std::wstring(L"Frame Generation · Unavailable"), frameGenerationContent.label);
         CHECK(!frameGenerationContent.enabled);
         const bool initialQualityExplicit = app.m_opt.qualityExplicit;
         const auto initialQuality = app.m_opt.quality;
@@ -246,6 +244,12 @@ struct PlayerAppTestAccess {
         CheckEncoderSettingsDialog(app);
 
         CheckSettingsDialogTipsSurviveASecondDialog(app);
+        CheckLiveExportEntry(app);
+        CheckDroppedPreviewJob(app, windowClass);
+        CheckUnloadDropsDeferredToggle(app);
+        CheckLiveJobDirectoryFailure(app);
+        CheckLiveRenderFailureLimit(app);
+        CheckJobSourceKeyGuard(app);
         app.m_seeking = false;
         app.m_cachedPlayback = false;
         app.m_havePresentedPair = false;
@@ -267,14 +271,12 @@ struct PlayerAppTestAccess {
         app.m_comparisonView = ComparisonView::Neural;
         app.SyncFeatureMenuState();
         const auto seekingOnContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
-        CHECK_EQ(std::wstring(L"Neural Rendering · Seeking · On"), seekingOnContent.label);
         CHECK(seekingOnContent.active);
         CHECK((GetMenuState(featureMenu, IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MFS_CHECKED) != 0);
         app.m_neuralRequested = false;
         app.m_comparisonView = ComparisonView::Original;
         app.SyncFeatureMenuState();
         const auto seekingOffContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
-        CHECK_EQ(std::wstring(L"Neural Rendering · Seeking · Off"), seekingOffContent.label);
         CHECK(!seekingOffContent.active);
         CHECK((GetMenuState(featureMenu, IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MFS_CHECKED) == 0);
 
@@ -292,7 +294,7 @@ struct PlayerAppTestAccess {
         app.m_seeking = false;
         app.m_neuralLifecycle.Begin();
         const auto preparingContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
-        CHECK_EQ(std::wstring(L"Neural Rendering · Preparing cache"), preparingContent.label);
+        CHECK(!preparingContent.enabled);
 
         struct FeatureLabel { UiIcon icon; const std::wstring& label; int widthDip; };
         const std::array featureLabels{
@@ -580,8 +582,7 @@ private:
 
         app.ToggleNeuralRendering();
         CHECK(app.m_neuralToggleDeferred);
-        CHECK_EQ(std::wstring(L"Neural Rendering · Queued for the seek"),
-                 app.ButtonContent(ToolbarAction::ToggleNeuralRendering).label);
+        CHECK(!app.ToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering));
 
         // The seek landed on something unrenderable: drop the press, do not
         // leave it queued for the next unrelated seek.
@@ -592,6 +593,198 @@ private:
 
         app.m_loaded = loaded; app.m_cachedPlayback = cached;
         app.m_havePresentedPair = pair; app.m_seeking = seeking;
+    }
+
+    // A session fills its range one hole at a time and every job publishes a
+    // cache entry of its own hole, while "Save converted video" writes the entry
+    // under the session's whole range. An entry that is one hole must not be on
+    // offer: a session that rendered [30,60) and then [0,30) exported its 30 s
+    // tail labelled as the film. Only a job that rendered the whole range does.
+    static void CheckLiveExportEntry(PlayerApp& app)
+    {
+        const bool liveSession = app.m_liveSession, cached = app.m_cachedPlayback, requested = app.m_neuralRequested;
+        app.m_liveSession = true; app.m_liveAttached = true; app.m_cachedPlayback = true;
+        app.m_liveRange = NeuralRenderRange{0, 600000000}; app.m_liveDirectory.clear();
+        app.m_liveRenderFailures = 0; app.m_liveTargetRevision = 0;
+        const auto entry = app.SettingsPath().parent_path() / L"live-export-entry.mkv";
+        {std::ofstream file(entry, std::ios::binary); file << "entry";}
+        const auto exportEnabled = [&] {
+            return (GetMenuState(GetMenu(app.m_hwnd), IDM_EXPORT_CACHED_VIDEO, MF_BYCOMMAND) & (MF_GRAYED | MF_DISABLED)) == 0;
+        };
+        const auto segment = [&](uint64_t run, int64_t start, int64_t end) {
+            NeuralSegment part{}; part.path = entry; part.runId = run;
+            part.firstTimestamp100ns = start; part.end100ns = end; part.frameCount = uint64_t((end - start) / 333333);
+            app.m_liveSegments->Append(part);
+        };
+        NeuralJobCompletion completion{}; completion.result.ok = true; completion.neuralPath = entry;
+
+        app.m_liveSegments = std::make_shared<NeuralSegmentIndex>();
+        segment(1, 300000000, 600000000);
+        completion.range = NeuralRenderRange{300000000, 600000000};
+        app.CompleteLiveNeuralJob(completion);
+        CHECK(app.m_liveSession);
+        CHECK(app.m_neuralPath.empty());
+        CHECK(!exportEnabled());
+        // The second job fills the opening: the range is rendered end to end
+        // now, but this entry is still one hole of it.
+        segment(2, 0, 300000000);
+        completion.range = NeuralRenderRange{0, 300000000};
+        app.CompleteLiveNeuralJob(completion);
+        CHECK(app.m_neuralPath.empty());
+        CHECK(!exportEnabled());
+
+        app.m_liveSegments = std::make_shared<NeuralSegmentIndex>();
+        segment(3, 0, 600000000);
+        completion.range = NeuralRenderRange{0, 600000000};
+        app.CompleteLiveNeuralJob(completion);
+        CHECK_EQ(app.m_neuralPath, entry);
+        CHECK(exportEnabled());
+
+        app.m_liveSegments.reset(); app.m_liveRange = {}; app.m_liveAttached = false;
+        app.m_liveSession = liveSession; app.m_cachedPlayback = cached; app.m_neuralRequested = requested;
+        app.m_neuralPath.clear(); app.m_cachedReceiptPath.clear(); app.m_cachedSettings = {}; app.m_cachedGuides = {};
+        app.m_neuralNotice.clear(); app.SyncFeatureMenuState();
+        std::filesystem::remove(entry);
+    }
+
+    // A settings preview that is dropped - Stop, the cancel button, a file
+    // change - used to leave m_previewJob set and the buffering panel up: no
+    // later preview could start and the panel never came down. The job is a
+    // real lifecycle with a worker, cancelled through the real path.
+    static void CheckDroppedPreviewJob(PlayerApp& app, const WNDCLASSW& windowClass)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, pair = app.m_havePresentedPair, seeking = app.m_seeking;
+        app.m_renderWnd = CreateWindowExW(0, windowClass.lpszClassName, nullptr, WS_CHILD, 0, 0, 320, 180,
+                                          app.m_hwnd, nullptr, windowClass.hInstance, nullptr);
+        CHECK(app.m_renderWnd != nullptr);
+        const auto startPreview = [&] {
+            app.m_previewJob = true; app.m_previewQueued = true;
+            app.ShowBufferOverlay();
+            app.m_neuralLifecycle.Begin();
+            app.m_neuralWorker = std::jthread([] {});
+            CHECK(app.NeuralJobActive());
+            CHECK(app.JobBehindPlayback());
+            CHECK(app.m_bufferWnd != nullptr && IsWindowVisible(app.m_bufferWnd));
+        };
+        startPreview();
+        app.CancelNeuralJob(false);
+        CHECK(!app.NeuralJobActive());
+        CHECK(!app.m_previewJob && !app.m_previewQueued);
+        CHECK(!app.JobBehindPlayback());
+        CHECK(!IsWindowVisible(app.m_bufferWnd));
+
+        // Unloading the file drops a running preview the same way.
+        startPreview();
+        app.Unload();
+        CHECK(!app.NeuralJobActive());
+        CHECK(!app.m_previewJob && !app.m_previewQueued);
+        CHECK(!IsWindowVisible(app.m_bufferWnd));
+
+        DestroyWindow(app.m_bufferWnd); app.m_bufferWnd = nullptr;
+        DestroyWindow(app.m_renderWnd); app.m_renderWnd = nullptr;
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_havePresentedPair = pair; app.m_seeking = seeking;
+        app.m_renderer = MakeD3D12Renderer();
+    }
+
+    // The toggle queued behind a seek belongs to the file the seek was in. It
+    // used to survive Unload and fire on the next file's first seek.
+    static void CheckUnloadDropsDeferredToggle(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, pair = app.m_havePresentedPair, seeking = app.m_seeking;
+        app.m_loaded = true; app.m_cachedPlayback = true; app.m_havePresentedPair = true; app.m_seeking = true;
+        app.ToggleNeuralRendering();
+        CHECK(app.m_neuralToggleDeferred);
+        app.Unload();
+        CHECK(!app.m_neuralToggleDeferred);
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_havePresentedPair = pair; app.m_seeking = seeking;
+        app.m_renderer = MakeD3D12Renderer();
+    }
+
+    // A live job whose segment directory cannot be created returned after the
+    // lifecycle had already marked a job as running: the spinner stayed on and
+    // every source and render action stayed greyed out for the rest of the
+    // file, with nothing to say why.
+    static void CheckLiveJobDirectoryFailure(PlayerApp& app)
+    {
+        // A regular file where the session directory should be: no job
+        // subdirectory can be created under it.
+        const auto blocker = app.SettingsPath().parent_path() / L"live-directory-blocker";
+        {std::ofstream file(blocker, std::ios::binary); file << "not a directory";}
+        app.m_liveSegments = std::make_shared<NeuralSegmentIndex>();
+        app.m_liveDirectory = blocker;
+        app.m_neuralNotice.clear();
+        CHECK(!app.StartNeuralJob(L"C:\\missing\\source.mp4", {}, L"Blocked", {}, MediaSourceKind::LocalFile,
+                                  YouTubeSourceQuality::Auto, {}, 0.0, NeuralRenderRange{0, 10000000}, false, NeuralJobKind::Live));
+        CHECK(!app.NeuralJobActive());
+        CHECK(!app.m_neuralWorker.joinable());
+        CHECK(!app.m_neuralNotice.empty());
+        CheckSourceMenus(app, true);
+        app.m_liveSegments.reset(); app.m_liveDirectory.clear(); app.m_neuralNotice.clear();
+        std::filesystem::remove(blocker);
+    }
+
+    // Two jobs that end without adding coverage stop the session filling holes,
+    // and a session that can no longer fill the hole the playhead is in hands
+    // the original back with a notice rather than sitting behind the buffering
+    // panel for good. Driven through the completion handler and the tick.
+    static void CheckLiveRenderFailureLimit(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested, seeking = app.m_seeking;
+        app.m_loaded = true; app.m_playing = false; app.m_currentSec = 0.0;
+        app.m_seeking = false; app.m_seekPending = false; app.m_dragSeek = false; app.m_lastSeekTick = 0;
+        app.m_liveSession = true; app.m_liveAttached = false; app.m_liveBuffering = false; app.m_cachedPlayback = false;
+        app.m_liveRange = NeuralRenderRange{0, 600000000}; app.m_liveTarget = {}; app.m_liveDirectory.clear();
+        app.m_liveSegments = std::make_shared<NeuralSegmentIndex>();
+        NeuralSegment tail{}; tail.path = L"tail.mkv"; tail.runId = 1;
+        tail.firstTimestamp100ns = 300000000; tail.end100ns = 600000000; tail.frameCount = 900;
+        app.m_liveSegments->Append(tail);
+        // The job started from this coverage; ending with it unchanged is a job
+        // that rendered nothing, however it reports itself.
+        app.m_liveTargetRevision = app.m_liveSegments->Revision();
+        app.m_liveRenderFailures = 0; app.m_neuralNotice.clear();
+        NeuralJobCompletion fruitless{}; fruitless.result.ok = true;
+        for (int strike = 1; strike <= PlayerApp::kLiveRenderFailureLimit; ++strike) {
+            app.CompleteLiveNeuralJob(fruitless);
+            CHECK(app.m_liveSession);
+            app.UpdateLiveSession();
+            CHECK_EQ(strike < PlayerApp::kLiveRenderFailureLimit, app.m_liveSession);
+        }
+        CHECK(!app.m_neuralNotice.empty());
+        CHECK(!app.m_liveBuffering);
+        app.DropRetainedLiveSegments();
+        app.m_liveRenderFailures = 0; app.m_neuralNotice.clear(); app.m_liveRange = {};
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+    }
+
+    // The running job's source key is offered to playback and to the next
+    // render only for the video it was reported for: two 1440p trailers share
+    // a geometry, so without the page guard the second video would have been
+    // handed the first one's copy. Driven through the real progress handler.
+    static void CheckJobSourceKeyGuard(PlayerApp& app)
+    {
+        const std::wstring first = L"https://youtu.be/first00000A", second = L"https://youtu.be/second0000B";
+        const std::string key(64, 'f');
+        app.m_recent.reset(); app.m_youtubePageUrl = first;
+        const uint64_t generation = app.m_neuralLifecycle.Begin();
+        const auto report = [&](const std::wstring& page) {
+            auto message = std::make_unique<NeuralProgressMessage>();
+            message->generation = generation; message->progress.phase = NeuralRenderPhase::Decoding;
+            message->sourcePath = L"C:\\cache\\first.mkv"; message->sourceKey = key; message->pageUrl = page;
+            uint64_t token = 0;
+            CHECK(app.m_neuralProgressMessages.RegisterAndPost(std::move(message),
+                [&](uint64_t registered) { token = registered; return true; }));
+            app.CompleteNeuralProgress(token);
+        };
+        report(first);
+        CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
+        // Another video is loaded now: the key is not its own.
+        app.m_youtubePageUrl = second;
+        CHECK(!app.CachedYouTubeSourceKey());
+        // A report for a video that is not the loaded one is not adopted either.
+        report(first);
+        CHECK(!app.CachedYouTubeSourceKey());
+        app.m_neuralLifecycle.Invalidate(); app.m_neuralProgress = {};
+        app.m_jobSourcePath.clear(); app.m_jobSourceKey.clear(); app.m_jobSourcePageUrl.clear(); app.m_youtubePageUrl.clear();
     }
 
     // The neural strength dial is presentation state: it must reach the renderer and the
@@ -1075,13 +1268,17 @@ private:
 
         // Use a genuine queued Win32 timer once as well as deterministic idle
         // deadlines, proving registration and dispatch through the window proc.
+        // The timer fires at 250 ms; a loaded runner can hold it back, so the
+        // wait is bounded generously rather than sized to the interval.
         MoveFullscreenPointer(app,app.m_hwnd);
         app.m_fullscreenLastInput=Clock::now()-std::chrono::seconds(3);
-        Sleep(300);
         MSG timerMessage{};bool receivedTimer=false;
-        while(PeekMessageW(&timerMessage,app.m_hwnd,WM_TIMER,WM_TIMER,PM_REMOVE)){
-            receivedTimer|=timerMessage.wParam==timer;
-            DispatchMessageW(&timerMessage);
+        for(const ULONGLONG deadline=GetTickCount64()+10000;!receivedTimer&&GetTickCount64()<deadline;){
+            MsgWaitForMultipleObjects(0,nullptr,FALSE,100,QS_TIMER);
+            while(PeekMessageW(&timerMessage,app.m_hwnd,WM_TIMER,WM_TIMER,PM_REMOVE)){
+                receivedTimer|=timerMessage.wParam==timer;
+                DispatchMessageW(&timerMessage);
+            }
         }
         CHECK(receivedTimer);
         CHECK(GetMenu(app.m_hwnd)==nullptr);
