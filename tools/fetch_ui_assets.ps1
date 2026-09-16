@@ -38,7 +38,8 @@ function Remove-ScopedDirectory {
 
 try {
     New-Item -ItemType Directory -Path $temporaryRoot, $extracted -Force | Out-Null
-    Invoke-WebRequest -Uri $packageUrl -OutFile $archive -UseBasicParsing
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $packageUrl -OutFile $archive -UseBasicParsing -TimeoutSec 300
 
     $sha512 = [Security.Cryptography.SHA512]::Create()
     try {

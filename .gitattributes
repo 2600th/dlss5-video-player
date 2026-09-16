@@ -6,3 +6,12 @@
 *.yaml text eol=lf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
+# tools/package_release.ps1 copies these as-is and hashes them into
+# PACKAGE_MANIFEST.txt, so their line endings cannot be left to each
+# maintainer's core.autocrlf (the *.md rule above already pins the rest of the
+# package). CRLF is what the in-tree INI writer and the manifest itself use.
+/LICENSE text eol=crlf
+/assets/tabler/LICENSE text eol=crlf
+/packaging/*.ini text eol=crlf
+/packaging/*.txt text eol=crlf
+/THIRD_PARTY_LICENSES/*.txt text eol=crlf

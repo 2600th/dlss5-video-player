@@ -60,6 +60,15 @@ function(dlss_video_player_use_nvof target)
     endif()
 endfunction()
 
+# Control Flow Guard and CET shadow stacks for the two shipped binaries. The
+# compiler and linker already default to /GS, /DYNAMICBASE, /NXCOMPAT and
+# /HIGHENTROPYVA; they are spelled out so a toolset that stops defaulting them
+# shows up as a diff here rather than in dumpbin output of a shipped package.
+function(dlss_video_player_harden target)
+    target_compile_options(${target} PRIVATE /guard:cf /GS)
+    target_link_options(${target} PRIVATE /GUARD:CF /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
+endfunction()
+
 # The packaging lock is embedded so the player and helper verify the exact
 # runtime files at run time, not only at packaging time.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/packaging/runtime-lock.json")
@@ -166,6 +175,7 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     nvsdk_ngx_d
 )
 dlss_video_player_use_nvof(DLSSVideoPlayer)
+dlss_video_player_harden(DLSSVideoPlayer)
 
 # Only the offline helper loads the experimental proxy/add-on. The player root
 # stays hook-free for its independent runtime Super Resolution feature.
@@ -182,6 +192,7 @@ target_link_directories(NeuralWorker PRIVATE "${DLSS_LIB_DIR}")
 get_target_property(player_libraries DLSSVideoPlayer LINK_LIBRARIES)
 target_link_libraries(NeuralWorker PRIVATE ${player_libraries})
 dlss_video_player_use_nvof(NeuralWorker)
+dlss_video_player_harden(NeuralWorker)
 set_target_properties(NeuralWorker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/neural-runtime")
 add_dependencies(DLSSVideoPlayer NeuralWorker)
 

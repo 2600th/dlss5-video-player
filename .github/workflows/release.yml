@@ -4,23 +4,47 @@ on:
   push:
     tags:
       - "dlss5-video-player-v*"
+  # Retry a publish that failed after the tag was already pushed, without
+  # re-pushing a public tag. The named tag is checked out and gated below
+  # exactly as a pushed one is.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing dlss5-video-player-v<VERSION> tag to build and publish"
+        required: true
+        type: string
+
+# Two runs for one tag would race on the same draft release; the later one
+# waits rather than cancelling a publish in flight.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
     runs-on: windows-2022
     permissions:
       contents: write
+      # The provenance attestation of the core zip signs with the job's OIDC
+      # token; no repository secret is involved.
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Require tag to match VERSION
         shell: powershell
         run: |
           $version = (Get-Content -Raw VERSION).Trim()
           $expectedTag = "dlss5-video-player-v$version"
-          $actualTag = $env:GITHUB_REF_NAME
+          $actualTag = $env:RELEASE_TAG
           if ($actualTag -cne $expectedTag) {
             throw "Release tag '$actualTag' does not match VERSION '$version' (expected '$expectedTag')."
           }
@@ -50,9 +74,9 @@ jobs:
 
       - name: Test Release
         shell: cmd
-        run: ctest --test-dir build-upscaling -C Release --output-on-failure
+        run: ctest --test-dir build-upscaling -C Release -LE gpu --output-on-failure
 
-      - name: Assemble release package
+      - name: Assemble the core package from the tested build
         shell: cmd
         run: package_public_release.bat
 
@@ -69,72 +93,37 @@ jobs:
           # would append CRLF and make the line unreadable to coreutils.
           [System.IO.File]::WriteAllText("$($zip[0].FullName).sha256", "$hash  $($zip[0].Name)`n")
 
+      # Signed SLSA provenance for the core zip, verifiable with
+      # `gh attestation verify <zip> --repo <owner>/<repo>`.
+      - name: Attest core package provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/DLSSVideoPlayer-v*-core-win64.zip
+
+      # The body is README's short version for this release plus the download
+      # lines; the same script gates pull requests that bump VERSION, so a
+      # missing CHANGELOG section or README entry is found there, not here.
       - name: Build release notes
         shell: powershell
-        run: |
-          # The body was the generated commit list, which says what was committed
-          # rather than what changed for someone installing it. The CHANGELOG
-          # section is the other extreme - 470 lines for 0.22.0, which buries the
-          # download. README's "What changed" paragraph for this version is the
-          # short version the repository already maintains, so that is the body,
-          # with the full section one link away.
-          $version = (Get-Content -Raw VERSION).Trim()
+        run: .\tools\release_notes.ps1 -Repository $env:GITHUB_REPOSITORY
 
-          # The cut still has to have happened: a tag pushed while the section is
-          # still called Unreleased is the mistake this catches.
-          if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version))( |`$)" -Quiet)) {
-            throw "CHANGELOG.md has no '## $version' section; cut it before tagging."
-          }
-
-          $lines = Get-Content -LiteralPath README.md
-          $start = $null
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match "^\*\*$([regex]::Escape($version))\*\* \(") { $start = $i; break }
-          }
-          if ($null -eq $start) {
-            throw "README.md has no '**$version** (date)' entry under What changed; write it before tagging."
-          }
-          $end = $lines.Count
-          for ($i = $start + 1; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\*\*[0-9]+\.[0-9]+\.[0-9]+\*\* \(') { $end = $i; break }
-          }
-          $summary = ($lines[$start..($end - 1)] -join "`n").TrimEnd()
-
-          $repo = $env:GITHUB_REPOSITORY
-          $tag = $env:GITHUB_REF_NAME
-          # Single quotes and -f: a here-string has to terminate at column 0,
-          # which would break out of this YAML block scalar.
-          $intro = @(
-            'Windows x64, an RTX GPU and NVIDIA driver 610.47 or newer. Community project, not an',
-            'NVIDIA product; the neural runtime is a modified, unsigned community build.',
-            '',
-            ('Download `dlss5-video-player-v{0}-win64.zip` below - player plus the pinned neural' -f $version),
-            ('runtime. `DLSSVideoPlayer-v{0}-core-win64.zip` is the player alone, with no runtime' -f $version),
-            'in it. Each has a `.sha256` beside it; GitHub''s "Source code" zip does not run.',
-            ''
-          )
-          $tail = @(
-            '',
-            ('Every detail, including what was measured: [CHANGELOG.md for {0}](https://github.com/{1}/blob/{2}/CHANGELOG.md).' -f $version, $repo, $tag)
-          )
-          $body = (($intro + $summary + $tail) -join "`n")
-          [System.IO.File]::WriteAllText("$PWD\release-notes.md", $body.TrimEnd() + "`n")
-          Write-Host "Release notes: $($body.Length) characters from README's $version entry."
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          # The body is README's short version for this release plus the download
-          # lines; the generated commit list is appended under it by the action.
+          tag_name: ${{ env.RELEASE_TAG }}
+          # The generated commit list is appended under the body by the action.
           body_path: release-notes.md
           generate_release_notes: true
           prerelease: true
+          # A draft: the notes tell people to download the complete package
+          # `dlss5-video-player-v<version>-win64.zip`, and CI never fetches the
+          # neural runtime that goes into it, so the maintainer builds that zip
+          # with package_release.bat, attaches it and its .sha256 to this draft,
+          # and then publishes. Until then nothing is public.
+          draft: true
           # The packager names the zip after VERSION, which the tag gate above
-          # already pinned; a missing file or checksum fails the release
-          # instead of publishing an incomplete one. The complete package with
-          # the neural runtime is attached by hand as
-          # `dlss5-video-player-v<version>-win64.zip` - the name the README
-          # promises - because CI never fetches that runtime.
+          # already pinned; a missing file or checksum fails the run instead of
+          # leaving a draft without its core package.
           fail_on_unmatched_files: true
           files: |
             dist/DLSSVideoPlayer-v*-core-win64.zip

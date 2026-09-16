@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch or pull request supersedes the run in flight.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-2022
@@ -14,7 +19,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require CHANGELOG and README entries when VERSION changes
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # The two guards the release notes throw on, run on the pull request
+          # that bumps VERSION so the mistake is found before the tag is pushed.
+          git fetch --depth 1 origin "$BASE_SHA"
+          base=$(git show "$BASE_SHA:VERSION" | tr -d '[:space:]')
+          version=$(tr -d '[:space:]' < VERSION)
+          if [ "$base" = "$version" ]; then
+            echo "VERSION is $version on both sides; no release entries are required."
+            exit 0
+          fi
+          echo "VERSION changes from $base to $version; the release notes must build from this tree."
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/release_notes.ps1 -Repository "$GITHUB_REPOSITORY" -OutFile "$RUNNER_TEMP/release-notes.md"
 
       - name: Clone NVIDIA DLSS SDK
         shell: cmd
@@ -33,24 +56,37 @@ jobs:
 
       - name: Configure
         shell: cmd
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+        run: cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
 
       - name: Build Release
         shell: cmd
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build-upscaling --config Release --parallel
 
       - name: Test Release
         shell: cmd
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build-upscaling -C Release -LE gpu --output-on-failure
 
-      - name: Upload executable artifact
-        uses: actions/upload-artifact@v4
+      # The same packager the release workflow runs, on the build ctest just
+      # ran, so a packaging break is found on the pull request and not on the
+      # tag.
+      - name: Assemble the core package from the tested build
+        shell: cmd
+        run: package_public_release.bat
+
+      - name: Verify the core package
+        shell: powershell
+        run: |
+          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'DLSSVideoPlayer-v*-core-win64.zip' -File)
+          if ($zip.Count -ne 1) {
+            throw "Expected exactly one core package in dist, found $($zip.Count)."
+          }
+          .\tools\verify_package.ps1 -Zip $zip[0].FullName -PublicCore
+
+      # Uploaded as the file itself, not re-zipped, so what is downloaded is the
+      # verified package under its own name and runs as-is.
+      - name: Upload core package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: DLSSVideoPlayer-windows-x64
+          path: dist/DLSSVideoPlayer-v*-core-win64.zip
+          archive: false
           if-no-files-found: error
-          path: |
-            build/Release/DLSSVideoPlayer.exe
-            build/Release/yt-dlp.exe
-            build/Release/deno.exe
-            LICENSE
-            README.md

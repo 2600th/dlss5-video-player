@@ -63,36 +63,25 @@ function Get-OrdinalPackageFiles {
     foreach ($relative in $relativePaths) { $filesByPath[$relative] }
 }
 
-function Invoke-FreshReleaseBuild {
+# This used to clean the build directory and rebuild the player, so the
+# executable it shipped was never the one ctest had just run. It packages the
+# tested build now and checks that build's identity instead.
+function Assert-ReleaseBuild {
     $configuredBuildDirectory = Join-Path $repositoryRoot $BuildDirectory
     $cachePath = Join-Path $configuredBuildDirectory 'CMakeCache.txt'
     if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
         throw "Configured build directory is missing: $cachePath"
     }
 
-    $cache = Get-Content -LiteralPath $cachePath
-    $cmakeLine = $cache | Where-Object { $_ -match '^CMAKE_COMMAND:INTERNAL=' } | Select-Object -First 1
-    $homeLine = $cache | Where-Object { $_ -match '^CMAKE_HOME_DIRECTORY:INTERNAL=' } | Select-Object -First 1
-    if (-not $cmakeLine -or -not $homeLine) { throw 'CMakeCache.txt does not identify its CMake command and source tree.' }
-    $cmake = $cmakeLine.Substring($cmakeLine.IndexOf('=') + 1)
+    $homeLine = Get-Content -LiteralPath $cachePath | Where-Object { $_ -match '^CMAKE_HOME_DIRECTORY:INTERNAL=' } | Select-Object -First 1
+    if (-not $homeLine) { throw 'CMakeCache.txt does not identify its source tree.' }
     $configuredHome = $homeLine.Substring($homeLine.IndexOf('=') + 1)
     if ([IO.Path]::GetFullPath($configuredHome).TrimEnd('\', '/') -ine [IO.Path]::GetFullPath($repositoryRoot).TrimEnd('\', '/')) {
         throw "The build directory belongs to a different source tree: $configuredHome"
     }
-    if (-not (Test-Path -LiteralPath $cmake -PathType Leaf)) { throw "Configured CMake executable is missing: $cmake" }
 
     $executable = Join-Path $buildRoot 'DLSSVideoPlayer.exe'
-    & $cmake --build $configuredBuildDirectory --config Release --target clean
-    if ($LASTEXITCODE -ne 0) { throw "Clean build step failed with exit code $LASTEXITCODE." }
-    if (Test-Path -LiteralPath $executable) { throw 'Clean left a stale DLSSVideoPlayer.exe; refusing to package it.' }
-
-    $buildStartedUtc = [DateTime]::UtcNow
-    & $cmake --build $configuredBuildDirectory --config Release --target DLSSVideoPlayer --parallel
-    if ($LASTEXITCODE -ne 0) { throw "Release build failed with exit code $LASTEXITCODE." }
-    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Fresh build did not produce DLSSVideoPlayer.exe.' }
-    if ((Get-Item -LiteralPath $executable).LastWriteTimeUtc -lt $buildStartedUtc.AddSeconds(-2)) {
-        throw 'DLSSVideoPlayer.exe timestamp predates the clean release build.'
-    }
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Release build is missing: $executable" }
 
     $identity = (Get-Item -LiteralPath $executable).VersionInfo
     $expectedIdentity = @{
@@ -113,12 +102,12 @@ function Invoke-FreshReleaseBuild {
             $built = Join-Path $buildRoot $helper
             if (-not (Test-Path -LiteralPath $built -PathType Leaf) -or
                 (Get-Sha256 -Path $built) -cne (Get-Sha256 -Path $source)) {
-                throw "Fresh build did not stage the pinned YouTube helper '$helper'."
+                throw "The build did not stage the pinned YouTube helper '$helper'."
             }
         }
     }
 
-    Write-Host "Fresh clean DLSSVideoPlayer $version.0 build verified."
+    Write-Host "DLSSVideoPlayer $version.0 build verified."
 }
 
 $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
@@ -175,7 +164,7 @@ function Get-AuthenticodeRecord {
     }
 }
 
-Invoke-FreshReleaseBuild
+Assert-ReleaseBuild
 if ($ValidateBuildOnly) { return }
 
 if (-not $PublicCore) {

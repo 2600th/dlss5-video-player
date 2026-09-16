@@ -40,7 +40,7 @@ DLSSVideoPlayer.ini
 DLSSVideoPlayer.log
 ReShade.log
 /dist/
-# Written into the workspace by the release workflow's notes step.
+# tools/release_notes.ps1 writes it here for the release workflow's publish step.
 /release-notes.md
 /cache/
 
