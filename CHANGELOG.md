@@ -47,6 +47,25 @@
   absent rather than as off and never refuses on it.
   No evaluate, presentation or pacing path exists yet, so the Frame Generation
   control stays unavailable; this commit buys the go/no-go, not the feature.
+- The same path also produces frames, which admission does not imply. Measured
+  with a synthetic pair whose answer is known in advance - a 200x200 square
+  translated exactly +200 px between two 1920x1080 frames - the raw evaluate
+  writes a real intermediate frame: all 2,073,600 output pixels overwritten
+  from a sentinel fill, the square's horizontal centroid at 812.7 against 699.5
+  and 899.5 in the inputs, differing from both, soft-edged across 736..894. It
+  is not a cross-fade, which would have spanned 600..999. It lands 13.2 px past
+  the 799.5 midpoint, biased toward the newer frame, which is a timing fact any
+  pacing work has to account for rather than assume away.
+- Recorded a negative result that constrains the design: the tagged
+  `DLSSG.MVecs` do not drive that output on this runtime. The same pair
+  evaluated with motion in backbuffer pixels, in normalised screen units, and
+  with the motion buffer deliberately zeroed - claiming nothing moved while the
+  colour pair jumps 200 px - produced the same frame all three times (centroids
+  812.73 / 812.73 / 812.79, mean channel difference between runs 0.00 and 0.01
+  of 255). So no claim that a better motion estimate buys a better generated
+  frame is supportable here, and `TemporalGuides` is not on the critical path
+  for frame generation the way it is for SR. `DlssgEvaluateSmoke` (gpu label)
+  is the experiment, including the zero-motion control.
 - `HexResultTextWide` is exported from `NeuralPreflight` so NGX result codes in
   wide diagnostics come from the one formatter the receipts already use.
 

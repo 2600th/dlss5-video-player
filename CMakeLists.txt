@@ -312,6 +312,27 @@ if(BUILD_TESTING)
             "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
             "$<TARGET_FILE_DIR:DlssgProbeSmoke>/nvngx_dlssg.dll"
     )
+    # The DLSS-G production experiment: same backend, same snippet staging, same
+    # include dirs and libraries as the admission probe beside it, because the
+    # question it asks only means something about the feature the probe admitted.
+    # It reads an interpolated frame back to the CPU, so it gets its own output
+    # directory for the same reason the probe does - Log truncates
+    # DLSSVideoPlayer.log on open and the NGX log beside the executable is the
+    # evidence.
+    add_executable(DlssgEvaluateSmoke tests/DlssgEvaluateSmoke.cpp
+        src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp)
+    target_include_directories(DlssgEvaluateSmoke PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(DlssgEvaluateSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(DlssgEvaluateSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_directories(DlssgEvaluateSmoke PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(DlssgEvaluateSmoke PRIVATE ${player_libraries})
+    set_target_properties(DlssgEvaluateSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dlssg-evaluate/$<CONFIG>")
+    add_custom_command(TARGET DlssgEvaluateSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
+            "$<TARGET_FILE_DIR:DlssgEvaluateSmoke>/nvngx_dlssg.dll"
+    )
     add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
         src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     target_include_directories(MediaGpuSmoke PRIVATE src)
@@ -327,7 +348,9 @@ if(BUILD_TESTING)
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME DlssgProbeSmoke COMMAND DlssgProbeSmoke)
-    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke PROPERTIES LABELS gpu)
+    add_test(NAME DlssgEvaluateSmoke COMMAND DlssgEvaluateSmoke)
+    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
+        PROPERTIES LABELS gpu)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

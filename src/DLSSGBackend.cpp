@@ -2,6 +2,7 @@
 #include "Log.h"
 #include "NeuralPreflight.h"
 #include <windows.h>
+#include <cfloat>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -123,6 +124,39 @@ bool DLSSGBackend::AcquireSession(ID3D12Device* device)
     return true;
 }
 
+// The create both entry points share, so admission and production are answered
+// about the same call: one differing parameter between them would make the
+// probe's verdict say nothing about the feature Initialize goes on to hold.
+NVSDK_NGX_Result DLSSGBackend::CreateFeature(ID3D12GraphicsCommandList* cmd,
+                                             uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat)
+{
+    // The DLFG-specific geometry keys, which the runtime prefers over the
+    // generic Width/Height pair whenever they are set
+    // (nvsdk_ngx_defs_dlssg.h), are populated here as well as in the create
+    // params below, so the create does not depend on which of the two pairs
+    // NGX_D3D12_CREATE_DLSSG happens to write.
+    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_DLSSG_Parameter_Width, width);
+    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_DLSSG_Parameter_Height, height);
+
+    NVSDK_NGX_DLSSG_Create_Params createParams{};
+    createParams.Width = width;
+    createParams.Height = height;
+    createParams.NativeBackbufferFormat = static_cast<unsigned int>(backbufferFormat);
+    // A player that owns its swapchain presents at one geometry, so the
+    // internal (render) size is the backbuffer size and never moves: dynamic
+    // resolution is off and the runtime is not asked to admit a range.
+    createParams.RenderWidth = width;
+    createParams.RenderHeight = height;
+    createParams.DynamicResolutionScaling = false;
+
+    // NGX_D3D12_CREATE_DLSSG sets the node masks and the DLSSG keys and then
+    // calls the raw NVSDK_NGX_D3D12_CreateFeature with
+    // NVSDK_NGX_Feature_FrameGeneration, which is the entry point in question.
+    const NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSSG(cmd, 1, 1, &m_handle, m_params, &createParams);
+    if (NVSDK_NGX_FAILED(result)) m_handle = nullptr;
+    return result;
+}
+
 DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
                                     uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat)
 {
@@ -177,29 +211,7 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
         << " MultiFrameCountMax=" << capability.multiFrameCountMax
         << " HwSchMode=" << (hwSchMode ? std::to_string(*hwSchMode) : std::string("absent")));
 
-    // The DLFG-specific geometry keys, which the runtime prefers over the
-    // generic Width/Height pair whenever they are set
-    // (nvsdk_ngx_defs_dlssg.h), are populated here as well as in the create
-    // params below, so the create does not depend on which of the two pairs
-    // NGX_D3D12_CREATE_DLSSG happens to write.
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_DLSSG_Parameter_Width, width);
-    NVSDK_NGX_Parameter_SetUI(m_params, NVSDK_NGX_DLSSG_Parameter_Height, height);
-
-    NVSDK_NGX_DLSSG_Create_Params createParams{};
-    createParams.Width = width;
-    createParams.Height = height;
-    createParams.NativeBackbufferFormat = static_cast<unsigned int>(backbufferFormat);
-    // A player that owns its swapchain presents at one geometry, so the
-    // internal (render) size is the backbuffer size and never moves: dynamic
-    // resolution is off and the runtime is not asked to admit a range.
-    createParams.RenderWidth = width;
-    createParams.RenderHeight = height;
-    createParams.DynamicResolutionScaling = false;
-
-    // NGX_D3D12_CREATE_DLSSG sets the node masks and the DLSSG keys and then
-    // calls the raw NVSDK_NGX_D3D12_CreateFeature with
-    // NVSDK_NGX_Feature_FrameGeneration, which is the entry point in question.
-    m_lastResult = NGX_D3D12_CREATE_DLSSG(cmd, 1, 1, &m_handle, m_params, &createParams);
+    m_lastResult = CreateFeature(cmd, width, height, backbufferFormat);
     capability.createResult = m_lastResult;
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
         m_handle = nullptr;
@@ -235,10 +247,10 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
         return capability;
     }
 
-    // Released at once: this class answers admission and holds nothing. A
-    // feature kept alive here would own runtime memory for the rest of the
-    // process with no evaluate path to justify it, and the create was recorded
-    // on a command list this class does not own and cannot flush.
+    // Released at once: this entry point answers admission and holds nothing.
+    // Initialize is the one that keeps a feature, and it takes a command list
+    // whose submission the caller commits to; the create here was recorded on
+    // a list this class does not own and cannot flush.
     const NVSDK_NGX_Result releaseResult = NVSDK_NGX_D3D12_ReleaseFeature(m_handle);
     m_handle = nullptr;
     if (NVSDK_NGX_FAILED(releaseResult)) {
@@ -263,6 +275,230 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
     return capability;
 }
 
+bool DLSSGBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
+                              uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat)
+{
+    if (!device || !cmd || !width || !height) {
+        m_lastResult = NVSDK_NGX_Result_FAIL_InvalidParameter;
+        return false;
+    }
+
+    // A live feature at this geometry already is the feature this call would
+    // create, and re-creating it would discard the temporal history it holds -
+    // which is the whole reason it is kept - for nothing.
+    if (m_handle && m_device == device && m_width == width && m_height == height &&
+        m_backbufferFormat == backbufferFormat) {
+        return true;
+    }
+    // Geometry and buffer format are the changes NVIDIA's DLSS Programming
+    // Guide 310.6.0 (S3.2 step 6) does require a re-create for. Every command
+    // list that referenced the outgoing feature in Evaluate must already have
+    // retired (S5.5), which only the caller can know, so this release trusts
+    // the caller the same way the SR backend's recreate path does.
+    if (m_handle) {
+        NVSDK_NGX_D3D12_ReleaseFeature(m_handle);
+        m_handle = nullptr;
+    }
+    m_available = false;
+    m_evaluations = 0;
+
+    if (!AcquireSession(device)) return false;
+
+    // The runtime's own ceiling on generated frames per real pair, read the way
+    // Probe reads it. An absent key means no multiframe, which is still one
+    // generated frame per pair once the create below succeeds, so it floors at
+    // 1 and Evaluate refuses anything above whatever this says.
+    unsigned int multiFrameCountMax = 0;
+    m_multiFrameCountMax =
+        NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetUI(m_params, NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax,
+                                                   &multiFrameCountMax)) || multiFrameCountMax == 0
+            ? 1u
+            : multiFrameCountMax;
+
+    m_lastResult = CreateFeature(cmd, width, height, backbufferFormat);
+    if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
+        m_handle = nullptr;
+        LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) for evaluation failed result=0x" << std::hex
+            << m_lastResult << std::dec << " at " << width << "x" << height
+            << " format=" << int(backbufferFormat)
+            << "; DLSSGBackend::Probe reports why a create is refused");
+        return false;
+    }
+
+    m_width = width;
+    m_height = height;
+    m_backbufferFormat = backbufferFormat;
+    m_available = true;
+    LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) KEPT at " << std::dec << width << "x" << height
+        << " format=" << int(backbufferFormat) << " multiFrameCountMax=" << m_multiFrameCountMax
+        << "; the create work is on the caller's command list and has to retire before the first evaluate");
+    return true;
+}
+
+// Everything in the optional evaluate block that a video source can honestly
+// state. Each value is a claim about the input, and a claim the source cannot
+// support - a projection it has no camera for, a jitter phase nothing applied -
+// would be answered by the runtime resolving the frame against geometry that
+// never existed.
+NVSDK_NGX_DLSSG_Opt_Eval_Params DLSSGBackend::VideoEvalConstants(uint32_t multiFrameCount,
+                                                                 uint32_t multiFrameIndex, bool reset) const
+{
+    NVSDK_NGX_DLSSG_Opt_Eval_Params constants{};
+    constants.multiFrameCount = multiFrameCount;
+    constants.multiFrameIndex = multiFrameIndex;
+    constants.reset = reset;
+    // Reset is the caller's statement, never the runtime's: automode is not in
+    // play on the raw path, so nothing here overrode the flag.
+    constants.automodeOverrideReset = false;
+
+    // A decoded frame has no camera, so there is no view, projection or lens
+    // transform to declare and every matrix is the identity. clipToPrevClip and
+    // prevClipToClip identity says the camera did not move between the two
+    // frames, which is exactly true of a video source: all apparent motion
+    // belongs to the content and is already in the MV buffer, which is what
+    // cameraMotionIncluded below declares. A made-up projection instead would
+    // have the runtime unproject the flat depth proxy into a scene that does
+    // not exist, and clipToLensClip identity says the colour is undistorted -
+    // the same statement the null distortion field in Evaluate makes.
+    const auto setIdentity = [](float matrix[4][4]) {
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) matrix[row][column] = row == column ? 1.0f : 0.0f;
+        }
+    };
+    setIdentity(constants.cameraViewToClip);
+    setIdentity(constants.clipToCameraView);
+    setIdentity(constants.clipToLensClip);
+    setIdentity(constants.clipToPrevClip);
+    setIdentity(constants.prevClipToClip);
+
+    // No temporal AA jitter: decoded frames arrive on a fixed sample grid, so
+    // there is no sub-pixel phase to report. This is the position
+    // DLSSBackend::FillEvaluateParameters takes for SR, for the same reason.
+    constants.jitterOffset[0] = 0.0f;
+    constants.jitterOffset[1] = 0.0f;
+
+    // DLSSG.MvecScale{X,Y} exist to normalize the buffer into [-1,1]
+    // (nvsdk_ngx_params_dlssg.h), so a buffer written in backbuffer pixels is
+    // divided by the backbuffer extent and one already written in normalized
+    // screen units passes through at 1.0. The units are the caller's
+    // declaration via SetMotionVectorUnits; the scale is derived here so the
+    // two can never disagree.
+    const bool pixelUnits = m_mvecUnits == MotionVectorUnits::BackbufferPixels;
+    constants.mvecScale[0] = pixelUnits && m_width ? 1.0f / float(m_width) : 1.0f;
+    constants.mvecScale[1] = pixelUnits && m_height ? 1.0f / float(m_height) : 1.0f;
+
+    // -FLT_MAX is unreachable by any displacement an R16G16_FLOAT buffer can
+    // hold, so nothing in the buffer is treated as invalid. The sentinel cannot
+    // be 0: a video producer writes zero for "this pixel did not move", which
+    // is most of a static shot, and calling that invalid would throw away the
+    // one thing the buffer is certain about.
+    constants.motionVectorsInvalidValue = -FLT_MAX;
+    // Per-pixel vectors straight from the estimator, not spread over silhouette
+    // edges by a dilation pass the video path does not run.
+    constants.motionVectorsDilated = false;
+
+    constants.cameraMotionIncluded = true;
+    // A frame is a flat image on a sample grid, not a perspective view of a
+    // scene, so the projection it was produced under is orthographic.
+    constants.orthoProjection = true;
+    // The depth handed in is a flat proxy written near-to-far as a plain [0,1]
+    // value, so it is not reversed-Z. depthInverted also selects the runtime's
+    // linearization (nvsdk_ngx_defs_dlssg.h: lin = 1/(1-depth) when false), and
+    // false is the branch that stays finite for a proxy written below 1.0.
+    constants.depthInverted = false;
+    // The backbuffer this path hands over is the player's SDR present surface.
+    constants.colorBuffersHDR = false;
+    // Every evaluate here is driven by a real decoded frame. There is no paused
+    // menu and no cut-scene player to declare, and saying otherwise would ask
+    // the runtime to stop generating exactly when the video is playing.
+    constants.notRenderingGameFrames = false;
+    // Fullscreen menu detection looks for a game menu that replaced the scene.
+    // This player composites its own UI after this pass, so there is no such
+    // menu in the backbuffer and the heuristic has only false positives to find
+    // in ordinary video content.
+    constants.menuDetectionEnabled = false;
+
+    // Explicit full-frame extents on every resource this path actually hands
+    // over, the way DLSSBackend states its subrects: with EvalFlags left at its
+    // default the runtime writes interpolated pixels inside the backbuffer
+    // extent and uninterpolated ones outside it, so declaring the extent as the
+    // whole frame is what says there is no "outside" here. The extents of the
+    // resources Evaluate leaves null stay zero.
+    const NVSDK_NGX_Dimensions frame{m_width, m_height};
+    constants.backbufferSubrectSize = frame;
+    constants.mvecsSubrectSize = frame;
+    constants.depthSubrectSize = frame;
+    constants.outputInterpSubrectSize = frame;
+    return constants;
+}
+
+bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
+                            ID3D12Resource* backbuffer,
+                            ID3D12Resource* motion,
+                            ID3D12Resource* depth,
+                            ID3D12Resource* outputInterpolated,
+                            uint32_t multiFrameCount,
+                            uint32_t multiFrameIndex,
+                            bool reset)
+{
+    if (!Available() || !m_handle || !cmd || !backbuffer || !motion || !depth || !outputInterpolated) return false;
+    // The index is 1-based and bounded by the count, and the count by what the
+    // runtime published. Out of range is a caller bug, refused here rather than
+    // handed to the runtime to interpret.
+    if (!multiFrameCount || !multiFrameIndex || multiFrameIndex > multiFrameCount ||
+        multiFrameCount > m_multiFrameCountMax) {
+        m_lastResult = NVSDK_NGX_Result_FAIL_InvalidParameter;
+        LOG("DLSS-G evaluate refused: multiFrameIndex=" << std::dec << multiFrameIndex << " of count="
+            << multiFrameCount << " is outside 1.." << m_multiFrameCountMax);
+        return false;
+    }
+
+    NVSDK_NGX_D3D12_DLSSG_Eval_Params evalParams{};
+    evalParams.pBackbuffer = backbuffer;
+    evalParams.pMVecs = motion;
+    evalParams.pDepth = depth;
+    evalParams.pOutputInterpFrame = outputInterpolated;
+    // Null because a decoded video frame has nothing to put in them, not
+    // because they were forgotten: the frame is one flat composited layer, so
+    // there is no HUD-less copy of it to hand over, no separate UI colour or
+    // alpha plane, and no post-process lens distortion for a bidirectional
+    // distortion field to undo. pOutputRealFrame is null because this path
+    // presents the decoded frame itself and will not have the runtime draw
+    // debug text into it, and pOutputDisableInterpolation is null because the
+    // hint it carries only matters to a presentation path that could act on it,
+    // which is a later measurement than this one.
+    evalParams.pHudless = nullptr;
+    evalParams.pUI = nullptr;
+    evalParams.pUIAlpha = nullptr;
+    evalParams.pBidirectionalDistortionField = nullptr;
+    evalParams.pOutputRealFrame = nullptr;
+    evalParams.pOutputDisableInterpolation = nullptr;
+
+    NVSDK_NGX_DLSSG_Opt_Eval_Params constants = VideoEvalConstants(multiFrameCount, multiFrameIndex, reset);
+
+    // NGX_D3D12_EVALUATE_DLSSG writes every DLSSG.* key from the two structs -
+    // including the optional resources above, which it sets to null explicitly
+    // rather than leaving whatever the last evaluate put there - and finishes
+    // with the raw NVSDK_NGX_D3D12_EvaluateFeature_C, which is the same entry
+    // point the SR path uses.
+    m_lastResult = NGX_D3D12_EVALUATE_DLSSG(cmd, m_handle, m_params, &evalParams, &constants);
+    if (NVSDK_NGX_FAILED(m_lastResult)) {
+        LOG("RAW NGX D3D12 EvaluateFeature(FrameGeneration) failed result=0x" << std::hex << m_lastResult
+            << std::dec << " frame " << multiFrameIndex << "/" << multiFrameCount
+            << " reset=" << (reset ? 1 : 0));
+        return false;
+    }
+
+    ++m_evaluations;
+    if (m_evaluations <= 2 || (m_evaluations % 300) == 0) {
+        LOG("RAW NGX D3D12 EvaluateFeature(FrameGeneration) SUCCESS #" << std::dec << m_evaluations
+            << " at " << m_width << "x" << m_height << " frame " << multiFrameIndex << "/" << multiFrameCount
+            << " mvecScale=(" << constants.mvecScale[0] << "," << constants.mvecScale[1] << ")"
+            << " reset=" << (reset ? 1 : 0));
+    }
+    return true;
+}
+
 void DLSSGBackend::Shutdown()
 {
     if (m_handle) {
@@ -281,5 +517,10 @@ void DLSSGBackend::Shutdown()
     }
     m_sessionKey = nullptr;
     m_device = nullptr;
+    m_width = 0;
+    m_height = 0;
+    m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
+    m_multiFrameCountMax = 0;
+    m_evaluations = 0;
     m_available = false;
 }
