@@ -66,6 +66,25 @@
   frame is supportable here, and `TemporalGuides` is not on the critical path
   for frame generation the way it is for SR. `DlssgEvaluateSmoke` (gpu label)
   is the experiment, including the zero-motion control.
+- `src/FrameRatePolicy.h` settles what a generated frame rate should be, which
+  is a display question and not a source question. A multiple is accepted only
+  when it divides the panel's refresh evenly: 30 fps doubles to 60 on a 60 Hz
+  panel and every frame is scanned out once, while 24 fps on that panel is
+  refused because 2x is 48 and 60/48 is 1.25 - generating there would trade one
+  uneven cadence for another. The same 24 fps source on a 120 Hz panel takes 5x
+  to exactly 120 and loses its 3:2 pulldown, which is the largest win available
+  and the one a source-only rule ("under 45 fps, double it") cannot see. The
+  seven refusals - unknown source rate, still image, variable frame rate,
+  unknown refresh, source meets refresh, no even multiple, runtime refused -
+  each name themselves, because "off" without a reason sends a viewer looking
+  for a broken toggle.
+  Nothing calls it yet, deliberately: choosing a multiplier needs the runtime's
+  own `DLSSG.MultiFrameCountMax`, which means holding an NGX FrameGeneration
+  feature, and standing a second undocumented NGX lifetime beside the RenoDX
+  neural path is exactly what this project refuses to do casually. The cap is
+  measured out of process by `DlssgProbeSmoke` until the render mode owns that
+  lifetime. The rules are settled first because they decide whether that work
+  is worth doing for a given source and panel at all.
 - `HexResultTextWide` is exported from `NeuralPreflight` so NGX result codes in
   wide diagnostics come from the one formatter the receipts already use.
 

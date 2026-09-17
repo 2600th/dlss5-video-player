@@ -1,0 +1,164 @@
+#pragma once
+
+#include <cmath>
+#include <cstdint>
+#include <string_view>
+
+// Frame-generation planning for a video source on a real display.
+//
+// Nothing here is keyed on the source alone. A generated rate is only worth
+// producing if the panel can present it evenly: 30 fps on a 60 Hz panel doubles
+// to 60 and every frame is scanned out exactly once, while 24 fps on the same
+// panel has no integer multiple that divides 60 - 2x is 48 and 60/48 is 1.25 -
+// so generating there would trade one uneven cadence for another and charge a
+// neural evaluate for it. The same 24 fps source on a 120 Hz panel takes 5x =
+// 120 exactly and its 3:2 pulldown disappears entirely, which is the largest
+// win available here and the one a source-only rule ("under 45 fps, double it")
+// cannot see, because it never looks at the panel.
+//
+// The refusals are as much of the answer as the multipliers. Every one of them
+// is a case where the honest output is the source's own cadence.
+//
+// Nothing in the player calls this yet, and that is deliberate rather than
+// unfinished wiring. Deciding a multiplier needs the runtime's own
+// DLSSG.MultiFrameCountMax, which means creating an NGX FrameGeneration
+// feature; doing that inside the player process would stand a second
+// undocumented NGX lifetime beside the RenoDX neural path this project
+// deliberately keeps sole (docs/RELATED_PROJECTS.md). So the cap is measured
+// out of process by tests/DlssgProbeSmoke.cpp today, and this policy is
+// consumed when the frame-generation render mode owns that lifetime. The rules
+// are here, tested, and settled first because they are what decides whether
+// that work is worth doing for a given source and panel at all.
+namespace frame_rate_policy {
+
+// Windows reports a mode's refresh as a whole number - 60 for a 59.94 Hz mode -
+// and the NTSC family of rates is 1000/1001 of its nominal value, so "divides
+// evenly" has to be judged with slack rather than exactly. 0.5% covers both
+// errors at once (1001/1000 is 0.0999% away) and stays far tighter than the gap
+// to the nearest wrong multiple: the closest contender in the table below is
+// 60/48 = 1.25, which is 25% away.
+inline constexpr double kRateTolerance = 0.005;
+
+enum class FrameGenerationRefusal : uint8_t {
+    None,
+    // No readable frame rate. A rate this policy cannot see is one it must not
+    // multiply.
+    UnknownSourceRate,
+    // A photo, or a GIF shown as an image: there is no second frame to generate
+    // between.
+    StillImage,
+    // The generated grid is placed on a constant-rate timeline; a variable one
+    // has no fixed interval to subdivide.
+    VariableFrameRate,
+    // The display did not report a mode, so there is no cadence to match.
+    UnknownRefresh,
+    // The source already runs at or above what the panel can present. Generating
+    // frames the display cannot scan out costs an evaluate and shows nothing.
+    SourceMeetsRefresh,
+    // A rate exists under the refresh, but none of the admissible multiples
+    // divides the refresh evenly. 24 fps on 60 Hz is the common case.
+    NoEvenMultiple,
+    // The runtime admits no generated frames at all on this machine.
+    RuntimeRefused,
+};
+
+constexpr std::string_view FrameGenerationRefusalName(FrameGenerationRefusal refusal) noexcept
+{
+    switch (refusal) {
+        case FrameGenerationRefusal::None: return "none";
+        case FrameGenerationRefusal::UnknownSourceRate: return "unknown-source-rate";
+        case FrameGenerationRefusal::StillImage: return "still-image";
+        case FrameGenerationRefusal::VariableFrameRate: return "variable-frame-rate";
+        case FrameGenerationRefusal::UnknownRefresh: return "unknown-refresh";
+        case FrameGenerationRefusal::SourceMeetsRefresh: return "source-meets-refresh";
+        case FrameGenerationRefusal::NoEvenMultiple: return "no-even-multiple";
+        case FrameGenerationRefusal::RuntimeRefused: return "runtime-refused";
+    }
+    return "unknown";
+}
+
+// What the decoder knows about the source's timing, separated from the decoder
+// itself so the policy is testable without one.
+struct SourceCadence {
+    double fps = 0.0;
+    bool stillImage = false;
+    bool constantFrameRate = true;
+};
+
+struct FrameGenerationPlan {
+    // 1 means no generation; the refusal says why.
+    uint32_t multiplier = 1;
+    // What DLSS-G's MultiFrameCount wants: frames generated after each source
+    // frame, so one less than the multiplier.
+    uint32_t generatedPerSource = 0;
+    double targetFps = 0.0;
+    // refresh / targetFps, rounded: how many scan-outs each frame of the
+    // generated sequence occupies. Always at least 1, and 1 whenever the target
+    // reaches the refresh exactly. This is the number that makes the cadence
+    // even, which is the whole reason a multiplier was accepted.
+    uint32_t presentsPerFrame = 0;
+    FrameGenerationRefusal refusal = FrameGenerationRefusal::None;
+
+    constexpr bool Generates() const noexcept { return multiplier > 1; }
+};
+
+// `multiFrameCountMax` is DLSSG.MultiFrameCountMax exactly as the runtime
+// reported it (5 on the RTX 5090 / 616.64 this project measured), so the largest
+// multiplier the runtime allows is one more than that: the source frame plus the
+// frames generated after it. 0 means the runtime admits no generation, which is
+// a refusal rather than a multiplier of 1 with no explanation.
+//
+// The largest admissible multiple wins, which is also the one with the smallest
+// `presentsPerFrame`: more generated frames is strictly smoother once the
+// cadence is even, and unevenness is already excluded.
+inline FrameGenerationPlan PlanFrameGeneration(const SourceCadence& source, double refreshHz,
+                                               uint32_t multiFrameCountMax)
+{
+    FrameGenerationPlan plan{};
+    if (source.stillImage) {
+        plan.refusal = FrameGenerationRefusal::StillImage;
+        return plan;
+    }
+    if (!(source.fps > 0.0) || !std::isfinite(source.fps)) {
+        plan.refusal = FrameGenerationRefusal::UnknownSourceRate;
+        return plan;
+    }
+    if (!source.constantFrameRate) {
+        plan.refusal = FrameGenerationRefusal::VariableFrameRate;
+        return plan;
+    }
+    if (!(refreshHz > 0.0) || !std::isfinite(refreshHz)) {
+        plan.refusal = FrameGenerationRefusal::UnknownRefresh;
+        return plan;
+    }
+    if (multiFrameCountMax == 0) {
+        plan.refusal = FrameGenerationRefusal::RuntimeRefused;
+        return plan;
+    }
+    // Checked before the multiples so a 60 fps source on a 60 Hz panel reports
+    // the reason a viewer can act on instead of "no even multiple", which would
+    // be true and useless.
+    if (source.fps >= refreshHz * (1.0 - kRateTolerance)) {
+        plan.refusal = FrameGenerationRefusal::SourceMeetsRefresh;
+        return plan;
+    }
+
+    plan.refusal = FrameGenerationRefusal::NoEvenMultiple;
+    for (uint32_t multiplier = 1 + multiFrameCountMax; multiplier >= 2; --multiplier) {
+        const double target = source.fps * double(multiplier);
+        if (target > refreshHz * (1.0 + kRateTolerance)) continue;
+        const double presents = refreshHz / target;
+        const double rounded = std::round(presents);
+        if (rounded < 1.0) continue;
+        if (std::abs(presents - rounded) > kRateTolerance * rounded) continue;
+        plan.multiplier = multiplier;
+        plan.generatedPerSource = multiplier - 1;
+        plan.targetFps = target;
+        plan.presentsPerFrame = uint32_t(rounded);
+        plan.refusal = FrameGenerationRefusal::None;
+        break;
+    }
+    return plan;
+}
+
+} // namespace frame_rate_policy

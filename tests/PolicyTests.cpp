@@ -19,6 +19,7 @@
 #include "D3D12Renderer.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
+#include "FrameRatePolicy.h"
 #include "NeuralCoverage.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
@@ -2671,6 +2672,95 @@ void ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test()
     const double uhdFrom1080p = playback_timing::PredictRenderMs(measured1080p, 3840, 2160, ada);
     CHECK(uhdFrom1080p > 4.0 * 11.5734 * 0.99);
     CHECK(!playback_timing::ForecastLiveRender(3840, 2160, 30.0, measured1080p, ada).keepsUp);
+}
+
+// DLSSG.MultiFrameCountMax exactly as the runtime reported it on the RTX 5090 /
+// driver 616.64 (DlssgProbeSmoke), so the cases below are planned against the
+// cap this project has actually seen rather than an invented one.
+constexpr uint32_t kMeasuredMultiFrameCountMax = 5;
+
+// The panel is half of every answer here, which is what separates this policy
+// from "double anything under 45 fps". Each row below is a case where the
+// source-only rule and this one disagree, or where a plausible refactor would
+// quietly start generating frames the display cannot scan out evenly.
+void frame_generation_plan_follows_the_panel_not_just_the_source_test()
+{
+    using namespace frame_rate_policy;
+    const auto plan = [](double fps, double refresh,
+                         uint32_t max = kMeasuredMultiFrameCountMax) {
+        return PlanFrameGeneration(SourceCadence{fps, false, true}, refresh, max);
+    };
+
+    // 30 -> 60 on a 60 Hz panel: every generated frame is scanned out once.
+    const auto thirty60 = plan(30.0, 60.0);
+    CHECK(thirty60.Generates());
+    CHECK_EQ(thirty60.multiplier, 2u);
+    CHECK_EQ(thirty60.generatedPerSource, 1u);
+    CHECK_EQ(thirty60.targetFps, 60.0);
+    CHECK_EQ(thirty60.presentsPerFrame, 1u);
+
+    // 60 on a 60 Hz panel is the refusal the source already earns.
+    CHECK(!plan(60.0, 60.0).Generates());
+    CHECK(plan(60.0, 60.0).refusal == FrameGenerationRefusal::SourceMeetsRefresh);
+
+    // 24 on 60 Hz: 2x is 48 and 60/48 is 1.25, so the only integer multiple
+    // under the refresh cannot be presented evenly. A source-only rule doubles
+    // here and buys a different judder; this refuses and says why.
+    CHECK(!plan(24.0, 60.0).Generates());
+    CHECK(plan(24.0, 60.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
+
+    // The same source on a 120 Hz panel is the largest win available: 5x lands
+    // exactly on the refresh and the 3:2 pulldown is gone. 6x, which the
+    // runtime's cap would also allow, overshoots the panel at 144 and is
+    // correctly passed over - the cap is not the target, the refresh is.
+    const auto film120 = plan(24.0, 120.0);
+    CHECK_EQ(film120.multiplier, 5u);
+    CHECK_EQ(film120.generatedPerSource, 4u);
+    CHECK_EQ(film120.targetFps, 120.0);
+    CHECK_EQ(film120.presentsPerFrame, 1u);
+
+    // NTSC rates against a refresh Windows reports as a whole number. 23.976 x 5
+    // is 119.88 against a mode called 120, which is inside the tolerance and
+    // must not be read as uneven.
+    const auto ntsc120 = plan(24000.0 / 1001.0, 120.0);
+    CHECK(ntsc120.Generates());
+    CHECK_EQ(ntsc120.presentsPerFrame, 1u);
+    CHECK(ntsc120.targetFps > 119.0 && ntsc120.targetFps < 120.0);
+
+    // PAL: nothing divides 60 evenly, 100 Hz takes 4x.
+    CHECK(!plan(25.0, 60.0).Generates());
+    CHECK_EQ(plan(25.0, 100.0).multiplier, 4u);
+
+    // 144 Hz is not a multiple of 60 or 30, so a high refresh is not by itself
+    // a reason to generate. 2x of 60 is 120 and 144/120 is 1.2.
+    CHECK(!plan(60.0, 144.0).Generates());
+    CHECK(plan(60.0, 144.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
+    CHECK(!plan(30.0, 144.0).Generates());
+
+    // 240 Hz with a runtime cap of 5 generated frames: 8x would divide evenly
+    // but is not admissible, and 4x is the largest that is.
+    const auto thirty240 = plan(30.0, 240.0);
+    CHECK_EQ(thirty240.multiplier, 4u);
+    CHECK_EQ(thirty240.targetFps, 120.0);
+    CHECK_EQ(thirty240.presentsPerFrame, 2u);
+
+    // A runtime that admits nothing is a refusal with a reason, not a silent 1x.
+    CHECK(plan(30.0, 60.0, 0).refusal == FrameGenerationRefusal::RuntimeRefused);
+    // And a cap of 1 still reaches the doubling case.
+    CHECK_EQ(plan(30.0, 60.0, 1).multiplier, 2u);
+
+    // Sources with nothing to interpolate, each naming itself.
+    CHECK(PlanFrameGeneration(SourceCadence{0.0, true, true}, 60.0,
+                              kMeasuredMultiFrameCountMax).refusal ==
+          FrameGenerationRefusal::StillImage);
+    CHECK(PlanFrameGeneration(SourceCadence{0.0, false, true}, 60.0,
+                              kMeasuredMultiFrameCountMax).refusal ==
+          FrameGenerationRefusal::UnknownSourceRate);
+    CHECK(PlanFrameGeneration(SourceCadence{30.0, false, false}, 60.0,
+                              kMeasuredMultiFrameCountMax).refusal ==
+          FrameGenerationRefusal::VariableFrameRate);
+    CHECK(plan(30.0, 0.0).refusal == FrameGenerationRefusal::UnknownRefresh);
+    CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::NoEvenMultiple) == "no-even-multiple");
 }
 
 void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
@@ -6795,6 +6885,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(neural_addon_is_gated_by_the_driver_floor_not_by_the_generation_test),
     TEST_CASE(render_pace_prior_zero_means_unmeasured_not_unsupported_test),
     TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
+    TEST_CASE(frame_generation_plan_follows_the_panel_not_just_the_source_test),
     TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),
     TEST_CASE(neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test),
     TEST_CASE(neural_playback_lifecycle_runs_render_validate_then_ready_test),
