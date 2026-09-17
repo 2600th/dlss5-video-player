@@ -74,6 +74,24 @@
   `outputAudioStreams=0`. The generated video's duration equals the source's,
   which is what keeps a plain copy correct; a silent source stays silent without
   failing.
+- **Frame generation works on a streaming source.** Every YouTube video reported
+  "needs a local copy" and greyed the control out - including videos whose copy
+  was already in the cache from an earlier render, because the input predicate
+  required playback to have MOVED onto that copy, which only happens on a seek
+  or around a render. It uses the cached copy directly now, and when there is
+  none the control offers to keep one: the same acquisition a render of a stream
+  already uses, with playback carrying on while it downloads and the conversion
+  turning live the moment it lands. The pill names which of the three states it
+  is in - "Get a copy", "Copying", "Generate" - instead of "Unavailable", and the
+  answer is memoised because it costs a cache validation and two stats and is
+  asked on every toolbar paint.
+  Verified on a YouTube trailer: 2560x1440 at 29.97 fps planned 4x to 119.88 fps
+  (kRateTolerance is what admits 119.88 against a 120 Hz panel), 11316 frames
+  from 2829 source frames in 114 s, the Opus track carried by copy.
+- Converted files are named from the display title plus an eight-hex hash of the
+  source identity - the page URL for a stream, the absolute path for a file. The
+  previous name came from the playing file's stem, which for a stream is a signed
+  URL: neither a name a user recognises nor a legal filename.
 - The conversion reads the neural render when that is what you are watching, and
   only when that render covers the WHOLE source and matches the settings on
   screen. A range render covers its range alone, so converting it returned a

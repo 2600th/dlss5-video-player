@@ -330,6 +330,12 @@ still image, a file whose frame rate varies, a display whose refresh Windows
 does not report, and a GPU whose runtime admits no generated frames each say so
 in the status line before you click, and say it again as a sentence if you do.
 
+A streaming source is converted too, because the pass needs a file: the player
+keeps a local copy of the video the way it already does for a render, the status
+line says so while it downloads, and Generate frames turns live the moment the
+copy lands. A stream whose copy is already in the cache is convertible straight
+away.
+
 Watching the neural view converts the neural render instead of the original,
 when that render covers the whole video and matches the settings on screen; the
 confirmation names which file it will read. Either way the converted file

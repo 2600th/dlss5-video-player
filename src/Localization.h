@@ -63,6 +63,17 @@ private:
             {L"framegen.status.off", L"Frame Generation off"},
             {L"framegen.status.generating", L"Generating frames"},
             {L"framegen.status.stopping", L"Stopping frame generation"},
+            // The streaming case. It is an OFFER, not a refusal: the pass
+            // converts a file, the player can keep one with the same
+            // acquisition a render of a stream uses, and playback continues
+            // while it downloads.
+            {L"framegen.pill.get_copy", L"Frame Generation \u00b7 Get a copy"},
+            {L"framegen.pill.copying", L"Frame Generation \u00b7 Copying"},
+            {L"framegen.status.needs_copy", L"Frame Generation needs a local copy of this stream"},
+            {L"framegen.status.copying", L"Frame Generation is keeping a local copy of this stream"},
+            {L"framegen.needs_copy", L"This video is streaming, and frame generation converts a file.\n\nKeep a local copy of it now? It goes into the player's cache, playback carries on while it downloads, and Generate frames becomes available as soon as it finishes."},
+            {L"framegen.copy_started", L"Keeping a local copy of this video. The status line shows it while it runs; Generate frames becomes available when it finishes."},
+            {L"framegen.copy_failed", L"A local copy of this video could not be started. Try again once playback is running, or open a local file."},
             {L"framegen.status.cancel_hint", L"Cancel: DLSS > Cancel frame generation"},
             // Refusals. The long form is what a dialog shows; the short form is
             // what fits the status line. The status line used to print the log

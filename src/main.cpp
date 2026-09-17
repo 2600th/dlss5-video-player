@@ -1345,8 +1345,27 @@ private:
            CachedRangeCoversSource()&&m_cachedSettings==m_neuralSettings&&m_cachedGuides==m_renderGuides)
             return{m_neuralPath.wstring(),true};
         if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return{m_path,false};
+        // A stream the cache already holds a complete copy of IS convertible,
+        // whether or not playback has moved onto that copy. Requiring the
+        // adoption - which only happens on a seek or around a render - is why
+        // every YouTube video reported "needs a local copy" even when its copy
+        // was sitting in the cache from an earlier render.
+        if(const std::filesystem::path* copy=FrameGenerationAcquiredCopy())return{copy->wstring(),false};
         return{};
     }
+    // Memoised, because FrameGenerationUiNow runs on every status refresh and
+    // every toolbar paint, and the answer costs a cache-root validation and two
+    // filesystem stats. Cleared whenever the loaded source changes or a
+    // background acquisition finishes, which are the only two ways it can move.
+    const std::filesystem::path* FrameGenerationAcquiredCopy()const{
+        if(m_sourceKind!=MediaSourceKind::YouTube)return nullptr;
+        if(!m_frameGenCopyChecked){
+            m_frameGenCopyChecked=true;
+            m_frameGenCopy=AcquiredSourceCopyPath();
+        }
+        return m_frameGenCopy?&*m_frameGenCopy:nullptr;
+    }
+    void InvalidateFrameGenerationCopy(){m_frameGenCopyChecked=false;m_frameGenCopy.reset();}
     // One state for the whole feature, computed once and read by the menu, the
     // toolbar pill and the status line. Three surfaces each deciding for
     // themselves is how the menu item stayed enabled while the pill greyed out
@@ -1358,7 +1377,13 @@ private:
     // runtime's own admission has not been measured yet, which happens inside
     // the click. The control is live in both - the states differ in what the
     // status line may promise, not in what the user can do.
-    enum class FrameGenerationUiState{Converting,Stopping,Busy,NoLocalCopy,Unchecked,Refused,Ready};
+    // NeedsSourceCopy and CopyingSource are the streaming cases. They are not
+    // refusals: the pass converts a file, the player can keep one, and the
+    // control's job in that state is to offer that rather than grey out - which
+    // is what every YouTube trailer used to do, with the reason only in the
+    // status line.
+    enum class FrameGenerationUiState{Converting,Stopping,Busy,NoLocalCopy,NeedsSourceCopy,
+                                      CopyingSource,Unchecked,Refused,Ready};
     struct FrameGenerationUi{
         FrameGenerationUiState state{FrameGenerationUiState::NoLocalCopy};
         frame_rate_policy::FrameGenerationPlan plan{};
@@ -1366,8 +1391,18 @@ private:
     FrameGenerationUi FrameGenerationUiNow()const{
         if(m_frameGenWorker.joinable())
             return{m_frameGenCancelling?FrameGenerationUiState::Stopping:FrameGenerationUiState::Converting,{}};
-        if(!m_loaded||FrameGenerationInputSource().path.empty())
+        if(!m_loaded)return{FrameGenerationUiState::NoLocalCopy,{}};
+        if(FrameGenerationInputSource().path.empty()){
+            // A stream with no copy yet is the ONE unavailable state the player
+            // can do something about, so it is offered rather than greyed: the
+            // acquisition that a render already uses can fetch the file, and
+            // the conversion becomes available when it lands.
+            if(m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()&&
+               !m_youtubeLifecycle.IsResolving()&&m_decoder.DurationSeconds()>0.0)
+                return{SourcePrefetchActive()?FrameGenerationUiState::CopyingSource
+                                             :FrameGenerationUiState::NeedsSourceCopy,{}};
             return{FrameGenerationUiState::NoLocalCopy,{}};
+        }
         if(ActivityBusy()||m_exportWorker.joinable()||m_seeking||m_seekPending||!m_renderer)
             return{FrameGenerationUiState::Busy,{}};
         // No Checking state: see the hazard note above MaybeProbe's removal -
@@ -1383,7 +1418,11 @@ private:
     }
     bool FrameGenerationAvailable()const{
         const auto state=FrameGenerationUiNow().state;
-        return state==FrameGenerationUiState::Ready||state==FrameGenerationUiState::Unchecked;
+        // NeedsSourceCopy counts as available because the control does something
+        // in that state: it offers the copy. The menu item and the pill read
+        // this, and a control the user can act on must not be greyed.
+        return state==FrameGenerationUiState::Ready||state==FrameGenerationUiState::Unchecked||
+               state==FrameGenerationUiState::NeedsSourceCopy;
     }
     frame_rate_policy::FrameGenerationPlan PlannedFrameGeneration(uint32_t multiFrameCountMax)const{
         // The two facts VideoDecoder probes and this policy refuses on. Both
@@ -1461,6 +1500,8 @@ private:
             case FrameGenerationUiState::Busy:return T(L"framegen.status.busy");
             case FrameGenerationUiState::NoLocalCopy:
                 return T(L"framegen.status.off")+L" ("+T(L"framegen.refusal.no_local_copy.short")+L")";
+            case FrameGenerationUiState::NeedsSourceCopy:return T(L"framegen.status.needs_copy");
+            case FrameGenerationUiState::CopyingSource:return T(L"framegen.status.copying");
             case FrameGenerationUiState::Unchecked:return T(L"framegen.status.ready_unchecked");
             case FrameGenerationUiState::Refused:
                 return T(L"framegen.status.off")+L" ("+FrameGenerationRefusalShort(ui.plan.refusal)+L")";
@@ -1508,10 +1549,78 @@ private:
         return base+(neural?L" \u00b7 generated from the neural render \u00b7 ":L" \u00b7 generated \u00b7 ")+
                FormatFrameRate(fps)+L" fps";
     }
+    // The converted file's name. Three things have to be true of it: a user can
+    // recognise it in a folder, two different sources can never collide, and
+    // the SAME request repeated lands on the same path - that last one is what
+    // lets the "already converted" offer exist at all.
+    //
+    // The title carries recognition and the identity hash carries uniqueness.
+    // Neither alone is enough: naming from the playing file's stem made every
+    // neural conversion `neural-...mkv` and every acquired stream
+    // `source-...mkv`, and for a YouTube stream the playing path is a signed
+    // URL whose stem is neither a name nor a legal filename. Two films that
+    // share a title stay apart because the hash is over the identity - the page
+    // URL for a stream, the absolute path for a file.
+    std::wstring FrameGenerationOutputName(bool neuralInput,
+                                           const frame_rate_policy::FrameGenerationPlan& plan)const{
+        std::wstring label;
+        for(const wchar_t character:m_displayTitle){
+            if(label.size()>=48)break;
+            // Anything a filename may not carry, plus the separators this name
+            // uses itself, collapse to one dash rather than vanishing.
+            const bool illegal=character<32||wcschr(L"<>:\"/\\|?*.",character)!=nullptr;
+            if(illegal||character==L' '){
+                if(!label.empty()&&label.back()!=L'-')label.push_back(L'-');
+            }else label.push_back(character);
+        }
+        while(!label.empty()&&label.back()==L'-')label.pop_back();
+        if(label.empty())label=L"video";
+        const std::wstring identity=m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()
+            ? m_youtubePageUrl
+            : std::filesystem::absolute(std::filesystem::path(m_path)).wstring();
+        // FNV-1a over the identity: eight hex digits is plenty to keep two
+        // sources apart in one directory, and it is stable across runs so the
+        // repeat-request case still finds the earlier file.
+        uint64_t hash=1469598103934665603ull;
+        for(const wchar_t character:identity){
+            hash^=static_cast<uint64_t>(character);
+            hash*=1099511628211ull;
+        }
+        wchar_t suffix[32]{};
+        swprintf_s(suffix,L"-%08x-%s%ux%ufps.mkv",static_cast<unsigned>(hash&0xffffffffu),
+                   neuralInput?L"neural-":L"",plan.multiplier,
+                   static_cast<unsigned>(std::lround(plan.targetFps)));
+        return label+suffix;
+    }
+    // Streaming source, no copy yet: the one unavailable-looking state the user
+    // can act on. The acquisition is the SAME one a render of a stream uses -
+    // the file lands in the source cache, playback is untouched while it
+    // downloads, and the conversion becomes available the moment it completes,
+    // because FrameGenerationInputSource then finds it.
+    void OfferSourceCopyForFrameGeneration(){
+        const std::wstring title=T(L"framegen.title");
+        if(MessageBoxW(m_hwnd,T(L"framegen.needs_copy").c_str(),title.c_str(),
+                       MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+        EnsureSourcePrefetch(/*forFrameGeneration=*/true);
+        if(!SourcePrefetchActive()){
+            LOG("Frame generation could not start the source acquisition for this stream.");
+            MessageBoxW(m_hwnd,T(L"framegen.copy_failed").c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
+            return;
+        }
+        LOG("Frame generation asked for a local copy of this stream; acquisition started.");
+        // No "it started" box: the status line already says the copy is being
+        // kept and the pill reads Copying, and a second modal here stops the
+        // tick - which means it pauses the video the user is watching.
+        SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+    }
     void StartFrameGeneration(){
         const std::wstring title=T(L"framegen.title");
         auto ui=FrameGenerationUiNow();
         if(ui.state==FrameGenerationUiState::Refused){ShowFrameGenerationRefusal(ui.plan.refusal);return;}
+        // The streaming case is an offer, not a refusal: the pass converts a
+        // file, and the player can keep one with the same acquisition a render
+        // uses. Every YouTube video used to dead-end here.
+        if(ui.state==FrameGenerationUiState::NeedsSourceCopy){OfferSourceCopyForFrameGeneration();return;}
         // Busy, NoLocalCopy, Converting and Stopping are states the menu item
         // and the pill are disabled in, so only a stale click or a keyboard
         // route arrives here and doing nothing is the whole correct behaviour.
@@ -1553,19 +1662,7 @@ private:
             MessageBoxW(m_hwnd,T(L"framegen.cache_failed").c_str(),title.c_str(),MB_OK|MB_ICONERROR);
             return;
         }
-        // Named from the ORIGINAL's stem, never the input's. A neural carrier is
-        // always called `neural.mkv` and an acquired network copy `source.mkv`,
-        // so naming from the file the frames come from made every neural
-        // conversion of every film the same path - and the offer below would
-        // then hand a user another film's conversion. The `-neural` marker
-        // keeps the two conversions of one film apart, and the multiplier and
-        // rounded rate are what make a repeat of the same request land on the
-        // same file, which is what the offer needs.
-        const std::wstring stem=std::filesystem::path(m_path).stem().wstring();
-        const std::filesystem::path output=outputDirectory/
-            ((stem.empty()?std::wstring(L"video"):stem)+(input.neural?L"-neural-":L"-")+
-             std::to_wstring(plan.multiplier)+L"x"+
-             std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L"fps.mkv");
+        const std::filesystem::path output=outputDirectory/FrameGenerationOutputName(input.neural,plan);
         std::error_code existsError;
         if(std::filesystem::is_regular_file(output,existsError)&&!existsError){
             // Minutes of GPU work and a large file already exist. Converting
@@ -2941,7 +3038,7 @@ private:
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
-        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();
+        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -3468,6 +3565,11 @@ private:
                 case S::Converting:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),true,true};
                 case S::Stopping:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),false,true};
                 case S::Busy:return{UiIcon::FrameGeneration,T(L"framegen.pill.busy"),false,false};
+                // The stream cases: one offers the copy, the other says it is
+                // being fetched. Neither is "Unavailable" - the first is the
+                // only unavailable-looking state the user can act on.
+                case S::NeedsSourceCopy:return{UiIcon::FrameGeneration,T(L"framegen.pill.get_copy"),enabled,false};
+                case S::CopyingSource:return{UiIcon::FrameGeneration,T(L"framegen.pill.copying"),false,true};
                 case S::NoLocalCopy:
                 case S::Refused:return{UiIcon::FrameGeneration,T(L"framegen.pill.unavailable"),false,false};
                 // Unchecked reads "Generate" like Ready: the click is what
@@ -3866,8 +3968,11 @@ private:
     // Downloads the playing stream into the source cache while playback
     // continues, so a render starts on a local file instead of waiting for the
     // whole video. Only a live stream needs it, and only once per source.
-    void EnsureSourcePrefetch(){
-        if(!m_loaded||!NeuralPreRenderEnabled()||!NetworkPlayback())return;
+    // `forFrameGeneration` ignores the neural pre-render preference: the copy is
+    // wanted for a conversion, which does not involve the neural path at all,
+    // and it is the user's explicit request rather than a background nicety.
+    void EnsureSourcePrefetch(bool forFrameGeneration=false){
+        if(!m_loaded||(!forFrameGeneration&&!NeuralPreRenderEnabled())||!NetworkPlayback())return;
         if(m_prefetchWorker.joinable()||CachedYouTubeSourceKey())return;
         if(m_path.empty()||m_youtubePageUrl.empty())return;
         const double duration=m_decoder.DurationSeconds();
@@ -3900,6 +4005,12 @@ private:
             const std::string key=m_prefetchState?m_prefetchState->key:std::string{};
             const std::wstring page=m_prefetchPageUrl,title=m_prefetchTitle;const auto quality=m_prefetchQuality;
             m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();
+            // A settled acquisition is the ONE moment the answer to "is there a
+            // local copy of this stream" can change while one source stays
+            // loaded, so it is the one place the memo is dropped. Dropping it
+            // every tick instead cost a cache-root validation and two stats per
+            // toolbar paint, which froze the window measurably.
+            InvalidateFrameGenerationCopy();
             if(key.empty()){LOG("Background source acquisition finished without a reusable copy.");UpdateCachedStatus();return;}
             LOG("Background source acquisition complete; a render will reuse it.");
             NeuralJobCompletion owned{};owned.sourceKind=MediaSourceKind::YouTube;owned.pageUrl=page;owned.displayTitle=title;owned.sourceQuality=quality;owned.sourceKey=key;
@@ -3913,7 +4024,7 @@ private:
             CancelSourcePrefetch();UpdateCachedStatus();
         }
     }
-    void CancelSourcePrefetch(){if(m_prefetchWorker.joinable()){m_prefetchWorker.request_stop();m_prefetchWorker.join();m_prefetchWorker=std::jthread{};}m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();}
+    void CancelSourcePrefetch(){if(m_prefetchWorker.joinable()){m_prefetchWorker.request_stop();m_prefetchWorker.join();m_prefetchWorker=std::jthread{};}m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();InvalidateFrameGenerationCopy();}
     bool RangeRenderAvailable()const{
         // m_frameGenWorker for the same reason the export gate carries it: two
         // GPU jobs in one process contend, and starting a range render mid
@@ -6070,6 +6181,10 @@ private:
     uint32_t m_upscaleTargetHeight=1440;
     // Cached monitor mode and the handle it was read for; see MonitorModeCached.
     mutable MonitorMode m_monitorMode{};
+    // Memoised answer to "does the cache hold a complete copy of this stream",
+    // which frame generation asks on every status refresh and toolbar paint.
+    mutable std::optional<std::filesystem::path> m_frameGenCopy;
+    mutable bool m_frameGenCopyChecked=false;
     mutable HMONITOR m_monitorModeHandle=nullptr;
     mutable bool m_monitorModeValid=false;
     std::wstring m_upscalingError;
