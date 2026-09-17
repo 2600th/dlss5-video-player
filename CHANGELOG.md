@@ -25,6 +25,11 @@
   the old default rather than a choice; keying Auto off that value would have
   denied Auto to every existing install. Absence of `UpscaleAuto` identifies
   those files and means Auto.
+  One consequence for ini-driven harnesses: a profile that pins a rung must now
+  write `UpscaleAuto=0` beside `UpscaleHeight`, or Auto takes over and a clip
+  matching the runner's panel legitimately reports no upscale. The dated
+  profiles under `docs/measurements/` are records of past runs and keep the keys
+  they were run with.
 
 ## 0.23.0 - 2026-09-16
 

@@ -597,7 +597,12 @@ native 1:1 resolution while preserving a real NGX feature creation/evaluation
 sequence for the optional interception layer in `neural-runtime/NeuralWorker.exe`.
 The main player does not load that proxy. Its independent runtime SR toggle
 defaults off, selects a supported NGX input range without resizing the source,
-and targets a 2560x1440 or 3840x2160 bounding box. It validates a candidate
+and targets a 1920x1080, 2560x1440 or 3840x2160 bounding box. Which box is
+chosen is a display decision, not a stored preference: Auto takes the largest
+rung the monitor's current mode can scan out, because a rung above the panel is
+scaled away at present time while the evaluate is charged per output pixel. The
+source only decides whether that rung is an upscale at all, which is the same
+`grows` guard as before. It validates a candidate
 renderer on a separate child window before swapping; failure preserves playback.
 No path samples with jitter. A decoded frame is already a fixed sample grid, so a
 sub-pixel offset cannot reveal new detail; it only convolves the frame with a
