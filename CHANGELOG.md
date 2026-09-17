@@ -85,6 +85,38 @@
   measured out of process by `DlssgProbeSmoke` until the render mode owns that
   lifetime. The rules are settled first because they decide whether that work
   is worth doing for a given source and panel at all.
+- The Auto target no longer costs a display-mode query per toolbar paint.
+  `EffectiveUpscaleHeight` is reached from `UpscalingAvailable` through
+  `ToolbarState`, which every paint and every hover runs, and
+  `EnumDisplaySettingsW` is not a function to call there. The mode is cached
+  against the `HMONITOR` the window is on, re-read when the window lands on a
+  different monitor, and dropped on `WM_DISPLAYCHANGE` and `WM_DPICHANGED` -
+  the handle comparison cannot see a mode change under a window that has not
+  moved, which is exactly what switching a 4K panel to 1080p does.
+- Covered the persistence contract the Auto default depends on: absent
+  `UpscaleAuto` with a legacy `UpscaleHeight=1440` loads as Auto, a rung pinned
+  on this version survives a reload, returning to Auto keeps that rung
+  underneath it, and an unrecognised height is not a selection.
+- One claim did not survive checking and is recorded so nobody chases it. The
+  UI regression suite was expected to pass once and then fail on a machine that
+  had already run it, because `~PlayerApp` saves and the fullscreen block pins
+  a manual rung. It did not: two consecutive runs both passed and the file kept
+  `UpscaleAuto=1`. The reason is destructor order.
+  `CheckFullscreenLifecycle` owns a second `PlayerApp` nested inside the outer
+  one, so the inner destructor writes `UpscaleAuto=0` and the outer destructor
+  overwrites it with 1 afterwards. So the suite was never broken - it was
+  relying on nesting. Both ends are now pinned: the outer reset carries
+  `m_upscaleAuto` with the rest of the persisted playback state, and the
+  fullscreen block hands the rung back through `IDM_UPSCALE_AUTO` before its
+  own destructor saves. Seeded with a hostile `UpscaleAuto=0`, the suite passes
+  repeatedly and normalises the file.
+- A display-mode change under an active Auto SR renderer is now reported rather
+  than silent. The renderer is only swapped through `EnableUpscaling`, which
+  recreates a device, a child window and an NGX feature, and a display change
+  is the worst moment to touch a device - the same event can accompany a device
+  loss. So the running output can outlive the rung Auto would now pick, and the
+  log says which two sizes disagree and when it is rebuilt. Silence there would
+  look like Auto ignoring the panel.
 - `HexResultTextWide` is exported from `NeuralPreflight` so NGX result codes in
   wide diagnostics come from the one formatter the receipts already use.
 

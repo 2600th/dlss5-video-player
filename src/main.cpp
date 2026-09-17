@@ -2408,8 +2408,42 @@ private:
     // the pixels survive the present. 0 means no rung applies - a panel below
     // 1080 lines, or a monitor that would not report its mode - and every
     // target call refuses it, so Auto fails closed to no upscaling.
+    // EnumDisplaySettingsW is the expensive half of CurrentMonitorMode, and this
+    // accessor is reached from UpscalingAvailable through ToolbarState, which
+    // every paint and every hover runs. MonitorFromWindow is a cheap handle
+    // lookup by comparison, so the mode is cached against that handle and
+    // re-read only when the window lands on a different monitor - or when
+    // WM_DISPLAYCHANGE/WM_DPICHANGED says the mode under it moved.
+    MonitorMode MonitorModeCached()const{
+        const HMONITOR monitor=m_hwnd?MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST):nullptr;
+        if(!m_monitorModeValid||monitor!=m_monitorModeHandle){
+            m_monitorMode=CurrentMonitorMode(m_hwnd);
+            m_monitorModeHandle=monitor;
+            m_monitorModeValid=true;
+        }
+        return m_monitorMode;
+    }
+    void InvalidateMonitorMode(){m_monitorModeValid=false;}
+    // A mode change under a live SR renderer does not rebuild it: the renderer
+    // is swapped only through EnableUpscaling, which recreates a device, a
+    // child window and an NGX feature, and a display change is exactly when a
+    // device is least worth touching - the same event can accompany a device
+    // loss. So the running output can outlive the rung Auto would now pick, and
+    // the status line will read the new rung while the picture is still the old
+    // one. Saying so in the log is the difference between a known deferral and
+    // Auto looking like it ignored the panel; the next load, toggle or rung
+    // change applies it.
+    void ReportUpscaleRungDrift()const{
+        if(!m_upscaleAuto||!UpscalingActive())return;
+        const auto wanted=UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight());
+        if(wanted.width==m_renderer->OutputW()&&wanted.height==m_renderer->OutputH())return;
+        LOG("Display mode changed under an active SR renderer. Auto now wants "
+            <<wanted.width<<"x"<<wanted.height<<" (grows="<<wanted.grows<<") but the renderer is still "
+            <<m_renderer->OutputW()<<"x"<<m_renderer->OutputH()
+            <<"; it is rebuilt on the next load, upscaling toggle or rung change.");
+    }
     uint32_t EffectiveUpscaleHeight()const{
-        return m_upscaleAuto?AutoUpscaleTargetHeight(CurrentMonitorMode(m_hwnd).height):m_upscaleTargetHeight;
+        return m_upscaleAuto?AutoUpscaleTargetHeight(MonitorModeCached().height):m_upscaleTargetHeight;
     }
     bool UpscalingAvailable()const{
         return m_loaded&&m_renderer&&m_renderer->DLSSAvailable()&&
@@ -2504,7 +2538,7 @@ private:
     void SetUpscaleTarget(uint32_t height){
         if((height&&!UpscaleRungWidth(height))||m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())return;
         const bool automatic=height==0;
-        const uint32_t resolved=automatic?AutoUpscaleTargetHeight(CurrentMonitorMode(m_hwnd).height):height;
+        const uint32_t resolved=automatic?AutoUpscaleTargetHeight(MonitorModeCached().height):height;
         if(UpscalingActive()){
             if(UpscalingTarget(m_decoder.Width(),m_decoder.Height(),resolved).grows){if(!EnableUpscaling(resolved))return;}
             else{m_renderer->SetDLSS(false);RenderVideoFrame(m_lastPlaybackFrame,true);}
@@ -5218,8 +5252,14 @@ private:
             UpdateFontsForDpi(dpi);
             const auto* suggested=reinterpret_cast<const RECT*>(l);
             if(suggested){const RECT target=ClampWindowRectToMinimumTrackSize(*suggested,MinimumPlayerWindowTrackSize(h,dpi));SetWindowPos(h,nullptr,target.left,target.top,target.right-target.left,target.bottom-target.top,SWP_NOZORDER|SWP_NOACTIVATE);}
+            InvalidateMonitorMode();
             Layout();InvalidateRect(h,nullptr,FALSE);return 0;
         }
+        // A mode change on the monitor the window is already on keeps the same
+        // HMONITOR, so the handle comparison cannot see it and the cached mode
+        // has to be dropped here. Switching a 4K panel to 1080p is exactly this
+        // case, and it moves the Auto rung.
+        case WM_DISPLAYCHANGE:InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
         case WM_SIZE:Layout();SyncActivityFeedback();return 0;
         case WM_PAINT:Paint();return 0;
         case WM_NCMOUSEMOVE:{
@@ -5355,6 +5395,10 @@ private:
     // is the rung the fixed target used to be.
     bool m_upscaleAuto=true;
     uint32_t m_upscaleTargetHeight=1440;
+    // Cached monitor mode and the handle it was read for; see MonitorModeCached.
+    mutable MonitorMode m_monitorMode{};
+    mutable HMONITOR m_monitorModeHandle=nullptr;
+    mutable bool m_monitorModeValid=false;
     std::wstring m_upscalingError;
     VideoFrame m_lastPlaybackFrame;
     // Read when a job starts; changing them only affects the next render.

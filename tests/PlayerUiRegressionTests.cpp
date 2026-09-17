@@ -136,6 +136,40 @@ struct PlayerAppTestAccess {
         // adjustments it sits with, clamps to the 0..2 the shader composites over, and
         // reads back as 1 (the neural frame untouched) when the key is absent.
         CHECK(std::abs(app.m_comparison.strength - 0.4f) < 0.001f);
+        // The upscaling target persists as two independent facts, and the split
+        // is the whole reason an existing install can reach Auto at all. Every
+        // release before this one wrote UpscaleHeight on every save, so a 1440
+        // in the file is the old default and not a choice; only the absence of
+        // UpscaleAuto identifies such a file, and absence has to mean Auto.
+        WritePrivateProfileStringW(L"Playback", L"UpscaleAuto", nullptr, app.SettingsPath().c_str());
+        app.WriteIniFloat(L"Playback", L"UpscaleHeight", 1440.0f);
+        app.m_upscaleAuto = false;
+        app.LoadVideoSettings();
+        CHECK(app.m_upscaleAuto);
+        CHECK_EQ(app.m_upscaleTargetHeight, 1440u);
+        // A rung pinned on this version survives the reload that the legacy
+        // 1440 must not.
+        app.m_upscaleAuto = false; app.m_upscaleTargetHeight = 2160;
+        app.SaveVideoSettings();
+        app.m_upscaleAuto = true; app.m_upscaleTargetHeight = 1080;
+        app.LoadVideoSettings();
+        CHECK(!app.m_upscaleAuto);
+        CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
+        // Returning to Auto keeps the pinned rung underneath it, so switching
+        // away and back does not silently retarget a later manual pick.
+        app.m_upscaleAuto = true;
+        app.SaveVideoSettings();
+        app.m_upscaleAuto = false; app.m_upscaleTargetHeight = 1080;
+        app.LoadVideoSettings();
+        CHECK(app.m_upscaleAuto);
+        CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
+        // A rung the build does not offer is not a selection: it falls back to
+        // the member default rather than reaching UpscalingTarget, which would
+        // refuse it anyway and report SR as merely unavailable.
+        app.WriteIniFloat(L"Playback", L"UpscaleHeight", 999.0f);
+        app.m_upscaleTargetHeight = 2160;
+        app.LoadVideoSettings();
+        CHECK_EQ(app.m_upscaleTargetHeight, 2160u);
         app.WriteIniFloat(L"VideoAdjustments", L"NeuralStrength", 9.0f);
         app.LoadVideoSettings();
         CHECK_EQ(app.m_comparison.strength, 2.0f);
@@ -161,6 +195,15 @@ struct PlayerAppTestAccess {
         app.LoadVideoSettings();
         CHECK_EQ(app.m_volume, 1.0f);
         app.m_muted = false; app.m_fill = false; app.m_neuralRequested = true;
+        // m_upscaleAuto is reset with the rest of the persisted playback state,
+        // and for the same reason: this save is what the next run of this exe
+        // loads. It is not reset because the suite was failing - it was not.
+        // CheckFullscreenLifecycle owns a second PlayerApp nested inside this
+        // scope (called at the end of Run), so that one's destructor saves
+        // UpscaleAuto=0 and THIS one's destructor overwrites it with 1
+        // afterwards. The pass therefore depends on destructor order, and both
+        // ends are pinned so it stops depending on it.
+        app.m_upscaleAuto = true;
         app.m_upscaleTargetHeight = 1440; app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto; app.m_neuralSettings = {}; app.m_comparison = {};
         app.m_cacheRoot.clear();
         WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,app.SettingsPath().c_str());
@@ -1426,6 +1469,12 @@ private:
         app.SyncFeatureMenuState();
         MoveFullscreenPointer(app,app.m_hwnd);
         CHECK((GetMenuState(menu,IDM_UPSCALE_2160,MF_BYCOMMAND)&MF_CHECKED)!=0);
+        // Handed back before this app's destructor saves. That destructor runs
+        // BEFORE the caller's, so leaving the pinned rung here would write
+        // UpscaleAuto=0 and rely on the caller's later save to undo it - which
+        // it does today, by ordering alone.
+        app.HandleCommand(IDM_UPSCALE_AUTO);
+        CHECK(app.m_upscaleAuto);
 
         // Do not hide underneath pointer capture, a native menu, a modal
         // dialog (disabled owner), adjustments, or keyboard navigation.
