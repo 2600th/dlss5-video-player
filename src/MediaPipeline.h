@@ -181,6 +181,55 @@ EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
                              const std::filesystem::path& output,
                              std::stop_token stop = {});
 
+// Stream-copies everything that travels with `sourceMedia` - audio, subtitles,
+// chapters, attachments and metadata - alongside the first video stream of
+// `video` into one Matroska file. Nothing is re-encoded and nothing is
+// re-timed: both inputs keep the timestamps they already have, so this is only
+// correct where `video` covers the same span of time as `sourceMedia` does.
+// A source with no audio, no subtitles and no chapters still produces a valid
+// output - every source map is optional - and Matroska is the container
+// because it accepts whatever codecs the source carries, which is what makes
+// the copy possible without touching a sample.
+EncodeError MuxVideoWithSourceStreams(const std::filesystem::path& helperDirectory,
+                                      const std::filesystem::path& video,
+                                      const std::filesystem::path& sourceMedia,
+                                      const std::filesystem::path& output,
+                                      std::stop_token stop = {});
+
+// Counts only, or the counts plus where the first audio stream ends.
+// WithAudioEnd demuxes that stream, so it is asked for only where the answer
+// is used.
+enum class MediaStreamMode { Counts, WithAudioEnd };
+
+// What a file carries beside its video. Separate from ProbeResult because
+// ProbeMedia answers for the video stream and is on the neural publish path,
+// which must not pay for a question about audio it never asks.
+struct MediaStreamSummary {
+    bool ok{};
+    uint32_t audioStreams{};
+    uint32_t subtitleStreams{};
+    // Where the first audio stream ends on the file's own timeline: its last
+    // packet's timestamp plus that packet's own duration. Measured by
+    // demuxing, because Matroska carries no per-stream duration at all - on
+    // this FFmpeg a stream-copied MKV reports stream duration=N/A for its
+    // video and its audio alike while the container says 8.021 s - so a header
+    // read cannot answer where the audio in a muxed file actually stops.
+    //
+    // An END and not a span, because a span is not comparable with a video's
+    // length: this clip's AAC begins with a priming packet at pts -0.021, so
+    // end-minus-first reads 8.021 s for audio that stops exactly with the
+    // 8.000 s video. The end is the number that says whether audio was
+    // truncated or stretched against the picture. 0 when the file has no audio
+    // stream or when mode is Counts.
+    int64_t audioEnd100ns{};
+    std::wstring detail;
+};
+
+MediaStreamSummary SummarizeMediaStreams(const std::filesystem::path& helperDirectory,
+                                         const std::filesystem::path& media,
+                                         std::stop_token stop,
+                                         MediaStreamMode mode = MediaStreamMode::Counts);
+
 enum class MediaProbeMode { FullValidation, CachedMetadata };
 
 ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,

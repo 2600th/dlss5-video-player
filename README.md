@@ -312,17 +312,31 @@ Defaults on a fresh install: neural rendering on, DLSS upscaling off, upscaling
 output Auto, YouTube quality Auto.
 
 **DLSS > Generate frames** raises the frame rate. It is a conversion rather than
-a live mode: the player writes a new file at the chosen multiple of the source
-rate, shows the progress while it does, and switches playback to the result when
-it finishes. The multiple comes from your display, not from the source alone - a
-multiple is only taken when it divides the refresh evenly, so 30 fps doubles to
-60 on a 60 Hz panel and reaches 120 on a 120 Hz one, while 24 fps is refused on
-60 Hz (2x is 48 and 60/48 is 1.25, which would trade one uneven cadence for
-another) and takes 5x to exactly 120 on a 120 Hz panel, where its 3:2 pulldown
-disappears. A source already at the refresh, a still image, a variable-rate file
-and a GPU whose runtime admits no generated frames each say so instead of
-failing quietly. Measured on an RTX 5090: an 8-second 1280x720 30 fps clip
-converted to 960 frames at 120 fps in 3.2 s, with the duration unchanged.
+a live mode: the player writes a new file at double the source rate, shows the
+progress while it does, and switches playback to the result when it finishes.
+Whether it runs at all comes from your display, not from the source alone - the
+doubled rate is only taken when it divides the refresh evenly, so 30 fps goes to
+60 on both a 60 Hz and a 120 Hz panel, 60 fps goes to 120 on a 120 Hz panel, and
+24 fps is refused (48 into 60 is 1.25 and into 120 is 2.5, either of which would
+trade one uneven cadence for another). A source already at the refresh, a still
+image, a variable-rate file and a GPU whose runtime admits no generated frames
+each say so instead of failing quietly. Watching the neural view converts the
+neural render rather than the original, and the confirmation says which.
+
+One generated frame per source frame is a deliberate ceiling, not a limit of the
+hardware: this RTX 5090 admits five, and four-times conversion does produce four
+distinct correctly-ordered frames per interval. They land in the wrong places.
+On a clip whose box moves exactly 40 px per source frame, the three intermediates
+of one interval measured at 0.478, 0.553 and 0.738 of the way across it instead
+of 0.250, 0.500 and 0.750 - the motion arrives as roughly 48/7/19/26 percent of
+the interval rather than four equal quarters, which is judder inside every source
+frame. A single midpoint has no such failure: it measured a uniform 6.6% late,
+which never changes and so is not visible. The ceiling lifts when that placement
+is understood.
+
+Measured on an RTX 5090 with the audio carried by stream copy: an 8-second
+1280x720 30 fps clip converted to 60 fps in about 3 s, duration unchanged to the
+millisecond and its audio track ending at exactly the same 8.000 s.
 
 Auto upscaling output takes the largest rung the monitor can scan out - 1080p,
 1440p or 2160p - and the source decides whether that rung is an upscale at all:

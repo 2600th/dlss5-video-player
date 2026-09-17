@@ -41,6 +41,32 @@ namespace frame_rate_policy {
 // 60/48 = 1.25, which is 25% away.
 inline constexpr double kRateTolerance = 0.005;
 
+// Generated frames per source frame this project has measured to land where it
+// asks for them, which is not the same number as the one the runtime admits.
+//
+// The runtime reports DLSSG.MultiFrameCountMax = 5 on an RTX 5090 / driver
+// 616.64, so 6x is admissible - and 4x does produce four distinct, correctly
+// ordered frames per interval; that much is measured through the shipped pass
+// on a synthetic clip whose box moves exactly 40 px per source frame, and every
+// output frame of a 240-frame 4x conversion was unique.
+//
+// Where they land is the problem. On that same clip the three intermediates of
+// one source interval measured at 0.478, 0.553 and 0.738 of the way across it,
+// against the 0.250 / 0.500 / 0.750 the timeline places them at. The motion is
+// therefore delivered as roughly 48% / 7% / 19% / 26% of the interval instead
+// of four equal quarters, which is micro-judder inside every source frame
+// rather than the smoother motion the higher rate promises. A second interval
+// on the same clip measured 0.390 / 0.490 / 0.750, so it is the shape of the
+// placement and not one bad pair.
+//
+// One generated frame has no such failure mode: it is a single midpoint, and it
+// measured 6.6% late on a 200 px displacement - a uniform offset, which is
+// invisible because it never changes. So generation is capped here until the
+// multi-frame placement is understood, and the cap is a measurement rather than
+// a preference. Raising it is a matter of measuring that phases land where they
+// are asked for, with the same synthetic clip.
+inline constexpr uint32_t kPhaseVerifiedMultiFrameCount = 1;
+
 enum class FrameGenerationRefusal : uint8_t {
     None,
     // No readable frame rate. A rate this policy cannot see is one it must not

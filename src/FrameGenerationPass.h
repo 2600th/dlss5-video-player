@@ -71,6 +71,13 @@ struct FrameGenerationResult {
     // backend's own count, so it also includes the history-establishing
     // evaluates whose output is discarded.
     uint64_t framesWritten{}, generatedFrames{}, evaluations{};
+    // What the finished file carries beside the generated video. The pass
+    // encodes video only and then stream-copies the source's audio, subtitles
+    // and chapters onto it, so these are read back off the muxed file rather
+    // than assumed: a conversion that ran and reports audioCarried=false is
+    // either a silent source, which is valid, or a caller-visible defect.
+    bool audioCarried{};
+    uint32_t outputAudioStreams{}, outputSubtitleStreams{};
 };
 
 class FrameGenerationPass {
@@ -104,6 +111,20 @@ public:
     // across a cut is a known artifact, and the player's TemporalGuides already
     // classifies cuts for Super Resolution and is where a later slice should
     // take them from.
+    //
+    // The frames are encoded into a video-only staging file beside
+    // `request.output`, and `request.output` is then MUXED from that video plus
+    // the source's audio, subtitle and chapter streams, stream-copied. Audio
+    // is what makes the mux a stage rather than an option: the player opens the
+    // converted file through its ordinary decode path and starts audio from the
+    // file it loaded, so a video-only output plays silent. A plain stream copy
+    // is correct here precisely because the paragraph above holds - the
+    // generated video is the same length as the source (measured 8.000 s for
+    // both on the 30 fps clip at 4x) - so the source's audio needs no
+    // stretching, resampling or offset to line up with it. Nothing in this pass
+    // may change the output's length without changing that copy into a retime.
+    // A source with no audio still produces a valid output, and on any failure
+    // the staging file and the output are both removed rather than left behind.
     FrameGenerationResult Run(const FrameGenerationRequest& request, std::stop_token stop,
                               std::function<void(const FrameGenerationProgress&)> onProgress = {});
 

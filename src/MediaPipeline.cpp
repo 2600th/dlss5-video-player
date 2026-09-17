@@ -1174,3 +1174,152 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     if (!result.ok) result.detail = L"The encoded final frame could not be decoded.";
     return result;
 }
+
+namespace {
+
+// The MKV half of BuildCachedExportArguments without its trim: input 0 carries
+// the finished video, input 1 everything that travels with the source. Every
+// source map is optional (`?`), which is what lets a silent source through the
+// mux instead of failing it, and `-c copy` is what keeps this a mux - a
+// re-encode here would undo the very work that produced input 0.
+std::vector<std::wstring> BuildStreamCopyMuxArguments(const std::filesystem::path& video,
+                                                      const std::filesystem::path& sourceMedia,
+                                                      const std::filesystem::path& output)
+{
+    return {L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
+            L"-i", video.wstring(), L"-i", sourceMedia.wstring(),
+            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?", L"-map", L"1:t?",
+            L"-map_metadata", L"1", L"-map_chapters", L"1",
+            L"-c", L"copy", L"-f", L"matroska", output.wstring()};
+}
+
+// Splits an ffprobe `key=value` stream into lines for `parse`, bounding a line
+// the way ProbeMedia does so a malformed file cannot grow this without bound.
+void ConsumeProbeLines(std::string& pending, bool& oversized, std::string_view chunk,
+                       const std::function<void(std::string_view)>& parse)
+{
+    for (const char character : chunk) {
+        if (character == '\n') {
+            if (!oversized) parse(pending);
+            pending.clear();
+            oversized = false;
+        } else if (pending.size() < 64 * 1024) pending.push_back(character);
+        else oversized = true;
+    }
+}
+
+} // namespace
+
+EncodeError MuxVideoWithSourceStreams(const std::filesystem::path& helperDirectory,
+                                      const std::filesystem::path& video,
+                                      const std::filesystem::path& sourceMedia,
+                                      const std::filesystem::path& output,
+                                      std::stop_token stop)
+{
+    if (video.empty() || sourceMedia.empty() || output.empty()) return EncodeError::InvalidSpecification;
+    std::error_code error;
+    uintmax_t totalBytes = 0;
+    for (const auto& input : {video, sourceMedia}) {
+        if (!std::filesystem::is_regular_file(input, error) || error)
+            return EncodeError::InvalidSpecification;
+        const auto bytes = std::filesystem::file_size(input, error);
+        if (!error) totalBytes += bytes;
+    }
+    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return EncodeError::HelperMissing;
+    if (stop.stop_requested()) return EncodeError::Cancelled;
+    // A stream copy is bound by the disk, so this takes ConcatenateMedia's
+    // budget for the same reason: ten minutes plus both inputs at 10 MB/s.
+    const CaptureResult capture = RunCapture(ffmpeg,
+        BuildStreamCopyMuxArguments(video, sourceMedia, output), stop,
+        MediaDeadline(double(totalBytes) / (10.0 * 1024.0 * 1024.0), std::chrono::minutes{10}, 1.0),
+        64 * 1024);
+    if (!capture.started) return EncodeError::StartFailed;
+    if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
+    if (capture.timedOut || capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
+        return EncodeError::FinishFailed;
+    return EncodeError::None;
+}
+
+MediaStreamSummary SummarizeMediaStreams(const std::filesystem::path& helperDirectory,
+                                         const std::filesystem::path& media,
+                                         std::stop_token stop, MediaStreamMode mode)
+{
+    MediaStreamSummary summary;
+    if (media.empty()) { summary.detail = L"No media was given to inspect."; return summary; }
+    const auto ffprobe = FindHelper(helperDirectory, L"ffprobe.exe");
+    if (ffprobe.empty()) { summary.detail = L"FFmpeg tools are unavailable."; return summary; }
+    std::string pending;
+    bool oversized = false;
+    const auto countLine = [&summary](std::string_view line) {
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (line == "codec_type=audio") ++summary.audioStreams;
+        else if (line == "codec_type=subtitle") ++summary.subtitleStreams;
+    };
+    // The stream list is a header read: seconds on any file, so a minute past
+    // it is a wedged child rather than a slow one.
+    const CaptureResult streams = RunCapture(ffprobe,
+        {L"-v", L"error", L"-show_entries", L"stream=codec_type",
+         L"-of", L"default=noprint_wrappers=1:nokey=0", L"-i", media.wstring()},
+        stop, std::chrono::minutes{1}, 64 * 1024,
+        [&](std::string_view chunk) { ConsumeProbeLines(pending, oversized, chunk, countLine); });
+    if (!pending.empty() && !oversized) countLine(pending);
+    if (!streams.started || streams.cancelled || streams.timedOut || streams.exitCode != 0) {
+        summary.detail = streams.cancelled ? L"Stream inspection was cancelled."
+                       : streams.timedOut ? L"FFprobe stream inspection timed out."
+                                          : L"FFprobe could not list the file's streams.";
+        return summary;
+    }
+    if (mode == MediaStreamMode::Counts || summary.audioStreams == 0) {
+        summary.ok = true;
+        return summary;
+    }
+    pending.clear();
+    oversized = false;
+    double end = -std::numeric_limits<double>::infinity();
+    double timestamp = std::numeric_limits<double>::quiet_NaN();
+    const auto packetLine = [&](std::string_view line) {
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        const size_t equals = line.find('=');
+        if (equals == std::string_view::npos) return;
+        const auto key = line.substr(0, equals);
+        const auto value = line.substr(equals + 1);
+        if (key == "pts_time") {
+            try { timestamp = std::stod(std::string(value)); }
+            catch (...) { timestamp = std::numeric_limits<double>::quiet_NaN(); }
+            if (std::isfinite(timestamp)) end = std::max(end, timestamp);
+        } else if (key == "duration_time" && std::isfinite(timestamp)) {
+            double packetSeconds = 0.0;
+            try { packetSeconds = std::stod(std::string(value)); } catch (...) {}
+            // The last packet's own duration is part of where the audio ends:
+            // audio whose final packet starts before the video's last frame
+            // still covers it, and ignoring that packet's length would read as
+            // a truncated stream.
+            if (std::isfinite(packetSeconds) && packetSeconds > 0.0)
+                end = std::max(end, timestamp + packetSeconds);
+        }
+    };
+    // Ten minutes, the bound ProbeMedia gives its own packet walk: an audio
+    // stream is a few hundred packets per second of media, so a feature-length
+    // file is seconds of demuxing and anything past this is wedged.
+    const CaptureResult packets = RunCapture(ffprobe,
+        {L"-v", L"error", L"-select_streams", L"a:0",
+         L"-show_entries", L"packet=pts_time,duration_time",
+         L"-of", L"default=noprint_wrappers=1:nokey=0", L"-i", media.wstring()},
+        stop, std::chrono::minutes{10}, 64 * 1024,
+        [&](std::string_view chunk) { ConsumeProbeLines(pending, oversized, chunk, packetLine); });
+    if (!pending.empty() && !oversized) packetLine(pending);
+    if (!packets.started || packets.cancelled || packets.timedOut || packets.exitCode != 0) {
+        summary.detail = packets.cancelled ? L"Stream inspection was cancelled."
+                       : packets.timedOut ? L"FFprobe audio inspection timed out."
+                                          : L"FFprobe could not read the audio stream's packets.";
+        return summary;
+    }
+    if (!std::isfinite(end) || end <= 0.0 || end >= double(INT64_MAX) / 10000000.0) {
+        summary.detail = L"The audio stream reported no usable end timestamp.";
+        return summary;
+    }
+    summary.audioEnd100ns = std::llround(end * 10000000.0);
+    summary.ok = true;
+    return summary;
+}

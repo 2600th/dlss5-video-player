@@ -702,6 +702,12 @@ struct ExportCompletion {
 struct FrameGenerationCompletion {
     FrameGenerationResult result;
     std::filesystem::path output;
+    // The file that was converted. A conversion takes minutes and the player
+    // stays usable, so by the time it lands the user may be watching something
+    // else entirely; the completion only takes playback over when this is still
+    // the file on screen.
+    std::wstring source;
+    bool neuralInput{};
     uint32_t multiplier{};
     std::wstring title;
 };
@@ -1279,20 +1285,36 @@ private:
     // guess would plan a rate the runtime then refuses. It is a create and
     // release of one NGX feature on a throwaway device, which is why a wait
     // cursor is enough and no background probe runs at startup.
+    // What the conversion should read, and whether that is the neural render.
+    //
+    // A viewer watching the neural view with a render cached is watching the
+    // neural carrier, and converting the ORIGINAL there would silently throw
+    // that away - the file they get back would be smooth and un-neural, and
+    // re-rendering neural afterwards costs four times the frames and a new
+    // cache identity. The carrier is constant-rate at exactly the source rate
+    // (SynchronizedPlayback::Open refuses a pair whose rates differ by more
+    // than 0.01 fps), so it is as valid an input as the original.
+    //
     // The pass hands the file to FFmpeg and to a decoder of its own, so a
     // network source only qualifies once the player is already playing an
     // acquired local copy of it. A live session or an export in flight is
     // excluded because both are already competing for the same GPU and helper
     // directory.
-    std::wstring FrameGenerationSource()const{
+    struct FrameGenerationInput {
+        std::wstring path;
+        bool neural{};
+    };
+    FrameGenerationInput FrameGenerationInputSource()const{
         if(!m_loaded)return{};
-        if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return m_path;
+        if(m_cachedPlayback&&!m_neuralPath.empty()&&m_comparisonView==ComparisonView::Neural)
+            return{m_neuralPath.wstring(),true};
+        if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return{m_path,false};
         return{};
     }
     bool FrameGenerationAvailable()const{
         return m_loaded&&!m_decoder.IsStillImage()&&!ActivityBusy()&&
                !m_frameGenWorker.joinable()&&!m_exportWorker.joinable()&&
-               !FrameGenerationSource().empty();
+               !FrameGenerationInputSource().path.empty();
     }
     frame_rate_policy::FrameGenerationPlan PlannedFrameGeneration(uint32_t multiFrameCountMax)const{
         const frame_rate_policy::SourceCadence cadence{m_decoder.FrameRate(),m_decoder.IsStillImage(),true};
@@ -1312,6 +1334,34 @@ private:
         }
         return L"";
     }
+    // The generated-frame budget the player will actually plan against: what the
+    // runtime admits, held down to what has been measured to land on its
+    // intended phase (frame_rate_policy::kPhaseVerifiedMultiFrameCount). The
+    // runtime's own number is logged unchanged so the gap stays visible.
+    uint32_t FrameGenerationCap()const{
+        if(!m_frameGenCapability||!m_frameGenCapability->available)return 0u;
+        return std::min(m_frameGenCapability->multiFrameCountMax,
+                        frame_rate_policy::kPhaseVerifiedMultiFrameCount);
+    }
+    // What the status line says about frame generation. Every arm is a state
+    // the player can actually establish: "unavailable" when no conversion can
+    // start, the planned multiple once the runtime's cap has been measured, the
+    // refusal's own name when the plan says no, and a bare "ready" before the
+    // cap is known - because the cap is measured on the first conversion and
+    // planning a multiple without it would be a guess on the status line.
+    std::wstring FrameGenerationStatus()const{
+        if(m_frameGenWorker.joinable())
+            return L"FG converting "+std::to_wstring(m_frameGenMultiplier)+L"\u00d7 \u2192 "+
+                   std::to_wstring(static_cast<int>(std::lround(m_frameGenTargetFps)))+L" fps";
+        if(!FrameGenerationAvailable())return L"FG unavailable";
+        if(!m_frameGenCapability)return L"FG ready";
+        const uint32_t cap=FrameGenerationCap();
+        const auto plan=PlannedFrameGeneration(cap);
+        if(!plan.Generates())
+            return L"FG off ("+Utf8ToWide(std::string(frame_rate_policy::FrameGenerationRefusalName(plan.refusal)))+L")";
+        return L"FG ready "+std::to_wstring(plan.multiplier)+L"\u00d7 \u2192 "+
+               std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L" fps";
+    }
     void StartFrameGeneration(){
         if(!FrameGenerationAvailable())return;
         if(!m_frameGenCapability){
@@ -1322,7 +1372,7 @@ private:
                 <<" multiFrameCountMax="<<m_frameGenCapability->multiFrameCountMax
                 <<" detail="<<WideToUtf8(m_frameGenCapability->detail));
         }
-        const uint32_t cap=m_frameGenCapability->available?m_frameGenCapability->multiFrameCountMax:0u;
+        const uint32_t cap=FrameGenerationCap();
         const auto plan=PlannedFrameGeneration(cap);
         const auto title=T(L"menu.frame_generation");
         if(!plan.Generates()){
@@ -1336,19 +1386,41 @@ private:
             MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
             return;
         }
-        const std::wstring source=FrameGenerationSource();
-        std::filesystem::path output=std::filesystem::path(source);
-        output.replace_filename(output.stem().wstring()+L"-"+std::to_wstring(plan.multiplier)+L"x"+
-                                std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L"fps.mkv");
-        wchar_t prompt[512];
-        swprintf_s(prompt,L"Generate %u\u00d7 the frames: %.3f fps \u2192 %.3f fps.\n\n"
-                          L"The converted video is written to:\n%s\n\n"
-                          L"Playback switches to it when the conversion finishes. Continue?",
-                   plan.multiplier,m_decoder.FrameRate(),plan.targetFps,output.wstring().c_str());
+        const FrameGenerationInput input=FrameGenerationInputSource();
+        // The converted file is a playback artifact, not an export: it goes
+        // where the other derived carriers go. Writing it beside the user's
+        // source - which the first version did - drops a large MKV into their
+        // library without a save dialog, lands in the acquired-copy directory
+        // for a network source, and simply fails on a read-only share.
+        // "Save converted video..." remains the way to get a file somewhere
+        // chosen.
+        NeuralCacheManager cache(m_cacheRoot);
+        if(!cache.Valid()){
+            MessageBoxW(m_hwnd,CacheFailureText().DescribeRoot(cache.LastFailure()).c_str(),title.c_str(),MB_OK|MB_ICONERROR);
+            return;
+        }
+        const std::filesystem::path outputDirectory=cache.Root()/L"frame-generation";
+        std::error_code directoryError;
+        std::filesystem::create_directories(outputDirectory,directoryError);
+        if(directoryError){
+            MessageBoxW(m_hwnd,L"The frame-generation directory could not be created inside the neural cache.",
+                        title.c_str(),MB_OK|MB_ICONERROR);
+            return;
+        }
+        const std::filesystem::path output=outputDirectory/
+            (std::filesystem::path(input.path).stem().wstring()+L"-"+std::to_wstring(plan.multiplier)+L"x"+
+             std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L"fps.mkv");
+        wchar_t prompt[768];
+        swprintf_s(prompt,L"Generate %u\u00d7 the frames of the %s video: %.3f fps \u2192 %.3f fps.\n\n"
+                          L"The converted video is written into the neural cache:\n%s\n\n"
+                          L"Playback switches to it when the conversion finishes, and "
+                          L"DLSS > Convert && save writes a copy wherever you want one. Continue?",
+                   plan.multiplier,input.neural?L"neural":L"original",
+                   m_decoder.FrameRate(),plan.targetFps,output.wstring().c_str());
         if(MessageBoxW(m_hwnd,prompt,title.c_str(),MB_OKCANCEL|MB_ICONQUESTION)!=IDOK)return;
 
         FrameGenerationRequest request{};
-        request.source=source;
+        request.source=input.path;
         request.output=output;
         request.multiplier=plan.multiplier;
         request.nvencPreset=m_nvencPreset;
@@ -1358,11 +1430,14 @@ private:
         const auto helpers=ExecutableDirectory();HWND target=m_hwnd;
         auto* completions=&m_frameGenCompletions;auto* progressMessages=&m_frameGenProgressMessages;
         const std::wstring displayTitle=m_displayTitle;
+        const bool neuralInput=input.neural;
         try{
-            m_frameGenWorker=std::jthread([target,request,helpers,completions,progressMessages,displayTitle](std::stop_token stop){
+            m_frameGenWorker=std::jthread([target,request,helpers,completions,progressMessages,displayTitle,neuralInput](std::stop_token stop){
                 auto completion=std::make_unique<FrameGenerationCompletion>();
                 completion->output=request.output;
                 completion->multiplier=request.multiplier;
+                completion->source=request.source;
+                completion->neuralInput=neuralInput;
                 completion->title=displayTitle;
                 completion->result=FrameGenerationPass(helpers).Run(request,stop,
                     [&](const FrameGenerationProgress& progress){
@@ -1402,7 +1477,10 @@ private:
         SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
         LOG("Frame generation finished: ok="<<completion->result.ok
             <<" frames="<<completion->result.framesWritten<<" generated="<<completion->result.generatedFrames
-            <<" outputFps="<<completion->result.outputFps<<" detail="<<WideToUtf8(completion->result.detail));
+            <<" outputFps="<<completion->result.outputFps
+            <<" audio="<<completion->result.audioCarried<<" audioStreams="<<completion->result.outputAudioStreams
+            <<" subtitleStreams="<<completion->result.outputSubtitleStreams
+            <<" detail="<<WideToUtf8(completion->result.detail));
         if(completion->result.error==FrameGenerationError::Cancelled)return;
         if(!completion->result.ok){
             std::wstring text=L"Frame generation did not finish. Your current video is unchanged.";
@@ -1410,12 +1488,24 @@ private:
             MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_OK|MB_ICONERROR);
             return;
         }
-        // "Then start playing": the conversion's whole purpose is the video it
-        // produced, so it is loaded rather than announced with a message box the
-        // user would have to dismiss before seeing anything.
+        // "Then start playing" - but only when the conversion is still about
+        // what is on screen. Nothing stops the user opening another video while
+        // this ran, and taking playback away from that one minutes later would
+        // be the player deciding what they are watching. The file is reported
+        // instead, and it is inside the neural cache where the other derived
+        // carriers live.
+        const FrameGenerationInput current=FrameGenerationInputSource();
+        if(current.path!=completion->source){
+            std::wstring text=L"Frame generation finished for a video you have since left.\n\nWritten to:\n"+
+                completion->output.wstring();
+            LOG("Frame generation result not adopted: the player has moved to another source.");
+            MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
+            return;
+        }
         std::wstring loadedTitle=completion->title;
         if(!loadedTitle.empty())
-            loadedTitle+=L" \u00b7 "+std::to_wstring(static_cast<int>(std::lround(completion->result.outputFps)))+L" fps";
+            loadedTitle+=(completion->neuralInput?L" \u00b7 neural \u00b7 ":L" \u00b7 ")+
+                std::to_wstring(static_cast<int>(std::lround(completion->result.outputFps)))+L" fps";
         LoadOriginal(completion->output.wstring(),loadedTitle);
     }
 
@@ -5165,9 +5255,9 @@ private:
             return text;
         }
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
-        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!CachedRangeCoversSource())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
+        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · "+FrameGenerationStatus()+L" · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!CachedRangeCoversSource())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
-        status.upscalingStatus=UpscalingStatus();std::wstring text=BuildPlayerStatusText(status);
+        status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();std::wstring text=BuildPlayerStatusText(status);
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;

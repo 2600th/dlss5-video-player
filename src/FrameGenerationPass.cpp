@@ -13,6 +13,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -383,21 +384,41 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     }
     if (stop.stop_requested()) return cancelled();
 
-    // Declared before the encoder and the backend so it is destroyed AFTER
-    // them: the FFmpeg child has to be gone before the file it was writing is
-    // deleted. Every failure path below is therefore a plain return - this
-    // removes a half-written output, ~RawVideoEncoder terminates the child's
-    // job object, and ~DLSSGBackend releases the feature and the NGX session.
-    struct OutputGuard {
+    // Both declared before the encoder and the backend so they are destroyed
+    // AFTER them: the FFmpeg child has to be gone before the file it was
+    // writing is deleted. Every failure path below is therefore a plain return
+    // - this removes a half-written output and the video-only staging file,
+    // ~RawVideoEncoder terminates the child's job object, and ~DLSSGBackend
+    // releases the feature and the NGX session.
+    struct FileGuard {
         std::filesystem::path path;
         bool keep = false;
-        ~OutputGuard()
+        ~FileGuard()
         {
             if (keep || path.empty()) return;
             std::error_code ignored;
-            std::filesystem::remove(path, ignored);
+            // A regular file and nothing else. The mux may fail before it ever
+            // creates the output, and a caller that named an existing
+            // directory must still have that directory afterwards - measured:
+            // an unconditional remove deleted an empty one that the pass had
+            // not created.
+            if (std::filesystem::is_regular_file(path, ignored))
+                std::filesystem::remove(path, ignored);
         }
-    } outputGuard{request.output};
+    } outputGuard{request.output}, stagingGuard;
+    // The encode's target: the generated frames alone, which the mux below
+    // turns into the output by adding the source's audio, subtitles and
+    // chapters. It sits beside the output because that directory is already
+    // known writable - the output goes there - and its name carries the
+    // process, the tick and a per-process counter so two conversions running
+    // at once, in this process or another, cannot pick the same file. The
+    // extension is .mkv because that is what it is: BuildEncoderArguments
+    // always writes Matroska, whatever the output is called.
+    static std::atomic_uint64_t stagingSequence{};
+    stagingGuard.path = request.output.parent_path() /
+        (L".dlss-framegen-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(GetTickCount64()) + L"-" +
+         std::to_wstring(stagingSequence.fetch_add(1)) + L".mkv");
 
     VideoDecoder::Settings settings;
     settings.helperDirectory = helperDirectory_.wstring();
@@ -532,7 +553,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
                     L"The source geometry and frame rate cannot be encoded at this multiplier.");
     }
     FallbackEncoder encoder(helperDirectory_);
-    if (const EncodeError error = encoder.Start(spec, request.output); error != EncodeError::None) {
+    if (const EncodeError error = encoder.Start(spec, stagingGuard.path); error != EncodeError::None) {
         return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
                                                     : FrameGenerationError::Encoder,
                     std::wstring(L"The frame-generation encoder could not be started: ") +
@@ -776,6 +797,65 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     if (encoder.UsedSoftware()) {
         Append(result.detail, L"NVENC refused this encode, so it was completed with the software H.264 encoder.");
     }
+    if (stop.stop_requested()) return cancelled();
+
+    // What the source carries, measured BEFORE the mux so the finished file can
+    // be checked against it instead of trusted. Counts only: the mux does not
+    // need to know how long the source's audio is, only whether all of it
+    // arrived.
+    const MediaStreamSummary sourceStreams = SummarizeMediaStreams(helperDirectory_, request.source, stop);
+    if (stop.stop_requested()) return cancelled();
+    if (!sourceStreams.ok) {
+        return fail(FrameGenerationError::Encoder,
+                    L"The source's streams could not be inspected, so it is not known what the converted "
+                    L"file has to carry: " + sourceStreams.detail);
+    }
+
+    // The mux, and the reason a plain stream copy of the audio is correct: the
+    // generated video is exactly sourceFrames * multiplier frames at
+    // sourceFps * multiplier, so it is the SAME LENGTH as the source - measured
+    // 8.000 s for both on the 1280x720 30 fps clip at 4x, 240 frames becoming
+    // 960. Audio that lined up with the source therefore lines up with the
+    // generated video with no stretch, resample or offset, and nothing above
+    // may change the output's length without turning this copy into a retime.
+    // Without this stage the pass produces video only and the player, which
+    // starts audio from the file it loaded, plays the conversion silent.
+    if (const EncodeError error = MuxVideoWithSourceStreams(helperDirectory_, stagingGuard.path,
+                                                            request.source, request.output, stop);
+        error != EncodeError::None) {
+        return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
+                                                    : FrameGenerationError::Encoder,
+                    std::wstring(L"The source's audio and subtitles could not be carried into the converted "
+                                 L"file: ") + EncodeErrorText(error) + L".");
+    }
+
+    // Read back off the finished file, never inferred from the arguments: the
+    // whole defect this stage exists to fix was invisible because nothing ever
+    // asked the output what it contained.
+    const MediaStreamSummary carried = SummarizeMediaStreams(helperDirectory_, request.output, stop);
+    if (stop.stop_requested()) return cancelled();
+    if (!carried.ok) {
+        return fail(FrameGenerationError::Encoder,
+                    L"The converted file could not be inspected after muxing: " + carried.detail);
+    }
+    result.outputAudioStreams = carried.audioStreams;
+    result.outputSubtitleStreams = carried.subtitleStreams;
+    result.audioCarried = carried.audioStreams > 0;
+    // Fail closed on a silent conversion of a source that had sound: the file
+    // would open, play and look converted, and the missing audio is exactly
+    // what a caller cannot see. A source that was silent to begin with carries
+    // nothing and is not a failure.
+    if (carried.audioStreams != sourceStreams.audioStreams) {
+        return fail(FrameGenerationError::Encoder,
+                    L"The converted file carries " + std::to_wstring(carried.audioStreams) +
+                        L" of the source's " + std::to_wstring(sourceStreams.audioStreams) +
+                        L" audio streams, so it would not play the source's sound.");
+    }
+    if (carried.subtitleStreams < sourceStreams.subtitleStreams) {
+        Append(result.detail, L"Only " + std::to_wstring(carried.subtitleStreams) + L" of the source's " +
+                                  std::to_wstring(sourceStreams.subtitleStreams) +
+                                  L" subtitle streams could be carried into the converted file.");
+    }
 
     outputGuard.keep = true;
     result.ok = true;
@@ -784,7 +864,9 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     LOG("Frame generation wrote " << std::dec << result.framesWritten << " frames ("
         << result.generatedFrames << " generated by DLSS-G, " << result.evaluations << " evaluates) from "
         << progress.sourceFramesRead << " source frames at " << width << "x" << height << " "
-        << result.sourceFps << " -> " << result.outputFps << " fps");
+        << result.sourceFps << " -> " << result.outputFps << " fps, carrying "
+        << result.outputAudioStreams << " audio and " << result.outputSubtitleStreams
+        << " subtitle streams from the source");
     return result;
 }
 

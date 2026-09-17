@@ -7,9 +7,14 @@
   `FrameGenerationPass`, reports progress on the status line, and switches
   playback to the result when it finishes - the shape chosen because live pacing
   would have to interleave generated frames into the playback clock, which also
-  owns audio sync, dropped-frame accounting and seeking. Ordering follows
-  NVIDIA's own pipeline: Super Resolution first, frame generation on the output,
-  so the pass never upscales and consumes whatever video it is given.
+  owns audio sync, dropped-frame accounting and seeking.
+  The pass does not upscale. It generates at the input's own resolution and the
+  player's runtime SR then runs live on the converted file, so the shipped order
+  is frame generation first, Super Resolution at present time - the opposite of
+  NVIDIA's in-engine order, and deliberately: generating at 720p is roughly nine
+  times cheaper than at 4K, and the player-side SR applies to any file it opens.
+  An earlier version of this entry cited NVIDIA's order as the justification,
+  which described something this code does not do.
   Verified end to end in the player on an RTX 5090 / 616.64 with a 120 Hz panel:
   a 1280x720 30 fps clip planned 4x, converted in 3.2 s to 960 frames (717
   generated, 718 evaluates) from 240 source frames, and the player reopened the
@@ -19,6 +24,62 @@
   not move. `framemd5` over twelve consecutive output frames showed twelve
   distinct hashes, so the file is real 120 fps content and not source frames
   repeated four times.
+- The conversion reads the neural render when that is what you are watching.
+  The first version always read the original, so converting while the neural
+  view was up silently returned a smooth un-neural file and re-rendering neural
+  afterwards would have cost four times the frames and a new cache identity. The
+  carrier is constant-rate at exactly the source rate - `SynchronizedPlayback`
+  refuses a pair whose rates differ by more than 0.01 fps - so it is as valid an
+  input as the original, and the confirmation now names which one it will read.
+- The converted file goes into the neural cache, not next to your source. The
+  first version wrote a large MKV beside the input with no save dialog, which
+  lands in the acquired-copy directory for a network source and simply fails on
+  a read-only share. It is a derived carrier and now lives with the others;
+  **Convert && save** remains the way to put a copy somewhere chosen.
+- A conversion no longer hijacks playback. The player stays usable while it
+  runs, so the result is adopted only when the file it was made from is still
+  the one on screen; otherwise the path is reported and playback is left alone.
+- The status line reports frame generation's real state. `FG unavailable` was a
+  hard-coded literal in two places, which became a contradiction the moment the
+  toolbar pill could read "Generate": it now reads the planned multiple, the
+  refusal's own name, or "converting" with the target rate.
+- Generation is capped at one frame per source frame, and the cap is a
+  measurement. The runtime admits five (`DLSSG.MultiFrameCountMax`), and 4x does
+  produce four distinct, correctly ordered frames per interval - a 240-frame 4x
+  conversion of a clip whose box moves exactly 40 px per source frame produced
+  240 unique frames. They land in the wrong places: the three intermediates of
+  one interval measured 0.478 / 0.553 / 0.738 of the way across it against the
+  0.250 / 0.500 / 0.750 the timeline puts them at, and a second interval on the
+  same clip measured 0.390 / 0.490 / 0.750 - so the motion arrives as roughly
+  48/7/19/26 percent of the interval instead of four equal quarters, which is
+  judder inside every source frame rather than the smoothness a higher rate
+  promises. One midpoint has no such failure mode: it measured a uniform 6.6%
+  late, invisible because it never varies. `kPhaseVerifiedMultiFrameCount`
+  carries the ceiling and the reasoning; raising it is a matter of measuring
+  that the phases land where they are asked for.
+  Cost of the cap, stated plainly: 24 fps film can no longer reach 120 fps on a
+  120 Hz panel, because 48 does not divide 120 evenly. That win comes back with
+  the placement fix.
+- A separate runtime rule was found while measuring this and is recorded in
+  `DlssgEvaluateSmoke` as a documented counter-example: handing the RESET
+  evaluate a `multiFrameCount` above 1 makes the runtime return the newer source
+  frame byte for byte at every index. The shipped conversion's own output does
+  not show it, so it is a constraint on how the feature may be driven rather
+  than a defect here - the test asserts the properties of the correct shape and
+  prints the counter-example beside them instead of staying permanently red.
+- Converted files carry the source's audio, subtitles and chapters by stream
+  copy. Without it the conversion produced a silent film, which the frame-count
+  and duration assertions could not see: the player hands the result to the
+  ordinary load path, which starts audio from the file it opened. The generated
+  video's duration equals the source's, which is what makes a plain copy line
+  up, and the pass now counts the source's audio streams before the mux and the
+  output's after and fails if they differ. Measured: the 8 s clip's AAC track
+  ends at exactly the video's 8.000 s, delta 0.000 ms. A silent source stays
+  silent without failing.
+- Frame generation and Super Resolution were measured together, which nothing
+  had done: with SR live at 1280x720 -> 1920x1080, the capability probe created
+  and released a FrameGeneration feature on its own device, the conversion ran,
+  and SR was re-created and enabled on the converted file afterwards.
 - The multiplier is the runtime's to bound. `QueryFrameGenerationCapability`
   measures `DLSSG.MultiFrameCountMax` once per process on the first conversion -
   5 on this machine, so 6x is the ceiling - and a request above it is clamped

@@ -511,7 +511,8 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
         configuration = L"DLSS SR safe mode";
     }
     std::wstringstream text;
-    text << configuration << L" \u00b7 " << (status.upscalingStatus.empty()?L"DLSS SR unavailable":status.upscalingStatus) << L" \u00b7 FG unavailable"
+    text << configuration << L" \u00b7 " << (status.upscalingStatus.empty()?L"DLSS SR unavailable":status.upscalingStatus)
+         << L" \u00b7 " << (status.frameGenerationStatus.empty()?L"FG unavailable":status.frameGenerationStatus)
          << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
          << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
          << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight

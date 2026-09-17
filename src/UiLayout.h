@@ -93,6 +93,11 @@ struct PlayerStatusSnapshot {
     uint32_t outputHeight{};
     std::wstring quality;
     std::wstring upscalingStatus;
+    // Frame generation's own state, for the same reason the upscaling status is
+    // a string rather than a flag: "unavailable" was hard-coded here while the
+    // control could only be unavailable, and it became a contradiction the
+    // moment the toolbar pill could read "Generate".
+    std::wstring frameGenerationStatus;
     double renderedFps{};
     double sourceFps{};
     uint64_t droppedFrames{};

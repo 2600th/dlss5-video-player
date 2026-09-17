@@ -210,6 +210,7 @@ if ($PublicCore) {
     $sources = @(
         @('DLSSVideoPlayer.exe', (Join-Path $buildRoot 'DLSSVideoPlayer.exe')),
         @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
+        @('nvngx_dlssg.dll', (Join-Path $buildRoot 'nvngx_dlssg.dll')),
         @('README.md', (Join-Path $repositoryRoot 'TECHNICAL_OVERVIEW.md')),
         @('LICENSE', (Join-Path $repositoryRoot 'LICENSE')),
         @('SECURITY.md', (Join-Path $repositoryRoot 'SECURITY.md')),
@@ -242,6 +243,7 @@ else {
         @('neural-runtime/ReShadePreset.ini', (Join-Path $repositoryRoot 'packaging\ReShadePreset.ini')),
         @('neural-runtime/renodx-dlss5.addon64', (Resolve-LockedRuntimeInput -Destination 'renodx-dlss5.addon64')),
         @('nvngx_dlss.dll', (Join-Path $buildRoot 'nvngx_dlss.dll')),
+        @('nvngx_dlssg.dll', (Join-Path $buildRoot 'nvngx_dlssg.dll')),
         @('neural-runtime/nvngx_dlss.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlss.dll')),
         @('neural-runtime/NeuralWorker.exe', (Join-Path $buildRoot 'neural-runtime/NeuralWorker.exe')),
         @('neural-runtime/nvngx_dlssnr.dll', (Resolve-LockedRuntimeInput -Destination 'nvngx_dlssnr.dll')),
