@@ -189,10 +189,15 @@ average bitrate; bitrate alone is not a cross-codec quality score.
 ## Upscaling is off or playback drops frames
 
 DLSS Upscaling starts off on a fresh installation and then follows the saved
-preference. Enable it from the DLSS menu or bottom bar. Choose 1440p or 2160p;
-a source that already meets/exceeds the target stays native.
+preference. Enable it from the DLSS menu or bottom bar. The output rung is Auto
+by default and follows the monitor's current mode; **DLSS > Upscaling output**
+pins 1080p, 1440p or 2160p instead. Two different refusals are reported and are
+not the same problem: "source meets output" means the source already meets or
+exceeds the rung, which a 4K source does everywhere and a 1080p source does on a
+1080p panel, and "display below 1080 lines" means the panel is shorter than the
+smallest rung, so there is nowhere to put the extra pixels.
 
-Try 1440p or turn runtime upscaling off to isolate its cost. For YouTube, choosing
+Pin a lower rung, or turn runtime upscaling off, to isolate its cost. For YouTube, choosing
 1080p reduces source load. The player drops late frames to preserve playback time.
 There are no legacy Auto/Balanced/Performance render-quality modes. Check the
 player log for SR startup/evaluation failures; ordinary playback remains available.

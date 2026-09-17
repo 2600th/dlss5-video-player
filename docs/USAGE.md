@@ -162,10 +162,18 @@ seconds idle. Dragging, an open menu/dialog or keyboard control focus keeps
 them visible. `Tab` reveals controls for keyboard access; `Esc`/`F11` restores
 the window (an active render or download consumes `Esc` to cancel first).
 
-**DLSS Upscaling** is independent and starts off on a fresh installation. Select
-1440p or 2160p output in the DLSS menu. It runs during playback on either view,
+**DLSS Upscaling** is independent and starts off on a fresh installation. Its
+output is **Auto** by default: the player takes the largest rung the monitor's
+current mode can scan out - 1080p, 1440p or 2160p - and never one above it,
+because the surplus is scaled away when the frame is presented while the DLSS
+evaluate is charged per output pixel. **DLSS > Upscaling output** offers each
+rung explicitly if you want to pin one; a pinned rung is kept between launches.
+It runs during playback on either view,
 preserves aspect ratio and does not downsample a source already at or above the
-target. Neural rendering itself preserves source resolution.
+target: a 4K source reports "source meets output" and stays off, and so does a
+1080p source on a 1080p panel. A display shorter than 1080 lines reports
+"display below 1080 lines", which is a different refusal from the first and says
+so. Neural rendering itself preserves source resolution.
 
 **Video > YouTube source quality** selects 1080p, 1440p or 2160p. At the selected
 resolution, the player chooses the highest advertised video bitrate across

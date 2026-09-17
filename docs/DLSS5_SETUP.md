@@ -64,7 +64,9 @@ See [third-party notices](../THIRD_PARTY.md) and the packaged
 
 The offline neural helper uses a native 1:1 DLAA carrier, with upscaling off.
 The player's independent runtime SR toggle starts off on a fresh install. Its output target
-defaults to 1440p, with 2160p selectable; the backend selects a supported NGX
+is Auto: the largest of the 1080p, 1440p and 2160p rungs that the monitor's
+current mode can scan out, never one above it. Any rung can be pinned from
+**DLSS > Upscaling output**. The backend selects a supported NGX
 quality range without resizing or downsampling the decoded source.
 
 ## Verified pre-render and playback profile

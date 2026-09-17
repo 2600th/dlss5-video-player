@@ -63,8 +63,10 @@ Next time, **File > Recent videos** reopens it with the render already done.
 - Exports what you rendered. PNG or JPEG for photos, GIF for animations, MP4 or
   MKV for video. MKV keeps the source audio, subtitles and chapters without
   re-encoding them.
-- Optional DLSS Super Resolution on top, 1440p or 2160p, for either view. The
-  render itself stays at source resolution.
+- Optional DLSS Super Resolution on top, for either view. The output rung
+  follows the display by default - 1080p, 1440p or 2160p, whichever the monitor
+  can actually scan out - and any rung can be pinned. The render itself stays at
+  source resolution.
 - Neural settings live at `Ctrl+N`. Change one while paused and that frame is
   re-rendered so you can judge on the picture. Settings are saved with each
   render and are part of its cache identity.

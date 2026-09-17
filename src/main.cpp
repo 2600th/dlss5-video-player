@@ -95,23 +95,34 @@ static void EnablePerMonitorDpiAwareness()
     }
 }
 
-// Native pixel height of the monitor the window sits on, or 0 when neither the
-// monitor nor its current mode could be read. MONITORINFO's rcMonitor is in
-// virtual-desktop space, which a scaled display reports in logical pixels, so
-// the adapter's own mode is what answers the question: dmPelsHeight is what the
-// panel scans out, which is the only height an upscale target can be judged
-// against.
-static uint32_t MonitorNativeHeight(HWND window)
+// The mode of the monitor the window sits on. Both fields are zero when the
+// monitor or its mode could not be read, which every consumer treats as "no
+// answer" rather than as a value.
+//
+// MONITORINFO's rcMonitor is in virtual-desktop space, which a scaled display
+// reports in logical pixels, so the adapter's own mode is what answers both
+// questions: dmPelsHeight is what the panel scans out, and dmDisplayFrequency
+// is how often. The height is the only one an upscale target can be judged
+// against, and the refresh is the only one a generated frame rate can.
+struct MonitorMode {
+    uint32_t height{};
+    double refreshHz{};
+};
+
+static MonitorMode CurrentMonitorMode(HWND window)
 {
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
     if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
                          reinterpret_cast<MONITORINFO*>(&info)))
-        return 0;
+        return {};
     DEVMODEW mode{};
     mode.dmSize = sizeof(mode);
-    if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 0;
-    return mode.dmPelsHeight;
+    if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return {};
+    // 0 and 1 are the documented "hardware default" placeholders for
+    // dmDisplayFrequency, not rates; neither is a cadence to plan against.
+    const double refresh = mode.dmDisplayFrequency > 1 ? double(mode.dmDisplayFrequency) : 0.0;
+    return {mode.dmPelsHeight, refresh};
 }
 
 static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
@@ -2398,7 +2409,7 @@ private:
     // 1080 lines, or a monitor that would not report its mode - and every
     // target call refuses it, so Auto fails closed to no upscaling.
     uint32_t EffectiveUpscaleHeight()const{
-        return m_upscaleAuto?AutoUpscaleTargetHeight(MonitorNativeHeight(m_hwnd)):m_upscaleTargetHeight;
+        return m_upscaleAuto?AutoUpscaleTargetHeight(CurrentMonitorMode(m_hwnd).height):m_upscaleTargetHeight;
     }
     bool UpscalingAvailable()const{
         return m_loaded&&m_renderer&&m_renderer->DLSSAvailable()&&
@@ -2493,7 +2504,7 @@ private:
     void SetUpscaleTarget(uint32_t height){
         if((height&&!UpscaleRungWidth(height))||m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())return;
         const bool automatic=height==0;
-        const uint32_t resolved=automatic?AutoUpscaleTargetHeight(MonitorNativeHeight(m_hwnd)):height;
+        const uint32_t resolved=automatic?AutoUpscaleTargetHeight(CurrentMonitorMode(m_hwnd).height):height;
         if(UpscalingActive()){
             if(UpscalingTarget(m_decoder.Width(),m_decoder.Height(),resolved).grows){if(!EnableUpscaling(resolved))return;}
             else{m_renderer->SetDLSS(false);RenderVideoFrame(m_lastPlaybackFrame,true);}
