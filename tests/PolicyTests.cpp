@@ -1165,9 +1165,16 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(has_menu_entry(entries, L"Neural Rendering\tD", app_menu::IDM_NEURAL_RENDERING));
     CHECK(has_menu_entry(entries, L"DLSS Upscaling",
                          app_menu::IDM_DLSS_UPSCALING));
-    CHECK(has_menu_entry(entries, L"Frame Generation\tUnavailable in this build",
+    // Frame generation is a command now, not a permanently disabled label, and
+    // the cancel item beside it is what makes a minutes-long conversion
+    // stoppable. The old entry read "Unavailable in this build", which was
+    // honest while no backend existed and would now be a lie.
+    CHECK(has_menu_entry(entries, L"Generate frames (higher frame rate)...",
                          app_menu::IDM_FRAME_GENERATION));
+    CHECK(has_menu_entry(entries, L"Cancel frame generation",
+                         app_menu::IDM_CANCEL_FRAME_GENERATION));
     CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
+    CHECK(!has_menu_text(entries, L"Frame Generation\tUnavailable in this build"));
 
     CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
                                               false, false, false, false));
@@ -1178,6 +1185,12 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK((neural & MF_CHECKED) != 0);
     CHECK((upscaling & (MF_DISABLED | MF_GRAYED)) != 0);
     CHECK((frameGeneration & (MF_DISABLED | MF_GRAYED)) != 0);
+    // And it enables when the player says a conversion is possible, which the
+    // permanently-false argument could never show.
+    CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
+                                              false, false, true, false));
+    CHECK((GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND) &
+           (MF_DISABLED | MF_GRAYED)) == 0);
     if (menu) DestroyMenu(menu);
 }
 

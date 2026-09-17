@@ -46,6 +46,8 @@
 #include "NetworkMediaTransaction.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
+#include "FrameRatePolicy.h"
+#include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "RecentMedia.h"
 #include "MediaPipeline.h"
@@ -221,6 +223,8 @@ static constexpr UINT WM_NEURAL_PROGRESS = WM_APP + 42;
 static constexpr UINT WM_NEURAL_COMPLETE = WM_APP + 43;
 static constexpr UINT WM_EXPORT_COMPLETE = WM_APP + 44;
 static constexpr UINT WM_UPDATE_CHECKED = WM_APP + 45;
+static constexpr UINT WM_FRAMEGEN_PROGRESS = WM_APP + 46;
+static constexpr UINT WM_FRAMEGEN_COMPLETE = WM_APP + 47;
 
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
@@ -691,6 +695,21 @@ struct ExportCompletion {
     std::filesystem::path output;
 };
 
+// One frame-generation conversion: what it was asked for, and what came back.
+// The multiplier is carried beside the result because the completion reports it
+// to the user and the result alone does not say what was requested when the
+// runtime's cap clamped it.
+struct FrameGenerationCompletion {
+    FrameGenerationResult result;
+    std::filesystem::path output;
+    uint32_t multiplier{};
+    std::wstring title;
+};
+
+struct FrameGenerationProgressMessage {
+    FrameGenerationProgress progress{};
+};
+
 struct UpdateCheckCompletion {
     UpdateFetchResult fetch;
     // A check the user asked for reports its outcome either way; the startup
@@ -1051,7 +1070,7 @@ class PlayerApp {
 #endif
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)),m_youtubeSourceQuality(YouTubeSourceQuality::Auto),m_neuralPauseEvent(CreateEventW(nullptr,TRUE,FALSE,nullptr)){}
-    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
+    ~PlayerApp(){if(m_activityTimer&&m_hwnd)KillTimer(m_hwnd,m_activityTimer);CancelExport();CancelFrameGeneration();CancelNeuralJob(false);CancelYouTubeResolution(false);SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);if(m_neuralWnd)DestroyWindow(m_neuralWnd);if(m_encoderWnd)DestroyWindow(m_encoderWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall); if(m_iconFont)DeleteObject(m_iconFont); if(m_neuralPauseEvent)CloseHandle(m_neuralPauseEvent);}
 
     bool Create(HINSTANCE hi) {
         if(!m_uiResources.Load(hi))LOG("Embedded Tabler icon font unavailable; continuing with label-only controls.");
@@ -1247,6 +1266,158 @@ private:
     }
     void CancelExport(){if(m_exportWorker.joinable()){m_exportWorker.request_stop();m_exportWorker.join();m_exportWorker=std::jthread{};}m_exportCompletions.Clear();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
     void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),L"Export complete",MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),L"Export failed",MB_OK|MB_ICONERROR);}
+
+    // Frame generation runs as a conversion, not as live presentation: the pass
+    // writes a new file at the planned multiple of the source rate, the user
+    // watches it progress, and the player then loads the result. Live pacing
+    // would have to interleave generated frames into the playback clock, which
+    // also owns audio sync, dropped-frame accounting and seeking; the
+    // conversion needs none of that and is the shape the user asked for.
+    //
+    // The runtime's cap is measured once per process, on the first invocation,
+    // because it decides which multiples are admissible at all and a wrong
+    // guess would plan a rate the runtime then refuses. It is a create and
+    // release of one NGX feature on a throwaway device, which is why a wait
+    // cursor is enough and no background probe runs at startup.
+    // The pass hands the file to FFmpeg and to a decoder of its own, so a
+    // network source only qualifies once the player is already playing an
+    // acquired local copy of it. A live session or an export in flight is
+    // excluded because both are already competing for the same GPU and helper
+    // directory.
+    std::wstring FrameGenerationSource()const{
+        if(!m_loaded)return{};
+        if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return m_path;
+        return{};
+    }
+    bool FrameGenerationAvailable()const{
+        return m_loaded&&!m_decoder.IsStillImage()&&!ActivityBusy()&&
+               !m_frameGenWorker.joinable()&&!m_exportWorker.joinable()&&
+               !FrameGenerationSource().empty();
+    }
+    frame_rate_policy::FrameGenerationPlan PlannedFrameGeneration(uint32_t multiFrameCountMax)const{
+        const frame_rate_policy::SourceCadence cadence{m_decoder.FrameRate(),m_decoder.IsStillImage(),true};
+        return frame_rate_policy::PlanFrameGeneration(cadence,MonitorModeCached().refreshHz,multiFrameCountMax);
+    }
+    static const wchar_t* FrameGenerationRefusalText(frame_rate_policy::FrameGenerationRefusal refusal){
+        using R=frame_rate_policy::FrameGenerationRefusal;
+        switch(refusal){
+            case R::None:return L"";
+            case R::UnknownSourceRate:return L"This source does not report a frame rate, so there is no interval to subdivide.";
+            case R::StillImage:return L"A still image has no second frame to generate between.";
+            case R::VariableFrameRate:return L"This source is not constant-frame-rate, which the generated grid needs.";
+            case R::UnknownRefresh:return L"Windows did not report a refresh rate for this display.";
+            case R::SourceMeetsRefresh:return L"The source already runs at or above what this display can present, so generated frames would never be shown.";
+            case R::NoEvenMultiple:return L"No whole multiple of this source's rate divides this display's refresh evenly, so generating frames would replace one uneven cadence with another.";
+            case R::RuntimeRefused:return L"This GPU and driver admit no generated frames.";
+        }
+        return L"";
+    }
+    void StartFrameGeneration(){
+        if(!FrameGenerationAvailable())return;
+        if(!m_frameGenCapability){
+            const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
+            m_frameGenCapability=QueryFrameGenerationCapability();
+            SetCursor(previous);
+            LOG("Frame generation capability: available="<<m_frameGenCapability->available
+                <<" multiFrameCountMax="<<m_frameGenCapability->multiFrameCountMax
+                <<" detail="<<WideToUtf8(m_frameGenCapability->detail));
+        }
+        const uint32_t cap=m_frameGenCapability->available?m_frameGenCapability->multiFrameCountMax:0u;
+        const auto plan=PlannedFrameGeneration(cap);
+        const auto title=T(L"menu.frame_generation");
+        if(!plan.Generates()){
+            std::wstring text=FrameGenerationRefusalText(plan.refusal);
+            if(plan.refusal==frame_rate_policy::FrameGenerationRefusal::RuntimeRefused&&
+               !m_frameGenCapability->detail.empty())
+                text+=L"\n\n"+m_frameGenCapability->detail;
+            LOG("Frame generation refused: "<<frame_rate_policy::FrameGenerationRefusalName(plan.refusal)
+                <<" source="<<m_decoder.FrameRate()<<" fps refresh="<<MonitorModeCached().refreshHz
+                <<" Hz cap="<<cap);
+            MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
+            return;
+        }
+        const std::wstring source=FrameGenerationSource();
+        std::filesystem::path output=std::filesystem::path(source);
+        output.replace_filename(output.stem().wstring()+L"-"+std::to_wstring(plan.multiplier)+L"x"+
+                                std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L"fps.mkv");
+        wchar_t prompt[512];
+        swprintf_s(prompt,L"Generate %u\u00d7 the frames: %.3f fps \u2192 %.3f fps.\n\n"
+                          L"The converted video is written to:\n%s\n\n"
+                          L"Playback switches to it when the conversion finishes. Continue?",
+                   plan.multiplier,m_decoder.FrameRate(),plan.targetFps,output.wstring().c_str());
+        if(MessageBoxW(m_hwnd,prompt,title.c_str(),MB_OKCANCEL|MB_ICONQUESTION)!=IDOK)return;
+
+        FrameGenerationRequest request{};
+        request.source=source;
+        request.output=output;
+        request.multiplier=plan.multiplier;
+        request.nvencPreset=m_nvencPreset;
+        m_frameGenProgress={};
+        m_frameGenMultiplier=plan.multiplier;
+        m_frameGenTargetFps=plan.targetFps;
+        const auto helpers=ExecutableDirectory();HWND target=m_hwnd;
+        auto* completions=&m_frameGenCompletions;auto* progressMessages=&m_frameGenProgressMessages;
+        const std::wstring displayTitle=m_displayTitle;
+        try{
+            m_frameGenWorker=std::jthread([target,request,helpers,completions,progressMessages,displayTitle](std::stop_token stop){
+                auto completion=std::make_unique<FrameGenerationCompletion>();
+                completion->output=request.output;
+                completion->multiplier=request.multiplier;
+                completion->title=displayTitle;
+                completion->result=FrameGenerationPass(helpers).Run(request,stop,
+                    [&](const FrameGenerationProgress& progress){
+                        auto message=std::make_unique<FrameGenerationProgressMessage>();
+                        message->progress=progress;
+                        progressMessages->RegisterAndPost(std::move(message),[&](uint64_t token){
+                            return PostMessageW(target,WM_FRAMEGEN_PROGRESS,static_cast<WPARAM>(token),0)!=FALSE;});
+                    });
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){
+                    return PostMessageW(target,WM_FRAMEGEN_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
+            });
+        }catch(const std::system_error&){
+            MessageBoxW(m_hwnd,L"The frame-generation worker could not start. Try again.",title.c_str(),MB_OK|MB_ICONERROR);
+            m_frameGenMultiplier=0;return;
+        }
+        LOG("Frame generation started: "<<m_decoder.FrameRate()<<" fps x"<<plan.multiplier<<" -> "<<plan.targetFps
+            <<" fps, presents/frame="<<plan.presentsPerFrame<<", output="<<WideToUtf8(output.wstring()));
+        SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+    }
+    void CancelFrameGeneration(){
+        if(m_frameGenWorker.joinable()){m_frameGenWorker.request_stop();m_frameGenWorker.join();m_frameGenWorker=std::jthread{};}
+        m_frameGenProgressMessages.Clear();m_frameGenCompletions.Clear();m_frameGenMultiplier=0;
+        if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();}
+    }
+    void CompleteFrameGenerationProgress(uint64_t token){
+        auto message=m_frameGenProgressMessages.Take(token);
+        if(!message||!m_frameGenWorker.joinable())return;
+        m_frameGenProgress=message->progress;
+        UpdateCachedStatus();InvalidateControls();
+    }
+    void CompleteFrameGeneration(uint64_t token){
+        auto completion=m_frameGenCompletions.Take(token);
+        if(!completion)return;
+        if(m_frameGenWorker.joinable()){m_frameGenWorker.join();m_frameGenWorker=std::jthread{};}
+        m_frameGenMultiplier=0;
+        const auto title=T(L"menu.frame_generation");
+        SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+        LOG("Frame generation finished: ok="<<completion->result.ok
+            <<" frames="<<completion->result.framesWritten<<" generated="<<completion->result.generatedFrames
+            <<" outputFps="<<completion->result.outputFps<<" detail="<<WideToUtf8(completion->result.detail));
+        if(completion->result.error==FrameGenerationError::Cancelled)return;
+        if(!completion->result.ok){
+            std::wstring text=L"Frame generation did not finish. Your current video is unchanged.";
+            if(!completion->result.detail.empty())text+=L"\n\n"+completion->result.detail;
+            MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_OK|MB_ICONERROR);
+            return;
+        }
+        // "Then start playing": the conversion's whole purpose is the video it
+        // produced, so it is loaded rather than announced with a message box the
+        // user would have to dismiss before seeing anything.
+        std::wstring loadedTitle=completion->title;
+        if(!loadedTitle.empty())
+            loadedTitle+=L" \u00b7 "+std::to_wstring(static_cast<int>(std::lround(completion->result.outputFps)))+L" fps";
+        LoadOriginal(completion->output.wstring(),loadedTitle);
+    }
 
     // Update notice. The check runs at most once a day in the background, keeps
     // its answer in the INI beside the player, and never blocks startup: the
@@ -1822,7 +1993,10 @@ private:
         const bool neuralActive=neuralAvailable&&m_comparisonView==ComparisonView::Neural;
         if(HMENU menu=GetMenu(m_hwnd)){
             app_menu::UpdateFeatureAvailability(menu,m_neuralRequested,neuralAvailable,neuralActive,
-                                                ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),false,false);
+                                                ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),
+                                                FrameGenerationAvailable(),m_frameGenWorker.joinable());
+            EnableMenuItem(menu,IDM_CANCEL_FRAME_GENERATION,
+                           MF_BYCOMMAND|(m_frameGenWorker.joinable()?MF_ENABLED:MF_GRAYED));
             const UINT checked=m_upscaleAuto?IDM_UPSCALE_AUTO
                 :(m_upscaleTargetHeight==2160?IDM_UPSCALE_2160
                  :(m_upscaleTargetHeight==1080?IDM_UPSCALE_1080:IDM_UPSCALE_1440));
@@ -2829,7 +3003,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),false};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable()};}
     std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -2908,7 +3082,12 @@ private:
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
         case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,UpscalingAvailable()?(UpscalingActive()?L"DLSS Upscaling · On":L"DLSS Upscaling · Off"):L"DLSS Upscaling · Unavailable",enabled,UpscalingActive()};
-        case ToolbarAction::ToggleFrameGeneration:return{UiIcon::Sparkles,L"Frame Generation · Unavailable",false,false};
+        // An action, not a toggle: it starts a conversion and the label says
+        // what that conversion would do, or why there is nothing to do.
+        case ToolbarAction::ToggleFrameGeneration:{
+            if(m_frameGenWorker.joinable())return{UiIcon::Sparkles,L"Frame Generation · Converting",false,true};
+            return {UiIcon::Sparkles,FrameGenerationAvailable()?L"Frame Generation · Generate":L"Frame Generation · Unavailable",enabled,false};
+        }
         case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill?L"Fit":L"Fill",enabled,m_fill};
         case ToolbarAction::Adjustments:return{UiIcon::Adjustments,L"Color",enabled,m_adjustWnd!=nullptr};
         case ToolbarAction::DebugView:{const bool active=rendererReady&&m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final;return{UiIcon::Debug,L"Debug",enabled,active};}
@@ -4968,6 +5147,23 @@ private:
     }
     std::wstring BuildStatusText()const{
         if(m_exportWorker.joinable())return L"Exporting processed media - File > Cancel export to stop";
+        // The conversion is the one activity that owns the whole status line:
+        // it is minutes long, it is the reason the picture is not changing, and
+        // a percentage is the only thing that distinguishes progress from a
+        // hang. A source with no readable duration reports frames instead of a
+        // percentage rather than inventing one.
+        if(m_frameGenWorker.joinable()){
+            std::wstring text=L"Generating frames · "+std::to_wstring(m_frameGenMultiplier)+L"× → "+
+                std::to_wstring(static_cast<int>(std::lround(m_frameGenTargetFps)))+L" fps · ";
+            if(m_frameGenProgress.sourceFramesTotal>0){
+                const double fraction=double(m_frameGenProgress.sourceFramesRead)/double(m_frameGenProgress.sourceFramesTotal);
+                text+=std::to_wstring(static_cast<int>(std::lround(std::clamp(fraction,0.0,1.0)*100.0)))+L"%";
+            }else{
+                text+=std::to_wstring(m_frameGenProgress.sourceFramesRead)+L" frames read";
+            }
+            text+=L" · "+std::to_wstring(m_frameGenProgress.framesWritten)+L" written · DLSS > Cancel frame generation to stop";
+            return text;
+        }
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
         if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · FG unavailable · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!CachedRangeCoversSource())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
@@ -5051,7 +5247,7 @@ private:
         case ToolbarAction::Mute:ToggleMute();break;
         case ToolbarAction::ToggleNeuralRendering:ToggleNeuralRendering();break;
         case ToolbarAction::ToggleUpscaling:ToggleUpscaling();break;
-        case ToolbarAction::ToggleFrameGeneration:break;
+        case ToolbarAction::ToggleFrameGeneration:StartFrameGeneration();break;
         case ToolbarAction::Aspect:m_fill=!m_fill;Layout();break;
         case ToolbarAction::Adjustments:ShowAdjustments();break;
         case ToolbarAction::DebugView:ShowDebugMenu(anchor);break;
@@ -5228,6 +5424,8 @@ private:
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
         case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
+        case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
+        case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();break;
@@ -5298,7 +5496,8 @@ private:
         case IDM_UPSCALE_1080:SetUpscaleTarget(1080);break;
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
-        case IDM_FRAME_GENERATION:break;
+        case IDM_FRAME_GENERATION:StartFrameGeneration();break;
+        case IDM_CANCEL_FRAME_GENERATION:CancelFrameGeneration();break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_CANCEL_EXPORT:CancelExport();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
@@ -5319,6 +5518,19 @@ private:
     std::filesystem::path m_neuralPath;
     CompletionRegistry<ExportCompletion> m_exportCompletions;
     std::jthread m_exportWorker;
+    CompletionRegistry<FrameGenerationCompletion> m_frameGenCompletions;
+    CompletionRegistry<FrameGenerationProgressMessage> m_frameGenProgressMessages;
+    std::jthread m_frameGenWorker;
+    FrameGenerationProgress m_frameGenProgress{};
+    // Non-zero only while a conversion runs; the status line reads it to say
+    // what the progress is progress towards.
+    uint32_t m_frameGenMultiplier=0;
+    double m_frameGenTargetFps=0.0;
+    // Measured once per process on the first conversion, never at startup: it
+    // creates and releases one NGX FrameGeneration feature on a throwaway
+    // device, and an unmeasured cap would let the policy plan a rate the
+    // runtime refuses.
+    std::optional<FrameGenerationCapability> m_frameGenCapability;
     CompletionRegistry<UpdateCheckCompletion> m_updateCompletions;
     std::jthread m_updateWorker;
     std::optional<UpdateNotice> m_updateNotice;

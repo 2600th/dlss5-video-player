@@ -608,7 +608,18 @@ No path samples with jitter. A decoded frame is already a fixed sample grid, so 
 sub-pixel offset cannot reveal new detail; it only convolves the frame with a
 per-frame bilinear tent, and the neural-rendering feature does not read a jitter
 offset at all. `Jitter_Offset_X/Y` are pinned to zero for every evaluation.
-Frame Generation is unavailable.
+Frame Generation is a conversion, not a presentation mode, and it is the one NGX
+feature the player creates besides Super Resolution. `FrameGenerationPass`
+decodes a file, evaluates `NVSDK_NGX_Feature_FrameGeneration` between each pair
+of source frames and encodes the result at the planned multiple of the source
+rate; the player then loads that file. `frame_rate_policy::PlanFrameGeneration`
+decides the multiple from the monitor's refresh rather than the source alone,
+and the runtime's own `DLSSG.MultiFrameCountMax` bounds it. Live pacing is
+deliberately absent: interleaving generated frames into the playback clock also
+means interleaving them with audio sync, dropped-frame accounting and seeking.
+`nvngx_dlssg.dll` is staged beside the player, not in `neural-runtime/` - NGX
+resolves a feature snippet from the directory of the process that creates the
+feature, and the render helper never creates this one.
 These controls do not alter the offline DLAA carrier or cache identity.
 
 Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.

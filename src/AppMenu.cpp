@@ -77,7 +77,9 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
     CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
-    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
+    add(dlss, IDM_CANCEL_FRAME_GENERATION, L"menu.cancel_frame_generation");
+    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     // Conversion writes a neural video to disk with the settings in the neural
     // settings dialog; it is deliberately separate from watching with the

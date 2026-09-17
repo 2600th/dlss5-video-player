@@ -19,16 +19,18 @@
 // The refusals are as much of the answer as the multipliers. Every one of them
 // is a case where the honest output is the source's own cadence.
 //
-// Nothing in the player calls this yet, and that is deliberate rather than
-// unfinished wiring. Deciding a multiplier needs the runtime's own
-// DLSSG.MultiFrameCountMax, which means creating an NGX FrameGeneration
-// feature; doing that inside the player process would stand a second
-// undocumented NGX lifetime beside the RenoDX neural path this project
-// deliberately keeps sole (docs/RELATED_PROJECTS.md). So the cap is measured
-// out of process by tests/DlssgProbeSmoke.cpp today, and this policy is
-// consumed when the frame-generation render mode owns that lifetime. The rules
-// are here, tested, and settled first because they are what decides whether
-// that work is worth doing for a given source and panel at all.
+// The runtime's own DLSSG.MultiFrameCountMax is an input, not a constant: the
+// cap decides which multiples are admissible at all, and it is measured
+// (QueryFrameGenerationCapability in FrameGenerationPass.h) rather than
+// assumed. An earlier version of this comment claimed the measurement had to
+// stay out of process to avoid a second NGX lifetime beside the RenoDX neural
+// path. That was wrong on the facts: RenoDX and feature 18 live in the render
+// helper, and ARCHITECTURE.md records that the main player does not load that
+// proxy at all - the player already owns an in-process NGX Super Resolution
+// feature of its own. The real constraint is the one the user settled: frame
+// generation runs as an offline conversion with progress and then plays the
+// result, because presentation pacing is entangled with the playback clock,
+// audio sync and seeking.
 namespace frame_rate_policy {
 
 // Windows reports a mode's refresh as a whole number - 60 for a 59.94 Hz mode -

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Frame generation ships, as a conversion.** **DLSS > Generate frames** plans
+  a multiple from the display, writes a new file at that rate through
+  `FrameGenerationPass`, reports progress on the status line, and switches
+  playback to the result when it finishes - the shape chosen because live pacing
+  would have to interleave generated frames into the playback clock, which also
+  owns audio sync, dropped-frame accounting and seeking. Ordering follows
+  NVIDIA's own pipeline: Super Resolution first, frame generation on the output,
+  so the pass never upscales and consumes whatever video it is given.
+  Verified end to end in the player on an RTX 5090 / 616.64 with a 120 Hz panel:
+  a 1280x720 30 fps clip planned 4x, converted in 3.2 s to 960 frames (717
+  generated, 718 evaluates) from 240 source frames, and the player reopened the
+  result at `1280x720 @ 120 fps, duration=8` - the same 8.000 s the source ran.
+  `FrameGenerationSmoke` (gpu label) asserts the two properties that separate a
+  conversion from a demo: the frame count is the multiple, and the duration did
+  not move. `framemd5` over twelve consecutive output frames showed twelve
+  distinct hashes, so the file is real 120 fps content and not source frames
+  repeated four times.
+- The multiplier is the runtime's to bound. `QueryFrameGenerationCapability`
+  measures `DLSSG.MultiFrameCountMax` once per process on the first conversion -
+  5 on this machine, so 6x is the ceiling - and a request above it is clamped
+  with the clamp reported rather than silently honoured. A 7x request came back
+  as 6x: 1440 frames from 240, duration within 1 ms.
+- `nvngx_dlssg.dll` ships beside the player and is held to the pinned SDK's own
+  bytes by `tools/verify_package.ps1`. It is deliberately NOT a
+  `packaging/runtime-lock.json` entry: that lock is the render helper's runtime
+  set, every entry must exist under `neural-runtime/`, and the helper never
+  creates the Frame Generation feature. Adding it there was tried and reverted
+  after the first launch of a fresh build logged "Neural pre-render failed: The
+  configured neural runtime is incomplete." - the lock also feeds
+  `runtimeDigest`, so the entry would have retired every cached render and
+  refused neural rendering on every existing install until its helper directory
+  was re-staged.
 - The upscaling output is chosen from the display instead of a fixed pick.
   **Auto** is the new default: it takes the largest rung the monitor can
   actually scan out (`AutoUpscaleTargetHeight`, read from the adapter's current

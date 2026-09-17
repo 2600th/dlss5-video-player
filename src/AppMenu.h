@@ -52,6 +52,7 @@ inline constexpr UINT IDM_UPSCALE_AUTO = 334;
 inline constexpr UINT IDM_UPSCALE_1080 = 335;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
+inline constexpr UINT IDM_CANCEL_FRAME_GENERATION = 338;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_FULLSCREEN = 402;

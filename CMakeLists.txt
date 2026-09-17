@@ -42,6 +42,11 @@ set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
 set(DLSS_NGX_LIBRARY "$<IF:$<CONFIG:Debug>,nvsdk_ngx_d_dbg,nvsdk_ngx_d>")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
+# The Frame Generation snippet from the same pinned SDK. NGX refuses feature 15
+# with 0xbad0000b unless this sits beside the executable, even though it locates
+# and logs the driver-store fallback - measured both ways by DlssgProbeSmoke.
+set(DLSSG_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlssg.dll")
+set(DLSSG_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlssg.dll")
 
 # The two Optical Flow interface headers live in external/nvof: NVIDIA licenses each
 # under MIT in its own copyright block, so unlike the DLSS SDK they are committed and
@@ -100,6 +105,11 @@ add_executable(DLSSVideoPlayer WIN32
     src/MediaSource.cpp
     src/DLSSBackend.cpp
     src/DLSSBackend.h
+    src/DLSSGBackend.cpp
+    src/DLSSGBackend.h
+    src/FrameGenerationPass.cpp
+    src/FrameGenerationPass.h
+    src/FrameRatePolicy.h
     src/D3D12Renderer.cpp
     src/D3D12Renderer.h
     src/OpticalFlowNvof.cpp
@@ -206,6 +216,9 @@ add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<IF:$<CONFIG:Debug>,${DLSS_RUNTIME_DEV},${DLSS_RUNTIME_REL}>"
         "$<TARGET_FILE_DIR:DLSSVideoPlayer>/nvngx_dlss.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "$<IF:$<CONFIG:Debug>,${DLSSG_RUNTIME_DEV},${DLSSG_RUNTIME_REL}>"
+        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/nvngx_dlssg.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/README.md"
         "$<TARGET_FILE_DIR:DLSSVideoPlayer>/README.md"
@@ -333,6 +346,26 @@ if(BUILD_TESTING)
             "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
             "$<TARGET_FILE_DIR:DlssgEvaluateSmoke>/nvngx_dlssg.dll"
     )
+    # The frame-generation conversion end to end: decode a real clip, generate
+    # the intermediates, encode, then probe the result. It asserts the two
+    # things that separate a conversion from a demo - the frame count is the
+    # multiple and the duration did not move - so it needs FFmpeg staged, the
+    # same way CachedExportTests does.
+    add_executable(FrameGenerationSmoke tests/FrameGenerationSmoke.cpp
+        src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
+        src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
+    target_include_directories(FrameGenerationSmoke PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(FrameGenerationSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(FrameGenerationSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_directories(FrameGenerationSmoke PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(FrameGenerationSmoke PRIVATE ${player_libraries})
+    set_target_properties(FrameGenerationSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/frame-generation/$<CONFIG>")
+    add_custom_command(TARGET FrameGenerationSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
+            "$<TARGET_FILE_DIR:FrameGenerationSmoke>/nvngx_dlssg.dll"
+    )
     add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
         src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     target_include_directories(MediaGpuSmoke PRIVATE src)
@@ -349,8 +382,11 @@ if(BUILD_TESTING)
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME DlssgProbeSmoke COMMAND DlssgProbeSmoke)
     add_test(NAME DlssgEvaluateSmoke COMMAND DlssgEvaluateSmoke)
+    add_test(NAME FrameGenerationSmoke COMMAND FrameGenerationSmoke
+        "${CMAKE_SOURCE_DIR}/external/test-media/dlaa-smoke.mp4" 4 "${FFMPEG_STAGED_DIR}"
+        "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke.mkv")
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
-        PROPERTIES LABELS gpu)
+        FrameGenerationSmoke PROPERTIES LABELS gpu)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -501,7 +537,9 @@ if(BUILD_TESTING)
     set_tests_properties(FrameIdentityTests CachedExportTests PlayerUiRegressionTests DlssgProbeSmoke
         PROPERTIES TIMEOUT 300)
     set_tests_properties(NeuralWorkerTests PolicyTests NeuralPrerenderTests PROPERTIES TIMEOUT 600)
-    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke PROPERTIES TIMEOUT 900)
+    # FrameGenerationSmoke decodes, generates and encodes a whole clip, so it
+    # belongs with the two smokes that render rather than with the 300 s probes.
+    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke FrameGenerationSmoke PROPERTIES TIMEOUT 900)
 
     # A test seam (PLAYER_APP_TESTING, YOUTUBE_RESOLVER_TESTING, ...) opens a
     # private route that only a test may take; none may be compiled into a

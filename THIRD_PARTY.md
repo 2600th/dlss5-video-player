@@ -11,12 +11,21 @@ claimed. Exact packaged binaries are pinned in `packaging/runtime-lock.json` and
 
 Source and terms: https://github.com/NVIDIA/DLSS
 
-The package uses NVIDIA-signed DLSS SR 310.8 together with ShortFuse's
-community-modified universal neural-rendering DLL (`310.8.SF-v2`, from the
-`RankFTW/rhi-repo` release mirror), which extends the leaked 310.8.0 runtime to
-Turing, Ampere, Ada and Blackwell. The modification removed the embedded NVIDIA
-signature, so the file is unsigned and must not be represented as authentic.
-NVIDIA files are not relicensed by this project.
+The package uses NVIDIA-signed DLSS SR 310.8 (`nvngx_dlss.dll`) and the
+NVIDIA-signed DLSS Frame Generation snippet `nvngx_dlssg.dll` (`310.7.0.0`,
+taken unmodified from the pinned official NVIDIA/DLSS SDK checkout `a291cc7`
+and used by the offline frame-generation conversion pass), together with
+ShortFuse's community-modified universal neural-rendering DLL
+(`310.8.SF-v2`, from the `RankFTW/rhi-repo` release mirror), which extends the
+leaked 310.8.0 runtime to Turing, Ampere, Ada and Blackwell. The modification
+removed the embedded NVIDIA signature, so that file is unsigned and must not be
+represented as authentic; both NVIDIA snippets above keep NVIDIA's own
+signature. `nvngx_dlss.dll` is pinned byte for byte in
+`packaging/runtime-lock.json`, which is the render helper's runtime set;
+`nvngx_dlssg.dll` is not in that lock because the helper never loads it - the
+player creates the Frame Generation feature - and `tools/verify_package.ps1`
+holds the packaged copy to the pinned SDK's own bytes instead. NVIDIA files are not
+relicensed by this project.
 
 ## NVIDIA Streamline
 

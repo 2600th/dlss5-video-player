@@ -309,8 +309,20 @@ Everything you set is kept between launches: volume, view, upscaling, YouTube
 quality, image adjustments, neural settings and guide switches.
 
 Defaults on a fresh install: neural rendering on, DLSS upscaling off, upscaling
-output Auto, YouTube quality Auto. Frame Generation has no backend and stays
-unavailable.
+output Auto, YouTube quality Auto.
+
+**DLSS > Generate frames** raises the frame rate. It is a conversion rather than
+a live mode: the player writes a new file at the chosen multiple of the source
+rate, shows the progress while it does, and switches playback to the result when
+it finishes. The multiple comes from your display, not from the source alone - a
+multiple is only taken when it divides the refresh evenly, so 30 fps doubles to
+60 on a 60 Hz panel and reaches 120 on a 120 Hz one, while 24 fps is refused on
+60 Hz (2x is 48 and 60/48 is 1.25, which would trade one uneven cadence for
+another) and takes 5x to exactly 120 on a 120 Hz panel, where its 3:2 pulldown
+disappears. A source already at the refresh, a still image, a variable-rate file
+and a GPU whose runtime admits no generated frames each say so instead of
+failing quietly. Measured on an RTX 5090: an 8-second 1280x720 30 fps clip
+converted to 960 frames at 120 fps in 3.2 s, with the duration unchanged.
 
 Auto upscaling output takes the largest rung the monitor can scan out - 1080p,
 1440p or 2160p - and the source decides whether that rung is an upscale at all:

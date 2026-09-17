@@ -14,7 +14,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $version = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'VERSION') -Raw).Trim()
 if ($PublicCore) {
     $expected = @(
-        'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'README.md', 'LICENSE',
+        'DLSSVideoPlayer.exe', 'nvngx_dlss.dll', 'nvngx_dlssg.dll', 'README.md', 'LICENSE',
         'SECURITY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
         'PUBLIC_RELEASE_NOTICE.txt', 'THIRD_PARTY_LICENSES/NVIDIA-DLSS-SDK.txt',
         'THIRD_PARTY_LICENSES/dlss5-feeder-MIT.txt',
@@ -28,7 +28,8 @@ else {
     $expected = @(
         'DLSSVideoPlayer.exe', 'neural-runtime/NeuralWorker.exe', 'neural-runtime/nvngx_dlss.dll', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe', 'deno.exe',
         'neural-runtime/dxgi.dll', 'neural-runtime/ReShade.ini', 'neural-runtime/ReShadePreset.ini', 'neural-runtime/renodx-dlss5.addon64',
-        'nvngx_dlss.dll', 'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
+        'nvngx_dlss.dll', 'nvngx_dlssg.dll',
+        'neural-runtime/nvngx_dlssnr.dll', 'neural-runtime/sl.common.dll', 'neural-runtime/sl.dlss.dll',
         'neural-runtime/sl.dlss_g.dll', 'neural-runtime/sl.dlss_nr.dll', 'neural-runtime/sl.interposer.dll', 'neural-runtime/sl.nis.dll',
         'neural-runtime/sl.pcl.dll', 'neural-runtime/sl.reflex.dll', 'README.md', 'LICENSE', 'SECURITY.md',
         'CONTRIBUTING.md', 'CHANGELOG.md', 'THIRD_PARTY.md',
@@ -147,29 +148,52 @@ function Assert-ReleaseExecutableIdentity {
 function Assert-LockedFiles {
     param([string]$Root)
     if ($PublicCore) {
-        $packagedPath = Join-Path $Root 'nvngx_dlss.dll'
-        $sdkPath = Join-Path $repositoryRoot 'external\DLSS\lib\Windows_x86_64\rel\nvngx_dlss.dll'
-        if (-not (Test-Path -LiteralPath $sdkPath -PathType Leaf)) {
-            throw "Pinned official DLSS runtime is missing: $sdkPath"
-        }
-        $packaged = Get-Item -LiteralPath $packagedPath
-        $sdk = Get-Item -LiteralPath $sdkPath
-        if ($packaged.Length -ne $sdk.Length -or
-            (Get-Sha256 -Path $packagedPath) -cne (Get-Sha256 -Path $sdkPath)) {
-            throw 'Public package DLSS runtime does not match the pinned official SDK.'
-        }
-        $signature = Get-AuthenticodeSignature -LiteralPath $packagedPath
-        $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
-        if ([string]$signature.Status -cne 'Valid' -or $subject -notlike '*NVIDIA*') {
-            throw "Public package DLSS runtime is not validly NVIDIA-signed: status=$($signature.Status) signer=$subject"
+        # Both NGX snippets in the public core are the pinned SDK's own files -
+        # the Super Resolution runtime and the Frame Generation snippet - and
+        # NVIDIA signs both, so both are held to the SDK bytes and to a valid
+        # NVIDIA signature. The core ships no FFmpeg, so the conversion pass
+        # that uses the second one cannot run there; it is packaged because the
+        # core's rule is provenance rather than feature reach, which is what
+        # PUBLIC_RELEASE_NOTICE.txt tells the reader.
+        foreach ($snippet in @('nvngx_dlss.dll', 'nvngx_dlssg.dll')) {
+            $packagedPath = Join-Path $Root $snippet
+            $sdkPath = Join-Path $repositoryRoot "external\DLSS\lib\Windows_x86_64\rel\$snippet"
+            if (-not (Test-Path -LiteralPath $sdkPath -PathType Leaf)) {
+                throw "Pinned official DLSS runtime is missing: $sdkPath"
+            }
+            $packaged = Get-Item -LiteralPath $packagedPath
+            $sdk = Get-Item -LiteralPath $sdkPath
+            if ($packaged.Length -ne $sdk.Length -or
+                (Get-Sha256 -Path $packagedPath) -cne (Get-Sha256 -Path $sdkPath)) {
+                throw "Public package $snippet does not match the pinned official SDK."
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $packagedPath
+            $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+            if ([string]$signature.Status -cne 'Valid' -or $subject -notlike '*NVIDIA*') {
+                throw "Public package $snippet is not validly NVIDIA-signed: status=$($signature.Status) signer=$subject"
+            }
         }
         return
     }
 
-    $rootSr=Join-Path $Root 'nvngx_dlss.dll'
-    $officialSr=Join-Path $repositoryRoot 'external/DLSS/lib/Windows_x86_64/rel/nvngx_dlss.dll'
-    if((Get-Sha256 -Path $rootSr) -cne (Get-Sha256 -Path $officialSr)) {
-        throw 'Playback SR runtime does not match the pinned official SDK.'
+    # NGX resolves a feature snippet from the directory of the process that
+    # creates the feature, and Frame Generation is created by the player, not by
+    # the render helper - so nvngx_dlssg.dll ships at the package root only. It
+    # is deliberately NOT a runtime-lock entry: the lock is the helper's set,
+    # every entry is required to exist under neural-runtime/, and adding a file
+    # the helper never loads would both retire every cached render (the lock
+    # feeds runtimeDigest) and refuse neural rendering outright on any install
+    # whose neural-runtime/ predates it. Measured: with the entry present and
+    # the file staged only beside the player, the very first log line of a fresh
+    # session read "Neural pre-render failed: The configured neural runtime is
+    # incomplete." Both root snippets are checked against the pinned SDK bytes
+    # here instead.
+    foreach($snippet in @('nvngx_dlss.dll','nvngx_dlssg.dll')){
+        $rootSnippet=Join-Path $Root $snippet
+        $officialSnippet=Join-Path $repositoryRoot "external/DLSS/lib/Windows_x86_64/rel/$snippet"
+        if((Get-Sha256 -Path $rootSnippet) -cne (Get-Sha256 -Path $officialSnippet)) {
+            throw "Playback runtime $snippet does not match the pinned official SDK."
+        }
     }
     $runtimeLock = Get-Content -LiteralPath (Join-Path $repositoryRoot 'packaging\runtime-lock.json') -Raw | ConvertFrom-Json
     foreach ($entry in $runtimeLock.entries) {
