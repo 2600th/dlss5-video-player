@@ -74,6 +74,24 @@
   `outputAudioStreams=0`. The generated video's duration equals the source's,
   which is what keeps a plain copy correct; a silent source stays silent without
   failing.
+- **The default multiple is 2x, and the rest is a setting.** Planning the largest
+  multiple the display admits was the player deciding how many minutes of GPU
+  time and how many gigabytes to spend: a 30 fps clip on a 120 Hz panel went
+  straight to 4x, four times the frames and four times the file. **DLSS >
+  Generated frames** offers 2x (default), 3x, 4x, 5x and "as many as the display
+  allows", kept between launches in `[Playback] FrameGenerationGenerated` and
+  clamped on load to what has been phase-verified. The preference is a third
+  ceiling beside the measured one and the runtime's, and the smallest wins.
+  A refusal the SETTING causes now says so instead of blaming the display: 24 fps
+  film on a 120 Hz panel needs 5x to land on 120 exactly, so at the default the
+  status line reads "Frame Generation off (set to 2x, needs 5x)" and the dialog
+  says "This display cannot show 2x this video's frame rate evenly, but it can
+  show 5x. Raise DLSS > Generated frames to convert it." Before this it read "no
+  even multiple of the refresh", which is true of 2x and useless to act on.
+  Verified on an RTX 5090 / 120 Hz panel: the same 30 fps clip that planned 4x
+  now plans `x2 -> 60 fps, presents/frame=2`; the 24 fps film refuses at the
+  default and converts at `x5 -> 120 fps` once the setting is raised; the ini
+  round-trips 0 for the display maximum and 3 for 4x.
 - **Frame generation works on a streaming source.** Every YouTube video reported
   "needs a local copy" and greyed the control out - including videos whose copy
   was already in the cache from an earlier render, because the input predicate

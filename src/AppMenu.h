@@ -56,6 +56,14 @@ inline constexpr UINT IDM_CANCEL_FRAME_GENERATION = 338;
 // Outside 334..337 for the same reason, and the only surface that can reach a
 // converted file once its confirmation dialog is gone.
 inline constexpr UINT IDM_SHOW_FRAMEGEN_OUTPUT = 339;
+// The generated-frame preference, its own contiguous radio block for the same
+// reason as the upscaling rungs above: 2x is the default and the rest are
+// opt-in, so one of these five is always checked.
+inline constexpr UINT IDM_FRAMEGEN_2X = 340;
+inline constexpr UINT IDM_FRAMEGEN_3X = 341;
+inline constexpr UINT IDM_FRAMEGEN_4X = 342;
+inline constexpr UINT IDM_FRAMEGEN_5X = 343;
+inline constexpr UINT IDM_FRAMEGEN_MAX = 344;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_FULLSCREEN = 402;

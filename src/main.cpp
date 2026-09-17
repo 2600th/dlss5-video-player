@@ -1474,19 +1474,54 @@ private:
         else swprintf_s(text,L"%.3f",fps);
         return text;
     }
-    // The generated-frame budget the player plans against: what this project has
-    // measured to land on its intended phase, narrowed by what the runtime
-    // admits once that has been measured. Before the probe answers, the
-    // measured ceiling is the honest input - it can only be an over-estimate of
-    // one number, the runtime's, and every other refusal is already decidable.
+    // The generated-frame budget the player plans against: three ceilings, and
+    // the smallest wins. What this project has phase-verified, what the runtime
+    // admits once that has been measured, and what the USER asked for -
+    // m_frameGenPreference, 1 generated frame (2x) on a fresh install, 0 for
+    // "as many as the display allows". A conversion is minutes of GPU work and
+    // a large file, so taking the largest admissible multiple automatically is
+    // the player deciding how much of both to spend.
+    //
+    // Before the runtime has been asked, the measured ceiling stands in for its
+    // answer: it can only over-estimate that one number, and every refusal
+    // except RuntimeRefused is already decidable without it.
     uint32_t FrameGenerationPlanningCap()const{
-        if(!m_frameGenCapability)return frame_rate_policy::kPhaseVerifiedMultiFrameCount;
-        return FrameGenerationCap();
+        const uint32_t measured=m_frameGenCapability?FrameGenerationCap()
+                                                    :frame_rate_policy::kPhaseVerifiedMultiFrameCount;
+        if(m_frameGenPreference==0u)return measured;
+        return std::min(measured,m_frameGenPreference);
     }
     uint32_t FrameGenerationCap()const{
         if(!m_frameGenCapability||!m_frameGenCapability->available)return 0u;
         return std::min(m_frameGenCapability->multiFrameCountMax,
                         frame_rate_policy::kPhaseVerifiedMultiFrameCount);
+    }
+    // The multiple this display WOULD accept if the preference were lifted, or
+    // 0 when the preference is not what is standing in the way. Without this a
+    // 24 fps film on a 120 Hz panel reads "no even multiple of the refresh"
+    // while the truth is that 5x divides it exactly and the setting says 2x -
+    // a refusal the user can act on, reported as one they cannot.
+    uint32_t FrameGenerationMultipleBeyondPreference()const{
+        if(m_frameGenPreference==0u)return 0u;
+        const uint32_t measured=m_frameGenCapability?FrameGenerationCap()
+                                                    :frame_rate_policy::kPhaseVerifiedMultiFrameCount;
+        if(measured<=m_frameGenPreference)return 0u;
+        if(PlannedFrameGeneration(FrameGenerationPlanningCap()).Generates())return 0u;
+        const auto unlimited=PlannedFrameGeneration(measured);
+        return unlimited.Generates()?unlimited.multiplier:0u;
+    }
+    // Changing the preference changes what the next conversion plans, nothing
+    // that is already running: a conversion in flight keeps the multiple it was
+    // started with, which is also the multiple its output file is named for.
+    void SetFrameGenerationPreference(uint32_t generatedFrames){
+        const uint32_t clamped=generatedFrames>frame_rate_policy::kPhaseVerifiedMultiFrameCount
+            ?frame_rate_policy::kPhaseVerifiedMultiFrameCount:generatedFrames;
+        if(m_frameGenPreference==clamped)return;
+        m_frameGenPreference=clamped;
+        LOG("Generated frames per source frame set to "<<(clamped==0u?std::string("the display's maximum")
+                                                                     :std::to_string(clamped))
+            <<"; the next conversion plans against it.");
+        SaveVideoSettings();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
     }
     // What the status line says about frame generation when the conversion is
     // not the thing that owns the whole line. Every arm is a state the player
@@ -1504,6 +1539,9 @@ private:
             case FrameGenerationUiState::CopyingSource:return T(L"framegen.status.copying");
             case FrameGenerationUiState::Unchecked:return T(L"framegen.status.ready_unchecked");
             case FrameGenerationUiState::Refused:
+                if(const uint32_t beyond=FrameGenerationMultipleBeyondPreference())
+                    return T(L"framegen.status.off")+L" ("+
+                           Format(T(L"framegen.refusal.preference.short"),m_frameGenPreference+1u,beyond)+L")";
                 return T(L"framegen.status.off")+L" ("+FrameGenerationRefusalShort(ui.plan.refusal)+L")";
             case FrameGenerationUiState::Ready:break;
         }
@@ -1522,6 +1560,16 @@ private:
     // safe (the probe, the conversion and a live SR feature coexisted) and that
     // is the only shape this code takes.
     void ShowFrameGenerationRefusal(frame_rate_policy::FrameGenerationRefusal refusal){
+        // A refusal the setting causes is a different sentence from one the
+        // video or the display causes, because the user can act on it.
+        if(const uint32_t beyond=FrameGenerationMultipleBeyondPreference()){
+            const std::wstring text=Format(T(L"framegen.refusal.preference"),
+                                           m_frameGenPreference+1u,beyond)+T(L"framegen.refusal.unchanged");
+            LOG("Frame generation refused by the generated-frames preference: set to "
+                <<(m_frameGenPreference+1u)<<"x, this display accepts "<<beyond<<"x");
+            MessageBoxW(m_hwnd,text.c_str(),T(L"framegen.title").c_str(),MB_OK|MB_ICONINFORMATION);
+            return;
+        }
         std::wstring text=FrameGenerationRefusalText(refusal);
         if(text.empty())return;
         // The hex NVSDK_NGX_Result and the NGX key names the runtime answered
@@ -2191,6 +2239,13 @@ private:
         // value would deny Auto to every existing install. The absence of
         // UpscaleAuto is what identifies those files, and absence means Auto.
         m_upscaleAuto=ReadIniFloat(L"Playback",L"UpscaleAuto",1.0f)!=0.0f;
+        // Generated frames per source frame the user asked for: 1 (2x) by
+        // default, 0 for "as many as the display allows". Clamped to what this
+        // project has phase-verified, so a hand-edited ini cannot ask for a
+        // multiple nothing has measured.
+        const float preference=ReadIniFloat(L"Playback",L"FrameGenerationGenerated",1.0f);
+        m_frameGenPreference=(preference<0.0f||preference>float(frame_rate_policy::kPhaseVerifiedMultiFrameCount))
+            ?1u:static_cast<uint32_t>(preference);
         const uint32_t storedTarget=uint32_t(ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f));
         if(UpscaleRungWidth(storedTarget))m_upscaleTargetHeight=storedTarget;
         const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
@@ -2345,6 +2400,7 @@ private:
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
+        WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
         WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
         WriteIniFloat(L"VideoAdjustments",L"Contrast",m_colorSettings.contrast);
@@ -2461,6 +2517,14 @@ private:
                 :(m_upscaleTargetHeight==2160?IDM_UPSCALE_2160
                  :(m_upscaleTargetHeight==1080?IDM_UPSCALE_1080:IDM_UPSCALE_1440));
             CheckMenuRadioItem(menu,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,checked,MF_BYCOMMAND);
+            // 2x..5x then "as many as the display allows", in the order the
+            // submenu appends them, so the radio always shows what the next
+            // conversion will plan against.
+            const UINT generatedChecked=m_frameGenPreference==0u?IDM_FRAMEGEN_MAX
+                :(m_frameGenPreference>=4u?IDM_FRAMEGEN_5X
+                 :(m_frameGenPreference==3u?IDM_FRAMEGEN_4X
+                  :(m_frameGenPreference==2u?IDM_FRAMEGEN_3X:IDM_FRAMEGEN_2X)));
+            CheckMenuRadioItem(menu,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,generatedChecked,MF_BYCOMMAND);
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
             for(const UINT item:{IDM_UPSCALE_AUTO,IDM_UPSCALE_1080,IDM_UPSCALE_1440,IDM_UPSCALE_2160})
                 EnableMenuItem(menu,item,MF_BYCOMMAND|outputState);
@@ -6058,6 +6122,11 @@ private:
         case IDM_FRAME_GENERATION:StartFrameGeneration();break;
         case IDM_CANCEL_FRAME_GENERATION:CancelFrameGeneration();break;
         case IDM_SHOW_FRAMEGEN_OUTPUT:ShowFrameGenerationOutput();break;
+        case IDM_FRAMEGEN_2X:SetFrameGenerationPreference(1);break;
+        case IDM_FRAMEGEN_3X:SetFrameGenerationPreference(2);break;
+        case IDM_FRAMEGEN_4X:SetFrameGenerationPreference(3);break;
+        case IDM_FRAMEGEN_5X:SetFrameGenerationPreference(4);break;
+        case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_CANCEL_EXPORT:CancelExport();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
@@ -6089,6 +6158,9 @@ private:
     // Set while a cancel is in flight: the request is posted and the worker is
     // retired by its own completion message, so nothing joins on the UI thread.
     bool m_frameGenCancelling=false;
+    // Generated frames per source frame the user asked for: 1 (2x) on a fresh
+    // install, 0 for "as many as the display allows". Kept between launches.
+    uint32_t m_frameGenPreference=1;
     Clock::time_point m_frameGenStarted{};
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.

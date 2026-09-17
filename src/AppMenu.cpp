@@ -79,6 +79,19 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
     add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
     add(dlss, IDM_CANCEL_FRAME_GENERATION, L"menu.cancel_frame_generation");
+    // The multiple is a preference, not an automatic maximum: a conversion is
+    // minutes of GPU work and a large file, so the default doubles the rate and
+    // anything beyond that is asked for. "As many as the display allows" is the
+    // old behaviour, kept for whoever wants it.
+    HMENU framegenMultiple=CreatePopupMenu();
+    add(framegenMultiple, IDM_FRAMEGEN_2X, L"menu.framegen_2x");
+    add(framegenMultiple, IDM_FRAMEGEN_3X, L"menu.framegen_3x");
+    add(framegenMultiple, IDM_FRAMEGEN_4X, L"menu.framegen_4x");
+    add(framegenMultiple, IDM_FRAMEGEN_5X, L"menu.framegen_5x");
+    add(framegenMultiple, IDM_FRAMEGEN_MAX, L"menu.framegen_max");
+    CheckMenuRadioItem(framegenMultiple,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,IDM_FRAMEGEN_2X,MF_BYCOMMAND);
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
+                localizer.Get(L"menu.framegen_multiple").c_str());
     // Grayed on creation like IDM_CANCEL_EXPORT below: main.cpp enables it once
     // a converted file exists. Without it the output is unreachable after the
     // confirmation dialog closes - the export item beside it is gated on a

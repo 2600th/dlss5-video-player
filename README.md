@@ -320,12 +320,21 @@ were watching. `Esc`, the toolbar pill and **DLSS > Cancel frame generation**
 all stop it; nothing is left behind when you do. The converted file is kept with
 the player's other converted videos and **DLSS > Show converted file** opens it.
 
-The multiple comes from your display, not from the source alone: it is taken
-only when the generated rate divides the refresh evenly, and the largest such
-multiple wins. On a 120 Hz panel 24 fps film reaches exactly 120 at 5x - its 3:2
-pulldown gone - and 30 fps reaches 120 at 4x; on a 60 Hz panel 30 fps doubles to
-60 and 24 fps is refused, because 48 into 60 is 1.25 and trading one uneven
-cadence for another is not an improvement. A source already at the refresh, a
+The default doubles the frame rate, and **DLSS > Generated frames** offers 3x,
+4x, 5x or "as many as the display allows" if you want more - a conversion is
+minutes of GPU work and a file several times the size of the source, so how much
+of both to spend is your choice rather than the player's. The pick is kept
+between launches.
+
+Whatever you pick, the multiple still has to fit your display: it is taken only
+when the generated rate divides the refresh evenly, and the largest multiple at
+or below your setting wins. On a 120 Hz panel 30 fps doubles to 60 at the default, and reaches 120 at 4x if
+you ask for it; 24 fps film needs 5x to reach exactly 120 with its 3:2 pulldown
+gone, so at the default it is refused and the status line says what it is
+refusing on - "set to 2x, needs 5x" - rather than pretending the display cannot
+do it. On a 60 Hz panel 30 fps doubles to 60 and 24 fps is refused outright,
+because 48 into 60 is 1.25 and trading one uneven cadence for another is not an
+improvement. A source already at the refresh, a
 still image, a file whose frame rate varies, a display whose refresh Windows
 does not report, and a GPU whose runtime admits no generated frames each say so
 in the status line before you click, and say it again as a sentence if you do.

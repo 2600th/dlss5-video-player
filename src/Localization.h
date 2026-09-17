@@ -39,6 +39,17 @@ private:
             {L"menu.frame_generation", L"Generate frames (higher frame rate)..."},
             {L"menu.cancel_frame_generation", L"Cancel frame generation"},
             {L"menu.show_framegen_output", L"Show converted file"},
+            // 2x is the default because a conversion costs minutes of GPU work
+            // and a large file; the rest are opt-in, and "as many as the
+            // display allows" is what the first version did automatically.
+            {L"menu.framegen_multiple", L"Generated frames"},
+            {L"menu.framegen_2x", L"2\u00d7 the frame rate (default)"},
+            {L"menu.framegen_3x", L"3\u00d7 the frame rate"},
+            {L"menu.framegen_4x", L"4\u00d7 the frame rate"},
+            {L"menu.framegen_5x", L"5\u00d7 the frame rate"},
+            {L"menu.framegen_max", L"As many as the display allows"},
+            {L"framegen.refusal.preference", L"This display cannot show %u\u00d7 this video's frame rate evenly, but it can show %u\u00d7.\n\nRaise DLSS > Generated frames to convert it."},
+            {L"framegen.refusal.preference.short", L"set to %u\u00d7, needs %u\u00d7"},
             // Frame generation names ONE feature on every surface. Before this
             // block the menu called it "Generate frames", the toolbar pill
             // called it "Frame Generation" and the status line called it "FG" -
