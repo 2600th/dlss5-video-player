@@ -36,6 +36,12 @@ struct ToolbarAvailability {
     bool neuralSessionAvailable{false};
     bool upscalingAvailable{false};
     bool frameGenerationAvailable{false};
+    // A conversion is running, which is a SECOND way the frame-generation pill
+    // is live: it reads "Cancel" then, and a control that says Cancel has to be
+    // clickable. Availability alone is false while a conversion runs - nothing
+    // can be started - so gating the pill on it alone made the Cancel label a
+    // lie.
+    bool frameGenerationConverting{false};
 };
 
 class YouTubeResolutionLifecycle {

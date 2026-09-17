@@ -635,13 +635,19 @@ refresh rather than the source alone, and the bound handed to it is
 `min(DLSSG.MultiFrameCountMax, frame_rate_policy::kPhaseVerifiedMultiFrameCount)`
 - the runtime's own answer held down to what has been measured to land on its
 intended phase, with the runtime's number logged unchanged so the gap stays
-visible. `kPhaseVerifiedMultiFrameCount` is 5 generated frames per source frame,
-and this RTX 5090 on driver 616.64 reports `MultiFrameCountMax` = 5 as well, so
-2x through 6x are admissible here and the minimum is not currently the limiting
-term. That is what lets the common cadences land on a 120 Hz panel exactly: 24
-fps at 5x is 120, 30 fps at 4x is 120. The refusals are unchanged - 24 fps on a
-60 Hz panel is still refused, because 48 does not divide 60 evenly and a
-fractional number of presents per source frame is judder, not smoothness.
+visible. `kPhaseVerifiedMultiFrameCount` is 4 generated frames per source frame
+- 5x - while this RTX 5090 on driver 616.64 reports `MultiFrameCountMax` = 5
+(6x), so the project's own bound is the limiting term and stays a real ceiling.
+The bound is a cadence one, stated rather than eyeballed: a multiplier is
+admitted while the worst ratio between adjacent gaps in the emitted sequence
+stays under 2.0, because a constant offset from the ideal phase is invisible
+while one short gap beside one long one is judder. Measured worst gap ratio:
+1.13 at 2x, 1.69 at 3x, 1.71 at 4x, 1.69 at 5x, 2.70 at 6x - 6x's shortest gap
+of 0.088 of an interval is a near-duplicate frame followed by a jump, so it is
+refused. What is admitted still lands the common cadences on a 120 Hz panel
+exactly: 24 fps at 5x is 120, 30 fps at 4x is 120. The refusals are unchanged -
+24 fps on a 60 Hz panel is still refused, because 48 does not divide 60 evenly
+and a fractional number of presents per source frame is judder, not smoothness.
 
 The phase evidence is a per-frame brightness centroid taken off a raw decode,
 and the instrument matters more than the multiplier does. Hashing the converted

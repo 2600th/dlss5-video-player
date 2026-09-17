@@ -336,23 +336,28 @@ confirmation names which file it will read. Either way the converted file
 carries the original's audio, subtitles and chapters by stream copy - the
 conversion preserves length exactly, which is what makes a copy correct.
 
-What the ceiling is, and why: five generated frames per source frame, which is
-also what this RTX 5090's runtime admits, so 2x through 6x are available. That
-number is measured, not assumed. On a clip carrying a textured patch that moves
+What the ceiling is, and why: four generated frames per source frame - 5x - which is
+BELOW what this RTX 5090's runtime admits (it allows five, i.e. 6x), so it is a
+real ceiling and not a restatement of the driver's. It is measured, and the
+bound is stated: a multiplier is admitted while the worst ratio between adjacent
+gaps in the emitted sequence stays under 2.0, because uneven gaps are what a
+viewer sees - a constant offset from the ideal never changes and is invisible. On a clip carrying a textured patch that moves
 exactly 40 px per source frame, each generated frame's position was read from
 its brightness centroid and compared with where the timeline puts it. At 4x the
 three intermediates of an interval land at 0.191, 0.474 and 0.707 of the way
-across it against an ideal 0.250 / 0.500 / 0.750; at 6x the five land at 0.157
-through 0.809 against 0.167 through 0.833. Every multiple is monotonic, strictly
-inside the pair and evenly spaced to within 0.11 of one interval, with a small
-constant early bias rather than clustering.
+across it against an ideal 0.250 / 0.500 / 0.750. Worst adjacent-gap ratio by
+multiple: 1.13 at 2x, 1.69 at 3x, 1.71 at 4x, 1.69 at 5x - and 2.70 at 6x, whose
+shortest gap of 0.088 is a near-duplicate frame followed by a jump, which is the
+artifact a higher rate is meant to remove. 6x is refused for that reason; 20 fps
+content on a 120 Hz panel is all it could have served anyway.
 
 An earlier release capped this at 2x on a measurement that was wrong twice over,
 and the corrections are worth stating. The probe was a flat white square: a
 featureless region has no interior detail for an interpolator to place, so the
 generated frame is close to a blend and its centroid is pulled to the midpoint -
 the same runs read 0.482 / 0.552 / 0.735 with the square and 0.191 / 0.474 /
-0.707 with texture. And the claim that a 4x conversion produced "240 unique
+0.707 with texture - placement is content-dependent, and flat graphics still
+interpolate as a blend today. And the claim that a 4x conversion produced "240 unique
 frames" came from hashing a lossy re-encode, where identical inputs hash
 differently, so it proved nothing at all. Separately, the pass was handing its
 history-establishing evaluate the pair's own frame count instead of 1, which

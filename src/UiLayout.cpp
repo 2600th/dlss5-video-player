@@ -404,7 +404,12 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
         // frameGenerationAvailable in main.cpp, which the identically-named
         // menu item reads too. Restating them here is what made the pill grey
         // out during a seek while the menu item stayed live.
-        return availability.mediaLoaded && availability.frameGenerationAvailable;
+        //
+        // Converting is the pill's other live state: it reads "Cancel" and
+        // cancels. Availability is false then, by construction, so the two have
+        // to be separate facts.
+        return availability.mediaLoaded &&
+               (availability.frameGenerationAvailable || availability.frameGenerationConverting);
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;

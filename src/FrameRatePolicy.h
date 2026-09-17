@@ -62,11 +62,32 @@ inline constexpr double kRateTolerance = 0.005;
 //                                                               worst 0.107
 //   6x  ideal 0.167 ... 0.833          measured 0.157 ... 0.809 worst 0.109
 //
-// Every multiplier is monotonic, strictly inside the pair, and evenly spaced to
-// within 0.11 of one interval, with a small systematic early bias rather than
-// clustering. So the ceiling is the runtime's number, not a lower one, and 5
-// generated frames is what has been measured rather than what a driver might
-// one day admit.
+// THE BOUND, stated so the number is not a taste: a multiplier is admitted
+// while the worst ratio between ADJACENT gaps in the emitted sequence stays
+// under 2.0 across those four intervals. Uneven gaps are what a viewer sees -
+// a uniform offset from the ideal phase never changes and is invisible, while
+// one short gap beside one long one is judder inside every source frame - so
+// the gap ratio is the quantity to bound, not the distance from the ideal.
+// Measured, with the smallest gap and the worst deviation expressed as a
+// fraction of one slot (1/m) beside it:
+//
+//   multiplier   worst gap ratio   smallest gap   worst deviation / slot
+//   2x           1.13              0.470          0.06
+//   3x           1.69              0.262          0.33
+//   4x           1.71              0.191          0.32
+//   5x           1.69              0.156          0.53
+//   6x           2.70              0.088          0.65
+//
+// 6x is the break, and it is not marginal: a 0.088 gap beside a 0.238 one is a
+// near-duplicate pair followed by a jump, which is the artifact a higher rate
+// is supposed to remove. Everything up to 5x holds at 1.7:1 or better. So the
+// ceiling is FOUR generated frames - 5x - which is below what this runtime
+// admits (DLSSG.MultiFrameCountMax = 5, i.e. 6x) and therefore still a real
+// ceiling rather than a restatement of the driver's.
+//
+// What that keeps: 24 fps film reaches exactly 120 fps at 5x on a 120 Hz panel,
+// pulldown gone, and 30 fps reaches 120 at 4x. What it gives up: 6x, which only
+// 20 fps content could use on a 120 Hz panel anyway.
 //
 // Two earlier claims in this comment were WRONG and are recorded here because
 // they were shipped. The first was that the intermediates cluster near the
@@ -75,12 +96,13 @@ inline constexpr double kRateTolerance = 0.005;
 // localise, so the generated frame is close to a blend of the pair and its
 // centroid sits near the midpoint. The flat-square control still measures
 // 0.482 / 0.552 / 0.735 today, beside 0.191 / 0.474 / 0.707 for textured
-// content in the same runs. The second was that a 240-frame 4x conversion
-// produced "240 unique frames": that came from framemd5 over a lossy NVENC
-// encode, where identical inputs still hash differently, so it proved nothing.
-// A per-frame centroid from a raw decode is the instrument; tests/
-// FrameGenerationSmoke.cpp asserts it on every run.
-inline constexpr uint32_t kPhaseVerifiedMultiFrameCount = 5;
+// content in the same runs - so placement is content-dependent, and flat
+// graphics interpolate as a blend. The second was that a 240-frame 4x
+// conversion produced "240 unique frames": that came from framemd5 over a
+// lossy NVENC encode, where identical inputs still hash differently, so it
+// proved nothing. A per-frame centroid from a raw decode is the instrument;
+// tests/FrameGenerationSmoke.cpp asserts it on every run.
+inline constexpr uint32_t kPhaseVerifiedMultiFrameCount = 4;
 
 enum class FrameGenerationRefusal : uint8_t {
     None,

@@ -82,7 +82,6 @@ private:
             {L"framegen.refusal.no_multiple.short", L"no even multiple of the refresh"},
             {L"framegen.refusal.runtime", L"This GPU and driver admit no generated frames."},
             {L"framegen.refusal.runtime.short", L"refused by the driver"},
-            {L"framegen.refusal.no_local_copy", L"This source is still streaming. Frame generation needs the local copy the player keeps while it plays."},
             {L"framegen.refusal.no_local_copy.short", L"needs a local copy"},
             {L"framegen.refusal.unchanged", L"\n\nNothing was changed and your video is still playing."},
             {L"framegen.driver_next_step", L"\n\nUpdate the NVIDIA driver and try again."},

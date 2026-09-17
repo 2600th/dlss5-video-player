@@ -23,21 +23,28 @@
   unchanged.
 - **The ceiling is five generated frames per source frame, and the cap that
   shipped at one was wrong twice over.** `kPhaseVerifiedMultiFrameCount` is now
-  5, which is also this RTX 5090's `DLSSG.MultiFrameCountMax`, so 2x through 6x
-  are admissible and the plan still takes the smaller of the two numbers.
+  4 - 5x - which is BELOW this RTX 5090's `DLSSG.MultiFrameCountMax` of 5, so it
+  is a real ceiling and not a restatement of the driver's, and the plan still
+  takes the smaller of the two. The bound is stated rather than eyeballed: a
+  multiplier is admitted while the worst ratio between adjacent gaps in the
+  emitted sequence stays under 2.0, because uneven gaps are what a viewer sees
+  while a constant offset from the ideal is invisible. Measured worst gap ratio
+  by multiple: 1.13 at 2x, 1.69 at 3x, 1.71 at 4x, 1.69 at 5x, and 2.70 at 6x -
+  whose shortest gap of 0.088 is a near-duplicate frame followed by a jump, the
+  artifact a higher rate exists to remove. 6x is refused on that measurement.
   Measured through the shipped pass on a 1280x720 30 fps FFV1 clip carrying a
   200x200 textured patch that moves exactly 40 px per source frame, reading each
   output frame's position from its brightness centroid: at 4x the intermediates
   land at 0.191 / 0.474 / 0.707 of the interval against an ideal 0.250 / 0.500 /
-  0.750, at 6x at 0.157 / 0.281 / 0.474 / 0.628 / 0.809 against 0.167 through
-  0.833, and every multiple from 2x to 6x is monotonic, strictly inside the pair
-  and evenly spaced to within 0.11 of one interval.
+  0.750, and every admitted multiple is monotonic and strictly inside the pair.
   Both of the measurements behind the old cap are refuted here. The first used a
   flat WHITE SQUARE as the moving probe: a featureless region has no interior
   detail to localise, so the generated frame is close to a blend of the pair and
   its centroid is pulled to the midpoint - the same runs measure 0.482 / 0.552 /
   0.735 with the square beside 0.191 / 0.474 / 0.707 with texture, which is
-  where "the motion arrives as 48/7/19/26 percent of the interval" came from.
+  where "the motion arrives as 48/7/19/26 percent of the interval" came from -
+  so placement is content-dependent, and flat graphics interpolate as a blend on
+  this runtime today, which is a limitation to know rather than a cap to keep.
   The second claimed a 240-frame 4x conversion produced "240 unique frames" from
   `framemd5` over a lossy re-encode, where identical inputs still hash
   differently; that instrument cannot answer the question it was asked.

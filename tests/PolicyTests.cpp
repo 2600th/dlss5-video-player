@@ -665,6 +665,22 @@ void frame_generation_pill_follows_media_and_availability_only_test()
     // The pills beside it do stop during a seek, so the difference is the
     // point and not an accident of this availability value.
     CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, seekingReady));
+
+    // The pill reads "Frame Generation · Cancel" while a conversion runs, and a
+    // control that says Cancel has to be clickable. Availability is false then
+    // by construction - nothing can be started - so gating the pill on it alone
+    // made the label a lie: the click never reached CancelFrameGeneration.
+    ToolbarAvailability converting{};
+    converting.mediaLoaded = true;
+    converting.frameGenerationAvailable = false;
+    converting.frameGenerationConverting = true;
+    CHECK(IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, converting));
+    // Still nothing without media, whatever a stale conversion flag says.
+    ToolbarAvailability convertingWithoutMedia = converting;
+    convertingWithoutMedia.mediaLoaded = false;
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, convertingWithoutMedia));
+    // And the flag is frame generation's alone: it must not revive a neighbour.
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, converting));
 }
 
 void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
@@ -835,9 +851,9 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     CHECK(shows(neural, L"1920\u00d71080"));
     CHECK(shows(neural, L"3840\u00d72160"));
     CHECK(shows(neural, L"Quality"));
-    CHECK(shows(neural, L"58"));
-    CHECK(shows(neural, L"60"));
-    CHECK(shows(neural, L"fps"));
+    // The format itself, not the digits in isolation: "60" alone is satisfied by
+    // the 2160 in a geometry, and "fps" by any segment carrying a rate.
+    CHECK(shows(neural, L"58 / 60 fps"));
     CHECK(shows(neural, L"Dropped 3"));
     // Rounded, never the raw double: a status line that reads 58.4 implies a
     // precision the sampled rate does not have.

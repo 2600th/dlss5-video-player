@@ -1110,18 +1110,27 @@ public:
         // window keeps its aspect while shrinking into it.
         RECT rc{0,0,1440,880}; AdjustWindowRect(&rc,WS_OVERLAPPEDWINDOW,TRUE);
         RECT work{};
+        int windowX=CW_USEDEFAULT,windowY=CW_USEDEFAULT;
         if(SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)){
             const LONG workWidth=work.right-work.left,workHeight=work.bottom-work.top;
             const LONG frameWidth=rc.right-rc.left,frameHeight=rc.bottom-rc.top;
-            if(workWidth>0&&workHeight>0&&(frameWidth>workWidth||frameHeight>workHeight)){
-                const double scale=std::min(double(workWidth)/double(frameWidth),
-                                            double(workHeight)/double(frameHeight));
-                rc.right=rc.left+std::max<LONG>(640,LONG(std::lround(frameWidth*scale)));
-                rc.bottom=rc.top+std::max<LONG>(480,LONG(std::lround(frameHeight*scale)));
+            if(workWidth>0&&workHeight>0){
+                if(frameWidth>workWidth||frameHeight>workHeight){
+                    const double scale=std::min(double(workWidth)/double(frameWidth),
+                                                double(workHeight)/double(frameHeight));
+                    rc.right=rc.left+std::max<LONG>(640,LONG(std::lround(frameWidth*scale)));
+                    rc.bottom=rc.top+std::max<LONG>(480,LONG(std::lround(frameHeight*scale)));
+                }
+                // Centred, not cascaded. CW_USEDEFAULT offsets each new window
+                // down and right, so a frame sized to exactly the work area
+                // still hangs its bottom - and therefore the seek bar - under
+                // the taskbar.
+                windowX=int(work.left+std::max<LONG>(0,(workWidth-(rc.right-rc.left))/2));
+                windowY=int(work.top+std::max<LONG>(0,(workHeight-(rc.bottom-rc.top))/2));
             }
         }
         const std::wstring appTitle=m_loc.Get(L"app.title");
-        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
+        m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,windowX,windowY,rc.right-rc.left,rc.bottom-rc.top,nullptr,app_menu::CreateMenuBar(m_loc,YouTubePlaybackAvailable()),hi,this);
         if(!m_hwnd) return false;
         ReadAnimationPreference();
         app_menu::UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);
@@ -1544,11 +1553,18 @@ private:
             MessageBoxW(m_hwnd,T(L"framegen.cache_failed").c_str(),title.c_str(),MB_OK|MB_ICONERROR);
             return;
         }
-        // The name carries the multiplier and the rounded rate, so a second
-        // conversion of the same video at the same multiple lands on the same
-        // file - which is what makes the offer below possible.
+        // Named from the ORIGINAL's stem, never the input's. A neural carrier is
+        // always called `neural.mkv` and an acquired network copy `source.mkv`,
+        // so naming from the file the frames come from made every neural
+        // conversion of every film the same path - and the offer below would
+        // then hand a user another film's conversion. The `-neural` marker
+        // keeps the two conversions of one film apart, and the multiplier and
+        // rounded rate are what make a repeat of the same request land on the
+        // same file, which is what the offer needs.
+        const std::wstring stem=std::filesystem::path(m_path).stem().wstring();
         const std::filesystem::path output=outputDirectory/
-            (std::filesystem::path(input.path).stem().wstring()+L"-"+std::to_wstring(plan.multiplier)+L"x"+
+            ((stem.empty()?std::wstring(L"video"):stem)+(input.neural?L"-neural-":L"-")+
+             std::to_wstring(plan.multiplier)+L"x"+
              std::to_wstring(static_cast<int>(std::lround(plan.targetFps)))+L"fps.mkv");
         std::error_code existsError;
         if(std::filesystem::is_regular_file(output,existsError)&&!existsError){
@@ -1559,9 +1575,9 @@ private:
             const int answer=MessageBoxW(m_hwnd,text.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONQUESTION);
             if(answer==IDCANCEL)return;
             if(answer==IDYES){
-                m_frameGenLastOutput=output;
-                LoadOriginal(output.wstring(),ConvertedTitle(m_displayTitle,input.neural,plan.targetFps));
-                SyncFeatureMenuState();return;
+                LOG("Frame generation offer accepted an existing file: "<<WideToUtf8(output.wstring()));
+                AdoptConvertedFile(output,m_displayTitle,input.neural,plan.targetFps);
+                return;
             }
         }
         std::wstring prompt=Format(T(L"framegen.confirm"),plan.multiplier,
@@ -1683,15 +1699,28 @@ private:
             MessageBoxW(m_hwnd,T(L"framegen.finished_elsewhere").c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);
             return;
         }
+        AdoptConvertedFile(completion->output,completion->title,completion->neuralInput,
+                           completion->result.outputFps);
+    }
+    // The ONE way a converted file becomes what is playing, used by the
+    // completion and by the "play the file you already made" offer. Two call
+    // sites meant two rule sets: the offer recorded the cache path in Recent
+    // videos and dropped the playhead, while the completion did neither.
+    void AdoptConvertedFile(const std::filesystem::path& file,const std::wstring& baseTitle,
+                            bool neuralInput,double outputFps){
         // Resume where the user was: the conversion preserves duration exactly,
         // so the same second is the same picture, and a minutes-long job that
         // snaps a film back to 0:00 is the one thing they would notice.
         const double resumeSeconds=m_currentSec;
-        if(!LoadOriginal(completion->output.wstring(),
-                         ConvertedTitle(completion->title,completion->neuralInput,completion->result.outputFps),
-                         MediaSourceKind::LocalFile,false,/*recordRecent=*/false))
-            return;
+        m_frameGenLastOutput=file;
+        // recordRecent=false: this is a derived carrier in the cache, and a
+        // Recent entry for it dangles the moment the cache is cleared.
+        if(!LoadOriginal(file.wstring(),ConvertedTitle(baseTitle,neuralInput,outputFps),
+                         MediaSourceKind::LocalFile,false,/*recordRecent=*/false)){
+            SyncFeatureMenuState();return;
+        }
         if(resumeSeconds>1.0)RequestSeek(resumeSeconds,true);
+        SyncFeatureMenuState();
     }
     void ShowFrameGenerationOutput(){
         if(m_frameGenLastOutput.empty())return;
@@ -3348,7 +3377,7 @@ private:
     IdleSurfaceLayout IdleLayout()const{RECT c{};GetClientRect(m_hwnd,&c);return LayoutIdleSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> ToolbarItems()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return LayoutToolbar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));}
     std::vector<ToolbarItem> FocusableItems()const{if(m_loaded)return ToolbarItems();const auto idle=IdleLayout();return{idle.actions.begin(),idle.actions.end()};}
-    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable()};}
+    ToolbarAvailability ToolbarState()const{return{m_loaded,m_seeking||m_seekPending,m_renderer!=nullptr,YouTubePlaybackAvailable(),m_youtubeLifecycle.IsResolving()||(NeuralJobActive()&&!JobBehindPlayback()),m_cachedPlayback&&m_havePresentedPair&&m_renderer!=nullptr,m_liveSession||LiveSessionAvailable()||StillImageRenderAvailable(),UpscalingAvailable(),FrameGenerationAvailable(),m_frameGenWorker.joinable()&&!m_frameGenCancelling};}
     std::optional<RECT> VolumeRect()const{if(!ControlsVisible())return std::nullopt;RECT c{};GetClientRect(m_hwnd,&c);const auto items=ToolbarItems();return LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),items);}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
@@ -5549,7 +5578,33 @@ private:
             return text;
         }
         PlayerStatusSnapshot status{};if(m_youtubeLifecycle.IsResolving()){status.activity=PlayerStatusActivity::ResolvingYouTube;return BuildPlayerStatusText(status);}if(!m_loaded||!m_renderer)return{};
-        if(m_cachedPlayback){std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural cached playback · "))+T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+L" · "+UpscalingStatus()+L" · "+FrameGenerationStatus()+L" · Source "+std::to_wstring(m_decoder.NativeWidth())+L"×"+std::to_wstring(m_decoder.NativeHeight())+L" · FPS "+std::to_wstring(static_cast<int>(std::lround(m_submitFps)))+L" rendered / "+std::to_wstring(static_cast<int>(std::lround(m_decoder.FrameRate())))+L" source · Dropped "+std::to_wstring(m_droppedFrames);if(!CachedRangeCoversSource())text+=L" · Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;text+=L" · "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);if(m_liveSession)text=LiveSessionStatusText()+L" · "+text;if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" · "+text;return text;}
+        // Cached playback fills the SAME snapshot as ordinary playback and adds
+        // only what is true of a cache entry: which view is on screen, the
+        // range when it is not the whole video, and the settings it was
+        // rendered with. Hand-building a second line here is how the two
+        // disagreed - pressing D silently swapped one fact set for another,
+        // and this branch kept printing the DLSS input size and "Dropped 0"
+        // after the shared builder stopped.
+        if(m_cachedPlayback){
+            const PlayerRuntimeStatus cachedRuntime=RuntimeStatus();
+            status.mediaLoaded=true;status.runtimeConfiguration=cachedRuntime.configuration;
+            status.dlssState=cachedRuntime.dlssState;
+            status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();
+            status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();
+            status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();
+            status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;
+            status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
+            status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();
+            std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
+                T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+
+                L" \u00b7 "+BuildPlayerStatusText(status);
+            if(!CachedRangeCoversSource())text+=L" \u00b7 Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);
+            if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;
+            text+=L" \u00b7 "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);
+            if(m_liveSession)text=LiveSessionStatusText()+L" \u00b7 "+text;
+            if(m_seeking||m_seekPending)text=T(L"status.seeking")+L" \u00b7 "+text;
+            return text;
+        }
         const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
         status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();std::wstring text=BuildPlayerStatusText(status);
         // Lead with what was marked, or with how to mark, because the runtime
