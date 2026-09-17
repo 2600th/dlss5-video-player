@@ -48,6 +48,9 @@ private:
             {L"menu.framegen_4x", L"4\u00d7 the frame rate"},
             {L"menu.framegen_5x", L"5\u00d7 the frame rate"},
             {L"menu.framegen_max", L"As many as the display allows"},
+            // A checkbox under the multiples. Off by default; FrameRatePolicy.h
+            // carries the measurement that made it a setting instead of a rule.
+            {L"menu.framegen_even_only", L"Even cadence only"},
             {L"framegen.refusal.preference", L"This display cannot show %u\u00d7 this video's frame rate evenly, but it can show %u\u00d7.\n\nRaise DLSS > Generated frames to convert it."},
             {L"framegen.refusal.preference.short", L"set to %u\u00d7, needs %u\u00d7"},
             // Frame generation names ONE feature on every surface. Before this
@@ -70,7 +73,7 @@ private:
             {L"framegen.status.ready_unchecked", L"Frame Generation ready"},
             {L"framegen.status.busy", L"Frame Generation waits for the current job"},
             // Printed with the refusal's short form in brackets, so the line
-            // reads "Frame Generation off (no even multiple of the refresh)".
+            // reads "Frame Generation off (already lands evenly)".
             {L"framegen.status.off", L"Frame Generation off"},
             {L"framegen.status.generating", L"Generating frames"},
             {L"framegen.status.stopping", L"Stopping frame generation"},
@@ -100,8 +103,23 @@ private:
             {L"framegen.refusal.unknown_refresh.short", L"no display refresh"},
             {L"framegen.refusal.meets_refresh", L"This video already runs at or above what this display can show, so generated frames would never be presented."},
             {L"framegen.refusal.meets_refresh.short", L"already matches the display"},
-            {L"framegen.refusal.no_multiple", L"No whole multiple of this video's frame rate divides this display's refresh evenly, so generated frames would trade one uneven cadence for another."},
-            {L"framegen.refusal.no_multiple.short", L"no even multiple of the refresh"},
+            {L"framegen.refusal.below_double", L"This display cannot show even twice this video's frame rate, so there is no multiple to generate."},
+            {L"framegen.refusal.below_double.short", L"display cannot double it"},
+            // The one cadence trade this player refuses: the video is already
+            // scanned out the same number of times per frame, and no multiple
+            // that fits divides this refresh, so generating would land the
+            // frames unevenly where the video does not.
+            {L"framegen.refusal.source_even", L"This video already lands evenly on this display - every frame is scanned out the same number of times - and no higher multiple divides this refresh, so generated frames would land unevenly where this video does not."},
+            {L"framegen.refusal.source_even.short", L"already lands evenly"},
+            // Uneven, admissible, and withheld by the setting: the generated
+            // frames would land in the grid the video is already playing in,
+            // which is why this is an offer rather than a rule.
+            {L"framegen.refusal.even_only", L"No whole multiple of this video's frame rate divides this display's refresh, and Even cadence only is on.\n\nTurning it off in DLSS > Generated frames converts it anyway: the generated frames land in the same uneven grid this video already plays in, and arrive twice as often."},
+            {L"framegen.refusal.even_only.short", L"even cadence only"},
+            // The display-side answer, offered as the refusal dialog's Yes.
+            // %s Hz, %u the multiple, %s the rate it reaches, %s Hz again.
+            {L"framegen.mode_switch", L"\n\nThis monitor also has a %s Hz mode, where %u\u00d7 this video's frame rate lands on the refresh exactly: %s fps.\n\nSwitch this display to %s Hz? Nothing is converted yet - ask for Generate frames again once the display has changed. Windows keeps the new mode until you change it back."},
+            {L"framegen.mode_switch_failed", L"Windows refused the display mode change. Nothing was changed and your video is still playing."},
             {L"framegen.refusal.runtime", L"This GPU and driver admit no generated frames."},
             {L"framegen.refusal.runtime.short", L"refused by the driver"},
             {L"framegen.refusal.no_local_copy.short", L"needs a local copy"},
@@ -110,6 +128,10 @@ private:
             // %u is the multiplier, then the source and target rates as text so
             // one formatter renders every rate the user sees.
             {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Show converted file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},
+            // Appended when the generated rate does not divide the refresh. The
+            // two holds are one scan-out apart, which is the same unevenness
+            // the source is already being shown with - see FrameRatePolicy.h.
+            {L"framegen.confirm.uneven", L"\n\nEach frame is shown for %u or %u refreshes of this display, which is the unevenness this video already plays with."},
             {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted."},
             {L"framegen.exists", L"This video has already been converted:\n%s\n\nPlay that file instead of converting again?\n\nYes plays it. No converts again and replaces it."},
             {L"framegen.worker_failed", L"The conversion could not start. Try again."},

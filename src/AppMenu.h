@@ -64,6 +64,10 @@ inline constexpr UINT IDM_FRAMEGEN_3X = 341;
 inline constexpr UINT IDM_FRAMEGEN_4X = 342;
 inline constexpr UINT IDM_FRAMEGEN_5X = 343;
 inline constexpr UINT IDM_FRAMEGEN_MAX = 344;
+// A checkbox, and deliberately OUTSIDE 340..344: CheckMenuRadioItem clears
+// every command in the range it is given, and this one is a constraint on the
+// multiple rather than one of the choices of multiple.
+inline constexpr UINT IDM_FRAMEGEN_EVEN_ONLY = 345;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_FULLSCREEN = 402;

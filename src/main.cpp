@@ -127,6 +127,65 @@ static MonitorMode CurrentMonitorMode(HWND window)
     return {mode.dmPelsHeight, refresh};
 }
 
+// Every refresh this monitor can be set to at the resolution it is in now. A
+// mode that changes the pixel grid is a different display rather than a cadence
+// fix, so width, height and colour depth are held and only the rate varies.
+// Interlaced modes are dropped outright: half a field is not a scan-out a
+// generated frame can be planned against.
+//
+// This is an EnumDisplaySettingsW loop over every mode the adapter advertises,
+// which is why no status refresh or paint may reach it - see MonitorModeCached
+// for what that cost did to the toolbar - and it runs on the refusal path only.
+static std::vector<double> AvailableRefreshRates(HWND window)
+{
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                         reinterpret_cast<MONITORINFO*>(&info)))
+        return {};
+    DEVMODEW current{};
+    current.dmSize = sizeof(current);
+    if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &current)) return {};
+    std::vector<double> rates;
+    for (DWORD index = 0;; ++index) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsW(info.szDevice, index, &mode)) break;
+        if (mode.dmPelsWidth != current.dmPelsWidth || mode.dmPelsHeight != current.dmPelsHeight)
+            continue;
+        if (mode.dmBitsPerPel != current.dmBitsPerPel) continue;
+        if ((mode.dmDisplayFlags & DM_INTERLACED) != 0) continue;
+        if (mode.dmDisplayFrequency <= 1) continue;
+        const double hz = double(mode.dmDisplayFrequency);
+        if (std::find(rates.begin(), rates.end(), hz) == rates.end()) rates.push_back(hz);
+    }
+    return rates;
+}
+
+// Dynamic, not persisted: flags 0 changes the mode for this session and leaves
+// the registry alone, so the display control panel - or a reboot - undoes it.
+// CDS_TEST runs first because a rate the monitor advertises can still be
+// refused at this colour depth, and by the time a bad ChangeDisplaySettings
+// call reports that, it has already blanked the panel to find out.
+static bool SetMonitorRefresh(HWND window, double refreshHz)
+{
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                         reinterpret_cast<MONITORINFO*>(&info)))
+        return false;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return false;
+    mode.dmDisplayFrequency = static_cast<DWORD>(std::lround(refreshHz));
+    mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    if (ChangeDisplaySettingsExW(info.szDevice, &mode, nullptr, CDS_TEST, nullptr) !=
+        DISP_CHANGE_SUCCESSFUL)
+        return false;
+    return ChangeDisplaySettingsExW(info.szDevice, &mode, nullptr, 0, nullptr) ==
+           DISP_CHANGE_SUCCESSFUL;
+}
+
 static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
 {
     const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
@@ -1424,17 +1483,24 @@ private:
         return state==FrameGenerationUiState::Ready||state==FrameGenerationUiState::Unchecked||
                state==FrameGenerationUiState::NeedsSourceCopy;
     }
+    // The two facts VideoDecoder probes and this policy refuses on. Both
+    // refusals were unreachable while this call declared constant-frame-rate
+    // unconditionally and handed over the decoder's 30 fps fallback as if it
+    // had been read off the file: a phone's variable-rate recording sailed
+    // through and the pass emitted sourceFrames*multiplier at a rate the
+    // file never had, which the audio it now carries would drift against.
+    frame_rate_policy::SourceCadence SourceCadenceNow()const{
+        return {m_decoder.FrameRateKnown()?m_decoder.FrameRate():0.0,
+                m_decoder.IsStillImage(),m_decoder.ConstantFrameRate()};
+    }
     frame_rate_policy::FrameGenerationPlan PlannedFrameGeneration(uint32_t multiFrameCountMax)const{
-        // The two facts VideoDecoder probes and this policy refuses on. Both
-        // refusals were unreachable while this call declared constant-frame-rate
-        // unconditionally and handed over the decoder's 30 fps fallback as if it
-        // had been read off the file: a phone's variable-rate recording sailed
-        // through and the pass emitted sourceFrames*multiplier at a rate the
-        // file never had, which the audio it now carries would drift against.
-        const frame_rate_policy::SourceCadence cadence{
-            m_decoder.FrameRateKnown()?m_decoder.FrameRate():0.0,
-            m_decoder.IsStillImage(),m_decoder.ConstantFrameRate()};
-        return frame_rate_policy::PlanFrameGeneration(cadence,MonitorModeCached().refreshHz,multiFrameCountMax);
+        return PlannedFrameGeneration(multiFrameCountMax,m_evenCadenceOnly);
+    }
+    frame_rate_policy::FrameGenerationPlan PlannedFrameGeneration(uint32_t multiFrameCountMax,
+                                                                  bool requireEvenCadence)const{
+        return frame_rate_policy::PlanFrameGeneration(SourceCadenceNow(),
+                                                      MonitorModeCached().refreshHz,
+                                                      multiFrameCountMax,requireEvenCadence);
     }
     static const wchar_t* FrameGenerationRefusalKey(frame_rate_policy::FrameGenerationRefusal refusal){
         using R=frame_rate_policy::FrameGenerationRefusal;
@@ -1445,7 +1511,9 @@ private:
             case R::VariableFrameRate:return L"framegen.refusal.variable_rate";
             case R::UnknownRefresh:return L"framegen.refusal.unknown_refresh";
             case R::SourceMeetsRefresh:return L"framegen.refusal.meets_refresh";
-            case R::NoEvenMultiple:return L"framegen.refusal.no_multiple";
+            case R::RefreshBelowDouble:return L"framegen.refusal.below_double";
+            case R::SourceCadenceEven:return L"framegen.refusal.source_even";
+            case R::EvenCadenceRequired:return L"framegen.refusal.even_only";
             case R::RuntimeRefused:return L"framegen.refusal.runtime";
         }
         return nullptr;
@@ -1498,9 +1566,9 @@ private:
     }
     // The multiple this display WOULD accept if the preference were lifted, or
     // 0 when the preference is not what is standing in the way. Without this a
-    // 24 fps film on a 120 Hz panel reads "no even multiple of the refresh"
-    // while the truth is that 5x divides it exactly and the setting says 2x -
-    // a refusal the user can act on, reported as one they cannot.
+    // 24 fps film on a 120 Hz panel reads "already lands evenly" - true, and it
+    // sounds final - while 5x divides that refresh exactly and the setting says
+    // 2x: a refusal the user can act on, reported as one they cannot.
     uint32_t FrameGenerationMultipleBeyondPreference()const{
         if(m_frameGenPreference==0u)return 0u;
         const uint32_t measured=m_frameGenCapability?FrameGenerationCap()
@@ -1509,6 +1577,27 @@ private:
         if(PlannedFrameGeneration(FrameGenerationPlanningCap()).Generates())return 0u;
         const auto unlimited=PlannedFrameGeneration(measured);
         return unlimited.Generates()?unlimited.multiplier:0u;
+    }
+    // The multiple an uneven cadence would allow while the even-cadence-only
+    // setting withholds it, or 0 when that setting is not what stands in the
+    // way. Same shape as the preference above and for the same reason: the two
+    // refusals a user can lift have to name the thing to lift.
+    uint32_t FrameGenerationMultipleWithoutEvenCadence()const{
+        if(!m_evenCadenceOnly)return 0u;
+        const auto uneven=PlannedFrameGeneration(FrameGenerationPlanningCap(),false);
+        return uneven.Generates()?uneven.multiplier:0u;
+    }
+    // The mode this monitor could be switched to so the conversion lands on the
+    // refresh exactly - the one move that removes an unevenness instead of
+    // reducing it. Enumerating modes is expensive, so this is reached from the
+    // refusal dialog and from nowhere that paints.
+    frame_rate_policy::RefreshSwitchOffer FrameGenerationRefreshOffer()const{
+        const std::vector<double> rates=AvailableRefreshRates(m_hwnd);
+        if(rates.size()<2)return {};
+        return frame_rate_policy::BetterRefreshForSource(SourceCadenceNow(),rates,
+                                                         MonitorModeCached().refreshHz,
+                                                         FrameGenerationPlanningCap(),
+                                                         m_evenCadenceOnly);
     }
     // Changing the preference changes what the next conversion plans, nothing
     // that is already running: a conversion in flight keeps the multiple it was
@@ -1521,6 +1610,17 @@ private:
         LOG("Generated frames per source frame set to "<<(clamped==0u?std::string("the display's maximum")
                                                                      :std::to_string(clamped))
             <<"; the next conversion plans against it.");
+        SaveVideoSettings();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+    }
+    // Even cadence only: the rule this player shipped with, kept as a setting
+    // for whoever would rather keep the source's own pacing than a finer one
+    // that lands unevenly. Off by default, because the unevenness it avoids is
+    // one refresh period wide whatever the rate - see FrameRatePolicy.h - while
+    // the step it refuses is halved.
+    void SetEvenCadenceOnly(bool enabled){
+        if(m_evenCadenceOnly==enabled)return;
+        m_evenCadenceOnly=enabled;
+        LOG("Even cadence only "<<(enabled?"on":"off")<<"; the next conversion plans against it.");
         SaveVideoSettings();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
     }
     // What the status line says about frame generation when the conversion is
@@ -1582,11 +1682,44 @@ private:
             if(m_frameGenCapability&&!m_frameGenCapability->detail.empty())
                 LOG("Frame generation runtime refusal detail: "<<WideToUtf8(m_frameGenCapability->detail));
         }
-        text+=T(L"framegen.refusal.unchanged");
         LOG("Frame generation refused: "<<frame_rate_policy::FrameGenerationRefusalName(refusal)
             <<" source="<<m_decoder.FrameRate()<<" fps known="<<m_decoder.FrameRateKnown()
             <<" cfr="<<m_decoder.ConstantFrameRate()<<" refresh="<<MonitorModeCached().refreshHz
             <<" Hz cap="<<FrameGenerationPlanningCap());
+        // Only a refusal about the grid has a display-side answer, and when the
+        // monitor already offers a mode where the conversion lands on the
+        // refresh exactly, that answer is better than anything this player can
+        // do to the frames. It becomes the dialog's Yes rather than a second
+        // box, and the mode change is where it stops: minutes of GPU work are
+        // not something to start from a dialog the user opened to be told no.
+        using R=frame_rate_policy::FrameGenerationRefusal;
+        if(refusal==R::SourceMeetsRefresh||refusal==R::RefreshBelowDouble||
+           refusal==R::SourceCadenceEven||refusal==R::EvenCadenceRequired){
+            const auto offer=FrameGenerationRefreshOffer();
+            if(offer.Offered()){
+                const std::wstring rate=FormatFrameRate(offer.refreshHz);
+                const std::wstring prompt=text+Format(T(L"framegen.mode_switch"),rate.c_str(),
+                                                      offer.multiplier,
+                                                      FormatFrameRate(offer.targetFps).c_str(),
+                                                      rate.c_str());
+                LOG("Frame generation offering a display mode: "<<offer.refreshHz<<" Hz for x"
+                    <<offer.multiplier<<" -> "<<offer.targetFps<<" fps");
+                if(MessageBoxW(m_hwnd,prompt.c_str(),T(L"framegen.title").c_str(),
+                               MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
+                if(!SetMonitorRefresh(m_hwnd,offer.refreshHz)){
+                    LOG("Display mode change to "<<offer.refreshHz<<" Hz was refused by Windows.");
+                    MessageBoxW(m_hwnd,T(L"framegen.mode_switch_failed").c_str(),
+                                T(L"framegen.title").c_str(),MB_OK|MB_ICONINFORMATION);
+                    return;
+                }
+                InvalidateMonitorMode();
+                LOG("Display mode changed for frame generation: refresh is now "
+                    <<MonitorModeCached().refreshHz<<" Hz");
+                SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
+                return;
+            }
+        }
+        text+=T(L"framegen.refusal.unchanged");
         MessageBoxW(m_hwnd,text.c_str(),T(L"framegen.title").c_str(),MB_OK|MB_ICONINFORMATION);
     }
     // The window title after a conversion is adopted. It used to gain a
@@ -1728,6 +1861,12 @@ private:
         std::wstring prompt=Format(T(L"framegen.confirm"),plan.multiplier,
                                    FormatFrameRate(m_decoder.FrameRate()).c_str(),
                                    FormatFrameRate(plan.targetFps).c_str());
+        // An uneven grid here is the one the source is already playing in - the
+        // two hold lengths are one scan-out apart either way, which is why this
+        // is a conversion the policy allows - but a viewer paying minutes of GPU
+        // time for it is owed the fact rather than left to see it.
+        if(!plan.cadence.even)
+            prompt+=Format(T(L"framegen.confirm.uneven"),plan.cadence.shortHold,plan.cadence.longHold);
         if(input.neural)prompt+=T(L"framegen.confirm.neural");
         LOG("Frame generation offer: output="<<WideToUtf8(output.wstring())
             <<" input="<<(input.neural?"neural":"original"));
@@ -2246,6 +2385,10 @@ private:
         const float preference=ReadIniFloat(L"Playback",L"FrameGenerationGenerated",1.0f);
         m_frameGenPreference=(preference<0.0f||preference>float(frame_rate_policy::kPhaseVerifiedMultiFrameCount))
             ?1u:static_cast<uint32_t>(preference);
+        // Absent means off, which is the step-and-spread rule in FrameRatePolicy.h.
+        // This setting opts back into the divides-the-refresh-or-nothing
+        // behaviour the player shipped with.
+        m_evenCadenceOnly=ReadIniFloat(L"Playback",L"EvenCadenceOnly",0.0f)!=0.0f;
         const uint32_t storedTarget=uint32_t(ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f));
         if(UpscaleRungWidth(storedTarget))m_upscaleTargetHeight=storedTarget;
         const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
@@ -2401,6 +2544,7 @@ private:
         WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"FrameGenerationGenerated",static_cast<float>(m_frameGenPreference));
+        WriteIniFloat(L"Playback",L"EvenCadenceOnly",m_evenCadenceOnly?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
         WriteIniFloat(L"VideoAdjustments",L"Contrast",m_colorSettings.contrast);
@@ -2525,6 +2669,10 @@ private:
                  :(m_frameGenPreference==3u?IDM_FRAMEGEN_4X
                   :(m_frameGenPreference==2u?IDM_FRAMEGEN_3X:IDM_FRAMEGEN_2X)));
             CheckMenuRadioItem(menu,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,generatedChecked,MF_BYCOMMAND);
+            // Outside the radio range above, which CheckMenuRadioItem clears:
+            // this is a constraint on the multiple, not one of the choices.
+            CheckMenuItem(menu,IDM_FRAMEGEN_EVEN_ONLY,
+                          MF_BYCOMMAND|(m_evenCadenceOnly?MF_CHECKED:MF_UNCHECKED));
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
             for(const UINT item:{IDM_UPSCALE_AUTO,IDM_UPSCALE_1080,IDM_UPSCALE_1440,IDM_UPSCALE_2160})
                 EnableMenuItem(menu,item,MF_BYCOMMAND|outputState);
@@ -6127,6 +6275,7 @@ private:
         case IDM_FRAMEGEN_4X:SetFrameGenerationPreference(3);break;
         case IDM_FRAMEGEN_5X:SetFrameGenerationPreference(4);break;
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
+        case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
         case IDM_CANCEL_EXPORT:CancelExport();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
@@ -6161,6 +6310,9 @@ private:
     // Generated frames per source frame the user asked for: 1 (2x) on a fresh
     // install, 0 for "as many as the display allows". Kept between launches.
     uint32_t m_frameGenPreference=1;
+    // Generate only when the rate divides the display's refresh. Off: see
+    // SetEvenCadenceOnly and FrameRatePolicy.h for why that is the default.
+    bool m_evenCadenceOnly=false;
     Clock::time_point m_frameGenStarted{};
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.

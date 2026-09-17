@@ -90,6 +90,10 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(framegenMultiple, IDM_FRAMEGEN_5X, L"menu.framegen_5x");
     add(framegenMultiple, IDM_FRAMEGEN_MAX, L"menu.framegen_max");
     CheckMenuRadioItem(framegenMultiple,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,IDM_FRAMEGEN_2X,MF_BYCOMMAND);
+    AppendMenuW(framegenMultiple, MF_SEPARATOR, 0, nullptr);
+    // A constraint on the multiple, not a choice of one: with it on, nothing is
+    // generated unless the generated rate divides the display's refresh.
+    add(framegenMultiple, IDM_FRAMEGEN_EVEN_ONLY, L"menu.framegen_even_only");
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
                 localizer.Get(L"menu.framegen_multiple").c_str());
     // Grayed on creation like IDM_CANCEL_EXPORT below: main.cpp enables it once

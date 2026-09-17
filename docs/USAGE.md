@@ -322,13 +322,23 @@ carries the multiple, the target rate and the frames written so far, and names
 the way out; **DLSS > Cancel frame generation** stops it and leaves the video you
 were watching untouched.
 
-The multiple comes from the display rather than the source alone, because the
-point is a rate the panel can actually scan out at equal intervals. 30 fps
-becomes 60 on a 60 Hz panel and 120 at 4x on a 120 Hz panel; 24 fps film becomes
-120 at 5x on a 120 Hz panel. 24 fps on a 60 Hz panel is refused and says why: 48
-does not divide 60 evenly, so those frames could not be presented evenly. A
-still image, a source that reports no frame rate and a source that already meets
-the refresh are each refused with their own reason instead of a generic one.
+The multiple comes from the display rather than the source alone, and it is
+judged on two quantities: how far the picture moves between presented frames,
+and how evenly those frames land on the refresh. A frame is held for a whole
+number of scan-outs, so an uneven landing is uneven by one refresh period
+whatever the rate - which is why a multiple is taken when it shortens the step
+without widening that spread, and why a rate that divides the refresh beats a
+higher one that does not. 30 fps becomes 60 on a 60 Hz panel and 120 at 4x on a
+120 Hz panel; 24 fps film becomes 120 at 5x on a 120 Hz panel, and 48 on a 60 Hz
+one - held for 1 or 2 refreshes, which is the cadence the film was already shown
+with, at half the step. The confirmation says so when it applies.
+
+**Even cadence only** generates nothing unless the rate divides the refresh. A
+source already at the refresh, a panel that cannot double the source, a still
+image, a source that reports no frame rate and a source that already lands evenly
+with no higher multiple that does are each refused with their own reason instead
+of a generic one - and where the monitor has a mode that would divide the rate,
+the refusal offers to switch the display to it.
 
 Watching the neural view converts the neural render rather than the original,
 but only when that render covers the whole source; a render covering one marked

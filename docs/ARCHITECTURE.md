@@ -645,9 +645,23 @@ while one short gap beside one long one is judder. Measured worst gap ratio:
 1.13 at 2x, 1.69 at 3x, 1.71 at 4x, 1.69 at 5x, 2.70 at 6x - 6x's shortest gap
 of 0.088 of an interval is a near-duplicate frame followed by a jump, so it is
 refused. What is admitted still lands the common cadences on a 120 Hz panel
-exactly: 24 fps at 5x is 120, 30 fps at 4x is 120. The refusals are unchanged -
-24 fps on a 60 Hz panel is still refused, because 48 does not divide 60 evenly
-and a fractional number of presents per source frame is judder, not smoothness.
+exactly: 24 fps at 5x is 120, 30 fps at 4x is 120.
+
+The cadence rule the multiples are drawn against changed, and the earlier one is
+recorded here because it shipped. It refused any rate that did not divide the
+refresh, on the claim that generating 48 fps for a 24 fps film on a 60 Hz panel
+"would trade one uneven cadence for another". A frame is held for a whole number
+of scan-outs, so the two hold lengths differ by exactly one refresh period and
+nothing else is reachable: 24 fps is held 33/50 ms there and 48 fps is held
+17/33 ms - the same spread - while the step between presented frames halves,
+41.7 ms to 20.8 ms. The refusal was giving that up for nothing. `PlanFrameGeneration`
+now admits a multiple when it shortens the step without widening the spread,
+which keeps two refusals that matter: a source already landing evenly is never
+made uneven (30 fps on 120 Hz takes 2x or 4x, never 3x), and a panel that cannot
+double the source has nothing to offer. `BetterRefreshForSource` answers the rest
+from the display side - a monitor advertising 48, 72 or 120 Hz can land 24 fps
+film exactly - and `DLSS > Generated frames > Even cadence only` restores the old
+behaviour as a setting.
 
 The phase evidence is a per-frame brightness centroid taken off a raw decode,
 and the instrument matters more than the multiplier does. Hashing the converted

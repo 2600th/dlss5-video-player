@@ -2777,9 +2777,11 @@ void ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test()
 }
 
 // The panel is half of every answer here, which is what separates this policy
-// from "double anything under 45 fps". Each row below is a case where the
+// from "double anything under 45 fps". Each row below is a case where a
 // source-only rule and this one disagree, or where a plausible refactor would
-// quietly start generating frames the display cannot scan out evenly.
+// start generating frames that land worse on the display than the source's own
+// rate does - or would refuse frames that land better, which is the mistake
+// this suite was written around and now records.
 //
 // Every row is planned against frame_rate_policy::kPhaseVerifiedMultiFrameCount
 // rather than a literal cap. That constant is a measurement of where the
@@ -2794,8 +2796,9 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
 {
     using namespace frame_rate_policy;
     const auto plan = [](double fps, double refresh,
-                         uint32_t max = kPhaseVerifiedMultiFrameCount) {
-        return PlanFrameGeneration(SourceCadence{fps, false, true}, refresh, max);
+                         uint32_t max = kPhaseVerifiedMultiFrameCount,
+                         bool evenOnly = false) {
+        return PlanFrameGeneration(SourceCadence{fps, false, true}, refresh, max, evenOnly);
     };
 
     // 24 fps film on a 120 Hz panel: 5x lands exactly on the refresh, every
@@ -2811,12 +2814,35 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     CHECK_EQ(4u, film120.generatedPerSource);
     CHECK_EQ(120.0, film120.targetFps);
     CHECK_EQ(1u, film120.presentsPerFrame);
+    CHECK(film120.cadence.even);
 
-    // The same source on 60 Hz stays refused: 2x is 48 and 60/48 is 1.25, so
-    // the only multiple under the refresh cannot be presented evenly. A
-    // source-only rule doubles here and buys a different judder.
-    CHECK(!plan(24.0, 60.0).Generates());
-    CHECK(plan(24.0, 60.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
+    // The same source on a 60 Hz panel DOUBLES, where it used to be refused
+    // for the claim that generating there "would trade one uneven cadence for
+    // another". These two spreads are the measurement that refutes it: 24 fps
+    // is held 2 or 3 scan-outs (33/50 ms, 3:2 pulldown) and 48 fps is held 1 or
+    // 2 (17/33 ms), so the unevenness is one refresh period in BOTH cases -
+    // that is all it can ever be - while the step between presented frames
+    // halves. Refusing cost the viewer that halving and bought nothing.
+    const auto film60 = plan(24.0, 60.0);
+    CHECK(film60.Generates());
+    CHECK_EQ(2u, film60.multiplier);
+    CHECK_EQ(48.0, film60.targetFps);
+    CHECK(!film60.cadence.even);
+    CHECK_EQ(film60.sourceCadence.spreadMs, film60.cadence.spreadMs);
+    CHECK(film60.cadence.stepMs < film60.sourceCadence.stepMs * 0.51);
+    CHECK_EQ(2u, film60.sourceCadence.shortHold);
+    CHECK_EQ(3u, film60.sourceCadence.longHold);
+    CHECK_EQ(1u, film60.cadence.shortHold);
+    CHECK_EQ(2u, film60.cadence.longHold);
+
+    // The even-cadence-only setting restores the old behaviour for exactly
+    // that case, and names itself: it is the one refusal here a user can lift.
+    CHECK(!plan(24.0, 60.0, kPhaseVerifiedMultiFrameCount, true).Generates());
+    CHECK(plan(24.0, 60.0, kPhaseVerifiedMultiFrameCount, true).refusal ==
+          FrameGenerationRefusal::EvenCadenceRequired);
+    // And it cannot change a case that already lands evenly: 30 -> 60 on 60 Hz
+    // is one scan-out per frame with the setting on or off.
+    CHECK_EQ(2u, plan(30.0, 60.0, kPhaseVerifiedMultiFrameCount, true).multiplier);
 
     // 30 fps on 120 Hz: 4x reaches the refresh exactly. 5x and 6x overshoot.
     const auto thirty120 = plan(30.0, 120.0);
@@ -2824,6 +2850,20 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     CHECK_EQ(3u, thirty120.generatedPerSource);
     CHECK_EQ(120.0, thirty120.targetFps);
     CHECK_EQ(1u, thirty120.presentsPerFrame);
+    CHECK(thirty120.sourceCadence.even);
+    CHECK(thirty120.cadence.even);
+
+    // The other side of the admission rule, and the one a "more frames is
+    // always better" refactor breaks: this source ALREADY lands evenly - 4
+    // scan-outs per frame, zero spread - so a multiple that does not divide the
+    // refresh must lose even though it is the higher rate. A runtime admitting
+    // two generated frames could reach 90 fps here (8/17 ms holds, a fresh
+    // unevenness where there was none); it takes 60 instead.
+    const auto thirty120Capped = plan(30.0, 120.0, 2);
+    CHECK_EQ(2u, thirty120Capped.multiplier);
+    CHECK_EQ(60.0, thirty120Capped.targetFps);
+    CHECK(thirty120Capped.cadence.even);
+    CHECK_EQ(0.0, thirty120Capped.cadence.spreadMs);
 
     // 30 -> 60 on a 60 Hz panel: the doubling case, one scan-out per frame.
     const auto thirty60 = plan(30.0, 60.0);
@@ -2839,7 +2879,7 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     CHECK_EQ(1u, sixty120.presentsPerFrame);
 
     // 60 on a 60 Hz panel names the reason a viewer can act on (get a faster
-    // panel) rather than the true and useless "no even multiple".
+    // panel) rather than a cadence argument, which would be true and useless.
     CHECK(!plan(60.0, 60.0).Generates());
     CHECK(plan(60.0, 60.0).refusal == FrameGenerationRefusal::SourceMeetsRefresh);
 
@@ -2856,14 +2896,16 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     CHECK(ntsc120.targetFps < 120.0);
     CHECK(120.0 - ntsc120.targetFps < 120.0 * kRateTolerance);
     CHECK_EQ(1u, ntsc120.presentsPerFrame);
+    CHECK(ntsc120.cadence.even);
 
     // A runtime that admits fewer frames than the phase measurement verified
-    // bounds the plan: the player takes min(runtime max, phase-verified max),
-    // and a machine reporting one generated frame must lose the 24 -> 120 case
-    // entirely rather than fall back to 2x = 48 on a 120 Hz panel (120/48 is
-    // 2.5 scan-outs, which is the judder this policy refuses).
+    // bounds the plan: the player takes min(runtime max, phase-verified max).
+    // A machine reporting one generated frame loses the 24 -> 120 case, and
+    // this is the trade the policy still refuses - the source lands evenly at 5
+    // scan-outs and 2x = 48 does not divide 120, so generating would introduce
+    // an unevenness the viewer does not have. It says which one it is.
     CHECK(!plan(24.0, 120.0, 1).Generates());
-    CHECK(plan(24.0, 120.0, 1).refusal == FrameGenerationRefusal::NoEvenMultiple);
+    CHECK(plan(24.0, 120.0, 1).refusal == FrameGenerationRefusal::SourceCadenceEven);
     // The doubling case survives that same runtime, because it only ever needed
     // one generated frame.
     CHECK_EQ(2u, plan(30.0, 60.0, 1).multiplier);
@@ -2871,27 +2913,41 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     // silent 1x that looks like a policy decision.
     CHECK(plan(30.0, 60.0, 0).refusal == FrameGenerationRefusal::RuntimeRefused);
 
-    // PAL on 60 Hz: no multiple of 25 divides 60.
-    CHECK(!plan(25.0, 60.0).Generates());
-    CHECK(plan(25.0, 60.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
+    // PAL on 60 Hz: no multiple of 25 divides 60, and it doubles anyway. 25 fps
+    // is held 2 or 3 scan-outs, 50 fps is held 1 or 2, and the step goes from
+    // 40 ms to 20 ms for the same one-period spread.
+    const auto pal60 = plan(25.0, 60.0);
+    CHECK_EQ(2u, pal60.multiplier);
+    CHECK_EQ(50.0, pal60.targetFps);
+    CHECK(!pal60.cadence.even);
+    CHECK_EQ(pal60.sourceCadence.spreadMs, pal60.cadence.spreadMs);
 
-    // 144 Hz is not a multiple of 60 or 30, so a high refresh is not by itself
-    // a reason to generate: 2x of 60 is 120 and 144/120 is 1.2, and 144/30 is
-    // 4.8, which no integer multiple of the source can divide evenly at any
-    // ceiling.
-    CHECK(!plan(60.0, 144.0).Generates());
-    CHECK(plan(60.0, 144.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
-    CHECK(!plan(30.0, 144.0).Generates());
+    // 144 Hz divides neither 60 nor 30, which is not a reason to leave the
+    // source where it is: 60 -> 120 and 30 -> 120 land in the same grid 60 and
+    // 30 already land in on this panel, two and four times as often.
+    const auto sixty144 = plan(60.0, 144.0);
+    CHECK_EQ(2u, sixty144.multiplier);
+    CHECK_EQ(120.0, sixty144.targetFps);
+    CHECK(!sixty144.cadence.even);
+    CHECK_EQ(sixty144.sourceCadence.spreadMs, sixty144.cadence.spreadMs);
+    CHECK_EQ(4u, plan(30.0, 144.0).multiplier);
+    CHECK_EQ(120.0, plan(30.0, 144.0).targetFps);
+
+    // A panel that cannot even double the source says so. 40 fps needs 80 and
+    // this panel scans out 60, so no multiple exists at all - a different fact
+    // from "no multiple divides the refresh", which is what it used to report.
+    CHECK(!plan(40.0, 60.0).Generates());
+    CHECK(plan(40.0, 60.0).refusal == FrameGenerationRefusal::RefreshBelowDouble);
 
     // A panel well above the source: the target does not have to reach the
-    // refresh, it has to divide it. Whatever multiple the search settles on for
-    // 30 fps on 240 Hz, targetFps is the source rate times that multiple and
-    // each generated frame occupies a whole number of scan-outs - that evenness
-    // is the only thing that makes a multiplier acceptable.
+    // refresh. Whatever multiple the search settles on for 30 fps on 240 Hz,
+    // targetFps is the source rate times that multiple and each generated frame
+    // occupies a whole number of scan-outs, because the source does too.
     const auto thirty240 = plan(30.0, 240.0);
     CHECK(thirty240.Generates());
     CHECK_EQ(30.0 * double(thirty240.multiplier), thirty240.targetFps);
     CHECK_EQ(240.0, thirty240.targetFps * double(thirty240.presentsPerFrame));
+    CHECK(thirty240.cadence.even);
 
     // Sources with nothing to interpolate, each naming itself and generating
     // nothing: the refusal is the answer the status line shows.
@@ -2915,7 +2971,107 @@ void frame_generation_plan_follows_the_panel_not_just_the_source_test()
     CHECK(!unknownRefresh.Generates());
     CHECK_EQ(0u, unknownRefresh.generatedPerSource);
 
-    CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::NoEvenMultiple) == "no-even-multiple");
+    CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::RefreshBelowDouble) ==
+          "refresh-below-double");
+    CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::SourceCadenceEven) ==
+          "source-cadence-even");
+    CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::EvenCadenceRequired) ==
+          "even-cadence-required");
+}
+
+// The two terms the policy trades, measured on their own. The equality below is
+// the whole reason 24 fps doubles on a 60 Hz panel: a presentation grid is
+// uneven by one refresh period or not at all, because a frame can only be held
+// for floor or ceil of refresh/rate scan-outs. A higher rate therefore cannot
+// be "more uneven" than a lower one on the same display, only finer-stepped.
+void display_cadence_spread_is_one_refresh_period_or_nothing_test()
+{
+    using namespace frame_rate_policy;
+    const auto film = CadenceOf(24.0, 60.0);
+    CHECK(!film.even);
+    CHECK_EQ(2u, film.shortHold);
+    CHECK_EQ(3u, film.longHold);
+    CHECK(std::abs(film.spreadMs - 1000.0 / 60.0) < 1e-9);
+    CHECK(std::abs(film.stepMs - 1000.0 / 24.0) < 1e-9);
+
+    const auto doubled = CadenceOf(48.0, 60.0);
+    CHECK(!doubled.even);
+    CHECK_EQ(1u, doubled.shortHold);
+    CHECK_EQ(2u, doubled.longHold);
+    CHECK_EQ(film.spreadMs, doubled.spreadMs);
+    CHECK(doubled.stepMs < film.stepMs);
+
+    // Even is even at any hold length, and carries no spread at all.
+    const auto even = CadenceOf(30.0, 120.0);
+    CHECK(even.even);
+    CHECK_EQ(4u, even.shortHold);
+    CHECK_EQ(4u, even.longHold);
+    CHECK_EQ(0.0, even.spreadMs);
+
+    // NTSC against a mode Windows calls 120: inside kRateTolerance, so this is
+    // one scan-out per frame rather than a 1.001-wide unevenness.
+    const auto ntsc = CadenceOf(24000.0 / 1001.0 * 5.0, 120.0);
+    CHECK(ntsc.even);
+    CHECK_EQ(1u, ntsc.shortHold);
+    CHECK_EQ(0.0, ntsc.spreadMs);
+
+    // Nothing to measure is not an even cadence.
+    CHECK(!CadenceOf(0.0, 120.0).even);
+    CHECK(!CadenceOf(24.0, 0.0).even);
+}
+
+// The display-side answer. Every refusal above is about a grid the player does
+// not own - but the monitor usually offers another one, and switching to it is
+// the only move that removes an unevenness instead of reducing it.
+void refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test()
+{
+    using namespace frame_rate_policy;
+    const SourceCadence film{24.0, false, true};
+    const double modes[] = {60.0, 120.0, 144.0};
+
+    // On 60 Hz the film doubles to 48 and keeps its pulldown; the same
+    // monitor's 120 Hz mode takes it to 120 exactly at 5x. 144 Hz is in the
+    // list and loses: it only reaches 72 evenly.
+    const auto from60 = BetterRefreshForSource(film, modes, 60.0, kPhaseVerifiedMultiFrameCount);
+    CHECK(from60.Offered());
+    CHECK_EQ(120.0, from60.refreshHz);
+    CHECK_EQ(5u, from60.multiplier);
+    CHECK_EQ(120.0, from60.targetFps);
+
+    // Already on the best mode: nothing to offer, and the player must not nag.
+    CHECK(!BetterRefreshForSource(film, modes, 120.0, kPhaseVerifiedMultiFrameCount).Offered());
+
+    // The offer survives the even-cadence-only setting, because switching the
+    // display is precisely how that setting gets what it asks for.
+    CHECK(BetterRefreshForSource(film, modes, 60.0, kPhaseVerifiedMultiFrameCount, true).Offered());
+
+    // The other case a mode change fixes: a source that meets its panel
+    // generates nothing at all on 60 Hz, and doubles on 120.
+    const SourceCadence sixty{60.0, false, true};
+    const auto faster = BetterRefreshForSource(sixty, modes, 60.0, kPhaseVerifiedMultiFrameCount);
+    CHECK(faster.Offered());
+    CHECK_EQ(120.0, faster.refreshHz);
+    CHECK_EQ(2u, faster.multiplier);
+    CHECK_EQ(120.0, faster.targetFps);
+
+    // A tie in presented rate goes to the lower refresh: 30 fps reaches 120
+    // evenly on a 120 Hz mode and on a 240 Hz one, and 120 asks less of the
+    // panel for the same result.
+    const SourceCadence thirty{30.0, false, true};
+    const double highModes[] = {60.0, 120.0, 240.0};
+    const auto tie = BetterRefreshForSource(thirty, highModes, 60.0, kPhaseVerifiedMultiFrameCount);
+    CHECK_EQ(120.0, tie.refreshHz);
+    CHECK_EQ(120.0, tie.targetFps);
+
+    // No alternative mode is not an offer, and neither is a list holding only
+    // the mode the display is already in.
+    CHECK(!BetterRefreshForSource(film, {}, 60.0, kPhaseVerifiedMultiFrameCount).Offered());
+    const double only60[] = {60.0};
+    CHECK(!BetterRefreshForSource(film, only60, 60.0, kPhaseVerifiedMultiFrameCount).Offered());
+
+    // A runtime that admits nothing has no offer to make either: the mode
+    // change would not buy a conversion.
+    CHECK(!BetterRefreshForSource(film, modes, 60.0, 0).Offered());
 }
 
 // The ceiling above is a measurement, and measurements move: it was one
@@ -7078,6 +7234,8 @@ constexpr TestCase kCases[] = {
     TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
     TEST_CASE(frame_generation_plan_follows_the_panel_not_just_the_source_test),
     TEST_CASE(frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test),
+    TEST_CASE(display_cadence_spread_is_one_refresh_period_or_nothing_test),
+    TEST_CASE(refresh_switch_offer_names_the_mode_that_removes_the_pulldown_test),
     TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),
     TEST_CASE(neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test),
     TEST_CASE(neural_playback_lifecycle_runs_render_validate_then_ready_test),

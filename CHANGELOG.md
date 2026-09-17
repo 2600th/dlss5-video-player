@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **A higher rate is worth more than an even cadence, and the old rule had that
+  backwards.** Frame generation used to refuse any multiple that did not divide
+  the display's refresh, so 24 fps film on a 60 Hz panel got nothing - the code
+  said generating there "would trade one uneven cadence for another". It does
+  not. A frame is held for a whole number of scan-outs, so the two hold lengths
+  differ by exactly one refresh period and no other unevenness is reachable:
+  24 fps on 60 Hz is held 33/50 ms (3:2 pulldown) and 48 fps is held 17/33 ms -
+  the SAME spread - while the motion between presented frames halves, 41.7 ms to
+  20.8 ms. The refusal gave up that halving for nothing. This is also what the
+  perceptual literature says the dominant term is: Daly et al.'s judder model
+  (ACM TOG 38(4)) has all four judder components falling steeply with frame
+  rate, and Blur Busters recommends this exact doubling for low-rate content.
+  `PlanFrameGeneration` now admits a multiple when it shortens the step without
+  widening the spread. Two refusals survive because they are real: a source that
+  already lands evenly is never made uneven - 30 fps on a 120 Hz panel takes 2x
+  or 4x and never 3x, even though 3x is the higher rate - and a panel that cannot
+  scan out twice the source says that instead of blaming the cadence.
+  Verified on an RTX 5090 with the panel at 60 Hz: a 24 fps clip that used to
+  read "Frame Generation off (no even multiple of the refresh)" now converts at
+  2x to 48 fps, 960 frames from 480, and the confirmation says what it lands in -
+  "each frame is shown for 1 or 2 refreshes of this display, which is the
+  unevenness this video already plays with".
+- **The display is now part of the answer, not just part of the question.** When
+  a refusal is about the grid, the monitor usually offers another one: the
+  refusal dialog's Yes switches the display to a mode where the conversion lands
+  on the refresh exactly, through `BetterRefreshForSource` and
+  `ChangeDisplaySettingsEx` (dynamic, not written to the registry). Only even
+  targets are offered, only when they beat the current mode, and the mode change
+  is where it stops - minutes of GPU work are not started from a dialog the user
+  opened to be told no. Verified on hardware: with **Even cadence only** on and
+  the panel at 60 Hz, a 24 fps film was refused with the setting named, offered
+  this monitor's 48 Hz mode at 2x, and after Yes the panel was at 48 Hz and the
+  same film converted with no cadence note at all.
+- **DLSS > Generated frames > Even cadence only** keeps the old behaviour as a
+  setting for whoever would rather hold a film's own pacing than a finer rate
+  that lands unevenly. Off by default, kept between launches in
+  `[Playback] EvenCadenceOnly`, and its refusal names itself - the one refusal
+  here a user can lift, beside the generated-frames preference.
 - **Frame generation ships, as a conversion.** **DLSS > Generate frames** plans
   a multiple from the display, writes a new file at that rate through
   `FrameGenerationPass`, reports the percentage and the time left on the status
@@ -277,17 +315,20 @@
   for frame generation the way it is for SR. `DlssgEvaluateSmoke` (gpu label)
   is the experiment, including the zero-motion control.
 - `src/FrameRatePolicy.h` settles what a generated frame rate should be, which
-  is a display question and not a source question. A multiple is accepted only
-  when it divides the panel's refresh evenly: 30 fps doubles to 60 on a 60 Hz
-  panel and every frame is scanned out once, while 24 fps on that panel is
-  refused because 2x is 48 and 60/48 is 1.25 - generating there would trade one
-  uneven cadence for another. The same 24 fps source on a 120 Hz panel takes 5x
-  to exactly 120 and loses its 3:2 pulldown, which is the largest win available
-  and the one a source-only rule ("under 45 fps, double it") cannot see. The
-  seven refusals - unknown source rate, still image, variable frame rate,
-  unknown refresh, source meets refresh, no even multiple, runtime refused -
-  each name themselves, because "off" without a reason sends a viewer looking
-  for a broken toggle.
+  is a display question and not a source question. A multiple is accepted when
+  it shortens the motion between presented frames without widening the
+  unevenness of the presentation grid - the two terms, and the second is one
+  refresh period wide or zero, because a frame is held for a whole number of
+  scan-outs. 30 fps doubles to 60 on a 60 Hz panel with every frame scanned out
+  once; 24 fps film on that panel doubles to 48 and is held 1 or 2 scan-outs
+  where it was held 2 or 3, the same spread for half the step; the same film on
+  a 120 Hz panel takes 5x to exactly 120 and loses its 3:2 pulldown, which is
+  the largest win available and the one a source-only rule ("under 45 fps,
+  double it") cannot see. The nine refusals - unknown source rate, still image,
+  variable frame rate, unknown refresh, source meets refresh, refresh below
+  double, source cadence even, even cadence required, runtime refused - each
+  name themselves, because "off" without a reason sends a viewer looking for a
+  broken toggle.
   Nothing calls it yet, deliberately: choosing a multiplier needs the runtime's
   own `DLSSG.MultiFrameCountMax`, which means holding an NGX FrameGeneration
   feature, and standing a second undocumented NGX lifetime beside the RenoDX
