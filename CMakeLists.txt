@@ -284,6 +284,34 @@ if(BUILD_TESTING)
     target_link_directories(UpscalingGpuSmoke PRIVATE "${DLSS_LIB_DIR}")
     target_link_libraries(UpscalingGpuSmoke PRIVATE ${player_libraries})
     dlss_video_player_use_nvof(UpscalingGpuSmoke)
+    # The DLSS-G admission probe. NeuralPreflight.cpp (with the NeuralCache.cpp it
+    # needs) is compiled in for HexResultText, so the hex NGX codes this probe
+    # prints are produced by the same function the receipts use.
+    add_executable(DlssgProbeSmoke tests/DlssgProbeSmoke.cpp
+        src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp)
+    target_include_directories(DlssgProbeSmoke PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(DlssgProbeSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(DlssgProbeSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_directories(DlssgProbeSmoke PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(DlssgProbeSmoke PRIVATE ${player_libraries})
+    # The NGX log this probe writes beside its executable is its evidence, and
+    # Log opens DLSSVideoPlayer.log with ios::trunc, so it gets its own place
+    # rather than erasing the player's log or having its own erased.
+    set_target_properties(DlssgProbeSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/dlssg-probe/$<CONFIG>")
+    # Measured on 2026-09-17 (RTX 5090, driver 616.64): with no nvngx_dlssg.dll
+    # beside the executable, CreateFeature(FrameGeneration) answers 0xbad0000b
+    # and the capability block reads FrameGeneration.Available=0 /
+    # FeatureInitResult=0xbad00004, even though NGX locates and logs the
+    # driver-store fallback snippet. With the vendored snippet staged the same
+    # create returns Success. So the probe stages it the way the player stages
+    # nvngx_dlss.dll, or it would be measuring a missing file instead of the
+    # runtime's answer.
+    add_custom_command(TARGET DlssgProbeSmoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${DLSS_SDK}/lib/Windows_x86_64/$<IF:$<CONFIG:Debug>,dev,rel>/nvngx_dlssg.dll"
+            "$<TARGET_FILE_DIR:DlssgProbeSmoke>/nvngx_dlssg.dll"
+    )
     add_executable(MediaGpuSmoke tests/MediaGpuSmoke.cpp
         src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
     target_include_directories(MediaGpuSmoke PRIVATE src)
@@ -298,7 +326,8 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4" 1440)
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
-    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke PROPERTIES LABELS gpu)
+    add_test(NAME DlssgProbeSmoke COMMAND DlssgProbeSmoke)
+    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke PROPERTIES LABELS gpu)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -444,7 +473,10 @@ if(BUILD_TESTING)
     # 20 s and the hardware smokes render real frames.
     set_tests_properties(RecentMediaTests RenderSettingsTests RuntimeLockTests RangeSelectionTests
         UpscalingTests ReleaseApiCompileTests UpdateCheckTests PROPERTIES TIMEOUT 60)
-    set_tests_properties(FrameIdentityTests CachedExportTests PlayerUiRegressionTests PROPERTIES TIMEOUT 300)
+    # DlssgProbeSmoke creates one feature and no frames, so it belongs with the
+    # 300 s budgets rather than with the two smokes that render.
+    set_tests_properties(FrameIdentityTests CachedExportTests PlayerUiRegressionTests DlssgProbeSmoke
+        PROPERTIES TIMEOUT 300)
     set_tests_properties(NeuralWorkerTests PolicyTests NeuralPrerenderTests PROPERTIES TIMEOUT 600)
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke PROPERTIES TIMEOUT 900)
 

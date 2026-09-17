@@ -89,12 +89,6 @@ int HexNibble(char character) noexcept
     return -1;
 }
 
-std::wstring HexResultTextWide(uint32_t value)
-{
-    const std::string text = HexResultText(value);
-    return std::wstring(text.begin(), text.end());
-}
-
 std::string Utf8(std::wstring_view text)
 {
     if (text.empty()) return {};
@@ -530,5 +524,11 @@ std::string HexResultText(uint32_t value)
     std::string text = "0x";
     for (int shift = 28; shift >= 0; shift -= 4) text.push_back("0123456789abcdef"[(value >> shift) & 0xFu]);
     return text;
+}
+
+std::wstring HexResultTextWide(uint32_t value)
+{
+    const std::string text = HexResultText(value);
+    return std::wstring(text.begin(), text.end());
 }
 

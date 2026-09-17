@@ -30,6 +30,25 @@
   matching the runner's panel legitimately reports no upscale. The dated
   profiles under `docs/measurements/` are records of past runs and keep the keys
   they were run with.
+- Settled whether Frame Generation is reachable at all from this player, which
+  had been assumed impossible without Streamline. It is not: raw
+  `NVSDK_NGX_D3D12_CreateFeature(..., NVSDK_NGX_Feature_FrameGeneration, ...)`
+  returns `NVSDK_NGX_Result_Success` on an RTX 5090 / driver 616.64 at
+  1920x1080 `B8G8R8A8_UNORM` with no `sl.*` module in the process, and
+  `DLSSG.MultiFrameCountMax` reads 5. `DLSSGBackend::Probe` is that
+  measurement, and `DlssgProbeSmoke` (gpu label) is how it is re-taken.
+  The one hard prerequisite, found by negative control run twice: `nvngx_dlssg.dll`
+  must be resolvable beside the executable. Without it the identical create is
+  refused with `0xbad0000b` and the capability block reads
+  `FrameGeneration.Available=0` / `FeatureInitResult=0xbad00004`, even though
+  NGX locates and logs the driver-store fallback snippet. HAGS is not a gate
+  here: `HwSchMode` is absent from the registry on the test machine and the
+  runtime admitted the feature anyway, so the probe reports an absent value as
+  absent rather than as off and never refuses on it.
+  No evaluate, presentation or pacing path exists yet, so the Frame Generation
+  control stays unavailable; this commit buys the go/no-go, not the feature.
+- `HexResultTextWide` is exported from `NeuralPreflight` so NGX result codes in
+  wide diagnostics come from the one formatter the receipts already use.
 
 ## 0.23.0 - 2026-09-16
 

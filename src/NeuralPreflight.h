@@ -108,6 +108,12 @@ std::string BuildPreflightFailureJson(std::wstring_view detail);
 // probe, which reports the same codes in its receipt JSON.
 std::string HexResultText(uint32_t value);
 
+// The same digits as a wide string, for the diagnostics that are shown to a
+// user or carried in a std::wstring reason (the DLSS-G probe's capability
+// detail among them). Widening here keeps HexResultText the only place the
+// digits are produced.
+std::wstring HexResultTextWide(uint32_t value);
+
 // The thirteen runtime files whose hashes form the render identity: the twelve
 // vendor modules the embedded lock pins byte for byte, plus NeuralWorker.exe,
 // which stages the guides and classifies the cuts. The worker was absent from
