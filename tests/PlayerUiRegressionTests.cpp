@@ -256,11 +256,21 @@ struct PlayerAppTestAccess {
         CHECK(!comparisonContent.active);
         CHECK(app.m_neuralRequested);
         CHECK(!app.m_upscalingRequested);
+        // Auto is the fresh default, and it is a state of its own: the manual
+        // rung underneath it must not move until a rung is actually picked.
+        CHECK(app.m_upscaleAuto);
         CHECK_EQ(app.m_upscaleTargetHeight,1440u);
         app.HandleCommand(IDM_UPSCALE_2160);
+        CHECK(!app.m_upscaleAuto);
         CHECK_EQ(app.m_upscaleTargetHeight,2160u);
         CHECK(!app.m_upscalingRequested);
+        app.HandleCommand(IDM_UPSCALE_1080);
+        CHECK_EQ(app.m_upscaleTargetHeight,1080u);
         app.HandleCommand(IDM_UPSCALE_1440);
+        CHECK(!app.m_upscaleAuto);
+        CHECK_EQ(app.m_upscaleTargetHeight,1440u);
+        app.HandleCommand(IDM_UPSCALE_AUTO);
+        CHECK(app.m_upscaleAuto);
         CHECK_EQ(app.m_upscaleTargetHeight,1440u);
         const auto upscalingContent = app.ButtonContent(ToolbarAction::ToggleUpscaling);
         CHECK(!upscalingContent.enabled);
@@ -1412,7 +1422,7 @@ private:
         CHECK_EQ(GetMenu(app.m_hwnd),menu);
         // A late worker update while the menu is detached must be reconciled.
         ExpireFullscreenIdle(app);
-        app.m_upscaleTargetHeight=2160;
+        app.m_upscaleAuto=false;app.m_upscaleTargetHeight=2160;
         app.SyncFeatureMenuState();
         MoveFullscreenPointer(app,app.m_hwnd);
         CHECK((GetMenuState(menu,IDM_UPSCALE_2160,MF_BYCOMMAND)&MF_CHECKED)!=0);

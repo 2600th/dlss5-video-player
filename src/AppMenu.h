@@ -46,6 +46,10 @@ inline constexpr UINT IDM_RENDER_RANGE = 312;
 inline constexpr UINT IDM_RENDER_WHOLE = 313;
 inline constexpr UINT IDM_NEURAL_SETTINGS = 314;
 inline constexpr UINT IDM_ENCODER_SETTINGS = 315;
+// One contiguous block: CheckMenuRadioItem clears every command in the range it
+// is given, so a rung outside it would keep a stale check.
+inline constexpr UINT IDM_UPSCALE_AUTO = 334;
+inline constexpr UINT IDM_UPSCALE_1080 = 335;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
 inline constexpr UINT IDM_ASPECT_FIT = 400;

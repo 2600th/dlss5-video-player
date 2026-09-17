@@ -306,11 +306,21 @@ pinned runtime hashes and a safe-mode escape hatch.
 Everything you set is kept between launches: volume, view, upscaling, YouTube
 quality, image adjustments, neural settings and guide switches.
 
-Defaults on a fresh install: neural rendering on, DLSS upscaling off (1440p
-selected when you turn it on), YouTube quality Auto. Frame Generation has no
-backend and stays unavailable.
+Defaults on a fresh install: neural rendering on, DLSS upscaling off, upscaling
+output Auto, YouTube quality Auto. Frame Generation has no backend and stays
+unavailable.
 
-Auto takes the tallest rung up to 1440p, then the highest advertised video
+Auto upscaling output takes the largest rung the monitor can scan out - 1080p,
+1440p or 2160p - and the source decides whether that rung is an upscale at all:
+a 1440p film on a 4K panel goes to 2160p, a 4K film anywhere reports "source
+meets output" and stays off, and a 1080p film on a 1080p panel does the same.
+The rung is never above the panel, because the surplus is scaled away at
+present time while the DLSS evaluate is charged per output pixel. It used to be
+a fixed 1440p pick, which both under-shot a 4K panel and asked a 1080p panel
+for 78% more pixels than it can show. **DLSS > Upscaling output** still offers
+each rung explicitly, and an explicit pick is kept between launches.
+
+YouTube quality Auto takes the tallest rung up to 1440p, then the highest advertised video
 bitrate inside that rung. It used to ask for exactly 1080p, which on YouTube is
 the last rung still offered in H.264 and the thinnest one on the page. The same
 trailer, as the bundled yt-dlp 2026.08.19 lists it (The Last of Us Part II

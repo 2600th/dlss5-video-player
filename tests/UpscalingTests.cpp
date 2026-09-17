@@ -17,6 +17,37 @@ int main() {
     CHECK_EQ(wide.width,2560u); CHECK_EQ(wide.height,1066u); CHECK(wide.grows);
     CHECK(!UpscalingTarget(0,1080,1440).grows);
     CHECK(!UpscalingTarget(1920,1080,720).grows);
+    // The 1080 rung. A 720p source on a 1080p panel is the case the two-rung
+    // menu could only answer by rendering 1440 lines for a 1080-line display.
+    const auto fhd = UpscalingTarget(1280,720,1080);
+    CHECK_EQ(fhd.width,1920u); CHECK_EQ(fhd.height,1080u); CHECK(fhd.grows);
+    CHECK(!UpscalingTarget(1920,1080,1080).grows);
+    CHECK_EQ(UpscaleRungWidth(1080),1920u);
+    CHECK_EQ(UpscaleRungWidth(1440),2560u);
+    CHECK_EQ(UpscaleRungWidth(2160),3840u);
+    CHECK_EQ(UpscaleRungWidth(720),0u);
+    CHECK_EQ(UpscaleRungWidth(0),0u);
+
+    // Auto takes the largest rung the panel can scan out, never one above it.
+    CHECK_EQ(AutoUpscaleTargetHeight(2160),2160u);
+    CHECK_EQ(AutoUpscaleTargetHeight(1440),1440u);
+    CHECK_EQ(AutoUpscaleTargetHeight(1600),1440u);
+    CHECK_EQ(AutoUpscaleTargetHeight(1080),1080u);
+    CHECK_EQ(AutoUpscaleTargetHeight(1200),1080u);
+    // Above the largest rung the target stays at 4K: an 8K panel is not a
+    // reason to pay for 8K of DLSS evaluate per frame.
+    CHECK_EQ(AutoUpscaleTargetHeight(4320),2160u);
+    // Below the smallest rung, and an unreadable monitor, both refuse.
+    CHECK_EQ(AutoUpscaleTargetHeight(1050),0u);
+    CHECK_EQ(AutoUpscaleTargetHeight(0),0u);
+    CHECK(!UpscalingTarget(1280,720,AutoUpscaleTargetHeight(0)).grows);
+
+    // The four cases the adaptive policy exists for, end to end.
+    CHECK_EQ(UpscalingTarget(2560,1440,AutoUpscaleTargetHeight(2160)).height,2160u); // 2K source, 4K panel
+    CHECK(UpscalingTarget(2560,1440,AutoUpscaleTargetHeight(2160)).grows);
+    CHECK(!UpscalingTarget(3840,2160,AutoUpscaleTargetHeight(2160)).grows);          // 4K source, 4K panel
+    CHECK(UpscalingTarget(1920,1080,AutoUpscaleTargetHeight(2160)).grows);           // 1080p source, 4K panel
+    CHECK(!UpscalingTarget(1920,1080,AutoUpscaleTargetHeight(1080)).grows);          // 1080p source, 1080p panel
     CHECK(SourceFitsDLSSRange(1920,1080,2560,1440,1280,720,2560,1440));
     CHECK(!SourceFitsDLSSRange(1920,1080,2560,1440,1280,720,1706,960));
     CHECK(!SourceFitsDLSSRange(3840,2160,2560,1440,1,1,3840,2160));

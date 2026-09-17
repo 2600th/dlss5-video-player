@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+- The upscaling output is chosen from the display instead of a fixed pick.
+  **Auto** is the new default: it takes the largest rung the monitor can
+  actually scan out (`AutoUpscaleTargetHeight`, read from the adapter's current
+  mode rather than `rcMonitor`, which a scaled display reports in logical
+  pixels), and `UpscalingTarget`'s existing `grows` guard still decides whether
+  that rung is an upscale at all. A 1440p source on a 4K panel now reaches
+  2160p, which the old fixed 1440p default refused as "source meets output"; a
+  4K source still reports exactly that and stays off. Verified on an RTX 5090 /
+  616.64 with a 1920x1080 panel: a 1280x720 source logged `Playback SR enabled:
+  1280x720 -> 1920x1080`, and a 1920x1080 source left the control reading
+  "Unavailable" with no feature created.
+- Added a 1080p rung. The two-rung menu could only serve a 1080p panel by
+  rendering 1440 lines for it - 78% more pixels than it can show, and the DLSS
+  evaluate is charged per output pixel. Auto never selects a rung above the
+  panel for the same reason.
+- The refusal now says which refusal it is: a panel below the smallest rung
+  reads "display below 1080 lines" instead of borrowing "source meets output",
+  which sent a viewer looking for a broken toggle.
+- `UpscaleAuto` is a new `[Playback]` key, separate from `UpscaleHeight`. Every
+  earlier version persisted `UpscaleHeight` on every save, so a stored 1440 is
+  the old default rather than a choice; keying Auto off that value would have
+  denied Auto to every existing install. Absence of `UpscaleAuto` identifies
+  those files and means Auto.
+
 ## 0.23.0 - 2026-09-16
 
 A verification pass over the whole tree after 0.22.0: seven audits in parallel

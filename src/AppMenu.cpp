@@ -71,9 +71,12 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
     add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
     HMENU upscaleOutput=CreatePopupMenu();
-    AppendMenuW(upscaleOutput,MF_STRING|MF_CHECKED,IDM_UPSCALE_1440,L"1440p (default)");
-    AppendMenuW(upscaleOutput,MF_STRING,IDM_UPSCALE_2160,L"2160p (4K)");
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),L"Upscaling output");
+    add(upscaleOutput, IDM_UPSCALE_AUTO, L"menu.upscale_auto");
+    add(upscaleOutput, IDM_UPSCALE_1080, L"menu.upscale_1080");
+    add(upscaleOutput, IDM_UPSCALE_1440, L"menu.upscale_1440");
+    add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
+    CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
     add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation_unavailable"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     // Conversion writes a neural video to disk with the settings in the neural

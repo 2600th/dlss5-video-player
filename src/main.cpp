@@ -95,6 +95,25 @@ static void EnablePerMonitorDpiAwareness()
     }
 }
 
+// Native pixel height of the monitor the window sits on, or 0 when neither the
+// monitor nor its current mode could be read. MONITORINFO's rcMonitor is in
+// virtual-desktop space, which a scaled display reports in logical pixels, so
+// the adapter's own mode is what answers the question: dmPelsHeight is what the
+// panel scans out, which is the only height an upscale target can be judged
+// against.
+static uint32_t MonitorNativeHeight(HWND window)
+{
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                         reinterpret_cast<MONITORINFO*>(&info)))
+        return 0;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) return 0;
+    return mode.dmPelsHeight;
+}
+
 static POINT MinimumPlayerWindowTrackSize(HWND window, UINT dpi)
 {
     const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
@@ -1528,7 +1547,14 @@ private:
         m_fill=ReadIniFloat(L"Playback",L"Fill",0.0f)==1.0f;
         m_neuralRequested=ReadIniFloat(L"Playback",L"NeuralView",1.0f)!=0.0f;
         m_upscalingRequested=ReadIniFloat(L"Playback",L"SuperResolution",0.0f)==1.0f;
-        m_upscaleTargetHeight=ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f)==2160.0f?2160:1440;
+        // Auto and the rung are separate keys on purpose. Every earlier version
+        // persisted UpscaleHeight on every save, so a stored 1440 is the old
+        // default rather than evidence of a choice, and keying Auto off that
+        // value would deny Auto to every existing install. The absence of
+        // UpscaleAuto is what identifies those files, and absence means Auto.
+        m_upscaleAuto=ReadIniFloat(L"Playback",L"UpscaleAuto",1.0f)!=0.0f;
+        const uint32_t storedTarget=uint32_t(ReadIniFloat(L"Playback",L"UpscaleHeight",1440.0f));
+        if(UpscaleRungWidth(storedTarget))m_upscaleTargetHeight=storedTarget;
         const float quality=ReadIniFloat(L"Playback",L"YouTubeQuality",0.0f);
         m_youtubeSourceQuality=YouTubeSourceQuality::Auto;
         for(const auto value:{YouTubeSourceQuality::Auto,YouTubeSourceQuality::P1080,YouTubeSourceQuality::P1440,YouTubeSourceQuality::P2160})
@@ -1679,6 +1705,7 @@ private:
         WriteIniFloat(L"Playback",L"Fill",m_fill?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"NeuralView",m_neuralRequested?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"SuperResolution",m_upscalingRequested?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"UpscaleAuto",m_upscaleAuto?1.0f:0.0f);
         WriteIniFloat(L"Playback",L"UpscaleHeight",static_cast<float>(m_upscaleTargetHeight));
         WriteIniFloat(L"Playback",L"YouTubeQuality",static_cast<float>(m_youtubeSourceQuality));
         WriteIniFloat(L"VideoAdjustments",L"Brightness",m_colorSettings.brightness);
@@ -1785,11 +1812,13 @@ private:
         if(HMENU menu=GetMenu(m_hwnd)){
             app_menu::UpdateFeatureAvailability(menu,m_neuralRequested,neuralAvailable,neuralActive,
                                                 ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),false,false);
-            CheckMenuRadioItem(menu,IDM_UPSCALE_1440,IDM_UPSCALE_2160,
-                m_upscaleTargetHeight==2160?IDM_UPSCALE_2160:IDM_UPSCALE_1440,MF_BYCOMMAND);
+            const UINT checked=m_upscaleAuto?IDM_UPSCALE_AUTO
+                :(m_upscaleTargetHeight==2160?IDM_UPSCALE_2160
+                 :(m_upscaleTargetHeight==1080?IDM_UPSCALE_1080:IDM_UPSCALE_1440));
+            CheckMenuRadioItem(menu,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,checked,MF_BYCOMMAND);
             const UINT outputState=(m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())?MF_GRAYED:MF_ENABLED;
-            EnableMenuItem(menu,IDM_UPSCALE_1440,MF_BYCOMMAND|outputState);
-            EnableMenuItem(menu,IDM_UPSCALE_2160,MF_BYCOMMAND|outputState);
+            for(const UINT item:{IDM_UPSCALE_AUTO,IDM_UPSCALE_1080,IDM_UPSCALE_1440,IDM_UPSCALE_2160})
+                EnableMenuItem(menu,item,MF_BYCOMMAND|outputState);
             EnableMenuItem(menu,IDM_EXPORT_CACHED_VIDEO,MF_BYCOMMAND|((m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!ActivityBusy())?MF_ENABLED:MF_GRAYED));
             EnableMenuItem(menu,IDM_CANCEL_EXPORT,MF_BYCOMMAND|(m_exportWorker.joinable()?MF_ENABLED:MF_GRAYED));
             CheckMenuRadioItem(menu,IDM_ASPECT_FIT,IDM_ASPECT_FILL,m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT,MF_BYCOMMAND);
@@ -2362,16 +2391,32 @@ private:
     }
 
     bool UpscalingActive()const{return m_renderer&&m_renderer->DLSSEnabled();}
+    // The rung a render should aim at. Auto reads the monitor this window is on
+    // rather than the source, because the source decides only whether the rung
+    // is reachable (UpscalingTarget's `grows`) while the panel decides whether
+    // the pixels survive the present. 0 means no rung applies - a panel below
+    // 1080 lines, or a monitor that would not report its mode - and every
+    // target call refuses it, so Auto fails closed to no upscaling.
+    uint32_t EffectiveUpscaleHeight()const{
+        return m_upscaleAuto?AutoUpscaleTargetHeight(MonitorNativeHeight(m_hwnd)):m_upscaleTargetHeight;
+    }
     bool UpscalingAvailable()const{
         return m_loaded&&m_renderer&&m_renderer->DLSSAvailable()&&
             !m_lastPlaybackFrame.bgra.empty()&&
-            (UpscalingActive()||UpscalingTarget(m_decoder.Width(),m_decoder.Height(),m_upscaleTargetHeight).grows);
+            (UpscalingActive()||UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows);
     }
     std::wstring UpscalingStatus()const{
         if(!m_upscalingError.empty())return m_upscalingError;
-        if(UpscalingActive())return L"DLSS SR on · "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH());
-        if(m_loaded&&m_decoder.Width()&&m_decoder.Height()&&!UpscalingTarget(m_decoder.Width(),m_decoder.Height(),m_upscaleTargetHeight).grows)
+        if(UpscalingActive())return L"DLSS SR on · "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
+            (m_upscaleAuto?L" (auto)":L"");
+        if(m_loaded&&m_decoder.Width()&&m_decoder.Height()&&!UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows){
+            // Two different answers the old text collapsed into one. A 4K source
+            // on a 4K panel has nothing to gain; a panel below the smallest rung
+            // has nowhere to put the gain. Both are correct refusals, and a
+            // viewer who sees the wrong reason goes looking for a broken toggle.
+            if(!EffectiveUpscaleHeight())return L"DLSS SR off (display below 1080 lines)";
             return L"DLSS SR off (source meets output)";
+        }
         return UpscalingAvailable()?L"DLSS SR off":L"DLSS SR unavailable";
     }
     bool EnableUpscaling(uint32_t height){
@@ -2409,7 +2454,11 @@ private:
             m_renderer=std::move(candidate->renderer);m_renderWnd=candidate->window;candidate->window=nullptr;
             m_guides=std::move(candidate->guides);m_guideReset=false;m_dlssReset=false;
             Layout();ShowWindow(m_renderWnd,SW_SHOW);old.reset();if(oldWindow)DestroyWindow(oldWindow);
-            m_upscalingError.clear();m_upscalingRequested=true;m_upscaleTargetHeight=height;
+            // The target itself is not adopted here. Every caller already owns
+            // the rung it asked for - Auto derives it per source, a manual pick
+            // stores it - and writing it back turned an Auto session into a
+            // pinned one the moment SR came on.
+            m_upscalingError.clear();m_upscalingRequested=true;
             LOG("Playback SR enabled: "<<m_decoder.Width()<<"x"<<m_decoder.Height()<<" -> "<<m_renderer->OutputW()<<"x"<<m_renderer->OutputH());
         }else{
             // "Unavailable" told the reporter of a 436x573 photo nothing. The
@@ -2425,25 +2474,32 @@ private:
         UpdateCachedStatus();InvalidateControls();return ready;
     }
     void RestoreUpscaling(){
-        if(m_upscalingRequested&&UpscalingTarget(m_decoder.Width(),m_decoder.Height(),m_upscaleTargetHeight).grows)
-            EnableUpscaling(m_upscaleTargetHeight);
+        const uint32_t height=EffectiveUpscaleHeight();
+        if(m_upscalingRequested&&UpscalingTarget(m_decoder.Width(),m_decoder.Height(),height).grows)
+            EnableUpscaling(height);
     }
     void ToggleUpscaling(){
         if(!ToolbarActionEnabled(ToolbarAction::ToggleUpscaling))return;
         if(UpscalingActive()){
             m_upscalingRequested=false;m_renderer->SetDLSS(false);m_upscalingError.clear();
             RenderVideoFrame(m_lastPlaybackFrame,true);UpdateCachedStatus();InvalidateControls();
-        }else if(!EnableUpscaling(m_upscaleTargetHeight)){
+        }else if(!EnableUpscaling(EffectiveUpscaleHeight())){
             MessageBoxW(m_hwnd,L"DLSS upscaling could not start at this output size. Your current video is unchanged. See DLSSVideoPlayer.log for details.",L"DLSS Upscaling",MB_OK|MB_ICONINFORMATION);
         }
     }
+    // `height` 0 selects Auto; anything else must name a rung. A refused
+    // re-enable leaves the previous selection standing, the same way a failed
+    // rung change always has.
     void SetUpscaleTarget(uint32_t height){
-        if((height!=1440&&height!=2160)||m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())return;
+        if((height&&!UpscaleRungWidth(height))||m_seeking||m_seekPending||NeuralJobActive()||m_youtubeLifecycle.IsResolving())return;
+        const bool automatic=height==0;
+        const uint32_t resolved=automatic?AutoUpscaleTargetHeight(MonitorNativeHeight(m_hwnd)):height;
         if(UpscalingActive()){
-            if(UpscalingTarget(m_decoder.Width(),m_decoder.Height(),height).grows){if(!EnableUpscaling(height))return;}
+            if(UpscalingTarget(m_decoder.Width(),m_decoder.Height(),resolved).grows){if(!EnableUpscaling(resolved))return;}
             else{m_renderer->SetDLSS(false);RenderVideoFrame(m_lastPlaybackFrame,true);}
         }
-        m_upscaleTargetHeight=height;m_upscalingError.clear();UpdateCachedStatus();InvalidateControls();
+        m_upscaleAuto=automatic;if(!automatic)m_upscaleTargetHeight=height;
+        m_upscalingError.clear();UpdateCachedStatus();InvalidateControls();
     }
 
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
@@ -5187,6 +5243,8 @@ private:
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
+        case IDM_UPSCALE_AUTO:SetUpscaleTarget(0);break;
+        case IDM_UPSCALE_1080:SetUpscaleTarget(1080);break;
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
         case IDM_FRAME_GENERATION:break;
@@ -5281,6 +5339,10 @@ private:
     UINT_PTR m_activityTimer=0;
     bool m_activityBusy=false,m_activityMotionEnabled=true;
     Clock::time_point m_activityStarted=Clock::now();
+    // The manual rung, only consulted when m_upscaleAuto is false. Auto is the
+    // fresh-install default; 1440 is what a manual pick starts from because it
+    // is the rung the fixed target used to be.
+    bool m_upscaleAuto=true;
     uint32_t m_upscaleTargetHeight=1440;
     std::wstring m_upscalingError;
     VideoFrame m_lastPlaybackFrame;
