@@ -193,6 +193,24 @@ public:
     double DurationSeconds() const { return m_source.durationSec; }
     bool IsStillImage() const { return m_source.stillImage; }
     bool IsAnimation() const { return m_source.gif; }
+    // Whether FrameRate() is the source's own rate or ProbeFFmpeg's 30.0
+    // fallback for a stream that reported neither avg_frame_rate nor
+    // r_frame_rate. FrameRate() cannot be asked: it is clamped to 1..240,
+    // overridden for stills and GIFs and never zero, so a fabricated 30.0 reads
+    // exactly like a real 30 fps source. False with no media open.
+    bool FrameRateKnown() const { return m_source.avgFrameRate > 0.0 || m_source.nominalFrameRate > 0.0; }
+    // Whether the source has one fixed cadence: ffprobe's avg_frame_rate
+    // (frames over duration) and r_frame_rate (the rate the container declares)
+    // agree within frame_rate_policy::kRateTolerance - 0.005, the same 0.5% the
+    // policy matches rates with, which covers the 1000/1001 NTSC offset. They
+    // diverge on a variable-frame-rate recording, whose single FrameRate()
+    // number is an average no individual frame is spaced at, so FrameRate()
+    // alone cannot tell the two apart. False when only one of the two rates was
+    // reported (nothing to corroborate it with), false for an unknown rate,
+    // false for a single-frame still image (which has no cadence at all -
+    // FrameRateKnown() is the signal about its rate), and false with no media
+    // open.
+    bool ConstantFrameRate() const;
     double DisplayAspectRatio() const { return m_source.displayAspect > 0.0 ? m_source.displayAspect : (m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0); }
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_source.width != 0 && m_source.height != 0; }
@@ -225,6 +243,13 @@ private:
         uint32_t nativeHeight = 0;
         int32_t stride = 0;
         double fps = 30.0;
+        // The rates the source itself reported, 0.0 for one it did not, kept
+        // beside fps because fps is the number the decoder paces with - clamped,
+        // rewritten to 1.0 for a still and 100.0 for a GIF, and 30.0 when the
+        // probe found nothing - and so cannot answer whether the source stated a
+        // rate or whether it states the same one twice.
+        double avgFrameRate = 0.0;      // stream=avg_frame_rate: frames over duration
+        double nominalFrameRate = 0.0;  // stream=r_frame_rate: the container's declared cadence
         double durationSec = 0.0;
         double displayAspect = 0.0;
         bool stillImage = false;

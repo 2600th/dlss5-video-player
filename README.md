@@ -297,6 +297,7 @@ pinned runtime hashes and a safe-mode escape hatch.
 | Seek ten seconds / step one frame | `Left` / `Right`; `.` |
 | Mark In / Out; clear; go to time | `I` / `O`; `Shift+I`; `Ctrl+G` |
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
+| Generate frames; cancel a conversion | **DLSS > Generate frames**; `Esc` |
 | Neural settings | `Ctrl+N` |
 | Image adjustments | `Ctrl+E` |
 | Volume, mute | Mouse wheel; `M` |
@@ -309,34 +310,60 @@ Everything you set is kept between launches: volume, view, upscaling, YouTube
 quality, image adjustments, neural settings and guide switches.
 
 Defaults on a fresh install: neural rendering on, DLSS upscaling off, upscaling
-output Auto, YouTube quality Auto.
+output Auto, YouTube quality Auto. Frame generation is an action, not a setting:
+nothing is converted until you ask.
 
 **DLSS > Generate frames** raises the frame rate. It is a conversion rather than
-a live mode: the player writes a new file at double the source rate, shows the
-progress while it does, and switches playback to the result when it finishes.
-Whether it runs at all comes from your display, not from the source alone - the
-doubled rate is only taken when it divides the refresh evenly, so 30 fps goes to
-60 on both a 60 Hz and a 120 Hz panel, 60 fps goes to 120 on a 120 Hz panel, and
-24 fps is refused (48 into 60 is 1.25 and into 120 is 2.5, either of which would
-trade one uneven cadence for another). A source already at the refresh, a still
-image, a variable-rate file and a GPU whose runtime admits no generated frames
-each say so instead of failing quietly. Watching the neural view converts the
-neural render rather than the original, and the confirmation says which.
+a live mode: the player writes a new file, shows the percentage and the time
+left while it does, and switches playback to the result at the same position you
+were watching. `Esc`, the toolbar pill and **DLSS > Cancel frame generation**
+all stop it; nothing is left behind when you do. The converted file is kept with
+the player's other converted videos and **DLSS > Show converted file** opens it.
 
-One generated frame per source frame is a deliberate ceiling, not a limit of the
-hardware: this RTX 5090 admits five, and four-times conversion does produce four
-distinct correctly-ordered frames per interval. They land in the wrong places.
-On a clip whose box moves exactly 40 px per source frame, the three intermediates
-of one interval measured at 0.478, 0.553 and 0.738 of the way across it instead
-of 0.250, 0.500 and 0.750 - the motion arrives as roughly 48/7/19/26 percent of
-the interval rather than four equal quarters, which is judder inside every source
-frame. A single midpoint has no such failure: it measured a uniform 6.6% late,
-which never changes and so is not visible. The ceiling lifts when that placement
-is understood.
+The multiple comes from your display, not from the source alone: it is taken
+only when the generated rate divides the refresh evenly, and the largest such
+multiple wins. On a 120 Hz panel 24 fps film reaches exactly 120 at 5x - its 3:2
+pulldown gone - and 30 fps reaches 120 at 4x; on a 60 Hz panel 30 fps doubles to
+60 and 24 fps is refused, because 48 into 60 is 1.25 and trading one uneven
+cadence for another is not an improvement. A source already at the refresh, a
+still image, a file whose frame rate varies, a display whose refresh Windows
+does not report, and a GPU whose runtime admits no generated frames each say so
+in the status line before you click, and say it again as a sentence if you do.
 
-Measured on an RTX 5090 with the audio carried by stream copy: an 8-second
-1280x720 30 fps clip converted to 60 fps in about 3 s, duration unchanged to the
-millisecond and its audio track ending at exactly the same 8.000 s.
+Watching the neural view converts the neural render instead of the original,
+when that render covers the whole video and matches the settings on screen; the
+confirmation names which file it will read. Either way the converted file
+carries the original's audio, subtitles and chapters by stream copy - the
+conversion preserves length exactly, which is what makes a copy correct.
+
+What the ceiling is, and why: five generated frames per source frame, which is
+also what this RTX 5090's runtime admits, so 2x through 6x are available. That
+number is measured, not assumed. On a clip carrying a textured patch that moves
+exactly 40 px per source frame, each generated frame's position was read from
+its brightness centroid and compared with where the timeline puts it. At 4x the
+three intermediates of an interval land at 0.191, 0.474 and 0.707 of the way
+across it against an ideal 0.250 / 0.500 / 0.750; at 6x the five land at 0.157
+through 0.809 against 0.167 through 0.833. Every multiple is monotonic, strictly
+inside the pair and evenly spaced to within 0.11 of one interval, with a small
+constant early bias rather than clustering.
+
+An earlier release capped this at 2x on a measurement that was wrong twice over,
+and the corrections are worth stating. The probe was a flat white square: a
+featureless region has no interior detail for an interpolator to place, so the
+generated frame is close to a blend and its centroid is pulled to the midpoint -
+the same runs read 0.482 / 0.552 / 0.735 with the square and 0.191 / 0.474 /
+0.707 with texture. And the claim that a 4x conversion produced "240 unique
+frames" came from hashing a lossy re-encode, where identical inputs hash
+differently, so it proved nothing at all. Separately, the pass was handing its
+history-establishing evaluate the pair's own frame count instead of 1, which
+made the first interval after every reset three copies of the same frame and the
+second interval land outside the pair entirely. `tests/FrameGenerationSmoke.cpp`
+now measures the phases on every run and rejects both failures.
+
+Measured end to end on an RTX 5090 with a 120 Hz panel: a 90-second 1280x720
+30 fps clip converted to 120 fps at 4x in 30 s - 10800 frames from 2700, of
+which 8097 were generated, the duration unchanged and the AAC track carried by
+copy.
 
 Auto upscaling output takes the largest rung the monitor can scan out - 1080p,
 1440p or 2160p - and the source decides whether that rung is an upscale at all:

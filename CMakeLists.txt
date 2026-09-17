@@ -347,10 +347,13 @@ if(BUILD_TESTING)
             "$<TARGET_FILE_DIR:DlssgEvaluateSmoke>/nvngx_dlssg.dll"
     )
     # The frame-generation conversion end to end: decode a real clip, generate
-    # the intermediates, encode, then probe the result. It asserts the two
-    # things that separate a conversion from a demo - the frame count is the
-    # multiple and the duration did not move - so it needs FFmpeg staged, the
-    # same way CachedExportTests does.
+    # the intermediates, encode, then probe the result. It asserts the things
+    # that separate a conversion from a demo - the frame count is the multiple,
+    # the duration did not move, the audio arrived, and the generated frames
+    # sit strictly inside their pair at even fractions of it, measured from
+    # decoded pixels - so it needs FFmpeg staged, the same way CachedExportTests
+    # does, and now needs it for the measurement itself rather than only for
+    # the conversion.
     add_executable(FrameGenerationSmoke tests/FrameGenerationSmoke.cpp
         src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
         src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
@@ -385,6 +388,103 @@ if(BUILD_TESTING)
     add_test(NAME FrameGenerationSmoke COMMAND FrameGenerationSmoke
         "${CMAKE_SOURCE_DIR}/external/test-media/dlaa-smoke.mp4" 4 "${FFMPEG_STAGED_DIR}"
         "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke.mkv")
+    # The phase assertions need content whose true motion is known, and
+    # dlaa-smoke.mp4 is not it: its framing is static, so its brightness
+    # centroid spans 0.05 px over its first six frames and the harness reports
+    # its pairs as unmeasurable. This clip is a 200x200 testsrc2 patch on black
+    # travelling exactly 40 px per source frame, which is the probe the
+    # corrected phase table was measured with - textured, so the runtime has
+    # interior detail to localise, rather than a flat blob whose generated
+    # frames read as a blend of the pair. It is generated at build time instead
+    # of committed: lossless FFV1 of 60 frames is megabytes of media for a file
+    # that two ffmpeg filters describe completely.
+    if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe")
+        set(FRAMEGEN_PHASE_CLIP "${CMAKE_BINARY_DIR}/frame-generation/phase-probe-textured.mkv")
+        add_custom_command(OUTPUT "${FRAMEGEN_PHASE_CLIP}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/frame-generation"
+            COMMAND "${FFMPEG_STAGED_DIR}/ffmpeg.exe" -hide_banner -nostdin -loglevel error -y
+                -f lavfi -i color=black:s=1280x720:r=30:d=2
+                -f lavfi -i testsrc2=s=200x200:r=30:d=2
+                -filter_complex [0][1]overlay=x=100+40*n:y=260
+                -c:v ffv1 -pix_fmt yuv420p "${FRAMEGEN_PHASE_CLIP}"
+            COMMENT "Generating the frame-generation phase probe clip"
+            VERBATIM)
+        add_custom_target(FrameGenerationPhaseClip DEPENDS "${FRAMEGEN_PHASE_CLIP}")
+        add_dependencies(FrameGenerationSmoke FrameGenerationPhaseClip)
+        # Multiplier 4 here as well, so the two registrations differ only in the
+        # content: 30 fps at 4x is 120 fps, which is what the policy plans for a
+        # 30 fps source on this 120 Hz panel.
+        add_test(NAME FrameGenerationSmokeTextured COMMAND FrameGenerationSmoke
+            "${FRAMEGEN_PHASE_CLIP}" 4 "${FFMPEG_STAGED_DIR}"
+            "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke-textured.mkv")
+        set_tests_properties(FrameGenerationSmokeTextured PROPERTIES LABELS gpu TIMEOUT 900)
+        # The stream-source case, in the exact shape of the defect
+        # FrameGenerationRequest::streamSource exists for. The player converts
+        # the NEURAL RENDER when that view is on screen and this project writes
+        # those carriers video-only (MediaPipeline's BuildEncoderArguments
+        # passes `-an`), so the converted file's streams can only be copied
+        # from the original the carrier was rendered from. That needs two
+        # files, both generated here for the same reason the phase clip is -
+        # lossless media does not belong in the repository: a VIDEO-ONLY
+        # carrier, which is what the pass is handed, and an audio-bearing
+        # ORIGINAL of the same geometry, rate and length, which is what the
+        # streams must come from. The carrier repeats the phase clip's moving
+        # textured patch so the phase assertions stay live on this run too
+        # rather than being skipped as a still image.
+        set(FRAMEGEN_CARRIER_CLIP "${CMAKE_BINARY_DIR}/frame-generation/stream-source-carrier.mkv")
+        set(FRAMEGEN_ORIGINAL_CLIP "${CMAKE_BINARY_DIR}/frame-generation/stream-source-original.mp4")
+        add_custom_command(OUTPUT "${FRAMEGEN_CARRIER_CLIP}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/frame-generation"
+            COMMAND "${FFMPEG_STAGED_DIR}/ffmpeg.exe" -hide_banner -nostdin -loglevel error -y
+                -f lavfi -i color=black:s=1280x720:r=30:d=2
+                -f lavfi -i testsrc2=s=200x200:r=30:d=2
+                -filter_complex [0][1]overlay=x=100+40*n:y=260
+                -an -c:v ffv1 -pix_fmt yuv420p "${FRAMEGEN_CARRIER_CLIP}"
+            COMMENT "Generating the video-only neural carrier clip"
+            VERBATIM)
+        add_custom_command(OUTPUT "${FRAMEGEN_ORIGINAL_CLIP}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/frame-generation"
+            COMMAND "${FFMPEG_STAGED_DIR}/ffmpeg.exe" -hide_banner -nostdin -loglevel error -y
+                -f lavfi -i color=black:s=1280x720:r=30:d=2
+                -f lavfi -i testsrc2=s=200x200:r=30:d=2
+                -f lavfi -i sine=frequency=440:duration=2
+                -filter_complex "[0][1]overlay=x=100+40*n:y=260[v]"
+                -map [v] -map 2:a:0 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest
+                "${FRAMEGEN_ORIGINAL_CLIP}"
+            COMMENT "Generating the audio-bearing original the carrier stands for"
+            VERBATIM)
+        add_custom_target(FrameGenerationStreamSourceClips
+            DEPENDS "${FRAMEGEN_CARRIER_CLIP}" "${FRAMEGEN_ORIGINAL_CLIP}")
+        add_dependencies(FrameGenerationSmoke FrameGenerationStreamSourceClips)
+        # Multiplier 2, the smallest conversion that still inserts a frame, so
+        # this registration costs the least of the three while asking its own
+        # question: the frames come from the video-only carrier and the audio
+        # has to arrive from the fifth argument. With streamSource unused the
+        # mux copies the streams of the video-only carrier, which has none, and
+        # the run reports outputAudioStreams=0 - which is what this
+        # registration catches. Measured here on exactly these two inputs, at
+        # 2x, on an RTX 5090: with the original as the fifth argument
+        # sourceAudioStreams=1, outputAudioStreams=1, resultAudioCarried=true,
+        # verdict=PASS, exit 0; with the fifth argument pointed at the CARRIER
+        # instead - which is what `request.streamSource.empty() ?
+        # request.source : request.streamSource` evaluates to when the field is
+        # ignored - sourceAudioStreams=0, outputAudioStreams=0,
+        # resultAudioCarried=false, verdict=FAIL, exit 1. That negative control
+        # has to NAME the carrier rather than omit the argument, because with
+        # no fifth argument the harness synthesises a tone onto the silent
+        # frame source (sourceAudioSynthesized=true) and the run passes with
+        # outputAudioStreams=1 - the pre-existing stage that keeps the other
+        # two registrations' audio assertion non-vacuous.
+        # The two FAIL patterns below state the defect's signature in the
+        # registration rather than leaving it to the exit code alone; they
+        # cannot match resultOutputAudioStreams=0, which differs in case.
+        add_test(NAME FrameGenerationSmokeStreamSource COMMAND FrameGenerationSmoke
+            "${FRAMEGEN_CARRIER_CLIP}" 2 "${FFMPEG_STAGED_DIR}"
+            "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke-stream-source.mkv"
+            "${FRAMEGEN_ORIGINAL_CLIP}")
+        set_tests_properties(FrameGenerationSmokeStreamSource PROPERTIES LABELS gpu TIMEOUT 900
+            FAIL_REGULAR_EXPRESSION "outputAudioStreams=0;resultAudioCarried=false")
+    endif()
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke PROPERTIES LABELS gpu)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)

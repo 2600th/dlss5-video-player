@@ -41,31 +41,46 @@ namespace frame_rate_policy {
 // 60/48 = 1.25, which is 25% away.
 inline constexpr double kRateTolerance = 0.005;
 
-// Generated frames per source frame this project has measured to land where it
-// asks for them, which is not the same number as the one the runtime admits.
+// Generated frames per source frame this project has MEASURED to land where it
+// asks for them. It is an independent ceiling from the runtime's own
+// DLSSG.MultiFrameCountMax, and the plan takes the smaller of the two, because
+// a runtime admitting a count is not the same claim as frames arriving at the
+// right instants.
 //
-// The runtime reports DLSSG.MultiFrameCountMax = 5 on an RTX 5090 / driver
-// 616.64, so 6x is admissible - and 4x does produce four distinct, correctly
-// ordered frames per interval; that much is measured through the shipped pass
-// on a synthetic clip whose box moves exactly 40 px per source frame, and every
-// output frame of a 240-frame 4x conversion was unique.
+// Measured 2026-09-17 on an RTX 5090 / driver 616.64 / nvngx_dlssg 310.7.0,
+// through the shipped pass, on a 1280x720 30 fps FFV1 clip carrying a 200x200
+// textured patch that moves exactly 40 px per source frame. Each output frame's
+// brightness centroid gives its position, so its phase inside the pair is
+// (centroid - previous source centroid) / (next - previous) and the ideal
+// phases for multiplier m are k/m. Four consecutive intervals per multiplier,
+// the first one included:
 //
-// Where they land is the problem. On that same clip the three intermediates of
-// one source interval measured at 0.478, 0.553 and 0.738 of the way across it,
-// against the 0.250 / 0.500 / 0.750 the timeline places them at. The motion is
-// therefore delivered as roughly 48% / 7% / 19% / 26% of the interval instead
-// of four equal quarters, which is micro-judder inside every source frame
-// rather than the smoother motion the higher rate promises. A second interval
-// on the same clip measured 0.390 / 0.490 / 0.750, so it is the shape of the
-// placement and not one bad pair.
+//   2x  ideal 0.500                    measured 0.474           worst 0.030
+//   3x  ideal 0.333 0.667              measured 0.281 0.628     worst 0.109
+//   4x  ideal 0.250 0.500 0.750        measured 0.191 0.474 0.707  worst 0.081
+//   5x  ideal 0.200 0.400 0.600 0.800  measured 0.160 0.367 0.529 0.787
+//                                                               worst 0.107
+//   6x  ideal 0.167 ... 0.833          measured 0.157 ... 0.809 worst 0.109
 //
-// One generated frame has no such failure mode: it is a single midpoint, and it
-// measured 6.6% late on a 200 px displacement - a uniform offset, which is
-// invisible because it never changes. So generation is capped here until the
-// multi-frame placement is understood, and the cap is a measurement rather than
-// a preference. Raising it is a matter of measuring that phases land where they
-// are asked for, with the same synthetic clip.
-inline constexpr uint32_t kPhaseVerifiedMultiFrameCount = 1;
+// Every multiplier is monotonic, strictly inside the pair, and evenly spaced to
+// within 0.11 of one interval, with a small systematic early bias rather than
+// clustering. So the ceiling is the runtime's number, not a lower one, and 5
+// generated frames is what has been measured rather than what a driver might
+// one day admit.
+//
+// Two earlier claims in this comment were WRONG and are recorded here because
+// they were shipped. The first was that the intermediates cluster near the
+// midpoint (0.478 / 0.553 / 0.738 at 4x). That was the probe: the clip used a
+// flat WHITE SQUARE, and a featureless region has no interior detail to
+// localise, so the generated frame is close to a blend of the pair and its
+// centroid sits near the midpoint. The flat-square control still measures
+// 0.482 / 0.552 / 0.735 today, beside 0.191 / 0.474 / 0.707 for textured
+// content in the same runs. The second was that a 240-frame 4x conversion
+// produced "240 unique frames": that came from framemd5 over a lossy NVENC
+// encode, where identical inputs still hash differently, so it proved nothing.
+// A per-frame centroid from a raw decode is the instrument; tests/
+// FrameGenerationSmoke.cpp asserts it on every run.
+inline constexpr uint32_t kPhaseVerifiedMultiFrameCount = 5;
 
 enum class FrameGenerationRefusal : uint8_t {
     None,

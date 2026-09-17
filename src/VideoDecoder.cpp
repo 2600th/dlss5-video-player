@@ -1,5 +1,6 @@
 #include "VideoDecoder.h"
 #include "HardErrorSuppression.h"
+#include "FrameRatePolicy.h"
 #include "Log.h"
 #include <propvarutil.h>
 #include <algorithm>
@@ -531,6 +532,13 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_source.height = height;
     m_source.stride = static_cast<int32_t>(m_source.width * 4u);
     m_source.fps = avgRate > 0.0 ? avgRate : (rawRate > 0.0 ? rawRate : 30.0);
+    // Both rates as probed, before the overrides and the clamp below touch fps:
+    // a consumer asking whether the cadence is fixed needs the pair, and a
+    // consumer asking whether the source stated a rate at all needs to see the
+    // 30.0 above as the fabrication it is. ParseRate writes only finite
+    // positive values, so an unreported or unparsable entry leaves 0.0 here.
+    m_source.avgFrameRate = avgRate;
+    m_source.nominalFrameRate = rawRate;
     // Matroska stores per-track duration here; its container may include longer audio.
     m_source.durationSec = videoDuration > 0.0 ? videoDuration :
         ((std::isfinite(duration) && duration > 0.0) ? duration : 0.0);
@@ -573,6 +581,20 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     LOG("ffprobe: " << m_source.width << "x" << m_source.height << " DAR=" << m_source.displayAspect << " @ " << m_source.fps
         << " fps, duration=" << m_source.durationSec << ", " << m_source.colorTags);
     return true;
+}
+
+bool VideoDecoder::ConstantFrameRate() const {
+    // A single frame has no spacing to be constant, and ffprobe hands a still
+    // image the image2 demuxer's own 25/1 for both rates, which would otherwise
+    // read as a perfectly constant 25 fps cadence.
+    if (m_source.stillImage) return false;
+    const double avg = m_source.avgFrameRate, nominal = m_source.nominalFrameRate;
+    // One rate on its own corroborates nothing, so an unknown or half-reported
+    // rate is not constant rather than assumed constant: the consumer that
+    // cares is choosing whether to retime the source, and retiming a VFR
+    // recording as if it were CFR is the failure this answer exists to prevent.
+    if (avg <= 0.0 || nominal <= 0.0) return false;
+    return std::abs(avg - nominal) <= frame_rate_policy::kRateTolerance * std::max(avg, nominal);
 }
 
 namespace {
@@ -854,6 +876,11 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         m_source.width = m_source.nativeWidth = known->width;
         m_source.height = m_source.nativeHeight = known->height;
         m_source.fps = known->fps;
+        // The sibling was encoded by StartFFmpeg with -fps_mode cfr -r fps, so
+        // this rate is both the source's own and genuinely constant; without it
+        // a no-probe open would report an unknown rate for a file whose rate
+        // this process chose.
+        m_source.avgFrameRate = m_source.nominalFrameRate = known->fps;
         m_source.durationSec = known->durationSec;
         m_source.hardwareProfile = known->hardwareProfile;
         m_source.displayAspect = double(m_source.width) / double(m_source.height);
@@ -1301,8 +1328,14 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
     m_source.nativeWidth=m_source.width; m_source.nativeHeight=m_source.height;
     m_source.displayAspect = m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0;
     UINT32 frN = 0, frD = 0;
-    if (SUCCEEDED(MFGetAttributeRatio(current.Get(), MF_MT_FRAME_RATE, &frN, &frD)) && frD)
+    if (SUCCEEDED(MFGetAttributeRatio(current.Get(), MF_MT_FRAME_RATE, &frN, &frD)) && frD) {
         m_source.fps = double(frN) / double(frD);
+        // A rate the reader stated, so FrameRateKnown() is true here rather than
+        // reporting the 30.0 default as the source's own. MF exposes one nominal
+        // rate and no frames-over-duration average, so there is no second rate to
+        // corroborate it with and ConstantFrameRate() stays false.
+        m_source.avgFrameRate = m_source.fps;
+    }
 
     UINT32 strideU = 0;
     if (SUCCEEDED(current->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideU)))

@@ -28,7 +28,19 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
     ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true},
     ToolbarDefinition{ToolbarAction::ToggleUpscaling, 230, 1, true},
-    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 320, 1, true},
+    // 264 dip = the widest arm, "Frame Generation · Unavailable" (217 dip in
+    // Segoe UI 16), plus the 17 dip icon, the 7 dip gap and both 10 dip insets.
+    // 320 was budgeted for no arm that exists: "· Generate" needs 243.
+    //
+    // Required, like the other two feature pills, and that is a measurement
+    // rather than symmetry: with it optional the full bar no longer fits the
+    // DEFAULT 1440 dip window, so the layout fell back to the required set and
+    // the only toolbar control for a shipped feature disappeared at the size
+    // the player opens at - verified on screen. The cost is the minimum window
+    // width, which this pill raises to about 1070 dip at 96 dpi; that is a
+    // window a video player may insist on, and a control the user cannot find
+    // is not.
+    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 264, 1, true},
     ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
     ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
     ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
@@ -388,8 +400,11 @@ bool IsToolbarActionEnabled(ToolbarAction action, ToolbarAvailability availabili
         return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
                availability.upscalingAvailable;
     case ToolbarAction::ToggleFrameGeneration:
-        return availability.mediaLoaded && !availability.seeking && availability.rendererReady &&
-               availability.frameGenerationAvailable;
+        // The seek and renderer conditions live in the single producer of
+        // frameGenerationAvailable in main.cpp, which the identically-named
+        // menu item reads too. Restating them here is what made the pill grey
+        // out during a seek while the menu item stayed live.
+        return availability.mediaLoaded && availability.frameGenerationAvailable;
     case ToolbarAction::Adjustments:
     case ToolbarAction::DebugView:
         return availability.mediaLoaded && availability.rendererReady;
@@ -511,15 +526,32 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
         configuration = L"DLSS SR safe mode";
     }
     std::wstringstream text;
-    text << configuration << L" \u00b7 " << (status.upscalingStatus.empty()?L"DLSS SR unavailable":status.upscalingStatus)
-         << L" \u00b7 " << (status.frameGenerationStatus.empty()?L"FG unavailable":status.frameGenerationStatus)
-         << L" \u00b7 Source " << status.sourceWidth << L'\u00d7' << status.sourceHeight
-         << L" \u00b7 Input " << status.inputWidth << L'\u00d7' << status.inputHeight
-         << L" \u00b7 Output " << status.outputWidth << L'\u00d7' << status.outputHeight
-         << L" \u00b7 " << (status.quality.empty() ? L"\u2014" : status.quality)
-         << L" \u00b7 FPS " << static_cast<int>(std::lround(status.renderedFps))
-         << L" rendered / " << static_cast<int>(std::lround(status.sourceFps))
-         << L" source \u00b7 Dropped " << status.droppedFrames;
+    // No fallback for either feature string: both are assigned unconditionally
+    // from UpscalingStatus()/FrameGenerationStatus(), and every arm of both
+    // returns a non-empty phrase. A default here was a third wording of
+    // "unavailable" that no state could produce, and one of them was already
+    // wrong once.
+    //
+    // Measured on 1920x1080: this line is drawn into one DT_END_ELLIPSIS row
+    // about 120 characters wide, and it used to be built from eleven segments
+    // - over 700 characters once any notice was prepended - so the frame rate
+    // and the two feature states were permanently past the ellipsis. What is
+    // printed now is what DIFFERS: the geometry collapses to one figure unless
+    // the pipeline actually changes it, which is the common case, and the
+    // DLSS input size is dropped entirely because it only ever repeated the
+    // source or the output.
+    text << configuration << L" \u00b7 " << status.upscalingStatus
+         << L" \u00b7 " << status.frameGenerationStatus
+         << L" \u00b7 " << status.sourceWidth << L'\u00d7' << status.sourceHeight;
+    if (status.outputWidth != status.sourceWidth || status.outputHeight != status.sourceHeight) {
+        text << L" \u2192 " << status.outputWidth << L'\u00d7' << status.outputHeight;
+    }
+    if (!status.quality.empty()) text << L" \u00b7 " << status.quality;
+    text << L" \u00b7 " << static_cast<int>(std::lround(status.renderedFps)) << L" / "
+         << static_cast<int>(std::lround(status.sourceFps)) << L" fps";
+    // Dropped frames are silent when there are none: a zero is the state a
+    // viewer never needs told, and it cost the segment that says the rate.
+    if (status.droppedFrames != 0) text << L" \u00b7 Dropped " << status.droppedFrames;
     return text.str();
 }
 

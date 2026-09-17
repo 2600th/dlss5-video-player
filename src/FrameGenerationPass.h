@@ -46,6 +46,16 @@ enum class FrameGenerationError { None, InvalidRequest, Source, Device, Runtime,
 
 struct FrameGenerationRequest {
     std::filesystem::path source;
+    // Where the audio, subtitles and chapters are copied from, when that is a
+    // different file from the one the frames come from. Empty means `source`.
+    // The player converts the NEURAL RENDER when that view is on screen, and
+    // this project writes those carriers video-only (`-an`), so the streams
+    // have to come from the original the carrier was rendered from - otherwise
+    // the converted file is silent and the pass's own audio check passes by
+    // comparing zero streams against zero. It is only ever the original of the
+    // same source: the carrier is admissible only when it covers the whole
+    // source, so both files have the same length and the copy needs no retime.
+    std::filesystem::path streamSource;
     std::filesystem::path output;
     uint32_t multiplier{};        // >= 2; generated frames per source frame is multiplier - 1
     uint32_t nvencPreset{7};

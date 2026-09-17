@@ -183,13 +183,20 @@ EncodeError ConcatenateMedia(const std::filesystem::path& helperDirectory,
 
 // Stream-copies everything that travels with `sourceMedia` - audio, subtitles,
 // chapters, attachments and metadata - alongside the first video stream of
-// `video` into one Matroska file. Nothing is re-encoded and nothing is
-// re-timed: both inputs keep the timestamps they already have, so this is only
-// correct where `video` covers the same span of time as `sourceMedia` does.
-// A source with no audio, no subtitles and no chapters still produces a valid
-// output - every source map is optional - and Matroska is the container
-// because it accepts whatever codecs the source carries, which is what makes
-// the copy possible without touching a sample.
+// `video` into one Matroska file. This is CachedVideoExporter driven with no
+// trim: the same single muxer the cached-range export uses, so the command,
+// the optional source maps and the container choice all come from there.
+// Nothing is re-encoded and nothing is re-timed: both inputs keep the
+// timestamps they already have, so this is only correct where `video` covers
+// the same span of time as `sourceMedia` does. A source with no audio, no
+// subtitles and no chapters still produces a valid output, because every
+// source map is optional.
+//
+// The output is written to an exclusively created staging file in its folder
+// and renamed onto `output` once the mux succeeds, so a failed or cancelled
+// run leaves no partial file. An existing `output` is removed first, which is
+// safe only because the caller owns and guards that path - unlike the
+// interactive export, which refuses to overwrite a file the user named.
 EncodeError MuxVideoWithSourceStreams(const std::filesystem::path& helperDirectory,
                                       const std::filesystem::path& video,
                                       const std::filesystem::path& sourceMedia,

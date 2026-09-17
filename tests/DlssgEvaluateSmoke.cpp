@@ -21,30 +21,47 @@
 //
 // That pair is then evaluated twice over: once at multiFrameCount=1, which is
 // the single midpoint, and once at multiFrameCount=3 across multiFrameIndex
-// 1, 2 and 3. The second case is the one the shipped conversion drives - it
-// plans 4x on a 120 Hz panel and clamps at 6x, so multiFrameCount reaches 5 -
-// and it is not answered by the first: a runtime that ignores multiFrameIndex,
-// or walks the phases backwards, or bunches them at the wrong fractions,
-// returns Success and a plausible picture every time. Three indices measured
-// side by side are what separate those from three real phases.
+// 1, 2 and 3. The multi-frame case is not answered by the first: a runtime
+// that ignores multiFrameIndex, or walks the phases backwards, or bunches them
+// at the wrong fractions, returns Success and a plausible picture every time.
+// Three indices measured side by side are what separate those from three real
+// phases. It is the case the shipped conversion drives - the player plans 4x on
+// a 120 Hz panel and admits up to 5 generated frames per source frame
+// (frame_rate_policy::kPhaseVerifiedMultiFrameCount, and DLSSG.MultiFrameCountMax
+// is 5 here), so multiFrameCount reaches 5 - but it drives it in exactly one
+// ORDER, the one this file calls the shipped shape: the reset evaluate at
+// count 1, the measured evaluates at the pair's count.
 //
 // What the multi-frame case measured on 2026-09-17 (RTX 5090, driver 616.64,
 // nvngx_dlssg.dll 310.7.0, DLSSG.MultiFrameCountMax=5), and why the controls
-// below exist: driven the way FrameGenerationPass drives it, all three indices
-// came back as a BYTE-EXACT copy of the newer source frame - centroid 899.50
-// three times, mean channel difference from frame B 0.00 - so 4x produces the
-// source frame repeated, not four frames. The controls localize it to one
-// parameter: the multiFrameCount handed to the RESET evaluate. Sweeping that
-// count over 1..5 with the measured evaluate matching it, only count 1
-// interpolates (812.73); counts 2, 3, 4 and 5 are all passthrough copies. Hand
-// the reset count 1 and the measured evaluates count 3, and the same three
-// indices produce three distinct frames, strictly increasing and strictly
-// inside the pair: 792.94, 812.73, 829.27 against ideals 749.50, 799.50,
-// 849.50. So multiFrameIndex is real on this runtime, and it is ordered
-// correctly, but the phases are compressed around the midpoint - the three land
-// 36 px apart where the ideals are 100 px apart, and the middle index lands
-// exactly on the 2x answer - which is why the placement assertion fails even on
-// the corrected sequence.
+// below exist: when the RESET evaluate carries the pair's own count instead of
+// 1, all three indices come back as a BYTE-EXACT copy of the newer source
+// frame - centroid 899.50 three times, mean channel difference from frame B
+// 0.00 - so such a 4x pair produces the source frame repeated, not four frames.
+// The controls localize it to that one parameter. Sweeping the reset count over
+// 1..5 with the measured evaluate matching it, only count 1 interpolates
+// (812.73); counts 2, 3, 4 and 5 are all passthrough copies. Hand the reset
+// count 1 and the measured evaluates count 3, and the same three indices
+// produce three distinct frames, strictly increasing and strictly inside the
+// pair: 792.94, 812.73, 829.27 against ideals 749.50, 799.50, 849.50. So
+// multiFrameIndex is real on this runtime and it is ordered correctly. This
+// finding is what fixed FrameGenerationPass, which now declares count=1,
+// index=1 on every reset evaluate whatever the multiplier is; the
+// count-carrying reset stays here as the negative control that keeps that fix
+// honest.
+//
+// The three corrected centroids land 36 px apart where the ideals are 100 px
+// apart, and the middle one sits on the 2x answer. That compaction is a
+// property of THIS PROBE, not of the runtime. A flat white square has no
+// interior detail to localise, so a generated frame is close to a blend of the
+// pair and its brightness centroid is pulled toward the temporal midpoint,
+// whereas textured content is placed where it belongs. Measured both ways
+// through the shipped pass on a patch moving exactly 40 px per source frame, at
+// 4x: a flat box reads phases 0.482 / 0.552 / 0.735 of the interval, a 200x200
+// textured (testsrc2) patch reads 0.191 / 0.474 / 0.707, against ideals
+// 0.250 / 0.500 / 0.750. That pair of numbers is why phase PLACEMENT is
+// reported here and never asserted - this probe cannot measure it - while the
+// properties that survive a blend (distinct, ordered, inside the pair) are.
 //
 // Two more properties came out of the controls and are worth keeping in mind
 // before anything here is "fixed": an index asked for on its own, without the
@@ -541,14 +558,16 @@ struct PhaseReport {
     std::vector<uint8_t> image; // packed BGRA, so the indices can be compared to each other
 };
 
-// How far a generated frame may sit from its ideal phase before the placement
-// is called wrong. Not invented, and deliberately not tight: the 2x case on
-// this runtime put its single midpoint at 812.73 against an ideal 799.50 - 13.2
-// px past it on a 200 px displacement, a 6.6% bias toward the newer frame - so
-// a correct multi-frame implementation carrying the same bias is expected to
-// miss each ideal phase by about that much. 20 px is 1.5x that measured bias,
-// which leaves the bias room to grow with the phase fraction, and it is under
-// half of the 50 px that separates adjacent ideal phases at count 3 - so a
+// How far a generated frame would have to sit from its ideal phase before the
+// placement could be called wrong. Reported only (phase3_tolerance), never
+// asserted - see the placement note in checkPhases for why a flat square
+// cannot measure placement at all. It is not invented: the 2x case on this
+// runtime put its single midpoint at 812.73 against an ideal 799.50, 13.2 px
+// past it toward the newer frame on a 200 px displacement. That pull is the
+// blend this featureless probe produces, not a bias of the runtime - a textured
+// patch through the shipped pass places the same 4x runs at
+// 0.191 / 0.474 / 0.707 of the interval. 20 px is 1.5x the measured pull and
+// still under half of the 50 px between adjacent ideal phases at count 3, so a
 // frame inside this tolerance cannot be sitting on a NEIGHBOURING phase, which
 // is the thing that would make a pass meaningless.
 constexpr double kPhaseTolerance = 20.0;
@@ -808,8 +827,11 @@ int wmain()
     }
 
     // --- multiFrameCount 3, multiFrameIndex 1..3 ----------------------------
-    // Everything above ran at count 1: one generated frame, one phase. This is
-    // the case the shipped conversion actually drives.
+    // Everything above ran at count 1: one generated frame, one phase. Below is
+    // the multi-frame case the shipped conversion drives, measured in the two
+    // driving orders that differ only in the multiFrameCount handed to the
+    // reset evaluate: the shipped one, which resets at count 1, and the one
+    // that resets at the pair's count and poisons the pair.
     constexpr uint32_t kPhaseCount = 3;
     std::cout << "\nphase3_multiFrameCountMax=" << backend.MultiFrameCountMax() << "\n"
               << "phase3_multiFrameCount=" << kPhaseCount << "\n"
@@ -863,8 +885,8 @@ int wmain()
         return true;
     };
 
-    // The production sequence, parameterized by the two things that turned out
-    // to matter. Frame A with reset=true establishes history in its own
+    // The pair sequence, parameterized by the two things that turned out to
+    // matter. Frame A with reset=true establishes history in its own
     // submission - the runs above left frame B in it, and B->B would measure
     // nothing - and then `calls` evaluates of frame B go into ONE submission,
     // which is exactly how FrameGenerationPass records a pair: back-to-back
@@ -872,7 +894,8 @@ int wmain()
     // `resetCount` is the multiFrameCount handed to the reset evaluate and
     // `count` the one handed to the measured evaluates; they are separate
     // because nothing requires them to agree and the difference turned out to
-    // decide the result. The index of call n is n clamped to the count, so a
+    // decide the result, which is why the pass now ships resetCount=1 with
+    // count=multiplier. The index of call n is n clamped to the count, so a
     // case that calls more often than the count allows repeats the last index
     // instead of passing an out-of-range one the backend would refuse. The
     // output is sentinel-filled before every single evaluate, so "this call
@@ -970,9 +993,10 @@ int wmain()
                   << prefix << ordinal << "_sentinelPixelsRemaining=" << phase.sentinelRemaining << "\n";
     };
 
-    // The measurement this program was extended to make: the production
-    // sequence at count 3, all three indices, reset carrying the same count the
-    // pass hands it.
+    // The negative control, measured first because every control below exists
+    // to explain its result: the pair at count 3, all three indices, with the
+    // reset evaluate carrying the pair's count instead of 1. That is what the
+    // pass drove before this smoke's finding fixed it.
     PhaseReport phases[kPhaseCount];
     if (!measureBatch(kPhaseCount, kPhaseCount, kPhaseCount, phases)) {
         std::cout << "phase3=unreachable reason=the count-3 batch could not be run\n";
@@ -1034,12 +1058,14 @@ int wmain()
         reportPhase("phase3_countSweep_count", count, swept);
     }
 
-    // 3. The reset evaluate carries a count too, and FrameGenerationPass hands
-    //    it the multiplier's count. These keep the multi-frame count on the
-    //    measured evaluate and give the reset the count 1 that is known to
-    //    work - first one index per pair, then the whole production batch - so
-    //    a count that poisons the history is told apart from a count that stops
-    //    the generation.
+    // 3. The reset evaluate carries a count too. FrameGenerationPass used to
+    //    hand it the multiplier's count and now hands it 1 always, which is
+    //    exactly this control: the multi-frame count stays on the measured
+    //    evaluate while the reset gets the count 1 that is known to
+    //    interpolate - first one index per pair, then the whole batch the pass
+    //    records - so a count that poisons the history is told apart from a
+    //    count that stops the generation. The batched form below is the shipped
+    //    driving order, and it is the one that carries the assertions.
     PhaseReport resetAtCount1[kPhaseCount];
     for (uint32_t index = 1; index <= kPhaseCount; ++index) {
         if (!measurePair(1, kPhaseCount, index, resetAtCount1[index - 1])) {
@@ -1094,16 +1120,17 @@ int wmain()
 
     // The properties that matter, each named so a failure says WHICH one broke.
     // The 2x cases proved a genuine intermediate frame exists; these say the
-    // three indices are three DIFFERENT frames, in the right order, at the
-    // right fractions - the only thing that makes 4x and 6x more than the same
-    // frame repeated.
+    // three indices are three DIFFERENT frames, in the right order, strictly
+    // inside the pair - the only thing that makes 4x and 6x more than the same
+    // frame repeated. Their fractions are reported rather than asserted, for
+    // the probe reason spelled out below.
     //
-    // They are asserted on both sequences that produced three frames: the one
-    // FrameGenerationPass records today, and the one that differs from it only
-    // in the count handed to the reset evaluate. Whichever of them breaks, the
-    // report names the shape and the property, because "multi-frame is wrong"
-    // and "multi-frame is wrong the way we drive it" are different bugs with
-    // different owners.
+    // They are asserted on the sequence FrameGenerationPass records today
+    // (reset at count 1, the indices batched) and reported without gating on
+    // the one that differs from it only in the count handed to the reset
+    // evaluate. Either way the report names the shape and the property,
+    // because "multi-frame is wrong" and "multi-frame is wrong the way we
+    // drive it" are different bugs with different owners.
     bool phasesHold = true;
     // Composed into one string and flushed on its own, unlike the report lines
     // above: nvngx_dlssg.dll installs logging hooks on this process's stdout
@@ -1114,12 +1141,14 @@ int wmain()
     // `gate` false reports the property without letting it fail the run. It is
     // used for one shape only, and for a measured reason: handing the RESET
     // evaluate a multiFrameCount above 1 makes the runtime return the newer
-    // source frame byte for byte at every index. That is a rule of this
-    // runtime, not a defect in this project - the shipped conversion's own
-    // output does not show it (a 240-frame 4x conversion of a clip whose box
-    // moves 40 px per source frame produced 240 unique frames whose phases
-    // match the count-1 shape below) - so it is recorded as the counter-example
-    // that documents the constraint, and the count-1 shape carries the
+    // source frame byte for byte at every index. The shipped conversion's own
+    // output DID show that, back when the pass drove the reset that way - a 4x
+    // conversion measured phases 1.002 / 1.002 / 1.002 in the first interval
+    // after every reset and -0.634 / -0.107 / 0.565 in the second, recovering
+    // only from the third interval on. The fix is the reset count: the pass now
+    // declares count=1, index=1 on every reset. So that shape is retained here
+    // as the negative control which keeps the fix honest - it must keep failing
+    // these properties for the same reason - and the shipped shape carries the
     // assertions.
     const auto check = [&](const char* shape, const char* property, bool held, const std::string& detail,
                            bool gate) {
@@ -1166,19 +1195,20 @@ int wmain()
               "centroid gaps " + Px(c2 - c1) + " and " + Px(c3 - c2) + "; mean channel differences " +
                   Px(pair12) + ", " + Px(pair23) + ", " + Px(pair13) + " of 255", gate);
 
-        // Placement is REPORTED, not asserted, and the reason is a product
-        // decision rather than a tolerance that could not be met. The measured
-        // phases are wrong - 0.478 / 0.553 / 0.738 of the interval against
-        // 0.250 / 0.500 / 0.750, reproduced through the shipped pass on a clip
-        // whose box moves exactly 40 px per source frame - so the player caps
-        // generation at one intermediate frame
-        // (frame_rate_policy::kPhaseVerifiedMultiFrameCount) and nothing on the
-        // shipped path asks for these indices. Asserting here would leave a
-        // permanently red test guarding a path no user reaches, which tells a
-        // later reader nothing except to ignore it. The properties above ARE
-        // asserted, because a runtime that stopped producing distinct, ordered,
-        // between-the-inputs frames would be a regression rather than a known
-        // limitation.
+        // Placement is REPORTED, not asserted, because this probe cannot
+        // measure it. A flat white square has no interior detail to localise,
+        // so a generated frame comes out close to a blend of the pair and its
+        // brightness centroid is pulled toward the temporal midpoint; textured
+        // content is placed correctly. Both measured through the shipped pass
+        // on a patch moving exactly 40 px per source frame, at 4x: the flat box
+        // reads 0.482 / 0.552 / 0.735 of the interval, a 200x200 textured
+        // (testsrc2) patch reads 0.191 / 0.474 / 0.707, against ideals
+        // 0.250 / 0.500 / 0.750. Asserting the fractions here would pin this
+        // probe's blend, not the runtime's placement, which is why the
+        // phase-verified ceiling is measured on textured content instead. The
+        // properties above ARE asserted, because a runtime that stopped
+        // producing distinct, ordered, between-the-inputs frames would be a
+        // regression rather than a limitation of this square.
         std::string placement;
         for (const PhaseReport& phase : trio) {
             const double delta = phase.interpolated.x - phase.expected;
@@ -1186,11 +1216,12 @@ int wmain()
                          " vs ideal " + Px(phase.expected) + " (delta " + Px(delta) + "); ";
         }
         std::cout << shape << "_phasePlacement=" << placement
-                  << "reported-not-asserted; see kPhaseVerifiedMultiFrameCount\n";
+                  << "reported-not-asserted; a featureless square blends toward the midpoint, so this "
+                     "probe cannot measure phase placement\n";
     };
 
-    checkPhases("productionShape", phases, false);
-    checkPhases("countOneResetShape", resetAtCount1Batch, true);
+    checkPhases("resetCarryingPairCountShape", phases, false);
+    checkPhases("shippedDrivingShape", resetAtCount1Batch, true);
 
     std::cout << "\nexperiment=ran\n"
               << "deviceRemovedReason=0x" << std::hex << uint32_t(gpu.device->GetDeviceRemovedReason()) << std::dec

@@ -84,6 +84,17 @@ public:
     // between the PREVIOUS evaluated backbuffer and `backbuffer`.
     // `motion` points from the current frame to the previous one, at backbuffer
     // resolution. `reset` breaks temporal continuity (first frame, scene cut).
+    //
+    // `backbufferFrameId` is DLSSG.BackbufferFrameID: the runtime's optional
+    // declaration of frame progression, documented in nvsdk_ngx_defs_dlssg.h as
+    // a counter that increments by one per fully rendered backbuffer frame and
+    // keeps incrementing while generation is off. A caller that presents real
+    // frames has one already; an offline caller has to state it, because the
+    // alternative is a runtime deriving progression from nothing. 0 leaves the
+    // key unset, which is what the capability probe wants - it creates a
+    // feature and never evaluates. Every index generated between the same pair
+    // carries the id of the newer frame of that pair: the pair is one rendered
+    // frame's worth of progression however many frames are generated inside it.
     bool Evaluate(ID3D12GraphicsCommandList* cmd,
                   ID3D12Resource* backbuffer,
                   ID3D12Resource* motion,
@@ -91,7 +102,8 @@ public:
                   ID3D12Resource* outputInterpolated,
                   uint32_t multiFrameCount,
                   uint32_t multiFrameIndex,
-                  bool reset);
+                  bool reset,
+                  uint64_t backbufferFrameId = 0);
     uint64_t EvaluationCount() const { return m_evaluations; }
     bool FeatureCreated() const { return m_handle != nullptr; }
     // DLSSG.MultiFrameCountMax as the runtime reported it to Initialize: the

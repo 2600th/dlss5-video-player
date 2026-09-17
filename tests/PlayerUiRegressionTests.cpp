@@ -355,9 +355,17 @@ struct PlayerAppTestAccess {
         const bool requestedBeforeSeekCommand = app.m_neuralRequested;
         app.HandleCommand(IDM_NEURAL_RENDERING);
         CHECK_EQ(requestedBeforeSeekCommand, app.m_neuralRequested);
-        const std::wstring cachedStatusBeforeFeatureStatusFix = app.BuildStatusText();
-        CHECK(cachedStatusBeforeFeatureStatusFix.find(L"DLSS SR unavailable") != std::wstring::npos);
-        CHECK(cachedStatusBeforeFeatureStatusFix.find(L"FG unavailable") != std::wstring::npos);
+        // The bar carries both feature segments verbatim - it does not compose
+        // their copy - so that is what the test states. The old assertions
+        // pinned "DLSS SR unavailable" and "FG unavailable", which said nothing
+        // a viewer relies on and failed the moment the copy was rewritten.
+        const std::wstring cachedStatus = app.BuildStatusText();
+        const std::wstring upscalingSegment = app.UpscalingStatus();
+        const std::wstring frameGenerationSegment = app.FrameGenerationStatus();
+        CHECK(!upscalingSegment.empty());
+        CHECK(!frameGenerationSegment.empty());
+        CHECK(cachedStatus.find(upscalingSegment) != std::wstring::npos);
+        CHECK(cachedStatus.find(frameGenerationSegment) != std::wstring::npos);
         CheckMarkersAndTimecode(app);
         CheckComparisonAvailability(app);
         CheckNeuralStrengthDial(app);
@@ -422,12 +430,30 @@ struct PlayerAppTestAccess {
         const auto preparingContent = app.ButtonContent(ToolbarAction::ToggleNeuralRendering);
         CHECK(!preparingContent.enabled);
 
+        // Each pill's width comes from the toolbar itself. The literals here
+        // were 270/230/320 dip, and the frame-generation pill is no longer
+        // 320: a label wider than its real pill would have passed unseen.
+        const auto widePills = LayoutToolbar(1600, 180, 96);
+        const auto pillWidthDip = [&widePills](ToolbarAction action) {
+            const auto found = std::find_if(widePills.begin(), widePills.end(),
+                                            [action](const ToolbarItem& item) {
+                                                return item.action == action;
+                                            });
+            CHECK(found != widePills.end());
+            return found == widePills.end()
+                       ? 0
+                       : static_cast<int>(found->bounds.right - found->bounds.left);
+        };
         struct FeatureLabel { UiIcon icon; const std::wstring& label; int widthDip; };
         const std::array featureLabels{
-            FeatureLabel{preparingContent.icon, preparingContent.label, 270},
-            FeatureLabel{seekingOffContent.icon, seekingOffContent.label, 270},
-            FeatureLabel{upscalingContent.icon, upscalingContent.label, 230},
-            FeatureLabel{frameGenerationContent.icon, frameGenerationContent.label, 320},
+            FeatureLabel{preparingContent.icon, preparingContent.label,
+                         pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
+            FeatureLabel{seekingOffContent.icon, seekingOffContent.label,
+                         pillWidthDip(ToolbarAction::ToggleNeuralRendering)},
+            FeatureLabel{upscalingContent.icon, upscalingContent.label,
+                         pillWidthDip(ToolbarAction::ToggleUpscaling)},
+            FeatureLabel{frameGenerationContent.icon, frameGenerationContent.label,
+                         pillWidthDip(ToolbarAction::ToggleFrameGeneration)},
         };
         for (const UINT dpi : {96u, 120u, 144u, 192u}) {
             app.UpdateFontsForDpi(dpi);

@@ -4,10 +4,11 @@
 
 - **Frame generation ships, as a conversion.** **DLSS > Generate frames** plans
   a multiple from the display, writes a new file at that rate through
-  `FrameGenerationPass`, reports progress on the status line, and switches
-  playback to the result when it finishes - the shape chosen because live pacing
-  would have to interleave generated frames into the playback clock, which also
-  owns audio sync, dropped-frame accounting and seeking.
+  `FrameGenerationPass`, reports the percentage and the time left on the status
+  line, and switches playback to the result at the position you were watching -
+  the shape chosen because live pacing would have to interleave generated frames
+  into the playback clock, which also owns audio sync, dropped-frame accounting
+  and seeking.
   The pass does not upscale. It generates at the input's own resolution and the
   player's runtime SR then runs live on the converted file, so the shipped order
   is frame generation first, Super Resolution at present time - the opposite of
@@ -16,75 +17,148 @@
   An earlier version of this entry cited NVIDIA's order as the justification,
   which described something this code does not do.
   Verified end to end in the player on an RTX 5090 / 616.64 with a 120 Hz panel:
-  a 1280x720 30 fps clip planned 4x, converted in 3.2 s to 960 frames (717
-  generated, 718 evaluates) from 240 source frames, and the player reopened the
-  result at `1280x720 @ 120 fps, duration=8` - the same 8.000 s the source ran.
-  `FrameGenerationSmoke` (gpu label) asserts the two properties that separate a
-  conversion from a demo: the frame count is the multiple, and the duration did
-  not move. `framemd5` over twelve consecutive output frames showed twelve
-  distinct hashes, so the file is real 120 fps content and not source frames
-  repeated four times.
-- The conversion reads the neural render when that is what you are watching.
-  The first version always read the original, so converting while the neural
-  view was up silently returned a smooth un-neural file and re-rendering neural
-  afterwards would have cost four times the frames and a new cache identity. The
-  carrier is constant-rate at exactly the source rate - `SynchronizedPlayback`
-  refuses a pair whose rates differ by more than 0.01 fps - so it is as valid an
-  input as the original, and the confirmation now names which one it will read.
-- The converted file goes into the neural cache, not next to your source. The
-  first version wrote a large MKV beside the input with no save dialog, which
-  lands in the acquired-copy directory for a network source and simply fails on
-  a read-only share. It is a derived carrier and now lives with the others;
-  **Convert && save** remains the way to put a copy somewhere chosen.
-- A conversion no longer hijacks playback. The player stays usable while it
-  runs, so the result is adopted only when the file it was made from is still
-  the one on screen; otherwise the path is reported and playback is left alone.
-- The status line reports frame generation's real state. `FG unavailable` was a
-  hard-coded literal in two places, which became a contradiction the moment the
-  toolbar pill could read "Generate": it now reads the planned multiple, the
-  refusal's own name, or "converting" with the target rate.
-- Generation is capped at one frame per source frame, and the cap is a
-  measurement. The runtime admits five (`DLSSG.MultiFrameCountMax`), and 4x does
-  produce four distinct, correctly ordered frames per interval - a 240-frame 4x
-  conversion of a clip whose box moves exactly 40 px per source frame produced
-  240 unique frames. They land in the wrong places: the three intermediates of
-  one interval measured 0.478 / 0.553 / 0.738 of the way across it against the
-  0.250 / 0.500 / 0.750 the timeline puts them at, and a second interval on the
-  same clip measured 0.390 / 0.490 / 0.750 - so the motion arrives as roughly
-  48/7/19/26 percent of the interval instead of four equal quarters, which is
-  judder inside every source frame rather than the smoothness a higher rate
-  promises. One midpoint has no such failure mode: it measured a uniform 6.6%
-  late, invisible because it never varies. `kPhaseVerifiedMultiFrameCount`
-  carries the ceiling and the reasoning; raising it is a matter of measuring
-  that the phases land where they are asked for.
-  Cost of the cap, stated plainly: 24 fps film can no longer reach 120 fps on a
-  120 Hz panel, because 48 does not divide 120 evenly. That win comes back with
-  the placement fix.
-- A separate runtime rule was found while measuring this and is recorded in
-  `DlssgEvaluateSmoke` as a documented counter-example: handing the RESET
-  evaluate a `multiFrameCount` above 1 makes the runtime return the newer source
-  frame byte for byte at every index. The shipped conversion's own output does
-  not show it, so it is a constraint on how the feature may be driven rather
-  than a defect here - the test asserts the properties of the correct shape and
-  prints the counter-example beside them instead of staying permanently red.
-- Converted files carry the source's audio, subtitles and chapters by stream
-  copy. Without it the conversion produced a silent film, which the frame-count
-  and duration assertions could not see: the player hands the result to the
-  ordinary load path, which starts audio from the file it opened. The generated
-  video's duration equals the source's, which is what makes a plain copy line
-  up, and the pass now counts the source's audio streams before the mux and the
-  output's after and fails if they differ. Measured: the 8 s clip's AAC track
-  ends at exactly the video's 8.000 s, delta 0.000 ms. A silent source stays
-  silent without failing.
-- Frame generation and Super Resolution were measured together, which nothing
-  had done: with SR live at 1280x720 -> 1920x1080, the capability probe created
-  and released a FrameGeneration feature on its own device, the conversion ran,
-  and SR was re-created and enabled on the converted file afterwards.
-- The multiplier is the runtime's to bound. `QueryFrameGenerationCapability`
-  measures `DLSSG.MultiFrameCountMax` once per process on the first conversion -
-  5 on this machine, so 6x is the ceiling - and a request above it is clamped
-  with the clamp reported rather than silently honoured. A 7x request came back
-  as 6x: 1440 frames from 240, duration within 1 ms.
+  a 90-second 1280x720 30 fps clip planned 4x and converted in 30 s to 10800
+  frames (8097 generated, 8098 evaluates) from 2700 source frames, carrying its
+  AAC track, and the player reopened the result at 120 fps with the duration
+  unchanged.
+- **The ceiling is five generated frames per source frame, and the cap that
+  shipped at one was wrong twice over.** `kPhaseVerifiedMultiFrameCount` is now
+  5, which is also this RTX 5090's `DLSSG.MultiFrameCountMax`, so 2x through 6x
+  are admissible and the plan still takes the smaller of the two numbers.
+  Measured through the shipped pass on a 1280x720 30 fps FFV1 clip carrying a
+  200x200 textured patch that moves exactly 40 px per source frame, reading each
+  output frame's position from its brightness centroid: at 4x the intermediates
+  land at 0.191 / 0.474 / 0.707 of the interval against an ideal 0.250 / 0.500 /
+  0.750, at 6x at 0.157 / 0.281 / 0.474 / 0.628 / 0.809 against 0.167 through
+  0.833, and every multiple from 2x to 6x is monotonic, strictly inside the pair
+  and evenly spaced to within 0.11 of one interval.
+  Both of the measurements behind the old cap are refuted here. The first used a
+  flat WHITE SQUARE as the moving probe: a featureless region has no interior
+  detail to localise, so the generated frame is close to a blend of the pair and
+  its centroid is pulled to the midpoint - the same runs measure 0.482 / 0.552 /
+  0.735 with the square beside 0.191 / 0.474 / 0.707 with texture, which is
+  where "the motion arrives as 48/7/19/26 percent of the interval" came from.
+  The second claimed a 240-frame 4x conversion produced "240 unique frames" from
+  `framemd5` over a lossy re-encode, where identical inputs still hash
+  differently; that instrument cannot answer the question it was asked.
+  What the cap restores: 24 fps film reaches exactly 120 fps at 5x on a 120 Hz
+  panel, pulldown gone, and 30 fps reaches 120 at 4x.
+- **A real defect the old measurement was hiding: the reset evaluate carried the
+  wrong count.** The pass hands its history-establishing evaluate - the one at
+  the first frame and after every decoder discontinuity - `multiFrameCount = 1`,
+  not the pair's own count. Driving it with the pair's count made this runtime
+  return the newer source frame byte for byte at every index: a 4x conversion
+  measured phases 1.002 / 1.002 / 1.002 in the first interval after each reset
+  and -0.634 / -0.107 / 0.565 in the second, recovering only from the third.
+  `DlssgEvaluateSmoke` keeps that shape as a named negative control, and
+  `FrameGenerationSmoke` now measures the phases of the first interval on every
+  run, so neither failure can return unnoticed. `DLSSG.BackbufferFrameID` is
+  also declared now, one id per decoded source frame, with every index inside a
+  pair carrying the newer frame's id.
+- Converted files carry the original's audio, subtitles and chapters by stream
+  copy, and they come from the ORIGINAL even when the frames come from the
+  neural render. Without the copy the conversion produced a silent film, which
+  the frame-count and duration assertions could not see. Then the neural path
+  produced one anyway: this project writes neural carriers video-only, so muxing
+  from the file the frames came from carried nothing and the pass's own audio
+  check passed by comparing zero streams against zero. `streamSource` is a
+  separate field for exactly that reason, and a smoke registration converts a
+  video-only carrier with a separate audio source and fails on
+  `outputAudioStreams=0`. The generated video's duration equals the source's,
+  which is what keeps a plain copy correct; a silent source stays silent without
+  failing.
+- The conversion reads the neural render when that is what you are watching, and
+  only when that render covers the WHOLE source and matches the settings on
+  screen. A range render covers its range alone, so converting it returned a
+  clip-length file that was then adopted under the film's title; a stale render
+  is not the picture on screen. Those are the two cases the cached export
+  already refuses, for the same two reasons.
+- The converted file is reachable after the dialog closes. It goes into the
+  neural cache rather than beside your source - the first version dropped a
+  large MKV into the user's library with no save dialog, landed in the
+  acquired-copy directory for a network source and simply failed on a read-only
+  share - and **DLSS > Show converted file** opens it with the file selected.
+  `NeuralCacheManager::Clear` now removes `frame-generation/` too: it was
+  excluded while `SizeBytes` counted the whole root, so the prompt offered to
+  free bytes it kept and generated files accumulated with nothing able to delete
+  them.
+- A conversion no longer hijacks playback, and no longer loses your place. The
+  result is adopted only when the file it was made from is still the one on
+  screen - compared against both of the current file's carriers rather than the
+  view-dependent pick, so pressing `D` while waiting is not mistaken for leaving
+  - and playback resumes at the position you were at, because the conversion
+  preserves duration exactly. The converted file is not recorded in Recent
+  videos: it is a derived carrier whose path would dangle the moment the cache
+  is cleared.
+- Two refusals that could never fire now can. `PlannedFrameGeneration` declared
+  every source constant-frame-rate and passed the decoder's 30 fps fallback as
+  if it had been read off the file, so `VariableFrameRate` and
+  `UnknownSourceRate` were unreachable - a variable-rate phone recording sailed
+  through and the pass emitted `sourceFrames * multiplier` at a rate the file
+  never had, which the audio it now carries would drift against. `VideoDecoder`
+  keeps both probed rates and answers `FrameRateKnown()` and
+  `ConstantFrameRate()` (`avg_frame_rate` against `r_frame_rate`, 0.5%
+  tolerance); measured 30/30 on a CFR clip and 37.25/50 on a VFR one.
+- **Measured hazard, recorded so it is not tried again:** the runtime's
+  admission is probed inside the click that needs it, never in the background.
+  Probing at load - a second D3D12 device and a second NGX feature create, 0.2 s
+  after the renderer armed its own deferred SuperSampling create - froze
+  presentation on the 19th frame of a 600-frame clip while the decoder read on
+  to the end. A conversion started from a settled playing session was measured
+  safe: the probe, the conversion and a live SR feature coexisted, and SR was
+  re-created on the converted file afterwards.
+- One state machine now feeds the menu item, the toolbar pill and the status
+  line, so they cannot disagree. Before this the menu item stayed enabled while
+  the pill greyed out on a seek, "ready" was claimed on hardware nobody had
+  asked, and a busy player read identically to a video that can never be
+  converted. Every refusal reports its own sentence instead of the log slug
+  (`no-even-multiple`), the pill reads **Cancel** while a conversion runs and
+  cancels, `Esc` cancels like it does for every other long job, the cancel no
+  longer joins the worker on the UI thread (the window stopped painting until
+  the pass noticed), the status line leads with the percentage and the time left
+  and puts the cancel route before the counters it used to hide behind, and the
+  confirmation is Yes/No with No focused rather than one stray Enter from
+  minutes of GPU work. Frame generation also has its own toolbar icon: it was a
+  third `Sparkles` beside the two real toggles, and at narrow widths three
+  identical pills.
+- Every frame-generation string lives in `Localization.h`. The whole feature was
+  hard-coded literals - eight of them in `main.cpp` alone - so it could not be
+  translated and its wording could not be reviewed in one place. Dialogs no
+  longer carry hex `NVSDK_NGX_Result` values or NGX key names either: the
+  refusal a user with an unsupported GPU sees is a sentence plus the driver ask,
+  and the runtime's own answer goes to the log where it already was.
+- The three DLSS features are named one way each. The status line reported the
+  toggle the user had just flipped as "DLSS SR" one line below a menu item and a
+  pill that both call it **DLSS Upscaling**, and frame generation was "Generate
+  frames", "Frame Generation" and "FG" in one screenshot.
+- The status line fits. It was eleven segments, over 700 characters once any
+  notice was prepended, drawn into one ellipsised row about 120 characters wide,
+  so the frame rate and both feature states were permanently past the ellipsis.
+  It prints what differs now: one geometry unless the pipeline changes it, the
+  DLSS input size dropped because it only ever repeated the source or the
+  output, and a dropped-frame count only when frames were dropped.
+- The player's first window fits the display. Its default 1440x880 client is a
+  1440x939 window, and on any work area shorter than that Windows placed the
+  bottom off screen - which is where this player draws its status line and its
+  entire seek bar. It now shrinks into the work area instead.
+- A conversion and an export can no longer run at once, in either direction, and
+  neither can a conversion and a range render: frame generation already refused
+  to start while an export ran, but not the reverse, so both competed for the
+  GPU and the helper directory while the export's status line hid the
+  conversion's progress. Clearing the neural cache mid conversion is refused for
+  the same reason - it deletes the staging file and the output from under the
+  running pass. The export's cancel hint also names the menu it is actually in
+  (**DLSS > Convert & save > Cancel saving**, not File).
+- One muxer. `MuxVideoWithSourceStreams` was a second MKV stream-copy command
+  beside `BuildCachedExportArguments`; it is now an adapter over
+  `CachedVideoExporter`, which brings the exclusively created staging file and
+  the atomic rename with it. The pass requires its output to be named `.mkv`,
+  because that exporter picks the container from the extension and an `.mp4`
+  name would re-encode the frames it just generated.
+- `tools/verification/capture-window.ps1` captured the CLIENT rect while
+  `PrintWindow` renders the whole window, so every screenshot it has ever taken
+  cut the bottom of the window off - the status line and the seek bar. Two UI
+  defects were investigated from screenshots that could not show them.
 - `nvngx_dlssg.dll` ships beside the player and is held to the pinned SDK's own
   bytes by `tools/verify_package.ps1`. It is deliberately NOT a
   `packaging/runtime-lock.json` entry: that lock is the render helper's runtime

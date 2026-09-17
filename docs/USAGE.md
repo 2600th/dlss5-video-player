@@ -310,13 +310,46 @@ not affect the offline render. This adds no unverified sliders or presets.
 Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
 in the player; the old quality arguments and 4K launch scripts are retired.
 
+## Generate frames for a higher frame rate
+
+**DLSS > Generate frames (higher frame rate)** converts what you are watching to
+a higher frame rate. It is an offline conversion rather than a live mode: the
+file is converted once, written into the neural cache under `frame-generation/`,
+and playback switches to that file when the conversion finishes. Nothing is
+interleaved into the playback clock, so seeking, audio sync and dropped-frame
+accounting behave as they do on any other file. While it runs the status line
+carries the multiple, the target rate and the frames written so far, and names
+the way out; **DLSS > Cancel frame generation** stops it and leaves the video you
+were watching untouched.
+
+The multiple comes from the display rather than the source alone, because the
+point is a rate the panel can actually scan out at equal intervals. 30 fps
+becomes 60 on a 60 Hz panel and 120 at 4x on a 120 Hz panel; 24 fps film becomes
+120 at 5x on a 120 Hz panel. 24 fps on a 60 Hz panel is refused and says why: 48
+does not divide 60 evenly, so those frames could not be presented evenly. A
+still image, a source that reports no frame rate and a source that already meets
+the refresh are each refused with their own reason instead of a generic one.
+
+Watching the neural view converts the neural render rather than the original,
+but only when that render covers the whole source; a render covering one marked
+range is not a stand-in for the film, so the original is read instead. The
+confirmation names which of the two files it will read, the rate it is going from
+and to, and where the result will be written, before anything starts.
+
+The converted file carries the source's audio, subtitle and chapter streams by
+copy. The conversion adds frames without changing the length, so those streams
+still line up with no retime; a source that had audio and came back silent is
+reported as a failure rather than opened. **DLSS > Convert & save > Save
+converted video** then writes a copy wherever you want one.
+
 ## Save a converted video
 
 1. Open a photo, GIF or video and wait for validated cached playback, or
    convert a clip or the whole video first.
 2. Choose **DLSS > Convert & save > Save converted video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
-4. Continue playback while saving runs, or use **Cancel saving**.
+4. Continue playback while saving runs, or use **DLSS > Convert & save > Cancel
+   saving**.
 
 After a live session, the item is offered only once a single render covered the
 whole video; while coverage is still a set of regions filled by separate jobs

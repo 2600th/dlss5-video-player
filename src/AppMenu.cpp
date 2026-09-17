@@ -79,6 +79,12 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
     add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
     add(dlss, IDM_CANCEL_FRAME_GENERATION, L"menu.cancel_frame_generation");
+    // Grayed on creation like IDM_CANCEL_EXPORT below: main.cpp enables it once
+    // a converted file exists. Without it the output is unreachable after the
+    // confirmation dialog closes - the export item beside it is gated on a
+    // neural cache path a frame-generation output never has.
+    AppendMenuW(dlss, MF_STRING | MF_GRAYED, IDM_SHOW_FRAMEGEN_OUTPUT,
+                localizer.Get(L"menu.show_framegen_output").c_str());
     AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
     // Conversion writes a neural video to disk with the settings in the neural
@@ -226,7 +232,7 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality)
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
-                               bool frameGenerationAvailable, bool frameGenerationActive)
+                               bool frameGenerationAvailable, bool /*frameGenerationActive*/)
 {
     const auto update = [&](UINT command, bool available, bool checked) {
         const HMENU menu = find_menu_containing_command(menuBar, command);
@@ -238,9 +244,17 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                 ? MF_CHECKED : MF_UNCHECKED));
         return enabled != static_cast<UINT>(-1) && marked != static_cast<DWORD>(-1);
     };
+    // Frame generation gets its enable state and no checkmark: a check states a
+    // persistent mode, and this item is a one-shot action that starts a
+    // minutes-long conversion - the cancel item beside it is what reports that
+    // a conversion is running. The two real toggles keep their checkmarks.
+    const HMENU frameGeneration = find_menu_containing_command(menuBar, IDM_FRAME_GENERATION);
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
            update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
-           update(IDM_FRAME_GENERATION, frameGenerationAvailable, frameGenerationActive);
+           frameGeneration &&
+           EnableMenuItem(frameGeneration, IDM_FRAME_GENERATION,
+               MF_BYCOMMAND | (frameGenerationAvailable ? MF_ENABLED : MF_GRAYED)) !=
+               static_cast<UINT>(-1);
 }
 
 bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool rangeRenderAvailable,

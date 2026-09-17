@@ -382,6 +382,16 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         return fail(FrameGenerationError::InvalidRequest,
                     L"A multiplier below 2 generates no frames at all, so there is nothing for this pass to do.");
     }
+    // The mux is CachedVideoExporter driven with no trim, and that exporter
+    // picks its container from the output's extension: an .mp4 name would
+    // re-encode the video this pass just generated, and an unknown extension
+    // would be refused deeper in with an export's vocabulary. This pass writes
+    // Matroska, so the name has to say Matroska.
+    if (request.output.extension() != L".mkv" && request.output.extension() != L".MKV") {
+        return fail(FrameGenerationError::InvalidRequest,
+                    L"A frame-generation output has to be named .mkv: the pass writes Matroska, and the "
+                    L"container is taken from that name.");
+    }
     if (stop.stop_requested()) return cancelled();
 
     // Both declared before the encoder and the backend so they are destroyed
@@ -650,14 +660,29 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         }
     }
 
+    // DLSSG.BackbufferFrameID for every evaluate below. One decoded source
+    // frame is one "fully rendered backbuffer frame" here, so this counts
+    // source frames and every index generated inside a pair carries the id of
+    // the newer frame of that pair. It starts at 1 rather than 0 because 0 is
+    // the backend's "leave the key unset".
+    uint64_t backbufferFrameId = 1;
+
     // Establishes the temporal history the pairs interpolate from. Its output
     // is discarded: there is no frame before the first one, so a frame
     // "generated" here would sit between nothing and something. reset=true is
     // the documented way to state that discontinuity, and it is the same call
     // DlssgEvaluateSmoke makes on frame A before the measured evaluate.
     const auto establishHistory = [&] {
+        // multiFrameCount=1 on a reset, whatever the conversion's multiplier
+        // is, and that is a measured requirement rather than tidiness: handing
+        // the RESET evaluate a count above 1 makes this runtime hand back the
+        // newer source frame byte for byte at every index afterwards
+        // (tests/DlssgEvaluateSmoke.cpp, productionShape against
+        // countOneResetShape). It is also the honest declaration - a reset
+        // generates nothing, so there is no pair for it to subdivide.
         return backend.Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(), interpolated.Get(),
-                                generatedPerSource, 1, /*reset=*/true) &&
+                                /*multiFrameCount=*/1, /*multiFrameIndex=*/1, /*reset=*/true,
+                                backbufferFrameId) &&
                gpu.Flush();
     };
     if (!establishHistory()) {
@@ -683,6 +708,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
             return fail(FrameGenerationError::Source, L"The decoder produced a frame of an unexpected size.");
         }
         ++progress.sourceFramesRead;
+        ++backbufferFrameId;
         progress.sourceSeconds = double(decoded.timestamp100ns) / 10000000.0;
 
         // Presentation order: the older frame of the pair, then what is
@@ -722,7 +748,8 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         } else {
             for (uint32_t index = 1; index <= generatedPerSource; ++index) {
                 if (!backend.Evaluate(gpu.cmd.Get(), backbuffer.Get(), motion.Get(), depth.Get(),
-                                      interpolated.Get(), generatedPerSource, index, /*reset=*/false)) {
+                                      interpolated.Get(), generatedPerSource, index, /*reset=*/false,
+                                      backbufferFrameId)) {
                     result.evaluations = backend.EvaluationCount();
                     return fail(FrameGenerationError::Runtime,
                                 L"DLSS-G evaluate " + std::to_wstring(index) + L" of " +
@@ -799,11 +826,20 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     }
     if (stop.stop_requested()) return cancelled();
 
-    // What the source carries, measured BEFORE the mux so the finished file can
-    // be checked against it instead of trusted. Counts only: the mux does not
-    // need to know how long the source's audio is, only whether all of it
-    // arrived.
-    const MediaStreamSummary sourceStreams = SummarizeMediaStreams(helperDirectory_, request.source, stop);
+    // What the streams come FROM, which is not always what the frames came
+    // from. Converting the neural render - a video-only carrier this player
+    // writes with `-an` - would otherwise carry nothing and pass this check by
+    // comparing zero against zero, and the adopted file would play silent. The
+    // carrier is admissible only when it covers the whole source, so the
+    // original's audio lines up with it exactly as it lines up with the
+    // original, and no retime is involved either way.
+    const std::filesystem::path streamSource =
+        request.streamSource.empty() ? request.source : request.streamSource;
+
+    // What that source carries, measured BEFORE the mux so the finished file
+    // can be checked against it instead of trusted. Counts only: the mux does
+    // not need to know how long the audio is, only whether all of it arrived.
+    const MediaStreamSummary sourceStreams = SummarizeMediaStreams(helperDirectory_, streamSource, stop);
     if (stop.stop_requested()) return cancelled();
     if (!sourceStreams.ok) {
         return fail(FrameGenerationError::Encoder,
@@ -821,7 +857,7 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
     // Without this stage the pass produces video only and the player, which
     // starts audio from the file it loaded, plays the conversion silent.
     if (const EncodeError error = MuxVideoWithSourceStreams(helperDirectory_, stagingGuard.path,
-                                                            request.source, request.output, stop);
+                                                            streamSource, request.output, stop);
         error != EncodeError::None) {
         return fail(error == EncodeError::Cancelled ? FrameGenerationError::Cancelled
                                                     : FrameGenerationError::Encoder,

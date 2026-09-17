@@ -608,19 +608,87 @@ No path samples with jitter. A decoded frame is already a fixed sample grid, so 
 sub-pixel offset cannot reveal new detail; it only convolves the frame with a
 per-frame bilinear tent, and the neural-rendering feature does not read a jitter
 offset at all. `Jitter_Offset_X/Y` are pinned to zero for every evaluation.
+These controls do not alter the offline DLAA carrier or cache identity.
+
 Frame Generation is a conversion, not a presentation mode, and it is the one NGX
 feature the player creates besides Super Resolution. `FrameGenerationPass`
 decodes a file, evaluates `NVSDK_NGX_Feature_FrameGeneration` between each pair
 of source frames and encodes the result at the planned multiple of the source
-rate; the player then loads that file. `frame_rate_policy::PlanFrameGeneration`
-decides the multiple from the monitor's refresh rather than the source alone,
-and the runtime's own `DLSSG.MultiFrameCountMax` bounds it. Live pacing is
-deliberately absent: interleaving generated frames into the playback clock also
-means interleaving them with audio sync, dropped-frame accounting and seeking.
-`nvngx_dlssg.dll` is staged beside the player, not in `neural-runtime/` - NGX
-resolves a feature snippet from the directory of the process that creates the
-feature, and the render helper never creates this one.
-These controls do not alter the offline DLAA carrier or cache identity.
+rate; the player then loads that file. Live pacing is deliberately absent:
+interleaving generated frames into the playback clock also means interleaving
+them with audio sync, dropped-frame accounting and seeking. `nvngx_dlssg.dll` is
+staged beside the player, not in `neural-runtime/` - NGX resolves a feature
+snippet from the directory of the process that creates the feature, and the
+render helper never creates this one.
+
+The order is deliberately the opposite of NVIDIA's. NVIDIA's own pipeline
+upscales first and generates frames on the upscaled result; here the pass
+generates at the source's own resolution and the player's live Super Resolution
+then runs on the converted file. Two reasons, neither of them NVIDIA's
+ordering: an evaluate is charged per output pixel, so generating a 1280x720
+source at 1280x720 is cheaper than generating it at a 4K output rung; and
+runtime SR already applies to any file the player opens, so baking it into this
+one buys nothing and costs a second, larger neural pass.
+
+`frame_rate_policy::PlanFrameGeneration` decides the multiple from the monitor's
+refresh rather than the source alone, and the bound handed to it is
+`min(DLSSG.MultiFrameCountMax, frame_rate_policy::kPhaseVerifiedMultiFrameCount)`
+- the runtime's own answer held down to what has been measured to land on its
+intended phase, with the runtime's number logged unchanged so the gap stays
+visible. `kPhaseVerifiedMultiFrameCount` is 5 generated frames per source frame,
+and this RTX 5090 on driver 616.64 reports `MultiFrameCountMax` = 5 as well, so
+2x through 6x are admissible here and the minimum is not currently the limiting
+term. That is what lets the common cadences land on a 120 Hz panel exactly: 24
+fps at 5x is 120, 30 fps at 4x is 120. The refusals are unchanged - 24 fps on a
+60 Hz panel is still refused, because 48 does not divide 60 evenly and a
+fractional number of presents per source frame is judder, not smoothness.
+
+The phase evidence is a per-frame brightness centroid taken off a raw decode,
+and the instrument matters more than the multiplier does. Hashing the converted
+file's frames cannot answer the question at all: any such checksum runs on the
+decode of a lossy encode, so two byte-identical inputs still hash differently
+and every output frame looks distinct whether it is a repeat or not. The
+measurement that replaced it moves a 200x200 `testsrc2` patch over black across
+a 1280x720 30 fps clip, exactly 40 px per source frame, encoded FFV1 lossless;
+the output is decoded to raw gray and each frame's brightness centroid becomes a
+phase, `(centroid - previousSource) / (nextSource - previousSource)`, so index
+k of multiplier m should read k/m. Four consecutive intervals per multiplier,
+including the first interval after a reset, put every multiplier from 2x to 6x
+monotonic, strictly inside the pair and evenly spaced to within 0.11 of one
+interval, with a systematic slight-early bias rather than clustering: 2x reads
+0.474 against an ideal 0.500, and 6x reads 0.157 / 0.281 / 0.474 / 0.628 / 0.809
+against 0.167 / 0.333 / 0.500 / 0.667 / 0.833. The patch's interior texture is
+the whole trick. A flat white box has no detail to localise, so a generated
+frame is close to a blend of the pair and its centroid sits near the temporal
+midpoint; the same 4x conversion of a flat box reads 0.482 / 0.552 / 0.735, off
+by 0.232, and it was that probe rather than the runtime that produced the
+earlier claim that the generated indices compact toward the middle.
+
+Two constraints on how the feature may be driven, both measured here rather than
+inferred from the headers:
+
+- The RESET evaluate declares `multiFrameCount = 1` and `multiFrameIndex = 1`
+  whatever the conversion's multiplier is. A reset states that there is no
+  previous frame - the first frame of the file, or a decoder discontinuity - so
+  it generates nothing and has no pair to subdivide. Driving it with the pair's
+  own count instead is not a cosmetic mismatch: on a 4x conversion the first
+  interval after every reset came back as three byte-identical copies of the
+  newer source frame (phases 1.002 / 1.002 / 1.002), and the second interval came
+  back on a poisoned history at phases -0.634 / -0.107 / 0.565, outside the pair
+  entirely, recovering only from the third interval onward.
+- `DLSSG.BackbufferFrameID` is declared, one id per decoded source frame. The
+  runtime documents it as a counter that increments once per fully rendered
+  backbuffer frame; a decoded source frame is this pass's equivalent of one, so
+  every index generated inside a pair carries the id of the newer frame of that
+  pair rather than an id of its own.
+
+What the conversion reads is not a free choice either. The pass reads the neural
+render only when the neural view is on screen and that render covers the whole
+source; anything else - the original view, or a render covering only a marked
+range - reads the original file, and the confirmation names which of the two it
+will read before the conversion starts. A partial render is not an
+interchangeable input: converting it would hand back a file shorter than the
+source it claims to be.
 
 Cache misses invoke a hidden, job-owned helper through a versioned metadata pipe.
 Only paths and progress/results cross processes; encoded videos remain in the

@@ -1,5 +1,5 @@
 param([string]$Process = 'DLSSVideoPlayer',
-      [string]$DialogTitle = 'Generate frames (higher frame rate)...',
+      [string]$DialogTitle = 'Frame Generation',
       [int]$TimeoutSeconds = 600)
 # Drives the frame-generation conversion from outside the player: posts the menu
 # command, answers the confirmation, and waits for the worker to finish. The
@@ -16,7 +16,9 @@ Add-Type -Namespace Win -Name Drive -MemberDefinition @'
 '@
 $IDM_FRAME_GENERATION = 309
 $WM_COMMAND = 0x0111
-$IDOK = 1
+# The confirmation is Yes/No with No focused, so Enter cannot commit a
+# minutes-long GPU job by accident; this script has to answer IDYES.
+$IDYES = 6
 
 $p = Get-Process -Name $Process -ErrorAction Stop | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { throw "no window for $Process" }
@@ -35,8 +37,8 @@ while ((Get-Date) -lt $deadline -and $dialog -eq [IntPtr]::Zero) {
 }
 if ($dialog -eq [IntPtr]::Zero) { throw "no confirmation dialog appeared" }
 "confirmation dialog found: $dialog"
-[void][Win.Drive]::PostMessage($dialog, $WM_COMMAND, [IntPtr]$IDOK, [IntPtr]::Zero)
-"answered OK; waiting up to $TimeoutSeconds s"
+[void][Win.Drive]::PostMessage($dialog, $WM_COMMAND, [IntPtr]$IDYES, [IntPtr]::Zero)
+"answered Yes; waiting up to $TimeoutSeconds s"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 while ((Get-Date) -lt $deadline) {

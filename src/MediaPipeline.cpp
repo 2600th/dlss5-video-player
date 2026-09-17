@@ -1177,22 +1177,6 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
 
 namespace {
 
-// The MKV half of BuildCachedExportArguments without its trim: input 0 carries
-// the finished video, input 1 everything that travels with the source. Every
-// source map is optional (`?`), which is what lets a silent source through the
-// mux instead of failing it, and `-c copy` is what keeps this a mux - a
-// re-encode here would undo the very work that produced input 0.
-std::vector<std::wstring> BuildStreamCopyMuxArguments(const std::filesystem::path& video,
-                                                      const std::filesystem::path& sourceMedia,
-                                                      const std::filesystem::path& output)
-{
-    return {L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
-            L"-i", video.wstring(), L"-i", sourceMedia.wstring(),
-            L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?", L"-map", L"1:t?",
-            L"-map_metadata", L"1", L"-map_chapters", L"1",
-            L"-c", L"copy", L"-f", L"matroska", output.wstring()};
-}
-
 // Splits an ffprobe `key=value` stream into lines for `parse`, bounding a line
 // the way ProbeMedia does so a malformed file cannot grow this without bound.
 void ConsumeProbeLines(std::string& pending, bool& oversized, std::string_view chunk,
@@ -1218,27 +1202,36 @@ EncodeError MuxVideoWithSourceStreams(const std::filesystem::path& helperDirecto
 {
     if (video.empty() || sourceMedia.empty() || output.empty()) return EncodeError::InvalidSpecification;
     std::error_code error;
-    uintmax_t totalBytes = 0;
     for (const auto& input : {video, sourceMedia}) {
         if (!std::filesystem::is_regular_file(input, error) || error)
             return EncodeError::InvalidSpecification;
-        const auto bytes = std::filesystem::file_size(input, error);
-        if (!error) totalBytes += bytes;
     }
-    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
-    if (ffmpeg.empty()) return EncodeError::HelperMissing;
     if (stop.stop_requested()) return EncodeError::Cancelled;
-    // A stream copy is bound by the disk, so this takes ConcatenateMedia's
-    // budget for the same reason: ten minutes plus both inputs at 10 MB/s.
-    const CaptureResult capture = RunCapture(ffmpeg,
-        BuildStreamCopyMuxArguments(video, sourceMedia, output), stop,
-        MediaDeadline(double(totalBytes) / (10.0 * 1024.0 * 1024.0), std::chrono::minutes{10}, 1.0),
-        64 * 1024);
-    if (!capture.started) return EncodeError::StartFailed;
-    if (capture.cancelled || stop.stop_requested()) return EncodeError::Cancelled;
-    if (capture.timedOut || capture.exitCode != 0 || !std::filesystem::is_regular_file(output, error) || error)
-        return EncodeError::FinishFailed;
-    return EncodeError::None;
+    // The exporter refuses an output that exists, because an interactive export
+    // must not overwrite a file the user named. This output is not the user's:
+    // the frame-generation pass composes the path and guards it, and converting
+    // the same source twice has to keep working, so a leftover from an earlier
+    // run is cleared here. `remove` returning false with no error is the usual
+    // case of nothing being there; an error means the path is held open or is
+    // not a file we may replace, which the export itself could not recover
+    // from either.
+    if (!std::filesystem::remove(output, error) && error) return EncodeError::FinishFailed;
+    // The cached-range exporter is the only muxer: run with no trim it emits
+    // exactly this mux, and it brings the exclusively created staging file and
+    // the no-replace rename with it, so a failed run leaves no partial output.
+    const MaterializeResult result = CachedVideoExporter(helperDirectory).Run(
+        CachedExportRequest{.neuralVideo = video, .sourceMedia = sourceMedia, .output = output,
+                            .rangeStartSeconds = 0.0, .rangeDurationSeconds = 0.0}, stop);
+    if (result.ok) return EncodeError::None;
+    switch (result.error) {
+    case MaterializeError::Cancelled: return EncodeError::Cancelled;
+    case MaterializeError::HelperMissing: return EncodeError::HelperMissing;
+    case MaterializeError::InvalidRequest: return EncodeError::InvalidSpecification;
+    case MaterializeError::StartFailed: return EncodeError::StartFailed;
+    // ProcessFailed and anything added later: the mux ran and did not produce
+    // the output.
+    default: return EncodeError::FinishFailed;
+    }
 }
 
 MediaStreamSummary SummarizeMediaStreams(const std::filesystem::path& helperDirectory,

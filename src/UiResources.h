@@ -12,6 +12,7 @@ enum class UiIcon {
     Volume,
     VolumeOff,
     Sparkles,
+    FrameGeneration,
     Crop,
     Adjustments,
     Debug,

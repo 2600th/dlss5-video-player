@@ -380,7 +380,7 @@ std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::
     if (error) { failure.error = error; return std::nullopt; }
     const auto writableRoot = ResolveWritableRoot(resolved, error);
     if (!writableRoot) { failure.error = error; return std::nullopt; }
-    for (const auto directory : {L"sources", L"renders", L"staging"}) {
+    for (const auto directory : {L"sources", L"renders", L"staging", L"frame-generation"}) {
         std::filesystem::create_directories(*writableRoot / directory, error);
         if (error) {
             failure.error = error;
@@ -1180,7 +1180,11 @@ uintmax_t NeuralCacheManager::SizeBytes() const
 bool NeuralCacheManager::Clear()
 {
     if (!valid_) return false;
-    for (const auto name : {L"sources", L"renders", L"staging"}) {
+    // frame-generation holds the player's converted videos. Leaving it out made
+    // the Clear prompt lie: SizeBytes recurses the whole root, so the dialog
+    // offered to free bytes it then kept, and generated files accumulated with
+    // no surface in the player able to delete them.
+    for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation"}) {
         const auto target = root_ / name;
         if (!OwnsPath(target)) return false;
         std::error_code error;

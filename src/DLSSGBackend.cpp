@@ -439,7 +439,8 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
                             ID3D12Resource* outputInterpolated,
                             uint32_t multiFrameCount,
                             uint32_t multiFrameIndex,
-                            bool reset)
+                            bool reset,
+                            uint64_t backbufferFrameId)
 {
     if (!Available() || !m_handle || !cmd || !backbuffer || !motion || !depth || !outputInterpolated) return false;
     // The index is 1-based and bounded by the count, and the count by what the
@@ -473,6 +474,17 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
     evalParams.pBidirectionalDistortionField = nullptr;
     evalParams.pOutputRealFrame = nullptr;
     evalParams.pOutputDisableInterpolation = nullptr;
+
+    // DLSSG.BackbufferFrameID, set before the helper writes the rest of the
+    // block so it travels with this evaluate. It is not in
+    // NVSDK_NGX_DLSSG_Opt_Eval_Params - the vendored struct has no field for it
+    // - so it is written straight onto the parameter block the way the create
+    // path writes DLSSG.Width/Height. Left unset at 0: a runtime that reads the
+    // key is better off seeing it absent than seeing a counter that restarted.
+    if (backbufferFrameId != 0) {
+        NVSDK_NGX_Parameter_SetULL(m_params, NVSDK_NGX_DLSSG_Parameter_BackbufferFrameID,
+                                   backbufferFrameId);
+    }
 
     NVSDK_NGX_DLSSG_Opt_Eval_Params constants = VideoEvalConstants(multiFrameCount, multiFrameIndex, reset);
 

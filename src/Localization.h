@@ -38,6 +38,67 @@ private:
             {L"menu.upscale_1080", L"1080p"}, {L"menu.upscale_1440", L"1440p"}, {L"menu.upscale_2160", L"2160p (4K)"},
             {L"menu.frame_generation", L"Generate frames (higher frame rate)..."},
             {L"menu.cancel_frame_generation", L"Cancel frame generation"},
+            {L"menu.show_framegen_output", L"Show converted file"},
+            // Frame generation names ONE feature on every surface. Before this
+            // block the menu called it "Generate frames", the toolbar pill
+            // called it "Frame Generation" and the status line called it "FG" -
+            // three names for one feature in a single screenshot, four while it
+            // ran. The control is "Frame Generation"; "Generate frames" is only
+            // the verb on the action item.
+            {L"framegen.title", L"Frame Generation"},
+            {L"framegen.pill.generate", L"Frame Generation \u00b7 Generate"},
+            {L"framegen.pill.cancel", L"Frame Generation \u00b7 Cancel"},
+            {L"framegen.pill.busy", L"Frame Generation \u00b7 Busy"},
+            {L"framegen.pill.unavailable", L"Frame Generation \u00b7 Unavailable"},
+            {L"framegen.status.ready", L"Frame Generation ready "},
+            // Ready in every way the player can check without the GPU; the
+            // runtime's own admission is measured inside the first conversion,
+            // because a second NGX feature create beside the renderer's own
+            // froze presentation when it was tried in the background. No
+            // multiple is promised here, because the cap could still narrow it.
+            {L"framegen.status.ready_unchecked", L"Frame Generation ready"},
+            {L"framegen.status.busy", L"Frame Generation waits for the current job"},
+            // Printed with the refusal's short form in brackets, so the line
+            // reads "Frame Generation off (no even multiple of the refresh)".
+            {L"framegen.status.off", L"Frame Generation off"},
+            {L"framegen.status.generating", L"Generating frames"},
+            {L"framegen.status.stopping", L"Stopping frame generation"},
+            {L"framegen.status.cancel_hint", L"Cancel: DLSS > Cancel frame generation"},
+            // Refusals. The long form is what a dialog shows; the short form is
+            // what fits the status line. The status line used to print the log
+            // slug ("no-even-multiple"), which is a developer identifier in a
+            // user's face while a written sentence sat unused beside it.
+            {L"framegen.refusal.unknown_rate", L"This video does not report a frame rate, so there is no interval to generate inside."},
+            {L"framegen.refusal.unknown_rate.short", L"no frame rate"},
+            {L"framegen.refusal.still_image", L"A still image has no second frame to generate between."},
+            {L"framegen.refusal.still_image.short", L"still image"},
+            {L"framegen.refusal.variable_rate", L"This video's frame rate varies, and generated frames need a constant one."},
+            {L"framegen.refusal.variable_rate.short", L"variable frame rate"},
+            {L"framegen.refusal.unknown_refresh", L"Windows did not report a refresh rate for this display."},
+            {L"framegen.refusal.unknown_refresh.short", L"no display refresh"},
+            {L"framegen.refusal.meets_refresh", L"This video already runs at or above what this display can show, so generated frames would never be presented."},
+            {L"framegen.refusal.meets_refresh.short", L"already matches the display"},
+            {L"framegen.refusal.no_multiple", L"No whole multiple of this video's frame rate divides this display's refresh evenly, so generated frames would trade one uneven cadence for another."},
+            {L"framegen.refusal.no_multiple.short", L"no even multiple of the refresh"},
+            {L"framegen.refusal.runtime", L"This GPU and driver admit no generated frames."},
+            {L"framegen.refusal.runtime.short", L"refused by the driver"},
+            {L"framegen.refusal.no_local_copy", L"This source is still streaming. Frame generation needs the local copy the player keeps while it plays."},
+            {L"framegen.refusal.no_local_copy.short", L"needs a local copy"},
+            {L"framegen.refusal.unchanged", L"\n\nNothing was changed and your video is still playing."},
+            {L"framegen.driver_next_step", L"\n\nUpdate the NVIDIA driver and try again."},
+            // %u is the multiplier, then the source and target rates as text so
+            // one formatter renders every rate the user sees.
+            {L"framegen.confirm", L"Generate %u\u00d7 the frames of this video: %s fps \u2192 %s fps.\n\nThe converted file is kept with the player's converted videos; DLSS > Show converted file opens it. Playback switches to it when the conversion finishes.\n\nStart the conversion?"},
+            {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted."},
+            {L"framegen.exists", L"This video has already been converted:\n%s\n\nPlay that file instead of converting again?\n\nYes plays it. No converts again and replaces it."},
+            {L"framegen.worker_failed", L"The conversion could not start. Try again."},
+            {L"export.worker_failed", L"Saving could not start. Try again."},
+            {L"framegen.cache_failed", L"The converted file could not be created where the player keeps its converted videos. Check that the cache folder is writable."},
+            {L"framegen.failed", L"The conversion did not finish, so nothing was written and your video is unchanged.\n\nSee DLSSVideoPlayer.log for what the runtime reported."},
+            {L"framegen.finished_elsewhere", L"The conversion finished for a video you have since left, so playback was left alone.\n\nDLSS > Show converted file opens the new file."},
+            {L"framegen.reveal_failed", L"The converted file could not be shown. It may have been moved or deleted."},
+            {L"export.title.failed", L"Save failed"},
+            {L"export.title.complete", L"Save complete"},
             {L"menu.rehook", L"Recreate NGX / re-hook DLSS 5\tF6"},
             {L"menu.preview_frame", L"Preview this frame (neural)\tF"}, {L"menu.preview_clip", L"Preview 4 s clip (neural)\tShift+F"},
             {L"menu.convert", L"Convert && save"},

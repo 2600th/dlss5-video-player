@@ -53,6 +53,9 @@ inline constexpr UINT IDM_UPSCALE_1080 = 335;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
 inline constexpr UINT IDM_CANCEL_FRAME_GENERATION = 338;
+// Outside 334..337 for the same reason, and the only surface that can reach a
+// converted file once its confirmation dialog is gone.
+inline constexpr UINT IDM_SHOW_FRAMEGEN_OUTPUT = 339;
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
 inline constexpr UINT IDM_FULLSCREEN = 402;
@@ -94,6 +97,9 @@ bool UpdateSourceActionAvailability(HMENU menuBar, bool openEnabled,
 std::optional<YouTubeSourceQuality> YouTubeQualityForCommand(UINT command);
 UINT CommandForYouTubeQuality(YouTubeSourceQuality quality);
 bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality);
+// The two toggles carry a checkmark for their active state; frame generation
+// does not, so frameGenerationActive is accepted and ignored - the item is a
+// one-shot conversion, and a check on it stated a mode the player never has.
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,

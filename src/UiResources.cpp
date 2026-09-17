@@ -18,6 +18,16 @@ wchar_t GlyphForIcon(UiIcon icon)
     case UiIcon::Volume: return L'\xeb51';           // volume
     case UiIcon::VolumeOff: return L'\xf1c3';        // volume-off
     case UiIcon::Sparkles: return L'\xf6d7';         // sparkles
+    // copy-plus: a duplicated frame with a plus, the one glyph in the embedded
+    // 3.46.0 set that reads as "more frames out of one frame". Verified present
+    // in the committed tabler-icons.ttf cmap (U+FDAE, 15 contours), so it needs
+    // no fallback. Picked over keyframes (U+F585, a timeline key row - an
+    // editing concept, not a frame count) and multiplier-2x (U+EF44, which
+    // states a fixed 2x while the planned multiple is measured per source).
+    // It must not be sparkles: the three feature pills collapse to icon-only
+    // at 44/36 dip, where three identical sparkles hid which one starts a
+    // minutes-long conversion.
+    case UiIcon::FrameGeneration: return L'\xfdae'; // copy-plus
     case UiIcon::Crop: return L'\xea85';             // crop
     case UiIcon::Adjustments: return L'\xea03';      // adjustments
     case UiIcon::Debug: return L'\xea48';            // bug

@@ -432,15 +432,6 @@ void check_toolbar_items_do_not_overlap(const std::vector<ToolbarItem>& items)
 
 void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
 {
-    const std::vector<ToolbarAction> requiredNarrow{
-        ToolbarAction::Open,
-        ToolbarAction::PlayPause,
-        ToolbarAction::Mute,
-        ToolbarAction::ToggleNeuralRendering,
-        ToolbarAction::ToggleUpscaling,
-        ToolbarAction::ToggleFrameGeneration,
-        ToolbarAction::Fullscreen,
-    };
     const std::vector<ToolbarAction> allActions{
         ToolbarAction::Open,
         ToolbarAction::Back10,
@@ -457,17 +448,44 @@ void toolbar_layout_selects_stable_action_sets_for_width_modes_test()
         ToolbarAction::Fullscreen,
     };
 
-    const auto narrow = LayoutToolbar(320, 180, 96);
-    CHECK_EQ(requiredNarrow, toolbar_actions(narrow));
-    for (const auto& item : narrow) CHECK(item.compact);
-
+    // The required set is whatever the layout keeps at its own minimum width,
+    // measured here rather than restated: a copy of the list only reported
+    // that somebody had edited the toolbar, which is how this test failed when
+    // the frame-generation pill stopped being required.
     const auto normal = LayoutToolbar(MinimumToolbarClientWidth(96), 180, 96);
-    CHECK_EQ(requiredNarrow, toolbar_actions(normal));
+    const std::vector<ToolbarAction> required = toolbar_actions(normal);
+    CHECK(!required.empty());
     for (const auto& item : normal) CHECK(!item.compact);
+
+    // Below that width nothing required drops off the bar - the pills only go
+    // compact - so every action reachable at 320 px is reachable at any width.
+    const auto narrow = LayoutToolbar(320, 180, 96);
+    CHECK_EQ(required, toolbar_actions(narrow));
+    for (const auto& item : narrow) CHECK(item.compact);
 
     const auto wide = LayoutToolbar(1600, 180, 96);
     CHECK_EQ(allActions, toolbar_actions(wide));
     for (const auto& item : wide) CHECK(!item.compact);
+
+    // Whatever the required set holds, it keeps the wide bar's order, so a
+    // pill never jumps across its neighbours when the window is resized. And
+    // opening a file, starting playback and leaving fullscreen have to stay
+    // reachable at the narrowest window the player allows.
+    const auto is_ordered_subset = [](const std::vector<ToolbarAction>& subset,
+                                      const std::vector<ToolbarAction>& full) {
+        auto cursor = full.begin();
+        for (const ToolbarAction action : subset) {
+            cursor = std::find(cursor, full.end(), action);
+            if (cursor == full.end()) return false;
+            ++cursor;
+        }
+        return true;
+    };
+    CHECK(is_ordered_subset(required, allActions));
+    for (const ToolbarAction action : {ToolbarAction::Open, ToolbarAction::PlayPause,
+                                       ToolbarAction::Fullscreen}) {
+        CHECK(std::find(required.begin(), required.end(), action) != required.end());
+    }
 }
 
 void toolbar_layout_preserves_group_separation_test()
@@ -537,23 +555,24 @@ void toolbar_hit_testing_is_half_open_and_boundary_stable_test()
 
 void minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test()
 {
-    const std::vector<ToolbarAction> requiredNarrow{
-        ToolbarAction::Open,
-        ToolbarAction::PlayPause,
-        ToolbarAction::Mute,
-        ToolbarAction::ToggleNeuralRendering,
-        ToolbarAction::ToggleUpscaling,
-        ToolbarAction::ToggleFrameGeneration,
-        ToolbarAction::Fullscreen,
-    };
+    // Measured from the layout at 96 dpi instead of listed: the set's
+    // membership is the toolbar's business, and what this test owns is that
+    // the floor produces the same set, uncompacted, at every dpi.
+    const std::vector<ToolbarAction> requiredNarrow =
+        toolbar_actions(LayoutToolbar(MinimumToolbarClientWidth(96), 400, 96));
+    CHECK(!requiredNarrow.empty());
 
     for (const UINT dpi : {0u, 96u, 120u, 144u, 192u}) {
         const UINT effectiveDpi = dpi == 0 ? 96 : dpi;
         const int clientWidth = MinimumToolbarClientWidth(dpi);
-        const auto items = LayoutToolbar(clientWidth,
-                                         MulDiv(400, static_cast<int>(effectiveDpi), 96), dpi);
+        const int clientHeight = MulDiv(400, static_cast<int>(effectiveDpi), 96);
+        const auto items = LayoutToolbar(clientWidth, clientHeight, dpi);
         CHECK_EQ(requiredNarrow, toolbar_actions(items));
-        CHECK_EQ(static_cast<size_t>(7), items.size());
+        // The floor is exact: one pixel less and the same pills have to shrink
+        // to their compact form, which is what the minimum track size buys.
+        const auto belowFloor = LayoutToolbar(clientWidth - 1, clientHeight, dpi);
+        CHECK_EQ(requiredNarrow, toolbar_actions(belowFloor));
+        for (const auto& item : belowFloor) CHECK(item.compact);
         for (const auto& item : items) {
             CHECK(!item.compact);
             CHECK(item.bounds.bottom - item.bounds.top >= MulDiv(36, static_cast<int>(effectiveDpi), 96));
@@ -607,7 +626,9 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     const ToolbarAvailability withoutRenderer{true, false, false};
     CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleNeuralRendering, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, withoutRenderer));
-    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, withoutRenderer));
+    // Frame generation is not on the renderer's gate here: the assertion that
+    // used to sit at this line read as "no renderer, so no conversion" while
+    // passing only because availability was false. Its real rule is below.
     CHECK(!IsToolbarActionEnabled(ToolbarAction::Adjustments, withoutRenderer));
     CHECK(!IsToolbarActionEnabled(ToolbarAction::DebugView, withoutRenderer));
     const ToolbarAvailability seeking{true, true, true};
@@ -617,6 +638,33 @@ void toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test()
     CHECK_EQ(ToolbarAction::Adjustments,
              NextFocusableToolbarAction(loadedItems, ToolbarAction::Mute, false,
                                         seeking));
+}
+
+// The frame-generation pill answers to exactly two facts, and a seek is not
+// one of them: a conversion reads the whole file, so it can be started while
+// the playhead is moving. Restating the seek gate here is what greyed the pill
+// out mid-seek while the identically-named menu item stayed live.
+void frame_generation_pill_follows_media_and_availability_only_test()
+{
+    ToolbarAvailability ready{};
+    ready.mediaLoaded = true;
+    ready.frameGenerationAvailable = true;
+    CHECK(IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, ready));
+
+    ToolbarAvailability withoutMedia = ready;
+    withoutMedia.mediaLoaded = false;
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, withoutMedia));
+
+    ToolbarAvailability withoutAvailability = ready;
+    withoutAvailability.frameGenerationAvailable = false;
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, withoutAvailability));
+
+    ToolbarAvailability seekingReady = ready;
+    seekingReady.seeking = true;
+    CHECK(IsToolbarActionEnabled(ToolbarAction::ToggleFrameGeneration, seekingReady));
+    // The pills beside it do stop during a seek, so the difference is the
+    // point and not an accident of this availability value.
+    CHECK(!IsToolbarActionEnabled(ToolbarAction::ToggleUpscaling, seekingReady));
 }
 
 void open_action_content_keeps_idle_and_toolbar_copy_distinct_test()
@@ -762,31 +810,62 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.renderedFps = 58.4;
     status.sourceFps = 59.94;
     status.droppedFrames = 3;
-    // The components a viewer reads off the bar: which runtime is active, the
-    // three geometries, the quality name, the two frame rates rounded to whole
-    // frames, and the dropped count. Their separator and order are the bar's
-    // own business.
+    // Stand-ins for whatever the two producers say: the bar does not compose
+    // this copy, it carries it, so the test states that and not the wording of
+    // the day. Both fields are always assigned by their producers, and the old
+    // "unavailable" fallbacks for an empty field are gone with them.
+    status.upscalingStatus = L"<upscaling segment>";
+    status.frameGenerationStatus = L"<frame generation segment>";
+    // The components a viewer reads off the bar: which runtime is active, both
+    // feature segments verbatim, the source geometry, the output geometry when
+    // the pipeline changed it, the quality name, both frame rates rounded to
+    // whole frames, and a dropped count only when frames were dropped. Their
+    // separator and order are the bar's own business.
+    //
+    // The DLSS input geometry is deliberately NOT here: it only ever repeated
+    // the source or the output, and this line is drawn into one ellipsised row
+    // where a repeated fact costs a fact that is not.
     const auto shows = [](const std::wstring& text, std::wstring_view part) {
         return text.find(part) != std::wstring::npos;
     };
     const std::wstring neural = BuildPlayerStatusText(status);
     CHECK(shows(neural, L"Neural addon enabled"));
-    CHECK(shows(neural, L"DLSS SR unavailable"));
+    CHECK(shows(neural, status.upscalingStatus));
+    CHECK(shows(neural, status.frameGenerationStatus));
     CHECK(shows(neural, L"1920\u00d71080"));
-    CHECK(shows(neural, L"1280\u00d7720"));
     CHECK(shows(neural, L"3840\u00d72160"));
     CHECK(shows(neural, L"Quality"));
-    CHECK(shows(neural, L"58 rendered"));
-    CHECK(shows(neural, L"60 source"));
+    CHECK(shows(neural, L"58"));
+    CHECK(shows(neural, L"60"));
+    CHECK(shows(neural, L"fps"));
     CHECK(shows(neural, L"Dropped 3"));
+    // Rounded, never the raw double: a status line that reads 58.4 implies a
+    // precision the sampled rate does not have.
     CHECK(!shows(neural, L"58.4"));
     CHECK(!shows(neural, L"59.94"));
 
-    status.upscalingStatus = L"DLSS SR 2x";
+    // A source the pipeline did not resize prints ONE geometry, not the same
+    // numbers two or three times.
+    PlayerStatusSnapshot unresized = status;
+    unresized.outputWidth = unresized.sourceWidth;
+    unresized.outputHeight = unresized.sourceHeight;
+    unresized.droppedFrames = 0;
+    const std::wstring passthrough = BuildPlayerStatusText(unresized);
+    const auto occurrences = [](const std::wstring& text, std::wstring_view part) {
+        size_t count = 0;
+        for (size_t at = text.find(part); at != std::wstring::npos; at = text.find(part, at + 1)) ++count;
+        return count;
+    };
+    CHECK_EQ(size_t(1), occurrences(passthrough, L"1920\u00d71080"));
+    // And a clean run says nothing about dropped frames at all.
+    CHECK(!shows(passthrough, L"Dropped"));
+
+    // Changing one segment changes only that segment.
+    status.upscalingStatus = L"DLSS Upscaling on \u00b7 3840\u00d72160 (auto)";
     const std::wstring upscaling = BuildPlayerStatusText(status);
-    CHECK(shows(upscaling, L"DLSS SR 2x"));
-    CHECK(!shows(upscaling, L"DLSS SR unavailable"));
-    status.upscalingStatus.clear();
+    CHECK(shows(upscaling, status.upscalingStatus));
+    CHECK(shows(upscaling, status.frameGenerationStatus));
+    CHECK(!shows(upscaling, L"<upscaling segment>"));
 
     status.runtimeConfiguration = PlayerRuntimeConfiguration::DlssSrSafeMode;
     status.dlssState = PlayerDlssState::Active;
@@ -1106,28 +1185,6 @@ void button_content_layout_centers_combined_icon_and_label_without_outline_conta
     }
 }
 
-void feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test()
-{
-    struct FeatureWidth { ToolbarAction action; int minimumWidthDip; };
-    constexpr FeatureWidth features[]{
-        {ToolbarAction::ToggleNeuralRendering, 270},
-        {ToolbarAction::ToggleUpscaling, 230},
-        {ToolbarAction::ToggleFrameGeneration, 320},
-    };
-    for (const UINT dpi : {96u, 120u, 144u, 192u}) {
-        const auto items = LayoutToolbar(MinimumToolbarClientWidth(dpi),
-                                         MulDiv(360, static_cast<int>(dpi), 96), dpi);
-        for (const auto& feature : features) {
-            const ToolbarItem* item = find_toolbar_item(items, feature.action);
-            CHECK(item != nullptr);
-            if (!item) continue;
-            CHECK(item->bounds.right - item->bounds.left >=
-                  MulDiv(feature.minimumWidthDip, static_cast<int>(dpi), 96));
-        }
-        check_toolbar_items_do_not_overlap(items);
-    }
-}
-
 void prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test()
 {
     const auto inside=[](const RECT& inner,const RECT& outer){
@@ -1176,6 +1233,10 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
     CHECK(!has_menu_text(entries, L"Frame Generation\tUnavailable in this build"));
 
+    // The two real toggles report a mode, so they carry a checkmark. Frame
+    // generation is an action that starts a one-shot conversion: a check on it
+    // would state a mode the player never has, so it gets an enable state and
+    // nothing else, whatever its arguments say.
     CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
                                               false, false, false, false));
     const UINT neural = GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND);
@@ -1185,12 +1246,24 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK((neural & MF_CHECKED) != 0);
     CHECK((upscaling & (MF_DISABLED | MF_GRAYED)) != 0);
     CHECK((frameGeneration & (MF_DISABLED | MF_GRAYED)) != 0);
+    CHECK((frameGeneration & MF_CHECKED) == 0);
     // And it enables when the player says a conversion is possible, which the
-    // permanently-false argument could never show.
+    // permanently-false argument could never show - still without a check,
+    // with both toggles on and checked beside it.
     CHECK(app_menu::UpdateFeatureAvailability(menu, true, true, true,
-                                              false, false, true, false));
-    CHECK((GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND) &
-           (MF_DISABLED | MF_GRAYED)) == 0);
+                                              true, true, true, true));
+    const UINT enabledFrameGeneration =
+        GetMenuState(menu, app_menu::IDM_FRAME_GENERATION, MF_BYCOMMAND);
+    CHECK((enabledFrameGeneration & (MF_DISABLED | MF_GRAYED)) == 0);
+    CHECK((enabledFrameGeneration & MF_CHECKED) == 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_DLSS_UPSCALING, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    // The converted file is unreachable until one exists: the item that opens
+    // it is created greyed and only main.cpp's own state can enable it, so no
+    // availability argument here may light it up.
+    const UINT showOutput = GetMenuState(menu, app_menu::IDM_SHOW_FRAMEGEN_OUTPUT, MF_BYCOMMAND);
+    CHECK(showOutput != static_cast<UINT>(-1));
+    CHECK((showOutput & (MF_DISABLED | MF_GRAYED)) != 0);
     if (menu) DestroyMenu(menu);
 }
 
@@ -2687,93 +2760,182 @@ void ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test()
     CHECK(!playback_timing::ForecastLiveRender(3840, 2160, 30.0, measured1080p, ada).keepsUp);
 }
 
-// DLSSG.MultiFrameCountMax exactly as the runtime reported it on the RTX 5090 /
-// driver 616.64 (DlssgProbeSmoke), so the cases below are planned against the
-// cap this project has actually seen rather than an invented one.
-constexpr uint32_t kMeasuredMultiFrameCountMax = 5;
-
 // The panel is half of every answer here, which is what separates this policy
 // from "double anything under 45 fps". Each row below is a case where the
 // source-only rule and this one disagree, or where a plausible refactor would
 // quietly start generating frames the display cannot scan out evenly.
+//
+// Every row is planned against frame_rate_policy::kPhaseVerifiedMultiFrameCount
+// rather than a literal cap. That constant is a measurement of where the
+// generated frames actually land - it has already moved once, from one
+// generated frame to five, when the phase probe was changed from a flat white
+// box (no interior detail to localise, so the generated frame measures as a
+// blend near the midpoint) to a textured patch - so the suite has to follow it
+// instead of restating today's value. Where a case is about the RUNTIME
+// bounding the plan, DLSSG.MultiFrameCountMax is passed explicitly, because
+// there the argument is the point.
 void frame_generation_plan_follows_the_panel_not_just_the_source_test()
 {
     using namespace frame_rate_policy;
     const auto plan = [](double fps, double refresh,
-                         uint32_t max = kMeasuredMultiFrameCountMax) {
+                         uint32_t max = kPhaseVerifiedMultiFrameCount) {
         return PlanFrameGeneration(SourceCadence{fps, false, true}, refresh, max);
     };
 
-    // 30 -> 60 on a 60 Hz panel: every generated frame is scanned out once.
-    const auto thirty60 = plan(30.0, 60.0);
-    CHECK(thirty60.Generates());
-    CHECK_EQ(thirty60.multiplier, 2u);
-    CHECK_EQ(thirty60.generatedPerSource, 1u);
-    CHECK_EQ(thirty60.targetFps, 60.0);
-    CHECK_EQ(thirty60.presentsPerFrame, 1u);
+    // 24 fps film on a 120 Hz panel: 5x lands exactly on the refresh, every
+    // frame is scanned out once and the 3:2 pulldown disappears. This is the
+    // largest win the policy has and the reason the ceiling matters: while the
+    // phase-verified count was one generated frame, this case planned nothing
+    // at all and the viewer kept the pulldown. 6x, which the runtime would also
+    // admit, overshoots the panel at 144 and is correctly passed over - the cap
+    // is not the target, the refresh is.
+    const auto film120 = plan(24.0, 120.0);
+    CHECK(film120.Generates());
+    CHECK_EQ(5u, film120.multiplier);
+    CHECK_EQ(4u, film120.generatedPerSource);
+    CHECK_EQ(120.0, film120.targetFps);
+    CHECK_EQ(1u, film120.presentsPerFrame);
 
-    // 60 on a 60 Hz panel is the refusal the source already earns.
-    CHECK(!plan(60.0, 60.0).Generates());
-    CHECK(plan(60.0, 60.0).refusal == FrameGenerationRefusal::SourceMeetsRefresh);
-
-    // 24 on 60 Hz: 2x is 48 and 60/48 is 1.25, so the only integer multiple
-    // under the refresh cannot be presented evenly. A source-only rule doubles
-    // here and buys a different judder; this refuses and says why.
+    // The same source on 60 Hz stays refused: 2x is 48 and 60/48 is 1.25, so
+    // the only multiple under the refresh cannot be presented evenly. A
+    // source-only rule doubles here and buys a different judder.
     CHECK(!plan(24.0, 60.0).Generates());
     CHECK(plan(24.0, 60.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
 
-    // The same source on a 120 Hz panel is the largest win available: 5x lands
-    // exactly on the refresh and the 3:2 pulldown is gone. 6x, which the
-    // runtime's cap would also allow, overshoots the panel at 144 and is
-    // correctly passed over - the cap is not the target, the refresh is.
-    const auto film120 = plan(24.0, 120.0);
-    CHECK_EQ(film120.multiplier, 5u);
-    CHECK_EQ(film120.generatedPerSource, 4u);
-    CHECK_EQ(film120.targetFps, 120.0);
-    CHECK_EQ(film120.presentsPerFrame, 1u);
+    // 30 fps on 120 Hz: 4x reaches the refresh exactly. 5x and 6x overshoot.
+    const auto thirty120 = plan(30.0, 120.0);
+    CHECK_EQ(4u, thirty120.multiplier);
+    CHECK_EQ(3u, thirty120.generatedPerSource);
+    CHECK_EQ(120.0, thirty120.targetFps);
+    CHECK_EQ(1u, thirty120.presentsPerFrame);
 
-    // NTSC rates against a refresh Windows reports as a whole number. 23.976 x 5
-    // is 119.88 against a mode called 120, which is inside the tolerance and
-    // must not be read as uneven.
-    const auto ntsc120 = plan(24000.0 / 1001.0, 120.0);
-    CHECK(ntsc120.Generates());
-    CHECK_EQ(ntsc120.presentsPerFrame, 1u);
-    CHECK(ntsc120.targetFps > 119.0 && ntsc120.targetFps < 120.0);
+    // 30 -> 60 on a 60 Hz panel: the doubling case, one scan-out per frame.
+    const auto thirty60 = plan(30.0, 60.0);
+    CHECK_EQ(2u, thirty60.multiplier);
+    CHECK_EQ(1u, thirty60.generatedPerSource);
+    CHECK_EQ(60.0, thirty60.targetFps);
+    CHECK_EQ(1u, thirty60.presentsPerFrame);
 
-    // PAL: nothing divides 60 evenly, 100 Hz takes 4x.
+    // 60 -> 120 on a 120 Hz panel is the same shape one octave up.
+    const auto sixty120 = plan(60.0, 120.0);
+    CHECK_EQ(2u, sixty120.multiplier);
+    CHECK_EQ(120.0, sixty120.targetFps);
+    CHECK_EQ(1u, sixty120.presentsPerFrame);
+
+    // 60 on a 60 Hz panel names the reason a viewer can act on (get a faster
+    // panel) rather than the true and useless "no even multiple".
+    CHECK(!plan(60.0, 60.0).Generates());
+    CHECK(plan(60.0, 60.0).refusal == FrameGenerationRefusal::SourceMeetsRefresh);
+
+    // The NTSC family against a refresh Windows reports as a whole number:
+    // 24000/1001 x 5 is 119.88 against a mode called 120, which is inside
+    // kRateTolerance (0.005, and 120/119.88 is 1.001 of a scan-out) and must
+    // not be read as uneven. The plan carries the source's own rate times the
+    // multiplier, not a rounded 120 - the conversion is driven at this rate and
+    // a rounded one would drift against the audio.
+    const double ntsc = 24000.0 / 1001.0;
+    const auto ntsc120 = plan(ntsc, 120.0);
+    CHECK_EQ(5u, ntsc120.multiplier);
+    CHECK_EQ(ntsc * 5.0, ntsc120.targetFps);
+    CHECK(ntsc120.targetFps < 120.0);
+    CHECK(120.0 - ntsc120.targetFps < 120.0 * kRateTolerance);
+    CHECK_EQ(1u, ntsc120.presentsPerFrame);
+
+    // A runtime that admits fewer frames than the phase measurement verified
+    // bounds the plan: the player takes min(runtime max, phase-verified max),
+    // and a machine reporting one generated frame must lose the 24 -> 120 case
+    // entirely rather than fall back to 2x = 48 on a 120 Hz panel (120/48 is
+    // 2.5 scan-outs, which is the judder this policy refuses).
+    CHECK(!plan(24.0, 120.0, 1).Generates());
+    CHECK(plan(24.0, 120.0, 1).refusal == FrameGenerationRefusal::NoEvenMultiple);
+    // The doubling case survives that same runtime, because it only ever needed
+    // one generated frame.
+    CHECK_EQ(2u, plan(30.0, 60.0, 1).multiplier);
+    // And a runtime that admits nothing is a refusal with a reason, not a
+    // silent 1x that looks like a policy decision.
+    CHECK(plan(30.0, 60.0, 0).refusal == FrameGenerationRefusal::RuntimeRefused);
+
+    // PAL on 60 Hz: no multiple of 25 divides 60.
     CHECK(!plan(25.0, 60.0).Generates());
-    CHECK_EQ(plan(25.0, 100.0).multiplier, 4u);
+    CHECK(plan(25.0, 60.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
 
     // 144 Hz is not a multiple of 60 or 30, so a high refresh is not by itself
-    // a reason to generate. 2x of 60 is 120 and 144/120 is 1.2.
+    // a reason to generate: 2x of 60 is 120 and 144/120 is 1.2, and 144/30 is
+    // 4.8, which no integer multiple of the source can divide evenly at any
+    // ceiling.
     CHECK(!plan(60.0, 144.0).Generates());
     CHECK(plan(60.0, 144.0).refusal == FrameGenerationRefusal::NoEvenMultiple);
     CHECK(!plan(30.0, 144.0).Generates());
 
-    // 240 Hz with a runtime cap of 5 generated frames: 8x would divide evenly
-    // but is not admissible, and 4x is the largest that is.
+    // A panel well above the source: the target does not have to reach the
+    // refresh, it has to divide it. Whatever multiple the search settles on for
+    // 30 fps on 240 Hz, targetFps is the source rate times that multiple and
+    // each generated frame occupies a whole number of scan-outs - that evenness
+    // is the only thing that makes a multiplier acceptable.
     const auto thirty240 = plan(30.0, 240.0);
-    CHECK_EQ(thirty240.multiplier, 4u);
-    CHECK_EQ(thirty240.targetFps, 120.0);
-    CHECK_EQ(thirty240.presentsPerFrame, 2u);
+    CHECK(thirty240.Generates());
+    CHECK_EQ(30.0 * double(thirty240.multiplier), thirty240.targetFps);
+    CHECK_EQ(240.0, thirty240.targetFps * double(thirty240.presentsPerFrame));
 
-    // A runtime that admits nothing is a refusal with a reason, not a silent 1x.
-    CHECK(plan(30.0, 60.0, 0).refusal == FrameGenerationRefusal::RuntimeRefused);
-    // And a cap of 1 still reaches the doubling case.
-    CHECK_EQ(plan(30.0, 60.0, 1).multiplier, 2u);
+    // Sources with nothing to interpolate, each naming itself and generating
+    // nothing: the refusal is the answer the status line shows.
+    const auto still = PlanFrameGeneration(SourceCadence{0.0, true, true}, 60.0,
+                                           kPhaseVerifiedMultiFrameCount);
+    CHECK(still.refusal == FrameGenerationRefusal::StillImage);
+    CHECK(!still.Generates());
+    CHECK_EQ(0u, still.generatedPerSource);
+    const auto unknownRate = PlanFrameGeneration(SourceCadence{0.0, false, true}, 60.0,
+                                                 kPhaseVerifiedMultiFrameCount);
+    CHECK(unknownRate.refusal == FrameGenerationRefusal::UnknownSourceRate);
+    CHECK(!unknownRate.Generates());
+    CHECK_EQ(0u, unknownRate.generatedPerSource);
+    const auto variable = PlanFrameGeneration(SourceCadence{30.0, false, false}, 60.0,
+                                              kPhaseVerifiedMultiFrameCount);
+    CHECK(variable.refusal == FrameGenerationRefusal::VariableFrameRate);
+    CHECK(!variable.Generates());
+    CHECK_EQ(0u, variable.generatedPerSource);
+    const auto unknownRefresh = plan(30.0, 0.0);
+    CHECK(unknownRefresh.refusal == FrameGenerationRefusal::UnknownRefresh);
+    CHECK(!unknownRefresh.Generates());
+    CHECK_EQ(0u, unknownRefresh.generatedPerSource);
 
-    // Sources with nothing to interpolate, each naming itself.
-    CHECK(PlanFrameGeneration(SourceCadence{0.0, true, true}, 60.0,
-                              kMeasuredMultiFrameCountMax).refusal ==
-          FrameGenerationRefusal::StillImage);
-    CHECK(PlanFrameGeneration(SourceCadence{0.0, false, true}, 60.0,
-                              kMeasuredMultiFrameCountMax).refusal ==
-          FrameGenerationRefusal::UnknownSourceRate);
-    CHECK(PlanFrameGeneration(SourceCadence{30.0, false, false}, 60.0,
-                              kMeasuredMultiFrameCountMax).refusal ==
-          FrameGenerationRefusal::VariableFrameRate);
-    CHECK(plan(30.0, 0.0).refusal == FrameGenerationRefusal::UnknownRefresh);
     CHECK(FrameGenerationRefusalName(FrameGenerationRefusal::NoEvenMultiple) == "no-even-multiple");
+}
+
+// The ceiling above is a measurement, and measurements move: it was one
+// generated frame while the phase probe was a featureless box and is five now
+// that a textured probe localised the generated frames inside the source
+// interval. So one case pins the RELATIONSHIP instead of the number. A source
+// running at refresh/m is exactly the case m-times generation exists for - it
+// lands on the refresh with one scan-out per frame - so every multiplier the
+// constant admits has to be reachable, and nothing beyond it may be.
+void frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test()
+{
+    using namespace frame_rate_policy;
+    // 120 Hz is used because it is a real mode that every multiplier from 2
+    // upwards divides into a plausible source rate (60, 40, 30, 24, 20).
+    constexpr double kRefresh = 120.0;
+    for (uint32_t multiplier = 2; multiplier <= kPhaseVerifiedMultiFrameCount + 1; ++multiplier) {
+        const double fps = kRefresh / double(multiplier);
+        const auto planned = PlanFrameGeneration(SourceCadence{fps, false, true}, kRefresh,
+                                                 kPhaseVerifiedMultiFrameCount);
+        CHECK(planned.refusal == FrameGenerationRefusal::None);
+        CHECK_EQ(multiplier, planned.multiplier);
+        CHECK_EQ(multiplier - 1u, planned.generatedPerSource);
+        CHECK_EQ(1u, planned.presentsPerFrame);
+        CHECK(std::abs(planned.targetFps - kRefresh) <= kRefresh * kRateTolerance);
+    }
+
+    // And the ceiling is a ceiling. The source that would need one multiple
+    // more than the constant admits must not get it: either the search finds a
+    // smaller admissible multiple that still divides the refresh, or it
+    // refuses, but the multiplier never exceeds the verified count plus the
+    // source frame itself, and the target never overshoots the panel.
+    const double beyond = kRefresh / double(kPhaseVerifiedMultiFrameCount + 2);
+    const auto bounded = PlanFrameGeneration(SourceCadence{beyond, false, true}, kRefresh,
+                                             kPhaseVerifiedMultiFrameCount);
+    CHECK(bounded.multiplier <= kPhaseVerifiedMultiFrameCount + 1);
+    CHECK(bounded.targetFps <= kRefresh * (1.0 + kRateTolerance));
 }
 
 void neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test()
@@ -6792,6 +6954,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(minimum_toolbar_client_width_owns_required_target_floor_across_dpi_test),
     TEST_CASE(volume_slider_never_intersects_compact_or_threshold_toolbar_test),
     TEST_CASE(toolbar_focus_order_includes_idle_open_and_skips_disabled_actions_test),
+    TEST_CASE(frame_generation_pill_follows_media_and_availability_only_test),
     TEST_CASE(open_action_content_keeps_idle_and_toolbar_copy_distinct_test),
     TEST_CASE(focused_toolbar_action_reconciles_layout_and_availability_changes_test),
     TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
@@ -6812,7 +6975,6 @@ constexpr TestCase kCases[] = {
     TEST_CASE(failed_icon_font_uses_label_only_presentation_test),
     TEST_CASE(button_content_layout_preserves_required_insets_and_icon_gap_at_every_dpi_test),
     TEST_CASE(button_content_layout_centers_combined_icon_and_label_without_outline_contact_test),
-    TEST_CASE(feature_toolbar_keeps_three_text_labels_readable_at_minimum_width_test),
     TEST_CASE(prerender_surface_layout_keeps_progress_cancel_and_text_inside_client_bounds_test),
     TEST_CASE(advanced_menu_contains_clear_neural_cache_and_no_removed_quality_commands_test),
     TEST_CASE(feature_menu_uses_distinct_controls_and_honest_availability_test),
@@ -6899,6 +7061,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(render_pace_prior_zero_means_unmeasured_not_unsupported_test),
     TEST_CASE(ada_render_pace_prior_forecasts_both_ends_of_the_measured_bracket_test),
     TEST_CASE(frame_generation_plan_follows_the_panel_not_just_the_source_test),
+    TEST_CASE(frame_generation_reaches_every_multiplier_the_verified_ceiling_admits_test),
     TEST_CASE(neural_prerender_defaults_prefer_1080p_and_preserve_explicit_output_test),
     TEST_CASE(neural_playback_lifecycle_accepts_its_generation_and_reaches_ready_test),
     TEST_CASE(neural_playback_lifecycle_runs_render_validate_then_ready_test),
