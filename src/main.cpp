@@ -1422,6 +1422,14 @@ private:
         // settings the user has since changed is not the picture they are
         // watching. The cached export refuses those same two cases, for the
         // same two reasons.
+        // The view gate is the Neural Rendering TOGGLE, not an inspection
+        // control: with a render cached, ToggleNeuralRendering switches this
+        // view and nothing else, so "the neural view is on screen" and "neural
+        // rendering is on" are the same state. Converting the carrier while it
+        // is on is therefore both the user's expressed choice and NVIDIA's own
+        // order - Super Resolution first, Frame Generation on the upscaled
+        // result - and turning the toggle off is how someone asks for the
+        // original instead. `framegen.confirm.neural` says which file it is.
         if(m_cachedPlayback&&!m_neuralPath.empty()&&m_comparisonView==ComparisonView::Neural&&
            CachedRangeCoversSource()&&m_cachedSettings==m_neuralSettings&&m_cachedGuides==m_renderGuides)
             return{m_neuralPath.wstring(),true};
@@ -1450,6 +1458,34 @@ private:
         if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return m_path;
         if(const std::filesystem::path* copy=FrameGenerationAcquiredCopy())return copy->wstring();
         return {};
+    }
+    // Whether the loaded file is one of this player's own frame-generation
+    // conversions. Those are written to <cache>/frame-generation and nowhere
+    // else, so the directory IS the provenance record and it survives the
+    // session that made it - `m_frameGenLastOutput` does not.
+    //
+    // It matters because rendering one is the pipeline BACKWARDS. NVIDIA's
+    // order is Super Resolution first and Frame Generation on the upscaled
+    // result, which is what converting a neural render does; going the other
+    // way asks the renderer for N times the frames - a 2x conversion doubles a
+    // job already measured in minutes - and spends them upscaling frames that
+    // were interpolated rather than photographed. The player cannot simply do
+    // the right thing here: the original is not what is loaded, and picking a
+    // different file to render is not a decision to take behind someone's back.
+    // So it says so, once, and renders what was asked for.
+    bool LoadedSourceIsGeneratedFrames()const{
+        if(!m_loaded||m_path.empty()||m_sourceKind!=MediaSourceKind::LocalFile)return false;
+        NeuralCacheManager cache(m_cacheRoot);
+        if(!cache.Valid())return false;
+        std::error_code error;
+        const auto generated=std::filesystem::weakly_canonical(cache.Root()/L"frame-generation",error);
+        if(error)return false;
+        const auto loaded=std::filesystem::weakly_canonical(std::filesystem::path(m_path),error);
+        if(error)return false;
+        // Compared as paths, not as text: a prefix match on the string would
+        // also accept a sibling directory whose name starts the same way.
+        const auto relative=loaded.lexically_relative(generated);
+        return !relative.empty()&&*relative.begin()!=L"..";
     }
     // Memoised, because FrameGenerationUiNow runs on every status refresh and
     // every toolbar paint, and the answer costs a cache-root validation and two
@@ -4412,6 +4448,16 @@ private:
     // one; otherwise the job acquires the source before rendering the range.
     bool RenderRangeOfCurrentSource(NeuralRenderRange range,NeuralJobKind kind=NeuralJobKind::Offline){
         if(!RangeRenderAvailable()){LOG("Render request ignored: loaded="<<m_loaded<<" job="<<NeuralJobActive()<<" resolving="<<m_youtubeLifecycle.IsResolving()<<" prerender="<<NeuralPreRenderEnabled()<<" haveSource="<<!m_path.empty()<<" cachedSourceKey="<<CachedYouTubeSourceKey().has_value()<<" duration="<<m_decoder.DurationSeconds());return false;}
+        // Asked here rather than at each of the three callers, and only for a
+        // render that is actually about to start, because the answer costs a
+        // cache-root validation. See LoadedSourceIsGeneratedFrames for why the
+        // order is worth a sentence to the viewer.
+        if(LoadedSourceIsGeneratedFrames()){
+            LOG("Neural render starting on this player's own frame-generation output ("
+                <<WideToUtf8(m_path)<<"); the documented order is to render first and convert the result.");
+            m_neuralNotice=T(L"neural.order.generated_source");
+            UpdateCachedStatus();InvalidateControls();
+        }
         if(m_sourceKind==MediaSourceKind::YouTube){
             const std::wstring page=m_youtubePageUrl,title=m_displayTitle;
             if(const auto sourceKey=CachedYouTubeSourceKey()){

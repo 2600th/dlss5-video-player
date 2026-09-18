@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Starting a neural render on this player's own frame-generation output says so.
+  That is the pipeline backwards - NVIDIA's order is Super Resolution first and
+  Frame Generation on the upscaled result, which is what converting a neural
+  render does - and it asks the renderer for as many times the frames as the
+  conversion multiplied, spent upscaling frames that were interpolated rather
+  than photographed. Conversions are written to `<cache>/frame-generation` and
+  nowhere else, so the directory is a provenance record that outlives the
+  session that made it. Nothing is refused: the original is not what is loaded,
+  and picking a different file to render is not a decision to take behind
+  someone's back.
+- The frame-generation confirmation says which file it is about to convert and
+  why. "The neural render on screen is what will be converted" left out both the
+  reason - upscale first, generate frames on the result, which is the order
+  NVIDIA's own pipeline uses - and the way to ask for the other one, which is to
+  turn Neural Rendering off before converting.
 - **NVENC preset p5 by default, on a measurement.** Measured on an RTX 5090 /
   driver 616.64, `hevc_nvenc` at the shipping settings, 120 frames of 2560x1440:
   p7 takes 1.51 s against p5's 0.75 s and buys 0.12 VMAF on ordinary content and

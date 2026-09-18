@@ -132,7 +132,7 @@ private:
             // two holds are one scan-out apart, which is the same unevenness
             // the source is already being shown with - see FrameRatePolicy.h.
             {L"framegen.confirm.uneven", L"\n\nEach frame is shown for %u or %u refreshes of this display, which is the unevenness this video already plays with."},
-            {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted."},
+            {L"framegen.confirm.neural", L"\n\nThe neural render on screen is what will be converted, not the original - upscale first, generate frames on the result, which is the order NVIDIA’s own pipeline uses. Turn Neural Rendering off first to generate frames from the original instead."},
             {L"framegen.exists", L"This video has already been converted:\n%s\n\nPlay that file instead of converting again?\n\nYes plays it. No converts again and replaces it."},
             {L"framegen.worker_failed", L"The conversion could not start. Try again."},
             {L"export.worker_failed", L"Saving could not start. Try again."},
@@ -187,6 +187,7 @@ private:
             // Which way the play press that arrived during buffering points: the
             // button state alone was invisible, so a second press cancelled it.
             {L"neural.live.stalled", L"Live rendering stopped: the render never reached this frame. Playing the original."},
+            {L"neural.order.generated_source", L"This video is a frame-generation conversion, so this render upscales generated frames and costs as many times the work as the conversion multiplied. Rendering first and converting the result is the faster order."},
             {L"neural.live.will_play", L"starts when the buffer fills"},
             {L"neural.live.will_stay_paused", L"stays paused when the buffer fills"},
             {L"neural.live.slow", L"This video is %ux%u at %.6g fps. On this GPU neural rendering runs at about %.3g frames per second, which is %.2gx real time, so watching it live would pause to buffer almost continuously.\n\nConvert the clip instead (DLSS > Convert & save) to watch it smoothly afterwards.\n\nStart the live session anyway?"},
