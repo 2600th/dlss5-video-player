@@ -25,7 +25,6 @@
 
 :root {
   --ground:      #050506;
-  --ground-lift: #0b0b0e;
   --line:        rgba(255, 255, 255, 0.15);
   --line-soft:   rgba(255, 255, 255, 0.075);
 
@@ -34,7 +33,6 @@
   --text-meta:   #837e77;
 
   --flag:        #ff6a1a;
-  --flag-deep:   #c74a08;
   --flag-wash:   rgba(255, 106, 26, 0.09);
 
   --sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;

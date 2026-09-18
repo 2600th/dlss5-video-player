@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-18T00:00:00Z",
+  "title": "Design System: DLSS 5 Video Player — Project Site",
+  "extensions": {
+    "colorMeta": {
+      "ground": {
+        "role": "neutral",
+        "displayName": "True Black",
+        "canonical": "#050506",
+        "tonalRamp": ["#050506", "#0e0e11", "#1b1b20", "#2b2b32", "#464650", "#6d6d78", "#9d9da7", "#d4d4da"]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#ecebe8",
+        "tonalRamp": ["#1d1c1a", "#2e2d2a", "#45433f", "#605d58", "#807c76", "#a4a099", "#c8c5c0", "#ecebe8"]
+      },
+      "text-dim": {
+        "role": "neutral",
+        "displayName": "Paper Dim",
+        "canonical": "#a4a099",
+        "tonalRamp": ["#191815", "#2a2824", "#403d38", "#5a5750", "#7a766e", "#a4a099", "#c6c2bc", "#e6e3df"]
+      },
+      "text-meta": {
+        "role": "neutral",
+        "displayName": "Paper Meta",
+        "canonical": "#837e77",
+        "tonalRamp": ["#171612", "#262420", "#3a3833", "#524f49", "#6c6861", "#837e77", "#a9a49c", "#d3cfc9"]
+      },
+      "flag": {
+        "role": "primary",
+        "displayName": "Flag Orange",
+        "canonical": "#ff6a1a",
+        "tonalRamp": ["#2a0f00", "#4a1c00", "#6d2b00", "#943c02", "#c74a08", "#ff6a1a", "#ff9c63", "#ffd2b8"]
+      },
+      "flag-lift": {
+        "role": "primary",
+        "displayName": "Flag Lift",
+        "canonical": "#ff8340",
+        "tonalRamp": ["#2f1405", "#50230a", "#752f0b", "#9c400f", "#ca5619", "#ff8340", "#ffab7d", "#ffdac4"]
+      },
+      "flag-wash": {
+        "role": "primary",
+        "displayName": "Flag Wash",
+        "canonical": "rgba(255, 106, 26, 0.09)",
+        "tonalRamp": ["rgba(255,106,26,0.04)", "rgba(255,106,26,0.06)", "rgba(255,106,26,0.09)", "rgba(255,106,26,0.14)", "rgba(255,106,26,0.22)", "rgba(255,106,26,0.34)", "rgba(255,106,26,0.55)", "rgba(255,106,26,0.8)"]
+      },
+      "ink-on-flag": {
+        "role": "neutral",
+        "displayName": "Ink on Flag",
+        "canonical": "#120602",
+        "tonalRamp": ["#0a0301", "#120602", "#1f0c04", "#301307", "#471c0a", "#67290f", "#8f3a15", "#c0511f"]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "rgba(255, 255, 255, 0.15)",
+        "tonalRamp": ["rgba(255,255,255,0.03)", "rgba(255,255,255,0.05)", "rgba(255,255,255,0.075)", "rgba(255,255,255,0.1)", "rgba(255,255,255,0.15)", "rgba(255,255,255,0.24)", "rgba(255,255,255,0.4)", "rgba(255,255,255,0.7)"]
+      },
+      "line-soft": {
+        "role": "neutral",
+        "displayName": "Hairline Soft",
+        "canonical": "rgba(255, 255, 255, 0.075)",
+        "tonalRamp": ["rgba(255,255,255,0.02)", "rgba(255,255,255,0.04)", "rgba(255,255,255,0.075)", "rgba(255,255,255,0.11)", "rgba(255,255,255,0.16)", "rgba(255,255,255,0.26)", "rgba(255,255,255,0.45)", "rgba(255,255,255,0.75)"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "The hero headline, once per page. Archivo 800 at wdth 92, tracked to -0.038em so two lines read as one block over the frame." },
+      "headline": { "displayName": "Headline", "purpose": "Every section h2. Archivo 750 at wdth 94." },
+      "title": { "displayName": "Title", "purpose": "Per-step h3 inside 'How it works' and the requirements heading." },
+      "body": { "displayName": "Body", "purpose": "All prose, at the neutral wdth 100, held to a 64ch measure (38ch in narrow beat columns, 34ch in package summaries)." },
+      "label": { "displayName": "Label", "purpose": "The shared uppercase condensed voice: nav, comparison tags, readout keys, matrix titles, package kind, footer headings, button meta lines. Never a decorative kicker." },
+      "data": { "displayName": "Data", "purpose": "Measured values only — resolutions, frame counts, timestamps, dB figures, driver versions, filenames, SHA-256 digests. Tabular figures." }
+    },
+    "shadows": [
+      { "name": "tag-legibility", "value": "text-shadow: 0 1px 6px rgba(0,0,0,0.8)", "purpose": "Only on the ORIGINAL/NEURAL tags, which sit on unpredictable footage. Legibility, not elevation." },
+      { "name": "seam-edge", "value": "box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55)", "purpose": "A 1px dark ring hugging the orange seam so it survives a bright frame." },
+      { "name": "grip-focus-halo", "value": "box-shadow: 0 0 0 3px rgba(5, 5, 6, 0.9), 0 0 0 6px var(--flag)", "purpose": "Keyboard focus on the comparison grip, where the global 2px outline would be lost on photography." }
+    ],
+    "motion": [
+      { "name": "seam-settle", "value": "1 - Math.pow(2, -10 * t) over 1500ms after a 550ms hold, 88% → 55%", "purpose": "The page's one authored moment: the seam sweeps in from an already-visible state and stops off-centre. Suppressed entirely under prefers-reduced-motion." },
+      { "name": "state-fast", "value": "0.16s ease", "purpose": "Button and CTA background/border/color changes on hover." },
+      { "name": "state-mark", "value": "0.18s ease", "purpose": "The comparison grip and the FAQ cross rotation." },
+      { "name": "state-tag", "value": "0.2s ease", "purpose": "Comparison tag opacity." },
+      { "name": "reduced-motion", "value": "animation-duration: 0.001ms; transition-duration: 0.001ms; scroll-behavior: auto", "purpose": "Global collapse under prefers-reduced-motion; the seam sweep is skipped rather than shortened." }
+    ],
+    "breakpoints": [
+      { "name": "stack", "value": "60rem" },
+      { "name": "narrow", "value": "34rem" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Download Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The flag-filled download action; always carries version and size on a second line.",
+      "html": "<a class=\"ds-btn-primary\" href=\"#\"><span class=\"ds-btn-primary__label\">Download for Windows</span><span class=\"ds-btn-primary__meta\">v0.21.0 · 308 MB</span></a>",
+      "css": ".ds-btn-primary { display: inline-flex; flex-direction: column; gap: 0.15rem; padding: 0.85rem 1.5rem; border: 1px solid transparent; border-radius: 0; text-decoration: none; background: #ff6a1a; color: #120602; font-family: 'Archivo', system-ui, sans-serif; transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease; } .ds-btn-primary__label { font-weight: 700; font-size: 1rem; letter-spacing: -0.01em; } .ds-btn-primary__meta { font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; opacity: 0.72; } .ds-btn-primary:hover { background: #ff8340; } .ds-btn-primary:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; }"
+    },
+    {
+      "name": "Ghost Button",
+      "kind": "button",
+      "refersTo": "button-ghost",
+      "description": "Hairline-bordered secondary action; border and text both go flag on hover.",
+      "html": "<a class=\"ds-btn-ghost\" href=\"#\"><span class=\"ds-btn-ghost__label\">See what changes</span></a>",
+      "css": ".ds-btn-ghost { display: inline-flex; flex-direction: column; justify-content: center; gap: 0.15rem; padding: 0.85rem 1.5rem; border: 1px solid rgba(255,255,255,0.15); border-radius: 0; text-decoration: none; background: transparent; color: #ecebe8; font-family: 'Archivo', system-ui, sans-serif; transition: border-color 0.16s ease, color 0.16s ease; } .ds-btn-ghost__label { font-weight: 700; font-size: 1rem; letter-spacing: -0.01em; } .ds-btn-ghost:hover { border-color: #ff6a1a; color: #ff6a1a; } .ds-btn-ghost:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; }"
+    },
+    {
+      "name": "Checksum Copy Control",
+      "kind": "button",
+      "refersTo": "checksum-button",
+      "description": "A button styled as mono text with a dashed underline; confirms a copy in place, never as a toast.",
+      "html": "<button class=\"ds-sum\" type=\"button\"><span class=\"ds-sum__hash\">sha256 9f2c…a41d</span><span class=\"ds-sum__action\">copy</span></button>",
+      "css": ".ds-sum { display: inline-flex; align-items: center; gap: 0.6rem; background: none; border: 0; border-bottom: 1px dashed rgba(255,255,255,0.15); border-radius: 0; padding: 0.2rem 0; color: #837e77; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.72rem; font-variant-numeric: tabular-nums; cursor: pointer; transition: color 0.16s ease, border-color 0.16s ease; } .ds-sum__action { font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.75; } .ds-sum:hover { color: #ff6a1a; border-color: #ff6a1a; } .ds-sum:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; } .ds-sum[data-copied='1'] .ds-sum__action { color: #ff6a1a; opacity: 1; }"
+    },
+    {
+      "name": "Masthead Navigation",
+      "kind": "nav",
+      "refersTo": null,
+      "description": "Baseline-aligned wordmark and uppercase label links over the hero; no background, no blur, not sticky.",
+      "html": "<header class=\"ds-masthead\"><a class=\"ds-wordmark\" href=\"#\"><span class=\"ds-wordmark__a\">DLSS&nbsp;5</span><span class=\"ds-wordmark__b\">Video Player</span></a><nav class=\"ds-nav\"><a href=\"#\">The difference</a><a href=\"#\">How it works</a><a href=\"#\">Download</a><a href=\"#\">GitHub</a></nav></header>",
+      "css": ".ds-masthead { display: flex; align-items: baseline; justify-content: space-between; gap: 1.5rem; padding: 1.4rem 2rem; background: #050506; font-family: 'Archivo', system-ui, sans-serif; } .ds-wordmark { display: inline-flex; align-items: baseline; gap: 0.5rem; text-decoration: none; font-weight: 800; font-variation-settings: 'wdth' 88; letter-spacing: -0.015em; } .ds-wordmark__a { color: #ff6a1a; } .ds-wordmark__b { color: #ecebe8; } .ds-nav { display: flex; gap: 1.6rem; } .ds-nav a { color: #a4a099; text-decoration: none; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; } .ds-nav a:hover { color: #ecebe8; } .ds-nav a:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; }"
+    },
+    {
+      "name": "Measured Readout",
+      "kind": "custom",
+      "refersTo": "readout-key",
+      "description": "The canonical way this system presents measured fact at rest: flag uppercase key, mono tabular value, one hairline per row, no box.",
+      "html": "<div class=\"ds-readout\"><p class=\"ds-readout__row\"><span class=\"ds-readout__k\">Source</span><span class=\"ds-readout__v\">2560×1440 VP9 · 23.976&nbsp;fps · 120.119&nbsp;s · 2,880 frames</span></p><p class=\"ds-readout__row\"><span class=\"ds-readout__k\">Machine</span><span class=\"ds-readout__v\">RTX 5090 · driver 616.64 · captured on v0.21.0</span></p></div>",
+      "css": ".ds-readout { border-top: 1px solid rgba(255,255,255,0.15); background: #050506; } .ds-readout__row { display: grid; grid-template-columns: 7.5rem 1fr; gap: 1.5rem; align-items: baseline; margin: 0; padding: 0.75rem 0; border-bottom: 1px solid rgba(255,255,255,0.075); } .ds-readout__k { color: #ff6a1a; font-family: 'Archivo', system-ui, sans-serif; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; } .ds-readout__v { color: #a4a099; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.76rem; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }"
+    },
+    {
+      "name": "Package Row",
+      "kind": "card",
+      "refersTo": "package-cta",
+      "description": "A download package as a rule-bottomed column, not a pricing card: no border, no radius, no shadow.",
+      "html": "<article class=\"ds-pkg\"><h3 class=\"ds-pkg__kind\">Complete</h3><p class=\"ds-pkg__summary\">The player and the pinned neural runtime. Everything needed to render.</p><a class=\"ds-pkg__cta\" href=\"#\"><span class=\"ds-pkg__cta-label\">Download</span><span class=\"ds-pkg__cta-size\">308 MB</span></a><p class=\"ds-pkg__file\">DLSSVideoPlayer-v0.21.0-win64.zip</p></article>",
+      "css": ".ds-pkg { display: flex; flex-direction: column; align-items: flex-start; gap: 0.6rem; padding: 1.75rem 0 2rem; border-bottom: 1px solid rgba(255,255,255,0.075); background: #050506; font-family: 'Archivo', system-ui, sans-serif; } .ds-pkg__kind { margin: 0; color: #ff6a1a; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; } .ds-pkg__summary { margin: 0; color: #a4a099; font-size: 0.95rem; line-height: 1.62; max-width: 34ch; } .ds-pkg__cta { display: inline-flex; align-items: baseline; gap: 0.75rem; margin-top: 0.4rem; padding: 0.7rem 1.25rem; border: 1px solid rgba(255,255,255,0.15); border-radius: 0; text-decoration: none; color: #ecebe8; transition: color 0.16s ease, border-color 0.16s ease; } .ds-pkg__cta-label { font-weight: 700; } .ds-pkg__cta-size { color: #837e77; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; } .ds-pkg__cta:hover { border-color: #ff6a1a; color: #ff6a1a; } .ds-pkg__cta:hover .ds-pkg__cta-size { color: #ff6a1a; } .ds-pkg__cta:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; } .ds-pkg__file { margin: 0; color: #837e77; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.76rem; letter-spacing: -0.01em; word-break: break-all; }"
+    },
+    {
+      "name": "Ticked List",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "A capability list whose bullet is a 6×1px flag rule — a mark on the line, never a glyph.",
+      "html": "<section class=\"ds-matrix\"><h3 class=\"ds-matrix__title\">Writes</h3><ul class=\"ds-matrix__list\"><li>PNG or JPEG, for photos</li><li>MP4, encoded with NVENC</li><li>MKV, keeping source audio and subtitles</li></ul></section>",
+      "css": ".ds-matrix { padding: 1.5rem 0 1.75rem; border-top: 1px solid rgba(255,255,255,0.15); border-bottom: 1px solid rgba(255,255,255,0.075); background: #050506; font-family: 'Archivo', system-ui, sans-serif; } .ds-matrix__title { margin: 0 0 0.9rem; color: #ff6a1a; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; } .ds-matrix__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.6rem; } .ds-matrix__list li { position: relative; padding-left: 1rem; color: #a4a099; font-size: 0.93rem; line-height: 1.5; } .ds-matrix__list li::before { content: ''; position: absolute; left: 0; top: 0.62em; width: 6px; height: 1px; background: #ff6a1a; }"
+    },
+    {
+      "name": "Disclosure Row",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "A FAQ row whose indicator is a drawn cross of two 1px bars; open state loses the vertical arm.",
+      "html": "<details class=\"ds-faq\"><summary>Why is the runtime unsigned?</summary><p>The neural runtime is a modified community build of NVIDIA's, not a redistribution of a signed NVIDIA package.</p></details>",
+      "css": ".ds-faq { border-bottom: 1px solid rgba(255,255,255,0.075); background: #050506; font-family: 'Archivo', system-ui, sans-serif; } .ds-faq summary { display: flex; justify-content: space-between; gap: 1rem; padding: 1.1rem 0; cursor: pointer; list-style: none; color: #ecebe8; font-weight: 650; font-size: 1.02rem; } .ds-faq summary::-webkit-details-marker { display: none; } .ds-faq summary::after { content: ''; flex: none; width: 12px; height: 12px; margin-top: 0.45em; background: linear-gradient(#ff6a1a, #ff6a1a) center / 12px 1px no-repeat, linear-gradient(#ff6a1a, #ff6a1a) center / 1px 12px no-repeat; transition: transform 0.18s ease; } .ds-faq[open] summary::after { background: linear-gradient(#ff6a1a, #ff6a1a) center / 12px 1px no-repeat; transform: rotate(180deg); } .ds-faq summary:focus-visible { outline: 2px solid #ff6a1a; outline-offset: 3px; } .ds-faq p { margin: 0; padding-bottom: 1.2rem; color: #a4a099; font-size: 0.96rem; line-height: 1.62; max-width: 64ch; }"
+    },
+    {
+      "name": "Comparison Seam",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "The signature component: two real plates, a clip-path driven by --seam, and a full-bleed invisible range input drawing a 2px flag seam and a splice-mark grip.",
+      "html": "<figure class=\"ds-compare\"><div class=\"ds-compare__frame\"><div class=\"ds-compare__plate ds-compare__plate--neural\"></div><div class=\"ds-compare__plate ds-compare__plate--original\"></div><span class=\"ds-compare__tag ds-compare__tag--left\">Original</span><span class=\"ds-compare__tag ds-compare__tag--right\">Neural</span><span class=\"ds-compare__seam\"><span class=\"ds-compare__grip\"></span></span><input class=\"ds-compare__range\" type=\"range\" min=\"0\" max=\"100\" value=\"55\" step=\"0.1\" aria-label=\"Reveal the neural render\"></div><figcaption class=\"ds-compare__caption\"><span class=\"ds-compare__caption-data\">2560×1440 source · paused at 73.98 s · RTX 5090 · one frame, only the view switched</span></figcaption></figure>",
+      "css": ".ds-compare { position: relative; margin: 0; --seam: 55%; font-family: 'Archivo', system-ui, sans-serif; } .ds-compare__frame { position: relative; aspect-ratio: 16 / 9; overflow: hidden; background: #050506; } .ds-compare__plate { position: absolute; inset: 0; } .ds-compare__plate--neural { background: linear-gradient(120deg, #2a2118, #6d5c46 55%, #1a1410); } .ds-compare__plate--original { background: linear-gradient(120deg, #201b16, #4a4238 55%, #141110); clip-path: inset(0 calc(100% - var(--seam)) 0 0); } .ds-compare__tag { position: absolute; top: 1.2rem; z-index: 4; color: #ecebe8; font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78; text-transform: uppercase; letter-spacing: 0.15em; text-shadow: 0 1px 6px rgba(0,0,0,0.8); } .ds-compare__tag--left { right: calc(100% - var(--seam) + 0.85rem); } .ds-compare__tag--right { left: calc(var(--seam) + 0.85rem); color: #ff6a1a; } .ds-compare__seam { position: absolute; top: 0; bottom: 0; left: var(--seam); width: 2px; margin-left: -1px; z-index: 4; background: #ff6a1a; box-shadow: 0 0 0 1px rgba(0,0,0,0.55); pointer-events: none; } .ds-compare__grip { position: absolute; top: 50%; left: 50%; width: 46px; height: 46px; transform: translate(-50%, -50%); border: 2px solid #ff6a1a; background: rgba(5,5,6,0.5); backdrop-filter: blur(2px); transition: box-shadow 0.18s ease, background 0.18s ease; } .ds-compare__grip::before, .ds-compare__grip::after { content: ''; position: absolute; top: 50%; width: 2px; height: 14px; background: #ff6a1a; transform: translateY(-50%); } .ds-compare__grip::before { left: 13px; } .ds-compare__grip::after { right: 13px; } .ds-compare__range { position: absolute; inset: 0; z-index: 5; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: ew-resize; -webkit-appearance: none; appearance: none; background: transparent; } .ds-compare__range::-webkit-slider-thumb { -webkit-appearance: none; width: 60px; height: 100%; } .ds-compare:hover .ds-compare__grip { background: rgba(5,5,6,0.7); } .ds-compare:has(.ds-compare__range:focus-visible) .ds-compare__grip { box-shadow: 0 0 0 3px rgba(5,5,6,0.9), 0 0 0 6px #ff6a1a; background: rgba(5,5,6,0.75); } .ds-compare__caption { display: grid; gap: 0.3rem; margin: 0.85rem 0 0; border-left: 1px solid #ff6a1a; padding-left: 0.85rem; } .ds-compare__caption-data { color: #837e77; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.76rem; line-height: 1.5; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }"
+    },
+    {
+      "name": "Binding Notice",
+      "kind": "card",
+      "refersTo": "notice",
+      "description": "The one place the ink becomes a field rather than a mark: the community-project and unsigned-runtime disclosure.",
+      "html": "<aside class=\"ds-notice\"><p><strong>This is a community project — it is not an NVIDIA product.</strong> The neural runtime it ships with is a modified, <strong>unsigned</strong> community build.</p></aside>",
+      "css": ".ds-notice { border: 1px solid rgba(255,106,26,0.32); border-radius: 0; background: rgba(255,106,26,0.09); padding: 1.4rem; max-width: 62rem; font-family: 'Archivo', system-ui, sans-serif; } .ds-notice p { margin: 0; color: #a4a099; font-size: 0.93rem; line-height: 1.62; } .ds-notice strong { color: #ecebe8; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Cutting Bench",
+    "overview": "This is a darkroom bench with a film strip on it, not a product page. The ground is true black, dusted with a fixed film grain borrowed from the subject's own world, and the only thing that carries colour is a single flag orange used the way a cutting bench uses a splice mark: to point at exactly one thing. There is no glow, no gradient card, no accent-tinted panel. When the page wants to say \"here\", it draws a two-pixel seam, a six-pixel tick, or a one-pixel rule — a mark, never a hue wash.\n\nDensity is the argument. The page is willing to pack real provenance — resolution, timestamp, frame counts, driver version, capture settings — against otherwise bare space, because the product's claim is measurable and the page's job is to let a visitor check it. That density is set in mono and it is always a measured value; prose never wears monospace as costume. Everything else is a condensed grotesk: heavy, tightly tracked headlines at negative letter-spacing, and small uppercase labels drawn at the width axis' condensed end.\n\nStructurally the page refuses containers. Sections are separated by hairline rules and by the whitespace of a generous section rhythm, not by boxes with corners. Nothing has a radius; nothing floats; nothing is elevated. The single largest element on the page is a real photograph at real resolution, and the interactions that matter operate directly on it.",
+    "keyCharacteristics": [
+      "True black ground (#050506) under a fixed feTurbulence grain at 0.06 opacity",
+      "One ink: flag orange, used as marks and edges, never as glow or fill-for-mood",
+      "Zero border-radius anywhere; hairline rules instead of cards",
+      "Condensed variable Archivo for everything except measured values, which are JetBrains Mono with tabular figures",
+      "Exactly one authored motion moment; all other movement is state transition",
+      "Real pixels for evidence — no CSS approximation of a screenshot"
+    ],
+    "rules": [
+      { "name": "The One Ink Rule", "body": "The page has exactly one hue. Anything that needs to be distinguished from its neighbour is distinguished by weight, width axis, greyscale step, or a drawn mark — never by introducing a second colour. A new state does not earn a new colour.", "section": "colors" },
+      { "name": "The Mark, Not A Hue Rule", "body": "State is expressed as a mark, not as a tint. The comparison grip carries two orange ticks like a splice mark; a list item carries a 6×1px orange tick instead of a bullet; an expanded FAQ row loses one arm of a drawn cross. When you reach for a coloured background to say \"active\", draw a rule instead.", "section": "colors" },
+      { "name": "The No Glow Rule", "body": "The ink never blooms. There is no box-shadow in orange, no radial gradient, no filter glow, no orange-tinted surface outside the one binding notice. Orange appears at full saturation, at hairline-to-2px scale, or as a solid button fill.", "section": "colors" },
+      { "name": "The Measured-Value Rule", "body": "JetBrains Mono appears only where a value was measured, generated, or is literally a filename, a hash, or a keyboard key. Resolutions, frame counts, timestamps, dB figures, driver versions, package names, SHA-256 digests: mono. A sentence, a heading, or a label: never mono, no matter how technical it sounds.", "section": "typography" },
+      { "name": "The Width-Axis Rule", "body": "Hierarchy is carried by Archivo's width axis alongside its weight. Larger type gets narrower and tighter (wdth 92–94, negative tracking); smaller type gets narrower still and wider-tracked (wdth 78, +0.15em, uppercase). Body prose sits at the neutral wdth 100. Do not add a second family to make a new level.", "section": "typography" },
+      { "name": "The No Eyebrow Rule", "body": "Uppercase condensed type is a label attached to a thing — a key in a readout, a group title over a list, a tag on a frame edge. It is never a decorative kicker floating above a headline to announce a section.", "section": "typography" },
+      { "name": "The Flat Ground Rule", "body": "Every surface sits on the same plane. If something needs separation, it gets a hairline rule or whitespace. A box-shadow is only permitted to make a mark legible against photography, never to imply a layer.", "section": "elevation" },
+      { "name": "The Grain-Is-Material Rule", "body": "The film grain is fixed to the viewport, above all content, non-interactive, at 0.06 opacity. It is a material from the subject's world, not a texture effect; do not animate it, do not vary its opacity per section, and do not add a second overlay on top of it.", "section": "elevation" },
+      { "name": "The One Moment Rule", "body": "The page has exactly one authored animation: the seam's entry sweep. Everything else that moves is a state transition on hover, focus, or open, between 0.15s and 0.2s ease. No scroll-triggered reveals, no parallax, no staggered fade-ins. If a new element wants to animate, it is asking for the page's only moment and the answer is no.", "section": "components" },
+      { "name": "The Real Pixels Rule", "body": "Evidence is shown at real resolution from real captures with intrinsic width/height attributes, and every shipping raster carries its provenance in an adjacent mono line (source resolution, frame, machine, capture settings). Never approximate a screenshot in CSS, and never ship an evidence image without its provenance.", "section": "components" }
+    ],
+    "dos": [
+      "Do separate sections with a hairline rule (structural 15% white between structures, 7.5% within one) and generous block padding.",
+      "Do keep every new element at 0 radius.",
+      "Do set measured values in JetBrains Mono with font-variant-numeric: tabular-nums, and everything else in Archivo.",
+      "Do attach provenance to any picture that functions as evidence, in the mono Data voice.",
+      "Do express state as a drawn mark — a tick, a rule, a seam, a greyscale step.",
+      "Do put the version and the file size on any download control, as its second line.",
+      "Do build interactions on real, native controls (<input type=\"range\">, <details>, <button>) and draw the visible affordance over them.",
+      "Do keep the primary action whole inside the first viewport at 390px by tightening the stack, not by shrinking the type.",
+      "Do respect prefers-reduced-motion by suppressing the seam sweep entirely, not by shortening it."
+    ],
+    "donts": [
+      "Don't introduce a second hue. Flag orange is the only colour; greyscale steps and Archivo's width axis carry the rest.",
+      "Don't let the ink glow: no orange shadows, no radial gradients, no tinted panels. The one orange field is the binding legal notice.",
+      "Don't wrap content in a card, a panel, or a bordered container. The only bordered boxes on the page are buttons, image frames, and the notice.",
+      "Don't set prose, headings, or labels in monospace. Mono is notation for measured values, filenames, hashes and keys.",
+      "Don't add a decorative uppercase kicker or eyebrow above a headline. Uppercase condensed type must label a specific thing.",
+      "Don't add an icon font or glyph stand-in (+, →, ▸) where a mark can be drawn; if a true icon is unavoidable, inline a stroked SVG.",
+      "Don't add scroll-triggered animation, parallax, or entrance staggering; the seam sweep is the page's only authored moment.",
+      "Don't tint, dim, or wash over footage in a section whose job is to show image quality — put the label on a plate beside or beneath the frame instead.",
+      "Don't reorder responsive columns with order; place them with grid-column so the wide column always keeps the screenshot."
+    ]
+  }
+}
