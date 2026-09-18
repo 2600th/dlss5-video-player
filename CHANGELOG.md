@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **A neural pair that stops assembling froze the picture with nothing said.**
+  `ReadNextCachedFrame` had one result with no owner: `NotReady`, which means a
+  segment source is reopening - normal at every segment boundary and after every
+  seek - was returned to `Tick`, which returns. Forever, if it never clears. The
+  frame that was last presented stays on screen, the session goes on reporting
+  "100% rendered", and not one line is written: the state reported as "the video
+  shows a static frame on seeking/playing" on a frame-generated file. Captured
+  from the wedged player: playhead parked at 00:07 of a 30 s 2560x1440 119.88
+  fps conversion, "22.8 s buffered · 100% rendered", two identical screen
+  captures five seconds apart, and the last log line four and a half minutes old.
+  A pair that has not assembled for three seconds is now bounded: the fault, the
+  position, the coverage and the render head go to the log, and playback takes
+  the same way out unrendered video already takes - the original comes back at
+  that position and the session re-attaches when its coverage reaches the
+  playhead. A cached render with no session to hand back to stops with the
+  desync notice instead of freezing.
+  The cached seek's render failure was silent in the same way, and left the old
+  frame on screen with the old position - a seek that reports nothing and
+  changes nothing. It says so now.
+  Verified on hardware against a 2560x1440 120 fps conversion with a neural
+  session attached: playback advances (screen captures differ), four seeks in a
+  row each move the picture, and the three-second bound does not fire on the
+  segment reopens those seeks cause.
 - **The upscaling pill says why, not just "Unavailable".** A verdict with no
   reason reads as a broken toggle, and the common case is not a fault at all:
   the source already fills the panel. The pill now carries the reason -

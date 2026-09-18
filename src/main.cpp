@@ -1286,6 +1286,12 @@ private:
     static constexpr UINT_PTR kFullscreenTimerId=0xD156;
     static constexpr UINT_PTR kPreviewTimerId=0xD157;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
+    // How long a live or cached pair may stay NotReady before the player stops
+    // waiting for it. A segment source is reopened at every boundary and after
+    // every seek; the slowest reopen measured here is a 2560x1440 file at
+    // 0.26 s (see "Seek timing" in the log), so three seconds is a reopen that
+    // is never going to finish rather than a slow one.
+    static constexpr double kPairStallSeconds=3.0;
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
     // A job that renders behind the loaded media: the player keeps the window,
     // and only its own panel and lanes report progress.
@@ -2261,8 +2267,44 @@ private:
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
     bool ReadNextCachedFrame(){
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
-        if(read==SynchronizedReadResult::PairReady){const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;m_next=*visible;m_haveNext=true;return true;}
-        if(read==SynchronizedReadResult::NotReady)return false;
+        if(read==SynchronizedReadResult::PairReady){
+            m_pairStall={};
+            const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;
+            m_next=*visible;m_haveNext=true;return true;
+        }
+        // NotReady is a decoder warming up: a segment source is reopened at
+        // every boundary and after every seek, and that takes a few frames. It
+        // is also the one result with no owner - Tick just returns - so when it
+        // does NOT clear, playback sits on the frame it last presented and says
+        // nothing. That is the "video shows a static frame" report: 1440p120
+        // pairs, everything rendered, and no line in the log to say what the
+        // pair was waiting for. Bound it, name the fault once, and take the same
+        // way out that unrendered video takes.
+        if(read==SynchronizedReadResult::NotReady){
+            if(m_pairStall==Clock::time_point{}){m_pairStall=Clock::now();return false;}
+            const double stalled=std::chrono::duration<double>(Clock::now()-m_pairStall).count();
+            if(stalled<kPairStallSeconds)return false;
+            const std::string fault=m_synchronizedPlayback.LastFault();
+            LOG("Neural playback has had no pair for "<<stalled<<" s at "<<Position()<<" s; fault="
+                <<(fault.empty()?std::string("none"):fault)<<" regions="<<LiveCoverage().size()
+                <<" head="<<LiveHeadSeconds()<<" s live="<<m_liveSession);
+            m_pairStall={};
+            if(m_liveSession){
+                const bool wasPlaying=m_playing;const double handBackAt=Position();
+                DetachLivePlayback();
+                AdoptAcquiredSourceCopyForPlayback();
+                RequestSeek(handBackAt,wasPlaying);
+                return false;
+            }
+            // A finished render being watched has no session to hand back to, so
+            // this is a decode failure in everything but name and stops the same
+            // way one does - with the reason on the status bar, not a modal.
+            m_haveNext=false;m_playing=false;Audio().Pause(true);
+            m_neuralNotice=T(L"neural.sync.warning");
+            UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+            return false;
+        }
+        m_pairStall={};
         // The playhead is on video nobody has rendered. When a job is filling
         // exactly this hole its frames are seconds away, so waiting shows the
         // picture the user asked for. Anywhere else - a seek back in front of the
@@ -3662,7 +3704,15 @@ private:
                 LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;
             }
             m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
-            if(!RenderVideoFrame(frame,true)){m_playing=false;m_synchronizedPlayback.SetPaused(true);SetSeeking(false);return false;}RememberRenderedCachedPair();
+            if(!RenderVideoFrame(frame,true)){
+                // Silent until now, and it leaves the frame that was on screen
+                // exactly where it was, with the position it already had: a seek
+                // that reports nothing and changes nothing reads as a frozen
+                // picture, which is what it was reported as.
+                LOG("Cached seek frame render failed at "<<sec<<" s; the frame on screen is unchanged.");
+                m_playing=false;m_synchronizedPlayback.SetPaused(true);SetSeeking(false);return false;
+            }
+            RememberRenderedCachedPair();
             // A drag preview would respawn the audio helper on every step; the
             // release restarts it once.
             m_currentSec=double(frame.timestamp100ns)*1e-7;
@@ -6419,6 +6469,9 @@ private:
     // SetEvenCadenceOnly and FrameRatePolicy.h for why that is the default.
     bool m_evenCadenceOnly=false;
     Clock::time_point m_frameGenStarted{};
+    // When the current pair first came back NotReady, or the epoch when one is
+    // assembling normally. See ReadNextCachedFrame.
+    Clock::time_point m_pairStall{};
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.
     std::filesystem::path m_frameGenLastOutput;
