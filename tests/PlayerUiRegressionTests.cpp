@@ -382,6 +382,7 @@ struct PlayerAppTestAccess {
         CheckLiveJobDirectoryFailure(app);
         CheckLiveRenderFailureLimit(app);
         CheckJobSourceKeyGuard(app);
+        CheckStreamConversionUsesTheAcquiredCopy(app);
         CheckLiveOutOfSyncHandsBack(app);
         CheckLivePaceConfirmation(app);
         app.m_seeking = false;
@@ -1042,6 +1043,99 @@ private:
         CHECK(!app.CachedYouTubeSourceKey());
         app.m_neuralLifecycle.Invalidate(); app.m_neuralProgress = {};
         app.m_jobSourcePath.clear(); app.m_jobSourceKey.clear(); app.m_jobSourcePageUrl.clear(); app.m_youtubePageUrl.clear();
+    }
+
+    // Converting a stream reads its acquired copy, and a settled acquisition is
+    // visible the moment it settles. Both halves shipped broken.
+    //
+    // `m_path` on a YouTube source is the signed googlevideo URL the decoder is
+    // reading, and the conversion hands a second path to the muxer for the
+    // audio, subtitles and chapters. That path used to be `m_path`, which is not
+    // a file: MuxVideoWithSourceStreams requires a regular file on both inputs,
+    // so a 2560x1440 trailer generated 3132 frames over 63 s and threw all of
+    // them away at the last stage with "the encoder refused the specification".
+    //
+    // The second half is the memo under CachedYouTubeSourceKey. A copy caught
+    // mid-promotion - payload moved into place, manifest not yet written -
+    // authenticates as missing while its size and write time are already final,
+    // so remembering that verdict pinned it for the rest of the session and a
+    // finished download went on reading as "needs a local copy".
+    static void CheckStreamConversionUsesTheAcquiredCopy(PlayerApp& app)
+    {
+        std::error_code ec;
+        const auto root = std::filesystem::temp_directory_path() / L"dlss5-stream-source-test";
+        std::filesystem::remove_all(root, ec);
+        NeuralCacheManager cache(root);
+        CHECK(cache.Valid());
+        const std::string key(64, 'a');
+        const auto staging = cache.BeginSourceStaging(key);
+        CHECK(staging.has_value());
+        if (!staging) return;
+        { std::ofstream payloadFile(*staging / L"source.mkv", std::ios::binary); payloadFile << "acquired copy"; }
+        NeuralCacheManifest manifest{};
+        manifest.encoder = kCompleteSourcePolicy;
+        manifest.width = 2560; manifest.height = 1440;
+        manifest.frameCount = 3133; manifest.duration100ns = 1044900000;
+        CHECK(cache.PromoteSource(key, *staging, manifest));
+        const auto payload = cache.SourcePayloadPath(key);
+        CHECK(payload.has_value());
+        if (!payload) return;
+
+        const auto savedCacheRoot = app.m_cacheRoot;
+        app.m_cacheRoot = cache.Root();
+        app.m_recent = std::make_unique<RecentMediaHistory>(cache.Root() / L"recent-videos.dat");
+        NeuralJobCompletion owned{};
+        owned.sourceKind = MediaSourceKind::YouTube;
+        owned.pageUrl = L"https://www.youtube.com/watch?v=EAEYZDgHNv8";
+        owned.displayTitle = L"Mafia";
+        owned.sourceQuality = YouTubeSourceQuality::Auto;
+        owned.sourceKey = key;
+        app.RecordRecent(owned, true);
+
+        app.m_loaded = true;
+        app.m_sourceKind = MediaSourceKind::YouTube;
+        app.m_youtubeSourceQuality = YouTubeSourceQuality::Auto;
+        app.m_youtubePageUrl = owned.pageUrl;
+        app.m_cachedSourceFile = false;
+        // What playback is actually reading: a signed URL, not a file.
+        app.m_path = L"https://rr3---sn-4g5e6nz6.googlevideo.com/videoplayback?expire=1758200000&ei=x";
+        app.InvalidateFrameGenerationCopy();
+
+        CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
+        CHECK_EQ(payload->wstring(), app.FrameGenerationStreamSource());
+        CHECK_EQ(payload->wstring(), app.FrameGenerationInputSource().path);
+        CHECK(!app.FrameGenerationInputSource().neural);
+        // Once playback has moved onto that copy, the loaded path IS the file and
+        // the streams come from it.
+        app.m_cachedSourceFile = true;
+        app.m_path = payload->wstring();
+        CHECK_EQ(payload->wstring(), app.FrameGenerationStreamSource());
+        app.m_cachedSourceFile = false;
+        app.m_path = L"https://rr3---sn-4g5e6nz6.googlevideo.com/videoplayback?expire=1758200000&ei=x";
+
+        // The mid-promotion shape: the payload is final, the manifest is not
+        // there yet, and the acquisition that will write it is still running.
+        const auto manifestPath = payload->parent_path() / L"manifest.json";
+        const auto hidden = payload->parent_path() / L"manifest.pending";
+        std::filesystem::rename(manifestPath, hidden, ec);
+        CHECK(!ec);
+        app.InvalidateFrameGenerationCopy();
+        app.m_prefetchState = std::make_shared<SourcePrefetchState>();
+        CHECK(!app.CachedYouTubeSourceKey());
+        std::filesystem::rename(hidden, manifestPath, ec);
+        CHECK(!ec);
+        app.m_prefetchState.reset();
+        // Nothing is invalidated here on purpose: this is the call the player
+        // makes on its next toolbar paint, and before the fix it answered from a
+        // memo keyed on a size and write time that never changed again.
+        CHECK(app.CachedYouTubeSourceKey() == std::optional<std::string>(key));
+        CHECK_EQ(payload->wstring(), app.FrameGenerationStreamSource());
+
+        app.m_loaded = false; app.m_sourceKind = MediaSourceKind::LocalFile;
+        app.m_path.clear(); app.m_youtubePageUrl.clear(); app.m_recent.reset();
+        app.InvalidateFrameGenerationCopy();
+        app.m_cacheRoot = savedCacheRoot;
+        std::filesystem::remove_all(root, ec);
     }
 
     // The neural strength dial is presentation state: it must reach the renderer and the

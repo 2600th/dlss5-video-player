@@ -1018,6 +1018,13 @@ struct SourceAcquisition {
 struct SourcePrefetchState {
     std::atomic<bool> finished{false};
     std::string key;
+    // Why it failed, in the acquisition's own words. Written before `finished`
+    // is released and read after the join, so the release/acquire pair is what
+    // publishes it. It used to be dropped on the floor: the log said
+    // "finished without a reusable copy" and nothing else, which is not enough
+    // to tell a throttled download from an expired URL from a full disk.
+    std::wstring detail;
+    bool cancelled{};
 };
 
 // The localizer belongs to the thread that owns the window, so a render job and
@@ -1412,6 +1419,23 @@ private:
         if(const std::filesystem::path* copy=FrameGenerationAcquiredCopy())return{copy->wstring(),false};
         return{};
     }
+    // Where the audio, subtitles and chapters are copied from, which is not
+    // always the file the frames came from and is never the loaded path when
+    // that path is a stream.
+    //
+    // `m_path` on an un-adopted YouTube source is a signed googlevideo URL, and
+    // MuxVideoWithSourceStreams requires a regular file on both of its inputs.
+    // Handing it the URL is how a 2560x1440 trailer spent 63 s of GPU work
+    // generating 3132 frames and then threw all of them away at the last stage
+    // with "the encoder refused the specification" - the muxer's InvalidSpecification,
+    // reported as if the encode had been wrong. Playback only moves onto the
+    // acquired copy on a seek or around a render, so the copy has to be found
+    // the same way FrameGenerationInputSource finds it.
+    std::wstring FrameGenerationStreamSource()const{
+        if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return m_path;
+        if(const std::filesystem::path* copy=FrameGenerationAcquiredCopy())return copy->wstring();
+        return {};
+    }
     // Memoised, because FrameGenerationUiNow runs on every status refresh and
     // every toolbar paint, and the answer costs a cache-root validation and two
     // filesystem stats. Cleared whenever the loaded source changes or a
@@ -1424,7 +1448,14 @@ private:
         }
         return m_frameGenCopy?&*m_frameGenCopy:nullptr;
     }
-    void InvalidateFrameGenerationCopy(){m_frameGenCopyChecked=false;m_frameGenCopy.reset();}
+    void InvalidateFrameGenerationCopy(){
+        m_frameGenCopyChecked=false;m_frameGenCopy.reset();
+        // The key memo is dropped with it. They answer the same question at two
+        // depths, and a settled acquisition is the moment both answers move:
+        // leaving the key memo alone is how a COMPLETED download left the player
+        // insisting the stream had no local copy until it was restarted.
+        m_sourceKeyMemo={};
+    }
     // One state for the whole feature, computed once and read by the menu, the
     // toolbar pill and the status line. Three surfaces each deciding for
     // themselves is how the menu item stayed enabled while the pill greyed out
@@ -1881,8 +1912,10 @@ private:
         // carrier: this player writes those carriers video-only, so the audio,
         // subtitles and chapters have to come from the file they were rendered
         // from. The carrier only qualifies when it covers the whole source, so
-        // the two are the same length and the copy stays a copy.
-        request.streamSource=m_path;
+        // the two are the same length and the copy stays a copy. For a stream
+        // that is the acquired copy and never the signed URL - see
+        // FrameGenerationStreamSource.
+        request.streamSource=FrameGenerationStreamSource();
         request.output=output;
         request.multiplier=plan.multiplier;
         request.nvencPreset=m_nvencPreset;
@@ -4082,38 +4115,45 @@ private:
             // second: measured 510 ms per Tick and 29 dropped frames a second on a
             // source whose acquired copy was already in the cache, while the decoder
             // kept handing 29.7 fps to a queue nobody drained. The verdict is memoised
-            // against the payload's size and write time, so a copy that a later
-            // acquisition replaced is authenticated again rather than trusted.
-            if(m_sourceKeyMemo.key==entry.sourceKey&&!m_sourceKeyMemo.payload.empty()){
-                std::error_code sizeError,timeError;
-                const auto size=std::filesystem::file_size(m_sourceKeyMemo.payload,sizeError);
-                const auto written=std::filesystem::last_write_time(m_sourceKeyMemo.payload,timeError);
-                if(!sizeError&&!timeError&&size==m_sourceKeyMemo.size&&written==m_sourceKeyMemo.written)
-                    return m_sourceKeyMemo.verdict;
-            }
-            const auto cached=cache.LookupSource(entry.sourceKey);
-            if(cached&&cached->manifest.encoder==kCompleteSourcePolicy){
-                std::error_code sizeError,timeError;
-                const auto size=std::filesystem::file_size(cached->payloadPath,sizeError);
-                const auto written=std::filesystem::last_write_time(cached->payloadPath,timeError);
-                if(!sizeError&&!timeError)
-                    m_sourceKeyMemo={entry.sourceKey,cached->payloadPath,size,written,entry.sourceKey};
-                return entry.sourceKey;
-            }
-            // A copy whose manifest survives but whose payload no longer
-            // authenticates fails the same 60 MiB hash on every call, so the miss
-            // is memoised against that payload exactly like the hit. Only the file
-            // changing - an acquisition repairing or replacing it - asks again.
+            // against the payload's identity - its size and write time - so a copy
+            // that a later acquisition replaced is authenticated again rather than
+            // trusted. Whether the payload can
+            // be stat'ed AT ALL is part of that identity: treating a missing one
+            // as "nothing memoised" re-ran this whole lookup, and re-logged it,
+            // on every toolbar paint and status refresh - 14,000 identical log
+            // lines and a disk write per frame, measured over one minute on one
+            // stream whose recent entry outlived its cache folder.
             std::error_code sizeError,timeError;
             const auto payload=cache.SourcePayloadPath(entry.sourceKey);
-            const auto size=payload?std::filesystem::file_size(*payload,sizeError):uintmax_t{};
-            const auto written=payload?std::filesystem::last_write_time(*payload,timeError)
-                                      :std::filesystem::file_time_type{};
-            if(payload&&!sizeError&&!timeError)
-                m_sourceKeyMemo={entry.sourceKey,*payload,size,written,std::nullopt};
-            else m_sourceKeyMemo={};
-            LOG("A recent entry names a source copy that is no longer in the cache; ignoring it.");
-            return std::nullopt;
+            const std::filesystem::path payloadPath=payload?*payload:std::filesystem::path{};
+            const auto size=payloadPath.empty()?uintmax_t{}
+                                               :std::filesystem::file_size(payloadPath,sizeError);
+            const auto written=payloadPath.empty()?std::filesystem::file_time_type{}
+                                                  :std::filesystem::last_write_time(payloadPath,timeError);
+            const bool absent=payloadPath.empty()||sizeError||timeError;
+            if(m_sourceKeyMemo.valid&&m_sourceKeyMemo.key==entry.sourceKey&&
+               m_sourceKeyMemo.absent==absent&&
+               (absent||(m_sourceKeyMemo.size==size&&m_sourceKeyMemo.written==written)))
+                return m_sourceKeyMemo.verdict;
+            const auto cached=cache.LookupSource(entry.sourceKey);
+            const bool complete=cached&&cached->manifest.encoder==kCompleteSourcePolicy;
+            // A copy caught MID-PROMOTION - the payload moved into place, its
+            // manifest not written yet - authenticates as missing while its size
+            // and write time are already final, so memoising that verdict pins
+            // it forever. That is what made a finished download read as no copy
+            // at all for the rest of the session: the toolbar happened to ask
+            // inside the promote. Nothing is remembered while an acquisition for
+            // this source is still running.
+            if(!complete&&!absent&&SourcePrefetchActive()){m_sourceKeyMemo={};return std::nullopt;}
+            m_sourceKeyMemo={true,absent,entry.sourceKey,payloadPath,absent?uintmax_t{}:size,
+                             absent?std::filesystem::file_time_type{}:written,
+                             complete?std::optional<std::string>{entry.sourceKey}:std::nullopt};
+            // Logged where the verdict is decided rather than where it is read,
+            // so it names a state change instead of counting paints.
+            if(!complete)
+                LOG("A recent entry names a source copy that is no longer in the cache; ignoring it: key="
+                    <<entry.sourceKey);
+            return m_sourceKeyMemo.verdict;
         }
         return std::nullopt;
     }
@@ -4199,7 +4239,8 @@ private:
                 if(cache.Valid()){
                     const SourceAcquisition acquired=AcquireYouTubeSource(cache,cacheFailureText,moduleDirectory,media,audio,page,quality,duration,{},stop);
                     if(!acquired.path.empty())state->key=acquired.key;
-                }
+                    else{state->detail=acquired.detail;state->cancelled=acquired.cancelled;}
+                }else state->detail=L"The neural cache directory is unavailable.";
                 state->finished.store(true,std::memory_order_release);
             });
         }catch(const std::system_error&){LOG("Background source acquisition could not be started.");return;}
@@ -4215,6 +4256,8 @@ private:
         if(!m_prefetchState||m_prefetchState->finished.load(std::memory_order_acquire)){
             m_prefetchWorker.join();
             const std::string key=m_prefetchState?m_prefetchState->key:std::string{};
+            const std::wstring failureDetail=m_prefetchState?m_prefetchState->detail:std::wstring{};
+            const bool acquisitionCancelled=m_prefetchState&&m_prefetchState->cancelled;
             const std::wstring page=m_prefetchPageUrl,title=m_prefetchTitle;const auto quality=m_prefetchQuality;
             m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();
             // A settled acquisition is the ONE moment the answer to "is there a
@@ -4223,17 +4266,27 @@ private:
             // every tick instead cost a cache-root validation and two stats per
             // toolbar paint, which froze the window measurably.
             InvalidateFrameGenerationCopy();
-            if(key.empty()){LOG("Background source acquisition finished without a reusable copy.");UpdateCachedStatus();return;}
+            if(key.empty()){
+                LOG("Background source acquisition finished without a reusable copy"
+                    <<(acquisitionCancelled?" (cancelled)":"")<<": "
+                    <<WideToUtf8(failureDetail.empty()?std::wstring(L"no reason was reported"):failureDetail));
+                SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();return;
+            }
             LOG("Background source acquisition complete; a render will reuse it.");
             NeuralJobCompletion owned{};owned.sourceKind=MediaSourceKind::YouTube;owned.pageUrl=page;owned.displayTitle=title;owned.sourceQuality=quality;owned.sourceKey=key;
-            RecordRecent(owned,true);UpdateCachedStatus();return;
+            RecordRecent(owned,true);
+            // The settled acquisition is what turns the pill from "Get a copy"
+            // into "Generate", and nothing else on this tick invalidates it:
+            // UpdateCachedStatus repaints the status rect alone, so the toolbar
+            // kept its old label until a mouse move happened to redraw it.
+            SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();return;
         }
         // A different video is playing now: the download is worthless. An offline
         // job owns the prefetch it will consume, but a live session renders what is
         // already on screen, so a download for some other page is still worthless.
         if(m_loaded&&(!NeuralJobActive()||m_liveSession)&&m_youtubePageUrl!=m_prefetchPageUrl){
             LOG("Loaded source changed; stopping the background acquisition.");
-            CancelSourcePrefetch();UpdateCachedStatus();
+            CancelSourcePrefetch();SyncFeatureMenuState();UpdateCachedStatus();InvalidateControls();
         }
     }
     void CancelSourcePrefetch(){if(m_prefetchWorker.joinable()){m_prefetchWorker.request_stop();m_prefetchWorker.join();m_prefetchWorker=std::jthread{};}m_prefetchState.reset();m_prefetchPageUrl.clear();m_prefetchTitle.clear();InvalidateFrameGenerationCopy();}
@@ -6372,6 +6425,10 @@ private:
     // asks whether one exists. Keyed on the payload's size and write time so a
     // replaced copy is authenticated again.
     struct SourceKeyMemo {
+        bool valid{};
+        // The payload could not be stat'ed at all, which is a stable state and
+        // memoised as one.
+        bool absent{};
         std::string key;
         std::filesystem::path payload;
         uintmax_t size{};

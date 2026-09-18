@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+- **Converting a YouTube video threw the whole conversion away at the last
+  step.** The pass takes a second path for the audio, subtitles and chapters,
+  and the player handed it `m_path` - which on a stream is the signed
+  googlevideo URL the decoder is reading, not a file. `MuxVideoWithSourceStreams`
+  requires a regular file on both inputs, so it refused, and the refusal arrived
+  AFTER the encode: a 2560x1440 trailer spent 63 s generating 3132 frames and
+  reported "the source's audio and subtitles could not be carried into the
+  converted file: the encoder refused the specification" with nothing kept.
+  Playback only moves onto the acquired local copy on a seek or around a render,
+  so `FrameGenerationStreamSource` now finds that copy the same way the input
+  side already did. Verified on the video that failed: 6266 frames from 3133,
+  `carrying 1 audio and 0 subtitle streams from the source`, and the output is
+  60 fps HEVC + AAC at the source's own 104.5 s.
+- **A finished download stayed invisible until the player was restarted.**
+  `CachedYouTubeSourceKey` memoises its verdict against the acquired copy's size
+  and write time, and a copy caught mid-promotion - payload moved into place,
+  manifest not written yet - fails to authenticate while its size and write time
+  are already final. Remembering that verdict pinned it: the toolbar asked
+  inside the promote once and the stream read "needs a local copy" for the rest
+  of the session, with the download sitting complete in the cache. Nothing is
+  memoised now while an acquisition for that source is still running, and the
+  settled acquisition drops both memos rather than one.
+- **The toolbar did not notice the download either.** The reap called
+  `UpdateCachedStatus`, which repaints the status rect alone, so the pill kept
+  reading "Get a copy" until an unrelated mouse move happened to redraw it - the
+  feature was available and looked unavailable. It now syncs the menu, the status
+  and the controls, like every other state change in the player. Verified from
+  composited screen pixels rather than `PrintWindow`, which repaints on demand
+  and would have hidden the bug: one click, no input afterwards, and the pill
+  reads "Frame Generation · Generate" with the status line at "Frame Generation
+  ready".
+- **A stream whose recent entry outlived its cache folder wrote a log line per
+  paint.** The miss could not be memoised - the payload was not there to stat,
+  which the memo read as "nothing remembered" - so the lookup and its log line
+  ran several times per frame: 14,000 identical lines and 1.3 MB in one minute,
+  with a disk write each. "Cannot be stat'ed" is now part of the memoised
+  identity and the line is logged where the verdict changes, not where it is
+  read: 46 lines for the same run, one of them that one.
+- Failed acquisitions say why. The reason the acquisition reported was dropped
+  on the floor, so a first click that failed and a second that worked left
+  nothing in the log but "finished without a reusable copy".
 - **A higher rate is worth more than an even cadence, and the old rule had that
   backwards.** Frame generation used to refuse any multiple that did not divide
   the display's refresh, so 24 fps film on a 60 Hz panel got nothing - the code
