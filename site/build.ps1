@@ -265,7 +265,6 @@ $mediaFiles = @(
     'docs/screenshots/current/neural-strength.jpg'
     'docs/screenshots/current/recent-videos.jpg'
     'docs/screenshots/current/original-comparison.jpg'
-    'docs/media/neural-comparison-poster.jpg'
 )
 if (-not $SkipMedia) { $mediaFiles += 'docs/media/neural-comparison-demo.mp4' }
 

@@ -432,6 +432,28 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .beat__figure img { width: 100%; height: auto; border: 1px solid var(--line-soft); }
 .beat__figure figcaption { margin-top: 0.7rem; color: var(--text-meta); font-size: 0.78rem; }
 
+/* Each step carries its own provenance, in the hero band's vocabulary: the
+   density the page uses to back a picture, rather than a caption alone. */
+.beat__tick {
+  display: block;
+  margin-top: 0.4rem;
+  padding-left: 0.7rem;
+  border-left: 1px solid var(--flag);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--text-meta);
+}
+
+.demo__credit {
+  margin-top: 0.7rem;
+  color: var(--text-meta);
+  font-size: 0.78rem;
+  max-width: var(--measure);
+}
+
 /* --- matrix --------------------------------------------------------------- */
 
 .matrix {
@@ -478,14 +500,19 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  background: rgba(5, 5, 6, 0.4);
+  /* The poster is daylight footage, not the dark title card it replaced, so the
+     scrim has to carry the label rather than merely tint the picture. */
+  background:
+    radial-gradient(60% 50% at 50% 50%, rgba(5, 5, 6, 0.78) 0%, rgba(5, 5, 6, 0.52) 100%);
   border: 0;
   color: var(--text);
   font-family: inherit;
   cursor: pointer;
   transition: background 0.18s ease;
 }
-.demo__play:hover { background: rgba(5, 5, 6, 0.24); }
+.demo__play:hover {
+  background: radial-gradient(60% 50% at 50% 50%, rgba(5, 5, 6, 0.6) 0%, rgba(5, 5, 6, 0.3) 100%);
+}
 
 .demo__play-icon {
   display: grid;
@@ -497,8 +524,8 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   margin-bottom: 0.4rem;
   padding-left: 3px;
 }
-.demo__play-label { font-weight: 700; font-size: 1rem; }
-.demo__play-meta { color: var(--text-meta); font-size: 0.78rem; }
+.demo__play-label { font-weight: 700; font-size: 1rem; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85); }
+.demo__play-meta { color: var(--text-dim); font-size: 0.78rem; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85); }
 
 .demo video { width: 100%; height: auto; display: block; }
 
@@ -598,8 +625,23 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   gap: 1rem;
 }
 .faq__item summary::-webkit-details-marker { display: none; }
-.faq__item summary::after { content: '+'; color: var(--flag); font-family: var(--mono); font-size: 1.15rem; line-height: 1; }
-.faq__item[open] summary::after { content: '–'; }
+/* Drawn at the page's hairline weight rather than typed: a '+' set in mono is a
+   glyph standing in for an icon, and monospace worn as costume. */
+.faq__item summary::after {
+  content: '';
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 0.45em;
+  background:
+    linear-gradient(var(--flag), var(--flag)) center / 12px 1px no-repeat,
+    linear-gradient(var(--flag), var(--flag)) center / 1px 12px no-repeat;
+  transition: transform 0.18s ease;
+}
+.faq__item[open] summary::after {
+  background: linear-gradient(var(--flag), var(--flag)) center / 12px 1px no-repeat;
+  transform: rotate(180deg);
+}
 .faq__item p { padding-bottom: 1.2rem; color: var(--text-dim); max-width: var(--measure); font-size: 0.96rem; }
 
 /* --- footer --------------------------------------------------------------- */
@@ -621,25 +663,31 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 /* --- responsive ----------------------------------------------------------- */
 
 @media (max-width: 60rem) {
-  .hero { min-height: 0; display: block; padding-top: 5.5rem; }
+  /* The stack is tightened so the download button lands whole inside the first
+     viewport on a 390x844 phone: STORY ends in the download, and a primary
+     action cut by the fold does not close it. */
+  .hero { min-height: 0; display: block; padding-top: 4rem; }
   .hero::after { display: none; }
+  .hero__headline { margin-bottom: 1rem; }
+  .hero__lede { margin-bottom: 1.35rem; font-size: 1rem; }
+  .hero__caveat { margin-top: 0.15rem; }
 
   /* The figure becomes a normal block: the frame keeps its own box and the
      caption flows underneath it instead of sitting on top of the picture.
      A taller crop than the source's 16:9 so the face is still legible on a
      phone - the comparison is the argument, and it has to survive the width. */
   .compare { position: static; }
-  .compare__frame { position: relative; inset: auto; aspect-ratio: 4 / 3; }
+  .compare__frame { position: relative; inset: auto; aspect-ratio: 3 / 2; }
   .compare__plate { object-position: 60% 42%; }
   .compare__tag { top: 0.85rem; }
   .compare__caption {
     position: static;
     max-width: none;
-    margin: 1rem var(--gutter) 0;
+    margin: 0.85rem var(--gutter) 0;
     padding-left: 0.75rem;
   }
 
-  .hero__type { margin: 2.25rem 0 0; max-width: none; padding-bottom: 2.5rem; }
+  .hero__type { margin: 1.5rem 0 0; max-width: none; padding-bottom: 2.5rem; }
   .hero__hint { display: none; }
 
   .beat { grid-template-columns: 1fr; gap: 1.5rem; }

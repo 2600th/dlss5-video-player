@@ -85,7 +85,7 @@
         video.controls = true;
         video.autoplay = true;
         video.playsInline = true;
-        video.setAttribute('poster', 'media/neural-comparison-poster.jpg');
+        video.setAttribute('poster', 'assets/demo/demo-poster.jpg');
 
         demo.textContent = '';
         demo.appendChild(video);

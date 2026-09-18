@@ -146,7 +146,7 @@
 
     <figcaption class="compare__caption" id="compare-caption">
       <span class="compare__caption-line">The Godfather 50th Anniversary Trailer · Paramount Pictures</span>
-      <span class="compare__caption-data">2560×1440 source · paused at 73.98&nbsp;s · RTX 5090 · v0.21.0 · crop 920×518 at 380,100 · one frame, only the view switched</span>
+      <span class="compare__caption-data">2560×1440 source · paused at 73.98&nbsp;s · RTX 5090 · captured on v0.21.0 · crop 920×518 at 380,100 · one frame, only the view switched</span>
     </figcaption>
   </figure>
 
@@ -190,7 +190,7 @@
   <div class="readout">
     <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 23.976&nbsp;fps · 120.119&nbsp;s · 2,880 frames</span></p>
     <p class="readout__row"><span class="readout__k">Session</span><span class="readout__v">2,875 of 2,875 frames verified · failure none · lock ok</span></p>
-    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 5090 · driver 616.64 · player v0.21.0</span></p>
+    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 5090 · driver 616.64 · captured on player v0.21.0</span></p>
     <p class="readout__row"><span class="readout__k">Capture</span><span class="readout__v">1442×932 window · JPEG q95, no chroma subsampling</span></p>
   </div>
 </section>
@@ -212,7 +212,7 @@
     <figure class="beat__figure">
       <img src="media/neural-playback.jpg" width="1442" height="932" loading="lazy" decoding="async"
            alt="The player during playback with neural rendering attached, the status line reporting buffered seconds and frame rate.">
-      <figcaption>Grand Theft Auto VI — Rockstar Games, via Netflix's <i>Now Playing</i></figcaption>
+      <figcaption>Grand Theft Auto VI, paused at 13.17&nbsp;s with the render attached<span class="beat__tick">2560×1440 source · 780 frames · session verified 702/702 · failure none</span></figcaption>
     </figure>
   </article>
 
@@ -229,7 +229,7 @@
     <figure class="beat__figure">
       <img src="media/original-comparison.jpg" width="1442" height="932" loading="lazy" decoding="async"
            alt="The same paused frame with neural rendering switched off, for comparison.">
-      <figcaption>The same frame with the render detached</figcaption>
+      <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1442×932 window · JPEG q95, no chroma subsampling</span></figcaption>
     </figure>
   </article>
 
@@ -245,7 +245,7 @@
     <figure class="beat__figure">
       <img src="media/neural-strength.jpg" width="1442" height="932" loading="lazy" decoding="async"
            alt="The image adjustments window open over a frame, showing the Neural strength dial.">
-      <figcaption>Neural strength re-mixes the rendered frame without re-rendering it</figcaption>
+      <figcaption>Neural strength, at its 1.00 default<span class="beat__tick">image adjustments over the same paused frame · captured on v0.21.0</span></figcaption>
     </figure>
   </article>
 
@@ -261,7 +261,7 @@
     <figure class="beat__figure">
       <img src="media/recent-videos.jpg" width="1442" height="932" loading="lazy" decoding="async"
            alt="The File menu open on Recent videos, with Export cached video beneath it.">
-      <figcaption>Recent videos reopens a film with its render already attached</figcaption>
+      <figcaption>Recent videos reopens a film with its render already attached<span class="beat__tick">File menu · captured 3 September 2026 · history submenu closed, no local paths in frame</span></figcaption>
     </figure>
   </article>
 </section>
@@ -318,9 +318,9 @@
   </p>
 
   <div class="demo" data-video="media/neural-comparison-demo.mp4">
-    <img class="demo__poster" src="media/neural-comparison-poster.jpg" width="1920" height="1080"
+    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1438" height="930"
          loading="lazy" decoding="async"
-         alt="Poster frame from the demonstration video, showing the player mid-comparison.">
+         alt="The player during playback with neural rendering attached, its status line reporting a live render of Grand Theft Auto VI.">
     <button class="demo__play" type="button">
       <span class="demo__play-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
@@ -331,6 +331,10 @@
       <span class="demo__play-meta">5.3 MB · loads only when you ask</span>
     </button>
   </div>
+  <p class="demo__credit">
+    Poster: frame 460 of the video, cropped to the player window. Grand Theft
+    Auto VI — Rockstar Games, via Netflix's <i>Now Playing</i>.
+  </p>
 </section>
 
 <!-- ============================ download ============================ -->
@@ -351,7 +355,7 @@
     <ol class="requires__list">
       <li>Unzip into a <strong>new, empty folder</strong>. Keep <code>neural-runtime/</code> next to the executable.</li>
       <li>Run <code>DLSSVideoPlayer.exe</code>.</li>
-      <li>Open a file with <kbd>Ctrl</kbd>+<kbd>O</kbd>, paste a YouTube link with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or pick something from <strong>File ▸ Game trailers</strong>.</li>
+      <li>Open a file with <kbd>Ctrl</kbd>+<kbd>O</kbd>, paste a YouTube link with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or pick something from <strong>File &gt; Game trailers</strong>.</li>
       <li>Press <kbd>D</kbd>. It buffers for a few seconds, then plays rendered.</li>
     </ol>
   </div>
