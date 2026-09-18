@@ -899,11 +899,14 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
 
     // nvencPreset selects the NVENC "-preset" value, clamped to the p1..p7 range NVENC
     // accepts; the software encoder ignores it entirely and always encodes at "slow".
-    CHECK_EQ((std::vector<std::wstring>{L"p7"}), value(arguments, L"-preset"));
-    EncoderSpec preset5 = encoder;
-    preset5.nvencPreset = 5;
-    CHECK_EQ((std::vector<std::wstring>{L"p5"}),
-             value(BuildEncoderArguments(preset5, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
+    // p5 is the default, on the measurement recorded beside EncoderSpec::nvencPreset.
+    CHECK_EQ((std::vector<std::wstring>{L"p5"}), value(arguments, L"-preset"));
+    // Asked for something OTHER than the default, so this still proves the field
+    // reaches the argument rather than agreeing with it by accident.
+    EncoderSpec preset7 = encoder;
+    preset7.nvencPreset = 7;
+    CHECK_EQ((std::vector<std::wstring>{L"p7"}),
+             value(BuildEncoderArguments(preset7, LR"(C:\Cache Root\neural.partial.mkv)"), L"-preset"));
     EncoderSpec presetTooLow = encoder;
     presetTooLow.nvencPreset = 0;
     CHECK_EQ((std::vector<std::wstring>{L"p1"}),

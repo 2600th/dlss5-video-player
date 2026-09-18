@@ -1496,17 +1496,20 @@ private:
         CHECK(GetDlgItem(dialog, IDC_ES_NVENC_PRESET) != nullptr);
         SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_SETCHECK, BST_CHECKED, 0);
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_GPU_SOURCE, BN_CLICKED), 0);
-        SendMessageW(GetDlgItem(dialog, IDC_ES_NVENC_PRESET), CB_SETCURSEL, 4, 0);
+        // Index 6 is p7, which is NOT the default any more - see
+        // EncoderSpec::nvencPreset - so this still proves the combo drives the
+        // value rather than agreeing with it by accident.
+        SendMessageW(GetDlgItem(dialog, IDC_ES_NVENC_PRESET), CB_SETCURSEL, 6, 0);
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_NVENC_PRESET, CBN_SELCHANGE), 0);
         CHECK(app.m_gpuSourceConversion);
-        CHECK_EQ(app.m_nvencPreset, uint32_t{5});
+        CHECK_EQ(app.m_nvencPreset, uint32_t{7});
         // Read saves via SaveVideoSettings(), since nothing needs re-rendering.
         CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"GpuSourceConversion", 0, app.SettingsPath().c_str()), UINT{1});
-        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"NvencPreset", 7, app.SettingsPath().c_str()), UINT{5});
+        CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"NvencPreset", 1, app.SettingsPath().c_str()), UINT{7});
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
         CHECK(!app.m_gpuColorConversion);
         CHECK(!app.m_gpuSourceConversion);
-        CHECK_EQ(app.m_nvencPreset, uint32_t{7});
+        CHECK_EQ(app.m_nvencPreset, uint32_t{5});
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_GETCHECK, 0, 0)), BST_UNCHECKED);
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_encoderWnd == nullptr);

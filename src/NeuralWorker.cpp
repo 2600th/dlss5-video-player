@@ -924,7 +924,9 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"1");
     }
     // Absent means preset 7 (slowest/highest quality), so an older parent and a
-    // newer helper still agree.
+    // newer helper still agree. That 7 is a version contract and NOT the
+    // player's default, which is p5 - see EncoderSpec::nvencPreset - so the
+    // shipping case does put the pair on the wire.
     if (request.nvencPreset != 7) {
         arguments.emplace_back(L"--nvenc-preset");
         arguments.emplace_back(std::to_wstring(request.nvencPreset));
@@ -1109,6 +1111,14 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[GpuSourceConversion], enabled) || enabled > 1) return std::nullopt;
         request.gpuSourceConversion = enabled != 0;
     }
+    // Absent means 7, stated here rather than left to the struct's own default.
+    // The two are different numbers and different decisions: 7 is the VERSION
+    // contract - every helper before this flag existed encoded at p7, so an
+    // older parent that cannot send it has to keep getting p7 - while the
+    // struct's default is the product's choice, and moving that to p5 on a
+    // measurement silently rewrote the wire contract when this line relied on
+    // it. tests/NeuralWorkerTests.cpp pins both halves.
+    request.nvencPreset = 7;
     if (values[NvencPreset]) {
         uint64_t preset = 0;
         if (!ParseUnsigned(*values[NvencPreset], preset) || !preset || preset > 7) return std::nullopt;

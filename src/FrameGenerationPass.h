@@ -58,7 +58,9 @@ struct FrameGenerationRequest {
     std::filesystem::path streamSource;
     std::filesystem::path output;
     uint32_t multiplier{};        // >= 2; generated frames per source frame is multiplier - 1
-    uint32_t nvencPreset{7};
+    // Default p5; the trade is measured beside EncoderSpec::nvencPreset in
+    // MediaPipeline.h, and this pass is where it was measured end to end.
+    uint32_t nvencPreset{5};
 };
 
 struct FrameGenerationProgress {

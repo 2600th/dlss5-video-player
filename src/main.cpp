@@ -2496,7 +2496,7 @@ private:
         m_renderGuides.depth=GetPrivateProfileIntW(L"NeuralGuides",L"Depth",1,SettingsPath().c_str())!=0;
         m_gpuColorConversion=GetPrivateProfileIntW(L"Encoding",L"GpuColorConversion",0,SettingsPath().c_str())!=0;
         m_gpuSourceConversion=GetPrivateProfileIntW(L"Encoding",L"GpuSourceConversion",0,SettingsPath().c_str())!=0;
-        m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",7,SettingsPath().c_str())),1,7);
+        m_nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,SettingsPath().c_str())),1,7);
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const UINT mode=GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str());
         m_comparison={};
@@ -3230,7 +3230,7 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kEncoderDesignW,kEncoderDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=7;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
+            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=5;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
             if(id==IDC_ES_CLOSE){DestroyWindow(h);return 0;}
             if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE)&&code==BN_CLICKED)||(id==IDC_ES_NVENC_PRESET&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
             break;
@@ -6608,7 +6608,8 @@ private:
     // an undeclared or BT.601 source now falls back to the CPU conversion instead of
     // reaching the model under the wrong matrix.
     bool m_gpuSourceConversion=false;
-    uint32_t m_nvencPreset=7;
+    // p5, on the measurement recorded beside EncoderSpec::nvencPreset.
+    uint32_t m_nvencPreset=5;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;

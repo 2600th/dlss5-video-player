@@ -7,6 +7,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <ranges>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -627,19 +628,36 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badConversionView = view(badConversion);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badConversionView).has_value());
-    // The NVENC preset is opt-in and travels as its own optional pair, so an older
-    // parent that never sends it still parses into the preset-7 default.
-    for (const auto& argument : normal) CHECK(argument != L"--nvenc-preset");
-    if (parsedNormal) CHECK(parsedNormal->request.nvencPreset == 7);
+    // The NVENC preset travels as its own optional pair, and ABSENT MEANS 7.
+    // That 7 is a VERSION contract, not the product default: an older parent
+    // that never sends the flag has to drive a newer helper exactly as an older
+    // helper ran, and every older helper encoded at p7. So the omission is
+    // tested with a request that asks for 7, and the shipping default - p5, on
+    // the measurement recorded beside EncoderSpec::nvencPreset - is a value the
+    // parent states rather than one a missing flag implies.
+    NeuralRenderRequest legacyPreset = request;
+    legacyPreset.nvencPreset = 7;
+    const auto legacyPresetArguments =
+        neural_worker_detail::BuildWorkerArguments(legacyPreset, metadata, pause, false);
+    for (const auto& argument : legacyPresetArguments) CHECK(argument != L"--nvenc-preset");
+    const auto legacyPresetView = view(legacyPresetArguments);
+    const auto parsedLegacyPreset = neural_worker_detail::ParseWorkerArguments(legacyPresetView);
+    CHECK(parsedLegacyPreset.has_value());
+    if (parsedLegacyPreset) CHECK(parsedLegacyPreset->request.nvencPreset == 7);
+    // The default request carries p5, so it does put the pair on the wire.
+    CHECK(std::ranges::find(normal, std::wstring(L"--nvenc-preset")) != normal.end());
+    if (parsedNormal) CHECK(parsedNormal->request.nvencPreset == 5);
     NeuralRenderRequest presetRequest = request;
-    presetRequest.nvencPreset = 5;
+    // Neither the default nor the absent-value, so the round trip below proves
+    // the pair travels rather than agreeing with either by accident.
+    presetRequest.nvencPreset = 3;
     const auto presetArguments =
         neural_worker_detail::BuildWorkerArguments(presetRequest, metadata, pause, false);
     const auto presetView = view(presetArguments);
     const auto parsedPreset = neural_worker_detail::ParseWorkerArguments(presetView);
     CHECK(parsedPreset.has_value());
     if (parsedPreset) {
-        CHECK(parsedPreset->request.nvencPreset == 5);
+        CHECK(parsedPreset->request.nvencPreset == 3);
     }
     auto badPresetHigh = presetArguments;
     for (size_t index = 0; index + 1 < badPresetHigh.size(); ++index) {

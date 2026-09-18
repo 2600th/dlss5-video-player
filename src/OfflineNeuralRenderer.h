@@ -48,8 +48,9 @@ struct NeuralRenderRequest {
     // and by the test evaluator, which always captures BGRA.
     bool gpuColorConversion{false};
     // hevc_nvenc preset p1..p7; 7 is slowest/highest quality. Only the NVENC
-    // attempt reads it.
-    uint32_t nvencPreset{7};
+    // attempt reads it. Default p5 on the measurement recorded beside
+    // EncoderSpec::nvencPreset in MediaPipeline.h.
+    uint32_t nvencPreset{5};
     // Decode the source to NV12 and convert it to BGRA on the GPU (true) or let ffmpeg
     // convert on the CPU (false). Default false on a measured throughput trade, not
     // on a colour risk: the decoder probes the source's matrix and range and only

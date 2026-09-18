@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **NVENC preset p5 by default, on a measurement.** Measured on an RTX 5090 /
+  driver 616.64, `hevc_nvenc` at the shipping settings, 120 frames of 2560x1440:
+  p7 takes 1.51 s against p5's 0.75 s and buys 0.12 VMAF on ordinary content and
+  0.53 on the noise-heavy worst case, at 95-98 VMAF - both far below the ~6 VMAF
+  usually quoted as a just-noticeable difference. Whether that is worth anything
+  depends on the encoder being the long pole, and it is: a frame-generation
+  conversion measured end to end through the shipped pass (2560x1440, 2x, fits
+  over 120 and 480 output frames) costs 9.86 ms per output frame on p7 against
+  5.08 ms on p5, and those per-frame figures MATCH the standalone encode - so
+  decode, upload, evaluate and readback already hide under FFmpeg's own
+  concurrency through the pipe, and the preset is the only thing on that path
+  worth changing. Whole conversions ran 8.8 s against 6.3 s. The same encoder
+  writes the neural render's segments, so both paths take the trade; Encoder
+  settings still offers p1-p7 and its tooltip now quotes these numbers. The
+  table is recorded beside `EncoderSpec::nvencPreset`.
 - **The Recent menu rolling over deleted finished renders.** A render costs
   minutes of GPU time and an acquired copy costs a download, and both are keyed
   by content and settings, so both are reusable in any later session that opens
