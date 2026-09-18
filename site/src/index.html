@@ -322,13 +322,18 @@
          loading="lazy" decoding="async"
          alt="The player during playback with neural rendering attached, its status line reporting a live render of Grand Theft Auto VI.">
     <button class="demo__play" type="button">
-      <span class="demo__play-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
-          <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
-        </svg>
+      <!-- The backing is a plate behind the label, not a wash over the frame:
+           this section's job is to show image quality, so the footage keeps
+           its own luminance. -->
+      <span class="demo__plate">
+        <span class="demo__play-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
+          </svg>
+        </span>
+        <span class="demo__play-label">Play the 22-second demonstration</span>
+        <span class="demo__play-meta">5.3 MB · loads only when you ask</span>
       </span>
-      <span class="demo__play-label">Play the 22-second demonstration</span>
-      <span class="demo__play-meta">5.3 MB · loads only when you ask</span>
     </button>
   </div>
   <p class="demo__credit">

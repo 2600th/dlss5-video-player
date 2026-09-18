@@ -500,18 +500,24 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  /* The poster is daylight footage, not the dark title card it replaced, so the
-     scrim has to carry the label rather than merely tint the picture. */
-  background:
-    radial-gradient(60% 50% at 50% 50%, rgba(5, 5, 6, 0.78) 0%, rgba(5, 5, 6, 0.52) 100%);
+  /* No wash over the frame: this section exists to show image quality, so the
+     footage keeps its luminance and the plate below carries the label. */
+  background: transparent;
   border: 0;
   color: var(--text);
   font-family: inherit;
   cursor: pointer;
   transition: background 0.18s ease;
 }
-.demo__play:hover {
-  background: radial-gradient(60% 50% at 50% 50%, rgba(5, 5, 6, 0.6) 0%, rgba(5, 5, 6, 0.3) 100%);
+.demo__play:hover { background: rgba(5, 5, 6, 0.16); }
+
+.demo__plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 1.5rem 2.25rem 1.35rem;
+  background: rgba(5, 5, 6, 0.88);
 }
 
 .demo__play-icon {
@@ -524,8 +530,8 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   margin-bottom: 0.4rem;
   padding-left: 3px;
 }
-.demo__play-label { font-weight: 700; font-size: 1rem; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85); }
-.demo__play-meta { color: var(--text-dim); font-size: 0.78rem; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85); }
+.demo__play-label { font-weight: 700; font-size: 1rem; }
+.demo__play-meta { color: var(--text-dim); font-size: 0.78rem; }
 
 .demo video { width: 100%; height: auto; display: block; }
 
