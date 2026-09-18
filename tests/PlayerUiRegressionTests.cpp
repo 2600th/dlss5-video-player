@@ -302,8 +302,9 @@ struct PlayerAppTestAccess {
         app.CancelNeuralJob(false);app.CancelYouTubeResolution(false);
         app.m_neuralProgress={};app.m_pendingNeuralTitle.clear();
         app.m_opt.neuralAddonConfigured=false;app.m_youtubeSourceQuality=YouTubeSourceQuality::Auto;
-        app.m_recent.reset();app.m_pendingCacheEvictions.clear();
+        app.m_recent.reset();
         std::filesystem::remove(recentFile);
+        CheckRecentRolloverKeepsTheCache(app);
 
         // This must remain a synchronized neural/original comparison, never an
         // ambiguous label for runtime Super Resolution.
@@ -1034,6 +1035,73 @@ private:
         app.m_pairStall = {}; app.m_pairStallRead = {};
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
         app.SyncFeatureMenuState();
+    }
+
+    // A render costs minutes of GPU time and an acquired copy costs a download;
+    // both are keyed by content and settings, so both are reusable in every
+    // later session that opens that video. They used to be deleted by the
+    // RECENT MENU rolling over: the list holds five videos, `Remember` reported
+    // the sixth pushing the first off the end, and `PruneRecentCache` turned
+    // that report into RemoveSource/RemoveRender. Opening a sixth video threw
+    // the first one's work away, and revisiting it did all of it again.
+    // Nothing evicts on the list's behalf now; "Clear neural cache" is the only
+    // bound, and it reports what it is about to delete.
+    static void CheckRecentRolloverKeepsTheCache(PlayerApp& app)
+    {
+        const auto root = app.SettingsPath().parent_path() / L"recent-rollover-cache";
+        const auto recentFile = app.SettingsPath().parent_path() / L"recent-rollover.dat";
+        std::filesystem::remove_all(root);
+        std::filesystem::remove(recentFile);
+        const auto cacheRoot = app.m_cacheRoot;
+        app.m_cacheRoot = root;
+        app.m_recent = std::make_unique<RecentMediaHistory>(recentFile);
+
+        // The copy the first video leaves behind, published for real so the
+        // assertion below is a cache lookup rather than a file test.
+        NeuralCacheManager cache(root);
+        CHECK(cache.Valid());
+        const std::string firstKey(64, 'a');
+        const auto staging = cache.BeginSourceStaging(firstKey);
+        CHECK(staging.has_value());
+        if (staging) {
+            { std::ofstream payload(*staging / L"source.mkv", std::ios::binary); payload << "rollover fixture"; }
+            NeuralCacheManifest manifest{};
+            manifest.encoder = "source-complete-v5-highest-bitrate";
+            manifest.width = 1920; manifest.height = 1080;
+            manifest.frameCount = 1; manifest.duration100ns = 333333;
+            CHECK(cache.PromoteSource(firstKey, *staging, manifest));
+        }
+        CHECK(cache.LookupSource(firstKey).has_value());
+
+        // Six streams, which is one more than the list holds. A LOCAL entry
+        // cannot carry a source key at all - Normalize refuses one - so these
+        // are the case where an acquired copy is at stake beside the render.
+        const char ids[] = {'a', 'b', 'c', 'd', 'e', 'f'};
+        for (size_t index = 0; index < sizeof(ids); ++index) {
+            NeuralJobCompletion entry{};
+            entry.sourceKind = MediaSourceKind::YouTube;
+            entry.pageUrl = L"https://www.youtube.com/watch?v=" + std::wstring(11, wchar_t(ids[index]));
+            entry.displayTitle = L"Rollover " + std::to_wstring(index);
+            entry.sourceQuality = YouTubeSourceQuality::P1080;
+            entry.sourceKey = std::string(64, ids[index]);
+            entry.renderKey = std::string(64, char('0' + index));
+            app.RecordRecent(entry);
+        }
+        // The MENU dropped the first one, which is the list doing its job...
+        const auto& entries = app.m_recent->Entries();
+        CHECK_EQ(entries.size(), size_t{5});
+        CHECK(std::none_of(entries.begin(), entries.end(), [&](const RecentMediaEntry& item) {
+            return item.sourceKey == firstKey;
+        }));
+        // ...and the work it named is still there, through the pump that used
+        // to be where the deletion happened.
+        app.Tick();
+        CHECK(cache.LookupSource(firstKey).has_value());
+
+        app.m_recent.reset();
+        app.m_cacheRoot = cacheRoot;
+        std::filesystem::remove(recentFile);
+        std::filesystem::remove_all(root);
     }
 
     // The forecast question is asked once per source and geometry, not once

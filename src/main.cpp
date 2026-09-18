@@ -1223,7 +1223,6 @@ public:
 
 
     void Tick() {
-        PruneRecentCache();
         ReapSourcePrefetch();
         UpdateLiveSession();
         WatchNeuralJobProgress();
@@ -1329,9 +1328,19 @@ private:
             const bool sameVideo=previous.youtube==entry.youtube&&((entry.youtube&&previous.id==entry.id&&previous.sourceQuality==entry.sourceQuality)||(!entry.youtube&&_wcsicmp(previous.source.c_str(),entry.source.c_str())==0));
             if(sameVideo&&(entry.sourceKey.empty()||entry.sourceKey==previous.sourceKey)){entry.sourceKey=previous.sourceKey;entry.renderKey=previous.renderKey;break;}
         }
-        auto evicted=m_recent->Remember(std::move(entry));
-        if(m_recent->Save())m_pendingCacheEvictions.insert(m_pendingCacheEvictions.end(),evicted.begin(),evicted.end());
-        else LOG("Recent video history could not be saved; cached media was preserved.");
+        // Remember reports what fell off the five-entry list and what it
+        // replaced. Nothing is done with either any more, and that is the whole
+        // policy change: the Recent list is a five-item MENU and the cache is a
+        // work product, so a menu rolling over was deleting renders that cost
+        // minutes of GPU time each. Opening the sixth video threw away the
+        // first one's render, and a session that revisited it rendered the same
+        // seconds again from scratch. A render is keyed by its source and its
+        // settings, so it stays reachable for as long as it stays on disk: the
+        // same video opened with the same settings in any later session is a
+        // cache hit. Retention is now bounded only by "Clear neural cache",
+        // which reports what it is about to delete.
+        (void)m_recent->Remember(std::move(entry));
+        if(!m_recent->Save())LOG("Recent video history could not be saved.");
         UpdateRecentMenu();
     }
     void RecordOriginalRecent(){
@@ -1345,16 +1354,6 @@ private:
         m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;
         auto original=completion;original.renderKey.clear();RecordRecent(original,true);
         UpdateYouTubeQualitySelection(GetMenu(m_hwnd),m_youtubeSourceQuality);NoteLoadedSourceQuality();return true;
-    }
-    void PruneRecentCache(){
-        // The background acquisition writes into the source cache while it runs;
-        // evicting under it would remove the copy it is about to promote.
-        if(m_pendingCacheEvictions.empty()||ActivityBusy()||m_exportWorker.joinable()||m_prefetchWorker.joinable())return;
-        NeuralCacheManager cache(m_cacheRoot);if(!cache.Valid()){m_pendingCacheEvictions.clear();return;}
-        const auto& keep=m_recent->Entries();
-        const auto referenced=[&](const std::string& key,bool render){return key.empty()||std::any_of(keep.begin(),keep.end(),[&](const auto& item){return (render?item.renderKey:item.sourceKey)==key;});};
-        for(const auto& item:m_pendingCacheEvictions){if(!referenced(item.sourceKey,false))cache.RemoveSource(item.sourceKey);if(!referenced(item.renderKey,true))cache.RemoveRender(item.renderKey);}
-        m_pendingCacheEvictions.clear();
     }
     void OpenRecent(size_t index){
         if(!m_recent||index>=m_recent->Entries().size()||ActivityBusy())return;
@@ -6160,7 +6159,7 @@ private:
         Unload();
         if(!cache.Clear())MessageBoxW(m_hwnd,L"The neural cache could not be fully cleared.",T(L"menu.clear_neural_cache").c_str(),MB_OK|MB_ICONERROR);
         if(m_recent){auto entries=m_recent->Entries();for(auto it=entries.rbegin();it!=entries.rend();++it){it->sourceKey.clear();it->renderKey.clear();m_recent->Remember(*it);}m_recent->Save();}
-        m_pendingCacheEvictions.clear();SyncSourceActionAvailability();
+        SyncSourceActionAvailability();
     }
     void ShowDebugMenu(const RECT& anchor){
         UINT selected=IDM_VIEW_FINAL;
@@ -6464,7 +6463,6 @@ private:
 
     std::unique_ptr<RecentMediaHistory> m_recent;
     std::filesystem::path m_cacheRoot;
-    std::vector<RecentMediaEntry> m_pendingCacheEvictions;
     std::filesystem::path m_neuralPath;
     CompletionRegistry<ExportCompletion> m_exportCompletions;
     std::jthread m_exportWorker;

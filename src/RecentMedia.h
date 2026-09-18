@@ -16,8 +16,15 @@ struct RecentMediaEntry {
     friend bool operator==(const RecentMediaEntry&, const RecentMediaEntry&) = default;
 };
 
-// History owns no media files. The caller must check returned records against
-// current entries and active playback/jobs before evicting owned cache keys.
+// History owns no media files, and since 2026-09-18 nothing evicts on its
+// behalf either. This list is the five-item Recent MENU; the neural cache is a
+// work product keyed by source and settings, and tying the second's lifetime to
+// the first's meant opening a sixth video deleted the first one's render -
+// minutes of GPU time thrown away by a menu rolling over, then spent again the
+// next time that video was opened. `Remember` still reports what it dropped and
+// what it replaced, because that is the honest description of what it did to
+// the list; the player no longer turns those records into deletions. The cache
+// is bounded by "Clear neural cache" alone.
 class RecentMediaHistory {
 public:
     explicit RecentMediaHistory(std::filesystem::path file);

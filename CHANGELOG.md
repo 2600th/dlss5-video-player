@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **The Recent menu rolling over deleted finished renders.** A render costs
+  minutes of GPU time and an acquired copy costs a download, and both are keyed
+  by content and settings, so both are reusable in any later session that opens
+  that video. They were nonetheless tied to a five-item MENU: `Remember`
+  reported the sixth video pushing the first off the list, and
+  `PruneRecentCache` turned that report into `RemoveSource`/`RemoveRender`.
+  Opening a sixth video threw the first one's work away, and going back to it
+  rendered the same seconds from scratch. Nothing evicts on the list's behalf
+  any more - the pruner and its queue are gone - so the cache keeps what it has
+  across sessions and "Clear neural cache", which already reports the megabytes
+  it is about to delete, is the only bound. Cheap to allow: lookups are by key
+  and the only directory the manager walks is `staging`, which holds abandoned
+  work rather than published entries. `CheckRecentRolloverKeepsTheCache` drives
+  six videos through the real list and asserts the first one's copy is still
+  there afterwards.
 - **A three-second pause could hand a neural session back.** The bound added
   hours earlier for a pair that never assembles reads a wall clock, and only
   `Tick`'s playing branch reads pairs at all - so a pause, a seek or a buffering
