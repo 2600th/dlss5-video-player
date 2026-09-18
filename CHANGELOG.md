@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **The upscaling pill says why, not just "Unavailable".** A verdict with no
+  reason reads as a broken toggle, and the common case is not a fault at all:
+  the source already fills the panel. The pill now carries the reason -
+  `Meets output`, `Panel too small`, `No DLSS`, `No frame yet`, `Starting up` -
+  taken from `UpscalingAvailable`'s own clauses in its own order, so the label
+  can never name a reason that is not the one holding it back. The status line
+  gained the two sentences it was missing: a GPU or driver with no DLSS at all,
+  and the first frame not yet presented. The pill's width went 230 -> 270 dip
+  for it, the same as the neural pill beside it: at 230 the reason was drawn as
+  "DLSS Upscaling · Source mee..." in the default window, which is worse than
+  no explanation. Verified on screen at the default size with a 1080p source on
+  a 1080p panel: `DLSS Upscaling · Meets output`, untruncated, with all three
+  feature pills still on the bar.
+- Every refusal inside an active neural session now names itself. A session that
+  started and then did nothing left no way to tell which of five silent exits it
+  had taken: an unreadable frame rate, a range with no frame in it, a target
+  shorter than one frame, a render that would not start, or a job with no source
+  path. The session also logs the position and range it starts with.
 - **No 60 fps source could be neural rendered, which is every frame-generated
   file.** A segment's exclusive end is synthesized from one rounded frame
   duration - `llround(1e7/fps)` - while its first timestamp is the real pts of

@@ -27,7 +27,14 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Forward10, 44, 0, false},
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
     ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true},
-    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 230, 1, true},
+    // 270 dip, the same as the neural pill beside it and for the same kind of
+    // measurement: the widest arm is now a reason rather than "Unavailable".
+    // "DLSS Upscaling · Panel too small" is 225 dip in Segoe UI 16, plus the
+    // 17 dip icon, the 7 dip gap and both 10 dip insets. At 230 the reason was
+    // drawn as "DLSS Upscaling · Source mee..." in the DEFAULT 1440 dip window
+    // - verified on screen - which is a truncated explanation, the one thing
+    // worse than none.
+    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 270, 1, true},
     // 264 dip = the widest arm, "Frame Generation · Unavailable" (217 dip in
     // Segoe UI 16), plus the 17 dip icon, the 7 dip gap and both 10 dip insets.
     // 320 was budgeted for no arm that exists: "· Generate" needs 243.

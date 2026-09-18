@@ -3337,6 +3337,23 @@ private:
             !m_lastPlaybackFrame.bgra.empty()&&
             (UpscalingActive()||UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows);
     }
+    // Why upscaling is not on offer, in the two words a toolbar pill has room
+    // for. "Unavailable" is a verdict without a reason: it told the reporter of
+    // a 436x573 photo nothing, and it reads as a broken toggle on the far more
+    // common case where the source already fills the panel. The clauses are
+    // UpscalingAvailable's own, in its order, so the pill can never name a
+    // reason that is not the one holding it back.
+    const wchar_t* UpscalingUnavailableReason()const{
+        if(!m_loaded)return L"No video";
+        if(!m_renderer)return L"Starting up";
+        if(!m_renderer->DLSSAvailable())return L"No DLSS";
+        if(m_lastPlaybackFrame.bgra.empty())return L"No frame yet";
+        // The remaining clause is a target that would not grow, which is two
+        // opposite facts: a source that already fills the output, or a panel
+        // with nowhere to put the pixels.
+        if(!EffectiveUpscaleHeight())return L"Panel too small";
+        return L"Meets output";
+    }
     std::wstring UpscalingStatus()const{
         if(!m_upscalingError.empty())return m_upscalingError;
         if(UpscalingActive())return L"DLSS Upscaling on \u00b7 "+std::to_wstring(m_renderer->OutputW())+L"×"+std::to_wstring(m_renderer->OutputH())+
@@ -3352,7 +3369,16 @@ private:
         // The feature is called DLSS Upscaling in the menu and on the pill, so
         // the status line says that too. It used to report the same toggle as
         // "DLSS SR" one line below the control the user had just flipped.
-        return UpscalingAvailable()?L"DLSS Upscaling off":L"DLSS Upscaling unavailable";
+        if(UpscalingAvailable())return L"DLSS Upscaling off";
+        // A GPU or driver with no DLSS at all is the one unavailability a viewer
+        // cannot fix by resizing anything, and the only one that used to arrive
+        // as a bare "unavailable".
+        if(m_loaded&&m_renderer&&!m_renderer->DLSSAvailable())
+            return L"DLSS Upscaling unavailable (this GPU or driver has no DLSS)";
+        // What is left once a DLSS-capable renderer exists and the target would
+        // grow: the first frame has not been presented yet, which is the one
+        // unavailability that clears itself.
+        return L"DLSS Upscaling unavailable (waiting for the first frame)";
     }
     bool EnableUpscaling(uint32_t height){
         if(!m_loaded||!m_renderer||m_lastPlaybackFrame.bgra.empty())return false;
@@ -3797,7 +3823,14 @@ private:
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
-        case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,UpscalingAvailable()?(UpscalingActive()?L"DLSS Upscaling · On":L"DLSS Upscaling · Off"):L"DLSS Upscaling · Unavailable",enabled,UpscalingActive()};
+        // The unavailable arm carries the reason, not the verdict: a pill that
+        // says only "Unavailable" sends a viewer looking for a broken toggle
+        // when the answer is usually that their source already fills the panel.
+        case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,
+            UpscalingAvailable()?(UpscalingActive()?std::wstring(L"DLSS Upscaling \u00b7 On")
+                                                   :std::wstring(L"DLSS Upscaling \u00b7 Off"))
+                                :std::wstring(L"DLSS Upscaling \u00b7 ")+UpscalingUnavailableReason(),
+            enabled,UpscalingActive()};
         // An action, not a toggle: it starts a conversion, and while one runs
         // the pill is the way to stop it rather than an inert label. Every arm
         // comes from the one state machine, so the pill, the menu item and the
@@ -4511,9 +4544,17 @@ private:
     bool StartLiveRenderTarget(CoverageSpan hole){
         const NeuralRenderRange target{SnapToFrame(hole.start100ns),hole.end100ns};
         const size_t holes=LiveHoles().size();
-        // A sub-frame residual is coverage, not work.
-        if(RenderRangeIsCovered(target.start100ns,target.end100ns,m_decoder.FrameRate())){m_liveTarget=target;return true;}
-        if(!RenderRangeOfCurrentSource(target,NeuralJobKind::Live))return false;
+        if(RenderRangeIsCovered(target.start100ns,target.end100ns,m_decoder.FrameRate())){
+            // A sub-frame residual is coverage, not work.
+            LOG("Active neural session target ["<<double(target.start100ns)*1e-7<<","
+                <<double(target.end100ns)*1e-7<<") s is shorter than one frame; nothing to render.");
+            m_liveTarget=target;return true;
+        }
+        if(!RenderRangeOfCurrentSource(target,NeuralJobKind::Live)){
+            LOG("Active neural session could not start a render for ["<<double(target.start100ns)*1e-7
+                <<","<<double(target.end100ns)*1e-7<<") s.");
+            return false;
+        }
         // The pace clock starts with this job's first segment: the wait between
         // jobs, and each job's startup, are not render time.
         m_liveSegments->ResetPace();
@@ -4530,10 +4571,21 @@ private:
     void StartLiveNeuralSession(){
         if(!LiveSessionAvailable()){LOG("Active neural session refused: loaded="<<m_loaded<<" cached="<<m_cachedPlayback<<" renderable="<<RangeRenderAvailable());return;}
         const double fps=m_decoder.FrameRate();const int64_t duration=SourceDuration100ns();
-        if(!(fps>0.0)||duration<=0)return;
+        if(!(fps>0.0)||duration<=0){
+            LOG("Active neural session refused: fps="<<fps<<" duration100ns="<<duration);
+            return;
+        }
         const int64_t at=SnapToFrame(Position100ns());
         const NeuralRenderRange range=LiveSessionRange(at,fps,duration);
-        if(range.end100ns<=range.start100ns)return;
+        // Every exit below this point used to be silent, which is how a session
+        // that started and then did nothing left no way to tell which of them
+        // it had taken.
+        LOG("Active neural session starting at "<<double(at)*1e-7<<" s over ["
+            <<double(range.start100ns)*1e-7<<","<<double(range.end100ns)*1e-7<<") s.");
+        if(range.end100ns<=range.start100ns){
+            LOG("Active neural session refused: the range holds no frame to render.");
+            return;
+        }
         if(!ConfirmLiveSessionPace(fps))return;
         // Frames rendered before the last toggle-off are still on disk, and they
         // are adopted whenever they belong to this video with these settings -
@@ -5171,7 +5223,7 @@ private:
     // False when no worker was started: the lifecycle is back to idle, and the
     // caller must not count the job as running.
     bool StartNeuralJob(const std::wstring& mediaUrl,const std::wstring& audioUrl,const std::wstring& displayTitle,const std::wstring& pageUrl,MediaSourceKind sourceKind,YouTubeSourceQuality sourceQuality,const std::string& reuseSourceKey={},double expectedDurationSeconds=0.0,NeuralRenderRange range={},bool prepareOnly=false,NeuralJobKind kind=NeuralJobKind::Offline){
-        if(mediaUrl.empty())return false;
+        if(mediaUrl.empty()){LOG("Neural job refused: the source has no path to render.");return false;}
         CancelNeuralJob(false);
         if(kind==NeuralJobKind::Offline)Unload();
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
