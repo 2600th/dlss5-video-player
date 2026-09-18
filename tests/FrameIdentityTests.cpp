@@ -1,3 +1,4 @@
+#include "SceneCut.h"
 #include "SynchronizedPlayback.h"
 #include "TemporalGuides.h"
 #include "TestSupport.h"
@@ -310,6 +311,91 @@ void scene_cut_needs_low_histogram_overlap_or_a_large_residual_test()
     CHECK_EQ(1.0f, TemporalGuideGenerator::LumaHistogramIntersection(dark, dark));
     CHECK_EQ(0.0f, TemporalGuideGenerator::LumaHistogramIntersection(dark, bright));
     CHECK_EQ(0.5f, TemporalGuideGenerator::LumaHistogramIntersection(dark, mixed));
+}
+
+// The frame-generation pass reaches the same criterion from two DECODED frames
+// and no alignment stage, so its evidence is gathered differently and only one
+// arm of the criterion survives the difference. These pin the property that
+// difference threatens: a pan must not read as a cut.
+void decoded_pair_evidence_separates_a_pan_from_a_cut_test()
+{
+    constexpr uint32_t w = 160, h = 90;
+    const auto fill = [](std::vector<uint8_t>& frame, auto shade) {
+        frame.assign(size_t(w) * h * 4u, 0);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) {
+                const uint8_t v = shade(x, y);
+                uint8_t* p = frame.data() + (size_t(y) * w + x) * 4u;
+                p[0] = p[1] = p[2] = v; p[3] = 255;
+            }
+    };
+    // Vertical stripes, which a horizontal shift carries EXACTLY: the luma
+    // histogram is identical before and after, which is the whole reason the
+    // histogram is in the criterion. A real pan reveals new content at one
+    // edge and only approximates this; it approximates it well, which is what
+    // the corpus measured as overlap >= 0.91.
+    std::vector<uint8_t> shot, panned, other, dimmed;
+    fill(shot, [](uint32_t x, uint32_t) { return uint8_t(((x / 4u) % 2u) ? 200 : 40); });
+    fill(panned, [](uint32_t x, uint32_t) { return uint8_t(((((x + 20u) % w) / 4u) % 2u) ? 200 : 40); });
+    // A different shot: the same geometry, a luma distribution with no overlap.
+    fill(other, [](uint32_t x, uint32_t) { return uint8_t(((x / 4u) % 2u) ? 130 : 120); });
+    // One step of a slow fade - the distribution slides while the frames stay
+    // nearly identical, which histogram overlap alone would call a cut.
+    fill(dimmed, [](uint32_t x, uint32_t) { return uint8_t(((x / 4u) % 2u) ? 196 : 36); });
+
+    const auto measure = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+        return scene_cut::MeasureDecodedPair(a, b, w, h);
+    };
+
+    // The same frame twice is never a cut.
+    const auto still = measure(shot, shot);
+    CHECK(still.residual == 0.0);
+    CHECK(still.histogramOverlap > 0.999);
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(still));
+
+    // A pan moves every pixel - an unaligned residual far above the strong
+    // arm's 0.30 - and changes the distribution not at all. This is exactly the
+    // case that made the strong arm unusable without a correspondence stage,
+    // so the assertion is worth stating both ways.
+    const auto pan = measure(shot, panned);
+    CHECK(pan.residual > scene_cut::kResidualStrong);
+    CHECK(pan.histogramOverlap > 0.999);
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(pan));
+    CHECK(scene_cut::Classify(pan.residual, pan.histogramOverlap) == SceneCutStrength::Residual);
+
+    // A cut loses both.
+    const auto cut = measure(shot, other);
+    CHECK(cut.residual > scene_cut::kResidualWeak);
+    CHECK(cut.histogramOverlap < scene_cut::kHistogramOverlap);
+    CHECK(scene_cut::IsCutBetweenDecodedFrames(cut));
+
+    // A fade step moves the histogram off its bins without moving the picture.
+    // The residual floor is what keeps it interpolating.
+    const auto fade = measure(shot, dimmed);
+    CHECK(fade.residual <= scene_cut::kResidualWeak);
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(fade));
+
+    // Degenerate inputs answer "not a cut" rather than reading past the end.
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(scene_cut::MeasureDecodedPair({}, {}, w, h)));
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(scene_cut::MeasureDecodedPair(shot, other, 0, 0)));
+
+    // Subsampling must not change the verdict: a 4K-shaped frame is thinned by
+    // MeasureDecodedPair and a 160x90 one is not, so run the same content at a
+    // size that forces a stride and check the answers still separate.
+    constexpr uint32_t bigW = 1920, bigH = 1080;
+    std::vector<uint8_t> bigShot(size_t(bigW) * bigH * 4u), bigOther(size_t(bigW) * bigH * 4u);
+    for (uint32_t y = 0; y < bigH; ++y)
+        for (uint32_t x = 0; x < bigW; ++x) {
+            const size_t at = (size_t(y) * bigW + x) * 4u;
+            const uint8_t a = uint8_t(((x / 48u) % 2u) ? 200 : 40);
+            const uint8_t b = uint8_t(((x / 48u) % 2u) ? 130 : 120);
+            bigShot[at] = bigShot[at + 1] = bigShot[at + 2] = a; bigShot[at + 3] = 255;
+            bigOther[at] = bigOther[at + 1] = bigOther[at + 2] = b; bigOther[at + 3] = 255;
+        }
+    CHECK(!scene_cut::IsCutBetweenDecodedFrames(
+        scene_cut::MeasureDecodedPair(bigShot, bigShot, bigW, bigH)));
+    CHECK(scene_cut::IsCutBetweenDecodedFrames(
+        scene_cut::MeasureDecodedPair(bigShot, bigOther, bigW, bigH)));
 }
 
 // The debounce is specified in seconds, so these tests run at the frame rate the labelled
@@ -867,6 +953,7 @@ int main()
     generate_treats_nv12_limited_range_luma_like_bgra_test();
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();
+    decoded_pair_evidence_separates_a_pan_from_a_cut_test();
     weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test();
     a_real_cut_one_frame_inside_the_old_window_is_taken_test();
     a_strong_scene_cut_fires_inside_the_minimum_interval_test();

@@ -5,20 +5,13 @@
 #include "FrameIdentity.h"
 #include "GuideControls.h"
 #include "PixelLayout.h"
+#include "SceneCut.h"
 
-// Strength of the image evidence behind a scene-cut decision. The two arms are
-// kept apart because only the weak one is debounced: NVIDIA's DLSS Programming
-// Guide 310.6.0 S3.13 asks for InReset on the first frame after a major
-// transition and warns that improper use "can result in temporal flickering,
-// heavy aliasing or other visual artifacts", so a false positive is far more
-// expensive than a late true positive - but a strong signal must still cut
-// immediately, which is also what x264/x265 do (their distance-ramped scenecut
-// threshold never blocks a decisive cut).
-enum class SceneCutStrength {
-    None,       // the frames correspond; history continues
-    Histogram,  // weak arm: a moderate residual plus a collapsed luma histogram
-    Residual,   // strong arm: correspondence failed outright
-};
+// The criterion, its measured thresholds and this enum's own rationale live in
+// SceneCut.h, because the frame-generation pass needs the same answer from
+// evidence it gathers differently. The name stays here: it is what the receipt,
+// the tests and every caller already say.
+using SceneCutStrength = scene_cut::Strength;
 
 // Lifetime tally of the decisions the classifier made, split the way the
 // decision itself is: the strong arm is never withheld, the weak one can be,

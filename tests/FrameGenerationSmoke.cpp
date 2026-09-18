@@ -63,6 +63,7 @@
 // audio track the carriage assertions need.
 //
 // Usage: FrameGenerationSmoke [source] [multiplier] [ffmpegBinDir] [output] [streamSource]
+//                              [expectedSceneCuts]
 #include <windows.h>
 
 #include "FrameGenerationPass.h"
@@ -399,7 +400,7 @@ int wmain(int argc, wchar_t** argv)
     // more of them than there are: say what they are rather than silently
     // ignoring one, because a mistyped fifth argument is a run whose audio
     // came from somewhere other than the file the caller meant.
-    if (argc > 6) {
+    if (argc > 7) {
         std::wcerr << L"Usage: FrameGenerationSmoke [source] [multiplier] [ffmpegBinDir] [output] "
                       L"[streamSource]\n"
                       L"  streamSource: the file the audio, subtitles and chapters are expected from -\n"
@@ -420,6 +421,10 @@ int wmain(int argc, wchar_t** argv)
     // which is the pass's "the streams come from `source`" and this harness's
     // behaviour before the field existed.
     const fs::path streamSource = argc > 5 ? fs::path(argv[5]) : fs::path();
+    // How many cuts this clip is KNOWN to contain, or -1 for "do not assert".
+    // A clip whose cuts nobody counted still exercises the accounting invariant
+    // below; only a clip built to hold a cut can prove the detector fires.
+    const long expectedSceneCuts = argc > 6 ? std::wcstol(argv[6], nullptr, 10) : -1;
     std::error_code directoryError;
     fs::create_directories(output.parent_path(), directoryError);
 
@@ -573,6 +578,7 @@ int wmain(int argc, wchar_t** argv)
                   << "sourceFramesTotal=" << latest.sourceFramesTotal << "\n"
                   << "framesWritten=" << result.framesWritten << "\n"
                   << "generatedFrames=" << result.generatedFrames << "\n"
+                  << "sceneCuts=" << result.sceneCuts << "\n"
                   << "evaluations=" << result.evaluations << "\n"
                   << "progressReports=" << progressReports << "\n"
                   << "probedFrameCount=" << outputProbe.frameCount << "\n"
@@ -782,8 +788,30 @@ int wmain(int argc, wchar_t** argv)
                 }
             }
 
+            // Scene-cut accounting, which is the only externally visible proof
+            // that a refused pair was refused rather than quietly interpolated.
+            // Every source frame after the first opens exactly one pair, and a
+            // pair either generates multiplier-1 frames or holds that many, so
+            // the identity below is exact for any clip - no tolerance, and it
+            // fails if the pass ever counts a cut it did not act on or acts on
+            // one it did not count. (A decoder discontinuity would break it
+            // too, which is correct: these clips are local lossless files that
+            // do not produce one, so a discontinuity here is a defect.)
+            const uint64_t pairs = latest.sourceFramesRead > 0 ? latest.sourceFramesRead - 1 : 0;
+            const uint64_t generating = result.sceneCuts <= pairs ? pairs - result.sceneCuts : 0;
+            const uint64_t expectedGenerated =
+                effectiveMultiplier > 1 ? generating * (effectiveMultiplier - 1) : 0;
+            const bool sceneCutAccountingHeld =
+                result.sceneCuts <= pairs && result.generatedFrames == expectedGenerated;
+            // And, where the clip was built around a known edit, that the
+            // detector found it. Without this a detector that never fires would
+            // satisfy the identity above trivially.
+            const bool sceneCutCountHeld =
+                expectedSceneCuts < 0 || result.sceneCuts == uint64_t(expectedSceneCuts);
+
             const bool held = frameCountHeld && durationHeld && audioCarriedHeld && audioSyncHeld &&
-                              passthroughHeld && phaseHeld;
+                              passthroughHeld && phaseHeld && sceneCutAccountingHeld &&
+                              sceneCutCountHeld;
             std::cout << "expectedFrameCount=" << expectedFrames << "\n"
                       << "frameCountDelta=" << frameDelta << "\n"
                       << "durationToleranceMs=" << durationToleranceMs << "\n"
@@ -795,6 +823,10 @@ int wmain(int argc, wchar_t** argv)
                       << "worstPhaseDeviation=" << worstPhaseDeviation << "\n"
                       << "passthroughHeld=" << (passthroughHeld ? "true" : "false") << "\n"
                       << "phaseHeld=" << (phaseHeld ? "true" : "false") << "\n"
+                      << "expectedGeneratedFrames=" << expectedGenerated << "\n"
+                      << "expectedSceneCuts=" << expectedSceneCuts << "\n"
+                      << "sceneCutAccountingHeld=" << (sceneCutAccountingHeld ? "true" : "false") << "\n"
+                      << "sceneCutCountHeld=" << (sceneCutCountHeld ? "true" : "false") << "\n"
                       << "experiment=ran\n"
                       << "verdict=" << (held ? "PASS" : "FAIL") << "\n";
             if (!held) exitCode = 1;

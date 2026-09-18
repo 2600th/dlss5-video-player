@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- **Frame generation no longer interpolates across a cut.** Generating between
+  the last frame of one shot and the first of the next blends two unrelated
+  pictures into every slot between them: at 2x on 24 fps film that is one
+  morphed frame per edit, several times a minute, and it is the most visible
+  defect this pass can produce. `FrameGenerationPass` said so and declined to
+  fix it, on the reasoning that `TemporalGuides` - which already classifies cuts
+  for Super Resolution - was where the signal should come from. That half was
+  right: the criterion, its thresholds and every measurement behind them moved
+  to `src/SceneCut.h` unchanged, the same way `FlowGate.h` holds the flow
+  criterion, and both consumers include it. A refused pair is now treated
+  exactly like a decoder discontinuity - the evaluate across it is a reset whose
+  output is discarded, and the slot is held - so the output keeps its length and
+  `FrameGenerationResult::sceneCuts` reports how many.
+  The pass may only use ONE arm of that criterion, which is the whole subtlety.
+  The strong arm is a statement about correspondence having failed, and an
+  offline conversion computes no correspondence: measured on a synthetic pan,
+  an unaligned residual is 0.30+ where the aligned one the corpus measured is
+  0.10-0.13, so the strong arm would fire on every frame of a pan and hold the
+  picture through the one shot that most needs interpolating. The luma histogram
+  is what separates the two - a pan carries its distribution with it, a cut does
+  not - and it is why the histogram is in the criterion at all. The residual
+  stays as a floor so a slow fade, whose distribution slides while consecutive
+  frames stay nearly identical, keeps interpolating.
+  No debounce here, unlike `TemporalGuides`: that interval protects an
+  upscaler's ACCUMULATED history from repeated resets, while a reset in this
+  pass re-establishes one frame for a pairwise interpolation, so repeated resets
+  cost repeated frames and nothing that compounds.
+  Measured on an RTX 5090: a two-shot 640x360 probe reports exactly 1 cut and
+  58 generated frames from 59 pairs, with the output still 120 frames from 60
+  and audio still carried; the moving clips already in the suite - 240 frames of
+  real video, a travelling textured patch, the stream-source carrier - report 0,
+  so nothing in motion reads as an edit. Cost is not measurable: evidence is
+  gathered from at most 320x180 samples a frame, and a 2560x1440 2x conversion
+  runs at 6.2-6.4 s against 6.3-6.4 s without it. `FrameGenerationSmokeSceneCut`
+  and `decoded_pair_evidence_separates_a_pan_from_a_cut_test` both fail with the
+  detector disabled.
 - Starting a neural render on this player's own frame-generation output says so.
   That is the pipeline backwards - NVIDIA's order is Super Resolution first and
   Frame Generation on the upscaled result, which is what converting a neural

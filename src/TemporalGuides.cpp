@@ -59,60 +59,15 @@ HistoryReset TemporalGuideGenerator::ClassifyReset(const FrameIdentity& frame, u
 }
 
 float TemporalGuideGenerator::LumaHistogramIntersection(const std::vector<float>& a, const std::vector<float>& b) {
-    if (a.empty() || a.size() != b.size()) return 0.0f;
-    constexpr int bins = 32;
-    std::array<float, bins> ha{}, hb{};
-    for (const float v : a) ++ha[size_t(std::clamp(int(v * bins), 0, bins - 1))];
-    for (const float v : b) ++hb[size_t(std::clamp(int(v * bins), 0, bins - 1))];
-    float overlap = 0.0f;
-    for (int i = 0; i < bins; ++i) overlap += std::min(ha[size_t(i)], hb[size_t(i)]);
-    return overlap / float(a.size());
+    return scene_cut::HistogramIntersection(a, b);
 }
 
-// Measured on the benchmark corpus: fast pans reach residual 0.10-0.13 with histogram
-// overlap >= 0.91; real cuts show residual 0.24-0.40 with overlap <= 0.47, and the softest
-// real cut observed was 0.108 / 0.78. Pairing a residual with a histogram distance under a
-// threshold band is x265's --hist-scenecut design; NVIDIA documents no threshold and no
-// detection method at all, so none of these numbers can be attributed to them.
-constexpr double kCutResidualStrong = 0.30;    // correspondence failed outright
-constexpr double kCutResidualWeak = 0.10;      // more than a pan, less than a certainty
-constexpr double kCutHistogramOverlap = 0.85;  // luma distribution no longer the same scene
-// The weak arm's minimum interval. It exists because a transient - a flash, an exposure
-// step - fires the weak arm twice, once going in and once coming back out, and per DLSS
-// Programming Guide 310.6.0 S3.13 over-firing InReset is the documented failure mode
-// ("temporal flickering, heavy aliasing or other visual artifacts"), not a missed reset.
-// A contributor measured 6 fires in 12 frames (#19119-19130) and 11 in 15 frames on
-// another clip. FFmpeg's scdet has no debounce; it also never has to protect an
-// upscaler's accumulated history.
-//
-// It was PySceneDetect's min_scene_len CLI default of 0.6 s, which is 18 frames at 30 fps
-// and long enough to discard a real discontinuity: on a labelled capture a hard cut
-// verified frame by frame, 17 frames after the previous one, fired the weak arm
-// (residual 0.2711, overlap 0.5294) and was withheld by construction. The labelled
-// corpus brackets the window from both sides, and the bracket is wide:
-//   * the only transient in it returns 4 frames after the cut that opened it
-//     (residual 0.2537, overlap 0.4324), so the window must exceed 4 frames;
-//   * the shortest span between two labelled discontinuities is 17 frames, so the
-//     window must not exceed that.
-// That 17-frame span is bounded above by the capture's own scene change rather than by
-// a film edit, so it is evidence that a reset must follow a discontinuity 17 frames
-// after its predecessor - not evidence about how fast footage is cut.
-// Nothing else in the corpus changes anywhere in between - the dissolves never reach the
-// weak arm at all, so they are protected by kCutResidualWeak and not by this window.
-// Note that the transient's return has the *lower* histogram overlap of the two, so no
-// pair of evidence thresholds orders the two cases: the interval is the only thing that
-// separates them, which is why this is still a plain minimum interval and not a
-// strength-conditional rule. 0.3 s sits between the two bounds with roughly equal
-// multiplicative margin on each side (9 frames at 30 fps: 2.25x the observed transient,
-// 0.53x the shortest labelled span). The cost is that the burst defence is now 9 frames
-// wide rather than 18, so a transition that keeps firing for longer than that produces a
-// second reset where it used to produce one; no clip in the corpus does.
-constexpr double kMinSecondsBetweenCuts = 0.3;
+// The thresholds, the debounce interval and the reasoning behind every one of
+// those numbers are in SceneCut.h now, unchanged: the frame-generation pass
+// needs the same criterion, and two copies of a measured constant drift.
 
 SceneCutStrength TemporalGuideGenerator::ClassifySceneCut(double residual, double histogramOverlap) {
-    if (residual > kCutResidualStrong) return SceneCutStrength::Residual;
-    if (residual > kCutResidualWeak && histogramOverlap < kCutHistogramOverlap) return SceneCutStrength::Histogram;
-    return SceneCutStrength::None;
+    return scene_cut::Classify(residual, histogramOverlap);
 }
 
 bool TemporalGuideGenerator::IsSceneCut(float globalMatchCost, float histogramIntersection) {
@@ -120,10 +75,7 @@ bool TemporalGuideGenerator::IsSceneCut(float globalMatchCost, float histogramIn
 }
 
 uint32_t TemporalGuideGenerator::MinFramesBetweenCuts(double fps) {
-    // A non-finite or absurd frame rate still has to leave the weak arm usable, and two
-    // frames is the shortest interval that suppresses anything at all.
-    if (!std::isfinite(fps) || fps <= 0.0) return 2;
-    return std::max<uint32_t>(2, uint32_t(std::lround(kMinSecondsBetweenCuts * fps)));
+    return scene_cut::MinFramesBetweenCuts(fps);
 }
 
 std::pair<uint32_t,uint32_t> TemporalGuideGenerator::AnalysisGrid(uint32_t sourceW, uint32_t sourceH, double targetFps) {

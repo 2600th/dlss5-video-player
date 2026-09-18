@@ -90,6 +90,11 @@ struct FrameGenerationResult {
     // either a silent source, which is valid, or a caller-visible defect.
     bool audioCarried{};
     uint32_t outputAudioStreams{}, outputSubtitleStreams{};
+    // Pairs the scene-cut criterion refused to generate across, so a caller can
+    // tell "nothing was generated" apart from "this film is cut quickly". Held
+    // frames, not generated ones: each cut contributes multiplier-1 repeats and
+    // therefore lowers generatedFrames without changing framesWritten.
+    uint64_t sceneCuts{};
 };
 
 class FrameGenerationPass {
@@ -118,11 +123,22 @@ public:
     //
     // A decoder discontinuity is treated the same way as the first frame: the
     // pair straddling it is not a pair, so the evaluate across it is a reset
-    // whose output is discarded and the slot is held instead. There is NO
-    // scene-cut detector here and none should be added to this pass: generating
-    // across a cut is a known artifact, and the player's TemporalGuides already
-    // classifies cuts for Super Resolution and is where a later slice should
-    // take them from.
+    // whose output is discarded and the slot is held instead.
+    //
+    // A SCENE CUT is treated identically, and is detected here. An earlier
+    // version of this comment said no detector should be added and that
+    // TemporalGuides - which classifies cuts for Super Resolution - was where a
+    // later slice should take the signal from. The second half was right and is
+    // what happened: the criterion moved to `src/SceneCut.h`, thresholds and
+    // measurements intact, and both consumers now include it. The first half
+    // was wrong. Generating across a cut blends two unrelated shots into every
+    // slot between them - at 2x on 24 fps film, one morphed frame per edit -
+    // and it is the most visible defect this pass can produce.
+    //
+    // The pass only gets to use the histogram arm of that criterion, because it
+    // has no correspondence stage to produce an aligned residual with; see
+    // `IsCutBetweenDecodedFrames`. `FrameGenerationResult::sceneCuts` reports
+    // how many pairs were refused.
     //
     // The frames are encoded into a video-only staging file beside
     // `request.output`, and `request.output` is then MUXED from that video plus

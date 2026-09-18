@@ -1,5 +1,7 @@
 #include "FrameGenerationPass.h"
 
+#include "SceneCut.h"
+
 #include "DLSSGBackend.h"
 #include "Log.h"
 #include "MediaPipeline.h"
@@ -727,17 +729,39 @@ FrameGenerationResult FrameGenerationPass::Run(const FrameGenerationRequest& req
         // A discontinuity says these two frames are not a pair - a decoder
         // restart happened between them - so nothing is generated across it:
         // the evaluate is a reset that only re-establishes history, and the
-        // slot is filled by holding the older frame. A scene cut is the same
-        // situation and is NOT detected here; generating across a cut is a
-        // known artifact of this pass, and TemporalGuides, which already
-        // classifies cuts for Super Resolution, is where a later slice should
-        // take that signal from.
-        const bool pairIsContinuous = !decoded.discontinuity;
+        // slot is filled by holding the older frame.
+        //
+        // A SCENE CUT is the same situation arriving from the content instead
+        // of the decoder, and it is now detected here on the criterion in
+        // SceneCut.h - the same one TemporalGuides classifies cuts for Super
+        // Resolution with, which is where this header took it from. Generating
+        // across a cut blends two unrelated shots into every slot between them:
+        // at 2x on 24 fps film that is one morphed frame per edit, several
+        // times a minute, and it is the most visible thing this pass can do
+        // wrong. `IsCutBetweenDecodedFrames` explains why an offline conversion
+        // may only use the histogram arm of that criterion.
+        //
+        // The two error directions are not symmetric here, which is what makes
+        // this worth doing at a threshold rather than not at all: a false
+        // positive holds the older frame for the slot, costing one repeated
+        // frame - a stutter of 1/outputFps - while a false negative is a
+        // visible morph. Note also that this pass does NOT debounce the way
+        // TemporalGuides does. That interval exists to stop repeated InReset
+        // from eroding an upscaler's ACCUMULATED history; a reset here
+        // re-establishes exactly one frame of history for a pairwise
+        // interpolation, so repeated resets cost repeated frames and nothing
+        // that compounds.
+        const scene_cut::PairEvidence evidence =
+            scene_cut::MeasureDecodedPair(previous, decoded.bgra, width, height);
+        const bool sceneCut = scene_cut::IsCutBetweenDecodedFrames(evidence);
+        if (sceneCut) ++result.sceneCuts;
+        const bool pairIsContinuous = !decoded.discontinuity && !sceneCut;
         if (!pairIsContinuous) {
             if (!establishHistory()) {
                 result.evaluations = backend.EvaluationCount();
                 return fail(FrameGenerationError::Runtime,
-                            L"The DLSS-G evaluate after a decoder discontinuity failed: " +
+                            std::wstring(sceneCut ? L"The DLSS-G evaluate after a scene cut failed: "
+                                                  : L"The DLSS-G evaluate after a decoder discontinuity failed: ") +
                                 HexResult(backend.LastResult()));
             }
             for (uint32_t held = 0; held < generatedPerSource; ++held) {

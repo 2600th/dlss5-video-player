@@ -418,6 +418,36 @@ if(BUILD_TESTING)
             "${FRAMEGEN_PHASE_CLIP}" 4 "${FFMPEG_STAGED_DIR}"
             "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke-textured.mkv")
         set_tests_properties(FrameGenerationSmokeTextured PROPERTIES LABELS gpu TIMEOUT 900)
+        # A clip with ONE hard cut in it, which is what the scene-cut criterion
+        # in src/SceneCut.h exists for: generating across an edit blends two
+        # unrelated shots into every slot between them, and it is the most
+        # visible thing this pass can get wrong. Two shots chosen so the edit is
+        # unambiguous on the criterion's own terms - a textured pattern against
+        # a flat white field shares almost no luma distribution - and so the
+        # count is exactly one, which the harness asserts. The first shot also
+        # moves, so the frames WITHIN it must keep interpolating: a detector
+        # that fired on motion would report more than one cut and fail here.
+        set(FRAMEGEN_CUT_CLIP "${CMAKE_BINARY_DIR}/frame-generation/scene-cut-probe.mkv")
+        add_custom_command(OUTPUT "${FRAMEGEN_CUT_CLIP}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/frame-generation"
+            COMMAND "${FFMPEG_STAGED_DIR}/ffmpeg.exe" -hide_banner -nostdin -loglevel error -y
+                -f lavfi -i testsrc2=s=640x360:r=30:d=1
+                -f lavfi -i color=white:s=640x360:r=30:d=1
+                -f lavfi -i anoisesrc=d=2:c=pink:r=48000:a=0.1
+                -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[v]"
+                -map "[v]" -map 2:a -c:v ffv1 -pix_fmt yuv420p -c:a aac "${FRAMEGEN_CUT_CLIP}"
+            COMMENT "Generating the frame-generation scene-cut probe clip"
+            VERBATIM)
+        add_custom_target(FrameGenerationCutClip DEPENDS "${FRAMEGEN_CUT_CLIP}")
+        add_dependencies(FrameGenerationSmoke FrameGenerationCutClip)
+        # 2x, so one refused pair is one held frame and the accounting identity
+        # the harness checks has the smallest possible arithmetic between it and
+        # the defect. The trailing 1 is the cut this clip is known to contain.
+        add_test(NAME FrameGenerationSmokeSceneCut COMMAND FrameGenerationSmoke
+            "${FRAMEGEN_CUT_CLIP}" 2 "${FFMPEG_STAGED_DIR}"
+            "${CMAKE_BINARY_DIR}/frame-generation/frame-generation-smoke-scene-cut.mkv"
+            "" 1)
+        set_tests_properties(FrameGenerationSmokeSceneCut PROPERTIES LABELS gpu TIMEOUT 900)
         # The stream-source case, in the exact shape of the defect
         # FrameGenerationRequest::streamSource exists for. The player converts
         # the NEURAL RENDER when that view is on screen and this project writes
