@@ -49,17 +49,48 @@ public:
             [](int64_t value, const NeuralSegment& existing) {
                 return value < existing.firstTimestamp100ns;
             });
-        // Ground that is already playable is never published over: a retargeted
-        // run can overlap what an earlier one finished, and a republished file
-        // would move the timeline under a decoder that is reading it.
-        if (at != segments_.begin() && segment.firstTimestamp100ns < std::prev(at)->end100ns) return;
-        // Measured from the span the producer declared, before the clamp below
-        // can shorten it: dividing a clamped end by the full frame count yields
-        // a duration too small to recognise the sub-frame seam this closes.
+        // Measured from the span the producer declared, before either clamp
+        // below can move it: dividing a clamped end by the full frame count
+        // yields a duration too small to recognise the sub-frame seams these
+        // close.
         const int64_t frameDuration =
             segment.frameCount
                 ? (segment.end100ns - segment.firstTimestamp100ns) / int64_t(segment.frameCount)
                 : 0;
+        // Ground that is already playable is never published over: a retargeted
+        // run can overlap what an earlier one finished, and a republished file
+        // would move the timeline under a decoder that is reading it.
+        //
+        // A SUB-FRAME overlap is not that; it is arithmetic. The producer
+        // synthesizes a segment's exclusive end from one rounded frame duration
+        // - llround(1e7/fps) in NeuralWorkerMain.cpp - so at every rate whose
+        // duration rounds UP, that end overshoots the next file's own first pts:
+        // 60 fps rounds 166666.67 to 166667, and a 120-frame file ends 40 ticks
+        // past the file that follows it. Refusing the follower for those 40
+        // ticks dropped EVERY OTHER segment of a 60 fps render - 14 of 28
+        // measured on a 2560x1440 clip, the joined result carrying 1590 of 3267
+        // frames - and the publish gate then correctly refused a render that had
+        // just succeeded, so no 60 or 24 fps source could be neural rendered at
+        // all. 30 fps escaped it only because 333333.33 rounds down into the
+        // sub-frame hole that the code below already closes.
+        //
+        // The seam belongs to the arriving file: it owns its own first pts, and
+        // the file before it gives that tick back. An overlap of a whole frame
+        // or more is a real republish and is still refused.
+        if (at != segments_.begin() && segment.firstTimestamp100ns < std::prev(at)->end100ns) {
+            NeuralSegment& previous = *std::prev(at);
+            const int64_t previousFrame =
+                previous.frameCount
+                    ? (previous.end100ns - previous.firstTimestamp100ns) / int64_t(previous.frameCount)
+                    : 0;
+            const int64_t seam = std::max(frameDuration, previousFrame);
+            if (seam <= 0) return;
+            if (previous.end100ns - segment.firstTimestamp100ns >= seam) return;
+            // A file that starts at or before the one it overlaps replaces it
+            // rather than continuing it, whatever the arithmetic says.
+            if (segment.firstTimestamp100ns <= previous.firstTimestamp100ns) return;
+            previous.end100ns = segment.firstTimestamp100ns;
+        }
         // A run filling a hole ends on a segment boundary rather than on the
         // hole's edge, so its last file can reach into the region beyond. Clamp
         // the declared end there: those frames are already served from the other

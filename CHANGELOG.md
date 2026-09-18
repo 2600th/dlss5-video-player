@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **No 60 fps source could be neural rendered, which is every frame-generated
+  file.** A segment's exclusive end is synthesized from one rounded frame
+  duration - `llround(1e7/fps)` - while its first timestamp is the real pts of
+  its first frame, so at any rate whose duration rounds UP the synthesized end
+  lands past the next file's own start: 60 fps rounds 166666.67 to 166667, and a
+  120-frame file ends 40 ticks beyond the file that follows it.
+  `NeuralSegmentIndex::Append` read that as a run republishing playable ground
+  and dropped the follower - which threw away EVERY OTHER segment. Measured on a
+  2560x1440 60 fps clip: 28 segments rendered, 14 kept, the join carrying 1590 of
+  the 3267 frames the render had just verified, and the publish gate then
+  correctly refused the render it had finished ("gate=0 ... probeFrames=1590
+  resultFrames=3267"). The session ended with "The neural video failed final
+  cache validation" and the neural view never attached, so the toggle looked
+  dead. 30 fps never showed it: 333333.33 rounds DOWN, into the sub-frame hole
+  the index already closed. 24 fps was broken the same way as 60.
+  A sub-frame overlap is now the seam it is - the arriving file owns its own
+  first pts and the one before it gives that tick back - while an overlap of a
+  whole frame or more is still refused as a republish. Verified on the same
+  file: 45 of 45 segments joined, "rendered 5305 frames and published its cache
+  entry", "Active neural playback attached at 16.0333 s with 6.48 s buffered",
+  and the status line reading "100% rendered".
 - **Converting a YouTube video threw the whole conversion away at the last
   step.** The pass takes a second path for the audio, subtitles and chapters,
   and the player handed it `m_path` - which on a stream is the signed

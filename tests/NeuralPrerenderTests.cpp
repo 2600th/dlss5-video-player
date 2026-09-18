@@ -3023,6 +3023,68 @@ void neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head
     CHECK(index.Covered(12*kLiveFrame100ns));
 }
 
+// The arithmetic that made 60 fps unrenderable. A segment's exclusive end is
+// synthesized from ONE rounded frame duration - llround(1e7/fps) - while its
+// first timestamp is the real pts of its first frame, so at any rate whose
+// duration rounds UP the synthesized end lands past the next file's own start:
+// 60 fps rounds 166666.67 to 166667, and 120 frames of it end 40 ticks beyond
+// the file that follows. Read as a republish, that dropped every other segment
+// of a 60 fps render - 14 of 28 measured on a 2560x1440 clip - and the publish
+// gate then refused the joined result for carrying 1590 of the 3267 frames the
+// render had just proven, so the session ended with nothing. 30 fps never saw
+// it: 333333.33 rounds down, into the sub-frame hole the index already closed.
+void neural_segment_index_keeps_a_segment_whose_predecessor_overshot_by_a_tick_test()
+{
+    // The producer's numbers, exactly: 60 fps, first pts from the decoder,
+    // exclusive end from the rounded duration.
+    constexpr int64_t kRounded=166667;          // llround(1e7/60)
+    const auto sixtyFps=[](uint64_t firstFrame,uint64_t frames,uint64_t index){
+        NeuralSegment segment;
+        segment.path=std::filesystem::path(L"neural-0000"+std::to_wstring(index)+L".mkv");
+        segment.runId=1;segment.index=index;segment.firstFrameNumber=firstFrame;
+        segment.firstTimestamp100ns=int64_t(std::llround(double(firstFrame)*1e7/60.0));
+        segment.end100ns=segment.firstTimestamp100ns+int64_t(frames)*kRounded;
+        segment.frameCount=frames;
+        return segment;
+    };
+    NeuralSegmentIndex index;
+    index.Append(sixtyFps(2999,30,0));
+    index.Append(sixtyFps(3029,120,1));
+    index.Append(sixtyFps(3149,120,2));
+    // Every file the render published is in the index, and the frames it claims
+    // are the frames it can join.
+    CHECK_EQ(size_t{3},index.Count());
+    CHECK_EQ(uint64_t{270},index.TotalFrames());
+    // One region, not three: the seam is closed at the arriving file's own pts,
+    // so nothing between them reads as a hole either.
+    CHECK_EQ(size_t{1},index.CoveredRanges().size());
+    if(const auto first=index.At(0);first&&index.At(1))
+        CHECK_EQ(index.At(1)->firstTimestamp100ns,first->end100ns);
+    CHECK(index.Covered(index.At(1)->firstTimestamp100ns-1));
+    CHECK(index.Containing(index.At(1)->firstTimestamp100ns)->index==uint64_t{1});
+
+    // A whole frame of overlap is still a republish over playable ground, which
+    // is the case the refusal exists for: a retargeted run must not move the
+    // timeline under a decoder that is already reading it.
+    NeuralSegment republished=sixtyFps(3269,120,3);
+    republished.firstTimestamp100ns=index.At(2)->end100ns-kRounded;
+    republished.end100ns=republished.firstTimestamp100ns+120*kRounded;
+    const uint64_t revision=index.Revision();
+    index.Append(republished);
+    CHECK_EQ(size_t{3},index.Count());
+    CHECK_EQ(revision,index.Revision());
+
+    // And a file republished at the position one already holds is refused for
+    // that same reason, whatever it contains: something may be reading it.
+    if(const auto existing=index.At(1)){
+        NeuralSegment same=*existing;
+        same.path=L"republished.mkv";same.index=4;
+        index.Append(same);
+        CHECK_EQ(size_t{3},index.Count());
+        CHECK_EQ(revision,index.Revision());
+    }
+}
+
 // The read that used to report "out of sync" and take the session down with it:
 // the playhead runs off the end of one rendered region into a hole the run has
 // not filled yet. A hole is work still to do, so the read waits, and it resumes
@@ -3811,6 +3873,7 @@ int wmain(int argc, wchar_t* argv[])
     neural_segment_index_keeps_two_disjoint_rendered_regions_test();
     neural_segment_index_after_finds_the_next_region_from_a_hole_test();
     neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head_test();
+    neural_segment_index_keeps_a_segment_whose_predecessor_overshot_by_a_tick_test();
     live_playback_waits_inside_a_hole_and_resumes_when_it_is_filled_test();
     live_seek_backward_into_an_earlier_region_serves_that_regions_frames_test();
     live_seek_into_a_hole_is_refused_without_discarding_coverage_test();
