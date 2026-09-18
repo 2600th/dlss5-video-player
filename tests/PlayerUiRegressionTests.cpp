@@ -56,6 +56,21 @@ private:
     uint64_t first_, index_{};
 };
 
+// A segment member that never hands a frame over. Live pairing reports
+// SynchronizedReadResult::NotReady for exactly this - a segment decoder that is
+// reopening - so it is what a wedged pair looks like from ReadNextCachedFrame.
+class NeverReadyFrameSource final : public ISynchronizedFrameSource {
+public:
+    bool Open(const std::filesystem::path&, std::stop_token) override { return true; }
+    void Close() override {}
+    VideoReadResult Read(VideoFrame&, std::stop_token) override { return VideoReadResult::NotReady; }
+    bool SeekSeconds(double) override { return true; }
+    uint32_t Width() const override { return 1; }
+    uint32_t Height() const override { return 1; }
+    double FrameRate() const override { return 30.0; }
+    double DurationSeconds() const override { return 3600.0; }
+};
+
 // An uncompressed RGB32 AVI of a few frames: the smallest file Media
 // Foundation describes without a codec or a helper process, which is how a
 // test gives the player's decoder a real geometry and frame rate.
@@ -384,6 +399,7 @@ struct PlayerAppTestAccess {
         CheckJobSourceKeyGuard(app);
         CheckStreamConversionUsesTheAcquiredCopy(app);
         CheckLiveOutOfSyncHandsBack(app);
+        CheckPairStallBoundIgnoresAPause(app);
         CheckLivePaceConfirmation(app);
         app.m_seeking = false;
         app.m_cachedPlayback = false;
@@ -951,6 +967,71 @@ private:
 
         app.m_synchronizedPlayback = SynchronizedPlayback{};
         app.m_seekPending = false; app.m_playing = false; app.m_neuralNotice.clear(); app.m_liveSegments.reset(); app.m_liveRange = {};
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+        app.SyncFeatureMenuState();
+    }
+
+    // A pair that never assembles is bounded at three seconds. That bound reads
+    // a wall clock, and only Tick's playing branch reads pairs at all, so a
+    // pause between one NotReady and the next used to run the clock with no
+    // reads under it: three seconds paused on a segment boundary, and then the
+    // first ordinary warm-up read on resume measured as a wedge and handed the
+    // session back. The window covers a CONTIGUOUS run of reads now.
+    static void CheckPairStallBoundIgnoresAPause(PlayerApp& app)
+    {
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested, seeking = app.m_seeking;
+        NumberedFrameSource original(0);
+        app.m_synchronizedPlayback = SynchronizedPlayback(original, [] {
+            return std::unique_ptr<ISynchronizedFrameSource>(std::make_unique<NeverReadyFrameSource>());
+        });
+        auto segments = std::make_shared<NeuralSegmentIndex>();
+        NeuralSegment part{}; part.path = L"segment.mkv"; part.runId = 1;
+        part.frameCount = 6000; part.end100ns = int64_t(part.frameCount) * 333333;
+        segments->Append(part);
+        CHECK(app.m_synchronizedPlayback.OpenLive(L"original.mkv", segments, SynchronizedRange{}, {},
+                                                  VideoDecoder::KnownMedia{1, 1, 30.0, 3600.0, {}}));
+        app.m_loaded = true; app.m_seeking = false; app.m_seekPending = false;
+        app.m_sourceKind = MediaSourceKind::LocalFile;
+        app.m_liveSession = true; app.m_liveAttached = true; app.m_liveBuffering = false;
+        app.m_liveResumePlaying = false; app.m_liveSegments = segments; app.m_liveDirectory.clear();
+        app.m_liveRange = NeuralRenderRange{0, part.end100ns};
+        app.m_cachedPlayback = true; app.m_neuralRequested = true; app.m_haveNext = false; app.m_playing = true;
+        app.m_neuralNotice.clear(); app.m_pairStall = {}; app.m_pairStallRead = {};
+        const auto backdate = [](Clock::time_point& point, double seconds) {
+            point -= std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
+        };
+
+        // One NotReady starts the wait and nothing else happens.
+        CHECK(!app.ReadNextCachedFrame());
+        CHECK(app.m_pairStall != Clock::time_point{});
+        CHECK(app.m_liveAttached);
+
+        // Four seconds later, with four seconds since the last READ: that is a
+        // pause across the wait, not a wait. The session survives it, and the
+        // second read starts a wait of its own.
+        backdate(app.m_pairStall, 4.0);
+        backdate(app.m_pairStallRead, 4.0);
+        CHECK(!app.ReadNextCachedFrame());
+        CHECK(app.m_liveSession);
+        CHECK(app.m_liveAttached);
+        CHECK(app.m_cachedPlayback);
+        CHECK(!app.m_seekPending);
+
+        // The same four seconds with the reads contiguous IS the wedge: the
+        // attachment goes and the original takes the picture back through a
+        // seek carrying the play state. The session itself stays, to re-attach
+        // when its coverage reaches the playhead again.
+        backdate(app.m_pairStall, 4.0);
+        CHECK(!app.ReadNextCachedFrame());
+        CHECK(!app.m_liveAttached);
+        CHECK(!app.m_cachedPlayback);
+        CHECK(app.m_seekPending);
+        CHECK(app.m_seekResumePlaying);
+
+        app.m_synchronizedPlayback = SynchronizedPlayback{};
+        app.m_liveSession = false; app.m_seekPending = false; app.m_playing = false;
+        app.m_neuralNotice.clear(); app.m_liveSegments.reset(); app.m_liveRange = {};
+        app.m_pairStall = {}; app.m_pairStallRead = {};
         app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
         app.SyncFeatureMenuState();
     }

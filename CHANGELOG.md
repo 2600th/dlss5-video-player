@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A three-second pause could hand a neural session back.** The bound added
+  hours earlier for a pair that never assembles reads a wall clock, and only
+  `Tick`'s playing branch reads pairs at all - so a pause, a seek or a buffering
+  wait landing between one `NotReady` and the next ran the clock with no reads
+  under it. Pause on a segment boundary for three seconds, press play, and the
+  ordinary decoder warm-up on resume - one `NotReady` - measured as a wedged
+  pair: the session detached, the original came back and the picture jumped, on
+  a session that was working. A cached render stopped outright with the desync
+  notice. The window measures a CONTIGUOUS run of reads now; a gap of more than
+  a second since the last one starts a new wait, which no interval between ticks
+  can be (the tick sleeps zero while playing and a stalled pair is read again
+  within a millisecond). `CheckPairStallBoundIgnoresAPause` pins both
+  directions: 3 failures with the fix reverted, 0 with it.
 - **A neural pair that stops assembling froze the picture with nothing said.**
   `ReadNextCachedFrame` had one result with no owner: `NotReady`, which means a
   segment source is reopening - normal at every segment boundary and after every

@@ -1292,6 +1292,16 @@ private:
     // 0.26 s (see "Seek timing" in the log), so three seconds is a reopen that
     // is never going to finish rather than a slow one.
     static constexpr double kPairStallSeconds=3.0;
+    // What makes two reads part of the SAME wait. The window above measures a
+    // contiguous run of NotReady reads, and only Tick's playing branch reads at
+    // all: a pause, a seek, a buffering wait or an unload lands between one
+    // NotReady and the next and stops the reads without stopping the clock.
+    // Without this the window ran across that gap, so pausing on a segment
+    // boundary for three seconds made the ordinary decoder warm-up on resume -
+    // one NotReady - measure as a wedged pair and hand the session back.
+    // A gap this long cannot be an interval between ticks: the tick sleeps zero
+    // while playing, and a stalled pair is read again within a millisecond.
+    static constexpr double kPairStallGapSeconds=1.0;
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
     // A job that renders behind the loaded media: the player keeps the window,
     // and only its own panel and lanes report progress.
@@ -2266,6 +2276,13 @@ private:
     AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
     bool ReadNextCachedFrame(){
+        // Before the read, because the stall window below has to be told that
+        // reads stopped happening at all - see kPairStallGapSeconds.
+        const auto attempt=Clock::now();
+        if(m_pairStallRead==Clock::time_point{}||
+           std::chrono::duration<double>(attempt-m_pairStallRead).count()>kPairStallGapSeconds)
+            m_pairStall={};
+        m_pairStallRead=attempt;
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
         if(read==SynchronizedReadResult::PairReady){
             m_pairStall={};
@@ -2281,8 +2298,8 @@ private:
         // pair was waiting for. Bound it, name the fault once, and take the same
         // way out that unrendered video takes.
         if(read==SynchronizedReadResult::NotReady){
-            if(m_pairStall==Clock::time_point{}){m_pairStall=Clock::now();return false;}
-            const double stalled=std::chrono::duration<double>(Clock::now()-m_pairStall).count();
+            if(m_pairStall==Clock::time_point{}){m_pairStall=attempt;return false;}
+            const double stalled=std::chrono::duration<double>(attempt-m_pairStall).count();
             if(stalled<kPairStallSeconds)return false;
             const std::string fault=m_synchronizedPlayback.LastFault();
             LOG("Neural playback has had no pair for "<<stalled<<" s at "<<Position()<<" s; fault="
@@ -6470,8 +6487,11 @@ private:
     bool m_evenCadenceOnly=false;
     Clock::time_point m_frameGenStarted{};
     // When the current pair first came back NotReady, or the epoch when one is
-    // assembling normally. See ReadNextCachedFrame.
+    // assembling normally, beside when this was last asked for a pair at all.
+    // The second is what separates a wait from a pause across one.
+    // See ReadNextCachedFrame.
     Clock::time_point m_pairStall{};
+    Clock::time_point m_pairStallRead{};
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.
     std::filesystem::path m_frameGenLastOutput;
