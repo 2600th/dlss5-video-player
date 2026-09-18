@@ -63,3 +63,12 @@ Thumbs.db
 
 # Python bytecode from the benchmark tools
 __pycache__/
+
+# Project website build output (site/README.md explains the build)
+site/dist/
+
+# Impeccable working files; the surface brief under .impeccable/surfaces/ is kept
+.impeccable/review/
+.impeccable/analysis/
+.impeccable/mocks/
+.impeccable/brief-body.md

@@ -1,0 +1,670 @@
+/* =============================================================================
+   DLSS 5 Video Player — project site
+
+   An image-quality breakdown, not a product page. True black under fine grain,
+   one ink carried at real scale, hairline rules, and no containers the content
+   does not need. Everything on this page is load-bearing.
+   ========================================================================== */
+
+@font-face {
+  font-family: 'Archivo';
+  src: url('assets/fonts/archivo-latin.woff2') format('woff2-variations');
+  font-weight: 400 900;
+  font-stretch: 62% 125%;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+2000-206F, U+2122, U+2191, U+2193, U+2212, U+2215;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('assets/fonts/jbmono-latin.woff2') format('woff2-variations');
+  font-weight: 400 700;
+  font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+2000-206F, U+2122, U+2212;
+}
+
+:root {
+  --ground:      #050506;
+  --ground-lift: #0b0b0e;
+  --line:        rgba(255, 255, 255, 0.15);
+  --line-soft:   rgba(255, 255, 255, 0.075);
+
+  --text:        #ecebe8;
+  --text-dim:    #a4a099;
+  --text-meta:   #837e77;
+
+  --flag:        #ff6a1a;
+  --flag-deep:   #c74a08;
+  --flag-wash:   rgba(255, 106, 26, 0.09);
+
+  --sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+
+  --gutter: clamp(1.25rem, 4vw, 2.75rem);
+  --measure: 64ch;
+
+  color-scheme: dark;
+}
+
+/* --- reset ---------------------------------------------------------------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scrollbar-color: #2b2b30 var(--ground);
+  scrollbar-width: thin;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.62;
+  font-variation-settings: 'wdth' 100;
+  -webkit-font-smoothing: antialiased;
+  caret-color: var(--flag);
+  overflow-x: hidden;
+}
+
+img, video, svg { display: block; max-width: 100%; }
+h1, h2, h3, p, ol, ul, figure { margin: 0; }
+
+/* Browser surfaces carry the design too. */
+::selection { background: var(--flag); color: #120602; }
+
+a { color: inherit; text-decoration-color: color-mix(in srgb, var(--flag) 55%, transparent); text-underline-offset: 0.22em; }
+a:hover { text-decoration-color: var(--flag); }
+
+:focus-visible { outline: 2px solid var(--flag); outline-offset: 3px; }
+
+kbd {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  padding: 0.12em 0.4em;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
+
+/* Parked above the viewport rather than at left: -9999px: the page sets
+   overflow-x: hidden, which clips a horizontally-parked link and can leave the
+   skip target unreachable. Vertical parking is unaffected by that. */
+.skip {
+  position: absolute; top: 0; left: 0; z-index: 99;
+  background: var(--flag); color: #120602; padding: 0.75rem 1.25rem;
+  font-weight: 650; text-decoration: none;
+  transform: translateY(-130%);
+  transition: transform 0.15s ease;
+}
+.skip:focus { transform: translateY(0); }
+
+/* Film grain: a material from the subject's world, not decoration. */
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.06;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* --- shared type ---------------------------------------------------------- */
+
+.label, .compare__tag, .readout__k, .pkg__kind, .masthead__nav a, .button__meta, .pkg__cta-size {
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.data, .readout__v, .pkg__file, .compare__caption-data, .footer__meta, .pkg__sum {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* --- masthead ------------------------------------------------------------- */
+
+.masthead {
+  position: absolute;
+  inset: 0 0 auto 0;
+  z-index: 20;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: clamp(1.1rem, 2.4vw, 1.9rem) var(--gutter);
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  text-decoration: none;
+  font-weight: 800;
+  font-variation-settings: 'wdth' 88;
+  letter-spacing: -0.015em;
+}
+.wordmark__dlss { color: var(--flag); }
+.wordmark__rest { color: var(--text); }
+
+.masthead__nav { display: flex; gap: clamp(0.9rem, 2vw, 1.9rem); }
+.masthead__nav a { color: var(--text-dim); text-decoration: none; }
+.masthead__nav a:hover { color: var(--text); }
+
+/* --- hero ----------------------------------------------------------------- */
+
+.hero {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100svh;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The scrim lands on both plates equally, so the comparison stays fair. */
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(98deg, rgba(5,5,6,0.94) 0%, rgba(5,5,6,0.86) 24%, rgba(5,5,6,0.42) 45%, rgba(5,5,6,0) 63%),
+    linear-gradient(to top, rgba(5,5,6,0.85) 0%, rgba(5,5,6,0) 32%);
+}
+
+/* The seam settles at 55%: the face occupies roughly 49-62% of the frame at
+   this crop and object-position, so anything further left puts the whole face
+   on one side and the comparison proves nothing. */
+.compare { position: absolute; inset: 0; margin: 0; --seam: 55%; }
+.compare__frame { position: absolute; inset: 0; overflow: hidden; }
+
+.compare__plate {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 58% 50%;
+}
+.compare__plate--neural   { z-index: 0; }
+.compare__plate--original { z-index: 1; clip-path: inset(0 calc(100% - var(--seam)) 0 0); }
+
+.compare__tag {
+  position: absolute;
+  top: clamp(4.5rem, 9vh, 6.5rem);
+  z-index: 4;
+  color: var(--text);
+  text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+  transition: opacity 0.2s ease;
+}
+.compare__tag--left  { right: calc(100% - var(--seam) + 0.85rem); }
+.compare__tag--right { left: calc(var(--seam) + 0.85rem); color: var(--flag); }
+
+/* The seam carries a dark edge so it stays visible on bright footage. */
+.compare__seam {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--seam);
+  width: 2px;
+  margin-left: -1px;
+  z-index: 4;
+  background: var(--flag);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.compare__grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 46px;
+  height: 46px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--flag);
+  background: rgba(5, 5, 6, 0.5);
+  backdrop-filter: blur(2px);
+  transition: box-shadow 0.18s ease, background 0.18s ease;
+}
+/* Two ticks, like a splice mark: a mark, not a hue. */
+.compare__grip::before,
+.compare__grip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 14px;
+  background: var(--flag);
+  transform: translateY(-50%);
+}
+.compare__grip::before { left: 13px; }
+.compare__grip::after  { right: 13px; }
+
+.compare__label {
+  position: absolute;
+  width: 1px; height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.compare__range {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: ew-resize;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  touch-action: pan-y;
+}
+.compare__range::-webkit-slider-thumb { -webkit-appearance: none; width: 60px; height: 100%; }
+.compare__range::-moz-range-thumb { width: 60px; height: 100%; border: 0; opacity: 0; }
+
+.compare:has(.compare__range:focus-visible) .compare__grip {
+  box-shadow: 0 0 0 3px rgba(5, 5, 6, 0.9), 0 0 0 6px var(--flag);
+  background: rgba(5, 5, 6, 0.75);
+}
+.compare:hover .compare__grip { background: rgba(5, 5, 6, 0.7); }
+
+.compare__caption {
+  position: absolute;
+  left: var(--gutter);
+  bottom: clamp(1.1rem, 3vh, 2rem);
+  z-index: 6;
+  max-width: min(46rem, calc(100% - 2 * var(--gutter)));
+  display: grid;
+  gap: 0.3rem;
+  border-left: 1px solid var(--flag);
+  padding-left: 0.85rem;
+}
+.compare__caption-line { color: var(--text-dim); font-size: 0.82rem; }
+.compare__caption-data { color: var(--text-meta); line-height: 1.5; }
+
+.hero__type {
+  position: relative;
+  z-index: 10;
+  pointer-events: none;
+  padding: 0 var(--gutter);
+  max-width: min(41rem, 92%);
+  margin-bottom: clamp(3rem, 10vh, 7rem);
+}
+.hero__type a { pointer-events: auto; }
+
+.hero__headline {
+  font-size: clamp(2.7rem, 6.2vw, 5.1rem);
+  font-weight: 800;
+  font-variation-settings: 'wdth' 92;
+  letter-spacing: -0.038em;
+  line-height: 0.96;
+  text-wrap: balance;
+  margin-bottom: 1.4rem;
+}
+
+.hero__lede {
+  max-width: 34rem;
+  color: var(--text-dim);
+  font-size: clamp(1rem, 1.35vw, 1.13rem);
+  margin-bottom: 2rem;
+}
+
+.hero__actions { display: flex; flex-wrap: wrap; gap: 0.85rem; margin-bottom: 1.35rem; }
+
+.hero__caveat { color: var(--text-meta); font-size: 0.85rem; max-width: 30rem; }
+
+.hero__hint {
+  position: absolute;
+  right: var(--gutter);
+  bottom: clamp(1.1rem, 3vh, 2rem);
+  z-index: 6;
+  color: var(--text-meta);
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variation-settings: 'wdth' 78;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+/* --- buttons -------------------------------------------------------------- */
+
+.button {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.85rem 1.5rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+}
+.button__label { font-weight: 700; font-size: 1rem; letter-spacing: -0.01em; }
+.button__meta { opacity: 0.72; }
+
+.button--primary { background: var(--flag); color: #120602; }
+.button--primary:hover { background: #ff8340; }
+
+.button--ghost { border-color: var(--line); color: var(--text); align-self: stretch; justify-content: center; }
+.button--ghost:hover { border-color: var(--flag); color: var(--flag); }
+
+/* --- sections ------------------------------------------------------------- */
+
+.section {
+  max-width: 76rem;
+  margin-inline: auto;
+  padding: clamp(3.5rem, 8vw, 7rem) var(--gutter);
+}
+.section--wide { max-width: 84rem; }
+
+.section__title {
+  font-size: clamp(1.65rem, 3.1vw, 2.6rem);
+  font-weight: 750;
+  font-variation-settings: 'wdth' 94;
+  letter-spacing: -0.028em;
+  line-height: 1.08;
+  text-wrap: balance;
+  margin-bottom: 1.1rem;
+}
+
+.section__note { max-width: var(--measure); color: var(--text-dim); margin-bottom: 2.5rem; }
+.section__head { margin-bottom: 2.5rem; }
+.section__head .section__note { margin-bottom: 0; }
+
+/* --- readout -------------------------------------------------------------- */
+
+.readout { border-top: 1px solid var(--line); }
+.readout__row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  gap: 1.5rem;
+  align-items: baseline;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.readout__k { color: var(--flag); }
+.readout__v { color: var(--text-dim); }
+
+/* --- beats ---------------------------------------------------------------- */
+
+.beat {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.25fr);
+  gap: clamp(1.75rem, 5vw, 4.5rem);
+  align-items: center;
+  padding-block: clamp(2.25rem, 5vw, 4rem);
+  border-top: 1px solid var(--line-soft);
+}
+.beat:first-of-type { border-top-color: var(--line); }
+
+/* Alternating rows swap sides by placement, not by `order`: with `order` the
+   figure lands in whichever column comes first and the screenshot gets the
+   narrow one. The image keeps the wide column on both sides. */
+.beat__text   { grid-column: 1; }
+.beat__figure { grid-column: 2; }
+.beat--flip   { grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); }
+.beat--flip .beat__text   { grid-column: 2; }
+.beat--flip .beat__figure { grid-column: 1; }
+
+.beat__title {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.7rem;
+}
+.beat__text p { color: var(--text-dim); max-width: 38ch; }
+
+.beat__figure img { width: 100%; height: auto; border: 1px solid var(--line-soft); }
+.beat__figure figcaption { margin-top: 0.7rem; color: var(--text-meta); font-size: 0.78rem; }
+
+/* --- matrix --------------------------------------------------------------- */
+
+.matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0 clamp(1.5rem, 4vw, 3.5rem);
+  border-top: 1px solid var(--line);
+}
+
+.matrix__group { padding: 1.5rem 0 1.75rem; border-bottom: 1px solid var(--line-soft); }
+.matrix__title { color: var(--flag); margin-bottom: 0.9rem;
+  font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78;
+  text-transform: uppercase; letter-spacing: 0.15em; }
+
+.matrix__list { list-style: none; padding: 0; display: grid; gap: 0.6rem; }
+.matrix__list li {
+  color: var(--text-dim);
+  font-size: 0.93rem;
+  line-height: 1.5;
+  padding-left: 1rem;
+  position: relative;
+}
+/* A tick on the rule, not a bullet glyph. */
+.matrix__list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.62em;
+  width: 6px;
+  height: 1px;
+  background: var(--flag);
+}
+
+/* --- demo ----------------------------------------------------------------- */
+
+.demo { position: relative; border: 1px solid var(--line-soft); }
+.demo__poster { width: 100%; height: auto; }
+
+.demo__play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: rgba(5, 5, 6, 0.4);
+  border: 0;
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.demo__play:hover { background: rgba(5, 5, 6, 0.24); }
+
+.demo__play-icon {
+  display: grid;
+  place-items: center;
+  width: 60px;
+  height: 60px;
+  border: 2px solid var(--flag);
+  color: var(--flag);
+  margin-bottom: 0.4rem;
+  padding-left: 3px;
+}
+.demo__play-label { font-weight: 700; font-size: 1rem; }
+.demo__play-meta { color: var(--text-meta); font-size: 0.78rem; }
+
+.demo video { width: 100%; height: auto; display: block; }
+
+/* --- packages ------------------------------------------------------------- */
+
+.packages {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 0 clamp(1.5rem, 4vw, 3.5rem);
+  border-top: 1px solid var(--line);
+  margin-bottom: 3rem;
+}
+
+.pkg {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 1.75rem 0 2rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.pkg__kind { color: var(--flag); }
+.pkg--pending .pkg__kind { color: var(--text-meta); }
+.pkg__summary { color: var(--text-dim); font-size: 0.95rem; max-width: 34ch; flex: 1; }
+
+.pkg__cta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-top: 0.4rem;
+  padding: 0.7rem 1.25rem;
+  text-decoration: none;
+  border: 1px solid var(--line);
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+.pkg__cta-label { font-weight: 700; }
+.pkg__cta-size { color: var(--text-meta); }
+.pkg__cta:hover { border-color: var(--flag); color: var(--flag); }
+.pkg__cta:hover .pkg__cta-size { color: var(--flag); }
+
+.pkg--primary .pkg__cta { background: var(--flag); border-color: var(--flag); color: #120602; }
+.pkg--primary .pkg__cta .pkg__cta-size { color: rgba(18, 6, 2, 0.72); }
+.pkg--primary .pkg__cta:hover { background: #ff8340; border-color: #ff8340; color: #120602; }
+.pkg--primary .pkg__cta:hover .pkg__cta-size { color: rgba(18, 6, 2, 0.72); }
+
+.pkg__file { color: var(--text-meta); word-break: break-all; }
+
+.pkg__sum {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: none;
+  border: 0;
+  border-bottom: 1px dashed var(--line);
+  padding: 0.2rem 0;
+  color: var(--text-meta);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+.pkg__sum:hover { color: var(--flag); border-color: var(--flag); }
+.pkg__sum-action { font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.75; }
+.pkg__sum[data-copied='1'] .pkg__sum-action { color: var(--flag); opacity: 1; }
+
+/* --- requirements & notice ------------------------------------------------ */
+
+.requires { margin-bottom: 2.5rem; }
+.requires__title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.9rem; }
+.requires__list { color: var(--text-dim); max-width: var(--measure); padding-left: 1.2rem; }
+.requires__list li { margin-bottom: 0.5rem; }
+.requires__list li::marker { color: var(--flag); font-family: var(--mono); font-size: 0.85em; }
+
+.notice {
+  border: 1px solid rgba(255, 106, 26, 0.32);
+  background: var(--flag-wash);
+  padding: clamp(1.1rem, 2.5vw, 1.6rem);
+  max-width: 62rem;
+}
+.notice p { color: var(--text-dim); font-size: 0.93rem; }
+.notice p + p { margin-top: 0.8rem; }
+.notice strong { color: var(--text); }
+
+/* --- faq ------------------------------------------------------------------ */
+
+.faq { border-top: 1px solid var(--line); max-width: 58rem; }
+.faq__item { border-bottom: 1px solid var(--line-soft); }
+.faq__item summary {
+  cursor: pointer;
+  padding: 1.1rem 0;
+  font-weight: 650;
+  font-size: 1.02rem;
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.faq__item summary::-webkit-details-marker { display: none; }
+.faq__item summary::after { content: '+'; color: var(--flag); font-family: var(--mono); font-size: 1.15rem; line-height: 1; }
+.faq__item[open] summary::after { content: '–'; }
+.faq__item p { padding-bottom: 1.2rem; color: var(--text-dim); max-width: var(--measure); font-size: 0.96rem; }
+
+/* --- footer --------------------------------------------------------------- */
+
+.footer { border-top: 1px solid var(--line); padding: clamp(2.5rem, 6vw, 4.5rem) var(--gutter) 3rem; max-width: 76rem; margin-inline: auto; }
+.footer__cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 2rem; margin-bottom: 3rem; }
+.footer__col { display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+.footer__col h3 {
+  font-size: 0.7rem; font-weight: 650; font-variation-settings: 'wdth' 78;
+  text-transform: uppercase; letter-spacing: 0.15em; color: var(--flag); margin-bottom: 0.35rem;
+}
+.footer__col a { color: var(--text-dim); text-decoration: none; font-size: 0.93rem; }
+.footer__col a:hover { color: var(--text); text-decoration: underline; }
+
+.footer__base { border-top: 1px solid var(--line-soft); padding-top: 1.5rem; }
+.footer__base p { color: var(--text-meta); font-size: 0.82rem; max-width: 62rem; }
+.footer__meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; margin-top: 1rem; }
+
+/* --- responsive ----------------------------------------------------------- */
+
+@media (max-width: 60rem) {
+  .hero { min-height: 0; display: block; padding-top: 5.5rem; }
+  .hero::after { display: none; }
+
+  /* The figure becomes a normal block: the frame keeps its own box and the
+     caption flows underneath it instead of sitting on top of the picture.
+     A taller crop than the source's 16:9 so the face is still legible on a
+     phone - the comparison is the argument, and it has to survive the width. */
+  .compare { position: static; }
+  .compare__frame { position: relative; inset: auto; aspect-ratio: 4 / 3; }
+  .compare__plate { object-position: 60% 42%; }
+  .compare__tag { top: 0.85rem; }
+  .compare__caption {
+    position: static;
+    max-width: none;
+    margin: 1rem var(--gutter) 0;
+    padding-left: 0.75rem;
+  }
+
+  .hero__type { margin: 2.25rem 0 0; max-width: none; padding-bottom: 2.5rem; }
+  .hero__hint { display: none; }
+
+  .beat { grid-template-columns: 1fr; gap: 1.5rem; }
+  .beat__text, .beat__figure,
+  .beat--flip .beat__text, .beat--flip .beat__figure { grid-column: auto; }
+  .beat--flip { grid-template-columns: 1fr; }
+  .beat__text p { max-width: var(--measure); }
+
+  .readout__row { grid-template-columns: 1fr; gap: 0.2rem; }
+}
+
+@media (max-width: 34rem) {
+  /* Keep the primary action reachable; the secondary links are the ones to drop. */
+  .masthead__nav a:not(.masthead__nav-primary) { display: none; }
+  .button { width: 100%; }
+  .hero__actions { flex-direction: column; align-items: stretch; }
+}
+
+/* --- motion --------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
