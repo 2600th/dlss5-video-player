@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en" data-version="{{VERSION}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DLSS 5 Video Player — AI video upscaling on your RTX card, for Windows</title>
+<meta name="description" content="Free, open-source Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer on your own RTX GPU while you watch, then compares the render with the original frame by frame. Export to MP4 or MKV. No upload, no subscription.">
+<link rel="canonical" href="{{SITE_URL}}">
+<meta name="theme-color" content="#050506">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<meta name="author" content="DLSS 5 Video Player contributors">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="DLSS 5 Video Player">
+<meta property="og:locale" content="en">
+<meta property="og:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
+<meta property="og:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame. Free and open source, for Windows.">
+<meta property="og:url" content="{{SITE_URL}}">
+<meta property="og:image" content="{{SITE_URL}}assets/hero/hero-neural.jpg">
+<meta property="og:image:width" content="920">
+<meta property="og:image:height" content="518">
+<meta property="og:image:alt" content="One frame of The Godfather split down the face: the original on the left, the DLSS 5 neural render on the right.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
+<meta name="twitter:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame.">
+<meta name="twitter:image" content="{{SITE_URL}}assets/hero/hero-neural.jpg">
+
+<link rel="icon" href="assets/favicon.ico" sizes="any">
+<link rel="preload" as="font" type="font/woff2" href="assets/fonts/archivo-latin.woff2" crossorigin>
+<link rel="preload" as="image" href="assets/hero/hero-neural.jpg" fetchpriority="high">
+<link rel="preload" as="image" href="assets/hero/hero-original.jpg" fetchpriority="high">
+<link rel="stylesheet" href="styles.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "{{SITE_URL}}#app",
+      "name": "DLSS 5 Video Player",
+      "url": "{{SITE_URL}}",
+      "description": "A Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer while you watch, and holds the original and the render on the same frame for comparison.",
+      "applicationCategory": "MultimediaApplication",
+      "applicationSubCategory": "Video upscaling",
+      "operatingSystem": "Windows 10, Windows 11",
+      "processorRequirements": "NVIDIA RTX graphics card",
+      "softwareRequirements": "NVIDIA driver 610.47 or newer, NVIDIA RTX graphics card",
+      "softwareVersion": "{{VERSION}}",
+      "datePublished": "{{PUBLISHED_ISO}}",
+      "downloadUrl": "{{PRIMARY_URL}}",
+      "installUrl": "{{RELEASE_URL}}",
+      "releaseNotes": "{{REPO_URL}}/blob/main/CHANGELOG.md",
+      "license": "https://opensource.org/licenses/MIT",
+      "isAccessibleForFree": true,
+      "image": "{{SITE_URL}}assets/hero/hero-neural.jpg",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "featureList": [
+        "Neural rendering while playback continues",
+        "Frame-accurate comparison of the original and the render",
+        "Seek anywhere, rendered or not",
+        "Export to PNG, JPEG, GIF, MP4 or MKV",
+        "Optional DLSS Super Resolution",
+        "Renders are cached and reused"
+      ],
+      "codeRepository": "{{REPO_URL}}"
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "{{SITE_URL}}#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Why is the runtime unsigned?",
+          "acceptedAnswer": { "@type": "Answer", "text": "The neural runtime is a modified community build of NVIDIA's, not a redistribution of a signed NVIDIA package. Nobody is in a position to sign it, so it ships unsigned and says so. If that is not acceptable to you, take the core package and supply your own runtime." }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I need an RTX card?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes, for neural rendering, along with NVIDIA driver 610.47 or newer. The player itself opens and plays video without one; the render is what needs the hardware." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it upload my video anywhere?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Rendering runs on your own GPU and the cache is on your own disk. The only network traffic is fetching a YouTube link if you paste one." }
+        },
+        {
+          "@type": "Question",
+          "name": "How long does a render take?",
+          "acceptedAnswer": { "@type": "Answer", "text": "It depends on the card, the resolution and the clip. The point of the design is that you do not wait for it: playback joins the render a few seconds after you press D, and the rest fills in while you watch." }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I keep the result?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes - PNG or JPEG for photos, GIF for animations, MP4 or MKV for video. MKV keeps the source audio, subtitles and chapters without re-encoding them." }
+        }
+      ]
+    }
+  ]
+}
+</script>
+{{ANALYTICS}}
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+<a class="skip" href="#download">Skip to download</a>
+
+<header class="masthead">
+  <a class="wordmark" href="{{SITE_URL}}">
+    <span class="wordmark__dlss">DLSS&nbsp;5</span>
+    <span class="wordmark__rest">Video Player</span>
+  </a>
+  <nav class="masthead__nav">
+    <a href="#evidence">The difference</a>
+    <a href="#how">How it works</a>
+    <a class="masthead__nav-primary" href="#download">Download</a>
+    <a href="{{REPO_URL}}" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<!-- ============================== hero ============================== -->
+<main id="main">
+<section class="hero">
+  <figure class="compare" id="compare">
+    <!-- The frame is its own box so the caption can sit over it on desktop and
+         below it on a phone, without either overlapping the other. -->
+    <div class="compare__frame">
+      <img class="compare__plate compare__plate--neural" src="assets/hero/hero-neural.jpg"
+           width="920" height="518" alt="One frame of The Godfather rendered through the DLSS 5 neural renderer."
+           fetchpriority="high" decoding="async">
+      <img class="compare__plate compare__plate--original" src="assets/hero/hero-original.jpg"
+           width="920" height="518" alt="The same frame with neural rendering switched off."
+           fetchpriority="high" decoding="async">
+
+      <span class="compare__tag compare__tag--left" aria-hidden="true">Original</span>
+      <span class="compare__tag compare__tag--right" aria-hidden="true">Neural</span>
+
+      <span class="compare__seam" aria-hidden="true">
+        <span class="compare__grip"></span>
+      </span>
+
+      <label class="compare__label" for="seam">Reveal the neural render</label>
+      <input class="compare__range" id="seam" type="range" min="0" max="100" value="55" step="0.1"
+             aria-describedby="compare-caption">
+    </div>
+
+    <figcaption class="compare__caption" id="compare-caption">
+      <span class="compare__caption-line">The Godfather 50th Anniversary Trailer · Paramount Pictures</span>
+      <span class="compare__caption-data">2560×1440 source · paused at 73.98&nbsp;s · RTX 5090 · captured on v0.21.0 · crop 920×518 at 380,100 · one frame, only the view switched</span>
+    </figcaption>
+  </figure>
+
+  <div class="hero__type">
+    <h1 class="hero__headline">The same frame,<br>rendered twice.</h1>
+    <p class="hero__lede">
+      Point a video, photo or GIF at NVIDIA's DLSS&nbsp;5 neural renderer and keep
+      watching while it works. The original stays beside the render, on the same
+      frame, so you judge it on the picture instead of the claim.
+    </p>
+    <div class="hero__actions">
+      <a class="button button--primary" href="{{PRIMARY_URL}}" data-download="hero">
+        <span class="button__label">Download for Windows</span>
+        <span class="button__meta">{{VERSION_LABEL}} · {{PRIMARY_SIZE}}</span>
+      </a>
+      <a class="button button--ghost" href="#evidence">See what changes</a>
+    </div>
+    <p class="hero__caveat">
+      Windows · RTX card · driver 610.47+. Community project, not an NVIDIA product.
+    </p>
+  </div>
+
+  <p class="hero__hint" aria-hidden="true">Drag the seam</p>
+</section>
+
+<!-- ============================ evidence ============================ -->
+<section class="section" id="evidence">
+  <div class="section__head">
+    <h2 class="section__title">What the renderer actually changed</h2>
+    <p class="section__note">
+      Both frames above come from one paused moment in a single live session:
+      the clip was rendered once, then the view was switched with
+      <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> without seeking. Nothing was
+      retouched, sharpened or colour-corrected. Measured across the player's
+      video area, the two captures differ by 29.8&nbsp;dB PSNR — the renderer is
+      rebuilding detail across the face, not applying a filter over the whole
+      picture.
+    </p>
+  </div>
+
+  <div class="readout">
+    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 23.976&nbsp;fps · 120.119&nbsp;s · 2,880 frames</span></p>
+    <p class="readout__row"><span class="readout__k">Session</span><span class="readout__v">2,875 of 2,875 frames verified · failure none · lock ok</span></p>
+    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 5090 · driver 616.64 · captured on player v0.21.0</span></p>
+    <p class="readout__row"><span class="readout__k">Capture</span><span class="readout__v">1442×932 window · JPEG q95, no chroma subsampling</span></p>
+  </div>
+</section>
+
+<!-- ============================== how =============================== -->
+<section class="section section--wide" id="how">
+  <h2 class="section__title">How it works</h2>
+
+  <article class="beat">
+    <div class="beat__text">
+      <h3 class="beat__title">Press <kbd>D</kbd> and keep watching</h3>
+      <p>
+        Rendering is not an export queue. Press <kbd>D</kbd> at any point and
+        playback continues on rendered frames a few seconds later, while the
+        session keeps filling in the rest of the video — nearest the playhead
+        first.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <img src="media/neural-playback.jpg" width="1442" height="932" loading="lazy" decoding="async"
+           alt="The player during playback with neural rendering attached, the status line reporting buffered seconds and frame rate.">
+      <figcaption>Grand Theft Auto VI, paused at 13.17&nbsp;s with the render attached<span class="beat__tick">2560×1440 source · 780 frames · session verified 702/702 · failure none</span></figcaption>
+    </figure>
+  </article>
+
+  <article class="beat beat--flip">
+    <div class="beat__text">
+      <h3 class="beat__title">Seek anywhere, rendered or not</h3>
+      <p>
+        Land on rendered frames and playback continues on them wherever they are
+        on the timeline. Land somewhere nobody has rendered and the original
+        plays at once while the render moves there. Nothing already rendered is
+        thrown away.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <img src="media/original-comparison.jpg" width="1442" height="932" loading="lazy" decoding="async"
+           alt="The same paused frame with neural rendering switched off, for comparison.">
+      <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1442×932 window · JPEG q95, no chroma subsampling</span></figcaption>
+    </figure>
+  </article>
+
+  <article class="beat">
+    <div class="beat__text">
+      <h3 class="beat__title">Judge it while it is paused</h3>
+      <p>
+        Compare as a split, a wipe or a blend without moving the playhead, and
+        step frames on either view. Change a neural setting while paused and
+        that frame is re-rendered immediately, so you decide on the picture.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <img src="media/neural-strength.jpg" width="1442" height="932" loading="lazy" decoding="async"
+           alt="The image adjustments window open over a frame, showing the Neural strength dial.">
+      <figcaption>Neural strength, at its 1.00 default<span class="beat__tick">image adjustments over the same paused frame · captured on v0.21.0</span></figcaption>
+    </figure>
+  </article>
+
+  <article class="beat beat--flip">
+    <div class="beat__text">
+      <h3 class="beat__title">Come back and it is still there</h3>
+      <p>
+        The last five videos and their renders are remembered. A render is
+        reused only when the source, the runtime and the neural settings all
+        still match — so what you reopen is what you rendered.
+      </p>
+    </div>
+    <figure class="beat__figure">
+      <img src="media/recent-videos.jpg" width="1442" height="932" loading="lazy" decoding="async"
+           alt="The File menu open on Recent videos, with Export cached video beneath it.">
+      <figcaption>Recent videos reopens a film with its render already attached<span class="beat__tick">File menu · captured 3 September 2026 · history submenu closed, no local paths in frame</span></figcaption>
+    </figure>
+  </article>
+</section>
+
+<!-- ============================= formats ============================ -->
+<section class="section" id="formats">
+  <h2 class="section__title">What goes in, what comes out</h2>
+  <p class="section__note">
+    The renderer works on whatever the player can open, and what you render can
+    be written back out to a file. Nothing is uploaded: the work happens on your
+    own GPU and the cache sits on your own disk.
+  </p>
+
+  <div class="matrix">
+    <section class="matrix__group">
+      <h3 class="matrix__title">Opens</h3>
+      <ul class="matrix__list">
+        <li>Local video files</li>
+        <li>Public YouTube links, pasted with <kbd>Ctrl</kbd>+<kbd>L</kbd></li>
+        <li>Photos and animated GIFs</li>
+        <li>Six bundled game trailers, each under three minutes</li>
+      </ul>
+    </section>
+
+    <section class="matrix__group">
+      <h3 class="matrix__title">Writes</h3>
+      <ul class="matrix__list">
+        <li>PNG or JPEG, for photos</li>
+        <li>GIF, for animations</li>
+        <li>MP4, encoded with NVENC</li>
+        <li>MKV, keeping the source audio, subtitles and chapters without re-encoding them</li>
+      </ul>
+    </section>
+
+    <section class="matrix__group">
+      <h3 class="matrix__title">On top</h3>
+      <ul class="matrix__list">
+        <li>Optional DLSS Super Resolution, on either view</li>
+        <li>Output follows the display: 1080p, 1440p or 2160p, whichever it can scan out</li>
+        <li>Any rung can be pinned; the render itself stays at source resolution</li>
+        <li>Neural strength from 0 to 200%, re-mixed without re-rendering</li>
+      </ul>
+    </section>
+  </div>
+</section>
+
+<!-- ============================== demo ============================== -->
+<section class="section" id="demo">
+  <h2 class="section__title">Twenty-two seconds of it running</h2>
+  <p class="section__note">
+    Two live 1440p sessions recorded as they ran: each film paused and magnified
+    2× in the player, split down the face, then playback with the render running
+    ahead. No sound.
+  </p>
+
+  <div class="demo" data-video="media/neural-comparison-demo.mp4">
+    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1438" height="930"
+         loading="lazy" decoding="async"
+         alt="The player during playback with neural rendering attached, its status line reporting a live render of Grand Theft Auto VI.">
+    <button class="demo__play" type="button">
+      <!-- The backing is a plate behind the label, not a wash over the frame:
+           this section's job is to show image quality, so the footage keeps
+           its own luminance. -->
+      <span class="demo__plate">
+        <span class="demo__play-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6">
+            <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
+          </svg>
+        </span>
+        <span class="demo__play-label">Play the 22-second demonstration</span>
+        <span class="demo__play-meta">5.3 MB · loads only when you ask</span>
+      </span>
+    </button>
+  </div>
+  <p class="demo__credit">
+    Poster: frame 460 of the video, cropped to the player window. Grand Theft
+    Auto VI — Rockstar Games, via Netflix's <i>Now Playing</i>.
+  </p>
+</section>
+
+<!-- ============================ download ============================ -->
+<section class="section" id="download">
+  <h2 class="section__title">Download</h2>
+  <p class="section__note">
+    {{VERSION_LABEL}}, published {{RELEASE_DATE}}. Every build is listed on the
+    <a href="{{RELEASE_URL}}" rel="noopener">release page</a> with its checksum.
+  </p>
+
+  <div class="packages">
+    {{FULL_PACKAGE}}
+    {{CORE_PACKAGE}}
+  </div>
+
+  <div class="requires">
+    <h3 class="requires__title">Before you run it</h3>
+    <ol class="requires__list">
+      <li>Unzip into a <strong>new, empty folder</strong>. Keep <code>neural-runtime/</code> next to the executable.</li>
+      <li>Run <code>DLSSVideoPlayer.exe</code>.</li>
+      <li>Open a file with <kbd>Ctrl</kbd>+<kbd>O</kbd>, paste a YouTube link with <kbd>Ctrl</kbd>+<kbd>L</kbd>, or pick something from <strong>File &gt; Game trailers</strong>.</li>
+      <li>Press <kbd>D</kbd>. It buffers for a few seconds, then plays rendered.</li>
+    </ol>
+  </div>
+
+  <aside class="notice">
+    <p>
+      <strong>This is a community project — it is not an NVIDIA product.</strong>
+      The neural runtime it ships with is a modified, <strong>unsigned</strong>
+      community build, so Windows and your antivirus will treat it as unknown
+      software. Neural rendering needs NVIDIA driver 610.47 or newer, on an RTX
+      card. Checked on an RTX 4080 SUPER and an RTX 5090.
+    </p>
+    <p>
+      GitHub's automatically generated “Source code” archives do not run: the
+      runtime is not in them. Third-party notices are in
+      <a href="{{REPO_URL}}/blob/main/THIRD_PARTY.md" rel="noopener">THIRD_PARTY.md</a>.
+    </p>
+  </aside>
+</section>
+
+<!-- ============================== faq =============================== -->
+<section class="section" id="faq">
+  <h2 class="section__title">Questions</h2>
+  <div class="faq">
+    <details class="faq__item">
+      <summary>Why is the runtime unsigned?</summary>
+      <p>
+        The neural runtime is a modified community build of NVIDIA's, not a
+        redistribution of a signed NVIDIA package. Nobody is in a position to
+        sign it, so it ships unsigned and says so. If that is not acceptable to
+        you, take the core package and supply your own runtime.
+      </p>
+    </details>
+    <details class="faq__item">
+      <summary>Do I need an RTX card?</summary>
+      <p>
+        Yes, for neural rendering, along with NVIDIA driver 610.47 or newer. The
+        player itself opens and plays video without one; the render is what
+        needs the hardware.
+      </p>
+    </details>
+    <details class="faq__item">
+      <summary>Does it upload my video anywhere?</summary>
+      <p>
+        No. Rendering runs on your own GPU and the cache is on your own disk.
+        The only network traffic is fetching a YouTube link if you paste one.
+      </p>
+    </details>
+    <details class="faq__item">
+      <summary>How long does a render take?</summary>
+      <p>
+        It depends on the card, the resolution and the clip. The point of the
+        design is that you do not wait for it: playback joins the render a few
+        seconds after you press <kbd>D</kbd>, and the rest fills in while you
+        watch. Measured figures for each release are in the
+        <a href="{{REPO_URL}}/blob/main/CHANGELOG.md" rel="noopener">changelog</a>.
+      </p>
+    </details>
+    <details class="faq__item">
+      <summary>Can I keep the result?</summary>
+      <p>
+        Yes — PNG or JPEG for photos, GIF for animations, MP4 or MKV for video.
+        MKV keeps the source audio, subtitles and chapters without re-encoding
+        them.
+      </p>
+    </details>
+  </div>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="footer__cols">
+    <div class="footer__col">
+      <h3>Read</h3>
+      <a href="{{REPO_URL}}/blob/main/README.md" rel="noopener">Overview</a>
+      <a href="{{REPO_URL}}/blob/main/docs/USAGE.md" rel="noopener">Usage guide</a>
+      <a href="{{REPO_URL}}/blob/main/docs/TROUBLESHOOTING.md" rel="noopener">Troubleshooting</a>
+      <a href="{{REPO_URL}}/blob/main/CHANGELOG.md" rel="noopener">Changelog</a>
+    </div>
+    <div class="footer__col">
+      <h3>Build</h3>
+      <a href="{{REPO_URL}}/blob/main/docs/BUILDING.md" rel="noopener">Build from source</a>
+      <a href="{{REPO_URL}}/blob/main/TECHNICAL_OVERVIEW.md" rel="noopener">Technical overview</a>
+      <a href="{{REPO_URL}}/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a>
+      <a href="{{REPO_URL}}/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a>
+    </div>
+    <div class="footer__col">
+      <h3>Verify</h3>
+      <a href="{{REPO_URL}}/blob/main/docs/VERIFICATION-matrix.md" rel="noopener">Verification matrix</a>
+      <a href="{{REPO_URL}}/blob/main/docs/screenshots/README.md" rel="noopener">Screenshot provenance</a>
+      <a href="{{REPO_URL}}/blob/main/THIRD_PARTY.md" rel="noopener">Third-party notices</a>
+      <a href="{{REPO_URL}}/blob/main/SECURITY.md" rel="noopener">Security policy</a>
+    </div>
+  </div>
+
+  <div class="footer__base">
+    <p>
+      MIT licensed. Not affiliated with, endorsed by, or a product of NVIDIA
+      Corporation. Footage is credited to Paramount Pictures and Rockstar Games
+      and is shown to document the software; its inclusion is not an
+      endorsement and the source licence does not relicense it.
+    </p>
+    <p class="footer__meta">
+      <span>© {{YEAR}} DLSS 5 Video Player contributors</span>
+      <span>Site built {{BUILT_AT}}</span>
+    </p>
+  </div>
+</footer>
+
+<script src="main.js" defer></script>
+</body>
+</html>

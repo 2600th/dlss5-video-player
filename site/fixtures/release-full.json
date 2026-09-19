@@ -1,0 +1,30 @@
+﻿{
+    "tag_name":  "dlss5-video-player-v0.23.0",
+    "name":  "dlss5-video-player-v0.23.0",
+    "html_url":  "https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.23.0",
+    "published_at":  "2026-09-16T10:06:07Z",
+    "draft":  false,
+    "prerelease":  true,
+    "assets":  [
+                   {
+                       "name":  "dlss5-video-player-v0.23.0-win64.zip",
+                       "size":  323722747,
+                       "browser_download_url":  "https://github.com/2600th/dlss5-video-player/releases/download/dlss5-video-player-v0.23.0/dlss5-video-player-v0.23.0-win64.zip"
+                   },
+                   {
+                       "name":  "dlss5-video-player-v0.23.0-win64.zip.sha256",
+                       "size":  103,
+                       "browser_download_url":  "https://github.com/2600th/dlss5-video-player/releases/download/dlss5-video-player-v0.23.0/dlss5-video-player-v0.23.0-win64.zip.sha256"
+                   },
+                   {
+                       "name":  "DLSSVideoPlayer-v0.23.0-core-win64.zip",
+                       "size":  32848801,
+                       "browser_download_url":  "https://github.com/2600th/dlss5-video-player/releases/download/dlss5-video-player-v0.23.0/DLSSVideoPlayer-v0.23.0-core-win64.zip"
+                   },
+                   {
+                       "name":  "DLSSVideoPlayer-v0.23.0-core-win64.zip.sha256",
+                       "size":  105,
+                       "browser_download_url":  "https://github.com/2600th/dlss5-video-player/releases/download/dlss5-video-player-v0.23.0/DLSSVideoPlayer-v0.23.0-core-win64.zip.sha256"
+                   }
+               ]
+}

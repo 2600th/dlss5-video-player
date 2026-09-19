@@ -1,0 +1,12 @@
+﻿{
+    "source":  "docs/media/neural-comparison-demo.mp4",
+    "why":  "the shipped title card is lettered in the demo green, which put a second ink on a one-ink page",
+    "chartreuseCoverage":  0,
+    "generatedBy":  "site/tools/make-demo-poster.ps1",
+    "operations":  "select one frame, crop to the player window, one JPEG encode",
+    "shows":  "Grand Theft Auto VI playing with neural rendering attached, status line reporting the live render",
+    "frame":  460,
+    "crop":  "x=464 y=75 w=1438 h=930 of 1920x1080",
+    "credit":  "Rockstar Games, via Netflix Now Playing",
+    "provenance":  "docs/media/README.md and docs/screenshots/README.md"
+}
