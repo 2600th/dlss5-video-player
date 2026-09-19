@@ -29,8 +29,8 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.24.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.24.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.24.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 312 MB |
+| `DLSSVideoPlayer-v0.24.0-core-win64.zip` | Player only, no neural runtime. | 35 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
