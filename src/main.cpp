@@ -1311,6 +1311,22 @@ public:
     bool Running()const{return m_running;}
     bool NeedsRealtimeTick()const{return m_loaded;}
     DWORD TickSleepMs()const{return (m_loaded&&!m_playing&&!m_seekPending&&!m_seeking)?8u:0u;}
+    // Blocks until there is something to do, rather than yielding and coming
+    // straight back. While playing, TickSleepMs() was 0, so this loop spun a
+    // core at 100% and every wasted iteration re-walked the live coverage
+    // spans under their mutex, read waveOutGetPosition under the audio
+    // producer's lock, and - on a YouTube source - built a NeuralCacheManager
+    // twice, which enumerates the staging directory.
+    //
+    // The swapchain's frame-latency waitable is the right signal: it is
+    // released when DXGI will accept another frame, which is exactly when the
+    // next Tick can do useful work. The bound keeps the loop responsive to a
+    // paused player and to a renderer that never came up with a waitable.
+    void WaitForNextTick()const{
+        const DWORD bound=TickSleepMs()?TickSleepMs():2u;
+        if(m_renderer&&m_renderer->HasPresentWait()&&m_playing){m_renderer->WaitForPresentSlot(bound);return;}
+        Sleep(TickSleepMs());
+    }
 
 
 private:
@@ -7070,7 +7086,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
                 }
                 if(quit)break;
                 app.Tick();
-                if(app.NeedsRealtimeTick())Sleep(app.TickSleepMs());
+                if(app.NeedsRealtimeTick())app.WaitForNextTick();
                 else WaitMessage();
             }
             return 0;

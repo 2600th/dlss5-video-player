@@ -281,6 +281,13 @@ public:
     // being unavailable for a runtime or device reason.
     bool DLSSSourceOutsideRange() const { return m_dlss.SourceOutsideSupportedRange(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
+    // Waits until the swapchain wants another frame, or `timeoutMs` elapses.
+    // The message loop uses this instead of a sleep, so a player that is
+    // keeping up blocks rather than spinning a core at 100%.
+    void WaitForPresentSlot(DWORD timeoutMs) const {
+        if (m_frameLatencyWaitable) WaitForSingleObjectEx(m_frameLatencyWaitable, timeoutMs, TRUE);
+    }
+    bool HasPresentWait() const { return m_frameLatencyWaitable != nullptr; }
     bool LastFrameUsedDLSS() const { return m_lastDLSSUsed; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
@@ -442,6 +449,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Device> m_device;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_queue;
     Microsoft::WRL::ComPtr<IDXGISwapChain3> m_swapchain;
+    // Signalled by DXGI when the swapchain will accept another frame. Owned by
+    // the swapchain, so it is never closed here and goes invalid with it.
+    HANDLE m_frameLatencyWaitable{};
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_allocators[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_cmds[FrameCount];
     // Uploads and the optical-flow capture are recorded separately from the frame, so

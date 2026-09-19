@@ -227,10 +227,23 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     }
     BOOL tearing=FALSE;if(m_requestedTearing&&SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
+    sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
+    // SetMaximumFrameLatency below is valid only on a waitable chain; without
+    // this flag it returned DXGI_ERROR_INVALID_CALL into a discarded HRESULT
+    // and the latency stayed at DXGI's default of 3. The flag also yields the
+    // waitable object, which is what lets the message loop block until the
+    // swapchain wants another frame instead of spinning on Sleep(0).
+    sd.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT|
+             (m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0u);
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
-    if(m_swapchain) m_swapchain->SetMaximumFrameLatency(2);
+    if(m_swapchain){
+        if(!HR(m_swapchain->SetMaximumFrameLatency(2),"SetMaximumFrameLatency"))
+            LOG("Swapchain kept DXGI's default frame latency; presentation may queue one extra frame.");
+        // Owned by the swapchain: not closed here, and invalid once it is gone.
+        m_frameLatencyWaitable=m_swapchain->GetFrameLatencyWaitableObject();
+        if(!m_frameLatencyWaitable)LOG("Swapchain reported no frame-latency waitable object.");
+    }
     if(!HR(m_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&m_fence)),"CreateFence"))return false;
     m_fenceEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);return m_fenceEvent!=nullptr;
 }
