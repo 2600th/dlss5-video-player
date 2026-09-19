@@ -401,6 +401,7 @@ struct PlayerAppTestAccess {
         CheckStreamConversionUsesTheAcquiredCopy(app);
         CheckLiveOutOfSyncHandsBack(app);
         CheckPairStallBoundIgnoresAPause(app);
+        CheckNv12ReferenceInverseIsBt709Limited();
         CheckLivePaceConfirmation(app);
         app.m_seeking = false;
         app.m_cachedPlayback = false;
@@ -978,6 +979,63 @@ private:
     // reads under it: three seconds paused on a segment boundary, and then the
     // first ordinary warm-up read on resume measured as a wedge and handed the
     // session back. The window covers a CONTIGUOUS run of reads now.
+    // The comparison reference is a BGRA-only texture, so an NV12 source has to
+    // come back through one CPU inverse. Playback admits NV12 only for BT.709
+    // limited (VideoDecoder's playbackConvertible gate), which is why exactly
+    // one set of coefficients is written and why it is worth pinning against
+    // hand-computed values: a wrong matrix here is not a crash, it is a
+    // side-by-side whose left half is quietly the wrong colour.
+    static void CheckNv12ReferenceInverseIsBt709Limited()
+    {
+        constexpr uint32_t w = 2, h = 2;
+        // Y plane then one interleaved UV pair, which both chroma-subsampled
+        // columns and both rows share at this size.
+        const auto convert = [&](uint8_t luma, uint8_t blueDiff, uint8_t redDiff) {
+            std::vector<uint8_t> nv12(size_t(w) * h + size_t(w) * h / 2u, 0);
+            for (size_t i = 0; i < size_t(w) * h; ++i) nv12[i] = luma;
+            nv12[size_t(w) * h + 0] = blueDiff;
+            nv12[size_t(w) * h + 1] = redDiff;
+            std::vector<uint8_t> bgra;
+            Nv12ToBgraBt709Limited(nv12.data(), w, h, bgra);
+            CHECK_EQ(size_t(w) * h * 4u, bgra.size());
+            return bgra;
+        };
+        // Not named `near`: windows.h still defines that as a macro, the same
+        // way it defines `far`.
+        const auto within = [](uint8_t actual, int expected) {
+            return std::abs(int(actual) - expected) <= 3;
+        };
+
+        // Limited-range black and white sit at 16 and 235, not 0 and 255. Taking
+        // them for full range is the classic washed-out/crushed failure.
+        const auto black = convert(16, 128, 128);
+        CHECK(within(black[0], 0) && within(black[1], 0) && within(black[2], 0));
+        CHECK_EQ(uint8_t{255}, black[3]);
+        const auto white = convert(235, 128, 128);
+        CHECK(within(white[0], 255) && within(white[1], 255) && within(white[2], 255));
+        // Mid grey: (126-16)/219 is 0.502 of the way up.
+        const auto grey = convert(126, 128, 128);
+        CHECK(within(grey[0], 128) && within(grey[1], 128) && within(grey[2], 128));
+
+        // Pure Rec.709 red, forward-computed: Y=16+0.2126*219=63,
+        // Cb=128-0.1146*224=102, Cr=128+0.5*224=240. Under BT.601 coefficients
+        // the same triple decodes visibly greener, which is the whole point of
+        // pinning it.
+        const auto red = convert(63, 102, 240);
+        CHECK(within(red[2], 255));  // R
+        CHECK(within(red[1], 0));    // G
+        CHECK(within(red[0], 0));    // B
+
+        // Odd geometry has no half-resolution chroma plane and is refused
+        // rather than read past the end.
+        std::vector<uint8_t> scratch{1, 2, 3};
+        Nv12ToBgraBt709Limited(nullptr, w, h, scratch);
+        CHECK_EQ(size_t{3}, scratch.size());
+        std::vector<uint8_t> odd(64, 0), out{9};
+        Nv12ToBgraBt709Limited(odd.data(), 3, 3, out);
+        CHECK_EQ(size_t{1}, out.size());
+    }
+
     static void CheckPairStallBoundIgnoresAPause(PlayerApp& app)
     {
         const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested, seeking = app.m_seeking;

@@ -204,14 +204,17 @@ void VideoDecoder::Close() {
     m_backend = Backend::None;
 }
 
-bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop) {
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false);
+bool VideoDecoder::Open(const std::wstring& path, MediaSourceKind sourceKind, std::stop_token stop,
+                        bool preferNv12) {
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false, true, nullptr,
+                    preferNv12);
 }
 
 bool VideoDecoder::OpenKnown(const std::wstring& path, const KnownMedia& media,
-                             MediaSourceKind sourceKind, std::stop_token stop) {
-    if (!media.Valid()) return Open(path, sourceKind, stop);
-    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false, true, &media);
+                             MediaSourceKind sourceKind, std::stop_token stop, bool preferNv12) {
+    if (!media.Valid()) return Open(path, sourceKind, stop, preferNv12);
+    return OpenImpl(path, sourceKind, stop, true, FFmpegAcceleration::Cuda, false, true, &media,
+                    preferNv12);
 }
 
 bool VideoDecoder::OpenMetadata(const std::wstring& path, MediaSourceKind sourceKind,
@@ -246,7 +249,7 @@ bool VideoDecoder::OpenSequential(const std::wstring& path, MediaSourceKind sour
 bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind,
                             std::stop_token stop, bool queueFrames,
                             FFmpegAcceleration acceleration, bool sequential,
-                            bool sequentialNv12, const KnownMedia* known) {
+                            bool sequentialNv12, const KnownMedia* known, bool playbackNv12) {
     Close();
     m_path = path;
     m_source = {};
@@ -257,6 +260,8 @@ bool VideoDecoder::OpenImpl(const std::wstring& path, MediaSourceKind sourceKind
     // stay NV12-or-Bgra for as long as this decoder instance is open.
     m_source.sequentialOpen = sequential;
     m_source.sequentialNv12 = sequentialNv12;
+    m_source.nv12Requested = playbackNv12 || (sequential && sequentialNv12);
+    m_source.playbackNv12Requested = playbackNv12;
     ++m_sourceGeneration;
 
     LOG("Opening video. Decoder preference: FFmpeg -> Windows Media Foundation");
@@ -883,6 +888,21 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         m_source.avgFrameRate = m_source.nominalFrameRate = known->fps;
         m_source.durationSec = known->durationSec;
         m_source.hardwareProfile = known->hardwareProfile;
+        // Declared by the caller off a file it probed, not assumed here. Empty
+        // stays empty, which lands on the same refusal as any other undeclared
+        // stream.
+        m_source.color = known->color;
+        // A known open runs no probe, so it has no verbatim ffprobe strings to
+        // quote. Render the mapped description instead: the accept/refuse line
+        // below is the only place either decision is visible, and a blank one
+        // is the sort of log that sends the next reader to a debugger.
+        const char* matrix = m_source.color.matrix == ColorMatrix::Bt709 ? "bt709" :
+            m_source.color.matrix == ColorMatrix::Bt601 ? "bt601" :
+            m_source.color.matrix == ColorMatrix::Other ? "other" : "unspecified";
+        const char* range = m_source.color.range == ColorRange::Limited ? "tv" :
+            m_source.color.range == ColorRange::Full ? "pc" : "unspecified";
+        m_source.colorTags = std::string("matrix=") + matrix + " range=" + range +
+                             " (declared by the sibling this file was opened from)";
         m_source.displayAspect = double(m_source.width) / double(m_source.height);
     } else if (!ProbeFFmpeg(path,stop) || stop.stop_requested()) {
         return false;
@@ -905,7 +925,18 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
     // only for a description SourceNv12ConversionFor already accepted.
     // Decided once here, from the probed geometry, and left alone by every
     // later StartFFmpeg call (acceleration fallback, seek restart) this session.
-    const bool wantNv12 = m_source.sequentialOpen && m_source.sequentialNv12;
+    const bool wantNv12 = m_source.nv12Requested;
+    // A PLAYBACK open takes a narrower gate than an export one. The player's
+    // comparison reference is a BGRA-only texture, so a source it decodes to
+    // NV12 has to be convertible back on the CPU for that one upload, and
+    // exactly one inverse is implemented and tested (BT.709 limited - see
+    // Nv12ToBgraBt709Limited in main.cpp). Everything else decodes to BGRA the
+    // way it always has rather than reaching a conversion nobody wrote. The
+    // export path is unaffected: it has no comparison reference and keeps all
+    // four conversions the GPU pass implements.
+    const bool playbackConvertible =
+        !m_source.playbackNv12Requested ||
+        SourceNv12ConversionFor(m_source.color) == SourceNv12Conversion::Bt709Limited;
     const bool evenGeometry = m_source.width % 2 == 0 && m_source.height % 2 == 0;
     const bool convertible = SourceNv12ConversionFor(m_source.color) != SourceNv12Conversion::Unsupported;
     // Accepted and refused are deliberately one grep away from each other - same
@@ -920,7 +951,7 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
                 << "; no conversion implements that description, so the source decodes to "
                    "BGRA and ffmpeg converts it on the CPU instead.");
     }
-    m_source.layout = (wantNv12 && evenGeometry && convertible)
+    m_source.layout = (wantNv12 && evenGeometry && convertible && playbackConvertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
     return StartFFmpeg(0.0,initialAcceleration);
 }

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **Playback decodes a neural pair to NV12 instead of raw BGRA.** This is the
+  reason the cadence work above could not rescue a high-rate source: with
+  presentation measured at 2.5% of the time, the other 97.5% was in
+  `ReadNextCachedFrame` - 15.5 ms per pair against an 8.34 ms budget at
+  119.88 fps, or 0.53x real time, which is what "slow speed, not realtime" was.
+  Playback shipped 14.7 MB per 2560x1440 frame down both pipes. `VideoDecoder`
+  gated NV12 on `sequentialOpen`, so only the export path ever got it.
+  Measured on an RTX 5090, two concurrent 2560x1440 decoders - one pair's worth:
+  BGRA 137.7 fps each (14.5 ms per pair, 0.57x real time), NV12 316.0 fps each
+  (6.3 ms per pair, 1.32x). The BGRA figure independently reproduces the
+  player's own 15.5 ms, so the model is the measurement rather than a story
+  fitted to it.
+  Three things had to hold first. A `known` open runs no probe and so declared
+  no colour, which is how the segment member - half the pair, reopened at every
+  boundary to avoid a ~0.7 s probe - could never qualify; `KnownMedia` carries a
+  `SourceColorDescription` now, copied off a file the caller probed and never
+  assumed, with `SourceNv12ConversionFor` still refusing any description the GPU
+  pass does not implement. Both members feed one renderer whose layout is fixed
+  at `Initialize`, so they take whatever the main decoder achieved and
+  `AdoptSegment` checks the layout beside the geometry. And the comparison
+  reference is a BGRA-only texture, so a playback open takes a narrower gate
+  than an export one - BT.709 limited only, the one inverse written and tested
+  here - with that inverse running only while someone is actually comparing.
+  Verified on hardware at 2560x1440 59.94 fps with a session attached: 12.3 fps
+  presented with 90 frames dropped every 2 s became 59.94 fps presented with
+  none, held across 36 consecutive health lines. The renderer's contract line
+  reads `Source=NV12 -> GPU BT.709 conversion`, and the decision is logged
+  either way with its colour tags named.
+  Not fixed by this and not claimed: a 119.88 fps source cannot be followed live
+  because the RENDER runs at 0.814x real time there, which the session already
+  forecasts and asks about before starting. This is the playback half.
+
 - **A late neural pair is not a frame the catch-up loop can discard.** Reported
   twice - "only some frames are showing", then "stuck frame ... frames played
   are at slow speed not realtime" - on a 2560x1440 trailer with neural rendering

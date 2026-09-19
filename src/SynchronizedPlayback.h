@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NeuralSegmentIndex.h"
+#include "PixelLayout.h"
 #include "VideoDecoder.h"
 
 #include <filesystem>
@@ -57,6 +58,15 @@ public:
     virtual uint32_t Height() const = 0;
     virtual double FrameRate() const = 0;
     virtual double DurationSeconds() const = 0;
+    // Byte layout of the frames this source hands over. Both members of a pair
+    // feed one renderer, whose layout is fixed at Initialize, so a mismatch is
+    // a decode error rather than a thing to paper over; AdoptSegment checks it
+    // the same way it checks geometry. A fake that only serves BGRA leaves this.
+    virtual PixelLayout Layout() const { return PixelLayout::Bgra; }
+    // Asked before Open. A REQUEST: odd geometry or a colour description the
+    // GPU conversion does not implement still decodes to BGRA, and Layout()
+    // reports what actually happened.
+    virtual void PreferNv12(bool) {}
     // What the next sibling of the open file can be opened with.
     virtual VideoDecoder::KnownMedia Media() const
     {
@@ -83,7 +93,8 @@ public:
     bool Open(const std::filesystem::path& originalPath,
               const std::filesystem::path& neuralPath = {},
               std::stop_token stop = {},
-              SynchronizedRange range = {});
+              SynchronizedRange range = {},
+              bool preferNv12 = false);
     // Plays the original against a render job that is still running: the neural
     // member is the growing segment index instead of one finished file.
     // `originalMedia` is the caller's own probe of `originalPath` - the player
@@ -93,7 +104,8 @@ public:
                   std::shared_ptr<const NeuralSegmentIndex> segments,
                   SynchronizedRange range,
                   std::stop_token stop = {},
-                  const VideoDecoder::KnownMedia& originalMedia = {});
+                  const VideoDecoder::KnownMedia& originalMedia = {},
+                  bool preferNv12 = false);
     SynchronizedRange Range() const;
     void Close();
     SynchronizedReadResult ReadNextAvailable(std::stop_token stop = {});

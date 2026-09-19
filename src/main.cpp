@@ -65,6 +65,45 @@
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
+
+// NV12 (BT.709, limited range) back to BGRA, for the ONE consumer that cannot
+// take the GPU conversion: the comparison reference is a B8G8R8A8_UNORM texture
+// uploaded from CPU bytes. Playback only decodes to NV12 when the source
+// declared exactly this description - VideoDecoder's playbackConvertible gate -
+// so this is the whole set of coefficients that path can ever need, rather than
+// the first of four.
+//
+// Limited range: Y spans 16..235 over 219, chroma 16..240 centred on 128 over
+// 224. The matrix is Rec.709's inverse. Chroma is half resolution in both axes
+// and sampled nearest, which is what the reference is for - a side-by-side
+// against the neural frame, not a mastering path.
+inline void Nv12ToBgraBt709Limited(const uint8_t* nv12, uint32_t width, uint32_t height,
+                                   std::vector<uint8_t>& bgra)
+{
+    if (!nv12 || !width || !height || (width | height) & 1u) return;
+    bgra.resize(size_t(width) * height * 4u);
+    const uint8_t* luma = nv12;
+    const uint8_t* chroma = nv12 + size_t(width) * height;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* chromaRow = chroma + size_t(y / 2u) * width;
+        uint8_t* out = bgra.data() + size_t(y) * width * 4u;
+        for (uint32_t x = 0; x < width; ++x) {
+            const double luminance = (double(luma[size_t(y) * width + x]) - 16.0) / 219.0;
+            const double blueDiff = (double(chromaRow[(x & ~1u)]) - 128.0) / 224.0;
+            const double redDiff = (double(chromaRow[(x & ~1u) + 1u]) - 128.0) / 224.0;
+            const double red = luminance + 1.5748 * redDiff;
+            const double green = luminance - 0.1873 * blueDiff - 0.4681 * redDiff;
+            const double blue = luminance + 1.8556 * blueDiff;
+            const auto clamp8 = [](double value) {
+                return uint8_t(std::lround(std::clamp(value, 0.0, 1.0) * 255.0));
+            };
+            out[size_t(x) * 4u + 0u] = clamp8(blue);
+            out[size_t(x) * 4u + 1u] = clamp8(green);
+            out[size_t(x) * 4u + 2u] = clamp8(red);
+            out[size_t(x) * 4u + 3u] = 255u;
+        }
+    }
+}
 using Microsoft::WRL::ComPtr;
 using namespace app_menu;
 static constexpr int CONTROL_H_DIP = 112;
@@ -2857,7 +2896,18 @@ private:
     void UploadComparisonReference(const VideoFrame& original){
         if(!m_renderer||original.bgra.empty())return;
         const ComparisonSettings effective=EffectiveComparison();
+        // The early-out below is also what makes an NV12 source cheap: the pure
+        // neural view needs no reference at all, so the conversion under it runs
+        // only while someone is actually comparing - a paused inspection, where
+        // a CPU pass over one frame costs nothing anyone can perceive.
         if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return;
+        if(original.layout==VideoPixelLayout::Nv12){
+            Nv12ToBgraBt709Limited(original.bgra.data(),m_decoder.Width(),m_decoder.Height(),
+                                   m_referenceBgra);
+            if(m_referenceBgra.empty())return;
+            m_renderer->UploadReferenceFrame(m_referenceBgra.data(),m_referenceBgra.size());
+            return;
+        }
         m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size());
     }
     void ApplyComparison(bool refreshPaused=true){
@@ -3491,14 +3541,15 @@ private:
         CancelYouTubeResolution();
         Unload();
         LOG("Opening " << (localPayload ? std::string_view("acquired source copy") : SafeSourceLogLabel(sourceKind)) << ".");
-        if(!m_decoder.Open(source,localPayload?MediaSourceKind::LocalFile:sourceKind)){std::wstring e=T(sourceKind==MediaSourceKind::YouTube?L"youtube.error.ffmpeg":L"error.decode"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);return false;}
+        if(!m_decoder.Open(source,localPayload?MediaSourceKind::LocalFile:sourceKind,{},/*preferNv12=*/true)){std::wstring e=T(sourceKind==MediaSourceKind::YouTube?L"youtube.error.ffmpeg":L"error.decode"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);return false;}
         m_dar=m_decoder.DisplayAspectRatio(); if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto ow=m_decoder.Width(),oh=m_decoder.Height();
         m_activeQuality=DefaultNeuralCarrierQuality();
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         ShowWindow(m_viewport,SW_SHOW); Layout();
         m_renderer=MakeD3D12Renderer();
-        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
+        ConfigureRendererSource();
+        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
@@ -3699,6 +3750,26 @@ private:
         m_upscalingError.clear();UpdateCachedStatus();InvalidateControls();
     }
 
+    // Told to the renderer BEFORE Initialize, which is the only moment its
+    // source layout can be set, and read back after: the decoder decides the
+    // layout from its probe and the renderer either took it or the two disagree,
+    // which is a black screen rather than an error unless somebody checks.
+    void ConfigureRendererSource(){
+        if(!m_renderer)return;
+        m_renderer->SetSourceLayout(m_decoder.PixelLayout());
+        m_renderer->SetSourceColor(m_decoder.ColorDescription());
+    }
+    bool RendererTookSourceLayout(){
+        if(!m_renderer)return false;
+        if(m_renderer->ActiveSourceLayout()==m_decoder.PixelLayout())return true;
+        LOG("Renderer refused the decoder's "
+            <<(m_decoder.PixelLayout()==VideoPixelLayout::Nv12?"NV12":"BGRA")
+            <<" source layout; playback would present garbage, so this open fails instead.");
+        return false;
+    }
+    // Both members of a pair feed one renderer whose layout is fixed, so they
+    // take whatever the main decoder achieved rather than asking again.
+    bool PairPrefersNv12()const{return m_decoder.PixelLayout()==VideoPixelLayout::Nv12;}
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
         if(!m_renderer)return false; GuideFrame g;
         // Translate the legacy reset flags into a named reason: a fresh load is
@@ -3764,7 +3835,8 @@ private:
         m_renderer.reset();
         m_renderer=MakeD3D12Renderer();
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
-        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)){
+        ConfigureRendererSource();
+        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){
             LOG("Renderer rebuild failed after the GPU became unusable; unloading.");
             Unload();
             MessageBoxW(m_hwnd,T(removed?L"renderer.removed.lost":L"renderer.stalled.lost").c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);
@@ -3933,7 +4005,8 @@ private:
         VideoFrame f; bool got=readAt(sec,f);
         if(!got){
             LOG("Seek decoder restart failed; reopening the same file for recovery.");
-            m_decoder.Close(); if(m_decoder.Open(m_path,DecodeKind()))got=readAt(sec,f);
+            const bool nv12=PairPrefersNv12();
+            m_decoder.Close(); if(m_decoder.Open(m_path,DecodeKind(),{},nv12))got=readAt(sec,f);
         }
         if(!got){
             LOG("Seek failed without crashing; playback remains paused.");m_playing=false;SetSeeking(false);m_currentSec=sec;UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return false;
@@ -5036,7 +5109,7 @@ private:
         if(!m_liveSegments->Covered(at100))return false;
         const bool wasPlaying=m_playing||m_liveResumePlaying;
         Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
-        if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media())){LOG("Active neural playback could not open the live pair.");return false;}
+        if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media(),PairPrefersNv12())){LOG("Active neural playback could not open the live pair.");return false;}
         if(!m_synchronizedPlayback.SeekSeconds(at)||!m_synchronizedPlayback.VisibleFrame()){LOG("Active neural playback could not position the live pair at "<<at<<" s.");m_synchronizedPlayback.Close();return false;}
         // The view has to switch before the frame is read: VisibleFrame returns
         // whichever side the view selects, and reading it first presented the
@@ -5845,11 +5918,12 @@ private:
     }
     bool LoadCachedPlayback(const NeuralJobCompletion& completion){
         Unload();
-        if(!m_decoder.Open(completion.sourcePath.wstring(),MediaSourceKind::LocalFile)||!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns})){Unload();return false;}
+        if(!m_decoder.Open(completion.sourcePath.wstring(),MediaSourceKind::LocalFile,{},/*preferNv12=*/true)||!m_synchronizedPlayback.Open(completion.sourcePath,completion.neuralPath,{},SynchronizedRange{completion.range.start100ns,completion.range.end100ns},PairPrefersNv12())){Unload();return false;}
         m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
         ShowWindow(m_viewport,SW_SHOW);Layout();m_renderer=MakeD3D12Renderer();
-        if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())){Unload();return false;}
+        ConfigureRendererSource();
+        if(!m_renderer||!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,DefaultNeuralCarrierQuality())||!RendererTookSourceLayout()){Unload();return false;}
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());m_activeQuality=DefaultNeuralCarrierQuality();
         const ComparisonView desiredView=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;
         // Decoder start-up (and any hardware-decode fallback) is asynchronous:
@@ -6698,6 +6772,9 @@ private:
     int m_cadenceReanchors=0;bool m_cadenceReanchoredRecently=false;
     // The two halves of a presented frame, summed over a health interval.
     double m_guideMsTotal=0.0,m_renderMsTotal=0.0;uint64_t m_renderMsFrames=0;
+    // Reused by the comparison reference's NV12->BGRA pass so comparing does not
+    // allocate a 14 MB buffer per frame.
+    std::vector<uint8_t> m_referenceBgra;
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.
     std::filesystem::path m_frameGenLastOutput;

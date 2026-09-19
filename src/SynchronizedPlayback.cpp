@@ -15,12 +15,14 @@ namespace {
 class DecoderFrameSource final : public ISynchronizedFrameSource {
 public:
     bool Open(const std::filesystem::path& path,std::stop_token stop)override{
-        return decoder_.Open(path.wstring(),MediaSourceKind::LocalFile,stop);
+        return decoder_.Open(path.wstring(),MediaSourceKind::LocalFile,stop,preferNv12_);
     }
     bool OpenKnown(const std::filesystem::path& path,const VideoDecoder::KnownMedia& media,
                    std::stop_token stop)override{
-        return decoder_.OpenKnown(path.wstring(),media,MediaSourceKind::LocalFile,stop);
+        return decoder_.OpenKnown(path.wstring(),media,MediaSourceKind::LocalFile,stop,preferNv12_);
     }
+    PixelLayout Layout()const override{return decoder_.PixelLayout();}
+    void PreferNv12(bool prefer)override{preferNv12_=prefer;}
     void Close()override{decoder_.Close();}
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{
         return decoder_.ReadNextAvailable(frame,stop);
@@ -33,6 +35,7 @@ public:
     VideoDecoder::KnownMedia Media()const override{return decoder_.Media();}
 private:
     VideoDecoder decoder_;
+    bool preferNv12_{};
 };
 
 SynchronizedReadResult ConvertRead(VideoReadResult result)
@@ -123,6 +126,9 @@ struct SynchronizedPlayback::Impl {
     };
     Fault fault{};
     int64_t prefetchLead100ns{10000000};
+    // What the caller asked the members to decode to. Every segment opened
+    // later this session inherits it, so one answer covers the whole pair.
+    bool preferNv12{};
 
     void ResetPublished()
     {
@@ -162,11 +168,13 @@ struct SynchronizedPlayback::Impl {
         auto factory=makeSegmentSource;
         const VideoDecoder::KnownMedia media=segmentMedia;
         const std::filesystem::path path=wanted.path;
+        const bool nv12=preferNv12;
         try{
             pending.future=std::async(std::launch::async,
-                [factory,media,path,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
+                [factory,media,path,nv12,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
                     auto source=factory();
                     if(!source)return nullptr;
+                    source->PreferNv12(nv12);
                     const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
                                                   :source->Open(path,stop);
                     if(!ready){source->Close();return nullptr;}
@@ -189,7 +197,13 @@ struct SynchronizedPlayback::Impl {
         NeuralSegment landed=pendingOpen->segment;
         pendingOpen.reset();
         if(!source)return;
-        if(source->Width()!=original->Width()||source->Height()!=original->Height()){
+        // Layout beside geometry, and for the same reason: both members feed
+        // one renderer whose source layout was fixed at Initialize. A segment
+        // that answered a different one cannot be presented, and a silent
+        // acceptance here would reach the screen as tearing rather than as an
+        // error. It takes the synchronous path's refusal, which reports.
+        if(source->Width()!=original->Width()||source->Height()!=original->Height()||
+           source->Layout()!=original->Layout()){
             source->Close();return;
         }
         if(prefetchSource)prefetchSource->Close();
@@ -382,11 +396,13 @@ struct SynchronizedPlayback::Impl {
         if(pendingOpen)CancelPendingOpen();
         auto source=makeSegmentSource?makeSegmentSource():nullptr;
         if(!source)return SynchronizedReadResult::Error;
+        source->PreferNv12(preferNv12);
         const bool ready=segmentMedia.Valid()?source->OpenKnown(wanted.path,segmentMedia,stop)
                                              :source->Open(wanted.path,stop);
         if(!ready)
             return stop.stop_requested()?SynchronizedReadResult::Cancelled:SynchronizedReadResult::Error;
-        if(source->Width()!=original->Width()||source->Height()!=original->Height()){
+        if(source->Width()!=original->Width()||source->Height()!=original->Height()||
+           source->Layout()!=original->Layout()){
             source->Close();return SynchronizedReadResult::Error;
         }
         // The first segment of a session is the one that pays for a probe.
@@ -523,10 +539,12 @@ SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&&) no
 
 bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
                                 const std::filesystem::path& neuralPath,std::stop_token stop,
-                                SynchronizedRange range)
+                                SynchronizedRange range,bool preferNv12)
 {
     Close();if(!impl_->original||originalPath.empty())return false;
     if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
+    impl_->preferNv12=preferNv12;
+    impl_->original->PreferNv12(preferNv12);
     if(!impl_->original->Open(originalPath,stop))return false;
     const double originalFps=impl_->original->FrameRate();
     if(!impl_->original->Width()||!impl_->original->Height()||
@@ -586,11 +604,13 @@ bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
 bool SynchronizedPlayback::OpenLive(const std::filesystem::path& originalPath,
                                     std::shared_ptr<const NeuralSegmentIndex> segments,
                                     SynchronizedRange range,std::stop_token stop,
-                                    const VideoDecoder::KnownMedia& originalMedia)
+                                    const VideoDecoder::KnownMedia& originalMedia,bool preferNv12)
 {
     Close();
     if(!impl_->original||!impl_->makeSegmentSource||originalPath.empty()||!segments)return false;
     if(range.start100ns<0||range.end100ns<0||(range.end100ns>0&&range.end100ns<=range.start100ns))return false;
+    impl_->preferNv12=preferNv12;
+    impl_->original->PreferNv12(preferNv12);
     const bool ready=originalMedia.Valid()
         ? impl_->original->OpenKnown(originalPath,originalMedia,stop)
         : impl_->original->Open(originalPath,stop);

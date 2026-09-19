@@ -118,9 +118,17 @@ public:
         m_accelerationMemo(std::move(settings.accelerationMemo)) {}
     ~VideoDecoder();
 
+    // preferNv12=true asks for the NV12 source layout on a PLAYBACK open, which
+    // is a throughput decision and nothing else: 5.5 MB instead of 14.7 MB per
+    // 2560x1440 frame down the pipe, converted by the same GPU pass the export
+    // path already uses. Measured on an RTX 5090, two concurrent 2560x1440
+    // decoders - which is what one neural pair costs - went 137.7 fps each to
+    // 316.0 fps each, or 14.5 ms per pair to 6.3 ms against an 8.34 ms budget
+    // at 119.88 fps. It is a REQUEST: odd geometry and any colour description
+    // the GPU conversion does not implement still decode to BGRA.
     bool Open(const std::wstring& path,
               MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
-              std::stop_token stop = {});
+              std::stop_token stop = {}, bool preferNv12 = false);
     // preferNv12=false keeps the output Bgra (ffmpeg converts on the CPU) even for
     // even geometry, for a caller whose neural render needs the GPU for something
     // more scarce than the NV12->BGRA conversion.
@@ -141,13 +149,21 @@ public:
         // Acceleration memo key of the sibling the parameters came from. All
         // segments of one render carry one codec, so they share one key.
         std::string hardwareProfile;
+        // What the sibling DECLARED about its colour. A `known` open runs no
+        // probe, so without this it declares nothing and can never take the
+        // NV12 path - which is most of the cost of a neural pair, since the
+        // segment member is opened this way at every boundary. Carrying it is
+        // safe precisely because it is carried rather than assumed: the caller
+        // copies it off a file it probed, and SourceNv12ConversionFor still
+        // refuses any description the GPU conversion does not implement.
+        SourceColorDescription color;
         bool Valid() const { return width != 0 && height != 0 && fps > 0.0; }
     };
     bool OpenKnown(const std::wstring& path, const KnownMedia& media,
                    MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
-                   std::stop_token stop = {});
+                   std::stop_token stop = {}, bool preferNv12 = false);
     // What a sibling file of the one this decoder has open can be opened with.
-    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile}; }
+    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color}; }
     // Geometry, frame rate and duration only: runs the probe and starts no
     // decoder. The caller that just needs to describe a file was paying for a
     // full ffmpeg child it closed two lines later.
@@ -215,9 +231,11 @@ public:
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_source.width != 0 && m_source.height != 0; }
     const wchar_t* BackendName() const;
-    // Bgra for Open (always), for OpenSequential(preferNv12=false), and for
-    // OpenSequential when the geometry can't take NV12 (odd width/height); Nv12
-    // for OpenSequential(preferNv12=true, the default) otherwise. Fixed once
+    // Bgra unless the open ASKED for Nv12 - OpenSequential(preferNv12=true, its
+    // default) or a playback Open/OpenKnown(preferNv12=true) - and then only
+    // when the geometry is even and the stream declared a colour description the
+    // GPU conversion implements. Odd geometry and an undeclared or unsupported
+    // description stay Bgra whoever asked. Fixed once
     // OpenFFmpeg's probe completes and unchanged by acceleration fallbacks or
     // seek restarts for the rest of the session.
     VideoPixelLayout PixelLayout() const { return m_source.layout; }
@@ -271,6 +289,15 @@ private:
         // rest on every open, so it never leaks from one OpenSequential into a
         // later Open() or OpenSequential(preferNv12=true).
         bool sequentialNv12 = true;
+        // Whichever open asked for NV12 - OpenSequential by its own argument, a
+        // playback Open/OpenKnown by preferNv12. One flag so the gate below has
+        // one question to ask, and reset with the rest on every open.
+        bool nv12Requested = false;
+        // True only when a PLAYBACK open asked. The gate is narrower there than
+        // for an export open - see the comment beside playbackConvertible - and
+        // the decision is taken in a different function from OpenImpl, so it
+        // travels in the aggregate rather than as an argument.
+        bool playbackNv12Requested = false;
         VideoPixelLayout layout = VideoPixelLayout::Bgra;
     };
     Source m_source;
@@ -286,7 +313,7 @@ private:
                   std::stop_token stop, bool queueFrames,
                   FFmpegAcceleration acceleration = FFmpegAcceleration::Cuda,
                   bool sequential = false, bool sequentialNv12 = true,
-                  const KnownMedia* known = nullptr);
+                  const KnownMedia* known = nullptr, bool playbackNv12 = false);
 
     bool OpenFFmpeg(const std::wstring& path, std::stop_token stop,
                     FFmpegAcceleration initialAcceleration,
