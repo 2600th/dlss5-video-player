@@ -48,6 +48,7 @@
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "CachedRenderVerdict.h"
+#include "CrashDump.h"
 #include "FrameRatePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
@@ -7062,6 +7063,9 @@ private:
 int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
 {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    // Before anything that can fault, so an early crash still leaves a dump
+    // beside the log rather than nothing at all.
+    crash_dump::Install();
     EnablePerMonitorDpiAwareness();
     AppOptions options=ParseArgs();
     if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS Video Player",MB_OK|MB_ICONERROR);return 1;}

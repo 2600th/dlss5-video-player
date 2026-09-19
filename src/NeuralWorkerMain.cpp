@@ -1,3 +1,4 @@
+#include "CrashDump.h"
 #include "Log.h"
 #include "NeuralPreflight.h"
 #include "NeuralPreflightProbe.h"
@@ -515,6 +516,9 @@ private:
 
 int wmain(int argc, wchar_t** argv)
 {
+    // A helper that dies leaves the parent reporting only an exit code, so it
+    // writes its own dump beside its own log.
+    crash_dump::Install();
     // Drops the working directory and PATH from every LoadLibrary search. The
     // runtime set (dxgi.dll, the sl.*.dll proxies, nvngx_dlssnr.dll) lives in
     // this executable's own directory, which stays in the default set.

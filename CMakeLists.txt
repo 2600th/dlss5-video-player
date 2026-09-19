@@ -187,7 +187,7 @@ target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
 target_link_libraries(DLSSVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
-    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt
+    ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi winhttp bcrypt dbghelp
     ${DLSS_NGX_LIBRARY}
 )
 dlss_video_player_use_nvof(DLSSVideoPlayer)
