@@ -115,20 +115,61 @@
     });
   });
 
-  /* --- download tracking -------------------------------------------------- */
+  /* --- downloads ---------------------------------------------------------- *
+   * The click is acknowledged because nothing else acknowledges it. A release
+   * asset is served cross-origin, so the page is told nothing about the
+   * download - not its progress, not its completion, not even that it began -
+   * and the complete package is over 300 MB, which is long enough for the
+   * browser's own indicator to feel late. So the link relabels itself, says so
+   * once for a screen reader, and puts itself back.
+   *
+   * Deliberately not a progress bar or a spinner: there is no progress to read
+   * here, and inventing one would be lying about a transfer this page cannot
+   * see. The link keeps its ordinary behaviour throughout - nothing is
+   * prevented, and with scripting off the download is exactly as it was.
+   * ---------------------------------------------------------------------- */
+
+  var ACKNOWLEDGE_MS = 6000;
+  var status = document.querySelector('.download-status');
 
   document.querySelectorAll('[data-download]').forEach(function (link) {
+    // Whichever slot this link keeps its size in; both say the same thing.
+    var slot = link.querySelector('.button__meta, .pkg__cta-size');
+    var original = null;
+    var restore = null;
+
     link.addEventListener('click', function () {
       track('download_click', {
         package: link.getAttribute('data-download'),
         version: document.documentElement.getAttribute('data-version') || 'unknown'
       });
+
+      if (!slot) { return; }
+
+      // Read at click rather than at setup: the backstop below can rewrite the
+      // hero's meta after this handler is attached, and restoring a string
+      // captured before that would erase its notice. A second click restarts
+      // the window rather than stacking timers, and must not capture the
+      // message already sitting in the slot as the thing to restore.
+      if (restore) { window.clearTimeout(restore); }
+      else { original = slot.textContent; }
+
+      slot.textContent = 'starting - check your downloads';
+      link.setAttribute('data-downloading', '1');
+      if (status) { status.textContent = 'Download starting. Check your browser downloads.'; }
+
+      restore = window.setTimeout(function () {
+        slot.textContent = original;
+        link.removeAttribute('data-downloading');
+        if (status) { status.textContent = ''; }
+        restore = null;
+      }, ACKNOWLEDGE_MS);
     });
   });
 
   /* --- the backstop ------------------------------------------------------- *
-   * The deploy workflow runs on release:published, so the baked release data
-   * is normally right within a minute. This exists for the run that failed.
+   * Publishing a release dispatches the deploy, so the baked release data is
+   * normally right within a minute. This exists for the run that failed.
    * It is deliberately timid: one request per session, only when the build is
    * already a day old, and any surprise at all leaves the page as built.
    * ----------------------------------------------------------------------- */

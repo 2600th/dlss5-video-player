@@ -361,6 +361,31 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 .button--ghost { border-color: var(--line); color: var(--text); align-self: stretch; justify-content: center; }
 .button--ghost:hover { border-color: var(--flag); color: var(--flag); }
 
+/* --- download acknowledgement ---------------------------------------------
+   A download link leaves the page sitting there with no sign the click landed,
+   and the complete package is over 300 MB, so the browser's own indicator can
+   take a moment to arrive. The link says it itself, in the slot already
+   holding its size.
+
+   No spinner, for two reasons. The page has one authored motion moment and
+   this is not it. And a spinner would be claiming to track a transfer this
+   page cannot see: the asset is served cross-origin, so there is no progress
+   to read and anything moving here would be invented. A state change is the
+   honest shape, and it is the same one the checksum button already uses.
+   -------------------------------------------------------------------------- */
+
+.download-status {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden; white-space: nowrap;
+}
+
+[data-downloading] .button__meta,
+[data-downloading] .pkg__cta-size { opacity: 1; font-weight: 650; }
+.pkg__cta[data-downloading] .pkg__cta-size { color: inherit; }
+
 /* --- sections ------------------------------------------------------------- */
 
 .section {

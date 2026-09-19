@@ -263,6 +263,56 @@ Test-Case 'column-swapped grid items also pin their row' {
     }
 }
 
+Test-Case 'every download link acknowledges the click' {
+    # A release asset is served cross-origin, so the page learns nothing about
+    # the download - and the complete package is over 300 MB, long enough for
+    # the browser's own indicator to feel late. Every link carrying
+    # data-download must therefore have a slot to relabel, and the page must
+    # carry the live region that says it once for a screen reader.
+    $js = Read-TextFile -Path (Join-Path $distFull 'main.js')
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+
+    Assert-Contains $htmlFull 'class="download-status"' 'the live region ships'
+    Assert-Contains $htmlFull 'aria-live="polite"' 'the live region is polite'
+    Assert-Contains $js 'data-downloading' 'the click sets the busy state'
+    Assert-Contains $css '[data-downloading]' 'the busy state is styled'
+
+    # The relabel writes into whichever slot the link keeps its size in, so a
+    # link with neither leaves the click unacknowledged.
+    $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    $links = [regex]::Matches($htmlFull, '<a[^>]*data-download=[^>]*>(.*?)</a>', $options)
+    $bad = @()
+    foreach ($m in $links) {
+        $inner = $m.Groups[1].Value
+        if ($inner -notmatch 'button__meta' -and $inner -notmatch 'pkg__cta-size') {
+            $bad += $m.Value.Trim()
+        }
+    }
+
+    # Asserted before the findings, and the reason this is not a bare loop: a
+    # loop that matches nothing reports every link as fine. The first draft of
+    # this test did exactly that - a stray control character in the pattern made
+    # it match zero links, and it passed against a page carrying a link with no
+    # slot at all.
+    Assert-True ($links.Count -ge 3) "expected the hero and both package links, matched $($links.Count)"
+    Assert-True ($bad.Count -eq 0) "data-download link with no slot to relabel: $($bad -join ' | ')"
+}
+
+Test-Case 'the page keeps its one authored motion moment' {
+    # DESIGN.md: the seam's entry sweep is the page's only animation, and it is
+    # driven from main.js by requestAnimationFrame rather than by CSS. So the
+    # stylesheet declares no keyframes and nothing that runs on its own - which
+    # is also why the download acknowledgement is a state change and not a
+    # spinner. A spinner here would be doubly wrong: it would take the page's
+    # one moment, and it would be pretending to track a cross-origin transfer
+    # that reports nothing back.
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+    Assert-NotContains $css '@keyframes' 'no keyframes in the stylesheet'
+    if ($css -match '(?m)^\s*animation(-name)?\s*:') {
+        throw 'the stylesheet starts an animation; the page has one authored moment and it is the seam'
+    }
+}
+
 Test-Case 'the hero comparison crops ship and stay a matched pair' {
     $originalCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-original.jpg')
     $neuralCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-neural.jpg')
