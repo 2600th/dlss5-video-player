@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <string>
 
 #include "NeuralCoverage.h"
 
@@ -314,6 +316,33 @@ inline double RealtimeRatio(double coveredSec, double elapsedSec, double settleS
 {
     if (elapsedSec < settleSec || !(coveredSec > 0.0)) return 0.0;
     return coveredSec / elapsedSec;
+}
+
+// Where an active session writes its finalized segments.
+//
+// Two things went wrong with `cacheRoot / "live"`. A second player instance
+// enabling neural rendering ran remove_all over the first instance's segments,
+// and the first kept reporting them covered because NeuralSegmentIndex is
+// in-memory arithmetic - so it seeked into "covered" ground and failed to open
+// the file. Both instances then wrote job1/neural-00000.mkv into the same
+// directory. And when no writable cache root could be prepared - a portable
+// install on a read-only share, which is exactly the case the fallback exists
+// for - `cacheRoot` was empty, so the path became the relative "live" and the
+// remove_all ran against the process working directory.
+//
+// Naming the directory after the process fixes both: an instance only ever
+// removes its own, and an empty root yields no directory at all rather than a
+// relative one. Windows does not reuse a pid while its process is alive, so a
+// `live/pid<N>` found at startup belongs to a dead run and is ours to clear -
+// the same reasoning NeuralCacheManager's staging sweep already uses.
+//
+// Returns an empty path when there is no root, which the caller must treat as
+// "no live session is possible" rather than as a path.
+inline std::filesystem::path SessionDirectory(const std::filesystem::path& cacheRoot,
+                                              uint32_t processId)
+{
+    if (cacheRoot.empty()) return {};
+    return cacheRoot / L"live" / (L"pid" + std::to_wstring(processId));
 }
 
 } // namespace live_session

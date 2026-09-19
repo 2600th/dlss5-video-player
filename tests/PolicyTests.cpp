@@ -7305,6 +7305,45 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// Two player instances shared cacheRoot/live. Enabling neural rendering in the
+// second ran remove_all over the first instance's finalized segments, and the
+// first kept reporting them covered because NeuralSegmentIndex is in-memory
+// arithmetic - so it seeked into "covered" ground and failed to open the file.
+// Both then wrote job1/neural-00000.mkv into the same directory, because the
+// run id is a per-process counter.
+//
+// Separately, m_cacheRoot is only assigned when a writable root was prepared.
+// Without one the path became the relative "live" and that same remove_all ran
+// against the process working directory - on a portable install on a read-only
+// share, which is the exact case the LocalAppData fallback exists for.
+void live_session_directory_is_per_process_and_never_relative_test()
+{
+    using live_session::SessionDirectory;
+    const std::filesystem::path root = L"D:\\cache\\v1";
+
+    // Named after the process, so one instance's removal cannot reach another's.
+    const auto mine = SessionDirectory(root, 4242);
+    const auto theirs = SessionDirectory(root, 9001);
+    CHECK(mine != theirs);
+    CHECK(mine.is_absolute());
+    CHECK_EQ(root / L"live" / L"pid4242", mine);
+
+    // Both still live under the root, so Clear and the size accounting can find
+    // them by walking one directory.
+    CHECK_EQ(root / L"live", mine.parent_path());
+    CHECK_EQ(root / L"live", theirs.parent_path());
+
+    // No root means no live directory - not a relative one. The caller has to
+    // read this as "no live session is possible"; anything else would put a
+    // recursive delete on the working directory.
+    CHECK(SessionDirectory({}, 4242).empty());
+    CHECK(!SessionDirectory({}, 4242).is_absolute());
+
+    // Same process, same answer: the directory is recomputed on every session
+    // and has to agree with the one the previous session removed.
+    CHECK_EQ(mine, SessionDirectory(root, 4242));
+}
+
 // The player runs on an audio master clock. When the reader thread ends - pipe
 // EOF, the ffmpeg child dying, waveOutWrite failing after a device change - the
 // queued buffers drain and waveOutGetPosition freezes, but hasAudioData stays
@@ -7645,6 +7684,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
+    TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
 };
 
 

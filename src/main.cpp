@@ -4948,7 +4948,12 @@ private:
             m_liveSegments=m_retainedSegments;m_liveDirectory=m_retainedDirectory;
             m_retainedSegments.reset();m_retainedDirectory.clear();m_retainedKey.clear();m_retainedRange={};
         }else{
-            m_liveDirectory=m_cacheRoot/L"live";
+            // Per process, and empty when there is no writable cache root. The
+            // shared path let a second instance delete this one's segments, and
+            // an empty root made it the relative "live" - so the remove_all
+            // below ran against the process working directory.
+            m_liveDirectory=live_session::SessionDirectory(m_cacheRoot,GetCurrentProcessId());
+            if(m_liveDirectory.empty()){LOG("Active neural session has no writable cache root for its segments.");return;}
             std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);std::filesystem::create_directories(m_liveDirectory,ec);
             if(ec){LOG("Active neural session could not create its segment directory.");m_liveDirectory.clear();return;}
             m_liveSegments=std::make_shared<NeuralSegmentIndex>();
