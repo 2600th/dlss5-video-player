@@ -19,7 +19,11 @@ public:
         line << '[' << std::setfill('0') << std::setw(2) << st.wHour << ':'
              << std::setw(2) << st.wMinute << ':' << std::setw(2) << st.wSecond
              << '.' << std::setw(3) << st.wMilliseconds << "] " << s << "\n";
-        OutputDebugStringA(line.str().c_str());
+        // OutputDebugStringA takes the system-wide DBWinMutex, so with no
+        // debugger attached every log line serialized this process against
+        // every other one on the machine - and in a degraded session the
+        // renderer logs its reset reason per frame.
+        if (m_debugger) OutputDebugStringA(line.str().c_str());
         m_file << line.str();
         m_file.flush();
         m_written += line.str().size();
@@ -121,6 +125,9 @@ private:
         m_written += banner.str().size();
     }
 
+    // Sampled once: attaching a debugger mid-session is not worth a syscall
+    // on every line.
+    const bool m_debugger = IsDebuggerPresent() != FALSE;
     std::filesystem::path m_path;
     std::ofstream m_file;
     std::uintmax_t m_written = 0;

@@ -12,6 +12,10 @@ code audits (correctness, performance, build & release), one duplication sweep.
 | ✅ | Read back against source and confirmed during the review |
 | 🔍 | Audit finding, cited to file:line, not independently re-read |
 
+**Checkbox state:** `[x]` done on branch `fix/tier1-correctness-and-perf`, `[~]`
+partly done (what remains is stated in the task), `[ ]` not started. All 21
+tests - 13 portable and 8 GPU-labelled on an RTX 5090 - pass at every commit.
+
 ---
 
 ## The rule that shapes this list
@@ -57,7 +61,7 @@ Correctness bugs and zero-cost wins. Nothing here changes output quality.
 
 ---
 
-### [ ] 1.1 · Cache key is missing two settings that change the pixels
+### [x] 1.1 · Cache key is missing two settings that change the pixels
 
 `BLOCKER` · ✅ verified · **effort: S** · **impact: high**
 
@@ -92,7 +96,7 @@ from `"2"` to `"3"` at `NeuralCache.cpp:585`.
 
 ---
 
-### [ ] 1.2 · Heap over-read of ~5 MB on the DLSS Upscaling toggle
+### [x] 1.2 · Heap over-read of ~5 MB on the DLSS Upscaling toggle
 
 `CRITICAL` · ✅ verified · **effort: XS** · **impact: crash**
 
@@ -139,7 +143,7 @@ Upscaling toggle. Also reached from `SetUpscaleTarget` and `RestoreUpscaling`.
 
 ---
 
-### [ ] 1.3 · Permanent deadlock on a resident helper's second job
+### [x] 1.3 · Permanent deadlock on a resident helper's second job
 
 `HIGH` · ✅ verified · **effort: XS** · **impact: hang**
 
@@ -174,7 +178,7 @@ before restarting it.
 
 ---
 
-### [ ] 1.4 · A stalled audio clock freezes video permanently
+### [x] 1.4 · A stalled audio clock freezes video permanently
 
 `HIGH` · 🔍 reported · **effort: S** · **impact: playback stops**
 
@@ -212,7 +216,7 @@ clear `hasAudioData`, log once, fall through to the steady-clock branch.
 
 ---
 
-### [ ] 1.5 · ffmpeg stderr goes to NUL everywhere; audio exit code never checked
+### [~] 1.5 · ffmpeg stderr goes to NUL everywhere; audio exit code never checked
 
 `MEDIUM` · 🔍 reported · **effort: S** · **impact: undiagnosable bugs**
 
@@ -230,7 +234,7 @@ points at the wrong subsystem.
 
 ---
 
-### [ ] 1.6 · A transient ffprobe failure deletes a hash-verified cache entry
+### [x] 1.6 · A transient ffprobe failure deletes a hash-verified cache entry
 
 `HIGH` · 🔍 reported · **effort: S** · **impact: data loss**
 
@@ -265,7 +269,7 @@ Only quarantine on the latter.
 
 ---
 
-### [ ] 1.7 · Adopting the local copy flips NV12 → BGRA under an NV12 renderer
+### [x] 1.7 · Adopting the local copy flips NV12 → BGRA under an NV12 renderer
 
 `HIGH` · 🔍 reported · **effort: XS** · **impact: corrupted picture**
 
@@ -297,7 +301,7 @@ and refuse the swap on a layout mismatch the way geometry already does.
 
 ---
 
-### [ ] 1.8 · `remove_all` runs against a relative path when there is no cache root
+### [x] 1.8 · `remove_all` runs against a relative path when there is no cache root
 
 `MEDIUM` · 🔍 reported · **effort: XS** · **impact: deletes user data**
 
@@ -323,7 +327,7 @@ is absolute before any `remove_all`.
 
 ---
 
-### [ ] 1.9 · Two player instances share `<cacheRoot>/live` and delete each other's work
+### [x] 1.9 · Two player instances share `<cacheRoot>/live` and delete each other's work
 
 `HIGH` · 🔍 reported · **effort: S** · **impact: data loss**
 
@@ -368,7 +372,7 @@ Referenced by:
 
 ---
 
-### [ ] 1.11 · Make a bug report possible at all
+### [x] 1.11 · Make a bug report possible at all
 
 `HIGH` · 🔍 reported · **effort: M** · **impact: every future debug session**
 
@@ -495,7 +499,7 @@ re-read from the pair.
 
 ---
 
-### [ ] 2.2 · Main loop busy-spins at 100% of a core, redoing work each spin
+### [~] 2.2 · Main loop busy-spins at 100% of a core, redoing work each spin
 
 🔍 reported · **effort: M** · **gain: one core + lock contention**
 
@@ -530,7 +534,7 @@ sub-millisecond, without touching global timer resolution.
 
 ---
 
-### [ ] 2.3 · Comparison-while-playing collapses to a slideshow
+### [x] 2.3 · Comparison-while-playing collapses to a slideshow
 
 🔍 reported · **effort: M** · **gain: 18-37 ms/frame @1440p** · `REGRESSION`
 
@@ -618,7 +622,7 @@ Guide history already resets when SR is toggled on, so no extra work there.
 
 ---
 
-### [ ] 2.5 · 177 MB (1440p) / 398 MB (4K) allocated and never touched
+### [~] 2.5 · 177 MB (1440p) / 398 MB (4K) allocated and never touched
 
 🔍 reported · **effort: S** · **gain: see table**
 
@@ -656,7 +660,7 @@ that slice's scope.
 
 ---
 
-### [ ] 2.6 · `SetMaximumFrameLatency(2)` is a silent no-op
+### [x] 2.6 · `SetMaximumFrameLatency(2)` is a silent no-op
 
 🔍 reported · **effort: S** · **gain: small directly, unlocks 2.2**
 
