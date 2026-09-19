@@ -1,0 +1,13 @@
+﻿{
+    "psnrBetweenCrops":  30.69,
+    "crop":  "x=380 y=100 w=920 h=518 in the 1442x932 capture",
+    "generatedBy":  "site/tools/make-hero-crops.ps1",
+    "operations":  "crop only; no scaling, colour adjustment or sharpening",
+    "provenance":  "docs/screenshots/README.md",
+    "cropBoxChosenBy":  "mean absolute difference between the two captures averaged into a 12x7 grid over the video area",
+    "sources":  [
+                    "docs/screenshots/current/godfather-original.jpg",
+                    "docs/screenshots/current/godfather-neural.jpg"
+                ],
+    "note":  "Frames of The Godfather, captured in the player. See docs/screenshots/README.md for full provenance."
+}

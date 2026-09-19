@@ -1,0 +1,73 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "VERSION"
+      - "docs/screenshots/current/**"
+      - "docs/media/**"
+      - ".github/workflows/pages.yml"
+  # Publishing a release is what changes the download the site advertises, so
+  # the site is rebuilt and redeployed within about a minute of it happening.
+  release:
+    types: [published]
+  # Used after setting or changing GA_MEASUREMENT_ID: the measurement id is
+  # baked into the page at build time, so the variable alone changes nothing
+  # until the site is rebuilt.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A deploy that is publishing should finish rather than be cancelled by a later
+# push; two runs queue instead of racing on the same Pages deployment.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Every script targets Windows PowerShell 5.1 so the maintainer can run
+      # them on Windows with nothing installed; pwsh 7 on the runner executes
+      # the same code.
+      - name: Test
+        shell: pwsh
+        run: ./site/test.ps1
+
+      - name: Build
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GA_MEASUREMENT_ID: ${{ vars.GA_MEASUREMENT_ID }}
+        run: ./site/build.ps1 -RequireRelease
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    # A fork gets the build as ordinary CI, but does not try to deploy to a
+    # Pages site it has not enabled.
+    if: github.repository_owner == '2600th'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
