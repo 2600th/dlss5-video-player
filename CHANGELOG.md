@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **The live buffer is sized from the render's drain rate, not a constant.**
+  Reported as "we exhaust buffered frames quickly ... in case framegen is on": a
+  session played a few seconds, stopped to buffer, played a few more and stopped
+  again. Frame generation doubles the frames the render has to produce without
+  changing the clock they have to arrive by, and 2560x1440 at 119.88 fps
+  measured 0.814x real time on an RTX 5090. Below real time the buffer DRAINS
+  while playback runs - the lead falls by (1 - ratio) every second played - so
+  no fixed cushion prevents a rebuffer. It only decides how often one happens,
+  and the total watching time is fixed by the ratio whatever the cushion is.
+  Both cushions were sized for the opposite case. `StartLead` had arms for a GPU
+  rendering 1.5x and 3x faster than real time and nothing below 1.0x, so it
+  could only ever SHRINK the cushion: the case that needs a bigger one got the
+  same four seconds as a card that keeps up exactly. `ShouldResume` did not
+  consult the pace at all and always used two seconds, which at 0.814x is eaten
+  by the drain in about eleven seconds - and the resume value is the one that
+  matters, because the first attach happens once and a rebuffer repeats.
+  `SustainedLead` takes the smaller of two bounds: what buys 60 s of
+  uninterrupted playback, and what can be refilled inside a 20 s wait, floored
+  at the old cushion and capped at 30 s. At 0.814x both cushions become 7.6 s,
+  so one fill buys about a minute of playback instead of about sixteen seconds;
+  at 0.5x the wait budget wins at 10 s, so the run is shorter rather than the
+  panel being up for a minute; at or above real time nothing changes. It is
+  sized against what the session is actually managing once there is enough of it
+  to measure and the forecast until then, because `LiveRealtimeRatio` reports
+  nothing for the first eight seconds - which is exactly when the first attach
+  is decided.
+  Not verified on hardware, and not claimed to be: the run meant to exercise it
+  attached with the whole remaining video buffered, because the session spent
+  61 seconds dismissing an 8.3 ms sliver target between the snapped playhead and
+  where coverage actually began. That gap is a separate defect and is still
+  open. What is pinned is the arithmetic, by
+  `live_session_sizes_the_cushion_from_the_render_drain_test`.
+
 - **Playback decodes a neural pair to NV12 instead of raw BGRA.** This is the
   reason the cadence work above could not rescue a high-rate source: with
   presentation measured at 2.5% of the time, the other 97.5% was in
@@ -65,6 +98,30 @@
   Verified at 2560x1440 59.94 fps with a session attached: 36 consecutive health
   lines at `stride=1in1`, 38 frames dropped in one transient at attach and none
   after.
+
+- **A project website, whose download is always the current build.** A landing
+  page at <https://2600th.github.io/dlss5-video-player/> built from `site/` by
+  `site/build.ps1` and deployed by `.github/workflows/pages.yml`. The coupling
+  to the player is read-only and one-way: the build reads `VERSION` and copies
+  screenshots out of `docs/`, and nothing in the C++ build reaches the other
+  way.
+  The download cannot go stale because it is resolved rather than written down.
+  `GET /releases/latest` returns 404 for this repository - every release is
+  marked as a prerelease and that endpoint excludes them - so the build forms
+  `dlss5-video-player-v<VERSION>` from `VERSION`, fetches that tag's release,
+  falls back to the newest non-draft one, and in CI `-RequireRelease` turns "no
+  release resolved" into a failed build rather than a published page with no
+  download. A release carrying only the CI-built core zip is a supported state,
+  since CI cannot know when the 308 MB complete package is attached by hand: the
+  page offers the core package and links the release page for the other. The
+  workflow also redeploys on `release: published`, so the page follows a publish
+  within about a minute.
+  `site/test.ps1` asserts the resolution rules against recorded release payloads
+  rather than the network, and CI runs it before deploying. Every script targets
+  Windows PowerShell 5.1 so the page can be previewed with nothing installed,
+  and is kept pure ASCII on purpose: Windows PowerShell reads a script with no
+  byte-order mark using the ANSI codepage, where the third byte of a UTF-8 em
+  dash is a smart closing quote that PowerShell honours as a string delimiter.
 
 - **Frame generation no longer interpolates across a cut.** Generating between
   the last frame of one shot and the first of the next blends two unrelated
