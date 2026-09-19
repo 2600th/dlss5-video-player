@@ -91,6 +91,11 @@
         },
         {
           "@type": "Question",
+          "name": "What is frame generation, and is it the same thing?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Neural rendering rebuilds detail in the frames a video already has; frame generation makes new frames between them, so a 30 fps clip becomes 60. It runs as a conversion rather than during playback - DLSS > Generate frames writes a new file, shows the time left, then switches to the result where you were watching. The multiple is yours to set, from 2x up to as many as your display can show evenly. The two features are independent: use either, or both." }
+        },
+        {
+          "@type": "Question",
           "name": "Can I keep the result?",
           "acceptedAnswer": { "@type": "Answer", "text": "Yes - PNG or JPEG for photos, GIF for animations, MP4 or MKV for video. MKV keeps the source audio, subtitles and chapters without re-encoding them." }
         }
@@ -253,9 +258,10 @@
     <div class="beat__text">
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
-        The last five videos and their renders are remembered. A render is
-        reused only when the source, the runtime and the neural settings all
-        still match — so what you reopen is what you rendered.
+        Every render stays on disk until you clear it. Reopen a film weeks
+        later and its render is still attached, reused whenever the source, the
+        runtime and the neural settings all still match — so what you reopen
+        is what you rendered.
       </p>
     </div>
     <figure class="beat__figure">
@@ -300,6 +306,7 @@
       <h3 class="matrix__title">On top</h3>
       <ul class="matrix__list">
         <li>Optional DLSS Super Resolution, on either view</li>
+        <li>Optional frame generation: convert a video to 2× its frame rate, or up to 5×</li>
         <li>Output follows the display: 1080p, 1440p or 2160p, whichever it can scan out</li>
         <li>Any rung can be pinned; the render itself stays at source resolution</li>
         <li>Neural strength from 0 to 200%, re-mixed without re-rendering</li>
@@ -417,6 +424,18 @@
         seconds after you press <kbd>D</kbd>, and the rest fills in while you
         watch. Measured figures for each release are in the
         <a href="{{REPO_URL}}/blob/main/CHANGELOG.md" rel="noopener">changelog</a>.
+      </p>
+    </details>
+    <details class="faq__item">
+      <summary>What is frame generation, and is it the same thing?</summary>
+      <p>
+        No. Neural rendering rebuilds detail in the frames a video already has;
+        frame generation makes new frames between them, so a 30&nbsp;fps clip
+        becomes 60. It runs as a conversion rather than during playback —
+        <strong>DLSS&nbsp;&gt; Generate frames</strong> writes a new file, shows
+        the time left, then switches to the result where you were watching. The
+        multiple is yours to set, from 2× up to as many as your display can
+        show evenly. The two features are independent: use either, or both.
       </p>
     </details>
     <details class="faq__item">
