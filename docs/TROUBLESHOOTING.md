@@ -204,6 +204,59 @@ Pin a lower rung, or turn runtime upscaling off, to isolate its cost. For YouTub
 There are no legacy Auto/Balanced/Performance render-quality modes. Check the
 player log for SR startup/evaluation failures; ordinary playback remains available.
 
+## Generate frames is unavailable, or refuses
+
+**DLSS > Generate frames** converts a video to a higher frame rate and writes a
+new file; it does not run during playback. The pill and the status line always
+name the reason rather than only saying "Unavailable", and the reasons fall into
+four groups.
+
+*Nothing to generate between.* "no frame rate", "still image" and "variable
+frame rate" are properties of the source: generated frames need a constant
+interval to land inside.
+
+*Nowhere to show them.* "no display refresh" means Windows did not report a
+refresh rate. "already matches the display" means the video already runs at or
+above what the panel can show, so generated frames would never be presented.
+"display cannot double it" means the refresh is below twice the source rate.
+"already lands evenly" means every source frame is already scanned out the same
+number of times and no higher multiple divides this refresh.
+
+*A setting, not the display.* "set to 2x, needs 5x" is **DLSS > Generated
+frames** being the binding limit - 24 fps film on a 120 Hz panel needs 5x to
+land exactly - and raising that setting converts it. "even cadence only" is the
+**Even cadence only** option refusing an uneven landing; turning it off converts
+anyway, with the generated frames in the same uneven grid the video already
+plays in. Where the monitor has another mode that would divide exactly, the
+dialog offers to switch to it and converts nothing until you ask again.
+
+*A streaming source.* "needs a local copy" is a YouTube video: the conversion
+reads a file. Accepting the prompt downloads one into the cache while playback
+continues, and Generate frames becomes available when it finishes. A copy
+already in the cache from an earlier render is used as-is.
+
+"This GPU and driver admit no generated frames" is the runtime refusing the
+feature outright, which is a driver and hardware question rather than a setting.
+
+## A neural session keeps stopping to buffer
+
+A live session plays rendered frames while the rest is still being rendered, so
+it can only keep up if the render produces video at least as fast as you watch
+it. Where it cannot, the buffer drains while playback runs and a rebuffer is
+arithmetic rather than a fault - the player forecasts this before starting and
+asks whether to go ahead.
+
+Frame generation is the usual way to get there: it doubles the frames the render
+must produce without changing the clock they have to arrive by. A 2560x1440
+source at 119.88 fps measures about 0.81x real time on an RTX 5090.
+
+The player sizes its buffer from that measured pace, so a sub-real-time render
+waits longer before starting and longer after each rebuffer, in exchange for
+playing about a minute at a time instead of a few seconds. What it cannot do is
+remove the stalls, and the total time is set by the pace whatever the cushion
+is. To watch without them, either render the video fully first and play the
+result, or generate frames at a lower multiple so there is less to render.
+
 ## Preferences do not persist
 
 The existing `DLSSVideoPlayer.ini` is stored beside the executable. Run from a

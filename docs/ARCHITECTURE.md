@@ -71,6 +71,10 @@ downsamples a source to fit a nominal DLSS quality ratio.
 
 Audio is the preferred master clock. The video side checks decoded timestamps against that clock. Frames that are too late are discarded and temporal history is reset rather than slowing playback.
 
+That rule assumes a late frame is cheap to throw away, which holds while playback advances by decoding ONE stream. A live neural session advances by decoding a PAIR - the original and the rendered segment, presented together - so a discard costs exactly what a present costs, and a catch-up loop that discards is a race it doubles the length of: once behind, every tick spends its budget discarding, presents at most one frame and ends further behind than it started. `src/PlaybackCadence.h` decides what a behind-schedule pair does instead. STRIDE presents one pair in N and skips the presentation work for the rest, which is the difference between 120 fps that cannot be shown and 60 fps that can; RE-ANCHOR stops walking and seeks, because a seek costs about half a second whatever the distance while walking costs a pair decode for every frame in between. Re-anchoring is bounded at three, after which the session says it cannot follow rather than hitching indefinitely. A playback-health line every two seconds records presented rate against source rate, drops, the frame budget, the cadence in force and the split between guide generation and the present - the measurement that disproved two plausible theories about where the time was going.
+
+Throughput is what makes that budget reachable at all. A pair is two decoders feeding one renderer, and both hand over NV12 rather than BGRA where the source's colour description allows it: 5.5 MB per 2560x1440 frame instead of 14.7 MB, with the BT.709 limited conversion done on the GPU. `SourceNv12ConversionFor` refuses any description that conversion does not implement, and a playback open takes a narrower gate than an export one because the comparison reference is a BGRA texture uploaded from CPU bytes.
+
 ## Temporal guides
 
 A normal movie does not contain engine motion vectors or depth. Motion comes from
@@ -573,7 +577,19 @@ sessions that cannot keep up, so erasing slow evidence is the wrong failure.
 Per *job* there is also about 7 s of fixed cost — the preflight process, ReShade
 stabilization, up to 120 priming frames, the reopen and seek, and 60 preroll
 frames — which is why a session is one long job rather than a chunk per few
-seconds, with a 4 s lead-in and a 2 s resume threshold.
+seconds. The lead it waits for before attaching, and the lead it waits for
+before ending a rebuffer, are sized from the render's pace rather than fixed.
+`live_session::StartLead` and `ResumeLead` keep 4 s and 2 s for a render at real
+time and shrink them for a card well above it, where the buffer refills faster
+than playback drains it and the cushion is only a wait. Below real time they
+grow: the lead falls by (1 - ratio) every second played, so no cushion prevents
+a rebuffer and the question is only how often one happens. `SustainedLead` takes
+whichever is smaller of what buys a minute of uninterrupted playback and what
+can be refilled inside a 20 s wait, floored at the fixed cushion and capped at
+30 s. It is sized against the pace the session is measuring once there is enough
+of it to report one, and the forecast until then, because `LiveRealtimeRatio`
+says nothing for the first eight seconds - which is when the first attach is
+decided.
 
 Inside a live session the rate holds up: on a 40 s native 4K30 source the median
 over nine segment intervals was **1.165x real time** against the forecast's
@@ -581,7 +597,9 @@ over nine segment intervals was **1.165x real time** against the forecast's
 file at the same geometry is a different answer - the 4K re-encode above runs at
 0.78x and buffers continuously - so the forecast asks before starting whatever
 it expects to fall behind, and buffering remains the release valve rather than
-an edge case.
+an edge case. That 0.78x case, and a frame-generated source at 119.88 fps which
+measures 0.814x, are what the grown cushion is for: neither can be made to keep
+up, only to stop and start less often.
 
 A settings change while the player is paused runs the same machinery for one
 frame (`NeuralJobKind::Preview`): the frame is rendered, decoded and presented
