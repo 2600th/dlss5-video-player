@@ -144,10 +144,16 @@ public:
         float tint = 0.0f;         // -1..+1 (green..magenta)
     };
 
+    // `captureOutput` reserves the readback ring the export path drains. The
+    // player never captures - only OfflineNeuralRenderer does - and the ring
+    // is four full output frames of host-visible committed memory: 59 MB at
+    // 1440p, 133 MB at 4K, allocated and never touched. Off by default, so a
+    // caller that wants it has to say so.
     bool Initialize(HWND hwnd, uint32_t sourceW, uint32_t sourceH,
                     uint32_t outputW, uint32_t outputH,
                     uint32_t gridW, uint32_t gridH,
-                    NVSDK_NGX_PerfQuality_Value quality, bool preserveSource = false);
+                    NVSDK_NGX_PerfQuality_Value quality, bool preserveSource = false,
+                    bool captureOutput = false);
     bool RenderFrame(const uint8_t* bgra, size_t bytes,
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
@@ -567,6 +573,8 @@ private:
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
     bool m_preserveSource = false;
+    // True when a caller asked for the capture readback ring at Initialize.
+    bool m_captureOutput=false;
     uint64_t m_framesPresented = 0;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};

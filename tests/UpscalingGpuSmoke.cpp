@@ -110,8 +110,9 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
         HWND window=CreateWindowExW(0,L"STATIC",L"guide probe",WS_POPUP,0,0,100,100,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
         auto renderer=MakeD3D12Renderer();
         const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(decoder.Width(),decoder.Height(),decoder.FrameRate());
+        // This arm drains the capture ring via RenderFrameForCache.
         if(renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
-            NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&renderer->DLSSAvailable()){
+            NVSDK_NGX_PerfQuality_Value_MaxQuality,true,true)&&renderer->DLSSAvailable()){
             TemporalGuideGenerator guides;guides.SetControls(controls);
             VideoFrame frame;uint32_t count=0;bool ok=true;
             std::ofstream out(std::filesystem::path(rawOut),std::ios::binary|std::ios::trunc);

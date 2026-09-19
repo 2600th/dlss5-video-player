@@ -160,8 +160,9 @@ D3D12Renderer::~D3D12Renderer() {
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
 
-bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource) {
+bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint32_t outputW,uint32_t outputH,uint32_t gridW,uint32_t gridH,NVSDK_NGX_PerfQuality_Value quality,bool preserveSource,bool captureOutput) {
     m_preserveSource=preserveSource;
+    m_captureOutput=captureOutput;
     m_hwnd=hwnd; m_sourceW=sourceW; m_sourceH=sourceH; m_outputW=outputW; m_outputH=outputH; m_gridW=gridW; m_gridH=gridH; m_quality=quality;
     if(!m_gridW||!m_gridH)return false;
     // NV12 planes need even dimensions, so an odd source keeps the BGRA upload
@@ -765,7 +766,11 @@ bool D3D12Renderer::CreateVideoResources(){
     // range exactly once. READBACK heap memory on a discrete PCIe adapter is write-back
     // cached and coherent, so that is safe here and this player already requires an RTX
     // GPU. A UMA or WARP adapter would need the range re-declared per read.
-    for(uint32_t i=0;i<CaptureSlots;++i){
+    // Four full output frames of host-visible committed memory - 59 MB at
+    // 1440p, 133 MB at 4K. Only the export path drains this ring; the player
+    // never calls any of the capture entry points, so it used to allocate the
+    // whole thing and never touch it.
+    for(uint32_t i=0;m_captureOutput&&i<CaptureSlots;++i){
         if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&readback,
             D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_cacheReadback[i])),
             "Create cache readback"))return false;
@@ -1173,6 +1178,8 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
 }
 
 bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
+    // The readback ring only exists when Initialize was asked for it.
+    if(!m_captureOutput)return false;
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     if(m_capturePending>=CaptureSlots)return false;
     const bool nv12=m_captureFormat==CaptureFormat::Nv12;
@@ -1245,6 +1252,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
 
 bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     view=CaptureReadbackView{};
+    if(!m_captureOutput)return false;
     if(!m_capturePending)return false;
     const uint32_t readbackSlot=m_captureRead;
     const bool nv12=m_captureFormat==CaptureFormat::Nv12;

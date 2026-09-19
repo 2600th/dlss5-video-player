@@ -1766,7 +1766,7 @@ struct ProductionEvaluatorAdapter {
         // present per frame; no one ever looks at it, and holding presents to the display
         // refresh would cap an export that already runs below real time.
         renderer->SetPresentTearing(true);
-        if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality()))return false;
+        if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality(),false,true))return false;
         // Both sides apply the same even-size rule, so this only fires if that rule drifts.
         if(renderer->ActiveSourceLayout()!=layout){
             LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");
