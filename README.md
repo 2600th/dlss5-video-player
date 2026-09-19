@@ -49,34 +49,30 @@ Next time, **File > Recent videos** reopens it with the render already done.
 
 ## What it does
 
-- Renders while you watch. Press `D` at any point and playback continues on the
-  rendered frames a few seconds later. The session's job is the whole video, so
-  it keeps filling in what is left while you watch, nearest to you first.
-- Seek anywhere, rendered or not. Rendered frames play wherever they are on the
-  timeline; somewhere nobody has rendered yet plays the original at once and the
-  render moves there. Nothing already rendered is thrown away, and turning it off
-  and on again picks up where it stopped.
+- Renders while you watch. Press `D` and playback continues on rendered frames a
+  few seconds later, while the rest fills in behind you, nearest first.
+- Seek anywhere, rendered or not. Rendered frames play wherever they sit on the
+  timeline; elsewhere the original plays at once and the render moves there.
+  Nothing already rendered is thrown away.
 - Keeps the original and the render in step. Switching views does not move the
   playhead, and you can pause and step frames on either.
-- Keeps every render, not the last few. A render is reused whenever the source,
-  the runtime and the neural settings all still match, however many videos ago
-  you made it. **File > Recent videos** lists five, but that is a menu length:
-  dropping off it deletes nothing.
+- Keeps every render. One is reused whenever the source, the runtime and the
+  settings still match, however long ago you made it. **File > Recent videos**
+  lists five, but dropping off that list deletes nothing.
+- Converts to a higher frame rate. **DLSS > Generate frames** writes a new file
+  at 2x to 5x the original rate, then plays it.
 - Exports what you rendered. PNG or JPEG for photos, GIF for animations, MP4 or
   MKV for video. MKV keeps the source audio, subtitles and chapters without
-  re-encoding them.
-- Optional DLSS Super Resolution on top, for either view. The output rung
-  follows the display by default - 1080p, 1440p or 2160p, whichever the monitor
-  can actually scan out - and any rung can be pinned. The render itself stays at
+  re-encoding.
+- Optional DLSS Super Resolution on either view, at 1080p, 1440p or 2160p -
+  taken from your monitor by default, or pinned. The render itself stays at
   source resolution.
-- Neural settings live at `Ctrl+N`. Change one while paused and that frame is
-  re-rendered so you can judge on the picture. Settings are saved with each
-  render and are part of its cache identity.
-- Encoder settings sit apart from the model settings. **DLSS > Encoder settings**
-  picks the NVENC preset and where colour conversion runs. The preset and the
-  output conversion do not invalidate a cached render; the source conversion
-  does, because it changes what the model is shown rather than how the result is
-  written.
+- Neural settings at `Ctrl+N`. Change one while paused and that frame is
+  re-rendered, so you judge on the picture. They are saved with the render and
+  are part of its cache identity.
+- Encoder settings at **DLSS > Encoder settings**: the NVENC preset, and where
+  colour conversion runs. Only the source conversion invalidates a cached
+  render, because only it changes what the model is shown.
 - Six official game trailers under **File > Game trailers**, each under three
   minutes, for a quick first test.
 
@@ -84,130 +80,56 @@ Next time, **File > Recent videos** reopens it with the render already done.
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
 
-**0.24.0** (2026-09-20). **Frame generation, and the playback work a generated
-file turned out to need.** **DLSS > Generate frames** converts a video to a
-higher frame rate - 2x by default and up to 5x where the display can show the
-result evenly - writing it as a new file with a percentage and a time remaining,
-after which playback switches to the result at the position you were watching.
-It generates at the source's own resolution and the player's Super Resolution
-runs live on top of the result. Every refusal now names itself rather than
-greying the control out - whether it is the source, the panel, your **DLSS >
-Generated frames** setting, or a stream that needs a local copy first -
-and where another display mode would divide the rate exactly, the player offers
-to switch to it. Generation no longer interpolates across a cut: a shot change
-is detected from the residual and a luma histogram, and the pair is repeated
-instead of blended.
+**0.24.0** (2026-09-20). **Frame generation.** **DLSS > Generate frames**
+converts a video to a higher frame rate - 2x by default, up to 5x - writes it as
+a new file, then plays it from where you were. When it cannot, it says why
+instead of greying out: the source, the display, your chosen multiple, or a
+stream it needs a local copy of first. It also detects cuts now, so it stops
+blending across a shot change.
 
-**Live playback was broken for high frame rates, and is fixed.** Reported as
-"only some frames are showing", then "stuck frame ... slow speed, not realtime".
-A live session advances by decoding a PAIR, so the catch-up loop that discards
-late frames - correct everywhere else - was a race it doubled the length of.
-Playback also shipped raw BGRA down both pipes, 14.7 MB per 1440p frame, which
-cost 15.5 ms per pair against an 8.34 ms budget; a pair is decoded to NV12 now
-and converted on the GPU, measured at 6.3 ms. On hardware, 1440p59.94 went from
-12.3 fps presented with 90 dropped every two seconds to 59.94 with none. Where a
-render genuinely cannot keep up, the buffer is sized from its measured pace
-instead of a fixed four seconds, so a sub-real-time session plays about a minute
-between stalls rather than a few seconds. A two-second playback-health line
-records what is actually happening, which is how all of this was found.
+**Live playback is fixed at high frame rates.** A neural session advances two
+frames at once, and the loop meant to drop late ones was throwing away work it
+had already paid for. A 1440p59.94 video went from 12 frames a second to all 60.
+Where the render genuinely cannot keep up, the player now buffers about once a
+minute instead of every few seconds.
 
-**Renders are no longer deleted by a menu.** The cache was tied to the
-five-entry Recent list, so opening a sixth video deleted the first one's render
-and going back to it rendered those minutes again. Nothing evicts automatically
-now; **Advanced > Clear Neural Cache**, which already reports the megabytes it
-is about to delete, is the only bound.
+Renders survive a sixth video pushing the first out of **Recent videos** - only
+**Clear Neural Cache** deletes them. Upscaling picks 1080p, 1440p or 2160p from
+your monitor instead of a fixed guess. Conversions encode noticeably faster at
+the same quality. And there is a website:
+<https://2600th.github.io/dlss5-video-player/>.
 
-Super Resolution output follows the display by default - 1080p, 1440p or 2160p,
-whichever the monitor can actually scan out - with any rung pinnable, and a
-1080p rung was added for panels the two-rung menu could not serve. Conversions
-encode with NVENC p5 rather than p7 on a measurement: p7 cost twice the encode
-time for +0.12 VMAF, and a 1440p conversion fell from 8.8 s to 6.3 s. The
-project also has a website at <https://2600th.github.io/dlss5-video-player/>,
-whose download is resolved from the published release rather than written down,
-so it cannot go stale.
+**0.23.0** (2026-09-16). A pass over the whole player, fixing what it turned up.
+**Save converted video** after a live session used to write only the last
+rendered stretch under the film's name; it is offered now only when a single
+render covered the whole video. A cancel arriving just after a job finished
+cancelled the next one instead.
 
-**0.23.0** (2026-09-16). **A verification pass over the whole player**, with
-seven audits read against the source and the findings fixed rather than filed.
-Two of them a user could have met: **Save converted video** after a live session
-used to write the last rendered hole under the film's name - toggle neural on at
-0:20 and the saved file was twenty seconds long - and is now offered only when a
-single render covered the whole video; and a cancel that reached the neural
-helper just after a job had finished cancelled the *next* job before its first
-frame, which is fixed and tested with a real command channel.
+A graphics device that is lost or stops responding now stops playback, says so,
+and rebuilds the renderer once, rather than freezing the picture with the audio
+still running. YouTube streams are fetched with certificate verification forced
+on. Both executables ship with Control Flow Guard and CET. Releases stay drafts
+until the complete package is attached, and every guide carries a line naming
+the version it was last read against.
 
-When the graphics device is removed or stops responding during playback, the
-player now stops, says so in the status bar and rebuilds its renderer once
-instead of freezing the picture with the audio still running; an export no
-longer retries a frame up to 120 times on a dead device. A render whose backend
-evaluated fewer frames than were captured is refused - the check that was meant
-to catch that compared a number with a copy of itself. Switching streams no
-longer leaves the player describing the previous one, a decode-thread
-allocation failure ends that playback instead of the player, every helper
-child has a wall-clock bound, and YouTube streams are fetched with certificate
-verification forced on and only `https`/`tls`/`tcp` allowed. Partial downloads
-and refused renders parked under the cache's `staging/` are reaped a few per
-launch instead of accumulating until a manual clear.
+**0.22.0** (2026-09-16). **A session renders the whole video**, not one run
+forward from where you pressed `D`. What you are watching is rendered first,
+then the rest, nearest first. Seek anywhere: rendered frames play wherever they
+sit on the timeline, and where nothing is rendered yet the original plays while
+the render moves there. Nothing already rendered is thrown away.
 
-Both executables ship with Control Flow Guard and CET compatibility. Releases
-are now created as drafts - so the complete package the notes name is attached
-before anything is public - with every workflow action pinned to a commit and a
-provenance attestation on the CI-built core package. Two agent-era planning
-documents are retired, the guides that ship in the package are corrected, and
-each carries a `Verified against` line that the release gate checks.
+**Colour was wrong in every render before this.** Files carried BT.601 pixels
+while declaring no colour space at all, so any player assuming BT.709 - the
+usual default for HD - showed them shifted. Renders now state `bt709`/`tv` and
+convert to match.
 
-**0.22.0** (2026-09-16). **A session now renders the whole video**, not one run
-forward from where you pressed `D`. Coverage is a set of rendered regions: the
-part you are watching is rendered first, then the rest, nearest the playhead,
-and the status line says how much of it is done. Seeking is no longer limited to
-what has been rendered - land in rendered frames and playback continues on them
-wherever they are on the timeline; land in frames nobody has rendered and the
-original plays there at once while the render moves to that part of the video.
-Nothing already rendered is discarded when you seek, which is what the old
-behaviour did: it deleted every segment the new playhead was not inside and
-rendered those seconds again.
+Two causes of stutter are gone: a cache check that hashed 60 MiB of the stream
+six times a frame on the drawing thread, and a decode pipe too small to hold a
+1440p frame. Seeking during a render takes about a third of a second instead of
+one and a half, and tapping the key repeatedly no longer restarts the job each
+time. Renders made by earlier versions are remade once, because the cache key
+now includes the driver and the model files.
 
-**Colour was wrong in every render before this.** The encoder tagged the file
-only when the GPU did the conversion, so a BT.709 source became a file that
-declared no colour space while carrying BT.601 pixels - a pure-red frame came
-back Y=81 U=90 V=240 - and any player that assumes BT.709 for HD, which is the
-usual default, showed those colours shifted. Renders now state `bt709`/`tv` and
-convert to match. The **Motion vectors** switch also changes the picture again:
-it had been zeroing the CPU grid while the hardware flow pass kept writing the
-texture NGX reads, so turning it off paid a full re-render and produced
-identical pixels.
-
-Two things that made playback stutter are gone. Asking whether a stream's cached
-copy existed hashed 60 MiB of it, six times a frame, on the thread that draws:
-the same clip and machine went from **FPS 1 rendered / 30 source with 1877
-dropped** to **30 / 30 with 25 dropped**. And the decode pipe was sized for two
-1080p frames, so a 1440p source ran at 28.85 fps against its 30; it now holds
-29.93. Turning neural rendering on a second time in one session reaches a
-picture in **2.44-2.52 s instead of 5.23-5.41 s**, because the helper stays
-alive between jobs and exits after 30 s idle.
-
-Seeking during a live render got the rest of the work. Seeking back on a YouTube
-video used to turn neural rendering off: the seek re-resolves the stream,
-rendering is unavailable for those two seconds, and two refusals in a row
-counted as a session that had failed. A stream also stops being a stream once
-its copy is on disk - a render always works from a local copy, and playback now
-moves onto that copy the first time a seek would have gone back to the network,
-so seeks take **223-345 ms instead of 1.2-1.9 s**. The render waits a second for
-you to stop moving before it follows: tapping the seek key six times used to
-restart the job five times and render nothing while you did it. You see the
-original a moment longer where you landed, and the render keeps working instead.
-
-A finished part also used to hold the next one back for 18 seconds. That was one
-call: checking the joined file asked FFprobe to decode every frame to count
-them - 23.8 s on a 1440p render - where the same count comes out of the container
-in 0.05 s. The wait is now about a second on a clip of this length, and it still
-grows with the render, so a feature-length video will want the next round of
-this. The speed on the status line is the render's speed again, not the
-download's: a first watch spends its first minute fetching the video, and that
-was being averaged in.
-
-Renders made by earlier versions are retired on purpose - the cache key now
-carries the driver version and a digest of the model files - so the first render
-of a video after upgrading is made again.
 
 **0.21.2** (2026-09-12). A live session could get stuck on one frame. If the
 render's first finished segment began a frame later than the playhead - 12.0662 s
@@ -520,36 +442,32 @@ screen, so it costs a present rather than a render.
 
 ## Limits
 
-- Speed. A live 1080p30 session costs about 8.4 ms per frame on an RTX 5090
-  (driver 616.64, median of eight 30 s sessions; the same clip cost 11.9 ms
-  before the export loop was pipelined in 0.17.0), and 15.4 ms at 1440p30. An
-  RTX 4080 SUPER measured 15.3 ms at 1080p30 on 0.16.0 and has not been
-  re-measured since. 4K30 depends on the file: a native 40 s 4K30 source ran at
-  1.165x real time, while a 6.3 Mbit/s 4K re-encode costs 42 ms per frame, or
-  0.78x, and drops nearly every present. The player measures your GPU after the
-  first session and warns before one it expects to fall behind.
-- Driver. Feature 18 lives in the driver's own NGX core, so an old driver
-  refuses the render whatever the card is, with `feature 18 create failed with
-  0xbad00002`. Below **610.47** the player says so up front instead of spending
-  five seconds in a probe that cannot pass; 616.64 is the driver this project
-  has rendered on. See
+- Speed. A live 1080p30 session costs about 8.4 ms a frame on an RTX 5090 and
+  15.4 ms at 1440p30; an RTX 4080 SUPER measured 15.3 ms at 1080p30. 4K depends
+  on the file - a native 4K30 source stays ahead of real time, a heavy 4K
+  re-encode does not. The player measures your GPU after the first session and
+  warns before one it expects to fall behind.
+- Driver. Neural rendering needs **610.47** or newer. Older drivers refuse it
+  whatever the card is, and the player says so up front rather than failing
+  inside a probe. See
   [troubleshooting](docs/TROUBLESHOOTING.md#neural-rendering-is-refused-because-the-driver-is-too-old).
 - RTX 20 and 30 run the universal runtime without native FP8, so expect them to
   be several times slower. Nobody has rendered on one here yet.
+- Frame generation is a conversion, not something that happens as you watch: it
+  writes a whole new file, which costs time and disk, and it needs a local copy
+  of a stream before it can start.
 - Depth is estimated from the picture, and so is motion on a card without the
   optical flow engine. Artifacts happen.
 - Export copies the cached 8-bit render. Image adjustments and upscaling are not
   baked in, and HDR or lost source precision is not restored.
 - Subtitles stay as separate tracks. No in-player subtitle display, no burn-in,
   no queue, no HDR, no resume of an interrupted render across restarts.
-- YouTube: public, non-DRM videos only, no login. Availability can change.
-  Age-restricted videos are the awkward case: YouTube keeps the full ladder for
-  a signed-in session, so an anonymous one can be handed a single legacy
-  640x360 format instead, and which of the two you get is not stable between
-  calls. Three of the six bundled trailers are age-restricted. When the source
-  comes back small the status line names the height and rate that arrived and
-  says the video is age-restricted, instead of playing 360p without comment.
-  Details in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
+- YouTube: public, non-DRM videos only, no login, and availability can change.
+  Age-restricted videos are the awkward case - an anonymous session can be
+  handed a legacy 640x360 stream instead of the full ladder, and three of the
+  six bundled trailers are affected. The status line names what actually
+  arrived rather than playing 360p without comment. Details in
+  [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
 - The render cache has no bound - no count, no size quota, and nothing evicted
   automatically. Big videos take space. **Advanced > Clear Neural Cache**
   reports how much it is about to delete and frees it.
