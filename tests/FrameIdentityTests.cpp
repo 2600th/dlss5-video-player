@@ -54,7 +54,7 @@ FrameIdentity Frame(uint64_t number, uint32_t sourceGeneration = 1, HistoryReset
 
 bool Generate(TemporalGuideGenerator& guides, const std::vector<uint8_t>& bgra, const FrameIdentity& frame, GuideFrame& out)
 {
-    return guides.Generate(bgra.data(), kWidth, kHeight, kWidth, kHeight, kFps, frame, out);
+    return guides.Generate(bgra.data(), bgra.size(), kWidth, kHeight, kWidth, kHeight, kFps, frame, out);
 }
 
 struct ChannelStats {
@@ -247,6 +247,42 @@ std::vector<uint8_t> TexturedNv12(int shiftX)
     return nv12;
 }
 
+void generate_refuses_a_buffer_too_small_for_the_declared_layout_test()
+{
+    // `layout` defaults to Bgra, so a caller holding an NV12 frame that forgets
+    // to pass it declares 4 bytes per pixel over a buffer holding 1.5. The read
+    // runs to (w*h-1)*4, which at 1080p is byte 8,294,396 of a 3,110,400-byte
+    // allocation - 5.2 MB past the end, into its own unmapped VirtualAlloc
+    // region. Refusing is the only safe answer: the generator cannot know which
+    // of the two the caller meant, only that they disagree.
+    const auto nv12 = TexturedNv12(0);
+    CHECK_EQ(size_t(kWidth) * kHeight + size_t(kWidth) * kHeight / 2u, nv12.size());
+
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    CHECK(!guides.Generate(nv12.data(), nv12.size(), kWidth, kHeight, kWidth, kHeight, kFps,
+                           Frame(0), out));
+
+    // The same bytes with the layout declared are fine, so the guard rejects
+    // the mismatch rather than the buffer.
+    CHECK(guides.Generate(nv12.data(), nv12.size(), kWidth, kHeight, kWidth, kHeight, kFps,
+                          Frame(0), out, SourcePixelLayout::Nv12));
+
+    // A short BGRA buffer is refused for the same reason, and one byte short is
+    // still short - the check is not a rounded-down guess at the row count.
+    const auto bgra = TexturedBgra(0);
+    CHECK(!guides.Generate(bgra.data(), bgra.size() - 1, kWidth, kHeight, kWidth, kHeight, kFps,
+                           Frame(1), out));
+    CHECK(guides.Generate(bgra.data(), bgra.size(), kWidth, kHeight, kWidth, kHeight, kFps,
+                          Frame(1), out));
+
+    // A larger buffer than the geometry needs is not an error: the export path
+    // reuses one allocation across frames of differing size.
+    std::vector<uint8_t> oversized(bgra.size() * 2u, 0);
+    CHECK(guides.Generate(oversized.data(), oversized.size(), kWidth, kHeight, kWidth, kHeight,
+                          kFps, Frame(2), out));
+}
+
 void generate_treats_nv12_limited_range_luma_like_bgra_test()
 {
     const auto bgra0 = TexturedBgra(0), bgra1 = TexturedBgra(5);
@@ -254,11 +290,11 @@ void generate_treats_nv12_limited_range_luma_like_bgra_test()
 
     TemporalGuideGenerator bgraGuides, nv12Guides;
     GuideFrame bgraOut0, bgraOut1, nv12Out0, nv12Out1;
-    CHECK(bgraGuides.Generate(bgra0.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), bgraOut0));
-    CHECK(bgraGuides.Generate(bgra1.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), bgraOut1));
-    CHECK(nv12Guides.Generate(nv120.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), nv12Out0,
+    CHECK(bgraGuides.Generate(bgra0.data(), bgra0.size(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), bgraOut0));
+    CHECK(bgraGuides.Generate(bgra1.data(), bgra1.size(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), bgraOut1));
+    CHECK(nv12Guides.Generate(nv120.data(), nv120.size(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(0), nv12Out0,
                                SourcePixelLayout::Nv12));
-    CHECK(nv12Guides.Generate(nv121.data(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), nv12Out1,
+    CHECK(nv12Guides.Generate(nv121.data(), nv121.size(), kWidth, kHeight, kWidth, kHeight, kFps, Frame(1), nv12Out1,
                                SourcePixelLayout::Nv12));
 
     CHECK_EQ(bgraOut0.hasHistory, nv12Out0.hasHistory);
@@ -411,7 +447,7 @@ bool GenerateAtCutFps(TemporalGuideGenerator& guides, const std::vector<uint8_t>
                       GuideFrame& out, HistoryReset reset = HistoryReset::None)
 {
     const FrameIdentity id{number, int64_t(double(number) / kCutFps * 1e7), 1, 0, 0, reset};
-    return guides.Generate(bgra.data(), kWidth, kHeight, kWidth, kHeight, kCutFps, id, out);
+    return guides.Generate(bgra.data(), bgra.size(), kWidth, kHeight, kWidth, kHeight, kCutFps, id, out);
 }
 
 void weak_scene_cuts_are_suppressed_inside_the_minimum_interval_test()
@@ -685,8 +721,8 @@ void flow_rejects_aliased_vectors_on_static_repetitive_content_test()
     GuideFrame first, second;
     const auto a = AliasFrame(0);
     const auto b = AliasFrame(kAliasShift);
-    CHECK(guides.Generate(a.data(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(0), first));
-    CHECK(guides.Generate(b.data(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(1), second));
+    CHECK(guides.Generate(a.data(), a.size(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(0), first));
+    CHECK(guides.Generate(b.data(), b.size(), kAliasW, kAliasH, kAliasW, kAliasH, kFps, Frame(1), second));
     CHECK(second.hasHistory);
     // The premise of the trap: the whole-frame estimate lands off zero (measured -20 px, a
     // compromise between the two halves), so zero motion is no longer the cheapest candidate
@@ -950,6 +986,7 @@ int main()
     guide_controls_neutralize_disabled_guides_test();
     guide_generator_reports_reset_reasons_test();
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();
+    generate_refuses_a_buffer_too_small_for_the_declared_layout_test();
     generate_treats_nv12_limited_range_luma_like_bgra_test();
     flow_rejects_aliased_vectors_on_static_repetitive_content_test();
     scene_cut_needs_low_histogram_overlap_or_a_large_residual_test();

@@ -3682,15 +3682,22 @@ private:
         if(candidate->window){
             candidate->renderer=MakeD3D12Renderer();
             const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
+            ConfigureRendererSource(candidate->renderer.get());
             if(candidate->renderer->Initialize(candidate->window,m_decoder.Width(),m_decoder.Height(),
                 size.width,size.height,gw,gh,NVSDK_NGX_PerfQuality_Value_MaxQuality,true)&&
+                RendererTookSourceLayout(candidate->renderer.get())&&
                 candidate->renderer->DLSSAvailable()){
                 candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
                 GuideFrame guide;
                 candidate->guides.SetControls(m_guides.Controls());
-                if(candidate->guides.Generate(m_lastPlaybackFrame.bgra.data(),m_decoder.Width(),m_decoder.Height(),
+                // The frame says which layout it is in. Playback opens NV12 for
+                // any even-dimension BT.709-limited source, which is most of
+                // them, so taking the Bgra default here read past the end of
+                // the buffer instead of building guides.
+                if(candidate->guides.Generate(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),m_decoder.Width(),m_decoder.Height(),
                     m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-                    IdentityOf(m_lastPlaybackFrame,m_historyGeneration,0,HistoryReset::FirstFrame),guide)){
+                    IdentityOf(m_lastPlaybackFrame,m_historyGeneration,0,HistoryReset::FirstFrame),guide,
+                    m_lastPlaybackFrame.layout)){
                     ready=candidate->renderer->RenderFrame(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
                         true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
@@ -3754,19 +3761,25 @@ private:
     // source layout can be set, and read back after: the decoder decides the
     // layout from its probe and the renderer either took it or the two disagree,
     // which is a black screen rather than an error unless somebody checks.
-    void ConfigureRendererSource(){
-        if(!m_renderer)return;
-        m_renderer->SetSourceLayout(m_decoder.PixelLayout());
-        m_renderer->SetSourceColor(m_decoder.ColorDescription());
+    // Every renderer that will be shown decoded frames has to be told their
+    // layout before Initialize, not just the one in m_renderer: a candidate
+    // built for a resolution change is shown the same frames and presents the
+    // first quarter of a BGRA image as a Y plane if it was left on the default.
+    void ConfigureRendererSource(D3D12Renderer* renderer){
+        if(!renderer)return;
+        renderer->SetSourceLayout(m_decoder.PixelLayout());
+        renderer->SetSourceColor(m_decoder.ColorDescription());
     }
-    bool RendererTookSourceLayout(){
-        if(!m_renderer)return false;
-        if(m_renderer->ActiveSourceLayout()==m_decoder.PixelLayout())return true;
+    void ConfigureRendererSource(){ConfigureRendererSource(m_renderer.get());}
+    bool RendererTookSourceLayout(D3D12Renderer* renderer){
+        if(!renderer)return false;
+        if(renderer->ActiveSourceLayout()==m_decoder.PixelLayout())return true;
         LOG("Renderer refused the decoder's "
             <<(m_decoder.PixelLayout()==VideoPixelLayout::Nv12?"NV12":"BGRA")
             <<" source layout; playback would present garbage, so this open fails instead.");
         return false;
     }
+    bool RendererTookSourceLayout(){return RendererTookSourceLayout(m_renderer.get());}
     // Both members of a pair feed one renderer whose layout is fixed, so they
     // take whatever the main decoder achieved rather than asking again.
     bool PairPrefersNv12()const{return m_decoder.PixelLayout()==VideoPixelLayout::Nv12;}
@@ -3784,7 +3797,7 @@ private:
         // both since the export path started decoding to NV12, and reading a
         // NV12 buffer as BGRA is the kind of mistake that shows up as motion
         // estimated from noise rather than as a failure.
-        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),IdentityOf(f,m_historyGeneration,0,reason),g,f.layout))return false;
+        if(!m_guides.Generate(f.bgra.data(),f.bgra.size(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),IdentityOf(f,m_historyGeneration,0,reason),g,f.layout))return false;
         m_guideMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-guideStart).count();
         m_historyGeneration=g.id.historyGeneration;
         // This path renders without a frame identity, so the renderer never logs
@@ -5724,7 +5737,7 @@ private:
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey)){
                         // LookupRender already verifies the full payload hash and
@@ -6134,7 +6147,7 @@ private:
     bool ValidatePreparedFrame(const YouTubeCompletion& completion,D3D12Renderer& renderer,TemporalGuideGenerator& guides){
         if(!NetworkPreparedGeometryIsValid(completion.configuration,completion.decoder->Width(),completion.decoder->Height(),completion.firstFrame.bgra.size()))return false;
         const FrameIdentity identity=IdentityOf(completion.firstFrame,0,0,HistoryReset::FirstFrame);
-        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),identity,guide))return false;
+        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),identity,guide))return false;
         const float frameMs=float(1000.0/std::max(1.0,completion.decoder->FrameRate()));
         return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),identity,guide,frameMs);
     }

@@ -56,7 +56,7 @@ int wmain(int argc,wchar_t** argv) {
             while(ok&&count<120&&decoder.ReadNext(frame)){
                 GuideFrame guide;
                 const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,count==0?HistoryReset::FirstFrame:HistoryReset::None);
-                ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
+                ok=guides.Generate(frame.bgra.data(),frame.bgra.size(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
                     renderer->UploadReferenceFrame(frame.bgra.data(),frame.bgra.size())&&
                     renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)&&renderer->LastFrameUsedDLSS();
                 if(ok)++count;
@@ -67,7 +67,7 @@ int wmain(int argc,wchar_t** argv) {
             if(ok&&count>0){
                 GuideFrame stale;FrameIdentity other=IdentityOf(frame,guides.HistoryGeneration(),0,HistoryReset::None);
                 other.frameNumber+=1000;
-                rejected=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),other,stale)&&
+                rejected=guides.Generate(frame.bgra.data(),frame.bgra.size(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),other,stale)&&
                     !renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),IdentityOf(frame,guides.HistoryGeneration(),0,HistoryReset::None),stale,frameMs);
             }
             // Cycle the paused presentation through every comparison mode against the
@@ -119,7 +119,7 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
             while(ok&&count<frames&&decoder.ReadNext(frame)){
                 GuideFrame guide;CapturedVideoFrame captured;
                 const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,count==0?HistoryReset::FirstFrame:HistoryReset::None);
-                ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
+                ok=guides.Generate(frame.bgra.data(),frame.bgra.size(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
                    renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captured);
                 if(ok){out.write(reinterpret_cast<const char*>(captured.pixels.data()),std::streamsize(captured.pixels.size()));++count;}
             }
@@ -219,7 +219,7 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight)
         auto render=[&](D3D12Renderer& renderer){
             GuideFrame guide;
             const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,rendered==0?HistoryReset::FirstFrame:HistoryReset::None);
-            const bool ok=guides.Generate(frame.bgra.data(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
+            const bool ok=guides.Generate(frame.bgra.data(),frame.bgra.size(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),decoder.FrameRate(),id,guide)&&
                 renderer.RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs);
             if(ok)++rendered;
             return ok;

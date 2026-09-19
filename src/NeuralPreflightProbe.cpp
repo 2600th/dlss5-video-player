@@ -74,7 +74,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                 FillProbeFrame(frame, attempts);
                 const FrameIdentity probeFrame{attempts, static_cast<int64_t>(double(attempts) * 1e7 / kProbeFps),
                                                0, 0, 0, attempts == 0 ? HistoryReset::FirstFrame : HistoryReset::None};
-                if (!guides.Generate(frame.data(), kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight, kProbeFps,
+                if (!guides.Generate(frame.data(), frame.size(), kProbeWidth, kProbeHeight, kProbeWidth, kProbeHeight, kProbeFps,
                                      probeFrame, guide) ||
                     !renderer->RenderFrame(frame.data(), frame.size(), guide.guideGridRGBA32F.data(),
                                            guide.guideGridRGBA32F.size() * sizeof(float), guide.gridW, guide.gridH,

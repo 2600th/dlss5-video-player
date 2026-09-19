@@ -519,11 +519,18 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
     m_prevDepth = depth;
 }
 
-bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
+bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
+                                       uint32_t sourceW, uint32_t sourceH,
                                        uint32_t renderW, uint32_t renderH, double targetFps,
                                        const FrameIdentity& frame, GuideFrame& out,
                                        SourcePixelLayout layout) {
+    const uint8_t* bgra = pixels;
     if (!bgra || !sourceW || !sourceH || !renderW || !renderH) return false;
+    // The buffer must hold what `layout` and the geometry say it does. A larger
+    // one is fine - the export path reuses a single allocation across frames -
+    // but a smaller one means the caller and this function disagree about the
+    // layout, and DownsampleLuma would read off the end rather than fail.
+    if (pixelBytes < PixelLayoutFrameBytes(layout, sourceW, sourceH)) return false;
 
     const auto [gw, gh] = AnalysisGrid(sourceW, sourceH, targetFps);
     if (!gw || !gh) return false;

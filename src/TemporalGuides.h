@@ -92,7 +92,13 @@ public:
     // A cut whose evidence is only Histogram-strength is withheld when fewer
     // than MinFramesBetweenCuts(targetFps) frames have passed since the last
     // accepted cut; `out.sceneCut*` reports every decision either way.
-    bool Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
+    // `pixelBytes` is the size of the buffer `pixels` points at. It is required
+    // and it is checked against what `layout` and the source geometry imply,
+    // because `layout` defaults to Bgra and a caller that forgets it for an
+    // NV12 frame would otherwise read 2.7x past the end of the allocation
+    // rather than fail: at 1080p that is byte 8,294,396 of a 3,110,400-byte
+    // buffer. Too small for the declared layout returns false.
+    bool Generate(const uint8_t* pixels, size_t pixelBytes, uint32_t sourceW, uint32_t sourceH,
                   uint32_t renderW, uint32_t renderH, double targetFps,
                   const FrameIdentity& frame, GuideFrame& out,
                   SourcePixelLayout layout = SourcePixelLayout::Bgra);

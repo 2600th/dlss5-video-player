@@ -1907,7 +1907,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
+            if(!guides.Generate(frame.bgra.data(),frame.bgra.size(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }
@@ -1962,7 +1962,7 @@ struct ProductionEvaluatorAdapter {
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
             StageClock clock(guideCost);
-            if(!guides.Generate(frame.bgra.data(),width,height,width,height,fps,id,guide,sourceLayout)){
+            if(!guides.Generate(frame.bgra.data(),frame.bgra.size(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
         }
