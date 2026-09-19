@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.0 - 2026-09-20
 
 - **The live buffer is sized from the render's drain rate, not a constant.**
   Reported as "we exhaust buffered frames quickly ... in case framegen is on": a
@@ -377,7 +377,7 @@
   frames (8097 generated, 8098 evaluates) from 2700 source frames, carrying its
   AAC track, and the player reopened the result at 120 fps with the duration
   unchanged.
-- **The ceiling is five generated frames per source frame, and the cap that
+- **The ceiling is 5x - four generated frames per source frame - and the cap that
   shipped at one was wrong twice over.** `kPhaseVerifiedMultiFrameCount` is now
   4 - 5x - which is BELOW this RTX 5090's `DLSSG.MultiFrameCountMax` of 5, so it
   is a real ceiling and not a restatement of the driver's, and the plan still

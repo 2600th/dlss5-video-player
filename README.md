@@ -1,12 +1,12 @@
 # DLSS 5 Video Player
 
-_Verified against 0.23.0 (cc423d1) on 2026-09-16._
+_Verified against 0.24.0 (918c0b0) on 2026-09-20._
 
 Run a video, photo or GIF through NVIDIA's DLSS 5 neural renderer, then look at
 the result next to the original on the same frame. Windows only. Needs an RTX
 card.
 
-[Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+[Website](https://2600th.github.io/dlss5-video-player/) · [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 [![22-second DLSS 5 Video Player demonstration: a paused face compared original against neural, then playback with the render running](docs/media/neural-comparison-preview.webp)](docs/media/neural-comparison-demo.mp4)
 
@@ -25,12 +25,12 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 ## Download
 
-**v0.23.0** (2026-09-16): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.23.0)
+**v0.24.0** (2026-09-20): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.24.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.23.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
-| `DLSSVideoPlayer-v0.23.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
+| `dlss5-video-player-v0.24.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 308 MB |
+| `DLSSVideoPlayer-v0.24.0-core-win64.zip` | Player only, no neural runtime. | 31 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -83,6 +83,48 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.24.0** (2026-09-20). **Frame generation, and the playback work a generated
+file turned out to need.** **DLSS > Generate frames** converts a video to a
+higher frame rate - 2x by default and up to 5x where the display can show the
+result evenly - writing it as a new file with a percentage and a time remaining,
+after which playback switches to the result at the position you were watching.
+It generates at the source's own resolution and the player's Super Resolution
+runs live on top of the result. Every refusal now names itself rather than
+greying the control out - whether it is the source, the panel, your **DLSS >
+Generated frames** setting, or a stream that needs a local copy first -
+and where another display mode would divide the rate exactly, the player offers
+to switch to it. Generation no longer interpolates across a cut: a shot change
+is detected from the residual and a luma histogram, and the pair is repeated
+instead of blended.
+
+**Live playback was broken for high frame rates, and is fixed.** Reported as
+"only some frames are showing", then "stuck frame ... slow speed, not realtime".
+A live session advances by decoding a PAIR, so the catch-up loop that discards
+late frames - correct everywhere else - was a race it doubled the length of.
+Playback also shipped raw BGRA down both pipes, 14.7 MB per 1440p frame, which
+cost 15.5 ms per pair against an 8.34 ms budget; a pair is decoded to NV12 now
+and converted on the GPU, measured at 6.3 ms. On hardware, 1440p59.94 went from
+12.3 fps presented with 90 dropped every two seconds to 59.94 with none. Where a
+render genuinely cannot keep up, the buffer is sized from its measured pace
+instead of a fixed four seconds, so a sub-real-time session plays about a minute
+between stalls rather than a few seconds. A two-second playback-health line
+records what is actually happening, which is how all of this was found.
+
+**Renders are no longer deleted by a menu.** The cache was tied to the
+five-entry Recent list, so opening a sixth video deleted the first one's render
+and going back to it rendered those minutes again. Nothing evicts automatically
+now; **Advanced > Clear Neural Cache**, which already reports the megabytes it
+is about to delete, is the only bound.
+
+Super Resolution output follows the display by default - 1080p, 1440p or 2160p,
+whichever the monitor can actually scan out - with any rung pinnable, and a
+1080p rung was added for panels the two-rung menu could not serve. Conversions
+encode with NVENC p5 rather than p7 on a measurement: p7 cost twice the encode
+time for +0.12 VMAF, and a 1440p conversion fell from 8.8 s to 6.3 s. The
+project also has a website at <https://2600th.github.io/dlss5-video-player/>,
+whose download is resolved from the published release rather than written down,
+so it cannot go stale.
 
 **0.23.0** (2026-09-16). **A verification pass over the whole player**, with
 seven audits read against the source and the findings fixed rather than filed.

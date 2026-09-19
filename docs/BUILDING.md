@@ -1,6 +1,6 @@
 # Building and testing
 
-_Verified against 0.23.0 (cc423d1) on 2026-09-16._
+_Verified against 0.24.0 (918c0b0) on 2026-09-20._
 
 Use Windows x64, Visual Studio 2022 or newer with the **Desktop development with
 C++** workload and Windows SDK, CMake 3.24 or newer, Git and PowerShell. Run the

@@ -1,6 +1,6 @@
 # Experimental DLSS 5 neural-rendering mode
 
-_Verified against 0.23.0 (cc423d1) on 2026-09-16._
+_Verified against 0.24.0 (918c0b0) on 2026-09-20._
 
 This is a community experiment built around a separately supplied RenoDX /
 ReShade add-on and modified neural runtime. It is not NVIDIA's official
