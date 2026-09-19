@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "D3D12Renderer.h"
+#include "DeferredCapture.h"
 #include "TemporalGuides.h"
 #include "VideoDecoder.h"
 #include "DLSSBackend.h"
@@ -1689,82 +1690,14 @@ NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
     return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
 }
 
-// Runs a capture's readback copy off the render loop.
-//
-// The copy is around 10 MiB of memcpy per frame and, taken inline, it was the largest
-// single item in the loop. It depends on nothing the loop does next, so it happens here
-// while the loop decodes, builds guides and submits the following frame. The readback slot
-// the view points into stays reserved by the renderer until Join returns, so the GPU
-// cannot land the next capture on top of the memory being copied.
-//
-// The worker thread is created on first use and lives for the job. Spawning one per frame
-// was never an option: Windows thread creation costs tens of microseconds, which is the
-// same reason the parallel passes share a pool rather than spawning.
-class DeferredCapture {
-public:
-    DeferredCapture()=default;
-    DeferredCapture(const DeferredCapture&)=delete;
-    DeferredCapture& operator=(const DeferredCapture&)=delete;
-    ~DeferredCapture(){Shutdown();}
-
-    // True while a posted copy has not been joined, and therefore while a readback slot
-    // is still spoken for.
-    bool Posted()const{std::scoped_lock lock(m_mutex);return m_posted;}
-
-    // Hands the copy to the worker. `scratch` is recycled as the destination buffer, so
-    // the full-frame allocation does not repeat every frame.
-    void Post(const D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>&& scratch){
-        if(!m_worker.joinable())m_worker=std::thread([this]{Loop();});
-        {
-            std::scoped_lock lock(m_mutex);
-            m_view=view;m_pixels=std::move(scratch);m_posted=true;m_busy=true;
-        }
-        m_wake.notify_one();
+// The readback copy itself. Kept beside the alias so DeferredCaptureWorker
+// stays free of D3D12 and its lifecycle can be tested without a device.
+struct D3D12CaptureCopy {
+    void operator()(const D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>& pixels)const{
+        D3D12Renderer::CopyCaptureView(view,pixels);
     }
-
-    // Blocks until the posted copy has finished and moves its bytes into `pixels`.
-    // False when nothing was posted, which leaves `pixels` alone.
-    bool Join(std::vector<uint8_t>& pixels){
-        std::unique_lock lock(m_mutex);
-        if(!m_posted)return false;
-        m_idle.wait(lock,[this]{return !m_busy;});
-        pixels=std::move(m_pixels);m_pixels.clear();m_posted=false;
-        return true;
-    }
-
-    void Shutdown(){
-        if(!m_worker.joinable())return;
-        {std::scoped_lock lock(m_mutex);m_quit=true;}
-        m_wake.notify_one();
-        m_worker.join();
-    }
-
-private:
-    void Loop(){
-        for(;;){
-            std::unique_lock lock(m_mutex);
-            m_wake.wait(lock,[this]{return m_busy||m_quit;});
-            // A copy already posted is finished before quitting, so a Join racing the
-            // shutdown still gets its bytes rather than blocking forever.
-            if(!m_busy)return;
-            const D3D12Renderer::CaptureReadbackView view=m_view;
-            std::vector<uint8_t> pixels=std::move(m_pixels);
-            lock.unlock();
-            D3D12Renderer::CopyCaptureView(view,pixels);
-            lock.lock();
-            m_pixels=std::move(pixels);m_busy=false;
-            lock.unlock();
-            m_idle.notify_one();
-        }
-    }
-
-    mutable std::mutex m_mutex;
-    std::condition_variable m_wake,m_idle;
-    D3D12Renderer::CaptureReadbackView m_view{};
-    std::vector<uint8_t> m_pixels;
-    bool m_posted=false,m_busy=false,m_quit=false;
-    std::thread m_worker;
 };
+using DeferredCapture=DeferredCaptureWorker<D3D12Renderer::CaptureReadbackView,D3D12CaptureCopy>;
 
 struct ProductionEvaluatorAdapter {
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};

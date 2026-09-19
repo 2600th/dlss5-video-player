@@ -24,6 +24,7 @@
 #include "NeuralCoverage.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
+#include "DeferredCapture.h"
 #ifdef small
 #undef small
 #endif
@@ -45,6 +46,7 @@
 #include <memory>
 #include <stop_token>
 #include <string>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -7302,6 +7304,65 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// A resident helper serves several jobs from one process. Whenever the next
+// job's geometry, fps, source layout, colour conversion or capture format
+// differs from the last, Initialize calls Release, which shuts the capture
+// worker down - and the worker then has to serve the new job. It did not: the
+// quit latch was never cleared, so the restarted thread exited after one copy
+// and left a joinable-but-finished thread that the Post after it declined to
+// replace. That Post notified nobody and the next Join waited forever, wedging
+// the helper on the third captured frame of the second job while it held the
+// D3D12 device and about a GiB of DLSS feature memory. There is no overall
+// timeout on the parent side, so the render never completed.
+void deferred_capture_serves_a_second_job_after_a_shutdown_test()
+{
+    struct View { int id{}; };
+    struct Copy {
+        void operator()(const View& view, std::vector<uint8_t>& pixels) const
+        {
+            pixels.assign(4, static_cast<uint8_t>(view.id));
+        }
+    };
+    using Worker = DeferredCaptureWorker<View, Copy>;
+
+    // Leaked deliberately if the sequence wedges: a deadlocked worker can never
+    // be destroyed, and ~DeferredCaptureWorker would block the test process on
+    // the join its own Shutdown can no longer reach.
+    auto* worker = new Worker();
+
+    std::promise<std::vector<uint8_t>> result;
+    auto finished = result.get_future();
+    std::thread runner([worker, &result] {
+        std::vector<uint8_t> pixels;
+        // Job 1, then the Release between jobs.
+        worker->Post(View{1}, std::vector<uint8_t>(4));
+        worker->Join(pixels);
+        worker->Shutdown();
+
+        // Job 2. The first Post restarts a thread; the second is the one that
+        // used to find it finished-but-joinable and start nothing.
+        worker->Post(View{2}, std::vector<uint8_t>(4));
+        worker->Join(pixels);
+        worker->Post(View{3}, std::vector<uint8_t>(4));
+        worker->Join(pixels);
+        result.set_value(pixels);
+    });
+
+    if (finished.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        CHECK(false && "second job wedged: Join never returned");
+        runner.detach();
+        return;
+    }
+    runner.join();
+
+    // The bytes have to come from the third Post, not a stale buffer left by
+    // the second: a worker that never ran would return the previous contents.
+    const auto pixels = finished.get();
+    CHECK_EQ(size_t{4}, pixels.size());
+    if (pixels.size() == 4) CHECK_EQ(3, int(pixels[0]));
+    delete worker;
+}
+
 constexpr TestCase kCases[] = {
     TEST_CASE(harness_sanity_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -7524,7 +7585,9 @@ constexpr TestCase kCases[] = {
     TEST_CASE(playback_cadence_thins_presentation_before_it_seeks_test),
     TEST_CASE(playback_cadence_phase_presents_exactly_one_pair_in_stride_test),
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
+    TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
 };
+
 
 } // namespace
 
