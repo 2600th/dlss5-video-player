@@ -9,10 +9,13 @@ on:
       - "docs/screenshots/current/**"
       - "docs/media/**"
       - ".github/workflows/pages.yml"
-  # Publishing a release is what changes the download the site advertises, so
-  # the site is rebuilt and redeployed within about a minute of it happening.
-  release:
-    types: [published]
+  # A release publish also has to rebuild the site, since it is what changes the
+  # download being advertised - but not from here. The github-pages environment
+  # admits deployments from main only, and a release event's ref is the tag, so
+  # this workflow's deploy job was rejected by protection rules before it ran.
+  # pages-on-release.yml catches the publish and dispatches this workflow on
+  # main instead.
+
   # Used after setting or changing GA_MEASUREMENT_ID: the measurement id is
   # baked into the page at build time, so the variable alone changes nothing
   # until the site is rebuilt.

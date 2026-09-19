@@ -1,0 +1,33 @@
+name: pages-on-release
+
+# Publishing a release changes the download the site advertises, so the site has
+# to be rebuilt within about a minute of it happening.
+#
+# pages.yml used to do this itself with a `release: [published]` trigger. That
+# could never work: the github-pages environment admits deployments from main
+# only, and a release event runs with the tag as its ref, so the deploy job was
+# rejected with "Tag ... is not allowed to deploy to github-pages due to
+# environment protection rules" every time - after a clean build, which is why
+# it looked like it was working. Checking out main does not help, because the
+# protection rule reads the run's ref rather than what it checked out.
+#
+# So the publish is caught here and turned into a dispatch of pages.yml on main,
+# which deploys from a branch the environment allows. Widening the environment
+# policy to admit release tags was the alternative, and this was preferred: it
+# keeps every deployment coming from main, so what is served is always the tip
+# of the default branch rather than whatever tree a tag happens to point at.
+on:
+  release:
+    types: [published]
+
+permissions:
+  actions: write
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild the site from main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
