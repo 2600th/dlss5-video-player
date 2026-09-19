@@ -412,12 +412,18 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
 
 /* Alternating rows swap sides by placement, not by `order`: with `order` the
    figure lands in whichever column comes first and the screenshot gets the
-   narrow one. The image keeps the wide column on both sides. */
-.beat__text   { grid-column: 1; }
-.beat__figure { grid-column: 2; }
+   narrow one. The image keeps the wide column on both sides.
+
+   The explicit `grid-row: 1` is what makes the flipped rows work. Text comes
+   first in the DOM and is placed in column 2 there, which moves the auto
+   placement cursor past column 1; grid's default sparse packing never goes
+   back, so the figure would start a second row and the pair would stack.
+   Pinning both to row 1 keeps them side by side. */
+.beat__text   { grid-column: 1; grid-row: 1; }
+.beat__figure { grid-column: 2; grid-row: 1; }
 .beat--flip   { grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.85fr); }
-.beat--flip .beat__text   { grid-column: 2; }
-.beat--flip .beat__figure { grid-column: 1; }
+.beat--flip .beat__text   { grid-column: 2; grid-row: 1; }
+.beat--flip .beat__figure { grid-column: 1; grid-row: 1; }
 
 .beat__title {
   font-size: 1.3rem;
@@ -695,8 +701,10 @@ code { font-family: var(--mono); font-size: 0.88em; color: var(--text-dim); }
   .hero__hint { display: none; }
 
   .beat { grid-template-columns: 1fr; gap: 1.5rem; }
+  /* One column here, so both the column and the pinned row are released and
+     the pair stacks in document order. */
   .beat__text, .beat__figure,
-  .beat--flip .beat__text, .beat--flip .beat__figure { grid-column: auto; }
+  .beat--flip .beat__text, .beat--flip .beat__figure { grid-column: auto; grid-row: auto; }
   .beat--flip { grid-template-columns: 1fr; }
   .beat__text p { max-width: var(--measure); }
 

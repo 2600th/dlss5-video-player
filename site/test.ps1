@@ -247,6 +247,22 @@ Test-Case 'every url() in the stylesheet resolves to a real file' {
     Assert-True ($missing.Count -eq 0) "unresolved stylesheet references: $($missing -join ', ')"
 }
 
+Test-Case 'column-swapped grid items also pin their row' {
+    # The alternating "How it works" rows place the text in column 2 and the
+    # figure in column 1, against DOM order. Grid's default sparse packing never
+    # moves the placement cursor backwards, so without an explicit row the
+    # figure starts a second row and the pair stacks instead of sitting side by
+    # side - which is exactly what shipped once. Any rule that assigns a column
+    # to these two must assign a row with it.
+    $css = Read-TextFile -Path (Join-Path $distFull 'styles.css')
+    foreach ($m in [regex]::Matches($css, '(?m)^[^\r\n{}]*\.beat__(?:text|figure)[^{}]*\{([^}]*)\}')) {
+        $body = $m.Groups[1].Value
+        if ($body -match 'grid-column' -and $body -notmatch 'grid-row') {
+            throw "a .beat__text/.beat__figure rule sets grid-column without grid-row: $($m.Value.Trim())"
+        }
+    }
+}
+
 Test-Case 'the hero comparison crops ship and stay a matched pair' {
     $originalCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-original.jpg')
     $neuralCrop = [IO.Path]::Combine($distFull, 'assets', 'hero', 'hero-neural.jpg')
