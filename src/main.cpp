@@ -4949,10 +4949,10 @@ private:
         m_livePaceWidth=m_decoder.Width();m_livePaceHeight=m_decoder.Height();
         // A GPU that renders far faster than real time refills the buffer faster
         // than playback drains it, so the four-second cushion is only a wait.
-        m_liveStartLead=live_session::StartLead(
+        m_liveForecastRatio=
             playback_timing::ForecastLiveRender(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-                                                m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio,
-            kLiveStartLead);
+                                                m_renderPace,RenderPacePrior(m_opt.detectedGpu.generation)).realtimeRatio;
+        m_liveStartLead=live_session::StartLead(m_liveForecastRatio,kLiveStartLead);
         EnterLiveBuffering();
         const auto target=WantedLiveTarget();
         if(!target)
@@ -5355,7 +5355,12 @@ private:
             return;
         }
         m_liveAttachFailures=0;m_liveStalledRebases=0;
-        if(m_liveBuffering&&live_session::ShouldResume(view))ExitLiveBuffering();
+        // Re-sized every tick rather than latched at session start: the
+        // forecast is a constant for the GPU, the measurement is what this
+        // render is managing against everything else on the machine, and a
+        // frame-generated source is exactly where the two differ.
+        m_liveStartLead=live_session::StartLead(LivePaceRatio(),kLiveStartLead);
+        if(m_liveBuffering&&live_session::ShouldResume(view,LiveResumeLead()))ExitLiveBuffering();
     }
     // Buffering panel. A popup owned by the main window, because the video is a
     // D3D12 child window that a sibling would have to fight for z-order.
@@ -5401,7 +5406,7 @@ private:
         const std::wstring heading=m_previewJob?T(L"neural.preview.title"):m_liveAttached?T(L"neural.live.buffering"):T(L"neural.live.title");
         DrawTextW(dc,heading.c_str(),-1,&title,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
         SelectObject(dc,m_fontSmall);SetTextColor(dc,ui_palette::SecondaryText);
-        const double lead=LiveLeadSeconds(),target=m_liveAttached?kLiveResumeLead:m_liveStartLead;
+        const double lead=LiveLeadSeconds(),target=m_liveAttached?LiveResumeLead():m_liveStartLead;
         wchar_t detail[128]={};
         if(m_previewJob)swprintf_s(detail,L"%s",T(L"neural.preview.detail").c_str());
         // A session that is still acquiring its source has no frames to report,
@@ -6297,6 +6302,18 @@ private:
     // Video seconds covered per second of wall clock. Measured against the
     // coverage this session added, so adopted regions and the holes between
     // rendered ones cannot inflate it.
+    // What the cushions are sized against: what this session is ACTUALLY
+    // managing once there is enough of it to measure, and the forecast until
+    // then. RealtimeRatio reports nothing for the first eight seconds, which is
+    // exactly when the first attach is decided - so without the fallback the
+    // sub-real-time arm would never see a ratio at the one moment it matters.
+    double LivePaceRatio()const{
+        const double measured=LiveRealtimeRatio();
+        return measured>0.0?measured:m_liveForecastRatio;
+    }
+    double LiveResumeLead()const{
+        return live_session::ResumeLead(LivePaceRatio(),kLiveResumeLead);
+    }
     double LiveRealtimeRatio()const{
         if(!m_liveSession||!m_liveSegments||!m_liveStartTick)return 0.0;
         const int64_t covered=CoveredDuration100ns(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns});
@@ -6976,6 +6993,9 @@ private:
     // render pace is measured against, since adopted coverage was not rendered now.
     uint64_t m_livePaintedRevision=0;int64_t m_liveCoveredAtStart=0;
     ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
+    // The forecast this session started on, kept so the cushion has a pace to
+    // size against before RealtimeRatio has enough samples to report one.
+    double m_liveForecastRatio=0.0;
     uint32_t m_livePaceWidth=0,m_livePaceHeight=0;
     playback_timing::RenderPaceProfile m_renderPace;
     // Every pace this GPU measured per geometry, newest last; m_renderPace

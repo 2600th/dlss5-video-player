@@ -49,17 +49,66 @@ inline constexpr double kBackwardSlack = 0.5;
 // already coalesces them. This owns the tapped key and the clicked button.
 inline constexpr double kSeekSettleSeconds = 1.0;
 
+// Seconds of uninterrupted playback one buffer fill should buy when the render
+// runs SLOWER than real time. A frame-generated source is the case: a 2x
+// conversion doubles the frames the render has to produce without changing the
+// clock they have to arrive by, and 2560x1440 at 119.88 fps measured 0.814x
+// real time on an RTX 5090.
+//
+// Below real time the buffer DRAINS while playback runs - the lead falls by
+// (1 - ratio) every second - so no fixed cushion prevents a rebuffer. It only
+// decides how often one happens, and the total watching time is fixed by the
+// ratio whatever this is set to. What it buys is fewer interruptions: at
+// 0.814x the old two-second resume bought about eleven seconds of playback
+// before the next stall, which is the "plays a few seconds then pauses" cycle.
+// A minute is long enough to stop reading as stuttering.
+inline constexpr double kSustainSeconds = 60.0;
+// ...but not at any price. The fill that buys it is time spent watching a
+// buffering panel, and past this a viewer would rather have the original.
+inline constexpr double kMaxRefillWaitSeconds = 20.0;
+// Cushion ceiling, whatever the arithmetic says.
+inline constexpr double kMaxLead = 30.0;
+
+// The cushion a sub-real-time render needs. Two bounds, and the smaller wins:
+// what buys kSustainSeconds of playback, and what can be refilled inside
+// kMaxRefillWaitSeconds.
+inline double SustainedLead(double realtimeRatio)
+{
+    const double drainPerSecond = 1.0 - realtimeRatio;
+    const double buysASustainedRun = drainPerSecond * kSustainSeconds;
+    const double refillableInTime = kMaxRefillWaitSeconds * realtimeRatio;
+    return std::clamp(std::min(buysASustainedRun, refillableInTime), kStartLead, kMaxLead);
+}
+
 // Lead to require before the first attach, given how fast this GPU renders
 // relative to real time (`LiveRenderForecast::realtimeRatio`). The 4 s cushion
 // is sized for a card that barely keeps up; on one that renders three times
 // faster the buffer refills faster than playback drains it, so the same cushion
 // only makes the user wait. An unknown pace keeps the full cushion.
+//
+// The sub-real-time arm is the one this function was missing: it could only
+// ever SHRINK the cushion, so the case that needs a bigger one - the render
+// losing ground on every frame played - got the same four seconds as a card
+// that keeps up exactly.
 inline double StartLead(double realtimeRatio, double startLead = kStartLead)
 {
     if (!(realtimeRatio > 0.0)) return startLead;
     if (realtimeRatio >= 3.0) return std::min(startLead, 1.0);
     if (realtimeRatio >= 1.5) return std::min(startLead, 2.0);
-    return startLead;
+    if (realtimeRatio >= 1.0) return startLead;
+    return std::max(startLead, SustainedLead(realtimeRatio));
+}
+
+// The same question for ending a rebuffer, and the more important one: the
+// first attach happens once, this happens every time the buffer runs dry.
+// Resuming a sub-real-time render on the small cushion is what turns one stall
+// into a cycle of them - it plays until the drain has eaten those two seconds
+// and stops again.
+inline double ResumeLead(double realtimeRatio, double resumeLead = kResumeLead)
+{
+    if (!(realtimeRatio > 0.0)) return resumeLead;
+    if (realtimeRatio >= 1.0) return resumeLead;
+    return std::max(resumeLead, SustainedLead(realtimeRatio));
 }
 
 struct SessionView {

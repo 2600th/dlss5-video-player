@@ -2727,6 +2727,65 @@ void render_pace_prior_zero_means_unmeasured_not_unsupported_test()
     }
 }
 
+// A render slower than real time DRAINS the buffer while playback runs, so no
+// fixed cushion prevents a rebuffer - it only sets how often one happens. The
+// case is a frame-generated source: 2560x1440 at 119.88 fps measured 0.814x
+// real time on an RTX 5090, where the two-second resume bought about eleven
+// seconds of playback before the next stall. That is the "plays a few seconds
+// then pauses" report.
+void live_session_sizes_the_cushion_from_the_render_drain_test()
+{
+    using namespace live_session;
+    // At or above real time the buffer refills faster than playback drains it,
+    // so the cushion only ever shrinks - the behaviour these arms always had.
+    CHECK_EQ(kStartLead, StartLead(0.0));
+    CHECK_EQ(kStartLead, StartLead(1.0));
+    CHECK_EQ(kResumeLead, ResumeLead(1.0));
+    CHECK_EQ(kResumeLead, ResumeLead(2.0));
+    CHECK(StartLead(1.6) < kStartLead);
+    CHECK(StartLead(3.5) < StartLead(1.6));
+
+    // Below it, both cushions grow, and the resume one is the one that matters:
+    // the first attach happens once, a rebuffer repeats.
+    const double measured = 0.814;
+    const double lead = SustainedLead(measured);
+    CHECK(lead > kStartLead);
+    CHECK_EQ(lead, StartLead(measured));
+    CHECK_EQ(lead, ResumeLead(measured));
+    // It buys a sustained run rather than a round number: the drain is
+    // (1 - ratio) per second, so this is what covers kSustainSeconds of play.
+    CHECK(std::abs(lead - (1.0 - measured) * kSustainSeconds) < 0.01);
+    // And the fill that buys it stays inside the wait budget.
+    CHECK(lead / measured <= kMaxRefillWaitSeconds + 0.01);
+
+    // A render at half speed cannot have both, so the wait budget wins and the
+    // run is shorter rather than the panel being up for a minute.
+    const double halfSpeed = SustainedLead(0.5);
+    CHECK(std::abs(halfSpeed - kMaxRefillWaitSeconds * 0.5) < 0.01);
+    CHECK(halfSpeed / 0.5 <= kMaxRefillWaitSeconds + 0.01);
+
+    // Barely below real time needs almost nothing, and never less than the
+    // cushion a card that keeps up exactly gets.
+    CHECK_EQ(kStartLead, SustainedLead(0.99));
+    CHECK(SustainedLead(0.2) <= kMaxLead);
+    // Monotone: the slower the render, the bigger the cushion, up to the cap.
+    CHECK(SustainedLead(0.9) <= SustainedLead(0.8));
+    CHECK(SustainedLead(0.8) <= SustainedLead(0.7));
+
+    // The decisions that read them move with it.
+    SessionView view{};
+    view.headSec = 6.0;
+    view.attached = false;
+    CHECK(ShouldAttach(view, StartLead(2.0)));    // fast GPU: 6 s is plenty
+    CHECK(!ShouldAttach(view, StartLead(0.814))); // slow: 6 s is not the cushion
+    view.attached = true;
+    CHECK(ShouldResume(view, ResumeLead(2.0)));
+    CHECK(!ShouldResume(view, ResumeLead(0.814)));
+    // A finished job never grows again, so it resumes on whatever it has.
+    view.finished = true;
+    CHECK(ShouldResume(view, ResumeLead(0.814)));
+}
+
 // Ada's prior is one scalar that has to serve every geometry, and the driven
 // player sessions of docs/VERIFICATION-matrix.md measured what it is actually
 // standing in for on an RTX 4080 SUPER (driver 610.47, eight 1080p sessions and
@@ -7461,6 +7520,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test),
     TEST_CASE(ngx_live_feature_is_never_released_on_a_frame_count_test),
     TEST_CASE(spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test),
+    TEST_CASE(live_session_sizes_the_cushion_from_the_render_drain_test),
     TEST_CASE(playback_cadence_thins_presentation_before_it_seeks_test),
     TEST_CASE(playback_cadence_phase_presents_exactly_one_pair_in_stride_test),
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
