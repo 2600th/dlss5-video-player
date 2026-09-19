@@ -49,6 +49,7 @@
 #include "LiveSessionPolicy.h"
 #include "CachedRenderVerdict.h"
 #include "CrashDump.h"
+#include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
@@ -73,38 +74,12 @@ using Clock = std::chrono::steady_clock;
 // uploaded from CPU bytes. Playback only decodes to NV12 when the source
 // declared exactly this description - VideoDecoder's playbackConvertible gate -
 // so this is the whole set of coefficients that path can ever need, rather than
-// the first of four.
-//
-// Limited range: Y spans 16..235 over 219, chroma 16..240 centred on 128 over
-// 224. The matrix is Rec.709's inverse. Chroma is half resolution in both axes
-// and sampled nearest, which is what the reference is for - a side-by-side
-// against the neural frame, not a mastering path.
+// the first of four. The conversion itself lives in Nv12Convert.h, where it can
+// be held bit-identical to the scalar original by test.
 inline void Nv12ToBgraBt709Limited(const uint8_t* nv12, uint32_t width, uint32_t height,
                                    std::vector<uint8_t>& bgra)
 {
-    if (!nv12 || !width || !height || (width | height) & 1u) return;
-    bgra.resize(size_t(width) * height * 4u);
-    const uint8_t* luma = nv12;
-    const uint8_t* chroma = nv12 + size_t(width) * height;
-    for (uint32_t y = 0; y < height; ++y) {
-        const uint8_t* chromaRow = chroma + size_t(y / 2u) * width;
-        uint8_t* out = bgra.data() + size_t(y) * width * 4u;
-        for (uint32_t x = 0; x < width; ++x) {
-            const double luminance = (double(luma[size_t(y) * width + x]) - 16.0) / 219.0;
-            const double blueDiff = (double(chromaRow[(x & ~1u)]) - 128.0) / 224.0;
-            const double redDiff = (double(chromaRow[(x & ~1u) + 1u]) - 128.0) / 224.0;
-            const double red = luminance + 1.5748 * redDiff;
-            const double green = luminance - 0.1873 * blueDiff - 0.4681 * redDiff;
-            const double blue = luminance + 1.8556 * blueDiff;
-            const auto clamp8 = [](double value) {
-                return uint8_t(std::lround(std::clamp(value, 0.0, 1.0) * 255.0));
-            };
-            out[size_t(x) * 4u + 0u] = clamp8(blue);
-            out[size_t(x) * 4u + 1u] = clamp8(green);
-            out[size_t(x) * 4u + 2u] = clamp8(red);
-            out[size_t(x) * 4u + 3u] = 255u;
-        }
-    }
+    nv12::ToBgraBt709Limited(nv12, width, height, bgra);
 }
 using Microsoft::WRL::ComPtr;
 using namespace app_menu;

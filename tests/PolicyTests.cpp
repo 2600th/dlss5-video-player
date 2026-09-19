@@ -27,6 +27,7 @@
 #include "DeferredCapture.h"
 #include "AudioClockPolicy.h"
 #include "CachedRenderVerdict.h"
+#include "Nv12Convert.h"
 #ifdef small
 #undef small
 #endif
@@ -7306,6 +7307,78 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// The comparison reference conversion runs on every presented frame once the
+// viewer picks Blend, Split or Wipe, which a scalar double pass over 3.69 Mpx
+// cannot do inside a 16.68 ms budget. Speeding it up is only allowed if the
+// picture does not change, so this pins the output against an independent
+// transcription of the original scalar arithmetic - not against the optimised
+// code's own idea of what it should produce.
+void nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test()
+{
+    // The arithmetic exactly as it was written inline in main.cpp, kept here
+    // as the thing the fast path has to agree with.
+    const auto scalar = [](const uint8_t* nv12, uint32_t width, uint32_t height,
+                           std::vector<uint8_t>& bgra) {
+        bgra.resize(size_t(width) * height * 4u);
+        const uint8_t* luma = nv12;
+        const uint8_t* chroma = nv12 + size_t(width) * height;
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint8_t* chromaRow = chroma + size_t(y / 2u) * width;
+            uint8_t* out = bgra.data() + size_t(y) * width * 4u;
+            for (uint32_t x = 0; x < width; ++x) {
+                const double luminance = (double(luma[size_t(y) * width + x]) - 16.0) / 219.0;
+                const double blueDiff = (double(chromaRow[(x & ~1u)]) - 128.0) / 224.0;
+                const double redDiff = (double(chromaRow[(x & ~1u) + 1u]) - 128.0) / 224.0;
+                const double red = luminance + 1.5748 * redDiff;
+                const double green = luminance - 0.1873 * blueDiff - 0.4681 * redDiff;
+                const double blue = luminance + 1.8556 * blueDiff;
+                const auto clamp8 = [](double value) {
+                    return uint8_t(std::lround(std::clamp(value, 0.0, 1.0) * 255.0));
+                };
+                out[size_t(x) * 4u + 0u] = clamp8(blue);
+                out[size_t(x) * 4u + 1u] = clamp8(green);
+                out[size_t(x) * 4u + 2u] = clamp8(red);
+                out[size_t(x) * 4u + 3u] = 255u;
+            }
+        }
+    };
+
+    // Wide enough to cross several parallel row bands, and the content walks
+    // the whole 0..255 range on all three planes so every table entry and both
+    // clamp arms are exercised - the out-of-gamut corners are where a
+    // fixed-point rewrite would have drifted.
+    constexpr uint32_t width = 64, height = 96;
+    std::vector<uint8_t> frame(size_t(width) * height + size_t(width) * height / 2u);
+    uint32_t state = 12345u;
+    for (auto& byte : frame) {
+        state = state * 1664525u + 1013904223u;
+        byte = uint8_t(state >> 24);
+    }
+
+    std::vector<uint8_t> expected, actual;
+    scalar(frame.data(), width, height, expected);
+    nv12::ToBgraBt709Limited(frame.data(), width, height, actual);
+    CHECK_EQ(expected.size(), actual.size());
+    CHECK(expected == actual);
+
+    // The extremes on their own, so a failure points at a value rather than at
+    // a pseudo-random offset.
+    for (const uint8_t fill : {uint8_t{0}, uint8_t{16}, uint8_t{128}, uint8_t{235}, uint8_t{255}}) {
+        std::vector<uint8_t> flat(frame.size(), fill);
+        scalar(flat.data(), width, height, expected);
+        nv12::ToBgraBt709Limited(flat.data(), width, height, actual);
+        CHECK(expected == actual);
+    }
+
+    // Refusals are part of the contract: odd geometry has no half-resolution
+    // chroma plane, and the caller relies on the buffer being left alone.
+    std::vector<uint8_t> untouched{1, 2, 3};
+    nv12::ToBgraBt709Limited(frame.data(), 63, 96, untouched);
+    CHECK_EQ(size_t{3}, untouched.size());
+    nv12::ToBgraBt709Limited(nullptr, width, height, untouched);
+    CHECK_EQ(size_t{3}, untouched.size());
+}
+
 // LookupRender verifies the full SHA-256 of the payload and both sidecars
 // before any of this runs, so the entry is known intact. The player then
 // ProbeMedia'd it and treated any failure as the entry being wrong - including
@@ -7725,6 +7798,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
     TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
+    TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
 };
 
 
