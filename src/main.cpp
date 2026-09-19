@@ -4573,7 +4573,12 @@ private:
         const auto copy=AcquiredSourceCopyPath();
         if(!copy)return false;
         VideoDecoder local;
-        if(!local.Open(copy->wstring(),MediaSourceKind::LocalFile)){
+        // Ask for the layout the renderer was built for. Open's preferNv12
+        // defaults to false while the streaming open passes true, so without
+        // this the swap silently moved the decoder to BGRA under a renderer
+        // still configured for NV12.
+        const bool preferNv12=m_decoder.PixelLayout()==VideoPixelLayout::Nv12;
+        if(!local.Open(copy->wstring(),MediaSourceKind::LocalFile,{},preferNv12)){
             LOG("The acquired source copy could not be opened for playback; staying on the stream.");return false;
         }
         // The renderer and every rendered segment were built for the geometry
@@ -4581,6 +4586,19 @@ private:
         if(local.NativeWidth()!=m_decoder.NativeWidth()||local.NativeHeight()!=m_decoder.NativeHeight()){
             LOG("The acquired source copy is "<<local.NativeWidth()<<"x"<<local.NativeHeight()<<" against the stream's "
                 <<m_decoder.NativeWidth()<<"x"<<m_decoder.NativeHeight()<<"; staying on the stream.");
+            local.Close();return false;
+        }
+        // preferNv12 is a request, not a guarantee: odd geometry and colour
+        // descriptions the GPU conversion does not implement still decode to
+        // BGRA. Swap() takes the whole source description including the
+        // layout, and nothing downstream reconfigures the renderer, so a
+        // disagreement here would upload the first quarter of a BGRA image as
+        // a Y plane - a corrupt picture the size check cannot catch, because
+        // w*h*4 is larger than the NV12 frame it is compared against.
+        if(local.PixelLayout()!=m_decoder.PixelLayout()){
+            LOG("The acquired source copy decodes as "<<(local.PixelLayout()==VideoPixelLayout::Nv12?"NV12":"BGRA")
+                <<" against the stream's "<<(m_decoder.PixelLayout()==VideoPixelLayout::Nv12?"NV12":"BGRA")
+                <<"; staying on the stream rather than presenting garbage.");
             local.Close();return false;
         }
         Audio().Stop();m_networkAudio.reset();

@@ -153,6 +153,20 @@ void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
 {
     try { ThreadMain(state); }
     catch (...) { LOG("Audio: reader thread stopped after an unexpected exception."); }
+    // The child's stderr goes to NUL and its exit code was never read, so a
+    // failed decode produced no diagnostic at all - and because the position
+    // it stopped advancing was still served as the master clock, the symptom
+    // was frozen video rather than missing sound. A reader that ends while
+    // nobody asked it to is worth a line whatever the cause.
+    if (!state->stop && state->process) {
+        DWORD exitCode = 0;
+        if (!GetExitCodeProcess(state->process, &exitCode))
+            LOG("Audio: ffmpeg exit code unavailable winerr=" << GetLastError());
+        else if (exitCode == STILL_ACTIVE)
+            LOG("Audio: reader ended while ffmpeg was still running; there will be no sound from here.");
+        else if (exitCode != 0)
+            LOG("Audio: ffmpeg exited with code " << exitCode << "; there will be no sound from here.");
+    }
     if(state->completed&&!SetEvent(state->completed))LOG("Audio: SetEvent(reader completion) failed winerr="<<GetLastError());
 }
 
@@ -197,9 +211,9 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
             // Re-check under the same lock used by Stop() before submitting audio.
             // Once Stop() has set m_stop and reset WaveOut, no late buffer can be queued.
             if (state->stop) break;
-            if (waveOutPrepareHeader(state->waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
+            if (const MMRESULT prepared=waveOutPrepareHeader(state->waveOut, &s.hdr, sizeof(s.hdr)); prepared != MMSYSERR_NOERROR) { LOG("Audio: waveOutPrepareHeader failed result="<<prepared<<"; audio stops here."); break; }
             s.prepared = true;
-            if (waveOutWrite(state->waveOut, &s.hdr, sizeof(s.hdr)) != MMSYSERR_NOERROR) break;
+            if (const MMRESULT written=waveOutWrite(state->waveOut, &s.hdr, sizeof(s.hdr)); written != MMSYSERR_NOERROR) { LOG("Audio: waveOutWrite failed result="<<written<<"; the output device has most likely gone away."); break; }
             if(!state->paused)++state->submittedBuffers;
         }
         index = (index + 1) % BufferCount;
