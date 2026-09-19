@@ -116,7 +116,28 @@ std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity);
 // capture-side encoder switches only change how the result is written, which is
 // why they stay out. The term is appended, never substituted, so every key
 // published before it existed keeps the key it was published under.
-std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion);
+// Canonical `quality` term for a render identity: everything about the
+// pipeline that changes the bytes a cache hit hands back.
+//
+// `gpuSourceConversion` changes what the model is shown. The other two change
+// what is written from what it produced: `nvencPreset` picks the NVENC preset
+// (measured 0.12 VMAF on ordinary content, 0.53 on noise-heavy, between p5 and
+// p7), and `gpuColorConversion` picks between a GPU 2x2 box chroma downsample
+// and ffmpeg's CPU conversion - two different filters over the neural output.
+// A render made under one must never be served for the other, or the setting
+// is silently inert on every range already rendered.
+//
+// Each term is appended only when it differs from the shipped default, so the
+// defaults canonicalize to exactly the term every field render was published
+// under and adding them retires no cache entry. No parameter defaults here on
+// purpose: a caller that forgets one must not silently get the shipped value.
+std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion, uint32_t nvencPreset,
+                                         bool gpuColorConversion);
+
+// The shipped encoder defaults, so a caller that means "unchanged" says so by
+// name rather than by repeating the literals.
+inline constexpr uint32_t kDefaultNvencPreset = 5;
+inline constexpr bool kDefaultGpuColorConversion = false;
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,

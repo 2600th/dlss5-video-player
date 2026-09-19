@@ -247,8 +247,8 @@ void source_conversion_changes_the_render_key_and_the_default_path_is_unchanged(
     // differ in it must not share an entry.
     const std::string shipped =
         "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
-    CHECK_EQ(shipped, NeuralRenderPipelineIdentity(false));
-    CHECK(NeuralRenderPipelineIdentity(true) != shipped);
+    CHECK_EQ(shipped, NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, kDefaultGpuColorConversion));
+    CHECK(NeuralRenderPipelineIdentity(true, kDefaultNvencPreset, kDefaultGpuColorConversion) != shipped);
 
     // Byte-for-byte the term the player shipped before it was extracted into a
     // function. A typo here would retire every cached render in the field, so the
@@ -256,10 +256,53 @@ void source_conversion_changes_the_render_key_and_the_default_path_is_unchanged(
     NeuralCacheIdentity shippedIdentity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
                                         std::string(64, 'b'), shipped, false};
     NeuralCacheIdentity identity = shippedIdentity;
-    identity.quality = NeuralRenderPipelineIdentity(false);
+    identity.quality = NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, kDefaultGpuColorConversion);
     CHECK_EQ(BuildNeuralCacheKey(shippedIdentity), BuildNeuralCacheKey(identity));
-    identity.quality = NeuralRenderPipelineIdentity(true);
+    identity.quality = NeuralRenderPipelineIdentity(true, kDefaultNvencPreset, kDefaultGpuColorConversion);
     CHECK(BuildNeuralCacheKey(identity) != BuildNeuralCacheKey(shippedIdentity));
+}
+
+void encoder_settings_that_change_the_written_pixels_change_the_render_key()
+{
+    // Both of these change the bytes a cache hit hands back. The NVENC preset
+    // changes the encode - the player's own tooltip measures p7 against p5 at
+    // 0.12 VMAF on ordinary content and 0.53 on noise-heavy - and the colour
+    // conversion runs a different chroma downsample over the neural output.
+    // Without them in the key, "Applies to the next render" is false for every
+    // range already rendered: the setting is accepted and then ignored.
+    const std::string shipped =
+        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
+
+    // The shipped defaults must canonicalize to the term every field render was
+    // published under, or adding these terms retires the whole cache.
+    CHECK_EQ(shipped, NeuralRenderPipelineIdentity(false, kDefaultNvencPreset,
+                                                   kDefaultGpuColorConversion));
+
+    // Each term moves the key on its own.
+    const auto preset = NeuralRenderPipelineIdentity(false, 7, kDefaultGpuColorConversion);
+    const auto colour = NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, true);
+    CHECK(preset != shipped);
+    CHECK(colour != shipped);
+    CHECK(preset != colour);
+
+    // Every preset is distinct: p1 and p7 are not one "non-default" bucket.
+    CHECK(NeuralRenderPipelineIdentity(false, 1, false) !=
+          NeuralRenderPipelineIdentity(false, 7, false));
+
+    // The three terms stay independent of one another.
+    CHECK(NeuralRenderPipelineIdentity(true, 7, true) !=
+          NeuralRenderPipelineIdentity(false, 7, true));
+    CHECK(NeuralRenderPipelineIdentity(true, 7, true) !=
+          NeuralRenderPipelineIdentity(true, 7, false));
+
+    // And the whole key moves with them, not just the term.
+    NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
+                                 std::string(64, 'b'), shipped, false};
+    const auto shippedKey = BuildNeuralCacheKey(identity);
+    identity.quality = preset;
+    CHECK(BuildNeuralCacheKey(identity) != shippedKey);
+    identity.quality = colour;
+    CHECK(BuildNeuralCacheKey(identity) != shippedKey);
 }
 
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
@@ -714,6 +757,7 @@ int main()
     manifest_accepts_legacy_and_valid_settings_but_rejects_malformed_extension();
     default_identity_key_is_stable_and_range_or_guides_change_it();
     source_conversion_changes_the_render_key_and_the_default_path_is_unchanged();
+    encoder_settings_that_change_the_written_pixels_change_the_render_key();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

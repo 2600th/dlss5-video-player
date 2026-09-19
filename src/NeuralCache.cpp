@@ -570,11 +570,19 @@ std::optional<std::string> Sha256FileCached(const std::filesystem::path& path, s
     return digest;
 }
 
-std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion)
+std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion, uint32_t nvencPreset,
+                                         bool gpuColorConversion)
 {
     std::string pipeline =
         "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
     if (gpuSourceConversion) pipeline += "|nv12-source-v1";
+    // Appended only when they leave the shipped default, so a default render
+    // keeps the exact term it was published under and no field cache is lost.
+    // The preset is spelled out rather than bucketed as "non-default": p1 and
+    // p7 are different encodes and must not share an entry.
+    if (nvencPreset != kDefaultNvencPreset)
+        pipeline += "|nvenc-p" + std::to_string(nvencPreset);
+    if (gpuColorConversion != kDefaultGpuColorConversion) pipeline += "|nv12-output-v1";
     return pipeline;
 }
 
