@@ -47,6 +47,7 @@
 #include "PlaybackCadence.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
+#include "CachedRenderVerdict.h"
 #include "FrameRatePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
@@ -5750,11 +5751,26 @@ private:
                         const ProbeResult cachedProbe=ProbeMedia(moduleDirectory,cached->payloadPath,stop,MediaProbeMode::CachedMetadata);
                         if(stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                         const int64_t durationTolerance=std::max<int64_t>(1,cached->manifest.duration100ns/static_cast<int64_t>(cached->manifest.frameCount)+1);
-                        const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cached->manifest.rangeStart100ns==range.start100ns&&cached->manifest.rangeEnd100ns==range.end100ns&&cached->manifest.guides==identity.guides&&cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height&&std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-expectedDuration100ns)<=frameDurationTolerance;
+                        // Split by what each piece of evidence needs. The
+                        // manifest is compared in process; everything else
+                        // needs ffprobe to have run. Reading a probe that
+                        // could not run as a probe that disagreed quarantined
+                        // - and then deleted - entries whose payload had just
+                        // been hash-verified as intact.
+                        const cached_render::Evidence evidence{
+                            cachedProbe.ok,
+                            cached->manifest.sourceDigest==*sourceDigest&&cached->manifest.runtimeDigest==*runtimeDigest&&cached->manifest.settingsDigest==*settingsDigest&&cached->manifest.rangeStart100ns==range.start100ns&&cached->manifest.rangeEnd100ns==range.end100ns&&cached->manifest.guides==identity.guides,
+                            cachedProbe.width==width&&cachedProbe.height==height&&cachedProbe.width==cached->manifest.width&&cachedProbe.height==cached->manifest.height,
+                            std::llabs(cachedProbe.duration100ns-cached->manifest.duration100ns)<=durationTolerance&&std::llabs(cachedProbe.duration100ns-expectedDuration100ns)<=frameDurationTolerance};
+                        const auto verdict=cached_render::Judge(evidence);
+                        const bool valid=verdict==cached_render::Verdict::Serve;
                         // A validated hit is answered without a helper, so the
                         // five phases a helper measures are absent by nature.
                         if(valid){coldStart->NoteNoHelper("cache-hit");completion->result.ok=true;completion->result.frameCount=cached->manifest.frameCount;completion->result.duration100ns=cached->manifest.duration100ns;completion->result.jobId=cached->manifest.jobId;completion->result.historyResets=cached->manifest.historyResets;completion->result.firstTimestamp100ns=cached->manifest.rangeStart100ns;completion->sourcePath=sourcePath;completion->neuralPath=cached->payloadPath;completion->cacheHit=true;completion->range={cached->manifest.rangeStart100ns,cached->manifest.rangeEnd100ns};if(!cached->manifest.receiptDigest.empty()&&std::filesystem::is_regular_file(cached->directory/L"receipt.json"))completion->receiptPath=cached->directory/L"receipt.json";goto finish;}
-                        if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
+                        if(verdict==cached_render::Verdict::Unverified){
+                            LOG("Neural cache entry "<<renderKey<<" could not be verified because the probe did not run ("
+                                <<WideToUtf8(cachedProbe.detail)<<"); it is kept and this render proceeds without it.");
+                        }else if(!cache.Quarantine(*cached)){completion->result.detail=L"The invalid neural cache entry could not be quarantined.";goto finish;}
                     }
                     // The cache check every open runs: no helper, and the line
                     // it logs is not a render that failed to measure.

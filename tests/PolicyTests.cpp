@@ -26,6 +26,7 @@
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
 #include "AudioClockPolicy.h"
+#include "CachedRenderVerdict.h"
 #ifdef small
 #undef small
 #endif
@@ -7305,6 +7306,44 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// LookupRender verifies the full SHA-256 of the payload and both sidecars
+// before any of this runs, so the entry is known intact. The player then
+// ProbeMedia'd it and treated any failure as the entry being wrong - including
+// the probe not running at all, which MediaPipeline reports for something as
+// ordinary as the helper not resolving. Quarantine moves the entry to
+// staging/invalid-cache-*, and the sweep deletes any `invalid*` name
+// unconditionally on the next manager construction. An antivirus holding the
+// unsigned ffprobe.exe therefore destroyed hours of hash-verified GPU time as
+// the user opened each of their rendered videos.
+void a_probe_that_could_not_run_does_not_condemn_a_cached_render_test()
+{
+    using namespace cached_render;
+    const Evidence good{true, true, true, true};
+    CHECK(Judge(good) == Verdict::Serve);
+
+    // The probe ran and contradicted the manifest: the entry really is wrong.
+    Evidence wrongGeometry = good; wrongGeometry.geometryMatches = false;
+    CHECK(Judge(wrongGeometry) == Verdict::Discard);
+    Evidence wrongDuration = good; wrongDuration.durationMatches = false;
+    CHECK(Judge(wrongDuration) == Verdict::Discard);
+
+    // The probe could not run. Nothing was learned, so the entry is not served
+    // and not destroyed either.
+    Evidence noProbe = good; noProbe.probeRan = false;
+    CHECK(Judge(noProbe) == Verdict::Unverified);
+
+    // Not even when the probe-only fields are default-false, which is what they
+    // are whenever ProbeMedia fails closed - the case that caused the loss.
+    CHECK(Judge(Evidence{false, true, false, false}) == Verdict::Unverified);
+
+    // The manifest comparison needs no child process. A mismatch there
+    // condemns the entry whether or not the probe ran, so a stale entry is
+    // still retired while ffprobe is broken.
+    CHECK(Judge(Evidence{false, false, false, false}) == Verdict::Discard);
+    Evidence wrongManifest = good; wrongManifest.manifestMatches = false;
+    CHECK(Judge(wrongManifest) == Verdict::Discard);
+}
+
 // Two player instances shared cacheRoot/live. Enabling neural rendering in the
 // second ran remove_all over the first instance's finalized segments, and the
 // first kept reporting them covered because NeuralSegmentIndex is in-memory
@@ -7685,6 +7724,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
+    TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
 };
 
 
