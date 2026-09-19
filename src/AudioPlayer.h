@@ -1,6 +1,8 @@
 #pragma once
 #include <windows.h>
 #include <mmsystem.h>
+
+#include "AudioClockPolicy.h"
 #include <atomic>
 #include <string>
 #include <thread>
@@ -91,4 +93,10 @@ private:
     double m_seekBaseSec = 0.0;
     float m_volume = 1.0f;
     Settings m_settings;
+    // PositionSeconds is const and is the only place that can notice the clock
+    // has stopped, so the staleness it tracks is mutable. Guarded because the
+    // position is read from more than the thread that starts and stops it.
+    mutable std::mutex m_clockMutex;
+    mutable audio_clock::StallState m_clock;
+    mutable bool m_clockStalled = false;
 };

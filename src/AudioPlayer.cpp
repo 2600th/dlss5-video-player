@@ -46,6 +46,7 @@ std::wstring AudioPlayer::FindFFmpeg() const {
 bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, AudioStartState state) {
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
+    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); m_clockStalled = false; }
     m_path = videoPath;
     m_ffmpeg = FindFFmpeg();
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
@@ -229,7 +230,31 @@ double AudioPlayer::PositionSeconds() const {
     { std::lock_guard<std::mutex> lock(state->waveMutex);
       if (waveOutGetPosition(state->waveOut, &mt, sizeof(mt)) != MMSYSERR_NOERROR || mt.wType != TIME_SAMPLES)
           return -1.0; }
-    return m_seekBaseSec + double(mt.u.sample) / 48000.0;
+    const double position = m_seekBaseSec + double(mt.u.sample) / 48000.0;
+    // hasAudioData is set once and cleared only by Stop(), so a reader thread
+    // that has ended - pipe EOF, a dead ffmpeg child, waveOutWrite failing
+    // after a device change - leaves the queued buffers to drain and this
+    // position frozen. Returning it anyway stopped video for the rest of the
+    // file, because the presentation gate holds every frame until the clock
+    // reaches its due time. -1.0 is what the caller already handles: it falls
+    // back to the steady clock.
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lock(m_clockMutex);
+    if (audio_clock::Usable(m_clock, position, now, !state->paused.load())) {
+        if (m_clockStalled) {
+            m_clockStalled = false;
+            LOG("Audio: clock advancing again at " << position << "s; master clock restored.");
+        }
+        return position;
+    }
+    if (!m_clockStalled) {
+        m_clockStalled = true;
+        LOG("Audio: clock frozen at " << position << "s for over " << audio_clock::kStallSeconds
+            << "s of playback; falling back to the steady clock. The helper has most likely "
+               "ended or the output device has gone away.");
+    }
+    return -1.0;
 }
 
 uint64_t AudioPlayer::SubmittedBuffers() const
@@ -271,6 +296,7 @@ bool AudioPlayer::Seek(double seconds) {
 
 void AudioPlayer::Stop() {
     const auto state=m_reader;
+    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); m_clockStalled = false; }
     if(!state){if(m_thread.joinable())m_thread.detach();return;}
     state->stop = true;
     state->hasAudioData = false;

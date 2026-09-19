@@ -25,6 +25,7 @@
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
+#include "AudioClockPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -7304,6 +7305,63 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// The player runs on an audio master clock. When the reader thread ends - pipe
+// EOF, the ffmpeg child dying, waveOutWrite failing after a device change - the
+// queued buffers drain and waveOutGetPosition freezes, but hasAudioData stays
+// set until Stop(), so PositionSeconds kept returning the frozen value. The
+// presentation gate holds each frame until the clock reaches its due time, so
+// video stopped for the rest of the file: a 60 s video with a 10 s audio track
+// played 10.7 s and then showed nothing, with no error and no log line.
+void audio_clock_stops_being_the_master_once_it_stops_advancing_test()
+{
+    using namespace audio_clock;
+    StallState state;
+
+    // A clock that advances is a clock, however slowly. waveOutGetPosition
+    // quantizes to about 10 ms, so repeats between moves are normal and must
+    // not on their own condemn it.
+    CHECK(Usable(state, 1.000, 100.0, true));
+    CHECK(Usable(state, 1.000, 100.005, true));
+    CHECK(Usable(state, 1.010, 100.010, true));
+    CHECK(Usable(state, 1.010, 100.4, true));
+    CHECK(Usable(state, 1.020, 100.5, true));
+
+    // Standing still past the window is not.
+    CHECK(Usable(state, 1.020, 100.5 + kStallSeconds * 0.99, true));
+    CHECK(!Usable(state, 1.020, 100.5 + kStallSeconds, true));
+    CHECK(!Usable(state, 1.020, 200.0, true));
+
+    // Moving again restores it: the player already switches between the audio
+    // and steady clocks when audio starts and stops, and one underrun should
+    // not demote audio for the rest of a film.
+    CHECK(Usable(state, 1.030, 200.1, true));
+    CHECK(Usable(state, 1.030, 200.2, true));
+
+    // A paused clock standing still is correct, not stalled - and the window
+    // starts again from the resume rather than counting the pause against it.
+    StallState paused;
+    CHECK(Usable(paused, 5.0, 0.0, true));
+    for (double t = 0.0; t <= 60.0; t += 1.0) CHECK(Usable(paused, 5.0, t, false));
+    // Resumed at t=60 and still standing still: inside the window from the
+    // resume, not from whenever the clock last moved an hour of pause ago.
+    CHECK(Usable(paused, 5.0, 60.0 + kStallSeconds * 0.99, true));
+    CHECK(!Usable(paused, 5.0, 60.0 + kStallSeconds, true));
+
+    // A seek moves the position backwards. That is movement.
+    StallState seeking;
+    CHECK(Usable(seeking, 90.0, 0.0, true));
+    CHECK(!Usable(seeking, 90.0, kStallSeconds, true));
+    CHECK(Usable(seeking, 12.0, kStallSeconds, true));
+
+    // Reset is what Start and Seek use, and it must not leave the old
+    // stand-still time behind for the new session to inherit.
+    StallState reused;
+    CHECK(Usable(reused, 7.0, 500.0, true));
+    CHECK(!Usable(reused, 7.0, 500.0 + kStallSeconds, true));
+    Reset(reused);
+    CHECK(Usable(reused, 7.0, 500.0 + kStallSeconds, true));
+}
+
 // A resident helper serves several jobs from one process. Whenever the next
 // job's geometry, fps, source layout, colour conversion or capture format
 // differs from the last, Initialize calls Release, which shuts the capture
@@ -7586,6 +7644,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(playback_cadence_phase_presents_exactly_one_pair_in_stride_test),
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
+    TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
 };
 
 
