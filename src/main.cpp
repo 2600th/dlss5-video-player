@@ -44,6 +44,7 @@
 #include "ExampleVideos.h"
 #include "CompletionRegistry.h"
 #include "NetworkMediaTransaction.h"
+#include "PlaybackCadence.h"
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "FrameRatePolicy.h"
@@ -1237,6 +1238,12 @@ public:
                 m_lastStaticPresent=nowClock;
             }
         }
+        // Before every early return below, because the state worth reporting is
+        // the one where nothing is reaching the screen. Reporting from the
+        // present path instead meant the worst case - no frames presented at
+        // all - was the quietest: one measured session logged a single line
+        // covering 132 s and two presented frames.
+        ReportPlaybackHealth();
         if(m_loaded&&m_cachedPlayback&&m_playing&&!m_haveNext&&!m_seeking){
             if(!ReadNextCachedFrame())return;
         }
@@ -1246,13 +1253,23 @@ public:
         if(!m_loaded||!m_playing||!m_haveNext||m_seeking) return;
         double now=Position(); const double frameDur=1.0/std::max(1.0,m_decoder.FrameRate());
         bool dropped=false;
+        // A neural pair is not a frame this loop can afford to discard. Every
+        // other path advances by decoding ONE stream, so throwing a late frame
+        // away is cheap; a neural session advances by decoding a PAIR, so a
+        // discard costs exactly what a present costs and the loop below cannot
+        // win a race it doubles the length of. See PlaybackCadence.h for the
+        // measured collapse - 0.31 fps presented, 203 discarded in 11.6 s - and
+        // for the two levers that replace it.
+        if(m_cachedPlayback){
+            if(!CadenceAdvanceCachedFrame(now,frameDur))return;
+        }else{
         while(m_haveNext) {
             double due=double(m_next.timestamp100ns)*1e-7;
             if(now-due <= playback_timing::LateFrameThreshold(frameDur)) break;
             VideoFrame skip=std::move(m_next); (void)skip; ++m_droppedFrames; dropped=true;
-            if(m_cachedPlayback){if(!ReadNextCachedFrame())break;}
-            else if(NetworkPlayback()){if(ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::BeforeRender)!=NetworkReadAction::UseFrame)break;}
+            if(NetworkPlayback()){if(ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::BeforeRender)!=NetworkReadAction::UseFrame)break;}
             else if(!m_decoder.ReadNext(m_next)){m_haveNext=false;break;}
+        }
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
         if(!m_haveNext){if(!NetworkPlayback()){m_playing=false;Audio().Pause(true);}InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
@@ -1301,6 +1318,11 @@ private:
     // A gap this long cannot be an interval between ticks: the tick sleeps zero
     // while playing, and a stalled pair is read again within a millisecond.
     static constexpr double kPairStallGapSeconds=1.0;
+    // Consecutive re-anchors before the session gives up following live. Three
+    // is enough to ride out a transient - a segment boundary landing under a
+    // burst of render work - and short enough that a source this machine simply
+    // cannot follow says so within a few seconds instead of hitching for ever.
+    static constexpr int kCadenceReanchorLimit=3;
     bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
     // A job that renders behind the loaded media: the player keeps the window,
     // and only its own panel and lanes report progress.
@@ -2310,6 +2332,55 @@ private:
     }
     AudioPlayer& Audio(){return m_networkAudio?*m_networkAudio:m_audio;}
     const AudioPlayer& Audio()const{return m_networkAudio?*m_networkAudio:m_audio;}
+    // How often playback says how it is doing. A session can currently drop two
+    // frames in three for minutes and write NOTHING: m_submitFps and
+    // m_droppedFrames reach the status bar and stop there, so a report of
+    // "only some frames are showing" arrives with no record of whether frames
+    // were late, how late, or what else was using the GPU at the time. That is
+    // the same blindness ReadNextCachedFrame's stall bound was added for.
+    //
+    // Two seconds, and only while a neural pair is on screen. A line per
+    // presented frame would be 60 disk writes a second - see the 14,000-line
+    // incident behind the memoised source-key lookup - and the question this
+    // answers is a trend, not an event.
+    static constexpr double kPlaybackHealthSeconds=2.0;
+    void ReportPlaybackHealth(){
+        if(!m_cachedPlayback||!m_playing){m_playbackHealthAt={};return;}
+        const auto now=Clock::now();
+        if(m_playbackHealthAt==Clock::time_point{}){
+            m_playbackHealthAt=now;m_playbackHealthDropped=m_droppedFrames;
+            m_playbackHealthPresented=m_cachedPresentedFrames;return;
+        }
+        const double elapsed=std::chrono::duration<double>(now-m_playbackHealthAt).count();
+        if(elapsed<kPlaybackHealthSeconds)return;
+        // Loading a source zeroes m_droppedFrames while this still holds the
+        // previous session's total, and an unsigned subtraction there would
+        // print a number near 2^64 rather than a small one.
+        const uint64_t dropped=m_droppedFrames>=m_playbackHealthDropped
+            ? m_droppedFrames-m_playbackHealthDropped : m_droppedFrames;
+        const uint64_t presented=m_cachedPresentedFrames>=m_playbackHealthPresented
+            ? m_cachedPresentedFrames-m_playbackHealthPresented : m_cachedPresentedFrames;
+        const double presentedFps=elapsed>0.0?double(presented)/elapsed:0.0;
+        const double sourceFps=m_decoder.FrameRate();
+        // Presented against what the source asks for: the ratio is the symptom a
+        // viewer describes, and the budget beside it is what a frame had to fit
+        // into to avoid being dropped.
+        LOG("Playback health: presented="<<presentedFps<<" fps of "<<sourceFps
+            <<" source fps over the last "<<elapsed<<" s; dropped="<<dropped
+            <<" (total "<<m_droppedFrames<<") presented_total="<<m_cachedPresentedFrames
+            <<" at "<<Position()<<" s; budget="<<(sourceFps>0.0?1000.0/sourceFps:0.0)
+            <<" ms/frame; guide="<<(m_renderMsFrames?m_guideMsTotal/double(m_renderMsFrames):0.0)
+            <<" ms present="<<(m_renderMsFrames?m_renderMsTotal/double(m_renderMsFrames):0.0)
+            <<" ms over "<<m_renderMsFrames<<" frames; stride=1in"<<m_presentStride<<" live="<<m_liveSession
+            <<" rendering="<<NeuralJobActive()<<" upscaling="<<UpscalingActive());
+        // An interval with no re-anchor in it is the session recovering, and
+        // the limit exists to catch one that never does.
+        m_guideMsTotal=0.0;m_renderMsTotal=0.0;m_renderMsFrames=0;
+        if(!m_cadenceReanchoredRecently)m_cadenceReanchors=0;
+        m_cadenceReanchoredRecently=false;
+        m_playbackHealthAt=now;m_playbackHealthDropped=m_droppedFrames;
+        m_playbackHealthPresented=m_cachedPresentedFrames;
+    }
     bool ReadNextCachedFrame(){
         // Before the read, because the stall window below has to be told that
         // reads stopped happening at all - see kPairStallGapSeconds.
@@ -2410,6 +2481,77 @@ private:
         }
         m_haveNext=false;m_playing=false;Audio().Pause(true);if(read==SynchronizedReadResult::EndOfStream)LOG("Cached playback completed: presented="<<m_cachedPresentedFrames<<" dropped="<<m_droppedFrames);
         InvalidateControls();InvalidatePlaybackProgress();return false;
+    }
+    // One step of the presentation cadence for a neural pair. Returns false
+    // when this tick is finished - the pair was skipped to hold the cadence, or
+    // the position was re-anchored - and true when the caller should present
+    // the frame it is holding.
+    //
+    // Skipping still DECODES the pair: stride removes the presentation work and
+    // nothing else. That is the honest limit of this lever and the reason
+    // re-anchoring exists beside it.
+    bool CadenceAdvanceCachedFrame(double now,double frameDur){
+        const double due=double(m_next.timestamp100ns)*1e-7;
+        // Not due yet is not late; the ordinary wait below handles it.
+        if(now+0.001<due)return true;
+        const auto decision=playback_cadence::Decide(now-due,frameDur,m_presentStride,m_presentPhase);
+        if(decision.stride!=m_presentStride){
+            LOG("Neural playback cadence "<<(decision.stride>m_presentStride?"widened":"narrowed")
+                <<" to 1 in "<<decision.stride<<" at "<<now<<" s; behind="<<(now-due)*1000.0
+                <<" ms of a "<<frameDur*1000.0<<" ms frame.");
+            m_presentStride=decision.stride;
+        }
+        if(decision.action==playback_cadence::Action::Reanchor){
+            // Walking this gap costs a pair decode per frame; a seek costs about
+            // half a second whatever the distance. Bounded, because a session
+            // that keeps arriving late is one this machine cannot follow, and
+            // saying so beats a picture that hitches every second for ever.
+            ++m_cadenceReanchors;m_cadenceReanchoredRecently=true;m_presentPhase=0;
+            LOG("Neural playback is "<<(now-due)<<" s behind the clock at "<<now
+                <<" s; re-anchoring rather than decoding every frame in between (attempt "
+                <<m_cadenceReanchors<<" of "<<kCadenceReanchorLimit<<").");
+            if(m_cadenceReanchors>=kCadenceReanchorLimit){
+                LOG("Neural playback cannot follow this source live; playing the original.");
+                const bool wasPlaying=m_playing;const double handBackAt=Position();
+                m_cadenceReanchors=0;m_presentStride=1;m_presentPhase=0;
+                if(m_liveSession){
+                    DetachLivePlayback();
+                    AdoptAcquiredSourceCopyForPlayback();
+                    RequestSeek(handBackAt,wasPlaying);
+                }else{
+                    m_haveNext=false;m_playing=false;Audio().Pause(true);
+                    m_neuralNotice=T(L"neural.cadence.cannot_follow");
+                    UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();
+                }
+                return false;
+            }
+            m_presentPhase=0;
+            RequestSeek(now,m_playing);
+            return false;
+        }
+        // Advanced for every pair consumed, whichever way the decision went.
+        // Resetting it on a present - which is what this did first - made
+        // (phase % stride) true on every frame, so the stride widened all the
+        // way to its cap and skipped nothing: measured stride=1in8 with
+        // dropped=0, presenting every pair it managed to read.
+        m_presentPhase=playback_cadence::NextPhase(m_presentPhase,m_presentStride);
+        if(decision.action==playback_cadence::Action::Skip){
+            // Counted as dropped because that is what it is from the viewer's
+            // side, but NOT a history reset: a stride is a regular decimation,
+            // the motion between two presented frames is a coherent two frames'
+            // worth, and RenderVideoFrame already hands DLSS the real timestamp
+            // delta. Resetting here would be the documented over-reset failure.
+            ++m_droppedFrames;
+            m_currentSec=due;m_haveNext=false;
+            InvalidatePlaybackProgress();
+            return false;
+        }
+        // BUG 2 was here: clearing the re-anchor count on any present meant a
+        // session that presented one frame between anchors never reached the
+        // limit - the log read "attempt 1 of 3" six times in a row while the
+        // picture hitched every 1.7 s. The count is cleared by a QUIET
+        // interval instead; see ReportPlaybackHealth.
+        return true;
     }
     void RememberRenderedCachedPair(){if(!m_cachedPlayback)return;if(const auto* pair=m_synchronizedPlayback.CurrentPair()){m_lastOriginalFrame=pair->original;m_lastNeuralFrame=pair->neural;m_havePresentedPair=true;}}
     NetworkReadAction ApplyNetworkRead(VideoReadResult result,NetworkReadPosition position){
@@ -3566,7 +3708,13 @@ private:
         if(m_lastRenderedTs<0)reason=HistoryReset::FirstFrame;
         else if(m_guideReset||m_dlssReset)reason=HistoryReset::Seek;
         else if(resetGuide)reason=f.discontinuity?HistoryReset::Seek:HistoryReset::Drop;
-        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),IdentityOf(f,m_historyGeneration,0,reason),g))return false;
+        const auto guideStart=Clock::now();
+        // The frame says which layout it is in; the guide generator has read
+        // both since the export path started decoding to NV12, and reading a
+        // NV12 buffer as BGRA is the kind of mistake that shows up as motion
+        // estimated from noise rather than as a failure.
+        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),IdentityOf(f,m_historyGeneration,0,reason),g,f.layout))return false;
+        m_guideMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-guideStart).count();
         m_historyGeneration=g.id.historyGeneration;
         // This path renders without a frame identity, so the renderer never logs
         // its reset reason and a cut decided from the pixels was invisible here.
@@ -3580,7 +3728,10 @@ private:
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
         bool r=m_dlssReset||!g.hasHistory;
         if(m_cachedPlayback){if(const auto* pair=m_synchronizedPlayback.CurrentPair())UploadComparisonReference(pair->original);}
+        const auto renderStart=Clock::now();
         bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,g.motionVectors,ms);
+        m_renderMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
+        ++m_renderMsFrames;
         if(ok){
             m_lastPlaybackFrame=f;
             if(m_renderer->DLSSEnabled()&&!m_renderer->LastFrameUsedDLSS()){
@@ -5712,7 +5863,7 @@ private:
         m_neuralPath=completion.neuralPath;m_cachedRange=completion.range;m_cachedReceiptPath=completion.receiptPath;m_cachedSettings=completion.settings;m_cachedGuides=completion.guides;m_currentSec=double(first.timestamp100ns)*1e-7;m_haveNext=false;m_cachedPlayback=true;m_comparisonView=desiredView;m_cachedPresentedFrames=1;RememberRenderedCachedPair();
         if(!m_decoder.IsStillImage())m_audio.Start(completion.sourcePath.wstring(),m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_synchronizedPlayback.SetPaused(m_decoder.IsStillImage());m_playStartSec=m_currentSec;m_playStart=Clock::now();
         m_loaded=true;m_path=completion.sourcePath.wstring();m_sourceKind=completion.sourceKind;m_youtubePageUrl=completion.pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_displayTitle=DisplayTitleForSource(completion.sourceKind,completion.displayTitle);if(m_displayTitle.empty())m_displayTitle=completion.sourcePath.stem().wstring();
-        m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
+        m_droppedFrames=0;m_presentStride=1;m_presentPhase=0;m_cadenceReanchors=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_guideReset=false;m_dlssReset=false;
         RestoreUpscaling();UpdateTitle();NoteLoadedSourceQuality();UpdateCachedStatus();Layout();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
     void CompleteNeuralProgress(uint64_t token){
@@ -6536,6 +6687,17 @@ private:
     // See ReadNextCachedFrame.
     Clock::time_point m_pairStall{};
     Clock::time_point m_pairStallRead{};
+    // Trend reporting for ReportPlaybackHealth: when it last spoke, and the
+    // dropped count it spoke with.
+    Clock::time_point m_playbackHealthAt{};
+    uint64_t m_playbackHealthDropped=0,m_playbackHealthPresented=0;
+    // Presentation cadence for neural pairs: show one pair in m_presentStride,
+    // m_presentPhase counting pairs since the last presented one. See
+    // PlaybackCadence.h.
+    uint32_t m_presentStride=1,m_presentPhase=0;
+    int m_cadenceReanchors=0;bool m_cadenceReanchoredRecently=false;
+    // The two halves of a presented frame, summed over a health interval.
+    double m_guideMsTotal=0.0,m_renderMsTotal=0.0;uint64_t m_renderMsFrames=0;
     // The last converted file, kept so "Show converted file" can reach it after
     // the completion dialog is gone. Cleared when the file stops existing.
     std::filesystem::path m_frameGenLastOutput;

@@ -187,6 +187,7 @@ private:
             // Which way the play press that arrived during buffering points: the
             // button state alone was invisible, so a second press cancelled it.
             {L"neural.live.stalled", L"Live rendering stopped: the render never reached this frame. Playing the original."},
+            {L"neural.cadence.cannot_follow", L"This video plays faster than the neural view can be assembled on this machine, so playback kept falling behind. Showing the rendered file on its own instead."},
             {L"neural.order.generated_source", L"This video is a frame-generation conversion, so this render upscales generated frames and costs as many times the work as the conversion multiplied. Rendering first and converting the result is the faster order."},
             {L"neural.live.will_play", L"starts when the buffer fills"},
             {L"neural.live.will_stay_paused", L"stays paused when the buffer fills"},

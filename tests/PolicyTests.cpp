@@ -20,6 +20,7 @@
 #include "PlaybackTiming.h"
 #include "LiveSessionPolicy.h"
 #include "FrameRatePolicy.h"
+#include "PlaybackCadence.h"
 #include "NeuralCoverage.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
@@ -7114,6 +7115,134 @@ constexpr TestCase kResolverAvailabilityCases[] = {
     TEST_CASE(resolver_output_validates_stream_availability_metadata_test),
 };
 
+// Live neural playback advances by decoding a PAIR, so discarding a late frame
+// costs what presenting one costs and falling behind is unrecoverable by
+// walking. These pin the two ways out: thin the presentation, or stop walking
+// and seek. Measured symptom the policy exists for, from the player's own
+// health line on an RTX 5090 at 2560x1440: a 119.88 fps source presented 0.31
+// fps with 203 frames discarded in 11.6 s.
+void playback_cadence_thins_presentation_before_it_seeks_test()
+{
+    using namespace playback_cadence;
+    constexpr double k120 = 1.0 / 119.88;   // 8.34 ms
+    constexpr double k60 = 1.0 / 59.9401;   // 16.68 ms
+
+    // On time: every pair is presented and the cadence stays where it is.
+    const auto onTime = Decide(0.0, k120, 1, 0);
+    CHECK(onTime.action == Action::Present);
+    CHECK_EQ(1u, onTime.stride);
+
+    // More than two frames late: the cadence widens. The frame in hand is still
+    // presented, because the stride in force for it was 1 - widening takes
+    // effect from the next one rather than skipping a beat already committed to.
+    const auto late = Decide(3.0 * k120, k120, 1, 0);
+    CHECK(late.action == Action::Present);
+    CHECK_EQ(2u, late.stride);
+
+    // At stride 2 the phase decides, which is what makes the result EVEN: one
+    // pair in two, so 119.88 fps becomes 59.94 fps of unbroken motion rather
+    // than a stutter.
+    CHECK(Decide(0.0, k120, 2, 0).action == Action::Present);
+    CHECK(Decide(0.0, k120, 2, 1).action == Action::Skip);
+    CHECK(Decide(0.0, k120, 2, 2).action == Action::Present);
+    CHECK(Decide(0.0, k120, 2, 3).action == Action::Skip);
+
+    // KEEPING UP narrows the cadence, one step at a time. Zero lateness is the
+    // case that matters and the one an earlier version got wrong: it asked for
+    // the pipeline to run EARLY before giving a frame back, and nothing that is
+    // merely keeping up ever runs early, so the stride ratcheted to its cap on
+    // one hiccup and stayed there - measured at 15 frames presented out of 120
+    // advanced every two seconds, which is a source being followed exactly and
+    // shown at an eighth of its rate.
+    CHECK_EQ(3u, Decide(0.0, k120, 4, 0).stride);
+    CHECK_EQ(3u, Decide(-1.0 * k120, k120, 4, 0).stride);
+    CHECK_EQ(3u, Decide(0.25 * k120, k120, 4, 0).stride);
+    // Inside the band it holds, which is what stops it oscillating between two
+    // cadences - more visible than the coarser one held steady.
+    CHECK_EQ(4u, Decide(1.0 * k120, k120, 4, 0).stride);
+    CHECK_EQ(4u, Decide(2.0 * k120, k120, 4, 0).stride);
+
+    // The floor and the ceiling.
+    CHECK_EQ(kMaxStride, Decide(5.0 * k120, k120, kMaxStride, 0).stride);
+    CHECK_EQ(1u, Decide(-5.0 * k120, k120, 1, 0).stride);
+    CHECK_EQ(1u, Decide(0.0, k120, 1, 0).stride);
+
+    // A second behind is past the point where walking is the cheaper way to
+    // arrive: a seek covers any distance for about half a second here, while
+    // walking costs a pair decode per frame - 120 of them for this one second.
+    // It outranks the stride entirely; the position is the thing that is wrong.
+    for (const uint32_t stride : {1u, 2u, kMaxStride}) {
+        // Not named `far`: windows.h still defines that as a macro.
+        const auto adrift = Decide(kReanchorSeconds, k120, stride, 0);
+        CHECK(adrift.action == Action::Reanchor);
+        CHECK_EQ(stride, adrift.stride);
+    }
+    CHECK(Decide(0.99 * kReanchorSeconds, k120, 1, 0).action != Action::Reanchor);
+
+    // 60 fps is the same policy with twice the room: two frames late there is
+    // 33 ms, where at 120 it is 17.
+    CHECK_EQ(2u, Decide(3.0 * k60, k60, 1, 0).stride);
+    CHECK(Decide(2.0 * k60, k60, 1, 0).action == Action::Present);
+    CHECK_EQ(3u, Decide(0.0, k60, 4, 0).stride);
+
+    // Degenerate inputs present rather than invent a cadence.
+    CHECK(Decide(0.0, 0.0, 4, 1).action == Action::Present);
+    CHECK_EQ(1u, Decide(0.0, 0.0, 4, 1).stride);
+    CHECK(Decide(std::numeric_limits<double>::quiet_NaN(), k120, 1, 0).action == Action::Present);
+}
+
+// The phase rule, run as a sequence rather than asserted a frame at a time,
+// because the way it failed was invisible frame by frame: a caller that reset
+// the phase whenever it presented satisfied every single-frame expectation and
+// still presented EVERY pair, because (0 % stride) is always 0. It shipped, and
+// the only trace was a health line reading stride=1in8 beside dropped=0.
+void playback_cadence_phase_presents_exactly_one_pair_in_stride_test()
+{
+    using namespace playback_cadence;
+    constexpr double k120 = 1.0 / 119.88;
+    for (const uint32_t stride : {1u, 2u, 3u, 5u, kMaxStride}) {
+        uint32_t phase = 0, presented = 0, skipped = 0, longestRun = 0, run = 0;
+        for (uint32_t frame = 0; frame < 240; ++frame) {
+            // One frame late: inside the hold band, so the cadence stays put
+            // and only the phase moves. Zero would NARROW it, which is correct
+            // behaviour and the wrong fixture for a phase test.
+            const auto decision = Decide(1.0 * k120, k120, stride, phase);
+            CHECK_EQ(stride, decision.stride);
+            if (decision.action == Action::Present) {
+                ++presented; longestRun = std::max(longestRun, run); run = 0;
+            } else {
+                ++skipped; ++run;
+            }
+            phase = NextPhase(phase, stride);
+        }
+        // Exactly one in `stride`, and the skips evenly spaced between them -
+        // an even cadence is the entire point, since 120 fps shown every other
+        // frame is smooth 60 while the same count shown in bursts is not.
+        CHECK_EQ(240u / stride, presented);
+        CHECK_EQ(240u - 240u / stride, skipped);
+        CHECK_EQ(stride - 1u, longestRun);
+    }
+}
+
+// Stride removes the presentation cost and nothing else: every pair is still
+// decoded. So a source whose frame interval is shorter than one pair's DECODE
+// can never be followed live, however coarse the cadence gets, and that is a
+// thing to say at attach time rather than let a viewer discover as a frozen
+// picture. Measured here: two concurrent 2560x1440 decoders sustain about
+// 139 fps each, so a pair costs roughly 7.2 ms.
+void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
+{
+    using namespace playback_cadence;
+    constexpr double kPairDecode = 0.0072;
+    CHECK(CanFollowLive(1.0 / 59.9401, kPairDecode));   // 16.68 ms, comfortable
+    CHECK(CanFollowLive(1.0 / 119.88, kPairDecode));    // 8.34 ms, and only just
+    CHECK(!CanFollowLive(1.0 / 240.0, kPairDecode));    // 4.17 ms, never
+    // An unmeasured cost is not evidence that the source cannot be followed.
+    CHECK(CanFollowLive(1.0 / 119.88, 0.0));
+    CHECK(CanFollowLive(0.0, kPairDecode));
+    CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
+}
+
 constexpr TestCase kCases[] = {
     TEST_CASE(harness_sanity_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -7332,6 +7461,9 @@ constexpr TestCase kCases[] = {
     TEST_CASE(ngx_renderer_frame_state_prioritizes_explicit_rehook_after_create_failure_test),
     TEST_CASE(ngx_live_feature_is_never_released_on_a_frame_count_test),
     TEST_CASE(spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test),
+    TEST_CASE(playback_cadence_thins_presentation_before_it_seeks_test),
+    TEST_CASE(playback_cadence_phase_presents_exactly_one_pair_in_stride_test),
+    TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
 };
 
 } // namespace

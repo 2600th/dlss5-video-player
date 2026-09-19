@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **A late neural pair is not a frame the catch-up loop can discard.** Reported
+  twice - "only some frames are showing", then "stuck frame ... frames played
+  are at slow speed not realtime" - on a 2560x1440 trailer with neural rendering
+  on and on its 119.88 fps frame-generation conversion. Every other playback
+  path advances by decoding ONE stream, so throwing a late frame away is cheap;
+  a neural session advances by decoding a PAIR, so a discard costs exactly what
+  a present costs and `Tick`'s loop was a race it doubled the length of. Once
+  behind, every tick spent its budget discarding, presented at most one frame,
+  and ended further behind than it started.
+  Nothing recorded any of it: `m_submitFps` and `m_droppedFrames` reached the
+  status bar and stopped there. A playback-health line now says so every two
+  seconds - presented against source rate, drops, the frame budget, the cadence,
+  and the split between guide generation and the present - and that split
+  immediately disproved two theories: guide 0.6 ms and present 2.1 ms against an
+  8.34 ms budget, about 2.5% of the time.
+  `src/PlaybackCadence.h` carries the policy. STRIDE presents one pair in N and
+  skips the presentation work for the rest, which is the difference between
+  120 fps that cannot be shown and 60 fps that can; RE-ANCHOR stops walking and
+  seeks, because a seek costs half a second whatever the distance while walking
+  costs a pair decode for every frame in between. Bounded at three, after which
+  the session says it cannot follow rather than hitching for ever.
+  Three defects in it were found by running it, and each is pinned by a test
+  that fails without the fix: the phase was reset on every present so the stride
+  skipped nothing (`stride=1in8` beside `dropped=0`); the re-anchor count was
+  cleared on every present so the bound never bound ("attempt 1 of 3" six times
+  running); and narrowing required running EARLY, which nothing that merely
+  keeps up ever does, so the stride ratcheted to its cap and stayed - advancing
+  120 pairs every two seconds, exactly the source rate, and showing 15 of them.
+  Verified at 2560x1440 59.94 fps with a session attached: 36 consecutive health
+  lines at `stride=1in1`, 38 frames dropped in one transient at attach and none
+  after.
+
 - **Frame generation no longer interpolates across a cut.** Generating between
   the last frame of one shot and the first of the next blends two unrelated
   pictures into every slot between them: at 2x on 24 fps film that is one
