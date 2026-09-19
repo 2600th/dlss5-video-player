@@ -191,8 +191,9 @@ different codecs. The neural output encoder and intensity are independent.
 
 ## Recent videos and cache retention
 
-**File > Recent videos** stores the last five distinct successfully opened
-videos, newest first. Reopening an entry moves it to the top. Local entries point
+**File > Recent videos** lists the last five distinct successfully opened
+videos, newest first. The list is a menu, not the cache: renders and downloads
+outlive it, and a video dropping off the end keeps everything rendered for it. Reopening an entry moves it to the top. Local entries point
 to the original file; YouTube entries retain the page identity and selected quality.
 Validated cached YouTube sources can reopen without resolving or downloading again,
 including when selected from Game trailers or pasted again at the same quality.
@@ -202,11 +203,15 @@ one replacement download on reopening. Successful downloads under the new policy
 are reused normally; existing files are retained until replacement succeeds
 and tracked-cache cleanup runs.
 
-The history tracks one current source/render pair per video. Adding a sixth
-video, or replacing a tracked render with new settings, makes old unreferenced
-cache entries eligible for removal after active work finishes. Local originals
-and exported files are never deleted by this policy. Older untracked cache data
-is not swept by the five-entry history. Work that was abandoned or refused -
+The history tracks one current source/render pair per video, and nothing
+evicts a render on the list's behalf. A sixth video pushes the first out of the
+menu and leaves its render on disk, so reopening that video attaches to it
+again instead of rendering the same seconds a second time; replacing a tracked
+render with new settings leaves the old one there too, since it is keyed by
+those settings and a later session may ask for them again. **Advanced > Clear
+Neural Cache** is the only thing that removes a published entry. Local
+originals and exported files are never deleted by any of this. Work that was
+abandoned or refused -
 a cancelled download, a render that failed its checks, a folder left by a
 player that was killed - is parked under `staging/` and reaped a few entries
 per launch, oldest first; a folder whose owning player is still running is
@@ -233,7 +238,8 @@ at their original paths.
 **Advanced > Clear Neural Cache** shows its size and asks for confirmation. It
 closes current playback and removes owned cache data, keeping recent titles and
 original-source references. Clearing is blocked during acquisition, rendering or
-export. This is a count-based retention policy, not a byte quota or a backup.
+export. Retention is unbounded and manual: not a count, not a byte quota, and
+not a backup.
 
 ## Saved settings and reproducibility
 

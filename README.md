@@ -58,8 +58,10 @@ Next time, **File > Recent videos** reopens it with the render already done.
   and on again picks up where it stopped.
 - Keeps the original and the render in step. Switching views does not move the
   playhead, and you can pause and step frames on either.
-- Remembers the last five videos and their renders. A render is reused only if
-  the source, the runtime and the neural settings all still match.
+- Keeps every render, not the last few. A render is reused whenever the source,
+  the runtime and the neural settings all still match, however many videos ago
+  you made it. **File > Recent videos** lists five, but that is a menu length:
+  dropping off it deletes nothing.
 - Exports what you rendered. PNG or JPEG for photos, GIF for animations, MP4 or
   MKV for video. MKV keeps the source audio, subtitles and chapters without
   re-encoding them.
@@ -506,8 +508,9 @@ screen, so it costs a present rather than a render.
   comes back small the status line names the height and rate that arrived and
   says the video is age-restricted, instead of playing 360p without comment.
   Details in [EXAMPLE_VIDEOS.md](docs/EXAMPLE_VIDEOS.md).
-- History is five videos, not a size quota. Big videos take space.
-  **Advanced > Clear Neural Cache** frees it.
+- The render cache has no bound - no count, no size quota, and nothing evicted
+  automatically. Big videos take space. **Advanced > Clear Neural Cache**
+  reports how much it is about to delete and frees it.
 - The menu bar shows `↑ Update <version>` when a newer release exists;
   **Advanced > Check for updates** asks GitHub on demand. `[Updates] Enabled=0`
   in `DLSSVideoPlayer.ini` turns the daily check off.

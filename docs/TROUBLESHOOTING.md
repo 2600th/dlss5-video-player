@@ -141,8 +141,10 @@ render's unique name was already there, which is refused rather than reused.
 
 ## A recent video is missing or needs a download
 
-Only the five most recent distinct videos are retained. Local files must still
-exist at their saved location. YouTube entries need a valid acquired source to
+The **menu** lists five videos; the cache behind it is unbounded. A video that
+has dropped off the list still has its render and its download, and reopening it
+by any route attaches to them. Local files must still exist at their saved
+location. YouTube entries need a valid acquired source to
 skip downloading; otherwise they resolve the original public page again. An
 older untracked cache is not automatically imported into recent history.
 
