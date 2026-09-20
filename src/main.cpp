@@ -1267,6 +1267,12 @@ public:
 
     void Tick() {
         ReapSourcePrefetch();
+        // Headphones unplugged, a default-device change, a driver restart: the
+        // endpoint reports itself invalidated and audio restarts on the new
+        // one. waveOut had no equivalent - the write failed, the reader thread
+        // broke, and the film played on in silence. Cheap when nothing
+        // happened, which is every tick but the one.
+        Audio().ServiceDeviceChanges();
         UpdateLiveSession();
         WatchNeuralJobProgress();
         if(m_seekPending) {

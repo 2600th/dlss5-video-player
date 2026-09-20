@@ -1,8 +1,8 @@
 #pragma once
 #include <windows.h>
-#include <mmsystem.h>
 
 #include "AudioClockPolicy.h"
+#include "WasapiRenderer.h"
 #include <atomic>
 #include <string>
 #include <thread>
@@ -33,7 +33,10 @@ public:
         // calls guard can be reached at all, and they are nested so that reaching
         // them has to be deliberate.
         struct FaultInjection {
-            bool disableWaveOut{false};
+            // Runs the whole pipe-reading path with no render endpoint opened,
+            // which is how the process and job-object teardown is reached on a
+            // machine that does have one.
+            bool disableAudioDevice{false};
             bool failTerminateJob{false};
             bool failInitialProcessWait{false};
             bool failGetExitCodeProcess{false};
@@ -61,8 +64,17 @@ public:
     double PositionSeconds() const;
     // Seek position the current helper process was started at.
     double SeekBaseSeconds() const { return m_seekBaseSec; }
-    // WaveOut buffers handed to the device since Start; 0 when stopped.
+    // Buffers handed to the endpoint since Start; 0 when stopped.
     uint64_t SubmittedBuffers() const;
+
+    // Restarts audio on the new default endpoint if the old one went away -
+    // headphones unplugged, a default-device change, a driver restart. Cheap
+    // when nothing happened, so the player calls it from its frame tick.
+    //
+    // waveOut had no equivalent: a write to a departed endpoint failed, the
+    // reader thread broke, and the film played on in silence for the rest of
+    // the session.
+    bool ServiceDeviceChanges();
 
 private:
     struct ReaderState {
@@ -70,18 +82,29 @@ private:
         HANDLE stdoutPipe = nullptr;
         HANDLE job = nullptr;
         HANDLE completed = nullptr;
-        HWAVEOUT waveOut = nullptr;
-        mutable std::mutex waveMutex;
+        // Null when the device is disabled by fault injection: the pipe is
+        // still read and the process still torn down, there is just nowhere
+        // for the samples to go.
+        std::unique_ptr<WasapiRenderer> renderer;
+        // Copied out of the renderer so the clock can be read without taking
+        // its lock behind the UI thread.
+        uint32_t sampleRate = 0;
         std::atomic<bool> stop{false};
         std::atomic<bool> paused{false};
         std::atomic<bool> hasAudioData{false};
         std::atomic<uint64_t> submittedBuffers{0};
-        bool disableWaveOut = false;
+        // Latched when the endpoint is invalidated - an unplugged pair of
+        // headphones, a default-device change. The owner restarts the whole
+        // pipeline on the new endpoint, because its mix format may differ and
+        // ffmpeg has to be told.
+        std::atomic<bool> deviceLost{false};
+        bool disableAudioDevice = false;
         ~ReaderState();
     };
 
     std::wstring FindFFmpeg() const;
-    bool StartProcess(double seekSeconds, const std::shared_ptr<ReaderState>& state);
+    bool StartProcess(double seekSeconds, const std::shared_ptr<ReaderState>& state,
+                      const WasapiRenderer::Format& format);
     void StopProcess(const std::shared_ptr<ReaderState>& state);
     static void ReaderThread(std::shared_ptr<ReaderState> state) noexcept;
     static void ThreadMain(const std::shared_ptr<ReaderState>& state);
@@ -99,4 +122,7 @@ private:
     mutable std::mutex m_clockMutex;
     mutable audio_clock::StallState m_clock;
     mutable bool m_clockStalled = false;
+    // The last position the clock actually answered with. A lost endpoint
+    // stops answering, so this is where playback resumes from.
+    mutable std::atomic<double> m_lastKnownPosition{0.0};
 };

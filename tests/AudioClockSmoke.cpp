@@ -231,6 +231,21 @@ int wmain(int argc, wchar_t** argv)
                   "the clock does not drift from real time over five seconds");
     }
 
+    // ---- device-change service is inert when nothing changed ---------------
+    // ServiceDeviceChanges runs on every frame tick. If it ever restarted
+    // audio when the endpoint was fine, playback would stutter continuously -
+    // a worse bug than the one it fixes. It must report "nothing to do" and
+    // leave the clock alone.
+    {
+        const double before = audio.PositionSeconds();
+        bool restarted = false;
+        for (int tick = 0; tick < 200; ++tick) restarted = audio.ServiceDeviceChanges() || restarted;
+        const double after = audio.PositionSeconds();
+        Check(!restarted, "two hundred ticks restart nothing while the endpoint is healthy");
+        if (before >= 0.0 && after >= 0.0)
+            Check(after >= before, "servicing device changes does not move the clock backwards");
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

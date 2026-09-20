@@ -33,7 +33,7 @@ constexpr VideoDecoder::Settings::FaultInjection kVideoFaults{};
 static_assert(kVideoFaults.resume == VideoDecoder::FailureStage::None);
 
 constexpr AudioPlayer::Settings::FaultInjection kAudioFaults{};
-static_assert(!kAudioFaults.disableWaveOut);
+static_assert(!kAudioFaults.disableAudioDevice);
 static_assert(!kAudioFaults.failTerminateJob);
 static_assert(!kAudioFaults.failInitialProcessWait);
 static_assert(!kAudioFaults.failGetExitCodeProcess);
@@ -46,7 +46,7 @@ bool ProductionDefaults()
     const VideoDecoder::Settings video{};
     const AudioPlayer::Settings audio{};
     return video.faults.resume == VideoDecoder::FailureStage::None &&
-        !audio.faults.disableWaveOut && !audio.faults.failTerminateJob &&
+        !audio.faults.disableAudioDevice && !audio.faults.failTerminateJob &&
         !audio.faults.failInitialProcessWait && !audio.faults.failGetExitCodeProcess &&
         !audio.faults.failFinalProcessWait && !audio.faults.failInitialReaderWait &&
         !audio.faults.failFinalReaderWait;

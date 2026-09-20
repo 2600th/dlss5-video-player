@@ -143,7 +143,7 @@ struct AudioPlayerTestAccess {
         bool failFinalReaderWait = false)
     {
         AudioPlayer::Settings settings;
-        settings.helperDirectory=helperDirectory.wstring();settings.faults.disableWaveOut=true;
+        settings.helperDirectory=helperDirectory.wstring();settings.faults.disableAudioDevice=true;
         settings.faults.failTerminateJob=failTerminateJob;
         settings.faults.failInitialProcessWait=failInitialProcessWait;
         settings.faults.failGetExitCodeProcess=failGetExitCodeProcess;

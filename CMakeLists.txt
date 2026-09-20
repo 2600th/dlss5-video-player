@@ -142,7 +142,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/TemporalGuides.h
     src/PixelLayout.h
     src/ParallelFor.h
-    src/AudioPlayer.cpp
+    src/AudioPlayer.cpp src/WasapiRenderer.cpp
     src/AudioPlayer.h
     src/Log.h
     src/Localization.h
@@ -569,7 +569,7 @@ if(BUILD_TESTING)
     # is computed from carried one assertion, that a number handed to Seek was
     # stored. This needs a real render endpoint, so it is labelled `audio` and
     # skips (125) where there is none.
-    add_executable(AudioClockSmoke tests/AudioClockSmoke.cpp src/AudioPlayer.cpp)
+    add_executable(AudioClockSmoke tests/AudioClockSmoke.cpp src/AudioPlayer.cpp src/WasapiRenderer.cpp)
     target_include_directories(AudioClockSmoke PRIVATE src)
     target_compile_definitions(AudioClockSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(AudioClockSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
@@ -622,7 +622,7 @@ if(BUILD_TESTING)
         src/VideoDecoder.h
         src/MediaSource.cpp
         src/CompletionRegistry.h
-        src/AudioPlayer.cpp
+        src/AudioPlayer.cpp src/WasapiRenderer.cpp
         src/AudioPlayer.h
         src/NetworkMediaTransaction.h
         src/D3D12FenceWait.h

@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <iterator>
 #include <chrono>
+#include <cstddef>
+#include <thread>
 
 namespace fs = std::filesystem;
 static std::wstring Q(const std::wstring& s) { return L"\"" + s + L"\""; }
@@ -20,10 +22,7 @@ AudioPlayer::ReaderState::~ReaderState()
     if (stdoutPipe && !CloseHandle(stdoutPipe)) LOG("Audio: CloseHandle(stdout) failed winerr=" << GetLastError());
     if (process && !CloseHandle(process)) LOG("Audio: CloseHandle(process) failed winerr=" << GetLastError());
     if (job && !CloseHandle(job)) LOG("Audio: CloseHandle(job) failed winerr=" << GetLastError());
-    if (waveOut) {
-        const MMRESULT closed = waveOutClose(waveOut);
-        if (closed != MMSYSERR_NOERROR) LOG("Audio: waveOutClose failed result=" << closed);
-    }
+    renderer.reset();
     if (completed && !CloseHandle(completed)) LOG("Audio: CloseHandle(completed) failed winerr=" << GetLastError());
 }
 
@@ -52,33 +51,33 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
 
     auto reader=std::make_shared<ReaderState>();
-    reader->disableWaveOut=m_settings.faults.disableWaveOut;
+    reader->disableAudioDevice=m_settings.faults.disableAudioDevice;
     reader->paused=state==AudioStartState::Paused;
     reader->completed=CreateEventW(nullptr,TRUE,FALSE,nullptr);
     if(!reader->completed){LOG("Audio: CreateEvent(reader completion) failed winerr="<<GetLastError());return false;}
 
-    WAVEFORMATEX fmt{};
-    fmt.wFormatTag = WAVE_FORMAT_PCM;
-    fmt.nChannels = 2;
-    fmt.nSamplesPerSec = 48000;
-    fmt.wBitsPerSample = 16;
-    fmt.nBlockAlign = fmt.nChannels * fmt.wBitsPerSample / 8;
-    fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
-    if(!reader->disableWaveOut){
-        if (waveOutOpen(&reader->waveOut, WAVE_MAPPER, &fmt, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-            reader->waveOut = nullptr;LOG("Audio: waveOutOpen failed.");return false;
-        }
-        DWORD volume=DWORD(m_volume*65535.0f+0.5f);
-        if(waveOutSetVolume(reader->waveOut,MAKELONG(volume,volume))!=MMSYSERR_NOERROR)LOG("Audio: initial volume failed.");
-        if(reader->paused&&waveOutPause(reader->waveOut)!=MMSYSERR_NOERROR){LOG("Audio: initial pause failed.");return false;}
+    // The endpoint is opened first so ffmpeg can be told to produce exactly
+    // the mix format, rather than the fixed 16-bit 48 kHz waveOut was opened
+    // at and Windows then converted again.
+    WasapiRenderer::Format format{};
+    if(!reader->disableAudioDevice){
+        reader->renderer=std::make_unique<WasapiRenderer>();
+        if(!reader->renderer->Open()){reader->renderer.reset();LOG("Audio: the render endpoint could not be opened.");return false;}
+        format=reader->renderer->CurrentFormat();
+        reader->sampleRate=format.sampleRate;
+        reader->renderer->SetVolume(m_volume);
+        // Started only when playing: a paused stream that was started would
+        // run the endpoint dry and advance its clock over silence.
+        if(!reader->paused&&!reader->renderer->Start()){LOG("Audio: the endpoint refused to start.");return false;}
     }
-    if (!StartProcess(seekSeconds,reader)) return false;
+    if (!StartProcess(seekSeconds,reader,format)) return false;
     m_reader=reader;
     try{m_thread=std::thread(&AudioPlayer::ReaderThread,reader);}catch(...){StopProcess(reader);m_reader.reset();throw;}
     return true;
 }
 
-bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderState>& state) {
+bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderState>& state,
+                               const WasapiRenderer::Format& format) {
     SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     HANDLE readPipe = nullptr, writePipe = nullptr;
     if (!CreatePipe(&readPipe, &writePipe, &sa, 1024 * 1024)) return false;
@@ -97,8 +96,16 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     // the same input options VideoDecoder and MediaPipeline put ahead of theirs.
     if (_wcsnicmp(m_path.c_str(), L"https://", 8) == 0 || _wcsnicmp(m_path.c_str(), L"http://", 7) == 0)
         args << L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
+    // Matching the endpoint's mix format means neither ffmpeg nor the Windows
+    // mixer resamples or requantizes: the samples the decoder produces are the
+    // samples the endpoint is handed. With the device disabled there is no
+    // format to match, so the old fixed one keeps that path unchanged.
+    const uint32_t rate = format.Valid() ? format.sampleRate : 48000u;
+    const uint16_t channels = format.Valid() ? format.channels : uint16_t{2};
+    const bool asFloat = format.Valid();
     args << L"-i " << Q(m_path)
-         << L" -map 0:a:0? -vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le -f s16le pipe:1";
+         << L" -map 0:a:0? -vn -sn -dn -ac " << channels << L" -ar " << rate
+         << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
     HANDLE job=CreateJobObjectW(nullptr,nullptr);if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
@@ -111,7 +118,7 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
     if(ResumeThread(pi.hThread)==DWORD(-1)){LOG("Audio: ResumeThread failed winerr="<<GetLastError());if(!TerminateJobObject(job,1))LOG("Audio: failed to terminate suspended job winerr="<<GetLastError());WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
     CloseHandle(pi.hThread);state->process=pi.hProcess;state->stdoutPipe=readPipe;state->job=job;
-    LOG("Audio: FFmpeg PCM/WaveOut path started at " << seekSeconds << " s.");
+    LOG("Audio: FFmpeg PCM path started at " << seekSeconds << " s.");
     return true;
 }
 
@@ -164,6 +171,12 @@ void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
             LOG("Audio: ffmpeg exit code unavailable winerr=" << GetLastError());
         else if (exitCode == STILL_ACTIVE)
             LOG("Audio: reader ended while ffmpeg was still running; there will be no sound from here.");
+        else if (exitCode == DWORD(-22))
+            // EINVAL, and on this command line it means ffmpeg mapped no audio
+            // stream: `-map 0:a:0?` is optional, so a video-only source leaves
+            // the output with nothing in it. Worth saying plainly - the old
+            // wording reported a normal silent film as a failure, in a number.
+            LOG("Audio: the source has no audio track (ffmpeg mapped no stream); playing silent.");
         else if (exitCode != 0)
             LOG("Audio: ffmpeg exited with code " << exitCode << "; there will be no sound from here.");
     }
@@ -171,89 +184,133 @@ void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
 }
 
 void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
-    constexpr size_t BufferCount = 8;
-    constexpr size_t BytesPerBuffer = 16384; // ~85 ms stereo/48k/16-bit
-    struct Slot { std::vector<char> bytes; WAVEHDR hdr{}; bool prepared=false; };
-    Slot slots[BufferCount];
-    for (auto& s : slots) { s.bytes.resize(BytesPerBuffer); s.hdr.lpData = s.bytes.data(); s.hdr.dwBufferLength = 0; }
-    size_t index = 0;
+    // Event-driven: the endpoint signals when it wants more and says how much,
+    // so this fills exactly the space available instead of pushing fixed 16 KB
+    // buffers at it and sleeping. The old ring carried 682 ms of queue for no
+    // benefit the clock could see - waveOutGetPosition reports samples PLAYED
+    // either way - and the depth is now whatever the engine period is, which
+    // the log records at Open.
+    WasapiRenderer* const renderer = state->renderer.get();
+    const uint32_t bytesPerFrame = renderer ? renderer->CurrentFormat().BytesPerFrame() : 4;
+
+    // Whole frames only: the endpoint is handed frames, and the pipe delivers
+    // arbitrary byte counts, so a partial frame has to be carried over.
+    std::vector<std::byte> pending;
+    std::vector<std::byte> chunk;
+
+    // With no endpoint the pipe is still drained, so the process and job
+    // teardown paths behave exactly as they do with one.
+    constexpr DWORD kNoDeviceSliceBytes = 16384;
 
     while (!state->stop) {
-        Slot& s = slots[index];
-        if (s.prepared) {
-            while (!state->stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
-            if (state->stop) break;
-            { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(state->waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: unprepare failed result="<<unprepared); }
-            s.prepared = false; s.hdr = {}; s.hdr.lpData = s.bytes.data();
+        uint32_t framesWanted = 0;
+        if (renderer) {
+            // A paused stream never signals, so the wait times out and the
+            // loop comes back to check the stop flag.
+            if (!renderer->WaitForSpace(20, framesWanted)) {
+                if (renderer->DeviceLost()) { state->deviceLost = true; break; }
+                LOG("Audio: the endpoint stopped accepting frames; there will be no sound from here.");
+                break;
+            }
+            if (state->paused) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); continue; }
+            if (!framesWanted) continue;
         }
 
-        size_t total = 0;
-        while (!state->stop && total < BytesPerBuffer) {
-            DWORD available=0;
-            if(!PeekNamedPipe(state->stdoutPipe,nullptr,0,nullptr,&available,nullptr)){
-                const DWORD error=GetLastError();if(error!=ERROR_BROKEN_PIPE)LOG("Audio: PeekNamedPipe failed winerr="<<error);break;
+        const size_t wantedBytes = renderer ? size_t(framesWanted) * bytesPerFrame
+                                            : size_t(kNoDeviceSliceBytes);
+        chunk.assign(pending.begin(), pending.end());
+        pending.clear();
+
+        bool ended = false;
+        while (!state->stop && chunk.size() < wantedBytes) {
+            DWORD available = 0;
+            if (!PeekNamedPipe(state->stdoutPipe, nullptr, 0, nullptr, &available, nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_BROKEN_PIPE) LOG("Audio: PeekNamedPipe failed winerr=" << error);
+                ended = true; break;
             }
-            if(available==0){
-                if(state->process&&WaitForSingleObject(state->process,0)==WAIT_OBJECT_0)break;
-                Sleep(2);continue;
+            if (!available) {
+                if (state->process && WaitForSingleObject(state->process, 0) == WAIT_OBJECT_0) { ended = true; break; }
+                // Nothing to render yet. Handing the endpoint silence here
+                // would advance the clock over audio that has not arrived.
+                break;
             }
-            const DWORD want=static_cast<DWORD>(std::min<size_t>(BytesPerBuffer-total,available));DWORD got=0;
-            if(!ReadFile(state->stdoutPipe,s.bytes.data()+total,want,&got,nullptr)){const DWORD error=GetLastError();if(error!=ERROR_OPERATION_ABORTED&&error!=ERROR_BROKEN_PIPE)LOG("Audio: ReadFile failed winerr="<<error);break;}
-            if(got==0)break;
-            total += got;
+            const size_t offset = chunk.size();
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(wantedBytes - offset, available));
+            chunk.resize(offset + want);
+            DWORD got = 0;
+            if (!ReadFile(state->stdoutPipe, chunk.data() + offset, want, &got, nullptr)) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_OPERATION_ABORTED && error != ERROR_BROKEN_PIPE)
+                    LOG("Audio: ReadFile failed winerr=" << error);
+                chunk.resize(offset);
+                ended = true; break;
+            }
+            chunk.resize(offset + got);
+            if (!got) { ended = true; break; }
         }
-        if (state->stop || total == 0) break;
-        state->hasAudioData = true;
-        if(state->disableWaveOut)continue;
-        s.hdr.dwBufferLength = DWORD(total);
-        {
-            std::lock_guard<std::mutex> lock(state->waveMutex);
-            // Re-check under the same lock used by Stop() before submitting audio.
-            // Once Stop() has set m_stop and reset WaveOut, no late buffer can be queued.
-            if (state->stop) break;
-            if (const MMRESULT prepared=waveOutPrepareHeader(state->waveOut, &s.hdr, sizeof(s.hdr)); prepared != MMSYSERR_NOERROR) { LOG("Audio: waveOutPrepareHeader failed result="<<prepared<<"; audio stops here."); break; }
-            s.prepared = true;
-            if (const MMRESULT written=waveOutWrite(state->waveOut, &s.hdr, sizeof(s.hdr)); written != MMSYSERR_NOERROR) { LOG("Audio: waveOutWrite failed result="<<written<<"; the output device has most likely gone away."); break; }
-            if(!state->paused)++state->submittedBuffers;
+
+        if (state->stop) break;
+        if (!chunk.empty()) state->hasAudioData = true;
+
+        if (!renderer) {
+            if (ended && chunk.empty()) break;
+            if (chunk.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
         }
-        index = (index + 1) % BufferCount;
+
+        const uint32_t wholeFrames = static_cast<uint32_t>(chunk.size() / bytesPerFrame);
+        const size_t wholeBytes = size_t(wholeFrames) * bytesPerFrame;
+        if (wholeFrames) {
+            if (!renderer->Write(chunk.data(), wholeFrames)) {
+                if (renderer->DeviceLost()) { state->deviceLost = true; break; }
+                LOG("Audio: writing to the endpoint failed; there will be no sound from here.");
+                break;
+            }
+            if (!state->paused) ++state->submittedBuffers;
+        }
+        // The tail of a partial frame waits for the rest rather than being
+        // rendered as a fraction of a sample.
+        pending.assign(chunk.begin() + static_cast<ptrdiff_t>(wholeBytes), chunk.end());
+
+        if (ended && pending.empty() && !wholeFrames) break;
+        if (!wholeFrames) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    // On natural EOF, drain the queued WaveOut buffers instead of calling waveOutReset().
-    // Resetting here would snap TIME_SAMPLES back to zero and make the audio-master clock
-    // jump backwards during the last video frames.  Stop()/Seek() already perform an
-    // explicit reset, so only the cancellation path should discard queued audio.
-    if (!state->stop && state->waveOut) {
-        for (auto& s : slots) {
-            if (!s.prepared) continue;
-            while (!state->stop && !(s.hdr.dwFlags & WHDR_DONE)) Sleep(2);
-        }
-    }
-    for (auto& s : slots) {
-        if (s.prepared) {
-            { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT unprepared=waveOutUnprepareHeader(state->waveOut,&s.hdr,sizeof(s.hdr));if(unprepared!=MMSYSERR_NOERROR)LOG("Audio: final unprepare failed result="<<unprepared); }
-            s.prepared = false;
+    // On natural EOF the queued frames are left to play out rather than reset.
+    // Resetting here would snap the played-frame count to zero and make the
+    // audio-master clock jump backwards during the last video frames.
+    // Stop() and Seek() perform their own reset, so only cancellation
+    // discards queued audio.
+    if (!state->stop && renderer && !state->deviceLost) {
+        uint64_t played = 0, previous = ~uint64_t{0};
+        // Bounded: at most the endpoint buffer plus slack, polled until the
+        // count stops moving.
+        for (int idle = 0; idle < 200 && !state->stop; ++idle) {
+            if (!renderer->PlayedFrames(played)) break;
+            if (played == previous) break;
+            previous = played;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
 }
 
 double AudioPlayer::PositionSeconds() const {
     const auto state=m_reader;
-    if (!state || !state->waveOut || !state->hasAudioData.load()) return -1.0;
-    MMTIME mt{}; mt.wType = TIME_SAMPLES;
-    { std::lock_guard<std::mutex> lock(state->waveMutex);
-      if (waveOutGetPosition(state->waveOut, &mt, sizeof(mt)) != MMSYSERR_NOERROR || mt.wType != TIME_SAMPLES)
-          return -1.0; }
-    const double position = m_seekBaseSec + double(mt.u.sample) / 48000.0;
+    if (!state || !state->renderer || !state->sampleRate || !state->hasAudioData.load()) return -1.0;
+    uint64_t played = 0;
+    if (!state->renderer->PlayedFrames(played)) return -1.0;
+    const double position = m_seekBaseSec + double(played) / double(state->sampleRate);
     // hasAudioData is set once and cleared only by Stop(), so a reader thread
-    // that has ended - pipe EOF, a dead ffmpeg child, waveOutWrite failing
-    // after a device change - leaves the queued buffers to drain and this
+    // that has ended - pipe EOF, a dead ffmpeg child, a write failing after a
+    // device change - leaves the queued frames to drain and this
     // position frozen. Returning it anyway stopped video for the rest of the
     // file, because the presentation gate holds every frame until the clock
     // reaches its due time. -1.0 is what the caller already handles: it falls
     // back to the steady clock.
     const double now = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_lastKnownPosition.store(position);
     std::lock_guard<std::mutex> lock(m_clockMutex);
     if (audio_clock::Usable(m_clock, position, now, !state->paused.load())) {
         if (m_clockStalled) {
@@ -277,25 +334,39 @@ uint64_t AudioPlayer::SubmittedBuffers() const
     return state?state->submittedBuffers.load():0;
 }
 
-bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->waveOut;}
+bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->renderer!=nullptr;}
 bool AudioPlayer::HasAudioData() const {const auto state=m_reader;return state&&state->hasAudioData.load();}
 bool AudioPlayer::Paused() const {const auto state=m_reader;return state&&state->paused.load();}
 
 void AudioPlayer::Pause(bool paused) {
     const auto state=m_reader;if(!state)return;
     state->paused = paused;
-    if (!state->waveOut) return;
-    std::lock_guard<std::mutex> lock(state->waveMutex);
-    const MMRESULT result=paused?waveOutPause(state->waveOut):waveOutRestart(state->waveOut);
-    if(result!=MMSYSERR_NOERROR)LOG("Audio: pause/restart failed result="<<result);
+    if (!state->renderer) return;
+    // Stop holds the clock where it is and keeps the queued frames; Start
+    // resumes from there. Neither discards anything, so the position does not
+    // move across a pause.
+    if(!(paused?state->renderer->Stop():state->renderer->Start()))
+        LOG("Audio: pause/resume was refused by the endpoint.");
 }
 
 void AudioPlayer::SetVolume(float volume01) {
     m_volume = std::clamp(volume01, 0.0f, 1.0f);
-    const auto state=m_reader;if(!state||!state->waveOut)return;
-    DWORD v = DWORD(m_volume * 65535.0f + 0.5f);
-    std::lock_guard<std::mutex> lock(state->waveMutex);
-    if(waveOutSetVolume(state->waveOut,MAKELONG(v,v))!=MMSYSERR_NOERROR)LOG("Audio: set volume failed.");
+    const auto state=m_reader;if(!state||!state->renderer)return;
+    state->renderer->SetVolume(m_volume);
+}
+
+bool AudioPlayer::ServiceDeviceChanges() {
+    const auto state = m_reader;
+    // exchange, so two callers in the same frame cannot both restart.
+    if (!state || !state->deviceLost.exchange(false)) return false;
+    const double resumeAt = m_lastKnownPosition.load();
+    LOG("Audio: the render endpoint went away; restarting on the current default at "
+        << resumeAt << " s.");
+    // A full restart rather than splicing into the new device: its mix format
+    // may differ from the old one, and ffmpeg is producing the old format.
+    if (Seek(resumeAt)) return true;
+    LOG("Audio: could not restart on the new endpoint; playback continues without sound.");
+    return false;
 }
 
 bool AudioPlayer::Seek(double seconds) {
@@ -316,10 +387,11 @@ void AudioPlayer::Stop() {
     state->hasAudioData = false;
     state->paused = false;
 
-    // Release queued WaveOut buffers, then stop the owned writer/process tree.
-    // ReaderState keeps every handle and mutex alive if a failed wait forces a
-    // detach; the availability-driven reader then retires and closes them.
-    if (state->waveOut) { std::lock_guard<std::mutex> lock(state->waveMutex);const MMRESULT reset=waveOutReset(state->waveOut);if(reset!=MMSYSERR_NOERROR)LOG("Audio: waveOutReset failed result="<<reset); }
+    // Discard anything queued, then stop the owned writer/process tree.
+    // ReaderState keeps every handle alive if a failed wait forces a detach;
+    // the availability-driven reader then retires and closes them.
+    if (state->renderer && !state->renderer->Reset())
+        LOG("Audio: the endpoint refused a reset during stop.");
     StopProcess(state);
     if (m_thread.joinable()) {
         HANDLE readerThread=reinterpret_cast<HANDLE>(m_thread.native_handle());
