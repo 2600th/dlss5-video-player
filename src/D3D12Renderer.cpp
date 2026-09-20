@@ -876,7 +876,15 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
-    if(!bgra||bytes<SourceFrameBytes()||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
+    // Guides exist for the NGX evaluate and the two debug views that draw them.
+    // With Super Resolution off - the default on every load - nothing reads the
+    // motion or depth textures, so the CPU estimator, the upload and the two
+    // full-resolution passes below were work for no consumer: measured at 0.84 ms
+    // per frame on a 2560x1440 source, beside a 41.7 ms budget, plus about 44 MB
+    // of render-target writes.
+    const bool guidesUsed=GuidesRequired();
+    if(!bgra||bytes<SourceFrameBytes())return false;
+    if(guidesUsed&&(!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH))return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
@@ -887,7 +895,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         CopyMappedRows(m_uploadMapped[slot],m_sourceLumaFootprint,bgra,size_t(m_sourceW),m_sourceH);
         CopyMappedRows(m_uploadMapped[slot],m_sourceChromaFootprint,bgra+size_t(m_sourceW)*m_sourceH,size_t(m_sourceW),m_sourceH/2u);
     }else CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
-    CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
+    if(guidesUsed)CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
     if(!DeviceHR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
     if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset frame upload allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
@@ -917,9 +925,11 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
     }
 
-    if(!m_gridInCopyDest)Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
-    d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);
-    Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_gridInCopyDest=false;
+    if(guidesUsed){
+        if(!m_gridInCopyDest)Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        Barrier(pre,m_guideGrid.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_gridInCopyDest=false;
+    }
 
     // Hardware optical flow. The engine reads the decoded frame the list above just
     // produced, so the queue is signalled past that list and the engine waits on the
@@ -950,6 +960,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
 }
 
 bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandList*cmd,bool nvofFrame,bool temporalReset,float frameTimeMs,const FrameIdentity*identity){
+    const bool guidesUsed=GuidesRequired();
     // False on the first frame of a stream and on every cut: there is no previous frame
     // to compare against. The compact CPU grid is already all-zero on exactly those
     // frames, so falling back to it emits the zero motion the reset needs anyway.
@@ -958,6 +969,11 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // Full-resolution motion for NGX: from the flow engine when it ran this frame,
     // otherwise by expanding the compact CPU analysis grid. Depth below always comes
     // from that grid - the engine estimates motion and nothing else.
+    //
+    // Both are skipped outright when nothing will read them, which is every frame
+    // with Super Resolution off and no guide debug view: two full-resolution
+    // draws and a depth clear, about 44 MB of writes at 1440p, for no consumer.
+    if(guidesUsed){
     if(!m_guidesInRT)Barrier(cmd,m_motion.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_guidesInRT=true;
     D3D12_VIEWPORT gvp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT gsc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&gvp);cmd->RSSetScissorRects(1,&gsc);
     auto grt=RTV(FrameCount+1);cmd->OMSetRenderTargets(1,&grt,FALSE,nullptr);
@@ -995,6 +1011,7 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     auto dsvh=DSV();cmd->OMSetRenderTargets(0,nullptr,FALSE,&dsvh);cmd->ClearDepthStencilView(dsvh,D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(5));cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
+    }
 
     // No render target in this frame is cleared. Every pass here draws the same
     // full-screen triangle over a viewport the size of its whole target, with blending

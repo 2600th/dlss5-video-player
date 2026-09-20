@@ -287,6 +287,11 @@ public:
     // being unavailable for a runtime or device reason.
     bool DLSSSourceOutsideRange() const { return m_dlss.SourceOutsideSupportedRange(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
+    // Whether anything this frame will read the motion and depth textures: the
+    // NGX evaluate, or a debug view that draws them. False is the shipped
+    // default - SetDLSS(false) runs on every media load - and on that path the
+    // guide estimator, upload and two full-resolution passes have no consumer.
+    bool GuidesRequired() const { return DLSSEnabled() || m_debugView != DebugView::Final; }
     // Waits until the swapchain wants another frame, or `timeoutMs` elapses.
     // The message loop uses this instead of a sleep, so a player that is
     // keeping up blocks rather than spinning a core at 100%.
