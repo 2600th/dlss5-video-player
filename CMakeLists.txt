@@ -565,6 +565,21 @@ if(BUILD_TESTING)
     # so this stays at 640x360. The ceiling is for a slower card, not for a
     # hang; a hang is what the timeout is meant to catch.
     set_tests_properties(NeuralRangeRenderSmoke PROPERTIES TIMEOUT 600)
+    # A/V sync had no coverage at all: the audio clock every frame's due time
+    # is computed from carried one assertion, that a number handed to Seek was
+    # stored. This needs a real render endpoint, so it is labelled `audio` and
+    # skips (125) where there is none.
+    add_executable(AudioClockSmoke tests/AudioClockSmoke.cpp src/AudioPlayer.cpp)
+    target_include_directories(AudioClockSmoke PRIVATE src)
+    target_compile_definitions(AudioClockSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(AudioClockSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_libraries(AudioClockSmoke PRIVATE winmm shell32 ole32)
+    set_target_properties(AudioClockSmoke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/audio-clock/$<CONFIG>")
+    add_test(NAME AudioClockSmoke COMMAND AudioClockSmoke
+        "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/audio-clock")
+    set_tests_properties(AudioClockSmoke PROPERTIES LABELS audio SKIP_RETURN_CODE 125 TIMEOUT 300)
+
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

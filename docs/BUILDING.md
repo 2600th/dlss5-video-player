@@ -42,12 +42,13 @@ actually provides - `Visual Studio 17 2022` or `Visual Studio 18 2026` - or omit
 ```powershell
 cmake -S . -B build-upscaling -G 'Visual Studio 18 2026' -A x64 -DBUILD_TESTING=ON
 cmake --build build-upscaling --config Release --parallel
-ctest --test-dir build-upscaling -C Release -LE gpu --output-on-failure
+ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
 ```
 
-`-LE gpu` excludes the hardware smokes, which need an RTX card and the staged
-neural runtime; without it a machine with no adapter reports skips rather than
-passes. See below for running those deliberately.
+`-LE "gpu|audio"` excludes the hardware smokes, which need an RTX card with the
+staged neural runtime, and `AudioClockSmoke`, which needs an audio render
+endpoint. Without it a machine with neither reports skips rather than passes.
+See below for running those deliberately.
 
 Naming `Visual Studio 17 2022` on a machine that has only 2026 asks for the v143
 toolset that install does not carry, and MSBuild stops with MSB8020 before
@@ -75,8 +76,10 @@ Nine more are registered under the `gpu` label and need an RTX card with the
 neural runtime staged beside the executable: `UpscalingGpuSmoke`,
 `MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `DlssgProbeSmoke`,
 `DlssgEvaluateSmoke` and the four `FrameGenerationSmoke` registrations.
-`ctest -LE gpu` is the portable run CI performs; `ctest -L gpu` runs the
-hardware set. Each opens with a no-adapter check and reports itself skipped
+`ctest -LE "gpu|audio"` is the portable run CI performs; `ctest -L "gpu|audio"`
+runs the hardware set. `AudioClockSmoke` is the `audio` one: it asserts the
+audio clock every video frame's due time is computed from, against a real
+render endpoint. Each opens with a no-adapter check and reports itself skipped
 (exit 125) rather than failed on a machine without a GPU.
 
 `NeuralRangeRenderSmoke` is the one to keep green when touching the renderer,

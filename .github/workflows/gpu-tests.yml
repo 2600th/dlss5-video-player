@@ -1,16 +1,18 @@
 name: gpu-tests
 
-# The `gpu`-labelled suite, which the hosted runners cannot run.
+# The `gpu`- and `audio`-labelled suites, which the hosted runners cannot run.
 #
-# build-windows runs `ctest -LE gpu`, so nine tests - and with them almost all
-# of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and most complex
-# feature in the tree - carry no CI-executed assertion. They pass in about a
-# minute on an RTX 5090; the only thing missing was a machine to run them on.
+# build-windows runs `ctest -LE "gpu|audio"`, so ten tests - and with them
+# almost all of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and
+# most complex feature in the tree, plus the audio clock every video frame's
+# due time is computed from - carry no CI-executed assertion. They pass in
+# about a minute; the only thing missing was a machine to run them on.
 #
 # This needs a self-hosted runner labelled `gpu` with an RTX card, a driver new
-# enough for neural rendering, and the neural runtime staged the way
-# docs/BUILDING.md describes. Until one is registered the workflow simply never
-# runs, which is the same coverage as today and costs nothing.
+# enough for neural rendering, an audio render endpoint, and the neural runtime
+# staged the way docs/BUILDING.md describes. Until one is registered the
+# workflow simply never runs, which is the same coverage as today and costs
+# nothing.
 #
 # It is scheduled rather than run per push: a self-hosted GPU box is a shared,
 # serial resource, and these tests drive a real device. workflow_dispatch is
@@ -69,19 +71,19 @@ jobs:
       # rather than Failed, so a driver or hardware problem on the runner does
       # not read as a code regression. That is also why this step then refuses
       # a run in which nothing actually executed.
-      - name: Test GPU suite
+      - name: Test the hardware suite
         shell: cmd
-        run: ctest --test-dir build-upscaling -C Release -L gpu --output-on-failure
+        run: ctest --test-dir build-upscaling -C Release -L "gpu|audio" --output-on-failure
 
       - name: Refuse a run that skipped everything
         shell: powershell
         run: |
-          $output = & ctest --test-dir build-upscaling -C Release -L gpu -N
+          $output = & ctest --test-dir build-upscaling -C Release -L "gpu|audio" -N
           $total = ($output | Select-String 'Total Tests: (\d+)').Matches.Groups[1].Value
-          if ([int]$total -lt 9) { throw "Expected at least 9 gpu-labelled tests, saw $total." }
-          # -L gpu with every test skipped still exits 0, which would make a
-          # runner whose GPU fell out of the machine look green forever.
-          $ran = & ctest --test-dir build-upscaling -C Release -L gpu 2>&1 | Out-String
+          if ([int]$total -lt 10) { throw "Expected at least 10 gpu/audio-labelled tests, saw $total." }
+          # A label filter with every test skipped still exits 0, which would
+          # make a runner whose GPU fell out of the machine look green forever.
+          $ran = & ctest --test-dir build-upscaling -C Release -L "gpu|audio" 2>&1 | Out-String
           if ($ran -match '\(Skipped\)') {
-            throw "A gpu-labelled test skipped on the GPU runner: no D3D12 adapter was found. Fix the runner."
+            throw "A gpu/audio-labelled test skipped on the runner: no D3D12 adapter or no audio endpoint. Fix the runner."
           }

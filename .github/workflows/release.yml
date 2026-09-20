@@ -74,7 +74,7 @@ jobs:
 
       - name: Test Release
         shell: cmd
-        run: ctest --test-dir build-upscaling -C Release -LE gpu --output-on-failure
+        run: ctest --test-dir build-upscaling -C Release -LE "gpu|audio" --output-on-failure
 
       - name: Assemble the core package from the tested build
         shell: cmd
