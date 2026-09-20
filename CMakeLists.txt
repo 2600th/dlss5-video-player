@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+﻿cmake_minimum_required(VERSION 3.24)
 
 # VERSION is the single source of the release number: the release workflow gates
 # the tag against it, the assembler compares the built executable's version
@@ -24,9 +24,29 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 
+# A single-config generator with no CMAKE_BUILD_TYPE compiles with no /O2, no
+# /Ob2 and no NDEBUG - asserts live, every inline call real - and
+# `--build --config Release` is silently ignored there, so nothing says so.
+# build_windows.bat has a branch that passes no generator at all, which is
+# taken whenever cmake came from PATH, so this is reachable from the
+# documented build. A project that publishes measured numbers cannot have a
+# path that quietly produces an unoptimized binary.
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    message(STATUS "No CMAKE_BUILD_TYPE on a single-config generator; defaulting to Release.")
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type for single-config generators" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 # Source files are UTF-8 without a BOM. Do not let the Windows ANSI code page
 # reinterpret UI punctuation when compiling wide string literals.
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+
+# Compile a target's translation units in parallel. MSBuild's /m already runs
+# projects side by side; this is the other axis, and it matters here because
+# the same sources are compiled into twenty executables - 162 object files for
+# 31 sources - so the long pole is one project with many TUs, not many
+# projects.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/MP>)
 
 set(DLSS_SDK "${CMAKE_SOURCE_DIR}/external/DLSS" CACHE PATH "Path to NVIDIA/DLSS SDK checkout")
 if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")

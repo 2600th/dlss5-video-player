@@ -125,5 +125,16 @@ copy /y packaging\ReShade.ini build-upscaling\Release\neural-runtime\ReShade.ini
 if errorlevel 1 exit /b 1
 copy /y packaging\ReShadePreset.ini build-upscaling\Release\neural-runtime\ReShadePreset.ini >nul
 if errorlevel 1 exit /b 1
+rem A single-config generator puts the binary elsewhere and ignores --config
+rem Release without a word, so this line used to be printed for a path that
+rem need not exist. Check before claiming it.
+if not exist "build-upscaling\Release\DLSSVideoPlayer.exe" (
+  echo [ERROR] build-upscaling\Release\DLSSVideoPlayer.exe was not produced.
+  echo         The generator above is probably single-config ^(Ninja or NMake^),
+  echo         which ignores --config Release. Delete build-upscaling and run
+  echo         again from a Developer Command Prompt, or pass a Visual Studio
+  echo         generator explicitly.
+  exit /b 1
+)
 echo [OK] build-upscaling\Release\DLSSVideoPlayer.exe
 echo Release packaging is a separate, allowlisted step: package_release.bat
