@@ -1,4 +1,5 @@
 #include "DLSSBackend.h"
+#include "PlatformPaths.h"
 #include "Log.h"
 #include "UpscalingPolicy.h"
 #include <windows.h>
@@ -21,11 +22,18 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     m_outputH = outputH;
     m_quality = quality;
 
-    wchar_t exePath[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    std::filesystem::path logDir = std::filesystem::path(exePath).parent_path() / L"ngx_logs";
+    // A MAX_PATH buffer with no return check used to put ngx_logs in the wrong
+    // place on any install deeper than 260 characters: GetModuleFileNameW fills
+    // the buffer, returns the size it was given, and parent_path() of that
+    // truncation is a different directory. ModuleDirectory refuses a truncated
+    // answer, and NGX is given no log directory at all rather than a wrong one.
+    const auto moduleDirectory = platform_paths::ModuleDirectory();
     std::error_code ec;
-    std::filesystem::create_directories(logDir, ec);
+    std::filesystem::path logDir;
+    if (moduleDirectory) {
+        logDir = *moduleDirectory / L"ngx_logs";
+        std::filesystem::create_directories(logDir, ec);
+    }
 
     // Custom engine/project identity is the officially supported NGX route for
     // non-engine samples. It is intentionally stable across runs.

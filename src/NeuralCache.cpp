@@ -1,4 +1,5 @@
 #include "NeuralCache.h"
+#include "PlatformPaths.h"
 #include "GuideControls.h"
 #include "Log.h"
 
@@ -798,12 +799,9 @@ bool IsReusableNeuralCacheManifest(const NeuralCacheManifest& manifest)
 
 std::optional<std::filesystem::path> NeuralCacheManager::DefaultRoot()
 {
-    std::wstring executable(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
-        static_cast<DWORD>(executable.size()));
-    if (!length || length >= executable.size()) return std::nullopt;
-    executable.resize(length);
-    return std::filesystem::path(executable).parent_path() / L"cache" / L"v1";
+    const auto directory = platform_paths::ModuleDirectory();
+    if (!directory) return std::nullopt;
+    return *directory / L"cache" / L"v1";
 }
 
 std::optional<std::filesystem::path> NeuralCacheManager::LegacyDefaultRoot()

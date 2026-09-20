@@ -1,4 +1,5 @@
 #include "VideoDecoder.h"
+#include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "FrameRatePolicy.h"
 #include "Log.h"
@@ -257,9 +258,8 @@ std::wstring VideoDecoder::FindTool(const wchar_t* exeName) const {
         if(fs::is_regular_file(candidate,ec))return candidate.wstring();
         return L"";
     }
-    wchar_t modulePath[32768]{};
-    if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
-        const fs::path base = fs::path(modulePath).parent_path();
+    if (const auto moduleDirectory = platform_paths::ModuleDirectory()) {
+        const fs::path base = *moduleDirectory;
         // neural-runtime is a contained helper package: use only the explicit
         // parent copy shared with the player, never an unrelated PATH tool.
         if (base.filename() == L"neural-runtime") {

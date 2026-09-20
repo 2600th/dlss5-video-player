@@ -1,4 +1,6 @@
 #pragma once
+#include "PlatformPaths.h"
+
 #include <windows.h>
 #include <shlobj.h>
 #include <fstream>
@@ -41,11 +43,7 @@ private:
     static constexpr std::uintmax_t kMaxBytes = 8u * 1024u * 1024u;
 
     static std::filesystem::path ModuleDirectory() {
-        std::wstring path(32768, L'\0');
-        const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-        if (!length || length >= path.size()) return {};
-        path.resize(length);
-        return std::filesystem::path(path).parent_path();
+        return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
     }
 
     // %LOCALAPPDATA%\DLSSVideoPlayer, the same fallback the neural cache uses
@@ -70,11 +68,9 @@ private:
     // The helper ships into neural-runtime/ beside the player, so it writes its
     // own file rather than truncating the player's.
     static std::wstring FileName() {
-        std::wstring path(32768, L'\0');
-        const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-        if (!length || length >= path.size()) return L"DLSSVideoPlayer.log";
-        path.resize(length);
-        std::wstring stem = std::filesystem::path(path).stem().wstring();
+        const auto path = platform_paths::ModulePath();
+        if (!path) return L"DLSSVideoPlayer.log";
+        const std::wstring stem = path->stem().wstring();
         return stem.empty() ? std::wstring(L"DLSSVideoPlayer.log") : stem + L".log";
     }
 

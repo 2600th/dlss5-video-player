@@ -1,4 +1,5 @@
 #include "YouTubeResolver.h"
+#include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 
 #include <winhttp.h>
@@ -62,12 +63,7 @@ private:
 
 std::filesystem::path module_directory()
 {
-    std::wstring path(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, path.data(),
-                                            static_cast<DWORD>(path.size()));
-    if (length == 0 || length >= path.size()) return {};
-    path.resize(length);
-    return std::filesystem::path(std::move(path)).parent_path();
+    return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
 }
 
 std::filesystem::path final_normalized_path(HANDLE handle)

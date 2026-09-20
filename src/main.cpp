@@ -28,6 +28,7 @@
 #include <mutex>
 #include <system_error>
 #include "VideoDecoder.h"
+#include "PlatformPaths.h"
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "AudioPlayer.h"
@@ -882,10 +883,9 @@ static std::wstring Win32Error(std::wstring_view operation) {
 }
 
 static bool CurrentExecutablePath(std::filesystem::path& executable,std::wstring& error) {
-    std::wstring path(32768,L'\0');
-    const DWORD length=GetModuleFileNameW(nullptr,path.data(),static_cast<DWORD>(path.size()));
-    if(length==0 || length>=path.size()) { error=Win32Error(L"Resolving the player executable"); return false; }
-    path.resize(length); executable=std::filesystem::path(path);
+    const auto path=platform_paths::ModulePath();
+    if(!path) { error=Win32Error(L"Resolving the player executable"); return false; }
+    executable=*path;
     if(!executable.is_absolute()) { error=L"The player executable path was not absolute"; return false; }
     return true;
 }
@@ -2626,9 +2626,10 @@ private:
     }
 
     std::filesystem::path SettingsPath()const{
-        wchar_t p[32768]{};DWORD n=GetModuleFileNameW(nullptr,p,static_cast<DWORD>(std::size(p)));
-        if(!n||n>=std::size(p))return std::filesystem::current_path()/L"DLSSVideoPlayer.ini";
-        return std::filesystem::path(p).parent_path()/L"DLSSVideoPlayer.ini";
+        // current_path() rather than nothing when the module cannot be
+        // located: the settings file is not worth refusing to start over.
+        const auto directory=platform_paths::ModuleDirectory();
+        return (directory?*directory:std::filesystem::current_path())/L"DLSSVideoPlayer.ini";
     }
 
     float ReadIniFloat(const wchar_t* section,const wchar_t* key,float fallback)const{

@@ -1,4 +1,5 @@
 #include "CrashDump.h"
+#include "PlatformPaths.h"
 #include "Log.h"
 #include "NeuralPreflight.h"
 #include "NeuralPreflightProbe.h"
@@ -31,11 +32,9 @@ namespace {
 
 std::filesystem::path ModuleDirectory()
 {
-    std::wstring value(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, value.data(), static_cast<DWORD>(value.size()));
-    if (!length || length >= value.size()) return {};
-    value.resize(length);
-    return std::filesystem::path(value).parent_path();
+    // platform_paths distinguishes "could not be determined" from a truncated
+    // path; these callers have always treated an empty path as the former.
+    return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
 }
 
 // Process creation to now. The loader window - the antivirus scan of the

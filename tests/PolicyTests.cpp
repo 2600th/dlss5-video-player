@@ -1,3 +1,4 @@
+#include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
 
@@ -2133,6 +2134,89 @@ void harness_isolates_a_failing_case_from_the_ones_after_it_test()
     CHECK(report.find("c0000005") != std::string::npos);
     // The case after the crash ran and did not fail.
     CHECK(report.find("harness_probe_passes") == std::string::npos);
+}
+
+// DLSSBackend.cpp and DLSSGBackend.cpp were byte-identical and both wrong:
+//
+//     wchar_t exePath[MAX_PATH]{};
+//     GetModuleFileNameW(nullptr, exePath, MAX_PATH);   // no return check
+//
+// On a path longer than 260 characters GetModuleFileNameW fills the buffer,
+// returns exactly the size it was given, sets ERROR_INSUFFICIENT_BUFFER, and
+// - before Windows 10 - does not even null-terminate. Both sites then took
+// parent_path() of a truncated string and created ngx_logs somewhere else
+// entirely. Fourteen sites called this function across three incompatible
+// buffer strategies.
+//
+// The query is injected so the growth loop is testable without a 300-character
+// install directory.
+void module_path_grows_past_max_path_test()
+{
+    // Longer than kInitialPathCharacters, so the loop has to grow at least
+    // once; 400 would have fit the first buffer and proved nothing.
+    const std::wstring actual(700, L'x');
+    int calls = 0;
+    const auto queried = platform_paths::ModulePathWith(
+        [&](wchar_t* buffer, uint32_t size) -> uint32_t {
+            ++calls;
+            if (actual.size() >= size) {          // truncated, exactly as Win32 reports it
+                std::copy_n(actual.begin(), size, buffer);
+                return size;
+            }
+            std::copy(actual.begin(), actual.end(), buffer);
+            buffer[actual.size()] = L'\0';
+            return static_cast<uint32_t>(actual.size());
+        });
+
+    CHECK(queried.has_value());
+    if (queried) CHECK_EQ(actual, queried->wstring());
+    // It grew rather than giving up on the first short answer.
+    CHECK(calls > 1);
+}
+
+// The whole bug: a return equal to the buffer size means truncation, never a
+// complete path. Accepting it is what put ngx_logs in the wrong directory.
+void module_path_never_accepts_a_filled_buffer_test()
+{
+    const auto queried = platform_paths::ModulePathWith(
+        [](wchar_t* buffer, uint32_t size) -> uint32_t {
+            std::fill_n(buffer, size, L'y');   // always exactly full: never enough room
+            return size;
+        });
+    CHECK(!queried.has_value());
+}
+
+void module_path_reports_a_failed_query_test()
+{
+    int calls = 0;
+    const auto queried = platform_paths::ModulePathWith(
+        [&](wchar_t*, uint32_t) -> uint32_t { ++calls; return 0; });
+    CHECK(!queried.has_value());
+    // A hard failure is not retried at a larger size.
+    CHECK_EQ(1, calls);
+}
+
+void module_directory_is_the_parent_of_the_module_test()
+{
+    const auto directory = platform_paths::ModuleDirectoryWith(
+        [](wchar_t* buffer, uint32_t size) -> uint32_t {
+            const std::wstring path = LR"(C:\Program Files\Player\DLSSVideoPlayer.exe)";
+            if (path.size() >= size) return size;
+            std::copy(path.begin(), path.end(), buffer);
+            buffer[path.size()] = L'\0';
+            return static_cast<uint32_t>(path.size());
+        });
+    CHECK(directory.has_value());
+    if (directory) CHECK_EQ(std::wstring(LR"(C:\Program Files\Player)"), directory->wstring());
+}
+
+// The real module, which every production caller uses. It has to answer on
+// this machine or the fourteen call sites have no fallback.
+void module_directory_answers_for_this_process_test()
+{
+    const auto directory = platform_paths::ModuleDirectory();
+    CHECK(directory.has_value());
+    if (directory) CHECK(std::filesystem::exists(*directory));
 }
 
 // RecoverUnusableRenderer rebuilt into the SAME HWND. DXGI allows one
@@ -7850,6 +7934,11 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
     TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
     TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
+    TEST_CASE(module_path_grows_past_max_path_test),
+    TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
+    TEST_CASE(module_path_reports_a_failed_query_test),
+    TEST_CASE(module_directory_is_the_parent_of_the_module_test),
+    TEST_CASE(module_directory_answers_for_this_process_test),
     TEST_CASE(renderer_recovery_rebuilds_into_a_fresh_window_test),
     TEST_CASE(renderer_recovery_keeps_a_retained_renderers_window_test),
     TEST_CASE(renderer_recovery_destroys_the_old_window_once_its_renderer_is_gone_test),

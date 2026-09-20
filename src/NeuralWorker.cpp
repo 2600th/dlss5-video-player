@@ -1,4 +1,5 @@
 #include "NeuralWorker.h"
+#include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
 
@@ -1239,11 +1240,9 @@ struct ResidentNeuralHelper::Session {
 
 std::filesystem::path PlayerSettingsPath()
 {
-    std::wstring path(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (!length || length >= path.size()) return {};
-    path.resize(length);
-    return std::filesystem::path(path).parent_path() / L"DLSSVideoPlayer.ini";
+    const auto directory = platform_paths::ModuleDirectory();
+    if (!directory) return {};
+    return *directory / L"DLSSVideoPlayer.ini";
 }
 
 resident_helper::IdleVramPolicy ReadIdleVramPolicy(const std::filesystem::path& settingsIni)

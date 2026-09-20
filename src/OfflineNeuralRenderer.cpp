@@ -1,4 +1,5 @@
 #include "OfflineNeuralRenderer.h"
+#include "PlatformPaths.h"
 
 #include "Log.h"
 #include "PixelLayout.h"
@@ -2129,8 +2130,9 @@ private:
 
 std::filesystem::path ModuleDirectory()
 {
-    std::wstring path(32768,L'\0');const DWORD length=GetModuleFileNameW(nullptr,path.data(),DWORD(path.size()));
-    if(!length||length>=path.size())return {};path.resize(length);return std::filesystem::path(path).parent_path();
+    // platform_paths distinguishes "could not be determined" from a truncated
+    // path; these callers have always treated an empty path as the former.
+    return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
 }
 
 } // namespace

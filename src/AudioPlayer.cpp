@@ -1,4 +1,5 @@
 #include "AudioPlayer.h"
+#include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "Log.h"
 #include <filesystem>
@@ -31,9 +32,8 @@ std::wstring AudioPlayer::FindFFmpeg() const {
         const fs::path candidate=fs::path(m_settings.helperDirectory)/L"ffmpeg.exe";std::error_code error;
         return fs::is_regular_file(candidate,error)?candidate.wstring():std::wstring{};
     }
-    wchar_t modulePath[32768]{};
-    if (GetModuleFileNameW(nullptr, modulePath, static_cast<DWORD>(std::size(modulePath)))) {
-        fs::path base = fs::path(modulePath).parent_path();
+    if (const auto moduleDirectory = platform_paths::ModuleDirectory()) {
+        fs::path base = *moduleDirectory;
         const fs::path cands[] = { base / L"ffmpeg.exe", base / L"ffmpeg" / L"bin" / L"ffmpeg.exe",
                                    base.parent_path() / L"ffmpeg" / L"bin" / L"ffmpeg.exe" };
         for (const auto& p : cands) { std::error_code ec; if (fs::is_regular_file(p, ec)) return p.wstring(); }

@@ -1,4 +1,5 @@
 #include "MediaPipeline.h"
+#include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 
 #include <windows.h>
@@ -54,11 +55,9 @@ std::chrono::milliseconds MediaDeadline(double mediaSeconds, std::chrono::minute
 
 std::filesystem::path ModuleDirectory()
 {
-    std::wstring value(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, value.data(), static_cast<DWORD>(value.size()));
-    if (length == 0 || length >= value.size()) return {};
-    value.resize(length);
-    return std::filesystem::path(value).parent_path();
+    // platform_paths distinguishes "could not be determined" from a truncated
+    // path; these callers have always treated an empty path as the former.
+    return platform_paths::ModuleDirectory().value_or(std::filesystem::path{});
 }
 
 std::filesystem::path FindHelper(const std::filesystem::path& directory,
