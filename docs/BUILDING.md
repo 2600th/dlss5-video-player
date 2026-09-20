@@ -42,8 +42,12 @@ actually provides - `Visual Studio 17 2022` or `Visual Studio 18 2026` - or omit
 ```powershell
 cmake -S . -B build-upscaling -G 'Visual Studio 18 2026' -A x64 -DBUILD_TESTING=ON
 cmake --build build-upscaling --config Release --parallel
-ctest --test-dir build-upscaling -C Release --output-on-failure
+ctest --test-dir build-upscaling -C Release -LE gpu --output-on-failure
 ```
+
+`-LE gpu` excludes the hardware smokes, which need an RTX card and the staged
+neural runtime; without it a machine with no adapter reports skips rather than
+passes. See below for running those deliberately.
 
 Naming `Visual Studio 17 2022` on a machine that has only 2026 asks for the v143
 toolset that install does not carry, and MSBuild stops with MSB8020 before
@@ -67,11 +71,22 @@ frame identity, update checks, the release API surface, prerender, playback and
 native UI regressions. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
-Two more are registered under the `gpu` label and need an RTX card with the
-neural runtime staged beside the executable: `UpscalingGpuSmoke` and
-`MediaGpuSmoke`. `ctest -LE gpu` is the portable run CI performs; `ctest -L gpu`
-runs the pair. `UpscalingGpuSmoke.exe <clip> 1440 device-loss` additionally
-removes the D3D12 device mid-frame and checks the renderer's recovery.
+Nine more are registered under the `gpu` label and need an RTX card with the
+neural runtime staged beside the executable: `UpscalingGpuSmoke`,
+`MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `DlssgProbeSmoke`,
+`DlssgEvaluateSmoke` and the four `FrameGenerationSmoke` registrations.
+`ctest -LE gpu` is the portable run CI performs; `ctest -L gpu` runs the
+hardware set. Each opens with a no-adapter check and reports itself skipped
+(exit 125) rather than failed on a machine without a GPU.
+
+`NeuralRangeRenderSmoke` is the one to keep green when touching the renderer,
+the swapchain or the helper: it renders a *range*, which is what every live
+session does, and a range is the only shape of render that exercises preroll -
+frames evaluated and never captured. fd9279b broke exactly that while the
+whole suite stayed green.
+
+`UpscalingGpuSmoke.exe <clip> 1440 device-loss` additionally removes the D3D12
+device mid-frame and checks the renderer's recovery.
 CTest still does not establish visual quality. For changes to rendering, timing
 or decoding, also run the applicable GPU/media checks from the most recent of
 the dated [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).

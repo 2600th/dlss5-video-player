@@ -396,6 +396,21 @@ if(BUILD_TESTING)
     target_compile_options(MediaGpuSmoke PRIVATE /W4 /permissive- /EHsc)
     target_link_libraries(MediaGpuSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi)
     add_dependencies(MediaGpuSmoke NeuralWorker)
+
+    # Renders a RANGE through the real helper - the one shape of neural render
+    # nothing covered, and the one every live session performs. A range render
+    # begins with preroll frames that are evaluated and never captured, so
+    # nothing retires their submissions and the add-on's four-generation NR
+    # workset pool is exhausted before the first captured frame. That is what
+    # fd9279b broke while all 21 tests stayed green. See the comment at the top
+    # of the source.
+    add_executable(NeuralRangeRenderSmoke tests/NeuralRangeRenderSmoke.cpp
+        src/NeuralWorker.cpp src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)
+    target_include_directories(NeuralRangeRenderSmoke PRIVATE src)
+    target_compile_definitions(NeuralRangeRenderSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(NeuralRangeRenderSmoke PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(NeuralRangeRenderSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi)
+    add_dependencies(NeuralRangeRenderSmoke NeuralWorker)
     # The hardware smokes need an RTX GPU, a display, and (MediaGpuSmoke) the neural
     # runtime staged beside NeuralWorker.exe. They are labelled `gpu` so the portable
     # suite is `ctest -LE gpu` and the opt-in run on such a machine is `ctest -L gpu`.
@@ -403,6 +418,8 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4" 1440)
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
+    add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
+        "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-range-smoke")
     add_test(NAME DlssgProbeSmoke COMMAND DlssgProbeSmoke)
     add_test(NAME DlssgEvaluateSmoke COMMAND DlssgEvaluateSmoke)
     add_test(NAME FrameGenerationSmoke COMMAND FrameGenerationSmoke
@@ -542,8 +559,12 @@ if(BUILD_TESTING)
     # machine with no adapter skips rather than reporting five hard failures.
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
-        FrameGenerationSmokeStreamSource
+        FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke
         PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
+    # Seconds on an RTX 5090 - the trigger is the preroll, not the pixel count,
+    # so this stays at 640x360. The ceiling is for a slower card, not for a
+    # hang; a hang is what the timeout is meant to catch.
+    set_tests_properties(NeuralRangeRenderSmoke PROPERTIES TIMEOUT 600)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

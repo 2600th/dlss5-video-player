@@ -20,7 +20,9 @@ and the canonical `build-upscaling` commands.
 For code changes, build Release x64 and run the thirteen portable CTest suites
 (`ctest -LE gpu`). FFmpeg and FFprobe must be staged so the real-media suite runs
 rather than reporting itself skipped. For rendering, timing or decoding changes
-also run the two `gpu`-labelled smokes on an RTX card. Keep automated results
+also run the `gpu`-labelled smokes on an RTX card (`ctest -L gpu`); for
+renderer, swapchain or helper changes `NeuralRangeRenderSmoke` is the one that
+catches a dead neural path. Keep automated results
 separate from GPU and visual-quality claims.
 
 Check the behavior affected by the change: MP4/MKV playback, play/pause and

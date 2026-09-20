@@ -2,10 +2,10 @@ name: gpu-tests
 
 # The `gpu`-labelled suite, which the hosted runners cannot run.
 #
-# build-windows runs `ctest -LE gpu`, so eight tests - and with them almost all
+# build-windows runs `ctest -LE gpu`, so nine tests - and with them almost all
 # of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and most complex
-# feature in the tree - carry no CI-executed assertion. They pass in about 45
-# seconds on an RTX 5090; the only thing missing was a machine to run them on.
+# feature in the tree - carry no CI-executed assertion. They pass in about a
+# minute on an RTX 5090; the only thing missing was a machine to run them on.
 #
 # This needs a self-hosted runner labelled `gpu` with an RTX card, a driver new
 # enough for neural rendering, and the neural runtime staged the way
@@ -78,7 +78,7 @@ jobs:
         run: |
           $output = & ctest --test-dir build-upscaling -C Release -L gpu -N
           $total = ($output | Select-String 'Total Tests: (\d+)').Matches.Groups[1].Value
-          if ([int]$total -lt 8) { throw "Expected at least 8 gpu-labelled tests, saw $total." }
+          if ([int]$total -lt 9) { throw "Expected at least 9 gpu-labelled tests, saw $total." }
           # -L gpu with every test skipped still exits 0, which would make a
           # runner whose GPU fell out of the machine look green forever.
           $ran = & ctest --test-dir build-upscaling -C Release -L gpu 2>&1 | Out-String
