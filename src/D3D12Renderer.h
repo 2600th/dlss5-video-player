@@ -341,6 +341,13 @@ public:
 
     d3d12_renderer_detail::FenceWaitResult LastFenceWaitResult() const { return m_lastFenceWaitResult; }
     bool GpuUnusable() const { return m_gpuUnusable; }
+    // How many renderers this process has retained rather than destroyed,
+    // because their bounded GPU drain did not complete. A retained renderer
+    // still owns its swapchain, so the window underneath it must outlive it -
+    // which is the difference between recovery working and DXGI refusing the
+    // next CreateSwapChainForHwnd. Compare across a reset to learn whether
+    // that particular renderer actually died; see RecoverUnusableRenderer.
+    static uint32_t RetainedRendererCount() noexcept { return s_retainedRenderers.load(); }
     // GPU time between the timestamp queries bracketing the last resolved DLSS
     // Evaluate; 0 until the first evaluated frame's fence has completed.
     double LastNeuralGpuMs() const { return m_lastNeuralGpuMs; }

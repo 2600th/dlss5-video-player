@@ -1,3 +1,4 @@
+#include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
 
 #include "RuntimePolicy.h"
@@ -2132,6 +2133,119 @@ void harness_isolates_a_failing_case_from_the_ones_after_it_test()
     CHECK(report.find("c0000005") != std::string::npos);
     // The case after the crash ran and did not fail.
     CHECK(report.find("harness_probe_passes") == std::string::npos);
+}
+
+// RecoverUnusableRenderer rebuilt into the SAME HWND. DXGI allows one
+// flip-model swapchain per window, and the renderer being retired may still
+// own one: D3D12Renderer's deleter deliberately retains a renderer whose
+// bounded GPU drain did not complete, because deleting it would free
+// resources its command lists are still reading. So the rebuild met
+// DXGI_ERROR_INVALID_CALL, the media unloaded, and the user was told the GPU
+// was lost - on the one path that exists to survive exactly that.
+//
+// Every other renderer-swap path in the player (EnableUpscaling,
+// CreateRendererCandidate) already creates a fresh child window. Only
+// recovery reused, and it is the path no one exercises by hand.
+//
+// The window work is injected so the ordering is testable without a device,
+// a display or a message loop - the same shape as the fence-teardown cases
+// above.
+void renderer_recovery_rebuilds_into_a_fresh_window_test()
+{
+    HWND retiring = reinterpret_cast<HWND>(0x1001);
+    HWND initializedWith = nullptr;
+    int created = 0;
+
+    const auto result = renderer_recovery::Rebuild(
+        retiring,
+        [&] { ++created; return reinterpret_cast<HWND>(0x2002); },
+        [](HWND) {},
+        [] { return true; },
+        [&](HWND window) { initializedWith = window; return true; });
+
+    CHECK_EQ(1, created);
+    CHECK(result.outcome == renderer_recovery::Outcome::Rebuilt);
+    // The whole bug in one assertion.
+    CHECK(initializedWith != retiring);
+    CHECK_EQ(reinterpret_cast<HWND>(0x2002), initializedWith);
+    CHECK_EQ(reinterpret_cast<HWND>(0x2002), result.window);
+}
+
+// A renderer that could not be drained is kept alive on purpose, and its
+// swapchain with it. Destroying the window underneath it would leave that
+// swapchain pointing at a dead HWND.
+void renderer_recovery_keeps_a_retained_renderers_window_test()
+{
+    HWND retiring = reinterpret_cast<HWND>(0x1001);
+    int destroyed = 0;
+
+    const auto result = renderer_recovery::Rebuild(
+        retiring,
+        [] { return reinterpret_cast<HWND>(0x2002); },
+        [&](HWND) { ++destroyed; },
+        [] { return false; },   // retained: the drain did not complete
+        [](HWND) { return true; });
+
+    CHECK_EQ(0, destroyed);
+    CHECK(!result.oldWindowDestroyed);
+    // The rebuild still happens; it just happens somewhere else.
+    CHECK(result.outcome == renderer_recovery::Outcome::Rebuilt);
+    CHECK_EQ(reinterpret_cast<HWND>(0x2002), result.window);
+}
+
+void renderer_recovery_destroys_the_old_window_once_its_renderer_is_gone_test()
+{
+    HWND retiring = reinterpret_cast<HWND>(0x1001);
+    std::vector<HWND> destroyed;
+
+    const auto result = renderer_recovery::Rebuild(
+        retiring,
+        [] { return reinterpret_cast<HWND>(0x2002); },
+        [&](HWND window) { destroyed.push_back(window); },
+        [] { return true; },
+        [](HWND) { return true; });
+
+    CHECK_EQ(size_t{1}, destroyed.size());
+    if (!destroyed.empty()) CHECK_EQ(retiring, destroyed.front());
+    CHECK(result.oldWindowDestroyed);
+}
+
+// No window means no rebuild: initializing against the old one is the bug.
+void renderer_recovery_without_a_window_does_not_initialize_test()
+{
+    HWND retiring = reinterpret_cast<HWND>(0x1001);
+    int initialized = 0, destroyed = 0, released = 0;
+
+    const auto result = renderer_recovery::Rebuild(
+        retiring,
+        [] { return HWND{nullptr}; },
+        [&](HWND) { ++destroyed; },
+        [&] { ++released; return true; },
+        [&](HWND) { ++initialized; return true; });
+
+    CHECK(result.outcome == renderer_recovery::Outcome::WindowCreationFailed);
+    CHECK_EQ(0, initialized);
+    CHECK_EQ(0, destroyed);
+    // Nothing is retired either: the caller still has a usable old window to
+    // report the failure through.
+    CHECK_EQ(0, released);
+    CHECK_EQ(retiring, result.window);
+}
+
+// A rebuild that fails on the device still reports which window it owns, so
+// the caller tears down the right one.
+void renderer_recovery_reports_the_new_window_after_a_failed_initialize_test()
+{
+    const auto result = renderer_recovery::Rebuild(
+        reinterpret_cast<HWND>(0x1001),
+        [] { return reinterpret_cast<HWND>(0x2002); },
+        [](HWND) {},
+        [] { return true; },
+        [](HWND) { return false; });
+
+    CHECK(result.outcome == renderer_recovery::Outcome::RendererInitFailed);
+    CHECK_EQ(reinterpret_cast<HWND>(0x2002), result.window);
+    CHECK(result.oldWindowDestroyed);
 }
 
 void gpu_teardown_fence_signal_failure_stops_before_event_registration_test()
@@ -7736,6 +7850,11 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
     TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
     TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
+    TEST_CASE(renderer_recovery_rebuilds_into_a_fresh_window_test),
+    TEST_CASE(renderer_recovery_keeps_a_retained_renderers_window_test),
+    TEST_CASE(renderer_recovery_destroys_the_old_window_once_its_renderer_is_gone_test),
+    TEST_CASE(renderer_recovery_without_a_window_does_not_initialize_test),
+    TEST_CASE(renderer_recovery_reports_the_new_window_after_a_failed_initialize_test),
     TEST_CASE(gpu_teardown_fence_signal_failure_stops_before_event_registration_test),
     TEST_CASE(gpu_teardown_fence_signal_failure_maps_to_device_removed_when_device_reason_failed_test),
     TEST_CASE(gpu_teardown_fence_event_registration_failure_stops_before_wait_test),

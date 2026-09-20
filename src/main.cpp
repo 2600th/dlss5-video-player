@@ -38,6 +38,7 @@
 #include "Log.h"
 #include "HardErrorSuppression.h"
 #include "ReShadeConfig.h"
+#include "RendererRecoveryPolicy.h"
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
 #include "YouTubeResolver.h"
@@ -3890,16 +3891,45 @@ private:
         const bool removed=reason==d3d12_renderer_detail::FenceWaitResult::DeviceRemoved;
         if(m_playing){m_currentSec=Position();m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}
         LOG("Renderer unusable at "<<m_currentSec<<" s: "<<(removed?"device removed":"GPU fence wait failed")<<" (result "<<static_cast<int>(reason)<<"); rebuilding it once.");
-        m_renderer.reset();
-        m_renderer=MakeD3D12Renderer();
         const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
-        ConfigureRendererSource();
-        if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)||!RendererTookSourceLayout()){
-            LOG("Renderer rebuild failed after the GPU became unusable; unloading.");
+        // Into a FRESH child window, never m_renderWnd. DXGI allows one
+        // flip-model swapchain per HWND and the renderer being retired may
+        // still own one - D3D12RendererDeleter keeps a renderer alive when its
+        // bounded drain does not complete - so rebuilding in place answered
+        // DXGI_ERROR_INVALID_CALL and this path reported "the GPU has been
+        // lost" for the failure it exists to survive. EnableUpscaling and
+        // CreateRendererCandidate always did it this way; only recovery did
+        // not. renderer_recovery::Rebuild owns the ordering so PolicyTests can
+        // assert it without a device.
+        const auto rebuild=renderer_recovery::Rebuild(m_renderWnd,
+            [this]{return CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,
+                WS_CHILD|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,GetModuleHandleW(nullptr),this);},
+            [](HWND window){DestroyWindow(window);},
+            [this]{
+                // The counter moves only when the deleter could not destroy it.
+                const uint32_t retainedBefore=D3D12Renderer::RetainedRendererCount();
+                m_renderer.reset();
+                return D3D12Renderer::RetainedRendererCount()==retainedBefore;
+            },
+            [&](HWND window){
+                m_renderer=MakeD3D12Renderer();
+                ConfigureRendererSource();
+                return m_renderer->Initialize(window,m_decoder.Width(),m_decoder.Height(),m_decoder.Width(),m_decoder.Height(),guideW,guideH,m_activeQuality)&&
+                    RendererTookSourceLayout();
+            });
+        m_renderWnd=rebuild.window;
+        if(rebuild.outcome!=renderer_recovery::Outcome::Rebuilt){
+            LOG("Renderer rebuild failed after the GPU became unusable ("
+                <<(rebuild.outcome==renderer_recovery::Outcome::WindowCreationFailed
+                    ?"no render window":"device initialization")
+                <<"); unloading. Old window destroyed: "<<rebuild.oldWindowDestroyed<<".");
             Unload();
             MessageBoxW(m_hwnd,T(removed?L"renderer.removed.lost":L"renderer.stalled.lost").c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);
             return true;
         }
+        // Created hidden so a failed rebuild never flashes an empty window,
+        // and positioned before it is shown.
+        Layout();ShowWindow(m_renderWnd,SW_SHOW);
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!m_lastPlaybackFrame.bgra.empty())RenderVideoFrame(m_lastPlaybackFrame,true);
