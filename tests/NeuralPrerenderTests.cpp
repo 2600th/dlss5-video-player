@@ -255,6 +255,37 @@ NeuralCacheManifest CompleteRenderManifest()
 // driver was served on every later one, and runtimeDigest covers the staged
 // runtime directory only, never the weights the pass resolves out of the NGX
 // core directory and the ProgramData model store.
+// Every field of NeuralCacheIdentity has to reach BuildNeuralCacheKey, or a
+// render made under one setting is served for another - the single failure the
+// whole receipt design exists to prevent. The key is a hand-maintained field
+// list, so nothing but this binding notices a field that was added and never
+// keyed: it names all thirteen, and adding or removing one stops the suite
+// compiling with an error that points here.
+//
+// Structured binding rather than a sizeof canary on purpose. sizeof moves with
+// the standard library's std::string layout - MSVC's _ITERATOR_DEBUG_LEVEL
+// changes it between Debug and Release - so a byte count fires for reasons
+// that have nothing to do with the field list and gets bumped without thought.
+//
+// When this stops compiling: add the field to BuildNeuralCacheKey, add a case
+// for it to the mutation loop below, then add its name here.
+void cache_identity_field_list_is_pinned_test()
+{
+    const NeuralCacheIdentity identity{};
+    const auto& [sourceDigest, width, height, applicationVersion, gpuPath,
+                 runtimeDigest, quality, upscaling, settingsDigest, range,
+                 guides, driverVersion, modelStoreDigest] = identity;
+    // Referring to each name keeps /W4 quiet and makes the list a checklist a
+    // reader can compare against BuildNeuralCacheKey line by line.
+    CHECK(sourceDigest.empty() && applicationVersion.empty() && gpuPath.empty());
+    CHECK(runtimeDigest.empty() && quality.empty() && settingsDigest.empty());
+    CHECK(guides.empty() && driverVersion.empty() && modelStoreDigest.empty());
+    CHECK_EQ(uint32_t{0}, width);
+    CHECK_EQ(uint32_t{0}, height);
+    CHECK(!upscaling);
+    CHECK(range.Whole());
+}
+
 void published_render_is_not_reused_across_identity_changes_test()
 {
     TempDirectory fixture;
@@ -303,16 +334,28 @@ void published_render_is_not_reused_across_identity_changes_test()
     changed.width = 2560;
     CHECK(!served(changed));
     changed = identity;
+    changed.height = 720;
+    CHECK(!served(changed));
+    changed = identity;
     changed.applicationVersion = "0.21.3";
     CHECK(!served(changed));
     changed = identity;
     changed.gpuPath = "rtx50";
     CHECK(!served(changed));
     changed = identity;
+    changed.quality = "UltraPerformance";
+    CHECK(!served(changed));
+    changed = identity;
     changed.upscaling = true;
     CHECK(!served(changed));
     changed = identity;
     changed.settingsDigest = std::string(64, '8');
+    CHECK(!served(changed));
+    changed = identity;
+    changed.range = NeuralRenderRange{100000000, 200000000};  // a sub-range of the same source
+    CHECK(!served(changed));
+    changed = identity;
+    changed.guides = "depth-off";
     CHECK(!served(changed));
     // The terms discriminate rather than refuse: the identity that produced the
     // entry still answers from it.
@@ -3795,6 +3838,7 @@ int wmain(int argc, wchar_t* argv[])
     default_cache_falls_back_when_portable_layout_is_unusable_test();
     explicit_cache_root_remains_authoritative_test();
     invalid_explicit_cache_root_does_not_silently_fall_back_test();
+    cache_identity_field_list_is_pinned_test();
     published_render_is_not_reused_across_identity_changes_test();
     schema_four_entries_are_retired_by_the_schema_gate_test();
     model_store_digest_tracks_root_contents_and_names_its_fallback_test();
