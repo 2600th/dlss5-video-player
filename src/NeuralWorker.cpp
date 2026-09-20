@@ -1,4 +1,5 @@
 #include "NeuralWorker.h"
+#include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
@@ -110,16 +111,6 @@ bool ParseDouble(std::wstring_view text, double& value)
     return end == copy.c_str() + copy.size() && std::isfinite(value);
 }
 
-std::string Narrow(std::wstring_view text)
-{
-    std::string narrow;
-    narrow.reserve(text.size());
-    for (const wchar_t character : text) {
-        if (character > 0x7F) return {};
-        narrow.push_back(static_cast<char>(character));
-    }
-    return narrow;
-}
 
 std::wstring HandleText(HANDLE handle)
 {
@@ -1125,7 +1116,8 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         !ParseUnsigned(*values[RetryLimit], retryLimit) || !width || !height || width > UINT32_MAX ||
         height > UINT32_MAX || !duration || duration > INT64_MAX || fps <= 0.0 || rangeStart > INT64_MAX ||
         rangeEnd > INT64_MAX || preroll > UINT32_MAX || retryLimit > UINT32_MAX) return std::nullopt;
-    const auto guides = ParseGuideControls(Narrow(*values[Guides]));
+    const auto guides = ParseGuideControls(
+        narrow_text::StrictAscii(*values[Guides]).value_or(std::string{}));
     if (!guides) return std::nullopt;
     NeuralRenderRequest& request = parsed.request;
     request.sourcePath = *values[Source];
@@ -1661,14 +1653,15 @@ void NeuralPreflightLatch::Invalidate()
 namespace {
 // Identity the stored verdict belongs to, written as the file's first line and
 // compared on load, so the file name only has to be a short unique-ish label.
+// Losslessly encoded, so two cards whose names differ only outside ASCII get
+// two identities. The old converter narrowed both to "" and they shared one -
+// a verdict probed on an RTX 4080 was served for an RTX 5090. Encoding rather
+// than refusing keeps the stored verdict working for those machines instead
+// of costing them a five second probe on every launch.
 std::string PreflightIdentity(const NeuralPreflightKey& key)
 {
-    std::string identity = Narrow(key.gpu);
-    identity += '|';
-    identity += Narrow(key.driver);
-    identity += '|';
-    identity += key.runtimeDigest;
-    return identity;
+    return narrow_text::IdentityEncoded(key.gpu) + '|' +
+           narrow_text::IdentityEncoded(key.driver) + '|' + key.runtimeDigest;
 }
 } // namespace
 
@@ -1676,10 +1669,18 @@ std::filesystem::path NeuralPreflightReceiptPath(const std::filesystem::path& ca
                                                  const NeuralPreflightKey& key)
 {
     if (cacheRoot.empty()) return {};
+    // No identity, no receipt. An unrepresentable GPU or driver name narrows
+    // to nothing, and every such name would otherwise share one filename AND
+    // compare equal to the stored line - which is how one card's verdict came
+    // to be served for another. Failing closed costs a preflight probe on a
+    // machine whose card has a non-ASCII name; the alternative costs
+    // correctness on every such machine.
+    const std::string identity = PreflightIdentity(key);
+    if (identity.empty()) return {};
     // FNV-1a, the same label hash the runtime lease uses for its mutex name: the
     // identity itself is stored in the file, so this only has to be a filename.
     uint64_t hash = 0xcbf29ce484222325ull;
-    for (const char c : PreflightIdentity(key)) {
+    for (const char c : identity) {
         hash ^= static_cast<uint8_t>(c);
         hash *= 0x100000001b3ull;
     }

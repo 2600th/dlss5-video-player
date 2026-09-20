@@ -1,4 +1,5 @@
 #include "CrashDump.h"
+#include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "Log.h"
 #include "NeuralPreflight.h"
@@ -146,14 +147,6 @@ private:
 // ASCII-only narrowing for the log, which is a narrow stream. Every string
 // that reaches it here is a fixed English diagnostic or a policy name, so a
 // non-ASCII character is a bug rather than a translation.
-std::string WideToNarrow(std::wstring_view value)
-{
-    std::string narrow;
-    narrow.reserve(value.size());
-    for (const wchar_t character : value)
-        narrow.push_back(character < 128 ? static_cast<char>(character) : '?');
-    return narrow;
-}
 
 LRESULT CALLBACK HiddenWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
@@ -265,7 +258,7 @@ NeuralRenderResult RunOneJob(OfflineNeuralRenderer& renderer, MetadataWriter& me
     LOG("Neural helper post-job VRAM: job=" << request.jobId
         << " localVramMiB=" << parked.localVramMiB
         << " featureArmed=" << (parked.featureArmed ? 1 : 0)
-        << " idleVramPolicy=" << WideToNarrow(resident_helper::IdleVramPolicyName(idleVramPolicy)));
+        << " idleVramPolicy=" << narrow_text::LossyAscii(resident_helper::IdleVramPolicyName(idleVramPolicy)));
     return result;
 }
 
@@ -362,7 +355,7 @@ public:
         NeuralRenderResult refused;
         refused.failure = NeuralRenderFailure::Protocol;
         refused.detail = std::wstring(detail);
-        LOG("Resident helper refused a job: " << WideToNarrow(detail));
+        LOG("Resident helper refused a job: " << narrow_text::LossyAscii(detail));
         return metadata_.WriteResult(refused);
     }
 
@@ -382,7 +375,7 @@ public:
         }
         if (const std::wstring invalid = CheckSessionInvariants(); !invalid.empty()) {
             LOG("Resident helper cannot serve job " << parsed->request.jobId << ": "
-                << WideToNarrow(invalid));
+                << narrow_text::LossyAscii(invalid));
             const NeuralRenderResult failed = FailedResult(invalid, parsed->request.jobId);
             return metadata_.WriteResult(failed) ? resident_worker::JobOutcome::Invalidated
                                                  : resident_worker::JobOutcome::WriteFailed;
@@ -426,7 +419,7 @@ public:
     // between jobs.
     void Idle()
     {
-        const std::string policyName = WideToNarrow(resident_helper::IdleVramPolicyName(idleVramPolicy_));
+        const std::string policyName = narrow_text::LossyAscii(resident_helper::IdleVramPolicyName(idleVramPolicy_));
         OfflineNeuralRenderer::MemoryFootprint parked;
         if (idleVramPolicy_ == resident_helper::IdleVramPolicy::FreeFeature) {
             const OfflineNeuralRenderer::IdleFeatureRelease observed =
@@ -594,7 +587,7 @@ int wmain(int argc, wchar_t** argv)
                 ? std::wstring(L"The helper could not read its neural settings.") : settingsError);
         }
         LOG("Resident helper session starting with idleVramPolicy="
-            << WideToNarrow(resident_helper::IdleVramPolicyName(arguments->idleVramPolicy)));
+            << narrow_text::LossyAscii(resident_helper::IdleVramPolicyName(arguments->idleVramPolicy)));
         int exitCode = 0;
         // One pump for the whole session: the window and the device outlive any
         // single job, so the thread that owns them has to keep pumping between

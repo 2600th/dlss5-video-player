@@ -1,3 +1,4 @@
+#include "NarrowText.h"
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
 #include "ResidentWorkerLoop.h"
@@ -1068,6 +1069,67 @@ void preflight_failure_detail_comes_from_the_receipt_diagnosis_test()
     CHECK_EQ(std::wstring(L"The neural runtime preflight did not arm feature 18."), bare.detail);
 }
 
+// Injectivity is the property every identity built on this depends on, so it
+// is asserted directly rather than only through the preflight receipt.
+void identity_encoding_keeps_different_names_different_test()
+{
+    using narrow_text::IdentityEncoded;
+
+    // ASCII is untouched, so existing identities read the same as before.
+    CHECK_EQ(std::string("NVIDIA GeForce RTX 5090"), IdentityEncoded(L"NVIDIA GeForce RTX 5090"));
+
+    // The case that collided: two names differing only outside ASCII.
+    CHECK(IdentityEncoded(L"RTX™ 4080") != IdentityEncoded(L"RTX™ 5090"));
+    CHECK(IdentityEncoded(L"RTX™") != IdentityEncoded(L"RTX–"));
+    // And differing only in where the non-ASCII character sits.
+    CHECK(IdentityEncoded(L"™RTX") != IdentityEncoded(L"RTX™"));
+
+    // The escape character cannot be used to forge another name's encoding.
+    CHECK(IdentityEncoded(L"%2122") != IdentityEncoded(L"™"));
+    CHECK_EQ(std::string("%%2122"), IdentityEncoded(L"%2122"));
+
+    // Nothing maps to empty except empty, or every unrepresentable name would
+    // share an identity again.
+    CHECK(IdentityEncoded(L"™").empty() == false);
+    CHECK(IdentityEncoded(L"").empty());
+}
+
+// PreflightIdentity narrowed the GPU and driver names with a converter that
+// returns an EMPTY string for anything outside ASCII. Two different cards
+// whose names carry a non-ASCII character - a trademark sign, a localized
+// model name - therefore collapsed to the same identity, and a verdict probed
+// on one was served for the other. A stored "this GPU cannot do neural
+// rendering" would be believed on a card that can.
+//
+// Same family as the cache-key bug: a lossy identity is worse than no
+// identity, because it compares equal.
+void a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test()
+{
+    const auto root = std::filesystem::temp_directory_path() /
+        (L"preflight-identity-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+
+    // Two genuinely different cards. The only ASCII-representable part of
+    // each name is what the old converter threw away.
+    const NeuralPreflightKey first{L"NVIDIA GeForce RTX™ 4080", L"32.0.15.6614", "digest-a"};
+    const NeuralPreflightKey second{L"NVIDIA GeForce RTX™ 5090", L"32.0.15.6614", "digest-a"};
+
+    CHECK(StoreNeuralPreflightReceipt(root, first, "{\"ok\":true,\"gpu\":\"first\"}"));
+    const std::string served = LoadNeuralPreflightReceipt(root, second);
+    // Either it refuses to answer for a name it cannot represent, or it
+    // answers for the right card. It must never hand back the other card's.
+    CHECK(served.find("first") == std::string::npos);
+
+    // And the card it was actually stored for still gets its own verdict.
+    // Refusing both would also pass the assertion above while quietly costing
+    // every such machine a five second probe on every launch.
+    const std::string own = LoadNeuralPreflightReceipt(root, first);
+    CHECK(own.find("first") != std::string::npos);
+
+    std::filesystem::remove_all(root, error);
+}
+
 void preflight_latch_holds_one_verdict_per_runtime_identity_test()
 {
     const NeuralPreflightKey key{L"NVIDIA GeForce RTX 3060 Laptop GPU", L"32.0.15.6614", "runtime-digest-a"};
@@ -2136,6 +2198,8 @@ int wmain(int argc, wchar_t** argv)
     crashed_helper_is_relaunched_at_most_once_test();
     preflight_receipt_round_trips_and_restarts_once_test();
     preflight_failure_detail_comes_from_the_receipt_diagnosis_test();
+    identity_encoding_keeps_different_names_different_test();
+    a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test();
     preflight_latch_holds_one_verdict_per_runtime_identity_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
