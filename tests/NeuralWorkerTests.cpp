@@ -305,6 +305,31 @@ int RunFakeWorker(int argc, wchar_t** argv)
         std::this_thread::sleep_for(20s);
         return 0;
     }
+    if (source == L"malformed-then-hang-source.mkv") {
+        // Garbage, then stays alive. The pump gives up on the stream while
+        // the process is still running, which is the state that used to be
+        // reported as "exited with code 259".
+        const WireHeader wrong{kProtocolMagic + 1, kProtocolVersion,
+            static_cast<uint16_t>(WireKind::Result), 8};
+        WriteAll(handle, &wrong, sizeof(wrong));
+        std::this_thread::sleep_for(20s);
+        return 0;
+    }
+    if (source == L"flood-source.mkv") {
+        // Writes progress as fast as the pipe will take it, for far longer
+        // than the test's patience. The parent's drain must still hand control
+        // back so its stop token is checked.
+        NeuralRenderProgress progress;
+        progress.phase = NeuralRenderPhase::NeuralRendering;
+        progress.totalFrames = 1000000;
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        for (uint64_t frame = 0; std::chrono::steady_clock::now() < deadline; ++frame) {
+            progress.completedFrames = frame;
+            const WireProgress wire = EncodeProgress(progress);
+            if (!WriteMessage(handle, WireKind::Progress, &wire, sizeof(wire))) break;
+        }
+        return 0;
+    }
     if (source == L"truncated-source.mkv") {
         const WireHeader truncated{kProtocolMagic, kProtocolVersion,
             static_cast<uint16_t>(WireKind::Result), sizeof(WireResult)};
@@ -748,6 +773,159 @@ void cancellation_of_running_child_is_bounded_test()
     CHECK(!result.ok);
     CHECK(result.cancelled);
     CHECK(elapsed < 3s);
+}
+
+// GetExitCodeProcess succeeds on a LIVE process and answers STILL_ACTIVE
+// (259). LaunchHelper called it unconditionally, so a helper the parent gave
+// up on while it was still running was reported as "exited with code 259" -
+// which classifies as WorkerCrashed and buries the real reason.
+void a_still_running_helper_is_not_reported_as_exit_code_259_test()
+{
+    const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(),
+        TestRequest(L"malformed-then-hang-source.mkv"));
+    CHECK(!result.ok);
+    CHECK(!result.cancelled);
+    // The diagnosis must name the malformed stream, not a fictional exit.
+    CHECK(result.detail.find(L"259") == std::wstring::npos);
+    CHECK(result.failure != NeuralRenderFailure::WorkerCrashed);
+    CHECK(!result.detail.empty());
+}
+
+// EndHelper wrote the shutdown frame inline, ahead of TerminateJobObject.
+// WriteCommand is a synchronous WriteFile on an anonymous pipe, so a helper
+// that had stopped reading - the one that actually needs ending - let the
+// pipe fill and the write never returned. Shutdown hung instead of happening.
+//
+// A real pipe nobody reads is the whole fixture: fill it, then ask.
+void a_shutdown_frame_to_an_unread_pipe_gives_up_instead_of_hanging_test()
+{
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    REQUIRE(CreatePipe(&readEnd, &writeEnd, &security, 4096) != 0);
+
+    // Fill the buffer exactly, so the next write is the one that blocks.
+    const std::vector<std::byte> filler(4096, std::byte{0});
+    DWORD wrote = 0;
+    CHECK(WriteFile(writeEnd, filler.data(), static_cast<DWORD>(filler.size()), &wrote, nullptr) != 0);
+    CHECK_EQ(DWORD{4096}, wrote);
+
+    const auto budget = neural_worker_detail::kShutdownWriteBudget;
+    const auto started = std::chrono::steady_clock::now();
+    // Takes ownership of writeEnd and closes it on every path.
+    const bool asked = neural_worker_detail::SendShutdownAndCloseBounded(writeEnd, budget);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(!asked);
+    // Two budgets: one to notice, one to let the cancelled write unwind.
+    CHECK(elapsed < budget * 4);
+
+    CloseHandle(readEnd);
+}
+
+// The ordinary path still works, and still reports that the frame was taken.
+void a_shutdown_frame_to_a_reading_pipe_is_taken_test()
+{
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    REQUIRE(CreatePipe(&readEnd, &writeEnd, &security, 4096) != 0);
+
+    const bool asked = neural_worker_detail::SendShutdownAndCloseBounded(
+        writeEnd, neural_worker_detail::kShutdownWriteBudget);
+    CHECK(asked);
+
+    DWORD available = 0;
+    CHECK(PeekNamedPipe(readEnd, nullptr, 0, nullptr, &available, nullptr) != 0);
+    CHECK_EQ(DWORD{sizeof(WireHeader)}, available);
+
+    CloseHandle(readEnd);
+}
+
+// The flood test above is a safety net, not a proof: whether an unbounded
+// drain actually traps the pump depends on how the writer and reader happen to
+// be scheduled, and on this machine the pipe runs dry often enough to let it
+// out. The bound itself is what has to be asserted, against a real pipe with
+// data still in it.
+void one_metadata_drain_pass_stops_on_its_budget_test()
+{
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    // A pipe buffer larger than the budget, so the writer below never blocks
+    // and the drain always has more waiting when its budget runs out.
+    REQUIRE(CreatePipe(&readEnd, &writeEnd,
+                       &security,
+                       static_cast<DWORD>(neural_worker_detail::kMetadataDrainByteBudget * 4)) != 0);
+
+    NeuralRenderProgress progress;
+    progress.phase = NeuralRenderPhase::NeuralRendering;
+    progress.totalFrames = 1000000;
+    size_t written = 0;
+    for (uint64_t frame = 0; written < neural_worker_detail::kMetadataDrainByteBudget * 2; ++frame) {
+        progress.completedFrames = frame;
+        const WireProgress wire = EncodeProgress(progress);
+        if (!WriteMessage(writeEnd, WireKind::Progress, &wire, sizeof(wire))) break;
+        written += sizeof(WireHeader) + sizeof(wire);
+    }
+    CHECK(written >= neural_worker_detail::kMetadataDrainByteBudget * 2);
+
+    const auto pass = neural_worker_detail::DrainMetadataPipeOnce(readEnd);
+    CHECK(!pass.malformed);
+    // It came back with work left rather than reading until the pipe was dry.
+    CHECK(pass.budgetSpent);
+    CHECK(pass.bytesRead >= neural_worker_detail::kMetadataDrainByteBudget);
+    // One chunk of overshoot is the most it may take past the budget.
+    CHECK(pass.bytesRead < neural_worker_detail::kMetadataDrainByteBudget + 8192);
+
+    // And the data it did not read is still there for the next pass.
+    DWORD remaining = 0;
+    CHECK(PeekNamedPipe(readEnd, nullptr, 0, nullptr, &remaining, nullptr) != 0);
+    CHECK(remaining > 0);
+
+    CloseHandle(writeEnd);
+    CloseHandle(readEnd);
+}
+
+// An empty pipe is not a spent budget: the pump has to be able to tell "no
+// more work" from "come back after checking your stop token".
+void an_empty_metadata_pipe_is_not_a_spent_budget_test()
+{
+    SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+    HANDLE readEnd = nullptr, writeEnd = nullptr;
+    REQUIRE(CreatePipe(&readEnd, &writeEnd, &security, 4096) != 0);
+
+    const auto pass = neural_worker_detail::DrainMetadataPipeOnce(readEnd);
+    CHECK(!pass.malformed);
+    CHECK(!pass.budgetSpent);
+    CHECK_EQ(size_t{0}, pass.bytesRead);
+
+    CloseHandle(writeEnd);
+    CloseHandle(readEnd);
+}
+
+// MetadataReader::ReadAvailable looped until the pipe ran dry, and it is the
+// FIRST statement of every Pump iteration - ahead of the stop check. A helper
+// that writes faster than the parent reads therefore made the render
+// uncancellable: the user pressed stop and nothing happened until the helper
+// chose to go quiet.
+//
+// hang-source above cannot catch this; it is silent, so the drain returns
+// immediately and the stop check is reached on the next line. Only a chatty
+// helper reaches the loop that did not terminate.
+void cancellation_is_bounded_even_when_the_helper_floods_the_pipe_test()
+{
+    std::stop_source stop;
+    std::jthread cancel([&] {
+        std::this_thread::sleep_for(300ms);
+        stop.request_stop();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(),
+        TestRequest(L"flood-source.mkv"), {}, stop.get_token());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(!result.ok);
+    CHECK(result.cancelled);
+    // The helper writes for 30 s. Anything near that means the drain, not the
+    // cancellation, decided when this returned.
+    CHECK(elapsed < 8s);
 }
 
 void malformed_or_truncated_results_are_rejected_test()
@@ -1946,6 +2124,12 @@ int wmain(int argc, wchar_t** argv)
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     cancellation_of_running_child_is_bounded_test();
+    a_still_running_helper_is_not_reported_as_exit_code_259_test();
+    a_shutdown_frame_to_an_unread_pipe_gives_up_instead_of_hanging_test();
+    a_shutdown_frame_to_a_reading_pipe_is_taken_test();
+    one_metadata_drain_pass_stops_on_its_budget_test();
+    an_empty_metadata_pipe_is_not_a_spent_budget_test();
+    cancellation_is_bounded_even_when_the_helper_floods_the_pipe_test();
     malformed_or_truncated_results_are_rejected_test();
     valid_result_preserves_all_verification_fields_test();
     request_fields_reach_the_helper_intact_test();

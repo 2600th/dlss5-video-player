@@ -15,13 +15,16 @@
 #include <cstring>
 #include <cwchar>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -130,26 +133,46 @@ public:
         : progress_(std::move(progress)), segments_(std::move(segments)),
           timeline_reported_(std::move(timeline)) {}
 
-    bool ReadAvailable(HANDLE pipe)
+    // Bounded by kMetadataDrainByteBudget. This is the first statement of
+    // every Pump iteration, ahead of the stop check, so a version that ran
+    // until the pipe was dry let a helper writing faster than the parent reads
+    // make the render uncancellable - the user pressed stop and nothing
+    // happened until the helper chose to go quiet. `budgetSpent` tells the
+    // pump the pipe still has work, so it checks its stop token and returns.
+    bool ReadAvailable(HANDLE pipe, bool* budgetSpent = nullptr, size_t* bytesRead = nullptr)
     {
+        size_t drained = 0;
+        if (budgetSpent) *budgetSpent = false;
         for (;;) {
+            if (drained >= neural_worker_detail::kMetadataDrainByteBudget) {
+                if (budgetSpent) *budgetSpent = true;
+                break;
+            }
             DWORD available = 0;
             if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
                 const DWORD error = GetLastError();
-                if (error == ERROR_BROKEN_PIPE) return true;
+                if (error == ERROR_BROKEN_PIPE) break;
                 malformed_ = true;
+                if (bytesRead) *bytesRead = drained;
                 return false;
             }
-            if (!available) return true;
+            if (!available) break;
             std::array<std::byte, 4096> chunk{};
             const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(chunk.size()));
             DWORD read = 0;
             if (!ReadFile(pipe, chunk.data(), wanted, &read, nullptr) || read == 0) {
                 malformed_ = true;
+                if (bytesRead) *bytesRead = drained;
                 return false;
             }
-            if (!Push(std::span<const std::byte>(chunk.data(), read))) return false;
+            drained += read;
+            if (!Push(std::span<const std::byte>(chunk.data(), read))) {
+                if (bytesRead) *bytesRead = drained;
+                return false;
+            }
         }
+        if (bytesRead) *bytesRead = drained;
+        return true;
     }
 
     // The same decoder, fed from memory instead of the pipe.
@@ -380,11 +403,21 @@ struct HelperProcess {
 // this function holding the GPU.
 void EndHelper(HelperProcess& helper, DWORD grace)
 {
+    // Bounded, and it decides whether the grace period is worth waiting out.
+    // This used to be an inline WriteCommand: a synchronous WriteFile on an
+    // anonymous pipe, ahead of TerminateJobObject. A helper that had stopped
+    // reading its commands - exactly the helper that needs ending - let the
+    // pipe fill at around 16 KiB and the write never returned, so shutdown
+    // hung instead of happening.
+    bool asked = true;
     if (helper.command) {
-        WriteCommand(helper.command, CommandKind::Shutdown, nullptr, 0);
-        CloseHandle(helper.command);
+        asked = neural_worker_detail::SendShutdownAndCloseBounded(
+            helper.command, neural_worker_detail::kShutdownWriteBudget);
+        helper.command = nullptr;   // ownership transferred, closed in there
     }
-    if (helper.process && grace) WaitForSingleObject(helper.process, grace);
+    // No point waiting out a grace period for a helper that never heard the
+    // request; it goes straight to the kill below.
+    if (asked && helper.process && grace) WaitForSingleObject(helper.process, grace);
     if (helper.job) TerminateJobObject(helper.job, ERROR_PROCESS_ABORTED);
     // A process that failed to be assigned to the job is not covered by it.
     if (helper.process) {
@@ -536,11 +569,24 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
     PumpOutcome outcome;
     std::optional<std::chrono::steady_clock::time_point> cancelDeadline;
     for (;;) {
-        if (!reader.ReadAvailable(helper.metadata)) { outcome.malformed = true; break; }
+        bool budgetSpent = false;
+        if (!reader.ReadAvailable(helper.metadata, &budgetSpent)) { outcome.malformed = true; break; }
         // Judged from the reader rather than from this break, because a helper
         // that writes its result and exits in the same breath is judged below
         // on what it said, not on the fact that it went.
         if (resident && (reader.Complete() || reader.PreflightComplete())) break;
+        // The pipe still has work. Fall through to the stop check rather than
+        // reading on, then come straight back without the 20 ms wait - which
+        // is for an idle helper, not a busy one.
+        if (budgetSpent) {
+            if (stop.stop_requested() && !outcome.cancelled) {
+                outcome.cancelled = true;
+                if (!resident || !WriteCommand(helper.command, CommandKind::Cancel, nullptr, 0)) break;
+                cancelDeadline = std::chrono::steady_clock::now() + kResidentCancelGrace;
+            }
+            if (cancelDeadline && std::chrono::steady_clock::now() >= *cancelDeadline) break;
+            continue;
+        }
         const DWORD wait = WaitForSingleObject(helper.process, 20);
         if (wait != WAIT_TIMEOUT) { outcome.exited = true; break; }
         if (stop.stop_requested() && !outcome.cancelled) {
@@ -577,7 +623,13 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     outcome.launched = true;
     const PumpOutcome pump = Pump(started.helper, reader, stop, false);
     outcome.cancelled = pump.cancelled;
-    GetExitCodeProcess(started.helper.process, &outcome.exitCode);
+    // Only when the process actually went. GetExitCodeProcess succeeds on a
+    // live process and answers STILL_ACTIVE (259), so asking unconditionally
+    // reported a helper that was still running as "exited with code 259" - a
+    // number that reads like a crash, classifies as WorkerCrashed, and hides
+    // the real diagnosis. The pump already knows which happened.
+    if (pump.exited) GetExitCodeProcess(started.helper.process, &outcome.exitCode);
+    else outcome.exitCode = 0;
     // The old process is signalled and all its handles are closed here. Waiting
     // for full exit releases ReShade.log before the next proxy loads; overlapping
     // helpers otherwise put the real evidence in ReShade.log1.
@@ -1471,6 +1523,48 @@ neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadata
     outcome.complete = reader.Complete();
     outcome.timeline = reader.Timeline();
     return outcome;
+}
+
+bool neural_worker_detail::SendShutdownAndCloseBounded(HANDLE command,
+                                                       std::chrono::milliseconds budget)
+{
+    if (!command) return true;
+    // The promise is shared so the thread can outlive this frame on the one
+    // path where it has to.
+    auto finished = std::make_shared<std::promise<bool>>();
+    std::future<bool> written = finished->get_future();
+    std::thread writer([command, finished] {
+        const bool ok = WriteCommand(command, CommandKind::Shutdown, nullptr, 0);
+        CloseHandle(command);
+        finished->set_value(ok);
+    });
+    if (written.wait_for(budget) == std::future_status::ready) {
+        writer.join();
+        return written.get();
+    }
+    // The helper is not reading. Cancel the blocked write so the thread can
+    // finish; CancelIoEx reaches synchronous I/O issued by another thread of
+    // this process.
+    CancelIoEx(command, nullptr);
+    if (written.wait_for(budget) == std::future_status::ready) {
+        writer.join();
+        return false;
+    }
+    // CancelIoEx did not take. The caller is about to kill the helper, which
+    // breaks the pipe, which releases this thread to close the handle and
+    // exit. Letting it go is the price of never hanging shutdown - and the
+    // alternative, closing a handle a blocked write still holds, is worse.
+    writer.detach();
+    return false;
+}
+
+neural_worker_detail::MetadataDrainPass neural_worker_detail::DrainMetadataPipeOnce(HANDLE pipe)
+{
+    MetadataDrainPass pass;
+    MetadataReader reader({}, {});
+    const bool ok = reader.ReadAvailable(pipe, &pass.budgetSpent, &pass.bytesRead);
+    pass.malformed = !ok || reader.Malformed();
+    return pass;
 }
 
 NeuralPreflightResult RunNeuralPreflight(const std::filesystem::path& executable, std::stop_token stop)

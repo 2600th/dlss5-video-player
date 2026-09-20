@@ -312,4 +312,49 @@ struct MetadataStreamOutcome {
 };
 MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes);
 
+// How many bytes one pass of the parent's metadata drain will absorb before
+// handing control back.
+//
+// The drain used to run until the pipe was dry, and it is the FIRST statement
+// of every pump iteration - ahead of the stop check. A helper that writes
+// faster than the parent reads therefore made a render uncancellable: the user
+// pressed stop and nothing happened until the helper chose to go quiet. One
+// mebibyte is far more than a well-behaved helper emits between iterations, so
+// the budget is invisible in normal operation and only bites a runaway.
+inline constexpr size_t kMetadataDrainByteBudget = 1u << 20;
+
+// What one bounded pass did.
+struct MetadataDrainPass {
+    bool malformed{};
+    // Stopped because the budget ran out rather than because the pipe was
+    // empty. The pump checks its stop token and comes straight back.
+    bool budgetSpent{};
+    size_t bytesRead{};
+};
+
+// Drains `pipe` once, exactly as the pump does between stop-token checks.
+// Exposed for the same reason DecodeMetadataStream is: the bound that keeps a
+// cancel responsive is worth asserting against a real pipe rather than hoped
+// for. Decoded messages are discarded - this entry point is about the bound.
+MetadataDrainPass DrainMetadataPipeOnce(HANDLE pipe);
+
+// How long the shutdown frame may take before the helper is killed instead of
+// asked.
+//
+// WriteCommand is a synchronous WriteFile on an anonymous pipe. A helper that
+// has stopped reading - which is precisely when it needs ending - lets the
+// pipe fill at around 16 KiB, and the write then never returns. Running that
+// inline ahead of TerminateJobObject hung the shutdown it was there to
+// perform.
+inline constexpr std::chrono::milliseconds kShutdownWriteBudget{250};
+
+// Sends the shutdown frame and takes ownership of `command`, closing it on
+// every path - possibly from the writer thread, if the write outlives the
+// budget. Returns true when the helper took the frame.
+//
+// A false return means the helper is not reading its commands, so the caller
+// must kill rather than wait. The kill breaks the pipe, which is what
+// releases any writer still blocked here.
+bool SendShutdownAndCloseBounded(HANDLE command, std::chrono::milliseconds budget);
+
 } // namespace neural_worker_detail
