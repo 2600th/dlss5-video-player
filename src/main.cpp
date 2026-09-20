@@ -39,6 +39,7 @@
 #include "Log.h"
 #include "HardErrorSuppression.h"
 #include "ReShadeConfig.h"
+#include "CacheEvictionPolicy.h"
 #include "RendererRecoveryPolicy.h"
 #include "RuntimePolicy.h"
 #include "RuntimeLifetime.h"
@@ -1229,8 +1230,30 @@ public:
         m_renderWnd=CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,hi,this);
         UpdateFontsForDpi(ActiveWindowDpi(m_hwnd));
         DragAcceptFiles(m_hwnd,TRUE); DragAcceptFiles(m_renderWnd,TRUE); ShowWindow(m_viewport,SW_HIDE); Layout(); UpdateTitle();
+        StartCacheEviction();
         if(!m_opt.file.empty()){if(IsSupportedYouTubeUrl(m_opt.file))StartYouTubeResolution(m_opt.file,L"",m_youtubeSourceQuality);else Load(m_opt.file);} // No startup file picker: the player opens idle by default.
         return true;
+    }
+
+    // Reclaims render entries that can never be served again, and - only when
+    // the volume is genuinely short of space - the least recently used ones.
+    //
+    // At startup, once, on its own thread. The cache had no eviction at all:
+    // its key retires entries wholesale, so a single driver update makes every
+    // render unreachable and the only remedy on offer was Clear(), which
+    // destroys the new ones too. Nothing is loaded yet, so no entry is active.
+    //
+    // Detached rather than joined: it walks directories, which on a large
+    // cache on a cold disk is seconds, and none of it needs to happen before
+    // the window appears. The manager is constructed inside the thread so
+    // nothing is shared with the UI.
+    void StartCacheEviction(){
+        if(m_cacheRoot.empty())return;
+        std::thread([root=m_cacheRoot]{
+            NeuralCacheManager cache(root);
+            if(!cache.Valid())return;
+            cache.Evict({},cache_eviction::kDefaultFreeFloorBytes);
+        }).detach();
     }
 
     // Only a live network stream needs the non-blocking read and the

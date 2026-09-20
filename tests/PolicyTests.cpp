@@ -1,3 +1,4 @@
+#include "CacheEvictionPolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -2134,6 +2135,114 @@ void harness_isolates_a_failing_case_from_the_ones_after_it_test()
     CHECK(report.find("c0000005") != std::string::npos);
     // The case after the crash ran and did not fail.
     CHECK(report.find("harness_probe_passes") == std::string::npos);
+}
+
+// There was no eviction at all. RemoveSource and RemoveRender existed with no
+// production caller; the only reclamation was Clear(), which is all or
+// nothing. Meanwhile the key deliberately retires entries wholesale -
+// applicationVersion, driverVersion, modelStoreDigest, runtimeDigest and the
+// manifest schema are all key terms - so an NVIDIA driver update changes every
+// key at once. A user with 40 GB of renders takes the update, all 40 GB
+// becomes unreachable, everything re-renders, and the cache grows to 80 GB.
+// The only remedy offered destroys the new renders too.
+//
+// Two rules, in order. An entry whose manifest can no longer be reused is
+// dead whatever the disk looks like. Everything else is only evicted when the
+// disk is actually under pressure, because re-rendering a film costs minutes
+// to hours and free space costs nothing until it runs out.
+namespace {
+cache_eviction::Entry EvictionEntry(std::string key, uintmax_t bytes, int64_t lastUsed,
+                                    bool reusable = true, bool active = false)
+{
+    return cache_eviction::Entry{std::move(key), bytes, lastUsed, reusable, active};
+}
+} // namespace
+
+void eviction_removes_entries_that_can_never_match_a_key_again_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("live", 10, 500),
+        EvictionEntry("retired", 25, 900, /*reusable=*/false),
+        EvictionEntry("also-live", 10, 100),
+    };
+    // Acres of free space: nothing is under pressure, and the dead entry still
+    // goes.
+    const auto plan = cache_eviction::PlanEviction(entries, /*freeBytes=*/1'000'000,
+                                                   /*freeFloorBytes=*/1000);
+    CHECK_EQ(size_t{1}, plan.evict.size());
+    if (plan.evict.size() == 1) CHECK_EQ(std::string("retired"), plan.evict.front());
+    CHECK_EQ(uintmax_t{25}, plan.freedBytes);
+}
+
+void eviction_keeps_everything_reusable_while_the_disk_has_room_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("old", 100, 1),
+        EvictionEntry("older", 100, 0),
+    };
+    const auto plan = cache_eviction::PlanEviction(entries, 1'000'000, 1000);
+    CHECK(plan.evict.empty());
+    CHECK_EQ(uintmax_t{0}, plan.freedBytes);
+}
+
+void eviction_frees_the_least_recently_used_until_the_floor_is_met_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("newest", 100, 300),
+        EvictionEntry("oldest", 100, 100),
+        EvictionEntry("middle", 100, 200),
+    };
+    // 250 free, floor 400: 150 short, so the two oldest go and the newest stays.
+    const auto plan = cache_eviction::PlanEviction(entries, 250, 400);
+    CHECK_EQ(size_t{2}, plan.evict.size());
+    if (plan.evict.size() == 2) {
+        CHECK_EQ(std::string("oldest"), plan.evict[0]);
+        CHECK_EQ(std::string("middle"), plan.evict[1]);
+    }
+    CHECK_EQ(uintmax_t{200}, plan.freedBytes);
+    // It stops as soon as the floor is met rather than emptying the cache.
+    CHECK(plan.freedBytes + 250 >= 400);
+}
+
+// A render in progress is reading and writing its own entry. Removing it under
+// the job is worse than running out of disk.
+void eviction_never_touches_an_active_entry_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("rendering-now", 100, 0, /*reusable=*/true, /*active=*/true),
+        EvictionEntry("dead-but-open", 100, 0, /*reusable=*/false, /*active=*/true),
+        EvictionEntry("free-to-go", 100, 50),
+    };
+    const auto plan = cache_eviction::PlanEviction(entries, 0, 1'000'000);
+    CHECK_EQ(size_t{1}, plan.evict.size());
+    if (plan.evict.size() == 1) CHECK_EQ(std::string("free-to-go"), plan.evict.front());
+}
+
+// The floor cannot always be met. It must free what it can and say so rather
+// than emptying the cache in a loop that can never succeed.
+void eviction_frees_what_it_can_when_the_floor_is_unreachable_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("a", 10, 1),
+        EvictionEntry("b", 10, 2, /*reusable=*/true, /*active=*/true),
+    };
+    const auto plan = cache_eviction::PlanEviction(entries, 0, 1'000'000);
+    CHECK_EQ(size_t{1}, plan.evict.size());
+    CHECK_EQ(uintmax_t{10}, plan.freedBytes);
+    CHECK(!plan.floorMet);
+}
+
+// A floor of zero disables pressure eviction, leaving only the dead entries.
+// That is the switch for anyone who would rather manage the cache by hand.
+void a_zero_floor_evicts_only_the_dead_test()
+{
+    const cache_eviction::Entry entries[] = {
+        EvictionEntry("dead", 10, 1, /*reusable=*/false),
+        EvictionEntry("alive", 10, 2),
+    };
+    const auto plan = cache_eviction::PlanEviction(entries, 0, 0);
+    CHECK_EQ(size_t{1}, plan.evict.size());
+    if (plan.evict.size() == 1) CHECK_EQ(std::string("dead"), plan.evict.front());
 }
 
 // DLSSBackend.cpp and DLSSGBackend.cpp were byte-identical and both wrong:
@@ -7934,6 +8043,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_destroyed_window_and_visibility_failure_leave_active_state_unchanged_test),
     TEST_CASE(youtube_candidate_render_failure_releases_window_handle_and_prepared_processes_test),
     TEST_CASE(legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin_test),
+    TEST_CASE(eviction_removes_entries_that_can_never_match_a_key_again_test),
+    TEST_CASE(eviction_keeps_everything_reusable_while_the_disk_has_room_test),
+    TEST_CASE(eviction_frees_the_least_recently_used_until_the_floor_is_met_test),
+    TEST_CASE(eviction_never_touches_an_active_entry_test),
+    TEST_CASE(eviction_frees_what_it_can_when_the_floor_is_unreachable_test),
+    TEST_CASE(a_zero_floor_evicts_only_the_dead_test),
     TEST_CASE(module_path_grows_past_max_path_test),
     TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
     TEST_CASE(module_path_reports_a_failed_query_test),

@@ -1,4 +1,6 @@
 #include "NeuralCache.h"
+#include "CacheEvictionPolicy.h"
+#include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "GuideControls.h"
 #include "Log.h"
@@ -381,7 +383,7 @@ std::optional<std::filesystem::path> PrepareWritableRoot(const std::filesystem::
     if (error) { failure.error = error; return std::nullopt; }
     const auto writableRoot = ResolveWritableRoot(resolved, error);
     if (!writableRoot) { failure.error = error; return std::nullopt; }
-    for (const auto directory : {L"sources", L"renders", L"staging", L"frame-generation"}) {
+    for (const auto directory : {L"sources", L"renders", L"staging", L"frame-generation", L"live"}) {
         std::filesystem::create_directories(*writableRoot / directory, error);
         if (error) {
             failure.error = error;
@@ -1173,14 +1175,107 @@ uintmax_t NeuralCacheManager::SizeBytes() const
 {
     if (!valid_) return 0;
     uintmax_t total = 0;
-    std::error_code error;
+    size_t unreadable = 0;
+    std::error_code walkError;
     for (std::filesystem::recursive_directory_iterator iterator(
-             root_, std::filesystem::directory_options::skip_permission_denied, error), end;
-         !error && iterator != end; iterator.increment(error)) {
-        if (iterator->is_regular_file(error) && !error) total += iterator->file_size(error);
-        if (error) return 0;
+             root_, std::filesystem::directory_options::skip_permission_denied, walkError), end;
+         !walkError && iterator != end; iterator.increment(walkError)) {
+        // Per entry, and never fatal. One shared error_code that was never
+        // cleared used to make a single unmeasurable file report the WHOLE
+        // cache as zero bytes - so the Clear prompt offered to free 0 MiB of a
+        // 40 GB cache. A file that vanishes mid-walk, which the staging sweep
+        // can cause, was enough.
+        std::error_code entryError;
+        if (iterator->is_regular_file(entryError) && !entryError) {
+            const uintmax_t bytes = iterator->file_size(entryError);
+            if (entryError) ++unreadable;
+            else total += bytes;
+        } else if (entryError) {
+            ++unreadable;
+        }
     }
-    return error ? 0 : total;
+    if (unreadable)
+        LOG("Cache size: " << unreadable << " entr" << (unreadable == 1 ? "y" : "ies")
+            << " could not be measured and are not counted in " << total << " bytes.");
+    return total;
+}
+
+NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
+    std::span<const std::string> activeKeys, uintmax_t freeFloorBytes)
+{
+    EvictionReport report;
+    if (!valid_) return report;
+    const auto renders = root_ / L"renders";
+    std::error_code error;
+    if (!std::filesystem::is_directory(renders, error)) return report;
+
+    std::vector<cache_eviction::Entry> entries;
+    for (const auto& child : std::filesystem::directory_iterator(
+             renders, std::filesystem::directory_options::skip_permission_denied, error)) {
+        std::error_code entryError;
+        if (!child.is_directory(entryError) || entryError) continue;
+        // A key is a hex digest, so anything that is not plain ASCII is not
+        // one of ours and is left alone rather than narrowed into something
+        // that might collide with one.
+        const auto key = narrow_text::StrictAscii(child.path().filename().wstring());
+        if (!key || !ValidKey(*key)) continue;
+
+        cache_eviction::Entry entry;
+        entry.key = *key;
+        entry.active = std::ranges::find(activeKeys, *key) != activeKeys.end();
+
+        // Unparsable or unreadable manifests count as unreachable: lookup
+        // refuses them too, so they are occupying space for nothing.
+        std::string manifestBytes;
+        if (std::ifstream input(child.path() / L"manifest.json", std::ios::binary); input)
+            manifestBytes.assign(std::istreambuf_iterator<char>(input),
+                                 std::istreambuf_iterator<char>());
+        const auto manifest = ParseNeuralCacheManifest(manifestBytes);
+        entry.reusable = manifest && IsReusableNeuralCacheManifest(*manifest);
+
+        // Last use is the newest timestamp in the entry, so serving a render
+        // keeps it alive only if something touches it. Nothing does today, so
+        // in practice this orders by when the entry was written - which is
+        // still a far better answer than an arbitrary one.
+        for (std::filesystem::recursive_directory_iterator file(
+                 child.path(), std::filesystem::directory_options::skip_permission_denied,
+                 entryError), end;
+             !entryError && file != end; file.increment(entryError)) {
+            std::error_code fileError;
+            if (!file->is_regular_file(fileError) || fileError) continue;
+            const uintmax_t bytes = file->file_size(fileError);
+            if (!fileError) entry.bytes += bytes;
+            const auto written = file->last_write_time(fileError);
+            if (!fileError)
+                entry.lastUsed = std::max(entry.lastUsed, written.time_since_epoch().count());
+        }
+        entries.push_back(std::move(entry));
+    }
+
+    uintmax_t freeBytes = 0;
+    if (freeFloorBytes) {
+        const auto space = std::filesystem::space(root_, error);
+        freeBytes = error ? freeFloorBytes : space.available;   // unknown: assume no pressure
+        if (error) LOG("Cache eviction could not read free space; skipping the pressure pass.");
+    }
+
+    const auto plan = cache_eviction::PlanEviction(entries, freeBytes, freeFloorBytes);
+    report.freeSpaceFloorMet = plan.floorMet;
+    for (const std::string& key : plan.evict) {
+        const auto matched = std::ranges::find(entries, key, &cache_eviction::Entry::key);
+        const bool unreachable = matched != entries.end() && !matched->reusable;
+        if (!RemoveRender(key)) { ++report.failures; continue; }
+        if (matched != entries.end()) report.freedBytes += matched->bytes;
+        if (unreachable) ++report.unreachableRemoved;
+        else ++report.leastRecentlyUsedRemoved;
+    }
+    if (!plan.evict.empty() || report.failures)
+        LOG("Cache eviction: removed " << report.unreachableRemoved
+            << " unreachable and " << report.leastRecentlyUsedRemoved
+            << " least-recently-used render(s), freeing " << report.freedBytes
+            << " bytes; " << report.failures << " could not be removed."
+            << (plan.floorMet ? "" : " The free-space floor was still not met."));
+    return report;
 }
 
 bool NeuralCacheManager::Clear()
@@ -1190,7 +1285,12 @@ bool NeuralCacheManager::Clear()
     // the Clear prompt lie: SizeBytes recurses the whole root, so the dialog
     // offered to free bytes it then kept, and generated files accumulated with
     // no surface in the player able to delete them.
-    for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation"}) {
+    //
+    // `live` is here for exactly the same reason and was missed the first time
+    // round. It holds each session's published segments; SizeBytes counts them
+    // and Clear did not remove them, so the dialog over-promised again by
+    // however much live rendering the user had done.
+    for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation", L"live"}) {
         const auto target = root_ / name;
         if (!OwnsPath(target)) return false;
         std::error_code error;

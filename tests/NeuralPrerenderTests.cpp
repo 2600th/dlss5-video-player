@@ -269,6 +269,89 @@ NeuralCacheManifest CompleteRenderManifest()
 //
 // When this stops compiling: add the field to BuildNeuralCacheKey, add a case
 // for it to the mutation loop below, then add its name here.
+// The cache never removed anything except by Clear(), which is all or
+// nothing. Its key retires entries wholesale - one driver update changes every
+// key - so 40 GB of renders could become unreachable at once with no way to
+// reclaim it that did not also destroy the new renders.
+//
+// This is the manager half; CacheEvictionPolicy's rules are asserted in
+// PolicyTests. Here: does it find the entries on disk, judge them by the same
+// gate lookup uses, and actually remove the right directories.
+void eviction_reclaims_unreachable_renders_and_keeps_the_rest_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+
+    const std::string goodKey(64, 'a');
+    const auto goodStaging = manager.BeginRenderStaging(goodKey);
+    REQUIRE(goodStaging.has_value());
+    WriteBytes(*goodStaging / L"neural.mkv", "neural-frames");
+    StageRenderReceipt(*goodStaging);
+    REQUIRE(manager.PromoteRender(goodKey, *goodStaging, CompleteRenderManifest()));
+
+    // A retired entry, written straight to disk the way a previous build would
+    // have left one: the schema gate refuses it, so it can never be served.
+    const std::string deadKey(64, 'b');
+    const auto deadDirectory = manager.Root() / L"renders" / std::wstring(deadKey.begin(), deadKey.end());
+    std::filesystem::create_directories(deadDirectory);
+    WriteBytes(deadDirectory / L"neural.mkv", "stale-frames");
+    WriteBytes(deadDirectory / L"manifest.json", "{\"schema\":4}");
+
+    CHECK(manager.LookupRender(goodKey).has_value());
+    CHECK(!manager.LookupRender(deadKey).has_value());
+
+    // A floor of zero: no disk pressure, so only the dead entry may go.
+    const auto report = manager.Evict({}, 0);
+    CHECK_EQ(size_t{1}, report.unreachableRemoved);
+    CHECK_EQ(size_t{0}, report.leastRecentlyUsedRemoved);
+    CHECK_EQ(size_t{0}, report.failures);
+    CHECK(report.freedBytes > 0);
+
+    CHECK(!std::filesystem::exists(deadDirectory));
+    // And the reusable entry is untouched and still serves.
+    CHECK(manager.LookupRender(goodKey).has_value());
+}
+
+// The guard that matters most: a render in progress owns its entry.
+void eviction_leaves_an_active_entry_alone_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+
+    const std::string activeKey(64, 'c');
+    const auto directory = manager.Root() / L"renders" / std::wstring(activeKey.begin(), activeKey.end());
+    std::filesystem::create_directories(directory);
+    WriteBytes(directory / L"neural.mkv", "frames-being-written");
+    WriteBytes(directory / L"manifest.json", "{\"schema\":4}");   // unreachable AND in use
+
+    const std::string active[] = {activeKey};
+    const auto report = manager.Evict(active, 0);
+    CHECK_EQ(size_t{0}, report.unreachableRemoved);
+    CHECK(std::filesystem::exists(directory));
+}
+
+// Clear() offered to free bytes it then kept: SizeBytes recurses the whole
+// root, live/ included, and Clear did not remove live/.
+void clearing_the_cache_frees_everything_size_bytes_counted_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+
+    const auto liveSegment = manager.Root() / L"live" / L"pid1234" / L"segment-000.mkv";
+    std::filesystem::create_directories(liveSegment.parent_path());
+    WriteBytes(liveSegment, std::string(4096, 'x'));
+
+    const uintmax_t before = manager.SizeBytes();
+    CHECK(before >= 4096);
+
+    CHECK(manager.Clear());
+    CHECK_EQ(uintmax_t{0}, manager.SizeBytes());
+    CHECK(!std::filesystem::exists(liveSegment));
+}
+
 void cache_identity_field_list_is_pinned_test()
 {
     const NeuralCacheIdentity identity{};
@@ -3838,6 +3921,9 @@ int wmain(int argc, wchar_t* argv[])
     default_cache_falls_back_when_portable_layout_is_unusable_test();
     explicit_cache_root_remains_authoritative_test();
     invalid_explicit_cache_root_does_not_silently_fall_back_test();
+    eviction_reclaims_unreachable_renders_and_keeps_the_rest_test();
+    eviction_leaves_an_active_entry_alone_test();
+    clearing_the_cache_frees_everything_size_bytes_counted_test();
     cache_identity_field_list_is_pinned_test();
     published_render_is_not_reused_across_identity_changes_test();
     schema_four_entries_are_retired_by_the_schema_gate_test();

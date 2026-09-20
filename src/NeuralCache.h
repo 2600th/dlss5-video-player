@@ -223,6 +223,29 @@ public:
     // Callers must first release playback/jobs referencing the entry.
     bool RemoveSource(std::string_view key);
     bool RemoveRender(std::string_view key);
+
+    // What one eviction pass did. Reported rather than silent: this deletes
+    // renders, and a user who finds one gone deserves to find out why from
+    // the log.
+    struct EvictionReport {
+        size_t unreachableRemoved{};   // manifests this build can never serve
+        size_t leastRecentlyUsedRemoved{};
+        uintmax_t freedBytes{};
+        bool freeSpaceFloorMet{};
+        size_t failures{};             // entries the filesystem refused
+    };
+
+    // Removes render entries that can never be served again, and - only when
+    // the volume has less than `freeFloorBytes` free - the least recently used
+    // reusable entries until it does. `activeKeys` are never touched.
+    //
+    // The cache had no eviction at all, and its key deliberately retires
+    // entries wholesale: one driver update changes every key, so 40 GB of
+    // renders becomes unreachable at once and the only remedy on offer was
+    // Clear(), which destroys the new renders too. See CacheEvictionPolicy.h
+    // for why the trigger is free space rather than a size cap.
+    EvictionReport Evict(std::span<const std::string> activeKeys = {},
+                         uintmax_t freeFloorBytes = 0);
     uintmax_t SizeBytes() const;
     bool Clear();
     // Reaps staging/ entries nothing will ever finish: directories set aside

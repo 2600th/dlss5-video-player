@@ -441,8 +441,23 @@ Invalid metadata is quarantined. Cancellation and failed
 validation can never publish a partial render.
 
 `RecentMediaHistory` atomically persists five distinct sources and their current
-cache keys. Displaced keys are removed only when unreferenced by that history and
-no active job/export can own them. Local originals are never removal targets.
+cache keys. Local originals are never removal targets.
+
+Reclamation happens at startup, on its own thread, in two steps
+(`NeuralCacheManager::Evict`, rules in `CacheEvictionPolicy.h`). Render entries
+whose manifest this build can never serve again — a retired schema, an
+unparsable manifest — are removed unconditionally: the lookup gate already
+refuses them, so keeping them costs space and buys nothing. Everything else is
+removed only when the volume has less than `kDefaultFreeFloorBytes` (20 GiB)
+free, least recently used first, and only until the floor is met. An entry an
+active job owns is never a target.
+
+The trigger is free space rather than a size cap because the key retires
+entries wholesale — `applicationVersion`, `driverVersion`, `modelStoreDigest`,
+`runtimeDigest` and the manifest schema are all key terms, so one driver update
+changes every key at once — while re-rendering a film costs minutes to hours.
+A cap would have to be either small enough to delete renders on a half-empty
+disk or large enough never to fire on the machine that needed it.
 The cache root is resolved through a temporary delete-on-close file before bucket
 creation, so inherited Windows package redirection cannot split the ownership root
 from newly written children. Descendant and reparse-point checks remain in force.
