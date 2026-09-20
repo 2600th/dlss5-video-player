@@ -147,6 +147,8 @@ private:
             {L"menu.convert", L"Convert && save"},
             {L"menu.render_range", L"Convert marked clip to neural video\tCtrl+R"}, {L"menu.render_whole", L"Convert whole video to neural video"},
             {L"menu.export_cached", L"Save converted video..."}, {L"menu.cancel_export", L"Cancel saving"},
+            {L"menu.neural_presets", L"Neural presets"},
+            {L"menu.neural_preset_custom", L"Custom (a control was changed)"},
             {L"menu.neural_settings", L"Neural settings...\tCtrl+N"},
             {L"menu.encoder_settings", L"Encoder settings..."},
             {L"menu.advanced", L"Advanced"}, {L"menu.safe_mode", L"Restart in DLSS SR safe mode"},

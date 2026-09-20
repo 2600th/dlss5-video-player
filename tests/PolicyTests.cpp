@@ -28,6 +28,7 @@
 #include "AudioClockPolicy.h"
 #include "CachedRenderVerdict.h"
 #include "Nv12Convert.h"
+#include "NeuralPresets.h"
 #ifdef small
 #undef small
 #endif
@@ -7307,6 +7308,65 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// Six controls with measured tooltips are the right surface for someone who
+// knows what they do, and the wrong first contact - issue #1 is someone who
+// never reached them. Presets answer "what should I pick" once.
+//
+// Two properties matter more than the values themselves. A preset whose value
+// falls outside what LoadNeuralSettings clamps to would not survive a restart:
+// the user picks it, the ini is written, and the next launch reads back
+// something else and reports Custom. And the default preset has to BE the
+// shipped default, or a first run silently starts somewhere the screenshots
+// and the measurements were not taken.
+void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
+{
+    using namespace neural_presets;
+    CHECK(kPresetCount >= 2);
+
+    // The recommended default is the settings the project actually measures.
+    CHECK(kPresets[kDefaultPresetIndex].settings == NeuralSettings{});
+    CHECK_EQ(size_t{0}, kDefaultPresetIndex);
+    CHECK(kPresets[kDefaultPresetIndex].label.find("recommended") != std::string_view::npos);
+
+    for (size_t index = 0; index < kPresetCount; ++index) {
+        const Preset& preset = kPresets[index];
+        CHECK(!preset.key.empty());
+        CHECK(!preset.label.empty());
+        CHECK(!preset.description.empty());
+
+        // Inside the ranges NeuralSettings.cpp clamps to on load. Outside them
+        // a preset cannot round-trip through the ini.
+        CHECK(preset.settings.intensity >= 0.0f && preset.settings.intensity <= 2.0f);
+        CHECK(preset.settings.localTone >= 0.0f && preset.settings.localTone <= 2.0f);
+        CHECK(preset.settings.localStructure >= 0.0f && preset.settings.localStructure <= 2.0f);
+        CHECK(preset.settings.skinStructure >= -1.0f && preset.settings.skinStructure <= 1.0f);
+        CHECK(preset.settings.colorStrength >= 0.0f && preset.settings.colorStrength <= 1.0f);
+        CHECK(preset.settings.preset >= 0 && preset.settings.preset <= 3);
+        CHECK(preset.settings.style >= 0 && preset.settings.style <= 2);
+
+        // Recognised by both lookups, and by its own key.
+        CHECK_EQ(index, IndexOf(preset.settings));
+        CHECK_EQ(index, IndexOfKey(preset.key));
+    }
+
+    // Distinct keys, labels and settings: two presets that resolve to the same
+    // settings would make IndexOf ambiguous and the UI show the wrong one.
+    for (size_t a = 0; a < kPresetCount; ++a)
+        for (size_t b = a + 1; b < kPresetCount; ++b) {
+            CHECK(kPresets[a].key != kPresets[b].key);
+            CHECK(kPresets[a].label != kPresets[b].label);
+            CHECK(!(kPresets[a].settings == kPresets[b].settings));
+        }
+
+    // Editing a preset is the expected path, and lands on Custom rather than
+    // on a neighbouring preset.
+    NeuralSettings edited = kPresets[kDefaultPresetIndex].settings;
+    edited.intensity = 1.37f;
+    CHECK_EQ(kPresetCount, IndexOf(edited));
+    CHECK_EQ(kPresetCount, IndexOfKey("no-such-preset"));
+    CHECK_EQ(kPresetCount, IndexOfKey(""));
+}
+
 // The comparison reference conversion runs on every presented frame once the
 // viewer picks Blend, Split or Wipe, which a scalar double pass over 3.69 Mpx
 // cannot do inside a 16.68 ms budget. Speeding it up is only allowed if the
@@ -7799,6 +7859,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
     TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
+    TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
 };
 
 

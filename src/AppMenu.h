@@ -87,6 +87,12 @@ inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 inline constexpr UINT IDM_OPEN_RENDER_RECEIPT = 452;
 inline constexpr UINT IDM_CHECK_FOR_UPDATES = 460;
+// One contiguous radio block, like the upscaling rungs: CheckMenuRadioItem
+// clears every command in the range it is given, so exactly one preset - or
+// the Custom entry that ends the block - is checked at a time. Custom is not
+// selectable; it reports that a control has been moved off every preset.
+inline constexpr UINT IDM_NEURAL_PRESET_FIRST = 470;
+inline constexpr UINT IDM_NEURAL_PRESET_CUSTOM = 479;
 // Right-justified affordance appended to the menu bar itself, not a submenu.
 inline constexpr UINT IDM_UPDATE_AVAILABLE = 461;
 

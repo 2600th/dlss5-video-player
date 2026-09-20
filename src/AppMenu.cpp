@@ -1,4 +1,5 @@
 #include "AppMenu.h"
+#include "NeuralPresets.h"
 
 #include "Localization.h"
 #include "YouTubeResolver.h"
@@ -42,7 +43,7 @@ HMENU CreateDebugViewMenu(UINT selectedCommand)
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
 {
-    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), convert = CreatePopupMenu(), advanced = CreatePopupMenu();
+    HMENU bar = CreateMenu(), file = CreatePopupMenu(), examples = CreatePopupMenu(), recent = CreatePopupMenu(), play = CreatePopupMenu(), video = CreatePopupMenu(), youtubeQuality = CreatePopupMenu(), compare = CreatePopupMenu(), dlss = CreatePopupMenu(), convert = CreatePopupMenu(), presets = CreatePopupMenu(), advanced = CreatePopupMenu();
     const auto add = [&](HMENU menu, UINT command, const wchar_t* key) {
         const std::wstring text = localizer.Get(key);
         AppendMenuW(menu, MF_STRING, command, text.c_str());
@@ -112,6 +113,26 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, localizer.Get(L"menu.cancel_export").c_str());
     const std::wstring convertName = localizer.Get(L"menu.convert");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    // Presets before the controls they set: six sliders with measured tooltips
+    // are the right surface for an expert and the wrong first contact. Every
+    // preset is one neural evaluation at the same resolution, so this is a
+    // choice of look, not a speed trade - that one lives in Encoder settings.
+    for (size_t index = 0; index < neural_presets::kPresetCount; ++index) {
+        const std::wstring label(neural_presets::kPresets[index].label.begin(),
+                                 neural_presets::kPresets[index].label.end());
+        AppendMenuW(presets, MF_STRING, IDM_NEURAL_PRESET_FIRST + index, label.c_str());
+    }
+    // Ends the radio block and is never selectable: it reports that a control
+    // has been moved off every preset, which is the expected path once someone
+    // starts from one and edits it.
+    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(presets, MF_STRING | MF_GRAYED, IDM_NEURAL_PRESET_CUSTOM,
+                localizer.Get(L"menu.neural_preset_custom").c_str());
+    CheckMenuRadioItem(presets, IDM_NEURAL_PRESET_FIRST, IDM_NEURAL_PRESET_CUSTOM,
+                       IDM_NEURAL_PRESET_FIRST + UINT(neural_presets::kDefaultPresetIndex),
+                       MF_BYCOMMAND);
+    const std::wstring presetsName = localizer.Get(L"menu.neural_presets");
+    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), presetsName.c_str());
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
     add(dlss, IDM_ENCODER_SETTINGS, L"menu.encoder_settings");
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");

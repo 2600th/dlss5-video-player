@@ -60,6 +60,7 @@
 #include "NeuralPreflight.h"
 #include "NeuralReceipt.h"
 #include "NeuralSettings.h"
+#include "NeuralPresets.h"
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
@@ -2976,6 +2977,14 @@ private:
                 :(m_upscaleTargetHeight==2160?IDM_UPSCALE_2160
                  :(m_upscaleTargetHeight==1080?IDM_UPSCALE_1080:IDM_UPSCALE_1440));
             CheckMenuRadioItem(menu,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,checked,MF_BYCOMMAND);
+            // Custom ends the block, so a settings edit that leaves every preset
+            // shows as Custom rather than leaving the last one checked.
+            const size_t presetIndex=neural_presets::IndexOf(m_neuralSettings);
+            CheckMenuRadioItem(menu,IDM_NEURAL_PRESET_FIRST,IDM_NEURAL_PRESET_CUSTOM,
+                               presetIndex==neural_presets::kPresetCount
+                                   ?IDM_NEURAL_PRESET_CUSTOM
+                                   :UINT(IDM_NEURAL_PRESET_FIRST+presetIndex),
+                               MF_BYCOMMAND);
             // 2x..5x then "as many as the display allows", in the order the
             // submenu appends them, so the radio always shows what the next
             // conversion will plan against.
@@ -3301,6 +3310,24 @@ private:
     }
 
     static constexpr int kNeuralDesignW=466,kNeuralDesignH=500;
+
+    // A preset is a starting point, not a mode: it writes the same six controls
+    // the dialog edits, so the dialog stays the place the values live and an
+    // edit afterwards simply lands on Custom. Applied the same way the dialog
+    // applies a change, including the paused re-render that lets the picture
+    // answer rather than the label.
+    void ApplyNeuralPreset(size_t index){
+        if(index>=neural_presets::kPresetCount)return;
+        const NeuralSettings wanted=neural_presets::kPresets[index].settings;
+        if(m_neuralSettings==wanted){SyncFeatureMenuState();return;}
+        m_neuralSettings=wanted;
+        LOG("Neural preset \""<<std::string(neural_presets::kPresets[index].key)
+            <<"\" applied: "<<CanonicalNeuralSettings(m_neuralSettings));
+        if(m_neuralWnd&&IsWindow(m_neuralWnd))SyncNeuralSettingControls(m_neuralWnd);
+        SaveVideoSettings();
+        SchedulePausedSettingsPreview();
+        SyncFeatureMenuState();
+    }
 
     void ShowNeuralSettings(){
         if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
@@ -6777,6 +6804,8 @@ private:
 
     void HandleCommand(UINT id){
         if(id>=IDM_RECENT_VIDEO_FIRST&&id<IDM_RECENT_VIDEO_FIRST+5){OpenRecent(id-IDM_RECENT_VIDEO_FIRST);return;}
+        if(id>=IDM_NEURAL_PRESET_FIRST&&id<IDM_NEURAL_PRESET_FIRST+neural_presets::kPresetCount){
+            ApplyNeuralPreset(size_t(id-IDM_NEURAL_PRESET_FIRST));return;}
         if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::NativeMenu,id)){Rehook();return;}
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
@@ -6803,7 +6832,11 @@ private:
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;
-        case IDM_NEURAL_SETTINGS:ShowNeuralSettings();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
+        case IDM_NEURAL_SETTINGS:ShowNeuralSettings();break;
+        // Handled before the switch would reach an unknown id, because the
+        // presets are a contiguous range rather than named commands.
+        case IDM_NEURAL_PRESET_CUSTOM:break;// reports state; not selectable
+case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
