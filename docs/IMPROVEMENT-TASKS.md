@@ -16,6 +16,17 @@ code audits (correctness, performance, build & release), one duplication sweep.
 partly done (what remains is stated in the task), `[ ]` not started. All 21
 tests - 13 portable and 8 GPU-labelled on an RTX 5090 - pass at every commit.
 
+**Measured on this machine** (2560x1440 23.976 fps, plain playback), before
+and after the branch:
+
+| | main (ee1f393) | branch |
+| --- | ---: | ---: |
+| CPU during playback | 113% of one core | 9.5-17.8% |
+| Guide work per frame, SR off | 0.84 ms | 0.0001 ms |
+| NV12 comparison conversion | 66.11 ms/frame | 5.51 ms/frame |
+| Full clean rebuild, all targets | 103.2 s | 52.4 s |
+| Presented vs source | not reported | 23.83-24.43 of 23.9794, dropped=0 |
+
 ---
 
 ## The rule that shapes this list
@@ -413,7 +424,7 @@ Also `MediaPipeline.cpp`, `SynchronizedPlayback.cpp`, `NeuralWorker.cpp`,
 
 ---
 
-### [ ] 1.12 · Attest the package users actually download
+### [~] 1.12 · Attest the package users actually download
 
 `CRITICAL` · 🔍 reported · **effort: M** · **impact: trust**
 
@@ -577,7 +588,7 @@ a 0..255 LUT instead of `std::lround`, and wrap the row loop in
 
 ---
 
-### [ ] 2.4 · Guides and two full-res GPU passes run every frame with DLSS off
+### [x] 2.4 · Guides and two full-res GPU passes run every frame with DLSS off
 
 🔍 reported · **effort: S** · **gain: 0.6 ms/frame CPU + ~44 MB/frame GPU**
 
@@ -830,7 +841,7 @@ measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
 
 ---
 
-### [ ] 2.11 · A reachable path to a fully unoptimized shipping binary
+### [x] 2.11 · A reachable path to a fully unoptimized shipping binary
 
 🔍 reported · **effort: S** · **impact: measurement integrity**
 
@@ -885,7 +896,7 @@ this carefully, that is a correctness-of-measurement hazard.**
 
 ---
 
-### [ ] 2.12 · 5.2× compile amplification — there is no `add_library` anywhere
+### [~] 2.12 · 5.2× compile amplification — there is no `add_library` anywhere
 
 🔍 reported · **effort: M** · **gain: ~halve a 10-minute CI**
 
@@ -967,7 +978,7 @@ Add it to `CachedExportTests`, which already has real media staged.
 
 ---
 
-### [ ] 2.14 · 8 GPU tests never run anywhere, and hard-fail instead of skipping
+### [x] 2.14 · 8 GPU tests never run anywhere, and hard-fail instead of skipping
 
 🔍 reported · **effort: S for the skip, M for the runner**
 
@@ -1371,7 +1382,7 @@ interpolation (SVP does it **live** for $25 into five players).
 
 ---
 
-### [ ] 3.2 · Named presets — the quality ladder lives here
+### [x] 3.2 · Named presets — the quality ladder lives here
 
 `FEATURE` · **effort: XS** · **impact: highest polish-per-hour on the list**
 
