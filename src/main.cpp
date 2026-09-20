@@ -1294,7 +1294,10 @@ public:
         if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
             LeaveSettingsPreviewFrame();
             RememberRenderedCachedPair();
-            if(m_cachedPlayback)++m_cachedPresentedFrames;
+            // Counted for plain playback too: a viewer reporting choppy playback
+            // on an ordinary file produced no health line at all, because both
+            // this and ReportPlaybackHealth were gated on a cached pair.
+            ++m_cachedPresentedFrames;
             ++m_fpsWindowFrames;
             const auto fpsNow=Clock::now();
             const double fpsElapsed=std::chrono::duration<double>(fpsNow-m_fpsWindowStart).count();
@@ -2377,7 +2380,7 @@ private:
     // answers is a trend, not an event.
     static constexpr double kPlaybackHealthSeconds=2.0;
     void ReportPlaybackHealth(){
-        if(!m_cachedPlayback||!m_playing){m_playbackHealthAt={};return;}
+        if(!m_loaded||!m_playing){m_playbackHealthAt={};return;}
         const auto now=Clock::now();
         if(m_playbackHealthAt==Clock::time_point{}){
             m_playbackHealthAt=now;m_playbackHealthDropped=m_droppedFrames;
