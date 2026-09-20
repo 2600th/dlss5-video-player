@@ -49,6 +49,7 @@
 #include <limits>
 #include <memory>
 #include <stop_token>
+#include <sstream>
 #include <string>
 #include <future>
 #include <thread>
@@ -2069,10 +2070,68 @@ void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin
     }
 }
 
-void harness_sanity_test()
+// The harness is the only thing standing between one bad case and the rest of
+// the suite, so it gets tested like anything else. CHECK(true) said nothing.
+//
+// These three probes are run through the real runner by the case below. They
+// are deliberately not in kCases: they fail on purpose.
+int g_harness_statements_after_require = 0;
+
+void harness_probe_require_stops_the_case()
+{
+    // Read through the counter so the condition is not a constant the
+    // compiler folds - /W4 reports C4127 for a literally false REQUIRE.
+    REQUIRE(g_harness_statements_after_require < 0);
+    ++g_harness_statements_after_require;  // must never run
+}
+
+void harness_probe_access_violation()
+{
+    volatile int* nowhere = nullptr;
+    *nowhere = 1;
+}
+
+void harness_probe_passes()
 {
     CHECK(true);
-    CHECK_EQ(2 + 2, 4);
+}
+
+// Three properties, all of which the suite lacked: a hard failure stops its
+// own case rather than the run; the case after a crash still executes; and
+// each failure is attributed to the case that produced it by name.
+void harness_isolates_a_failing_case_from_the_ones_after_it_test()
+{
+    static constexpr test_support::TestCase probes[] = {
+        TEST_CASE(harness_probe_require_stops_the_case),
+        TEST_CASE(harness_probe_access_violation),
+        TEST_CASE(harness_probe_passes),
+    };
+
+    g_harness_statements_after_require = 0;
+    const int failuresBefore = test_support::failure_count;
+    // The probes report through the same stream every other case does, so it
+    // is borrowed for the duration rather than letting two expected failures
+    // print as if the suite were broken.
+    std::ostringstream captured;
+    std::streambuf* const previous = std::cerr.rdbuf(captured.rdbuf());
+    const test_support::RunSummary summary =
+        test_support::run_cases(probes, std::size(probes), {});
+    std::cerr.rdbuf(previous);
+    test_support::failure_count = failuresBefore;
+
+    CHECK_EQ(size_t{3}, summary.ran);
+    CHECK_EQ(size_t{2}, summary.failed);
+    // A failed REQUIRE abandons its case at the point of failure. A failed
+    // CHECK would have carried on to the increment.
+    CHECK_EQ(0, g_harness_statements_after_require);
+
+    const std::string report = captured.str();
+    CHECK(report.find("harness_probe_require_stops_the_case") != std::string::npos);
+    CHECK(report.find("harness_probe_access_violation") != std::string::npos);
+    // The access violation is reported as one, not as a silent abort.
+    CHECK(report.find("c0000005") != std::string::npos);
+    // The case after the crash ran and did not fail.
+    CHECK(report.find("harness_probe_passes") == std::string::npos);
 }
 
 void gpu_teardown_fence_signal_failure_stops_before_event_registration_test()
@@ -7107,73 +7166,7 @@ void spawning_a_corrupt_helper_fails_closed_without_a_hard_error_dialog_test()
     std::filesystem::remove_all(directory, directoryError);
 }
 
-struct TestCase {
-    const char* name;
-    void (*run)();
-};
-#define TEST_CASE(function) TestCase{#function, &function}
-
-struct CaseOutcome {
-    DWORD exceptionCode{};
-    std::string exception;
-};
-
-void run_case_catching(void (*run)(), CaseOutcome& outcome)
-{
-    try {
-        run();
-    } catch (const std::exception& error) {
-        outcome.exception = error.what();
-        if (outcome.exception.empty()) outcome.exception = "std::exception";
-    } catch (...) {
-        outcome.exception = "non-standard exception";
-    }
-}
-
-// __try cannot share a frame with objects that need unwinding, so the C++
-// catch lives one call down. An access violation or a stack overflow in one
-// case used to take every case after it, and the failing name, with it.
-void run_case_guarded(void (*run)(), CaseOutcome& outcome) noexcept
-{
-    __try {
-        run_case_catching(run, outcome);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        outcome.exceptionCode = GetExceptionCode();
-    }
-}
-
-// Runs every case whose name contains `only` (all of them when it is empty),
-// attributing each failed CHECK, uncaught exception and structured exception
-// to the case it happened in. Returns the number of cases run.
-size_t run_cases(const TestCase* cases, size_t count, std::string_view only)
-{
-    size_t ran = 0;
-    std::vector<const char*> failed;
-    for (size_t index = 0; index < count; ++index) {
-        const TestCase& test = cases[index];
-        if (std::string_view(test.name).find(only) == std::string_view::npos) continue;
-        ++ran;
-        const int before = test_support::failure_count;
-        test_support::current_case = test.name;
-        CaseOutcome outcome;
-        run_case_guarded(test.run, outcome);
-        test_support::current_case = nullptr;
-        if (!outcome.exception.empty()) {
-            ++test_support::failure_count;
-            std::cerr << '[' << test.name << "] uncaught exception: " << outcome.exception << '\n';
-        }
-        if (outcome.exceptionCode != 0) {
-            ++test_support::failure_count;
-            std::cerr << '[' << test.name << "] structured exception 0x" << std::hex
-                      << outcome.exceptionCode << std::dec << '\n';
-        }
-        if (test_support::failure_count != before) failed.push_back(test.name);
-    }
-    for (const char* name : failed) std::cerr << "FAILED: " << name << '\n';
-    return ran;
-}
-
-constexpr TestCase kResolverAvailabilityCases[] = {
+constexpr test_support::TestCase kResolverAvailabilityCases[] = {
     TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
     TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
     TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),
@@ -7656,8 +7649,8 @@ void deferred_capture_serves_a_second_job_after_a_shutdown_test()
     delete worker;
 }
 
-constexpr TestCase kCases[] = {
-    TEST_CASE(harness_sanity_test),
+constexpr test_support::TestCase kCases[] = {
+    TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
     TEST_CASE(runtime_shutdown_releases_player_before_media_foundation_and_com_test),
     TEST_CASE(runtime_shutdown_rethrows_only_after_single_ordered_cleanup_test),
@@ -7895,7 +7888,7 @@ int wmain(int argc, wchar_t* argv[])
     const std::wstring executableName=current_test_executable().filename().wstring();
     if(_wcsicmp(executableName.c_str(),L"ffprobe.exe")==0||_wcsicmp(executableName.c_str(),L"ffmpeg.exe")==0)return run_fake_media_child(argc,argv);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--resolver-availability-tests") {
-        run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
+        test_support::run_cases(kResolverAvailabilityCases, std::size(kResolverAvailabilityCases), {});
         return test_support::failure_count == 0 ? 0 : 1;
     }
     // `--only=<text>` runs the cases whose name contains the text.
@@ -7909,7 +7902,7 @@ int wmain(int argc, wchar_t* argv[])
     } else if (argc > 1) {
         return run_fake_resolver_child(argc, argv);
     }
-    const size_t ran = run_cases(kCases, std::size(kCases), only);
+    const size_t ran = test_support::run_cases(kCases, std::size(kCases), only).ran;
     if (ran == 0) {
         std::cerr << "no case name contains '" << only << "'\n";
         return EXIT_FAILURE;

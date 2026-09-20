@@ -115,11 +115,45 @@ void WriteTinyAvi(const std::filesystem::path& path, uint32_t width, uint32_t he
 }
 } // namespace
 
+// Names each case after the member function that runs it, so a failure line
+// reads [toolbar_pills_and_progress_panel_test] rather than a file and line
+// in a two-thousand-line function.
+#define UI_CASE(function) ::test_support::TestCase{#function, &PlayerAppTestAccess::function}
+
 struct PlayerAppTestAccess {
-    static void Run()
+    // Every case below shares this one PlayerApp, in the order the registry
+    // lists them. That is deliberate, not laziness: the suite asserts against
+    // state the previous case left behind, and the destructor-order contract
+    // described in saved_settings_survive_a_reload depends on when this app is
+    // destroyed relative to the one CheckFullscreenLifecycle owns. Splitting
+    // the cases apart changed none of that - it only means a crash or a failed
+    // REQUIRE now names the case it happened in and lets the rest run.
+    //
+    // Only what genuinely outlives a single case lives here. Everything else
+    // stayed a local in the case that uses it.
+    struct Fixture {
+        PlayerApp app{AppOptions{}};
+        WNDCLASSW windowClass{};
+        // Snapshots taken while the toolbar is in a particular state and
+        // compared against the measured pill widths much later, in
+        // toolbar_pills_and_progress_panel.
+        PlayerApp::ToolbarButtonContent upscalingContent{};
+        PlayerApp::ToolbarButtonContent frameGenerationContent{};
+        HMENU featureMenu = nullptr;
+    };
+    static inline Fixture* fixture = nullptr;
+
+    static void cache_settings_round_trip_test()
     {
-        PlayerApp app(AppOptions{});
+        PlayerApp& app = fixture->app;
+
         CheckCacheSettings(app);
+    }
+
+    static void saved_settings_survive_a_reload_test()
+    {
+        PlayerApp& app = fixture->app;
+
         // Saved playback choices must survive a reload, with invalid volume clamped.
         app.m_volume = 0.35f; app.m_muted = true; app.m_fill = true;
         app.m_neuralRequested = false; app.m_upscaleTargetHeight = 2160;
@@ -223,7 +257,14 @@ struct PlayerAppTestAccess {
         app.m_cacheRoot.clear();
         WritePrivateProfileStringW(L"Storage",L"CacheDirectory",nullptr,app.SettingsPath().c_str());
         app.SaveVideoSettings();
-        WNDCLASSW windowClass{};
+    }
+
+    static void hidden_window_and_menu_bar_open_test()
+    {
+        PlayerApp& app = fixture->app;
+        WNDCLASSW& windowClass = fixture->windowClass;
+
+        windowClass = WNDCLASSW{};
         windowClass.lpfnWndProc = DefWindowProcW;
         windowClass.hInstance = GetModuleHandleW(nullptr);
         windowClass.lpszClassName = L"DLSSPlayerUiRegressionWindow";
@@ -235,6 +276,11 @@ struct PlayerAppTestAccess {
         CHECK(app.m_hwnd != nullptr);
         CHECK(app.m_uiResources.Load(GetModuleHandleW(nullptr)));
         app.UpdateFontsForDpi(96);
+    }
+
+    static void old_source_policy_requests_a_fresh_resolution_test()
+    {
+        PlayerApp& app = fixture->app;
 
         // Old source policies must request a fresh resolution; current sources
         // must reach decoding instead of being rejected by the policy gate.
@@ -304,7 +350,21 @@ struct PlayerAppTestAccess {
         app.m_opt.neuralAddonConfigured=false;app.m_youtubeSourceQuality=YouTubeSourceQuality::Auto;
         app.m_recent.reset();
         std::filesystem::remove(recentFile);
+    }
+
+    static void recent_rollover_keeps_the_cache_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckRecentRolloverKeepsTheCache(app);
+    }
+
+    static void neural_button_label_and_upscaling_rungs_test()
+    {
+        PlayerApp& app = fixture->app;
+        PlayerApp::ToolbarButtonContent& upscalingContent = fixture->upscalingContent;
+        PlayerApp::ToolbarButtonContent& frameGenerationContent = fixture->frameGenerationContent;
+
 
         // This must remain a synchronized neural/original comparison, never an
         // ambiguous label for runtime Super Resolution.
@@ -331,9 +391,9 @@ struct PlayerAppTestAccess {
         app.HandleCommand(IDM_UPSCALE_AUTO);
         CHECK(app.m_upscaleAuto);
         CHECK_EQ(app.m_upscaleTargetHeight,1440u);
-        const auto upscalingContent = app.ButtonContent(ToolbarAction::ToggleUpscaling);
+        upscalingContent = app.ButtonContent(ToolbarAction::ToggleUpscaling);
         CHECK(!upscalingContent.enabled);
-        const auto frameGenerationContent = app.ButtonContent(ToolbarAction::ToggleFrameGeneration);
+        frameGenerationContent = app.ButtonContent(ToolbarAction::ToggleFrameGeneration);
         CHECK(!frameGenerationContent.enabled);
         const bool initialQualityExplicit = app.m_opt.qualityExplicit;
         const auto initialQuality = app.m_opt.quality;
@@ -345,7 +405,14 @@ struct PlayerAppTestAccess {
         CHECK_EQ(initialQualityExplicit, app.m_opt.qualityExplicit);
         CHECK_EQ(initialQuality, app.m_opt.quality);
 
-        const HMENU featureMenu = GetMenu(app.m_hwnd);
+    }
+
+    static void feature_menu_mirrors_the_toolbar_test()
+    {
+        PlayerApp& app = fixture->app;
+        HMENU& featureMenu = fixture->featureMenu;
+
+        featureMenu = GetMenu(app.m_hwnd);
         CHECK((GetMenuState(featureMenu, IDM_NEURAL_RENDERING, MF_BYCOMMAND) & MFS_CHECKED) != 0);
         CHECK((GetMenuState(featureMenu, IDM_NEURAL_RENDERING, MF_BYCOMMAND) & (MFS_DISABLED | MFS_GRAYED)) != 0);
         CHECK((GetMenuState(featureMenu, IDM_DLSS_UPSCALING, MF_BYCOMMAND) & (MFS_DISABLED | MFS_GRAYED)) != 0);
@@ -382,27 +449,154 @@ struct PlayerAppTestAccess {
         CHECK(!frameGenerationSegment.empty());
         CHECK(cachedStatus.find(upscalingSegment) != std::wstring::npos);
         CHECK(cachedStatus.find(frameGenerationSegment) != std::wstring::npos);
+    }
+
+    static void markers_and_timecode_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckMarkersAndTimecode(app);
+    }
+
+    static void comparison_availability_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckComparisonAvailability(app);
+    }
+
+    static void neural_strength_dial_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckNeuralStrengthDial(app);
+    }
+
+    static void live_buffering_play_intent_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLiveBufferingPlayIntent(app);
+    }
+
+    static void neural_toggle_queued_during_seek_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckNeuralToggleQueuedDuringSeek(app);
+    }
+
+    static void neural_settings_dialog_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckNeuralSettingsDialog(app);
+    }
+
+    static void settings_ahead_notice_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckSettingsAheadNotice(app);
+    }
+
+    static void encoder_settings_dialog_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckEncoderSettingsDialog(app);
+    }
+
+    static void settings_dialog_tips_survive_a_second_dialog_test()
+    {
+        PlayerApp& app = fixture->app;
 
         CheckSettingsDialogTipsSurviveASecondDialog(app);
+    }
+
+    static void live_export_entry_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLiveExportEntry(app);
+    }
+
+    static void dropped_preview_job_test()
+    {
+        PlayerApp& app = fixture->app;
+        WNDCLASSW& windowClass = fixture->windowClass;
+
         CheckDroppedPreviewJob(app, windowClass);
+    }
+
+    static void unload_drops_deferred_toggle_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckUnloadDropsDeferredToggle(app);
+    }
+
+    static void live_job_directory_failure_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLiveJobDirectoryFailure(app);
+    }
+
+    static void live_render_failure_limit_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLiveRenderFailureLimit(app);
+    }
+
+    static void job_source_key_guard_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckJobSourceKeyGuard(app);
+    }
+
+    static void stream_conversion_uses_the_acquired_copy_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckStreamConversionUsesTheAcquiredCopy(app);
+    }
+
+    static void live_out_of_sync_hands_back_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLiveOutOfSyncHandsBack(app);
+    }
+
+    static void pair_stall_bound_ignores_a_pause_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckPairStallBoundIgnoresAPause(app);
+    }
+
+    static void nv12_reference_inverse_is_bt709_limited_test()
+    {
         CheckNv12ReferenceInverseIsBt709Limited();
+    }
+
+    static void live_pace_confirmation_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckLivePaceConfirmation(app);
+    }
+
+    static void toolbar_pills_and_progress_panel_test()
+    {
+        PlayerApp& app = fixture->app;
+        PlayerApp::ToolbarButtonContent& upscalingContent = fixture->upscalingContent;
+        PlayerApp::ToolbarButtonContent& frameGenerationContent = fixture->frameGenerationContent;
+        HMENU& featureMenu = fixture->featureMenu;
+
         app.m_seeking = false;
         app.m_cachedPlayback = false;
         app.m_havePresentedPair = false;
@@ -590,12 +784,35 @@ struct PlayerAppTestAccess {
         app.SyncSourceActionAvailability();
         const uint64_t staleToken = QueueCompletion(app, oldGeneration, true);
         app.CompleteNeuralJob(staleToken);
+    }
+
+    static void source_menus_are_disabled_without_media_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CheckSourceMenus(app, false);
+    }
+
+    static void source_menus_return_after_a_cancelled_job_test()
+    {
+        PlayerApp& app = fixture->app;
+
         CHECK(app.NeuralJobActive());
         app.CancelNeuralJob();
         CheckSourceMenus(app, true);
+    }
+
+    static void loading_feedback_test()
+    {
+        PlayerApp& app = fixture->app;
 
         CheckLoadingFeedback(app);
+    }
+
+    static void window_and_menu_teardown_test()
+    {
+        PlayerApp& app = fixture->app;
+        WNDCLASSW& windowClass = fixture->windowClass;
 
         HMENU menu = GetMenu(app.m_hwnd);
         SetMenu(app.m_hwnd, nullptr);
@@ -603,10 +820,51 @@ struct PlayerAppTestAccess {
         CHECK(DestroyWindow(app.m_hwnd));
         app.m_hwnd = nullptr;
         CHECK(UnregisterClassW(windowClass.lpszClassName, windowClass.hInstance));
+    }
+
+    static void fullscreen_lifecycle_test()
+    {
         CheckFullscreenLifecycle();
     }
 
-private:
+    static constexpr ::test_support::TestCase kCases[] = {
+        UI_CASE(cache_settings_round_trip_test),
+        UI_CASE(saved_settings_survive_a_reload_test),
+        UI_CASE(hidden_window_and_menu_bar_open_test),
+        UI_CASE(old_source_policy_requests_a_fresh_resolution_test),
+        UI_CASE(recent_rollover_keeps_the_cache_test),
+        UI_CASE(neural_button_label_and_upscaling_rungs_test),
+        UI_CASE(feature_menu_mirrors_the_toolbar_test),
+        UI_CASE(markers_and_timecode_test),
+        UI_CASE(comparison_availability_test),
+        UI_CASE(neural_strength_dial_test),
+        UI_CASE(live_buffering_play_intent_test),
+        UI_CASE(neural_toggle_queued_during_seek_test),
+        UI_CASE(neural_settings_dialog_test),
+        UI_CASE(settings_ahead_notice_test),
+        UI_CASE(encoder_settings_dialog_test),
+        UI_CASE(settings_dialog_tips_survive_a_second_dialog_test),
+        UI_CASE(live_export_entry_test),
+        UI_CASE(dropped_preview_job_test),
+        UI_CASE(unload_drops_deferred_toggle_test),
+        UI_CASE(live_job_directory_failure_test),
+        UI_CASE(live_render_failure_limit_test),
+        UI_CASE(job_source_key_guard_test),
+        UI_CASE(stream_conversion_uses_the_acquired_copy_test),
+        UI_CASE(live_out_of_sync_hands_back_test),
+        UI_CASE(pair_stall_bound_ignores_a_pause_test),
+        UI_CASE(nv12_reference_inverse_is_bt709_limited_test),
+        UI_CASE(live_pace_confirmation_test),
+        UI_CASE(toolbar_pills_and_progress_panel_test),
+        UI_CASE(source_menus_are_disabled_without_media_test),
+        UI_CASE(source_menus_return_after_a_cancelled_job_test),
+        UI_CASE(loading_feedback_test),
+        UI_CASE(window_and_menu_teardown_test),
+        UI_CASE(fullscreen_lifecycle_test),
+    };
+
+
+    // Helpers below are invoked by the cases above, in registry order.
     static void CheckMarkersAndTimecode(PlayerApp& app)
     {
         // Loaded cached playback with a bare renderer object; the closed
@@ -2020,9 +2278,23 @@ int main()
         std::cerr << "Media Foundation could not start.\n";
         return EXIT_FAILURE;
     }
-    PlayerAppTestAccess::Run();
+
+    size_t ran = 0;
+    {
+        // Scoped so the fixture's PlayerApp is destroyed - saving its settings -
+        // before Media Foundation shuts down, exactly as it was when this was
+        // one function.
+        PlayerAppTestAccess::Fixture fixture;
+        PlayerAppTestAccess::fixture = &fixture;
+        ran = ::test_support::run_cases(PlayerAppTestAccess::kCases,
+                                        std::size(PlayerAppTestAccess::kCases), {}).ran;
+        PlayerAppTestAccess::fixture = nullptr;
+    }
+
     MFShutdown();
     CoUninitialize();
-    std::cout << "Player UI regression failures: " << test_support::failure_count << '\n';
+    std::cout << "Player UI regression: " << ran << " cases, "
+              << test_support::assertion_count << " assertions, failures: "
+              << test_support::failure_count << '\n';
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
