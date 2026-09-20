@@ -702,7 +702,7 @@ removes the need to guess a sleep interval.
 
 ---
 
-### [ ] 2.7 · 682 ms of `waveOut` buffering sets the seek cost
+### [x] 2.7 · ~~682 ms of `waveOut` buffering sets the seek cost~~ — measured false, replaced anyway
 
 🔍 reported · **effort: S cheap / L structural**
 
@@ -943,7 +943,7 @@ No source references `__cplusplus`, so the `/Zc:__cplusplus` inconsistency at
 
 ---
 
-### [ ] 2.13 · Zero A/V sync coverage
+### [x] 2.13 · Zero A/V sync coverage
 
 🔍 reported · **effort: M** · **impact: the most user-visible property**
 
@@ -1014,7 +1014,7 @@ runner is missing.**
 
 ---
 
-### [ ] 2.15 · Nothing structurally guards cache-key completeness
+### [x] 2.15 · Nothing structurally guards cache-key completeness
 
 🔍 reported · **effort: S** · **impact: the failure the whole receipt
 architecture exists to prevent**
@@ -1045,7 +1045,7 @@ static_assert(sizeof(NeuralCacheIdentity) == /*pinned*/,
 
 ---
 
-### [ ] 2.16 · One 1,894-line test function with no crash guard
+### [x] 2.16 · One 1,894-line test function with no crash guard
 
 🔍 reported · **effort: M**
 
@@ -1117,7 +1117,7 @@ likewise never exercised.
 
 ---
 
-### [ ] 2.18 · Renderer recovery cannot work — it reuses the HWND
+### [x] 2.18 · Renderer recovery cannot work — it reuses the HWND
 
 🔍 reported · **effort: S** · **impact: the recovery path is dead on arrival**
 
@@ -1154,7 +1154,7 @@ is confirmed dead.
 
 ---
 
-### [ ] 2.19 · No cache eviction at all
+### [x] 2.19 · No cache eviction at all
 
 🔍 reported · **effort: M** · **impact: unbounded disk**
 
@@ -1194,7 +1194,7 @@ renders too.
 
 ---
 
-### [ ] 2.20 · Two `MAX_PATH` truncation bugs, and 13 copies of one function
+### [x] 2.20 · Two `MAX_PATH` truncation bugs, and 13 copies of one function
 
 🔍 reported · **effort: S**
 
@@ -1224,7 +1224,7 @@ convert all 13. Start with the two truncation bugs.
 
 ---
 
-### [ ] 2.21 · Other verified duplication worth collapsing
+### [~] 2.21 · Other verified duplication worth collapsing
 
 🔍 reported · **effort: M** · **impact: divergence, not compile time**
 
@@ -1267,7 +1267,7 @@ ffmpeg that the other two deliberately refuse.**
 
 ---
 
-### [ ] 2.23 · Smaller confirmed items
+### [~] 2.23 · Smaller confirmed items
 
 🔍 reported · **effort: XS each**
 
@@ -1560,7 +1560,7 @@ perspective, no subtitle support for that content.
 
 ---
 
-### [ ] 3.8 · WASAPI audio
+### [x] 3.8 · WASAPI audio
 
 `BASELINE` · **effort: L** · **impact: severe, affects everyone**
 
@@ -1895,3 +1895,64 @@ Six agents, 2026-09-20, against `dec9a87`:
 user-demand evidence is from directly fetched Topaz Discourse, the SVP forum,
 Doom9, VideoHelp, Plex forums, NVIDIA developer forums and GitHub trackers. No
 Reddit content is quoted.
+
+---
+
+## Round two — what this branch closed after the regression
+
+Written after the swapchain regression, which is the fact that shaped the
+order: the suite stayed green through a total outage, so verification came
+before features.
+
+**Corrected claims.** Two statements in this document turned out to be wrong
+when measured, and both had been repeated to the user before being checked:
+
+| Claim | Measured |
+| --- | --- |
+| 2.7: 682 ms of `waveOut` buffering "sets the seek cost" | **60 ms.** `Seek` restarts ffmpeg and resets the device, so the queue depth was never in that path. The 682 ms was buffering the clock does not read. |
+| "No automated test renders a frame through feature 18" | **False.** `MediaGpuSmoke` does, and asserts on the runtime evidence. It passed with the regression reinstated. The real gap was that every GPU test rendered *whole-source*, and only a *range* render runs the preroll that exhausts the add-on's workset pool. |
+
+**Closed**
+
+| Item | What landed |
+| --- | --- |
+| 2.13 | `AudioClockSmoke`: the audio clock asserted against a real endpoint at start, forward seek, backward seek, pause, resume, drift and EOF |
+| 2.14 | `NeuralRangeRenderSmoke` — a range render, the shape nothing covered |
+| 2.15 | Structured binding pinning all thirteen identity fields; `height`, `quality`, `range`, `guides` added to the mutation loop |
+| 2.16 | `REQUIRE`, the SEH case guard and `TestCase` lifted into `TestSupport.h`; `Run()` split into 33 named cases at an identical 798 assertions |
+| 2.18 | `renderer_recovery::Rebuild` — recovery makes a fresh child window instead of reusing the dead one |
+| 2.19 | `NeuralCacheManager::Evict` + `CacheEvictionPolicy.h`; `Clear()`/`SizeBytes()` agree |
+| 2.20 | `PlatformPaths.h`; all fourteen `GetModuleFileNameW` sites converted, two truncation bugs gone |
+| 2.21 | The one divergence that bites: `PreflightIdentity` gave two GPUs one identity. `NarrowText.h` names all three conversions |
+| 2.23 | The two hangs (`ReadAvailable`, `EndHelper`) and the exit-code 259 misreport |
+| 3.8 | WASAPI shared-mode, event-driven, at the endpoint's mix format, with device-change recovery |
+
+**Measured**
+
+| | before | after |
+| --- | ---: | ---: |
+| audio format delivered | 16-bit 48 kHz, converted twice | 32-bit float at the mix format |
+| audio queue depth | 682 ms | 22 ms |
+| clock drift over 5 s | −0.074 ms | −0.003 ms |
+| position after seek to 20 s | 20.047 s | 20.000 s |
+| render-cache reclamation | none | unreachable entries at startup |
+| UI-regression cases | 1 | 33 |
+| `gpu`/`audio` tests | 8 | 10 |
+| a crashing test case | kills the run | named, run continues |
+
+**Still open**
+
+- **1.2 · Register the self-hosted runner.** `gpu-tests.yml` takes `gpu` and
+  `audio` and refuses a run in which anything skipped. It needs a runner
+  registered against the repository, which needs the owner's credentials.
+- **2.19 residue** — `SweepStaging`'s uninterruptible `remove_all` on the UI
+  thread, no `FlushFileBuffers` before the publishing rename, quarantine's
+  missing forensic window.
+- **2.21 residue** — the 18 wide/narrow converters outside the helper channel,
+  `JsonEscape`, hex formatting, `CreateKillOnCloseJob`, `QuoteArgument`.
+- **Device-change recovery is unverified end-to-end.** Exercising it means
+  changing the machine's default audio endpoint. The latch is asserted inert;
+  the recovery itself is reasoned, not measured.
+- **`SizeBytes` unreadable-entry handling has no test.** A denied ACL does not
+  make `file_size` fail on Windows — the size comes from the directory entry —
+  and no portable injection was found.
