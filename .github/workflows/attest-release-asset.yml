@@ -1,0 +1,74 @@
+name: attest-release-asset
+
+# Attests a release asset this repository did not build.
+#
+# release.yml attests the core package, because CI builds it. The complete
+# package - the one README calls "the one you want" - is assembled on the
+# maintainer's machine, since CI does not fetch the neural runtime. It has
+# therefore shipped with a .sha256 computed on that same machine and nothing
+# else: a checksum proves the download arrived intact, and proves nothing at
+# all about where it came from.
+#
+# This binds the published asset's digest to this repository through the
+# workflow's OIDC identity, so `gh attestation verify` can answer "did this
+# repository vouch for these exact bytes".
+#
+# Be clear about what that is and is not. It is NOT build provenance: no
+# runner compiled this file, and the attestation cannot say one did. It is a
+# signed statement, traceable to a run of this workflow on this repository,
+# that this digest is the release asset. That is strictly more than a
+# self-computed checksum and strictly less than release.yml gives the core
+# package.
+#
+# The honest fix is for CI to build the complete package, which needs
+# tools/fetch_neural_runtime.ps1 to run on a runner - a redistribution
+# decision, not a CI one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset-name:
+        description: 'Exact file name of the published release asset'
+        required: true
+        type: string
+      asset-digest:
+        description: 'sha256 of that asset, lowercase hex, no prefix'
+        required: true
+        type: string
+
+jobs:
+  attest:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write     # OIDC, for the signing identity
+      attestations: write
+      contents: read
+
+    steps:
+      - name: Reject a digest that is not a sha256
+        run: |
+          digest='${{ inputs.asset-digest }}'
+          if ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "asset-digest must be 64 lowercase hex characters; got '$digest'." >&2
+            exit 1
+          fi
+          name='${{ inputs.asset-name }}'
+          case "$name" in
+            *.zip) ;;
+            *) echo "asset-name must be the .zip as published; got '$name'." >&2; exit 1 ;;
+          esac
+
+      - name: Attest the published asset
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ inputs.asset-name }}
+          subject-digest: sha256:${{ inputs.asset-digest }}
+
+      - name: Explain what was attested
+        run: |
+          echo "Attested ${{ inputs.asset-name }} (sha256:${{ inputs.asset-digest }})."
+          echo "Verify with:"
+          echo "  gh attestation verify <file> --repo ${{ github.repository }}"
+          echo
+          echo "This records that this repository vouched for these bytes."
+          echo "It does not record that a runner built them."

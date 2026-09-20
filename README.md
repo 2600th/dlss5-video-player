@@ -35,6 +35,26 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
 
+### Check what you downloaded
+
+The checksum says the file arrived intact. It does not say who built it, so
+check both:
+
+```sh
+# Intact: the .sha256 sits beside the zip on the release page.
+sha256sum -c DLSSVideoPlayer-v0.24.0-core-win64.zip.sha256
+
+# Built here: signed SLSA provenance, verified against this repository.
+gh attestation verify DLSSVideoPlayer-v0.24.0-core-win64.zip --repo 2600th/dlss5-video-player
+```
+
+> [!NOTE]
+> Provenance covers the **core** package today. The complete package is
+> assembled on the maintainer's machine, because CI does not fetch the neural
+> runtime, so it carries its checksum but not a build attestation. If that
+> matters to you, take the core zip and stage the runtime yourself with
+> [docs/BUILDING.md](docs/BUILDING.md).
+
 ## First run
 
 1. Unzip into a **new, empty folder**. Keep `neural-runtime/` next to the exe.
