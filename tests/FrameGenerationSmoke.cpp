@@ -1,3 +1,4 @@
+#include "GpuTestGate.h"
 // Opt-in hardware experiment: registered under the `gpu` CTest label, which the
 // portable suite excludes (`ctest -LE gpu`) and an RTX machine opts into with
 // `ctest -L gpu`.
@@ -394,6 +395,7 @@ PairVerdict JudgePair(double lo, double hi, const std::vector<double>& generated
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     std::cout << std::fixed << std::setprecision(3);
 
     // Every argument is optional and positional, so the only wrong shape is

@@ -1,3 +1,4 @@
+#include "GpuTestGate.h"
 // Opt-in hardware experiment: registered under the `gpu` CTest label, which the
 // portable suite excludes (`ctest -LE gpu`) and an RTX machine opts into with
 // `ctest -L gpu`.
@@ -589,6 +590,7 @@ std::string Px(double value)
 
 int wmain()
 {
+    if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     std::cout << std::fixed << std::setprecision(2);
 
     ComPtr<IDXGIFactory6> factory;

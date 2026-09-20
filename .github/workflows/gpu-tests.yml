@@ -1,0 +1,87 @@
+name: gpu-tests
+
+# The `gpu`-labelled suite, which the hosted runners cannot run.
+#
+# build-windows runs `ctest -LE gpu`, so eight tests - and with them almost all
+# of DLSSGBackend.cpp and FrameGenerationPass.cpp, the newest and most complex
+# feature in the tree - carry no CI-executed assertion. They pass in about 45
+# seconds on an RTX 5090; the only thing missing was a machine to run them on.
+#
+# This needs a self-hosted runner labelled `gpu` with an RTX card, a driver new
+# enough for neural rendering, and the neural runtime staged the way
+# docs/BUILDING.md describes. Until one is registered the workflow simply never
+# runs, which is the same coverage as today and costs nothing.
+#
+# It is scheduled rather than run per push: a self-hosted GPU box is a shared,
+# serial resource, and these tests drive a real device. workflow_dispatch is
+# there for the run you actually want before tagging a release.
+
+on:
+  schedule:
+    # 03:00 UTC daily, off the back of the day's merges.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # One at a time: the tests share one GPU.
+  group: gpu-tests
+  cancel-in-progress: false
+
+jobs:
+  gpu:
+    runs-on: [self-hosted, windows, gpu]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Clone NVIDIA DLSS SDK
+        shell: cmd
+        run: |
+          git init external\DLSS
+          git -C external\DLSS remote add origin https://github.com/NVIDIA/DLSS.git
+          git -C external\DLSS fetch --depth 1 origin a291cc7d2cc642a51566f3dfd5376f635cd1b284
+          git -C external\DLSS checkout --detach FETCH_HEAD
+
+      - name: Fetch pinned UI assets and media helpers
+        shell: powershell
+        run: |
+          .\tools\fetch_ui_assets.ps1
+          .\tools\fetch_youtube_helpers.ps1
+          .\tools\fetch_ffmpeg_helpers.ps1
+
+      - name: Stage the neural runtime
+        shell: powershell
+        run: .\tools\fetch_neural_runtime.ps1
+
+      - name: Configure
+        shell: cmd
+        run: cmake -S . -B build-upscaling -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
+
+      - name: Build Release
+        shell: cmd
+        run: cmake --build build-upscaling --config Release --parallel
+
+      # A machine that has lost its GPU reports every one of these as Skipped
+      # rather than Failed, so a driver or hardware problem on the runner does
+      # not read as a code regression. That is also why this step then refuses
+      # a run in which nothing actually executed.
+      - name: Test GPU suite
+        shell: cmd
+        run: ctest --test-dir build-upscaling -C Release -L gpu --output-on-failure
+
+      - name: Refuse a run that skipped everything
+        shell: powershell
+        run: |
+          $output = & ctest --test-dir build-upscaling -C Release -L gpu -N
+          $total = ($output | Select-String 'Total Tests: (\d+)').Matches.Groups[1].Value
+          if ([int]$total -lt 8) { throw "Expected at least 8 gpu-labelled tests, saw $total." }
+          # -L gpu with every test skipped still exits 0, which would make a
+          # runner whose GPU fell out of the machine look green forever.
+          $ran = & ctest --test-dir build-upscaling -C Release -L gpu 2>&1 | Out-String
+          if ($ran -match '\(Skipped\)') {
+            throw "A gpu-labelled test skipped on the GPU runner: no D3D12 adapter was found. Fix the runner."
+          }

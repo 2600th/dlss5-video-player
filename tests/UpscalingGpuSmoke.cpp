@@ -1,3 +1,4 @@
+#include "GpuTestGate.h"
 // Opt-in hardware smoke test: registered under the `gpu` CTest label, which
 // the portable suite excludes (`ctest -LE gpu`), and run on an RTX machine with
 // `ctest -L gpu` against the demo clip in docs/media.
@@ -28,6 +29,7 @@ int RunGuideProbe(const wchar_t* source,uint32_t targetHeight,const GuideControl
 int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight);
 
 int wmain(int argc,wchar_t** argv) {
+    if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if(argc==6){
         const std::wstring wide(argv[4]);
         std::string text;for(const wchar_t c:wide){if(c>0x7F)return 2;text.push_back(char(c));}

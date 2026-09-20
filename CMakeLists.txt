@@ -374,7 +374,7 @@ if(BUILD_TESTING)
     target_include_directories(MediaGpuSmoke PRIVATE src)
     target_compile_definitions(MediaGpuSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(MediaGpuSmoke PRIVATE /W4 /permissive- /EHsc)
-    target_link_libraries(MediaGpuSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32)
+    target_link_libraries(MediaGpuSmoke PRIVATE shell32 mfplat mfreadwrite mfuuid ole32 dxgi)
     add_dependencies(MediaGpuSmoke NeuralWorker)
     # The hardware smokes need an RTX GPU, a display, and (MediaGpuSmoke) the neural
     # runtime staged beside NeuralWorker.exe. They are labelled `gpu` so the portable
@@ -515,8 +515,15 @@ if(BUILD_TESTING)
         set_tests_properties(FrameGenerationSmokeStreamSource PROPERTIES LABELS gpu TIMEOUT 900
             FAIL_REGULAR_EXPRESSION "outputAudioStreams=0;resultAudioCarried=false")
     endif()
+    # 125, not 2. Every one of these already returns 2 for an ordinary failure -
+    # bad arguments, a missing ffmpeg.exe, unreadable media - so mapping 2 to
+    # "skipped" would hide the regressions a GPU runner exists to catch. Each
+    # smoke opens with gpu_test_gate::SkipWithoutGpu(), so `ctest -L gpu` on a
+    # machine with no adapter skips rather than reporting five hard failures.
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
-        FrameGenerationSmoke PROPERTIES LABELS gpu)
+        FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
+        FrameGenerationSmokeStreamSource
+        PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
     add_executable(NeuralWorkerTests tests/NeuralWorkerTests.cpp src/NeuralWorker.cpp)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

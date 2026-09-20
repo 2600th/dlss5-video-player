@@ -1,3 +1,4 @@
+#include "GpuTestGate.h"
 // Opt-in hardware probe: registered under the `gpu` CTest label, which the
 // portable suite excludes (`ctest -LE gpu`) and an RTX machine opts into with
 // `ctest -L gpu`.
@@ -94,6 +95,7 @@ ComPtr<IDXGIAdapter1> SelectAdapter(IDXGIFactory6* factory)
 
 int wmain()
 {
+    if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     ComPtr<IDXGIFactory6> factory;
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) {
         std::cout << "probe=unreachable reason=CreateDXGIFactory2 failed\n";
