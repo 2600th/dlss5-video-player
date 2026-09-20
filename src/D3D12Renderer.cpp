@@ -229,22 +229,31 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     BOOL tearing=FALSE;if(m_requestedTearing&&SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount=SwapchainBuffers;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
-    // SetMaximumFrameLatency below is valid only on a waitable chain; without
-    // this flag it returned DXGI_ERROR_INVALID_CALL into a discarded HRESULT
-    // and the latency stayed at DXGI's default of 3. The flag also yields the
-    // waitable object, which is what lets the message loop block until the
-    // swapchain wants another frame instead of spinning on Sleep(0).
-    sd.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT|
-             (m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0u);
+    // DO NOT add DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT here.
+    //
+    // It looks free - it is what makes SetMaximumFrameLatency below anything
+    // other than a no-op, and it yields a waitable object a message loop can
+    // block on. It also stops neural rendering producing a single frame.
+    //
+    // Bisected to this line. With the flag set, the RenoDX add-on's inline NR
+    // path allocates a fresh workset per evaluation instead of reusing one and
+    // exhausts its pool within three frames, after which ReShade.log reads
+    // "NR workset pool exhausted; preserving game output for this evaluation"
+    // and every later frame is the untouched source. The helper then reports
+    // frames=0/0 and the player refuses the render with "A frame was not
+    // produced by feature 18". The add-on hooks this swapchain, so its flags
+    // are part of the contract with it, not a private presentation detail.
+    //
+    // SetMaximumFrameLatency is therefore not called at all: without the flag
+    // it returns DXGI_ERROR_INVALID_CALL, and a call that can only fail is
+    // worse than none. The latency stays at DXGI's default of 3.
+    //
+    // The message loop does not need any of this. It blocks on a
+    // high-resolution waitable timer instead, which is where the 113% -> 18%
+    // of one core actually came from.
+    sd.Flags=d3d12_renderer_detail::SwapchainFlags(m_allowTearing);
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
-    if(m_swapchain){
-        if(!HR(m_swapchain->SetMaximumFrameLatency(2),"SetMaximumFrameLatency"))
-            LOG("Swapchain kept DXGI's default frame latency; presentation may queue one extra frame.");
-        // Owned by the swapchain: not closed here, and invalid once it is gone.
-        m_frameLatencyWaitable=m_swapchain->GetFrameLatencyWaitableObject();
-        if(!m_frameLatencyWaitable)LOG("Swapchain reported no frame-latency waitable object.");
-    }
     if(!HR(m_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&m_fence)),"CreateFence"))return false;
     m_fenceEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);return m_fenceEvent!=nullptr;
 }

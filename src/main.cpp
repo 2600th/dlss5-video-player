@@ -61,6 +61,7 @@
 #include "NeuralReceipt.h"
 #include "NeuralSettings.h"
 #include "NeuralPresets.h"
+#include "PrecisionSleeper.h"
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
@@ -1322,14 +1323,20 @@ public:
     // producer's lock, and - on a YouTube source - built a NeuralCacheManager
     // twice, which enumerates the staging directory.
     //
-    // The swapchain's frame-latency waitable is the right signal: it is
-    // released when DXGI will accept another frame, which is exactly when the
-    // next Tick can do useful work. The bound keeps the loop responsive to a
-    // paused player and to a renderer that never came up with a waitable.
-    void WaitForNextTick()const{
-        const DWORD bound=TickSleepMs()?TickSleepMs():2u;
-        if(m_renderer&&m_renderer->HasPresentWait()&&m_playing){m_renderer->WaitForPresentSlot(bound);return;}
-        Sleep(TickSleepMs());
+    // A high-resolution waitable timer, not the swapchain's frame-latency
+    // object: asking DXGI for that one means creating the swapchain with
+    // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, and the neural
+    // runtime's add-on hooks this swapchain and stops producing frames when
+    // that flag is set - see the comment in D3D12Renderer::CreateDevice. The
+    // timer needs nothing from the presentation path and is what the measured
+    // 113% -> 18% of one core came from.
+    //
+    // 2 ms while playing: far below any frame interval (8.34 ms at 119.88 fps)
+    // so a due frame is never missed by more than that, and far above the
+    // ~0 ms the loop was effectively using.
+    void WaitForNextTick(){
+        const DWORD sleepMs=TickSleepMs();
+        m_tickSleeper.SleepMs(int(sleepMs?sleepMs:2u));
     }
 
 
@@ -6970,6 +6977,9 @@ case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEI
     std::jthread m_prefetchWorker;
     std::wstring m_prefetchPageUrl,m_prefetchTitle;
     YouTubeSourceQuality m_prefetchQuality{YouTubeSourceQuality::Auto};
+    // The message loop blocks on this instead of yielding. Owned by the app so
+    // the handle is created once rather than once per tick.
+    PrecisionSleeper m_tickSleeper;
     bool m_guideReset=true,m_dlssReset=true;
     // Set while guides are being skipped because nothing reads them, so the
     // first frame after they resume declares its discontinuity instead of

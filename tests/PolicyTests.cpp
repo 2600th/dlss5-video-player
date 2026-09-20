@@ -7308,6 +7308,30 @@ void playback_cadence_reports_a_rate_no_cadence_can_follow_test()
     CHECK(CanFollowLive(1.0 / 119.88, std::numeric_limits<double>::infinity()));
 }
 
+// The flag that killed neural rendering, and that the whole suite stayed green
+// through. It is attractive - it is the only way SetMaximumFrameLatency does
+// anything, and it hands back an object a message loop can block on instead of
+// spinning a core. But the RenoDX add-on hooks this swapchain, and with the
+// flag set its inline NR path allocates a fresh workset per evaluation,
+// exhausts its pool in three frames, and logs "NR workset pool exhausted;
+// preserving game output" while every later frame passes through untouched:
+// frames=0/0, and "A frame was not produced by feature 18".
+//
+// Nothing else in the suite can see that, so this asserts the one property
+// directly. The player does not need the flag: its loop waits on a
+// high-resolution timer, which measured lower CPU than the swapchain object.
+void swapchain_never_asks_for_the_frame_latency_waitable_object_test()
+{
+    using d3d12_renderer_detail::SwapchainFlags;
+    for (const bool tearing : {false, true}) {
+        const UINT flags = SwapchainFlags(tearing);
+        CHECK((flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) == 0u);
+        // Tearing is the one flag this chain is allowed to carry, and it has to
+        // survive - it is what lets an unthrottled present reach the panel.
+        CHECK_EQ(tearing ? UINT(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) : 0u, flags);
+    }
+}
+
 // Six controls with measured tooltips are the right surface for someone who
 // knows what they do, and the wrong first contact - issue #1 is someone who
 // never reached them. Presets answer "what should I pick" once.
@@ -7860,6 +7884,7 @@ constexpr TestCase kCases[] = {
     TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
+    TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
 };
 
 

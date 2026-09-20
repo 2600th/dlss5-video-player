@@ -24,51 +24,7 @@
 using Microsoft::WRL::ComPtr;
 namespace fs = std::filesystem;
 
-namespace {
-// Windows SDK 10.0.17134 (Win10 1803) introduced the flag; older headers lack the
-// name but the kernel still honours (or ignores) the value, and the plain-timer
-// fallback below covers the rest.
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
-// std::this_thread::sleep_for rounds up to the ~15.6ms default Windows
-// scheduler tick unless a high-resolution timer backs the wait; nothing in
-// this process calls the process-wide timeBeginPeriod, so a 1-2ms poll sleep
-// here was measuring p95 13.7ms instead. A waitable timer with the
-// high-resolution flag (Win10 1803+) gets sub-ms accuracy without touching
-// global timer resolution. One handle per thread via thread_local: creating
-// it is measurable, so it is paid once per decode thread, not once per poll.
-class PrecisionSleeper {
-public:
-    PrecisionSleeper() {
-        m_timer = CreateWaitableTimerExW(nullptr, nullptr,
-            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-        if (!m_timer) m_timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
-    }
-    ~PrecisionSleeper() { if (m_timer) CloseHandle(m_timer); }
-    PrecisionSleeper(const PrecisionSleeper&) = delete;
-    PrecisionSleeper& operator=(const PrecisionSleeper&) = delete;
-
-    void SleepMs(int ms) {
-        if (!m_timer) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); return; }
-        // Relative due time in 100ns units; negative means relative-to-now.
-        LARGE_INTEGER due; due.QuadPart = -(static_cast<LONGLONG>(ms) * 10000);
-        if (!SetWaitableTimer(m_timer, &due, 0, nullptr, nullptr, FALSE)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-            return;
-        }
-        WaitForSingleObject(m_timer, INFINITE);
-    }
-
-private:
-    HANDLE m_timer = nullptr;
-};
-
-void SleepPreciseMs(int ms) {
-    thread_local PrecisionSleeper sleeper;
-    sleeper.SleepMs(ms);
-}
-} // namespace
+#include "PrecisionSleeper.h"
 
 static std::wstring Quote(const std::wstring& s) {
     // Windows filenames cannot contain a literal quote character, so this is
