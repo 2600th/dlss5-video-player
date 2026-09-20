@@ -218,8 +218,7 @@ def prepare(name: str, spec: dict, pass_index: int, fresh: bool) -> Path:
     if not (runtime / "NeuralWorker.exe").exists():
         source = runtime_source()
         wait_for_stable(source / "NeuralWorker.exe")
-        shutil.copytree(source, runtime, ignore=shutil.ignore_patterns("*.log", "*.log1", "ngx_logs",
-                                                                       "DLSSVideoPlayer.log"))
+        shutil.copytree(source, runtime, ignore=shutil.ignore_patterns("*.log", "*.log1", "*.log.1", "ngx_logs"))
         # VideoDecoder::FindTool: a neural-runtime helper only looks in its parent directory.
         for helper in (FFMPEG, FFPROBE):
             dest = root / helper.name

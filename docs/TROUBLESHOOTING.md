@@ -49,7 +49,7 @@ those are a request: Windows' own Graphics settings and the NVIDIA Control
 Panel override them, and a machine whose discrete GPU is disabled in firmware
 or muxed away from the panel ignores them entirely.
 
-`DLSSVideoPlayer.log` beside the EXE, and `neural-runtime/DLSSVideoPlayer.log`
+`DLSSVideoPlayer.log` beside the EXE, and `neural-runtime/NeuralWorker.log`
 for the helper, carry one line per device creation naming the adapter that
 actually rendered:
 
@@ -96,7 +96,7 @@ timing and neural evidence pass validation. Changed settings or binaries trigger
 a new render. An incomplete, modified or invalid cache is not reusable.
 
 Keep neural settings unchanged while rendering. Inspect
-`neural-runtime/DLSSVideoPlayer.log` and `neural-runtime/ReShade.log` for worker
+`neural-runtime/NeuralWorker.log` and `neural-runtime/ReShade.log` for worker
 diagnostics; player-side failures are in `DLSSVideoPlayer.log` beside the EXE.
 Successful NGX initialization alone does not prove neural output was captured.
 
@@ -261,6 +261,26 @@ result, or generate frames at a lower multiple so there is less to render.
 
 The existing `DLSSVideoPlayer.ini` is stored beside the executable. Run from a
 writable extracted folder and close the player normally to save preferences.
+
+## Where the logs are, and what survives a crash
+
+`DLSSVideoPlayer.log` sits beside the EXE, and the helper writes
+`neural-runtime/NeuralWorker.log`. Each file is named after the executable that
+writes it, so running a test binary no longer overwrites the player's.
+
+Both are **appended**, not truncated, and each run starts with a
+`===== session started <date> pid=N =====` banner. Relaunching after a crash to
+collect the log no longer destroys the evidence of it. They roll at 8 MB,
+keeping one previous generation as `<name>.log.1`.
+
+If the folder holding the EXE cannot be written - `%ProgramFiles%`, or a
+protected location under Controlled Folder Access - the log falls back to
+`%LOCALAPPDATA%\DLSSVideoPlayer\`. Look there before concluding nothing was
+logged.
+
+An unhandled crash writes a minidump beside the log, named
+`DLSSVideoPlayer-crash-<date>-<pid>.dmp`, and records the exception code and
+address in the log itself. Attach both.
 
 ## Reporting an issue
 

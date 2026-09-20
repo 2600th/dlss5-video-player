@@ -759,11 +759,20 @@ function Invoke-PlayerSession {
 
     $playerDirectory = Split-Path -Parent $PlayerPath
     $logPath = Join-Path $playerDirectory 'DLSSVideoPlayer.log'
-    # The helper is a separate process in its own directory, so `src/Log.h:28-31`
-    # gives it its own DLSSVideoPlayer.log there. The policy lines this harness is
-    # often run to assert - idleVramPolicy, post-job VRAM - are emitted by
-    # NeuralWorkerMain and appear only in that file.
-    $helperLogPath = Join-Path $playerDirectory 'neural-runtime\DLSSVideoPlayer.log'
+    # The helper is a separate process in its own directory, so `src/Log.h`
+    # gives it its own log there. The policy lines this harness is often run to
+    # assert - idleVramPolicy, post-job VRAM - are emitted by NeuralWorkerMain
+    # and appear only in that file.
+    #
+    # The name follows the running module now, so the helper writes
+    # NeuralWorker.log. It used to write DLSSVideoPlayer.log, which meant every
+    # test executable truncated the player's; the older name is still accepted
+    # so this harness can drive a build from before that change.
+    $helperLogPath = Join-Path $playerDirectory 'neural-runtime\NeuralWorker.log'
+    if (-not (Test-Path -LiteralPath $helperLogPath)) {
+        $legacyHelperLog = Join-Path $playerDirectory 'neural-runtime\DLSSVideoPlayer.log'
+        if (Test-Path -LiteralPath $legacyHelperLog) { $helperLogPath = $legacyHelperLog }
+    }
     # Snapshotted, NOT cleared like the player's log below, and the difference is
     # deliberate. Clearing relies on the remove-or-skip pair: when the file cannot be
     # removed, the pre-existing line count is skipped past instead. That is sound for
