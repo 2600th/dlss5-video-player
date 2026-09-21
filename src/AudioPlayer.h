@@ -2,7 +2,9 @@
 #include <windows.h>
 
 #include "AudioClockPolicy.h"
+#include "AudioTrackPolicy.h"
 #include "WasapiRenderer.h"
+#include <vector>
 #include <atomic>
 #include <string>
 #include <thread>
@@ -76,6 +78,17 @@ public:
     // the session.
     bool ServiceDeviceChanges();
 
+    // The source's audio streams, in container order. Empty when there is
+    // one unremarkable track, when ffprobe could not be found, or when the
+    // source is a stream the player did not enumerate - in all of which the
+    // first stream is played, which is what happened before this existed.
+    const std::vector<audio_track::Track>& AudioTracks() const { return m_tracks; }
+    // Index among the audio streams, which is what `-map 0:a:N` takes.
+    int SelectedAudioTrack() const { return m_selectedTrack; }
+    // Switches track and restarts at the current position. False when the
+    // index names no track, so a mis-click cannot silence the film.
+    bool SelectAudioTrack(int audioIndex);
+
 private:
     struct ReaderState {
         HANDLE process = nullptr;
@@ -102,7 +115,12 @@ private:
         ~ReaderState();
     };
 
-    std::wstring FindFFmpeg() const;
+    std::wstring FindTool(const wchar_t* name) const;
+    std::wstring FindFFmpeg() const { return FindTool(L"ffmpeg.exe"); }
+    // Enumerates the source's audio streams and picks the opening one. Runs
+    // once per loaded path: a seek respawns the child but the container has
+    // not changed, and re-probing it would add an ffprobe to every seek.
+    void ProbeAudioTracks(const std::wstring& videoPath);
     bool StartProcess(double seekSeconds, const std::shared_ptr<ReaderState>& state,
                       const WasapiRenderer::Format& format);
     void StopProcess(const std::shared_ptr<ReaderState>& state);
@@ -111,6 +129,11 @@ private:
 
     std::wstring m_path;
     std::wstring m_ffmpeg;
+    std::vector<audio_track::Track> m_tracks;
+    // The path m_tracks describes, so a seek reuses them and a new media load
+    // re-enumerates.
+    std::wstring m_tracksPath;
+    int m_selectedTrack = 0;
     std::shared_ptr<ReaderState> m_reader;
     std::thread m_thread;
     double m_seekBaseSec = 0.0;

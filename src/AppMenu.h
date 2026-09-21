@@ -32,6 +32,12 @@ inline constexpr UINT IDM_MARK_OUT = 206;
 inline constexpr UINT IDM_CLEAR_MARKS = 207;
 inline constexpr UINT IDM_GOTO_TIMECODE = 208;
 inline constexpr UINT IDM_PAUSE_NEURAL_RENDER = 209;
+// One contiguous radio block for the source's audio streams, like the
+// upscaling rungs: CheckMenuRadioItem clears every command in the range it is
+// given, so exactly one track carries the mark. Sixteen is far past what any
+// consumer container carries and keeps the block clear of IDM_NEURAL_RENDERING.
+inline constexpr UINT IDM_AUDIO_TRACK_FIRST = 210;
+inline constexpr UINT IDM_AUDIO_TRACK_COUNT = 16;
 inline constexpr UINT IDM_NEURAL_RENDERING = 300;
 inline constexpr UINT IDM_REHOOK = 301;
 inline constexpr UINT IDM_VIEW_FINAL = 302;
@@ -103,6 +109,10 @@ enum class PlayerCommandRoute {
 
 HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable);
 void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, bool enabled);
+// Playback > Audio track. Empty labels leave a disabled placeholder rather
+// than an empty popup; `selected` is the index of the track playing and
+// carries the only radio mark.
+void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.

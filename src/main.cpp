@@ -1407,6 +1407,21 @@ private:
         app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy());
         DrawMenuBar(m_hwnd);
     }
+    // Playback > Audio track, rebuilt whenever the source changes. The list
+    // is empty for a source with one unremarkable track, which is most of
+    // them, and the menu shows a disabled placeholder for that.
+    void UpdateAudioTrackMenu(){
+        if(!m_hwnd)return;
+        std::vector<std::wstring> labels;
+        for(const auto& track:Audio().AudioTracks())
+            labels.push_back(Utf8ToWide(audio_track::Describe(track)));
+        app_menu::UpdateAudioTracks(GetMenu(m_hwnd),labels,Audio().SelectedAudioTrack());
+        DrawMenuBar(m_hwnd);
+    }
+    void ChooseAudioTrack(int audioIndex){
+        if(!Audio().SelectAudioTrack(audioIndex))return;
+        UpdateAudioTrackMenu();
+    }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
         RecentMediaEntry entry{};entry.youtube=completion.sourceKind==MediaSourceKind::YouTube;
@@ -3615,7 +3630,7 @@ private:
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);if(!m_decoder.IsStillImage())Audio().Start(source,m_currentSec);Audio().SetVolume(m_muted?0.0f:m_volume);m_playing=!m_decoder.IsStillImage();m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_sourceKind=sourceKind;m_cachedSourceFile=localPayload;m_displayTitle=DisplayTitleForSource(sourceKind,displayTitle);if(m_displayTitle.empty()&&sourceKind==MediaSourceKind::LocalFile){m_displayTitle=std::filesystem::path(source).stem().wstring();if(m_displayTitle.empty())m_displayTitle=std::filesystem::path(source).filename().wstring();}m_droppedFrames=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
-        RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();if(recordRecent)RecordOriginalRecent();SyncFeatureMenuState();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
+        RestoreUpscaling();UpdateTitle();UpdateCachedStatus();Layout();if(recordRecent)RecordOriginalRecent();SyncFeatureMenuState();UpdateAudioTrackMenu();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
@@ -6877,6 +6892,8 @@ private:
         if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::NativeMenu,id,false)){ActivateYouTube();return;}
         if(const ExampleVideo* example=app_menu::ExampleVideoForCommand(id)){ActivateExampleVideo(*example);return;}
         if(const auto quality=app_menu::YouTubeQualityForCommand(id)){SetYouTubeSourceQuality(*quality);return;}
+        if(id>=IDM_AUDIO_TRACK_FIRST&&id<IDM_AUDIO_TRACK_FIRST+IDM_AUDIO_TRACK_COUNT){
+            ChooseAudioTrack(int(id-IDM_AUDIO_TRACK_FIRST));return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;

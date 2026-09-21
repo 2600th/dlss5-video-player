@@ -1,6 +1,7 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "AudioFadePolicy.h"
+#include "AudioTrackPolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -6595,6 +6596,27 @@ int run_fake_media_child(int argc,wchar_t* argv[])
                      <<"duration=5\n"<<color("bt709","tv","bt709","bt709")<<std::flush;
             return 0;
         }
+        // Audio track enumeration. Two English tracks with the commentary
+        // listed first and flagged default, which is the disc-rip layout that
+        // made the old first-stream rule play the wrong one.
+        if(all.find(L"trackpick_")!=std::wstring::npos){
+            if(all.find(L"stream_disposition")==std::wstring::npos)return 0;
+            const auto stream=[](int index,const char* codec,int channels,const char* language,
+                                 const char* title,int isDefault,int comment){
+                std::string text="[STREAM]\nindex="+std::to_string(index)+"\ncodec_name="+codec+
+                                 "\nchannels="+std::to_string(channels)+"\n";
+                if(*language)text+=std::string("TAG:language=")+language+"\n";
+                if(*title)text+=std::string("TAG:title=")+title+"\n";
+                text+="DISPOSITION:default="+std::to_string(isDefault)+
+                      "\nDISPOSITION:comment="+std::to_string(comment)+
+                      "\nDISPOSITION:visual_impaired=0\nDISPOSITION:descriptions=0"
+                      "\nDISPOSITION:hearing_impaired=0\n[/STREAM]\n";
+                return text;
+            };
+            std::cout<<stream(1,"ac3",6,"eng","Director's Commentary",1,1)
+                     <<stream(2,"ac3",6,"eng","",0,0)<<std::flush;
+            return 0;
+        }
         if(all.find(L"largeburst")!=std::wstring::npos){
             std::cout<<geometry(1024,1024,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
         }
@@ -8186,6 +8208,181 @@ void audio_fade_out_tail_decays_from_the_last_frame_to_silence_test()
     CHECK(none.empty());
 }
 
+// Auto-picking the director's commentary is one of the loudest complaints
+// there is about media players, and the path here could not do anything else:
+// ffmpeg was told `-map 0:a:0?`, which is the first audio stream whatever it
+// happens to be. A disc rip whose commentary is listed first played the
+// commentary, with no way to change it.
+void audio_track_selection_skips_the_tracks_nobody_asked_for_test()
+{
+    using namespace audio_track;
+    const auto make = [](int index, const char* language, bool isDefault) {
+        Track track; track.audioIndex = index; track.language = language;
+        track.isDefault = isDefault; track.codec = "ac3"; track.channels = 6;
+        return track;
+    };
+
+    // Nothing to choose from.
+    CHECK_EQ(kNoTrack, SelectDefault({}));
+
+    // One track, and it is the answer even if it is a commentary: a film has
+    // to have sound.
+    Track onlyCommentary = make(0, "eng", true);
+    onlyCommentary.comment = true;
+    const Track single[] = {onlyCommentary};
+    CHECK_EQ(size_t{0}, SelectDefault(single));
+
+    // The case that bites: commentary listed first, feature second.
+    Track commentary = make(0, "eng", true);
+    commentary.comment = true;
+    const Track rip[] = {commentary, make(1, "eng", false)};
+    CHECK_EQ(size_t{1}, SelectDefault(rip));
+
+    // Each of the four dispositions is disqualifying on its own.
+    for (int which = 0; which < 4; ++which) {
+        Track flagged = make(0, "eng", true);
+        if (which == 0) flagged.comment = true;
+        if (which == 1) flagged.visualImpaired = true;
+        if (which == 2) flagged.descriptions = true;
+        if (which == 3) flagged.hearingImpaired = true;
+        const Track pair[] = {flagged, make(1, "eng", false)};
+        CHECK_EQ(size_t{1}, SelectDefault(pair));
+    }
+
+    // Among ordinary tracks the container's own default wins, wherever it is.
+    const Track dubbed[] = {make(0, "fre", false), make(1, "eng", true), make(2, "deu", false)};
+    CHECK_EQ(size_t{1}, SelectDefault(dubbed));
+
+    // No default flagged anywhere: the first ordinary track, which is what a
+    // player without any of this would have done for the ordinary case.
+    const Track plain[] = {make(0, "fre", false), make(1, "eng", false)};
+    CHECK_EQ(size_t{0}, SelectDefault(plain));
+
+    // Every track flagged. Still has to produce sound, and still prefers the
+    // one the container marked.
+    Track first = make(0, "eng", false); first.descriptions = true;
+    Track second = make(1, "eng", true); second.comment = true;
+    const Track allFlagged[] = {first, second};
+    CHECK_EQ(size_t{1}, SelectDefault(allFlagged));
+}
+
+// The menu has to say enough that a viewer can tell two English tracks apart.
+void audio_track_labels_say_what_distinguishes_the_tracks_test()
+{
+    using namespace audio_track;
+    Track track;
+    track.audioIndex = 0; track.language = "eng"; track.codec = "ac3"; track.channels = 6;
+    CHECK_EQ(std::string("1. English - AC3 5.1"), Describe(track));
+
+    track.title = "Director's Commentary";
+    track.comment = true;
+    CHECK_EQ(std::string("1. English - Director's Commentary - AC3 5.1 (commentary)"), Describe(track));
+
+    // Untagged, which is most of what people actually have.
+    Track bare;
+    bare.audioIndex = 2; bare.codec = "aac"; bare.channels = 2;
+    CHECK_EQ(std::string("3. AAC stereo"), Describe(bare));
+
+    Track mono;
+    mono.audioIndex = 1; mono.codec = "opus"; mono.channels = 1;
+    mono.hearingImpaired = true;
+    CHECK_EQ(std::string("2. Opus mono (for the hard of hearing)"), Describe(mono));
+}
+
+// The player asked ffmpeg for `-map 0:a:0?` and offered nothing else, so a
+// rip whose commentary is listed first played the commentary. The tracks have
+// to be enumerated before the child is launched, and the choice has to
+// survive a seek, which tears the child down and starts another.
+void audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test()
+{
+    MediaFixture fixture;
+    auto audio = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(audio->Start(L"trackpick_commentary", 0.0, AudioStartState::Paused));
+
+    const auto& tracks = audio->AudioTracks();
+    CHECK_EQ(size_t{2}, tracks.size());
+    if (tracks.size() == 2) {
+        CHECK_EQ(std::string("1. English - Director's Commentary - AC3 5.1 (commentary)"),
+                 audio_track::Describe(tracks[0]));
+        CHECK_EQ(std::string("2. English - AC3 5.1"), audio_track::Describe(tracks[1]));
+    }
+    // The feature, not the commentary that is listed first and flagged default.
+    CHECK_EQ(1, audio->SelectedAudioTrack());
+
+    // A seek respawns the child, and the choice has to go with it rather than
+    // reverting to whatever is first.
+    CHECK(audio->Seek(5.0));
+    CHECK_EQ(1, audio->SelectedAudioTrack());
+    CHECK_EQ(size_t{2}, audio->AudioTracks().size());
+
+    // A viewer overriding the choice sticks, including across a seek.
+    CHECK(audio->SelectAudioTrack(0));
+    CHECK_EQ(0, audio->SelectedAudioTrack());
+    CHECK(audio->Seek(1.0));
+    CHECK_EQ(0, audio->SelectedAudioTrack());
+    // And a track that does not exist is refused rather than silencing the film.
+    CHECK(!audio->SelectAudioTrack(7));
+    CHECK_EQ(0, audio->SelectedAudioTrack());
+    audio->Stop();
+
+    // A source ffprobe cannot enumerate still plays: no list, first stream,
+    // which is exactly what the player did before any of this.
+    auto plain = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(plain->Start(L"audiotrickle", 0.0, AudioStartState::Paused));
+    CHECK(plain->AudioTracks().empty());
+    CHECK_EQ(0, plain->SelectedAudioTrack());
+    plain->Stop();
+}
+
+// A track list a viewer cannot reach is not a fix. The menu carries the
+// labels, marks which one is playing, and disables itself when there is
+// nothing to choose between.
+void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    if (!menu) return;
+
+    // Nothing loaded: a disabled placeholder, not an empty popup a viewer
+    // clicks into and out of.
+    app_menu::UpdateAudioTracks(menu, {}, 0);
+    std::vector<MenuEntry> entries;
+    collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"No audio tracks", app_menu::IDM_AUDIO_TRACK_FIRST));
+
+    const std::wstring labels[] = {
+        L"1. English - Director's Commentary - AC3 5.1 (commentary)",
+        L"2. English - AC3 5.1",
+        L"3. French - AC3 5.1",
+    };
+    app_menu::UpdateAudioTracks(menu, labels, 1);
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, labels[0], app_menu::IDM_AUDIO_TRACK_FIRST));
+    CHECK(has_menu_entry(entries, labels[1], app_menu::IDM_AUDIO_TRACK_FIRST + 1));
+    CHECK(has_menu_entry(entries, labels[2], app_menu::IDM_AUDIO_TRACK_FIRST + 2));
+    CHECK(!has_menu_entry(entries, L"No audio tracks", app_menu::IDM_AUDIO_TRACK_FIRST));
+
+    // Exactly one radio mark, on the track that is playing.
+    // GetMenuState with MF_BYCOMMAND searches submenus, so the bar is enough.
+    CHECK_EQ(UINT{0}, GetMenuState(menu, app_menu::IDM_AUDIO_TRACK_FIRST, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK(GetMenuState(menu, app_menu::IDM_AUDIO_TRACK_FIRST + 1, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK_EQ(UINT{0}, GetMenuState(menu, app_menu::IDM_AUDIO_TRACK_FIRST + 2, MF_BYCOMMAND) & MF_CHECKED);
+
+    // A track title is free text from whoever made the file, so an ampersand
+    // in it has to reach the menu doubled or Windows eats it and underlines
+    // the next letter as an accelerator. The stored string is the escaped
+    // one; what a viewer sees is "1. R&B mix".
+    const std::wstring ampersand[] = {L"1. R&B mix", L"2. English"};
+    app_menu::UpdateAudioTracks(menu, ampersand, 0);
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"1. R&&B mix", app_menu::IDM_AUDIO_TRACK_FIRST));
+
+    DestroyMenu(menu);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8436,6 +8633,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
     TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),
     TEST_CASE(audio_fade_out_tail_decays_from_the_last_frame_to_silence_test),
+    TEST_CASE(audio_track_selection_skips_the_tracks_nobody_asked_for_test),
+    TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
+    TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
+    TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
 };
 
 

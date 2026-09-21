@@ -61,6 +61,11 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
+    HMENU audioTracks = CreatePopupMenu();
+    AppendMenuW(audioTracks, MF_STRING | MF_GRAYED, IDM_AUDIO_TRACK_FIRST, L"No audio tracks");
+    AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(audioTracks),
+                localizer.Get(L"menu.audio_track").c_str());
+    AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
     add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out"); add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr); add(play, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
     add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
     const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
@@ -191,6 +196,36 @@ void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, boo
         }
         AppendMenuW(recent,MF_STRING|(enabled?MF_ENABLED:MF_GRAYED),IDM_RECENT_VIDEO_FIRST+static_cast<UINT>(index),label.c_str());
     }
+}
+
+void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected)
+{
+    HMENU tracks=find_menu_containing_command(menuBar,IDM_AUDIO_TRACK_FIRST);
+    if(!tracks)return;
+    while(GetMenuItemCount(tracks)>0)DeleteMenu(tracks,0,MF_BYPOSITION);
+    // A source with one track has nothing to choose between, and the player
+    // does not build a list for it, so the placeholder covers both that and
+    // nothing being loaded.
+    if(labels.empty()){
+        AppendMenuW(tracks,MF_STRING|MF_GRAYED,IDM_AUDIO_TRACK_FIRST,L"No audio tracks");
+        return;
+    }
+    const size_t shown=std::min<size_t>(labels.size(),IDM_AUDIO_TRACK_COUNT);
+    for(size_t index=0;index<shown;++index){
+        // A title is free text from whoever made the file, so an ampersand in
+        // it is a character rather than an accelerator, and a control
+        // character is not allowed to break the item.
+        std::wstring label;
+        for(wchar_t character:labels[index].substr(0,160)){
+            if(character==L'&')label+=L'&';
+            label+=(character<L' '?L' ':character);
+        }
+        AppendMenuW(tracks,MF_STRING,IDM_AUDIO_TRACK_FIRST+static_cast<UINT>(index),label.c_str());
+    }
+    const UINT chosen=IDM_AUDIO_TRACK_FIRST+
+        static_cast<UINT>(selected>=0&&size_t(selected)<shown?size_t(selected):0);
+    CheckMenuRadioItem(tracks,IDM_AUDIO_TRACK_FIRST,
+                       IDM_AUDIO_TRACK_FIRST+static_cast<UINT>(shown)-1,chosen,MF_BYCOMMAND);
 }
 
 bool RoutesToRehook(PlayerCommandRoute route, UINT value)

@@ -26,20 +26,161 @@ AudioPlayer::ReaderState::~ReaderState()
     if (completed && !CloseHandle(completed)) LOG("Audio: CloseHandle(completed) failed winerr=" << GetLastError());
 }
 
-std::wstring AudioPlayer::FindFFmpeg() const {
+std::wstring AudioPlayer::FindTool(const wchar_t* name) const {
     if(!m_settings.helperDirectory.empty()){
-        const fs::path candidate=fs::path(m_settings.helperDirectory)/L"ffmpeg.exe";std::error_code error;
+        const fs::path candidate=fs::path(m_settings.helperDirectory)/name;std::error_code error;
         return fs::is_regular_file(candidate,error)?candidate.wstring():std::wstring{};
     }
     if (const auto moduleDirectory = platform_paths::ModuleDirectory()) {
         fs::path base = *moduleDirectory;
-        const fs::path cands[] = { base / L"ffmpeg.exe", base / L"ffmpeg" / L"bin" / L"ffmpeg.exe",
-                                   base.parent_path() / L"ffmpeg" / L"bin" / L"ffmpeg.exe" };
+        const fs::path cands[] = { base / name, base / L"ffmpeg" / L"bin" / name,
+                                   base.parent_path() / L"ffmpeg" / L"bin" / name };
         for (const auto& p : cands) { std::error_code ec; if (fs::is_regular_file(p, ec)) return p.wstring(); }
     }
     wchar_t found[32768]{};
-    DWORD n = SearchPathW(nullptr, L"ffmpeg.exe", nullptr, static_cast<DWORD>(std::size(found)), found, nullptr);
+    DWORD n = SearchPathW(nullptr, name, nullptr, static_cast<DWORD>(std::size(found)), found, nullptr);
     return (n && n < std::size(found)) ? std::wstring(found) : std::wstring();
+}
+
+namespace {
+
+// Runs a helper and returns its standard output. Bounded in both directions:
+// a helper that never exits is killed with its job, and one that floods the
+// pipe is cut off. A track list is a few hundred bytes.
+bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments, std::string& out)
+{
+    constexpr size_t kOutputLimit = 1u << 20;
+    constexpr DWORD kTimeoutMs = 10000;
+    out.clear();
+
+    SECURITY_ATTRIBUTES sa{}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 64 * 1024)) return false;
+    if (!SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(readPipe); CloseHandle(writePipe); return false;
+    }
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = nul; si.hStdOutput = writePipe; si.hStdError = nul;
+    std::wstring command = Q(exe) + L" " + arguments;
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+            CloseHandle(job); job = nullptr;
+        }
+    }
+    PROCESS_INFORMATION pi{};
+    const ScopedHardErrorSuppression noHardErrorDialog;
+    const BOOL started = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
+                                               CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
+    CloseHandle(writePipe);
+    if (nul) CloseHandle(nul);
+    if (!started) { CloseHandle(readPipe); if (job) CloseHandle(job); return false; }
+    if (!AssignProcessToJobObject(job, pi.hProcess) || ResumeThread(pi.hThread) == DWORD(-1)) {
+        TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(readPipe); CloseHandle(job);
+        return false;
+    }
+    CloseHandle(pi.hThread);
+
+    char buffer[8192];
+    DWORD got = 0;
+    while (ReadFile(readPipe, buffer, DWORD(sizeof(buffer)), &got, nullptr) && got) {
+        if (out.size() + got > kOutputLimit) break;
+        out.append(buffer, got);
+    }
+    CloseHandle(readPipe);
+    const DWORD waited = WaitForSingleObject(pi.hProcess, kTimeoutMs);
+    DWORD code = 1;
+    if (waited == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    // Closing the kill-on-close job reaps a helper that ignored the deadline.
+    CloseHandle(job);
+    return waited == WAIT_OBJECT_0 && code == 0;
+}
+
+} // namespace
+
+void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
+    if (videoPath == m_tracksPath) return;
+    m_tracksPath = videoPath;
+    m_tracks.clear();
+    m_selectedTrack = 0;
+
+    const std::wstring ffprobe = FindTool(L"ffprobe.exe");
+    if (ffprobe.empty()) {
+        LOG("Audio: ffprobe was not found, so the track list is unavailable; playing the first stream.");
+        return;
+    }
+    std::wstring inputOptions;
+    if (_wcsnicmp(videoPath.c_str(), L"https://", 8) == 0 || _wcsnicmp(videoPath.c_str(), L"http://", 7) == 0)
+        inputOptions = L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
+
+    std::string text;
+    if (!CaptureHelperOutput(ffprobe,
+            L"-v error -select_streams a "
+            L"-show_entries stream=index,codec_name,channels:stream_tags=language,title:"
+            L"stream_disposition=default,comment,visual_impaired,descriptions,hearing_impaired "
+            L"-of default=noprint_wrappers=0 " + inputOptions + L"-i " + Q(videoPath), text)) {
+        LOG("Audio: the track list could not be read; playing the first stream.");
+        return;
+    }
+
+    // [STREAM] wrappers rather than a flat list: without them ffprobe runs
+    // consecutive streams' entries together with no separator, and a track
+    // missing an optional tag would silently absorb the next one's.
+    std::vector<audio_track::Track> tracks;
+    audio_track::Track current;
+    bool inStream = false;
+    std::istringstream lines(text);
+    std::string line;
+    const auto flag = [](const std::string& value) { return value == "1"; };
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line == "[STREAM]") { current = {}; current.audioIndex = int(tracks.size()); inStream = true; continue; }
+        if (line == "[/STREAM]") { if (inStream) tracks.push_back(current); inStream = false; continue; }
+        if (!inStream) continue;
+        const size_t equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        const std::string key = line.substr(0, equals), value = line.substr(equals + 1);
+        if (key == "codec_name") current.codec = value;
+        else if (key == "channels") { try { current.channels = std::stoi(value); } catch (...) {} }
+        else if (key == "TAG:language") current.language = value;
+        else if (key == "TAG:title") current.title = value;
+        else if (key == "DISPOSITION:default") current.isDefault = flag(value);
+        else if (key == "DISPOSITION:comment") current.comment = flag(value);
+        else if (key == "DISPOSITION:visual_impaired") current.visualImpaired = flag(value);
+        else if (key == "DISPOSITION:descriptions") current.descriptions = flag(value);
+        else if (key == "DISPOSITION:hearing_impaired") current.hearingImpaired = flag(value);
+    }
+
+    // One track needs no menu and no decision; the list stays empty so
+    // everything downstream takes the path it always did.
+    if (tracks.size() < 2) return;
+    m_tracks = std::move(tracks);
+    const size_t chosen = audio_track::SelectDefault(m_tracks);
+    m_selectedTrack = chosen == audio_track::kNoTrack ? 0 : m_tracks[chosen].audioIndex;
+    LOG("Audio: " << m_tracks.size() << " tracks; opening on "
+        << audio_track::Describe(m_tracks[size_t(m_selectedTrack)]) << '.');
+}
+
+bool AudioPlayer::SelectAudioTrack(int audioIndex) {
+    if (audioIndex < 0 || size_t(audioIndex) >= m_tracks.size()) return false;
+    if (audioIndex == m_selectedTrack) return true;
+    m_selectedTrack = audioIndex;
+    LOG("Audio: switching to " << audio_track::Describe(m_tracks[size_t(audioIndex)]) << '.');
+    // A track change is a stream change, so the child has to be respawned.
+    // Resuming where the clock is keeps the switch where the viewer was.
+    const double resumeAt = m_path.empty() ? 0.0 : std::max(0.0, m_lastKnownPosition.load());
+    return Seek(resumeAt);
 }
 
 bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, AudioStartState state) {
@@ -49,6 +190,7 @@ bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, Audio
     m_path = videoPath;
     m_ffmpeg = FindFFmpeg();
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
+    ProbeAudioTracks(videoPath);
 
     auto reader=std::make_shared<ReaderState>();
     reader->disableAudioDevice=m_settings.faults.disableAudioDevice;
@@ -103,8 +245,12 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     const uint32_t rate = format.Valid() ? format.sampleRate : 48000u;
     const uint16_t channels = format.Valid() ? format.channels : uint16_t{2};
     const bool asFloat = format.Valid();
+    // The chosen stream, not simply the first: a rip that lists the
+    // director's commentary first used to play the commentary. Still
+    // optional, so a video-only source produces an empty output rather than
+    // a failure.
     args << L"-i " << Q(m_path)
-         << L" -map 0:a:0? -vn -sn -dn -ac " << channels << L" -ar " << rate
+         << L" -map 0:a:" << m_selectedTrack << L"? -vn -sn -dn -ac " << channels << L" -ar " << rate
          << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
