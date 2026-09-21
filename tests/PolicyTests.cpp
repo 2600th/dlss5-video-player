@@ -3,6 +3,7 @@
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
 #include "SourceDigestMemo.h"
+#include "AudioEndpointPolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -8488,6 +8489,88 @@ void source_digest_is_computed_once_per_file_and_never_survives_a_change_test()
     CHECK_EQ(std::optional<std::string>("digest-6"), Lookup(entry, L"gone.mkv", 1, 1, compute));
 }
 
+// Device-change recovery was polled: the renderer only noticed an endpoint
+// had gone when a call to it returned AUDCLNT_E_DEVICE_INVALIDATED. That
+// covers an endpoint that disappears and nothing else. A default-device
+// change leaves the old endpoint working, so the film keeps playing out of
+// the headphones that were just unplugged from the mixer's point of view;
+// a format change under the stream is not reported at all; and some drivers
+// stop asking for data without ever erroring, which polling cannot see.
+void audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test()
+{
+    using namespace audio_endpoint;
+    const std::wstring ours = L"{0.0.0.00000000}.{aaaa}";
+    const std::wstring other = L"{0.0.0.00000000}.{bbbb}";
+
+    // A new default for playback is ours to follow.
+    CHECK(DefaultChangeAffectsUs(eRender, eConsole, other, ours));
+    CHECK(DefaultChangeAffectsUs(eRender, eMultimedia, other, ours));
+    // Capture is not ours, whatever happens to it.
+    CHECK(!DefaultChangeAffectsUs(eCapture, eConsole, other, ours));
+    // Communications is the headset role; the player does not follow it, or
+    // starting a call would move the film's audio.
+    CHECK(!DefaultChangeAffectsUs(eRender, eCommunications, other, ours));
+    // Already there: restarting would be an audible gap for no reason.
+    CHECK(!DefaultChangeAffectsUs(eRender, eConsole, ours, ours));
+    // No default at all - every endpoint removed - is still a change we lost.
+    CHECK(DefaultChangeAffectsUs(eRender, eConsole, L"", ours));
+
+    // State changes only matter for the endpoint being rendered to.
+    CHECK(StateChangeAffectsUs(ours, DEVICE_STATE_UNPLUGGED, ours));
+    CHECK(StateChangeAffectsUs(ours, DEVICE_STATE_DISABLED, ours));
+    CHECK(StateChangeAffectsUs(ours, DEVICE_STATE_NOTPRESENT, ours));
+    CHECK(!StateChangeAffectsUs(ours, DEVICE_STATE_ACTIVE, ours));
+    CHECK(!StateChangeAffectsUs(other, DEVICE_STATE_UNPLUGGED, ours));
+
+    // The forgotten one: the engine's mix format changing under a stream that
+    // was opened at the old format, and ffmpeg is still producing it.
+    CHECK(FormatChangeAffectsUs(ours, ours, true));
+    CHECK(!FormatChangeAffectsUs(ours, ours, false));
+    CHECK(!FormatChangeAffectsUs(other, ours, true));
+
+    // Before Open has an id, nothing can be about us - and a blank id must
+    // not match every notification.
+    CHECK(!DefaultChangeAffectsUs(eRender, eConsole, other, L""));
+    CHECK(!StateChangeAffectsUs(ours, DEVICE_STATE_UNPLUGGED, L""));
+    CHECK(!FormatChangeAffectsUs(ours, L"", true));
+}
+
+// Some drivers stop signalling the render event without ever returning an
+// error, which Kodi documents and works around with a 1100 ms guard. Polling
+// cannot see that: every call succeeds and the film simply goes quiet.
+void audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test()
+{
+    using namespace audio_sink;
+    State state;
+
+    // A stream that keeps being asked for data is alive.
+    CHECK(!Dead(state, 0.0, true, true));
+    CHECK(!Dead(state, 5.0, true, true));
+    CHECK(!Dead(state, 5.5, false, true));
+    CHECK(!Dead(state, 6.09, false, true));
+    // Past the guard with no request for data while playing.
+    CHECK(Dead(state, 6.11, false, true));
+
+    // A paused stream is silent on purpose and never signals. Declaring it
+    // dead would restart the pipeline every time someone pauses for a minute.
+    State paused;
+    CHECK(!Dead(paused, 0.0, true, true));
+    CHECK(!Dead(paused, 100.0, false, false));
+    CHECK(!Dead(paused, 200.0, false, false));
+    // And the clock it was paused for does not count against it on resume.
+    CHECK(!Dead(paused, 200.5, false, true));
+    CHECK(Dead(paused, 201.5, false, true));
+
+    // One signal resets the guard, so an underrun that recovers is not a
+    // death: the recovery path costs a restart and an audible gap.
+    State recovered;
+    CHECK(!Dead(recovered, 0.0, true, true));
+    CHECK(!Dead(recovered, 1.0, false, true));
+    CHECK(!Dead(recovered, 1.05, true, true));
+    CHECK(!Dead(recovered, 2.0, false, true));
+    CHECK(Dead(recovered, 2.2, false, true));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8744,6 +8827,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),
+    TEST_CASE(audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test),
+    TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
 };
 
 

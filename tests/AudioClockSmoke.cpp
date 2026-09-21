@@ -246,6 +246,53 @@ int wmain(int argc, wchar_t** argv)
             Check(after >= before, "servicing device changes does not move the clock backwards");
     }
 
+    // ---- device-change recovery, end to end --------------------------------
+    // This was the one thing the audio work could not verify: exercising it
+    // used to mean changing the machine's default playback endpoint, which is
+    // not this harness's to do. The recovery was reasoned, not measured.
+    //
+    // It is measured now. The renderer's notification handler is the same
+    // entry point the OS calls through the registered IMMNotificationClient,
+    // so delivering a default-device change to it drives the whole path -
+    // latch, ServiceDeviceChanges, restart, clock resuming - without touching
+    // anyone's audio settings.
+    {
+        Check(audio.Seek(8.0), "Seek to a known point before the device change");
+        if (WaitForClock(audio, 5s) >= 0.0) {
+            const double before = audio.PositionSeconds();
+            Check(!audio.ServiceDeviceChanges(),
+                  "nothing to service before the endpoint changes");
+
+            // A different endpoint becomes the default for playback.
+            Check(audio.DeliverDefaultEndpointChange(L"{0.0.0.00000000}.{not-the-one-we-are-on}"),
+                  "the notification reached the running renderer");
+            Check(audio.ServiceDeviceChanges(),
+                  "a default-endpoint change restarts audio on the new default");
+            // And exactly once: a second tick has nothing left to do.
+            Check(!audio.ServiceDeviceChanges(),
+                  "the restart is not repeated on the next tick");
+
+            const double latency = WaitForClock(audio, 5s);
+            Check(latency >= 0.0, "the clock answers again after the endpoint changed");
+            std::cout << "device-change recovery latency: " << latency << " s\n";
+            if (latency >= 0.0 && before >= 0.0) {
+                const double after = audio.PositionSeconds();
+                // Resumed where it was, not from the start of the file: the
+                // recovery seeks to the last position the clock reported.
+                CheckNear(before, after, 1.0,
+                          "playback resumes where it was when the endpoint changed");
+                std::cout << "position before/after the device change: " << before
+                          << " s / " << after << " s\n";
+                // And it is really playing, not merely answering.
+                const auto mark = std::chrono::steady_clock::now();
+                std::this_thread::sleep_for(1000ms);
+                const double later = audio.PositionSeconds();
+                CheckNear(after + Seconds(mark), later, kFrameSeconds * 2,
+                          "the clock advances at real time after the recovery");
+            }
+        }
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

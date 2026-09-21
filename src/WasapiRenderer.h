@@ -2,12 +2,16 @@
 
 #include <windows.h>
 #include <audioclient.h>
+#include <audiopolicy.h>
 #include <mmdeviceapi.h>
 #include <wrl/client.h>
+
+#include "AudioEndpointPolicy.h"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // The audio output endpoint, shared-mode and event-driven.
@@ -94,7 +98,27 @@ public:
     // mid-stream: the mix format may differ, so the decoder has to be told.
     bool DeviceLost() const { return deviceLost_.load(); }
 
+    // The endpoint this renderer is on, empty before Open.
+    std::wstring DeviceId() const;
+
+    // The endpoint notification handlers.
+    //
+    // The OS calls these through the registered IMMNotificationClient. The
+    // audio smoke calls the same three directly, which is how the recovery
+    // path is exercised end to end without changing the machine's default
+    // playback device out from under whoever is using it. They are the
+    // handlers, not a test seam: there is one implementation and both callers
+    // reach it.
+    void OnDefaultEndpointChanged(EDataFlow flow, ERole role, const wchar_t* newDeviceId);
+    void OnEndpointStateChanged(const wchar_t* deviceId, DWORD newState);
+    void OnEndpointFormatChanged(const wchar_t* deviceId, bool isDeviceFormatKey);
+    // The session went away underneath the stream - device removed, audio
+    // service restarted, or the format changed.
+    void OnSessionDisconnected();
+
 private:
+    class EndpointWatcher;
+
     mutable std::mutex mutex_;
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;
     Microsoft::WRL::ComPtr<IMMDevice> device_;
@@ -118,6 +142,18 @@ private:
     std::vector<float> lastFrame_;
     std::vector<float> fadeTail_;
     bool refusingWrites_ = false;
+    // Endpoint identity and the notification registrations that watch it.
+    std::wstring deviceId_;
+    // Raw and hand-counted rather than a ComPtr: ComPtr's destructor needs
+    // the complete type in this header, and the watcher's definition wants
+    // to stay in the .cpp beside the handlers it forwards to. Exactly one
+    // reference is owned here, taken in Open and released in Close.
+    EndpointWatcher* watcher_ = nullptr;
+    Microsoft::WRL::ComPtr<IAudioSessionControl> session_;
+    bool watchingEndpoints_ = false;
+    bool watchingSession_ = false;
+    // Guard for a sink that stops asking for data without erroring.
+    audio_sink::State sinkState_;
 
     // Records a device-invalidated result and returns whether it was one, so
     // every call site handles it the same way.

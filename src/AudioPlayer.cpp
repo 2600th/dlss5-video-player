@@ -503,10 +503,28 @@ void AudioPlayer::SetVolume(float volume01) {
     state->renderer->SetVolume(m_volume);
 }
 
+bool AudioPlayer::DeliverDefaultEndpointChange(const std::wstring& newDeviceId) {
+    const auto state = m_reader;
+    if (!state || !state->renderer) return false;
+    state->renderer->OnDefaultEndpointChanged(eRender, eConsole, newDeviceId.c_str());
+    return true;
+}
+
 bool AudioPlayer::ServiceDeviceChanges() {
     const auto state = m_reader;
-    // exchange, so two callers in the same frame cannot both restart.
-    if (!state || !state->deviceLost.exchange(false)) return false;
+    if (!state) return false;
+    // Two sources, and both are needed. The reader latches a loss it ran
+    // into - a call to the endpoint that failed. The renderer latches one the
+    // OS reported through the endpoint notifications, and those arrive while
+    // every call is still succeeding: a default-device change leaves the old
+    // endpoint working perfectly, so the reader would never see it.
+    //
+    // exchange on the reader's latch, so two callers in the same frame cannot
+    // both restart. The renderer's own latch goes away with the renderer when
+    // the restart replaces it.
+    const bool readerSawLoss = state->deviceLost.exchange(false);
+    const bool endpointReportedLoss = state->renderer && state->renderer->DeviceLost();
+    if (!readerSawLoss && !endpointReportedLoss) return false;
     const double resumeAt = m_lastKnownPosition.load();
     LOG("Audio: the render endpoint went away; restarting on the current default at "
         << resumeAt << " s.");

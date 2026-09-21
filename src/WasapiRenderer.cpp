@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 #include <cmath>
 
 using Microsoft::WRL::ComPtr;
@@ -18,6 +19,13 @@ namespace {
 // requested duration is zero, which is what the endpoint is tuned for. Naming
 // a number here only risks asking for something the driver then rounds.
 constexpr REFERENCE_TIME kEnginePeriod = 0;
+
+// PKEY_AudioEngine_DeviceFormat, spelled out rather than pulled in from
+// functiondiscoverykeys_devpkey.h: that header only defines the storage under
+// INITGUID, and defining INITGUID here would instantiate every other key in
+// mmdeviceapi in this translation unit as well.
+const PROPERTYKEY kDeviceFormatKey = {
+    {0xf19f064d, 0x082c, 0x4e27, {0xbc, 0x73, 0x68, 0x82, 0xa1, 0xbb, 0x8e, 0x4c}}, 0};
 
 WasapiRenderer::Format DescribeFormat(const WAVEFORMATEX& wave)
 {
@@ -37,7 +45,131 @@ WasapiRenderer::Format DescribeFormat(const WAVEFORMATEX& wave)
 
 } // namespace
 
+// One object for both notification interfaces, because both answer the same
+// question - has the stream this player is on gone away - and splitting them
+// would double the boilerplate for no separation of concern.
+//
+// The back pointer is raw and that is deliberate: the renderer unregisters
+// both callbacks inside Close before any of its own members are torn down, so
+// the watcher can never outlive what it points at. A weak reference would
+// imply the opposite lifetime and hide the ordering requirement.
+class WasapiRenderer::EndpointWatcher final : public IMMNotificationClient,
+                                              public IAudioSessionEvents {
+public:
+    explicit EndpointWatcher(WasapiRenderer* owner) : owner_(owner) {}
+
+    // Called under the renderer's lock before it releases us, so no
+    // notification in flight can reach a half-torn-down renderer.
+    void Detach() { owner_ = nullptr; }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return references_.fetch_add(1) + 1; }
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG remaining = references_.fetch_sub(1) - 1;
+        if (!remaining) delete this;
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** object) override
+    {
+        if (!object) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient))
+            *object = static_cast<IMMNotificationClient*>(this);
+        else if (riid == __uuidof(IAudioSessionEvents))
+            *object = static_cast<IAudioSessionEvents*>(this);
+        else { *object = nullptr; return E_NOINTERFACE; }
+        AddRef();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role,
+                                                     LPCWSTR deviceId) override
+    {
+        if (owner_) owner_->OnDefaultEndpointChanged(flow, role, deviceId);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR deviceId, DWORD newState) override
+    {
+        if (owner_) owner_->OnEndpointStateChanged(deviceId, newState);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR deviceId, const PROPERTYKEY key) override
+    {
+        // The one that is routinely forgotten: the engine's mix format
+        // changing under a stream that was opened at the old one.
+        if (owner_)
+            owner_->OnEndpointFormatChanged(deviceId, key == kDeviceFormatKey);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR deviceId) override
+    {
+        if (owner_) owner_->OnEndpointStateChanged(deviceId, DEVICE_STATE_NOTPRESENT);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnSessionDisconnected(AudioSessionDisconnectReason) override
+    {
+        if (owner_) owner_->OnSessionDisconnected();
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDisplayNameChanged(LPCWSTR, LPCGUID) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnIconPathChanged(LPCWSTR, LPCGUID) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnSimpleVolumeChanged(float, BOOL, LPCGUID) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnChannelVolumeChanged(DWORD, float[], DWORD, LPCGUID) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnGroupingParamChanged(LPCGUID, LPCGUID) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnStateChanged(AudioSessionState) override { return S_OK; }
+
+private:
+    ~EndpointWatcher() = default;
+    std::atomic<ULONG> references_{1};
+    // Raw, and cleared by Detach before the renderer tears down.
+    WasapiRenderer* owner_ = nullptr;
+};
+
 WasapiRenderer::~WasapiRenderer() { Close(); }
+
+std::wstring WasapiRenderer::DeviceId() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return deviceId_;
+}
+
+void WasapiRenderer::OnDefaultEndpointChanged(EDataFlow flow, ERole role, const wchar_t* newDeviceId)
+{
+    std::wstring ours;
+    { std::lock_guard<std::mutex> lock(mutex_); ours = deviceId_; }
+    if (!audio_endpoint::DefaultChangeAffectsUs(flow, role, newDeviceId ? newDeviceId : L"", ours))
+        return;
+    if (!deviceLost_.exchange(true))
+        LOG("Audio: the default playback endpoint changed; the owner will move onto it.");
+}
+
+void WasapiRenderer::OnEndpointStateChanged(const wchar_t* deviceId, DWORD newState)
+{
+    std::wstring ours;
+    { std::lock_guard<std::mutex> lock(mutex_); ours = deviceId_; }
+    if (!audio_endpoint::StateChangeAffectsUs(deviceId ? deviceId : L"", newState, ours)) return;
+    if (!deviceLost_.exchange(true))
+        LOG("Audio: the endpoint being played to is no longer active (state=0x"
+            << std::hex << newState << std::dec << "); the owner will reopen.");
+}
+
+void WasapiRenderer::OnEndpointFormatChanged(const wchar_t* deviceId, bool isDeviceFormatKey)
+{
+    std::wstring ours;
+    { std::lock_guard<std::mutex> lock(mutex_); ours = deviceId_; }
+    if (!audio_endpoint::FormatChangeAffectsUs(deviceId ? deviceId : L"", ours, isDeviceFormatKey))
+        return;
+    if (!deviceLost_.exchange(true))
+        LOG("Audio: the endpoint's mix format changed under the stream; the owner will reopen "
+            "so the decoder is told the new one.");
+}
+
+void WasapiRenderer::OnSessionDisconnected()
+{
+    if (!deviceLost_.exchange(true))
+        LOG("Audio: the render session was disconnected; the owner will reopen.");
+}
 
 bool WasapiRenderer::NoteDeviceLoss(HRESULT result)
 {
@@ -90,6 +222,17 @@ bool WasapiRenderer::Open()
     result = client_->GetBufferSize(&bufferFrames_);
     if (FAILED(result)) { LOG("Audio: GetBufferSize failed hr=0x" << std::hex << result); return false; }
 
+    // Identity first: every notification decision compares against it, and a
+    // notification can arrive the instant the callback is registered.
+    LPWSTR rawId = nullptr;
+    if (SUCCEEDED(device_->GetId(&rawId)) && rawId) {
+        deviceId_.assign(rawId);
+        CoTaskMemFree(rawId);
+    } else {
+        LOG("Audio: the endpoint would not name itself; default-device changes cannot be "
+            "distinguished from changes to other devices, so only invalidation is noticed.");
+    }
+
     fadeFrames_ = audio_fade::FrameCount(format_.sampleRate);
     lastFrame_.assign(format_.channels, 0.0f);
     framesFadedIn_ = 0;
@@ -113,6 +256,24 @@ bool WasapiRenderer::Open()
     if (FAILED(client_->GetService(IID_PPV_ARGS(&volume_))))
         LOG("Audio: ISimpleAudioVolume unavailable; the volume slider will not reach the mixer.");
 
+    // Notifications rather than polling. Registered last, so everything a
+    // callback reads is already in place.
+    watcher_ = new EndpointWatcher(this);
+    if (SUCCEEDED(enumerator_->RegisterEndpointNotificationCallback(watcher_)))
+        watchingEndpoints_ = true;
+    else
+        LOG("Audio: endpoint notifications could not be registered; a default-device change "
+            "will not be noticed until a call to the endpoint fails.");
+
+    if (SUCCEEDED(client_->GetService(IID_PPV_ARGS(&session_))) && session_) {
+        if (SUCCEEDED(session_->RegisterAudioSessionNotification(watcher_)))
+            watchingSession_ = true;
+        else
+            LOG("Audio: session notifications could not be registered; a disconnect will not "
+                "be noticed until a call to the endpoint fails.");
+    }
+    sinkState_ = {};
+
     LOG("Audio: WASAPI shared mode at " << format_.sampleRate << " Hz, " << format_.channels
         << " channels, 32-bit float; endpoint buffer " << bufferFrames_ << " frames ("
         << (double(bufferFrames_) * 1000.0 / double(format_.sampleRate)) << " ms).");
@@ -122,6 +283,20 @@ bool WasapiRenderer::Open()
 void WasapiRenderer::Close()
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    // Unregister before anything else is released, and detach before that:
+    // a notification already in flight must not reach a renderer that is
+    // halfway through tearing itself down.
+    if (watcher_) {
+        watcher_->Detach();
+        if (watchingSession_ && session_) session_->UnregisterAudioSessionNotification(watcher_);
+        if (watchingEndpoints_ && enumerator_)
+            enumerator_->UnregisterEndpointNotificationCallback(watcher_);
+        watchingSession_ = false;
+        watchingEndpoints_ = false;
+        watcher_->Release();
+        watcher_ = nullptr;
+    }
+    session_.Reset();
     if (client_ && started_) client_->Stop();
     started_ = false;
     volume_.Reset();
@@ -134,6 +309,8 @@ void WasapiRenderer::Close()
     format_ = {};
     bufferFrames_ = 0;
     clockFrequency_ = 0;
+    deviceId_.clear();
+    sinkState_ = {};
 }
 
 bool WasapiRenderer::Valid() const
@@ -146,11 +323,30 @@ bool WasapiRenderer::WaitForSpace(DWORD timeoutMilliseconds, uint32_t& framesWan
 {
     framesWanted = 0;
     HANDLE ready = nullptr;
-    { std::lock_guard<std::mutex> lock(mutex_); ready = ready_; }
+    bool playing = false;
+    { std::lock_guard<std::mutex> lock(mutex_); ready = ready_; playing = started_; }
     if (!ready) return false;
-    // A timeout is not a failure: the caller polls its stop flag between
-    // waits, and a paused stream never signals.
-    if (WaitForSingleObject(ready, timeoutMilliseconds) != WAIT_OBJECT_0) return true;
+    const bool signalled = WaitForSingleObject(ready, timeoutMilliseconds) == WAIT_OBJECT_0;
+
+    // Some drivers stop asking for data without ever returning an error, so
+    // every call below would succeed and the film would simply go quiet.
+    // Nothing polling can see that; only the absence of the request can.
+    {
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (audio_sink::Dead(sinkState_, now, signalled, started_ && !refusingWrites_)) {
+            if (!deviceLost_.exchange(true))
+                LOG("Audio: the endpoint has not asked for data in over "
+                    << audio_sink::kDeadSeconds << " s while playing; treating the sink as dead "
+                    "and reopening.");
+            return false;
+        }
+    }
+    (void)playing;
+    // A timeout is not otherwise a failure: the caller polls its stop flag
+    // between waits, and a paused stream never signals.
+    if (!signalled) return true;
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (!client_) return false;

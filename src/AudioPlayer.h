@@ -78,6 +78,15 @@ public:
     // the session.
     bool ServiceDeviceChanges();
 
+    // Delivers a default-endpoint change to the running renderer through the
+    // same handler the OS calls. The audio smoke uses this to exercise
+    // device-change recovery end to end - notification, latch, restart,
+    // clock resuming - without changing the machine's default playback
+    // device out from under whoever is using it. False when nothing is
+    // playing. It is the handler, not a test double: the OS delivers the
+    // identical call through the registered IMMNotificationClient.
+    bool DeliverDefaultEndpointChange(const std::wstring& newDeviceId);
+
     // The source's audio streams, in container order. Empty when there is
     // one unremarkable track, when ffprobe could not be found, or when the
     // source is a stream the player did not enumerate - in all of which the
