@@ -268,6 +268,13 @@ private:
         // rate or whether it states the same one twice.
         double avgFrameRate = 0.0;      // stream=avg_frame_rate: frames over duration
         double nominalFrameRate = 0.0;  // stream=r_frame_rate: the container's declared cadence
+        // What the packet timestamps say about the spacing, which outranks
+        // both rates above when it has an answer. See VariableFrameRatePolicy.h
+        // for why neither declared rate can be trusted on the sources that
+        // matter. spacingDecided is false when the probe could not sample
+        // enough packets, and then the two declared rates are all there is.
+        bool spacingDecided = false;
+        bool spacingConstant = true;
         double durationSec = 0.0;
         double displayAspect = 0.0;
         bool stillImage = false;
@@ -319,6 +326,8 @@ private:
                     FFmpegAcceleration initialAcceleration,
                     const KnownMedia* known);
     bool ProbeFFmpeg(const std::wstring& path, std::stop_token stop);
+    void ProbePacketSpacing(const std::wstring& path, const std::wstring& inputOptions,
+                            std::stop_token stop);
     // Restarts (seeks, resizes, recovery) default to the path that last produced
     // frames instead of re-running a hardware chain that already failed.
     bool StartFFmpeg(double seekSeconds,

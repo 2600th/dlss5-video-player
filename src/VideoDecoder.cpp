@@ -2,6 +2,7 @@
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "FrameRatePolicy.h"
+#include "VariableFrameRatePolicy.h"
 #include "Log.h"
 #include <propvarutil.h>
 #include <algorithm>
@@ -539,9 +540,75 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     // Avoid pathological metadata causing gigantic pacing delays/CPU usage.
     m_source.fps = std::clamp(m_source.fps, 1.0, 240.0);
 
+    ProbePacketSpacing(path, inputOptions, stop);
+
     LOG("ffprobe: " << m_source.width << "x" << m_source.height << " DAR=" << m_source.displayAspect << " @ " << m_source.fps
         << " fps, duration=" << m_source.durationSec << ", " << m_source.colorTags);
     return true;
+}
+
+// Samples the first packets' presentation timestamps and asks whether they are
+// evenly spaced. See VariableFrameRatePolicy.h for why the two rates the
+// container declares cannot answer that.
+//
+// Local files only. The sources whose declared rates lie are captures and
+// phone video, which arrive as files; a stream has been transcoded by the
+// service and its container rebuilt, and probing one costs a fresh connection
+// and range request on every open for an answer that is not in doubt. A still
+// image has no spacing at all.
+//
+// Best effort throughout: a probe that fails leaves spacingDecided false and
+// the declared rates are all ConstantFrameRate() has, which is where it
+// started.
+void VideoDecoder::ProbePacketSpacing(const std::wstring& path, const std::wstring& inputOptions,
+                                      std::stop_token stop) {
+    m_source.spacingDecided = false;
+    m_source.spacingConstant = true;
+    if (m_source.stillImage || m_sourceKind != MediaSourceKind::LocalFile) return;
+    if (m_ffprobeExe.empty()) return;
+
+    const std::wstring args =
+        L"-v error -select_streams v:0 -read_intervals \"%+#" +
+        std::to_wstring(variable_frame_rate::kRecommendedSamples) +
+        L"\" -show_entries packet=pts_time -of default=noprint_wrappers=1 " +
+        inputOptions + L"-i " + Quote(path);
+
+    std::string text;
+    DWORD code = 0;
+    if (!RunCapture(m_ffprobeExe, args, text, &code, stop, m_probeTimeout)) {
+        LOG("ffprobe: the packet-spacing probe did not run (exitCode=" << code
+            << "); frame-rate constancy falls back to the two declared rates.");
+        return;
+    }
+
+    std::vector<double> times;
+    times.reserve(variable_frame_rate::kRecommendedSamples);
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("pts_time=", 0) != 0) continue;
+        const std::string value = line.substr(9);
+        // "N/A" for a packet the demuxer could not timestamp. One of those in
+        // the middle would look like a doubled interval, so the sample stops
+        // rather than inventing a gap.
+        double time = 0.0;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), time);
+        if (parsed.ec != std::errc{} || !std::isfinite(time)) break;
+        times.push_back(time);
+    }
+
+    const auto verdict = variable_frame_rate::Classify(times);
+    if (!verdict.decided) {
+        LOG("ffprobe: " << times.size() << " packet timestamps is too few to judge the spacing; "
+            "frame-rate constancy falls back to the two declared rates.");
+        return;
+    }
+    m_source.spacingDecided = true;
+    m_source.spacingConstant = verdict.constant;
+    LOG("ffprobe: packet spacing over " << verdict.intervals << " intervals is "
+        << (verdict.constant ? "constant" : "variable") << " (median "
+        << (verdict.medianIntervalSeconds * 1000.0) << " ms, " << verdict.deviatingIntervals
+        << " outside tolerance, " << verdict.reorderedIntervals << " reordered).");
 }
 
 bool VideoDecoder::ConstantFrameRate() const {
@@ -549,6 +616,12 @@ bool VideoDecoder::ConstantFrameRate() const {
     // image the image2 demuxer's own 25/1 for both rates, which would otherwise
     // read as a perfectly constant 25 fps cadence.
     if (m_source.stillImage) return false;
+    // Evidence beats declaration. When the packet timestamps were sampled and
+    // had enough of a story to tell, they are the answer: the two rates below
+    // are wrong in both directions on exactly the sources this question is
+    // asked about. They remain the fallback for a source whose packets could
+    // not be walked - a stream, a probe that failed, too few frames.
+    if (m_source.spacingDecided) return m_source.spacingConstant;
     const double avg = m_source.avgFrameRate, nominal = m_source.nominalFrameRate;
     // One rate on its own corroborates nothing, so an unknown or half-reported
     // rate is not constant rather than assumed constant: the consumer that

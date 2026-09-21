@@ -1,4 +1,5 @@
 #include "CacheEvictionPolicy.h"
+#include "VariableFrameRatePolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -6571,6 +6572,28 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         // largeburst and drainexit are sequential opens whose subject is the frame
         // queue, so they declare BT.709 limited range: the frames they are about have
         // to be the NV12 ones, and only a declared description gets those.
+        // Spacing scenarios for ConstantFrameRate(). The packet probe is a
+        // second ffprobe invocation, so serving it from the same stub is what
+        // proves the decoder actually asks for the timestamps rather than
+        // trusting the two rates it already has.
+        if(all.find(L"vfrspacing_")!=std::wstring::npos){
+            const bool capture=all.find(L"vfrspacing_capture")!=std::wstring::npos;
+            const bool nopackets=all.find(L"vfrspacing_nopackets")!=std::wstring::npos;
+            if(all.find(L"packet=pts_time")!=std::wstring::npos){
+                if(nopackets){std::cout<<std::flush;return 0;}
+                double now=0.0;
+                for(int index=0;index<120;++index){
+                    std::cout<<"pts_time="<<std::to_string(now)<<'\n';
+                    now+=capture?((index%7==0)?3.0/60.0:1.0/60.0):(1.0/24.0);
+                }
+                std::cout<<std::flush;return 0;
+            }
+            std::cout<<"width=640\nheight=360\ndisplay_aspect_ratio=16:9\nsample_aspect_ratio=1:1\n"
+                     <<(capture?"avg_frame_rate=60/1\nr_frame_rate=60/1\n"
+                               :"avg_frame_rate=23/1\nr_frame_rate=24/1\n")
+                     <<"duration=5\n"<<color("bt709","tv","bt709","bt709")<<std::flush;
+            return 0;
+        }
         if(all.find(L"largeburst")!=std::wstring::npos){
             std::cout<<geometry(1024,1024,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
         }
@@ -7956,6 +7979,102 @@ void deferred_capture_serves_a_second_job_after_a_shutdown_test()
     delete worker;
 }
 
+// A screen recording's spacing is the evidence; its two declared rates are
+// not. r_frame_rate is the largest interval the container could express and
+// avg_frame_rate is frames over duration, so a capture that ran at 60 and
+// dropped a tenth of its frames declares 60 and 54 - far enough apart to be
+// caught - while one that dropped almost nothing declares 60 and 59.8 and
+// sails through, and a perfectly constant file whose duration metadata is
+// slightly long is refused for no reason. This classifies the spacing itself.
+void variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test()
+{
+    using namespace variable_frame_rate;
+
+    const auto timesAt = [](double interval, size_t count) {
+        std::vector<double> times;
+        for (size_t index = 0; index < count; ++index) times.push_back(double(index) * interval);
+        return times;
+    };
+
+    // Exactly constant 23.976: nothing deviates.
+    const auto film = Classify(timesAt(1001.0 / 24000.0, 120));
+    CHECK(film.decided);
+    CHECK(film.constant);
+    CHECK_EQ(size_t{0}, film.deviatingIntervals);
+
+    // The same rate in a container that only stores milliseconds, so every
+    // interval alternates between 41 ms and 42 ms. That is rounding, not a
+    // variable rate, and refusing frame generation on it would be wrong.
+    std::vector<double> rounded;
+    for (size_t index = 0; index < 120; ++index)
+        rounded.push_back(std::round(double(index) * (1001.0 / 24000.0) * 1000.0) / 1000.0);
+    const auto millisecond = Classify(rounded);
+    CHECK(millisecond.decided);
+    CHECK(millisecond.constant);
+
+    // A screen recording: mostly 60 fps, with frames the compositor never
+    // produced. This is the case the whole check exists for.
+    std::vector<double> capture;
+    double now = 0.0;
+    for (size_t index = 0; index < 120; ++index) {
+        capture.push_back(now);
+        now += (index % 7 == 0) ? 3.0 / 60.0 : 1.0 / 60.0;
+    }
+    const auto recording = Classify(capture);
+    CHECK(recording.decided);
+    CHECK(!recording.constant);
+
+    // One dropped frame in a hundred is a hiccup, not a variable rate.
+    std::vector<double> hiccup = timesAt(1.0 / 30.0, 120);
+    for (size_t index = 60; index < hiccup.size(); ++index) hiccup[index] += 1.0 / 30.0;
+    const auto single = Classify(hiccup);
+    CHECK(single.decided);
+    CHECK(single.constant);
+
+    // Too few intervals to tell. It must say so rather than guess, because
+    // the caller keeps its existing answer when this one is undecided.
+    const auto tooFew = Classify(timesAt(1.0 / 30.0, 4));
+    CHECK(!tooFew.decided);
+
+    // Non-monotonic timestamps - B-frames handed over in coded order - carry
+    // no spacing information at all and must not read as wild variation.
+    std::vector<double> outOfOrder = timesAt(1.0 / 30.0, 120);
+    std::swap(outOfOrder[10], outOfOrder[11]);
+    const auto reordered = Classify(outOfOrder);
+    CHECK(reordered.decided);
+    CHECK(reordered.constant);
+}
+
+// The two rates a container declares and the spacing its packets actually
+// have can disagree in both directions, and the spacing is the one that is
+// true. Both halves matter: a capture wrongly called constant hands frame
+// generation a timeline it will lurch on, and a film wrongly called variable
+// loses the feature for no reason.
+void constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test()
+{
+    MediaFixture fixture;
+
+    // Declares a flat 60 against 60, which the two-rate comparison calls
+    // constant, while its packets are a screen recording's - mostly 60 fps
+    // with frames the compositor never produced.
+    auto capture = VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(capture->Open(L"vfrspacing_capture", MediaSourceKind::LocalFile));
+    CHECK(!capture->ConstantFrameRate());
+
+    // Declares 23 against 24, far enough apart that the two-rate comparison
+    // calls it variable, while every packet is exactly 1/24 apart.
+    auto film = VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(film->Open(L"vfrspacing_film", MediaSourceKind::LocalFile));
+    CHECK(film->ConstantFrameRate());
+
+    // No packets came back - a container ffprobe can describe but not walk.
+    // The declared rates are all there is, so the old answer stands rather
+    // than the absence of evidence reading as either verdict.
+    auto silent = VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(silent->Open(L"vfrspacing_nopackets", MediaSourceKind::LocalFile));
+    CHECK(!silent->ConstantFrameRate());
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8201,6 +8320,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),
     TEST_CASE(neural_presets_round_trip_and_default_to_the_shipped_settings_test),
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
+    TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
+    TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
 };
 
 
