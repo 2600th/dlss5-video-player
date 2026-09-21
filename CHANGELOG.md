@@ -1,5 +1,89 @@
 # Changelog
 
+## Unreleased
+
+- **Seeking, pausing and resuming no longer click.** A seek tore the stream
+  down mid-waveform and the next one started mid-waveform, so the endpoint saw
+  a step from an arbitrary sample value to zero and back. A step is a
+  discontinuity and its spectrum is everything, which is what a click is - on
+  the controls you use most. A four-millisecond raised cosine now ramps the
+  endpoint down and back up; a straight line would have removed the step in the
+  signal and left one in its derivative. Measured through a loopback capture of
+  a tone stopped on a known peak: the largest sample-to-sample step falls from
+  0.910 to about 0.32, which is 9.6 dB off the discontinuity. The remainder is
+  the audio engine's own teardown transient and does not move when the ramp is
+  made ten times longer. Seeks still cost 53-63 ms, because the drain overlaps
+  the FFmpeg teardown a seek was already paying for.
+
+- **The player no longer opens on the director's commentary.** It asked FFmpeg
+  for the first audio stream, whatever that was, and offered no way to change
+  it - so a disc rip that lists the commentary first played the commentary, and
+  a film with a dub ahead of the original played the dub. Containers already
+  say which tracks are not the feature, and the four dispositions they carry
+  are now read: commentary, visual-impaired, descriptions and hearing-impaired
+  tracks are skipped, and the container's own default is preferred among the
+  rest. Only if every track is flagged is one of those used, because a film
+  still has to have sound. **Playback > Audio track** lists them with enough
+  detail to tell two English tracks apart, and the choice survives a seek.
+  Nothing guesses from titles: titles are free text in whatever language the
+  ripper felt like.
+
+- **Unplugging headphones no longer leaves the film playing in silence.**
+  Recovery was polled - the player noticed only when a call to the endpoint
+  failed, which covers an endpoint that disappears and nothing else. A
+  default-device change leaves the old endpoint working perfectly, so every
+  call still succeeded and playback stayed on the device you had just stopped
+  using. The endpoint notifications now run, including the mix-format change
+  that is routinely forgotten, along with a guard for drivers that stop asking
+  for data without reporting an error. Measured end to end: 56 ms to move to
+  the new device, resuming at the same position and then advancing at real
+  time. The player follows the console and multimedia roles and deliberately
+  not the communications role, so taking a call does not move a film's audio.
+
+- **Frame generation is refused on variable-rate sources it used to accept.**
+  Constancy was decided by comparing the two rates a container declares, and
+  both are unreliable for exactly the sources the question is about. A screen
+  recording that dropped a tenth of its frames was caught; one that dropped
+  almost nothing was not, and its motion was then interpolated across intervals
+  of 16 ms and 83 ms as if they were the same - motion that speeds up and
+  lurches. In the other direction, a perfectly constant film whose duration
+  metadata ran slightly long lost the feature for no reason. The spacing of the
+  packets is now measured instead. Where there is not enough evidence the old
+  answer stands, because refusing a feature on absent evidence is the same
+  mistake pointing the other way.
+
+- **The neural presets say what they cost.** Measured rather than assumed: the
+  same range render, three passes per preset, with the player's own settings
+  applied. All four land within 0.6% of each other - less than the spread
+  between passes of one preset - so the menu says they render in the same time
+  and differ in look alone. That is worth printing precisely because it is "no
+  cost": without it, "Strong" reads as the expensive rung and nobody picks it.
+
+- **A YouTube failure says which failure it was.** Five distinct causes shared
+  one string, and four of them were misdescribed: a read-only install whose
+  helpers are all present was told they were missing, and so was a junction
+  attack being correctly refused. Each now names what happened and what to do
+  about it. The module also logs - it had no log line anywhere in 1,143 lines,
+  in the component most exposed to upstream breakage.
+
+- **Starting a render on a large file no longer stalls first.** Every job
+  hashed the whole source before doing anything, including the cache check and
+  every live retarget, so the same unchanged file was read end to end again for
+  each one - three to five seconds on a 5 GB source. It is hashed once per
+  loaded file now. The digest is still recomputed whenever the file's size or
+  timestamp changes, because it is part of the cache key and a stale one would
+  hand back the render of a different file.
+
+- **`verify_package.ps1` ships inside the package it checks.** The README told
+  you to verify what you downloaded and then gave you no way to do it short of
+  cloning the repository.
+
+- Documentation corrections: the render identity was listed with eight of its
+  thirteen terms, offline decoding was described as software when it requests
+  CUDA, and ten of twelve runtime-lock entries claimed "user-supplied"
+  provenance while the fetch script had real URLs and digests for all of them -
+  which mattered because `SECURITY.md` points auditors at that file.
+
 ## 0.24.0 - 2026-09-20
 
 - **The live buffer is sized from the render's drain rate, not a constant.**

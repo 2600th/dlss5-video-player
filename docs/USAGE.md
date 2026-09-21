@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.24.0+ (ddce653) on 2026-09-21._
 
 This guide covers whole-video session coverage and seeking,
 recent history, settings-aware cache identity, media export and
@@ -315,6 +315,36 @@ not affect the offline render. This adds no unverified sliders or presets.
 
 Launch `DLSSVideoPlayer.exe` directly. Select optional 2160p playback upscaling
 in the player; the old quality arguments and 4K launch scripts are retired.
+
+## Choosing the audio track
+
+**Playback > Audio track** lists the source's audio streams. Most files have
+one and the menu says so; the entry exists for the ones that do not.
+
+The player does not simply take the first stream. A disc rip often lists the
+director's commentary first, and a release with a dub often lists the dub
+ahead of the original, so "first" is regularly the wrong answer. Containers
+mark the tracks that are not the feature - commentary, audio description,
+descriptions, and tracks for the hard of hearing - and those are skipped when
+the player picks an opening track. Among what is left it prefers the one the
+container marks as its default. If every track is flagged, one of those is
+used anyway: a film has to have sound.
+
+Nothing is inferred from the track's title. Titles are free text written by
+whoever made the file, in whatever language they chose, so they are shown to
+you and not used to decide.
+
+Each entry names the language, the title if there is one, the codec and the
+channel layout, which is what it takes to tell two English tracks apart:
+
+```
+1. English - Director's Commentary - AC3 5.1 (commentary)
+2. English - AC3 5.1
+3. French - AC3 5.1
+```
+
+Switching tracks restarts the audio at the position you are at, so it costs
+the same as a seek. The choice stays until you load something else.
 
 ## Generate frames for a higher frame rate
 

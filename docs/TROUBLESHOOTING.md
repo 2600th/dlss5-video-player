@@ -1,6 +1,6 @@
 # Troubleshooting
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.24.0+ (ddce653) on 2026-09-21._
 
 For setup and everyday use, see [Building](BUILDING.md) and [Using the player](USAGE.md).
 
@@ -188,6 +188,19 @@ At the chosen resolution, the resolver prefers the highest advertised video
 bitrate across codecs. That estimate can differ from the downloaded file's
 average bitrate; bitrate alone is not a cross-codec quality score.
 
+If the helpers themselves are the problem, the message now names which one it
+is rather than always reporting them missing. "yt-dlp.exe is not beside the
+app" is a broken install; "is there but could not be opened" is usually
+antivirus or file permissions; "is a link rather than a file, so it was
+refused" and "resolves to somewhere outside the app's folder" are the
+junction checks doing their job and mean the install has been tampered with.
+"The YouTube helpers are present, but their cache folder beside the app could
+not be created" is a read-only install folder, which used to be reported as
+the files being missing.
+
+Every refusal is also written to the log now, with the cause named, which is
+what to attach to a bug report when YouTube changes something upstream.
+
 ## Upscaling is off or playback drops frames
 
 DLSS Upscaling starts off on a fresh installation and then follows the saved
@@ -256,6 +269,51 @@ playing about a minute at a time instead of a few seconds. What it cannot do is
 remove the stalls, and the total time is set by the pace whatever the cushion
 is. To watch without them, either render the video fully first and play the
 result, or generate frames at a lower multiple so there is less to render.
+
+## There is no sound, or it is the wrong track
+
+*The wrong track.* If you are hearing the director's commentary or a dub,
+open **Playback > Audio track** and pick another. The player skips tracks the
+container marks as commentary, audio description or hard-of-hearing when it
+chooses an opening track, but a file whose tracks carry no such marking gives
+it nothing to go on.
+
+*A silent film that should not be.* The log distinguishes the cases:
+
+```
+Audio: the source has no audio track (ffmpeg mapped no stream); playing silent.
+```
+
+is a video-only file and not a fault. Any other non-zero exit is reported with
+its code, and
+
+```
+Audio: the endpoint's mix format is not 32-bit float (16 bits); refusing rather than guessing.
+```
+
+means the endpoint reported a shared-mode format the player will not write
+blind. Windows mixes in float in shared mode, so this indicates something
+unusual about the device rather than an ordinary configuration.
+
+*Sound stopped after changing devices.* Unplugging headphones, switching
+default device, or an audio service restart are all handled: the player moves
+to the new default and resumes where it was, and says so.
+
+```
+Audio: the default playback endpoint changed; the owner will move onto it.
+Audio: the render endpoint went away; restarting on the current default at 8.004 s.
+```
+
+If neither line appears and the film has gone quiet, look for
+
+```
+Audio: the endpoint has not asked for data in over 1.1 s while playing; treating the sink as dead and reopening.
+```
+
+which is the guard for drivers that stop asking for data without reporting an
+error. Note that the player follows the *console* and *multimedia* default
+device and deliberately not the *communications* one, so starting a call does
+not move a film's audio to your headset.
 
 ## Preferences do not persist
 

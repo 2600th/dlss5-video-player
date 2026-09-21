@@ -1,6 +1,6 @@
 # Architecture
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.24.0+ (ddce653) on 2026-09-21._
 
 ## High-level pipeline
 
@@ -74,6 +74,42 @@ Audio is the preferred master clock. The video side checks decoded timestamps ag
 That rule assumes a late frame is cheap to throw away, which holds while playback advances by decoding ONE stream. A live neural session advances by decoding a PAIR - the original and the rendered segment, presented together - so a discard costs exactly what a present costs, and a catch-up loop that discards is a race it doubles the length of: once behind, every tick spends its budget discarding, presents at most one frame and ends further behind than it started. `src/PlaybackCadence.h` decides what a behind-schedule pair does instead. STRIDE presents one pair in N and skips the presentation work for the rest, which is the difference between 120 fps that cannot be shown and 60 fps that can; RE-ANCHOR stops walking and seeks, because a seek costs about half a second whatever the distance while walking costs a pair decode for every frame in between. Re-anchoring is bounded at three, after which the session says it cannot follow rather than hitching indefinitely. A playback-health line every two seconds records presented rate against source rate, drops, the frame budget, the cadence in force and the split between guide generation and the present - the measurement that disproved two plausible theories about where the time was going.
 
 Throughput is what makes that budget reachable at all. A pair is two decoders feeding one renderer, and both hand over NV12 rather than BGRA where the source's colour description allows it: 5.5 MB per 2560x1440 frame instead of 14.7 MB, with the BT.709 limited conversion done on the GPU. `SourceNv12ConversionFor` refuses any description that conversion does not implement, and a playback open takes a narrower gate than an export one because the comparison reference is a BGRA texture uploaded from CPU bytes.
+
+## Audio
+
+The output is WASAPI shared mode, event driven, at the endpoint's own mix
+format. `AudioPlayer` opens the endpoint first and then tells FFmpeg to
+produce exactly that format, which removes the two conversions the old
+`waveOut` path paid: it was opened at a fixed 16-bit 48 kHz and Windows
+converted again to whatever the device actually wanted. The clock the video
+side reads is `IAudioClock`'s played-frame count, not an estimate of what was
+submitted.
+
+Which track plays is a decision, not the first stream. `AudioTrackPolicy.h`
+reads the four dispositions a container carries - commentary, visual
+impaired, descriptions, hearing impaired - and picks the container's default
+among the tracks that carry none of them. Titles are never parsed: they are
+free text in an arbitrary language. A source with fewer than two tracks
+builds no list, so nothing downstream changes for the common case.
+
+Every stop is ramped. `AudioFadePolicy.h` decays the last frame the endpoint
+was handed to silence over four milliseconds and opens the next stream with
+the matching ramp, because a seek otherwise cuts mid-waveform and the step is
+a click. The tail has to wait for room - the reader fills whatever the
+endpoint asks for, so at the moment a seek arrives the buffer is typically
+full - and the stop has to wait one buffer beyond what `IAudioClock` reports,
+because that clock leads the speaker.
+
+Device changes are noticed rather than tripped over. Polling a call's return
+value only ever catches an endpoint that disappears; a default-device change
+leaves the old one working, so nothing fails and playback continues on the
+device the viewer stopped using. `IMMNotificationClient` and
+`IAudioSessionEvents` both run, `AudioEndpointPolicy.h` decides which
+notifications are about this stream, and a watchdog covers drivers that stop
+requesting data without erroring. The player follows the console and
+multimedia roles and not communications, so a call does not move a film's
+audio. Recovery reopens and restarts the source rather than splicing into the
+new device, because its mix format may differ and the decoder has to be told.
 
 ## Temporal guides
 
