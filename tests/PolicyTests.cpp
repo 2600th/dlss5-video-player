@@ -2,6 +2,7 @@
 #include "VariableFrameRatePolicy.h"
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
+#include "SourceDigestMemo.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -8442,6 +8443,51 @@ void youtube_helper_refusals_each_say_which_one_happened_test()
     std::filesystem::remove_all(outsideDirectory, error);
 }
 
+// Every neural job full-hashed the source before doing anything, including
+// the prepare-only cache check and every live-session retarget. On a 5 GB
+// file that is 3-5 seconds of dead air after the viewer presses render, paid
+// again for each job against the same unchanged file.
+void source_digest_is_computed_once_per_file_and_never_survives_a_change_test()
+{
+    using namespace source_digest;
+    Entry entry;
+    int computed = 0;
+    const auto compute = [&]() -> std::optional<std::string> {
+        ++computed;
+        return std::string("digest-") + std::to_string(computed);
+    };
+
+    CHECK_EQ(std::optional<std::string>("digest-1"), Lookup(entry, L"film.mkv", 5000, 100, compute));
+    CHECK_EQ(1, computed);
+    // The whole point: the same file again costs nothing.
+    CHECK_EQ(std::optional<std::string>("digest-1"), Lookup(entry, L"film.mkv", 5000, 100, compute));
+    CHECK_EQ(std::optional<std::string>("digest-1"), Lookup(entry, L"film.mkv", 5000, 100, compute));
+    CHECK_EQ(1, computed);
+
+    // Any of the three identity terms changing re-hashes. A cache key is
+    // built from this digest, so a stale one would serve the wrong render.
+    CHECK_EQ(std::optional<std::string>("digest-2"), Lookup(entry, L"film.mkv", 5001, 100, compute));
+    CHECK_EQ(std::optional<std::string>("digest-3"), Lookup(entry, L"film.mkv", 5001, 101, compute));
+    CHECK_EQ(std::optional<std::string>("digest-4"), Lookup(entry, L"other.mkv", 5001, 101, compute));
+    CHECK_EQ(4, computed);
+
+    // Forgetting is what a new media load does, so a file replaced between
+    // loads is hashed again even if its size and timestamp were preserved.
+    Forget(entry);
+    CHECK_EQ(std::optional<std::string>("digest-5"), Lookup(entry, L"other.mkv", 5001, 101, compute));
+    CHECK_EQ(5, computed);
+
+    // A failed hash is not remembered as a failure: the next attempt tries.
+    int failures = 0;
+    const auto failing = [&]() -> std::optional<std::string> { ++failures; return std::nullopt; };
+    CHECK(!Lookup(entry, L"gone.mkv", 1, 1, failing).has_value());
+    CHECK(!Lookup(entry, L"gone.mkv", 1, 1, failing).has_value());
+    CHECK_EQ(2, failures);
+    // And it did not leave the previous file's digest reachable under the new
+    // identity, which would be the worst possible outcome here.
+    CHECK_EQ(std::optional<std::string>("digest-6"), Lookup(entry, L"gone.mkv", 1, 1, compute));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8697,6 +8743,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
+    TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),
 };
 
 

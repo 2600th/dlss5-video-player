@@ -56,6 +56,34 @@
 #include "FrameRatePolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
+#include "SourceDigestMemo.h"
+
+// The loaded source's SHA-256, computed once per file rather than once per
+// job. Shared with the neural worker by value: that thread captures nothing
+// owned by the window, so the memo cannot live behind `this`.
+struct SharedSourceDigest {
+    std::mutex mutex;
+    source_digest::Entry entry;
+};
+
+// The size and write time are re-read on every call, so a file that changes
+// under the player is re-hashed rather than served stale. That matters more
+// than it would for an ordinary memo: the digest is a render-cache key term,
+// and a stale one hands back the render of a different file.
+inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
+                                                       const std::filesystem::path& path,
+                                                       std::stop_token stop)
+{
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error) return Sha256File(path, stop);
+    const auto written = std::filesystem::last_write_time(path, error);
+    if (error) return Sha256File(path, stop);
+    const int64_t writeTime = written.time_since_epoch().count();
+    std::scoped_lock lock(memo.mutex);
+    return source_digest::Lookup(memo.entry, path.wstring(), size, writeTime,
+                                 [&] { return Sha256File(path, stop); });
+}
 #include "RecentMedia.h"
 #include "MediaPipeline.h"
 #include "OfflineNeuralRenderer.h"
@@ -1407,6 +1435,12 @@ private:
         app_menu::UpdateRecentVideos(GetMenu(m_hwnd),titles,!ActivityBusy());
         DrawMenuBar(m_hwnd);
     }
+    void ForgetSourceDigest(){
+        if(!m_sourceDigestMemo)return;
+        std::scoped_lock lock(m_sourceDigestMemo->mutex);
+        source_digest::Forget(m_sourceDigestMemo->entry);
+    }
+
     // Playback > Audio track, rebuilt whenever the source changes. The list
     // is empty for a source with one unremarkable track, which is most of
     // them, and the menu shows a disabled placeholder for that.
@@ -3634,6 +3668,10 @@ private:
     }
 
     void Unload() {
+        // A new file gets a new digest, even if the old one had the same size
+        // and timestamp: the memo is scoped to the loaded media precisely so
+        // it cannot outlive it.
+        ForgetSourceDigest();
         // The live pair holds the segment files open; it has to be closed
         // before the session's directory is removed, or the removal fails
         // silently and the segments stay on disk until the next session.
@@ -5775,7 +5813,7 @@ private:
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 // Set the moment the job knows its local source; every progress
@@ -5839,7 +5877,11 @@ private:
                     // Published to the UI thread from here, which is what lets
                     // playback move off a stream and onto this copy.
                     progressSourcePath=sourcePath;progressSourceKey=completion->sourceKey;
-                    const auto sourceDigest=Sha256File(sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
+                    // Memoised per loaded file. Every job used to full-hash
+                    // the source first, including the prepare-only cache check
+                    // and every live retarget, which is 3-5 s of dead air on a
+                    // 5 GB file each time it is asked for.
+                    const auto sourceDigest=MemoisedSourceDigest(*sourceDigestMemo,sourcePath,stop);if(!sourceDigest){completion->result.cancelled=stop.stop_requested();completion->result.detail=L"The source digest could not be computed.";goto finish;}
                     // Metadata only: this decoder was opened and closed two lines
                     // later, and a full open paid for an ffmpeg child for nothing.
                     VideoDecoder metadata;if(!metadata.OpenMetadata(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
@@ -7041,6 +7083,11 @@ case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEI
     };
     mutable SourceKeyMemo m_sourceKeyMemo;
     Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path,m_youtubeAudioUrl,m_youtubePageUrl,m_displayTitle,m_cachedStatus,m_cachedWindowTitle,m_pendingYouTubeTitle,m_pendingNeuralTitle;YouTubeSourceQuality m_youtubeSourceQuality=YouTubeSourceQuality::P1080;MediaSourceKind m_sourceKind=MediaSourceKind::LocalFile;VideoDecoder m_decoder;VideoFrame m_next;D3D12RendererOwner m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;std::unique_ptr<AudioPlayer>m_networkAudio;NetworkReadState m_networkReadState;YouTubeResolutionLifecycle m_youtubeLifecycle;std::unique_ptr<YouTubeResolver>m_youtubeResolver;CompletionRegistry<YouTubeCompletion>m_youtubeCompletions;std::jthread m_youtubeWorker;
+    // The loaded source's digest, so a second job against the same file does
+    // not pay for a second full hash. Read from job threads.
+    // Shared with the job thread by value, never through `this`: the neural
+    // worker deliberately captures nothing owned by the window.
+    std::shared_ptr<SharedSourceDigest> m_sourceDigestMemo=std::make_shared<SharedSourceDigest>();
     NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
     // Progress-watchdog state: the last progress the job reported and when it
     // moved, so a phase that stops reporting can be told from a slow one.
