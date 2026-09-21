@@ -122,6 +122,15 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // are the right surface for an expert and the wrong first contact. Every
     // preset is one neural evaluation at the same resolution, so this is a
     // choice of look, not a speed trade - that one lives in Encoder settings.
+    // The measured cost, stated where the choice is made. The project's rule
+    // is that a quality ladder prints what each rung costs; here the measured
+    // answer is that they all cost the same, and that is precisely the answer
+    // worth printing - without it "Strong" reads as the expensive one and
+    // nobody picks it. Disabled, because it is a statement and not a choice.
+    // The numbers and how to reproduce them are in NeuralPresets.h.
+    AppendMenuW(presets, MF_STRING | MF_GRAYED, 0,
+                L"All four render in the same time (6.3 s measured) - they change the look");
+    AppendMenuW(presets, MF_SEPARATOR, 0, nullptr);
     for (size_t index = 0; index < neural_presets::kPresetCount; ++index) {
         const std::wstring label(neural_presets::kPresets[index].label.begin(),
                                  neural_presets::kPresets[index].label.end());

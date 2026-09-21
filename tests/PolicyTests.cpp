@@ -7692,6 +7692,36 @@ void swapchain_never_asks_for_the_frame_latency_waitable_object_test()
 // and the measurements were not taken.
 void neural_presets_round_trip_and_default_to_the_shipped_settings_test()
 {
+    // The project's rule is that a quality choice is an explicit ladder with
+    // its measured cost printed beside each rung. The ladder shipped without
+    // the costs, so a viewer could read what "Strong" changes and had no way
+    // to know whether it doubles the render.
+    // And the ladder itself says what it costs, where the viewer chooses.
+    // Four rungs whose cost is identical is exactly the case where the
+    // number has to be stated: without it, "Strong" reads as the expensive
+    // one and nobody picks it.
+    {
+        Localizer localizer;
+        const HMENU bar = app_menu::CreateMenuBar(localizer, true);
+        CHECK(bar != nullptr);
+        if (bar) {
+            std::vector<MenuEntry> entries;
+            collect_menu_entries(bar, entries);
+            const bool statesTheCost = std::ranges::any_of(entries, [](const MenuEntry& entry) {
+                return entry.text.find(L"same time") != std::wstring::npos &&
+                       entry.text.find(L"6.3") != std::wstring::npos;
+            });
+            CHECK(statesTheCost);
+            DestroyMenu(bar);
+        }
+    }
+    for (const auto& preset : neural_presets::kPresets) {
+        CHECK(!preset.cost.empty());
+        // A number or the word "same" - never an adjective. The tooltip this
+        // is modelled on quotes VMAF and encode time, not "a bit slower".
+        CHECK(preset.cost.find("measured") != std::string_view::npos);
+    }
+
     using namespace neural_presets;
     CHECK(kPresetCount >= 2);
 
