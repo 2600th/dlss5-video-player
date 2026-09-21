@@ -393,7 +393,7 @@ the release packager, which is referenced by `package_release.bat`,
 
 ---
 
-### [~] 1.11 · Make a bug report possible at all
+### [x] 1.11 · Make a bug report possible at all
 
 `HIGH` · 🔍 reported · **effort: M** · **impact: every future debug session**
 
@@ -429,14 +429,18 @@ Also `MediaPipeline.cpp`, `SynchronizedPlayback.cpp`, `NeuralWorker.cpp`,
 - [x] Cap and roll at ~8 MB — `Log.h:43` `kMaxBytes`, `Roll()` at `:94`
 - [x] `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` — `src/CrashDump.h`,
       installed in both processes (`main.cpp:7184`, `NeuralWorkerMain.cpp:513`)
-- [ ] **Add `LOG` lines to `YouTubeResolver.cpp`** — every refusal path still
-      returns the same opaque string for five distinct causes.
-      `grep -c 'LOG(' src/YouTubeResolver.cpp` → **0**. The 1,143-line module
-      most exposed to upstream breakage still logs nothing.
+- [x] **`YouTubeResolver.cpp` logs, and says which refusal happened.**
+      `HelperFailure` names ten outcomes across the directory check, the two
+      helper opens and the cache creation, each mapping to a sentence a
+      viewer can act on - four of the five old causes were actively
+      misdescribed, including a read-only install being told its files were
+      missing. Every other refusal is covered by one log line in
+      `resolver_error`, which all twenty-five return through; cancellation is
+      excluded because it happens on every abandoned paste.
 
 ---
 
-### [~] 1.12 · Attest the package users actually download
+### [x] 1.12 · Attest the package users actually download
 
 `CRITICAL` · 🔍 reported · **effort: M** · **impact: trust**
 
@@ -474,9 +478,9 @@ zip. A user cannot verify what they downloaded without cloning the repo. And
 - [x] `workflow_dispatch` "attest an uploaded asset" job —
       `.github/workflows/attest-release-asset.yml`, which is explicit in-file
       about being a signed statement rather than build provenance
-- [ ] **Add `verify_package.ps1` to `$expected`** so it ships inside the zip —
-      still absent from both allowlists (`tools/verify_package.ps1:16`, `:24`),
-      so a user still cannot verify a download without cloning
+- [x] `verify_package.ps1` is in both allowlists and staged into both
+      packages, and README says how to run it. A `.ps1` is not a PE, so the
+      Authenticode check reports N/A for it rather than failing
 - [x] `gh attestation verify` + `sha256sum -c` block in `README.md:44-48`
 
 ---
@@ -841,7 +845,7 @@ says was unavailable. Coalesce header+payload (every message but
 
 ---
 
-### [ ] 2.9 · Cache hashes everything, every time
+### [~] 2.9 · Cache hashes everything, every time
 
 🔍 reported · **effort: M** · **gain: 3-5 s per job start on a 5 GB source**
 
@@ -864,8 +868,12 @@ measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
 
 **Fix**
 
-- [ ] Hash the source **once per loaded media**, carry the digest on the
-      session
+- [x] **Hashed once per loaded media** — `SourceDigestMemo.h`, owned by the
+      loaded file and forgotten in `Unload`, keyed on (path, size, write
+      time). Deliberately not `Sha256FileCached`, whose own header says never
+      to use it for user content: this digest is a cache-key term, so a stale
+      one hands back the render of a different file. Shared with the worker
+      by value - that thread captures nothing owned by the window
 - [ ] Promote to `Sha256FileCached` for payloads this process published this
       session, keyed on `(path, size, mtime, promotionSequence)`. The
       correctness objection in `NeuralCache.h:104` is about *user* content — a
@@ -1368,10 +1376,14 @@ ffmpeg that the other two deliberately refuse.**
 
 | Doc | Says | Reality |
 | --- | --- | --- |
-| `docs/ARCHITECTURE.md:385` | *"Source, application version, GPU path, runtime digest, native dimensions, quality, upscaling state, and a canonical neural-settings digest"* | Omits `range` and `guides`. Both **are** keyed — **2.15**'s canary now pins all thirteen fields, so this list is checkable and should be made to match |
-| `docs/ARCHITECTURE.md:432` | *"Sequential offline decoding uses software FFmpeg"* | Offline requests **CUDA** (`VideoDecoder.cpp:203`), with an in-code comment explaining the change. The doc describes the behaviour that was replaced |
-| `packaging/runtime-lock.json` | **8** `provenance` strings still say *"user-supplied matching pack"* | `fetch_neural_runtime.ps1` has real URLs + digests. `SECURITY.md:16` and `THIRD_PARTY.md:7` point auditors **at the stale copy**; `docs/BUILDING.md:123` has the correct table |
-| `docs/RELATED_PROJECTS.md:5` | reviewed 2026-09-01 | **Three weeks stale** — see **3.1** |
+| `docs/RELATED_PROJECTS.md:5` | reviewed 2026-09-01 | **Three weeks stale.** Rewriting it is **3.1**; until then the page says plainly that its comparisons are September 1 facts rather than current ones |
+
+_Also fixed since:_ `ARCHITECTURE.md`'s identity list now names all thirteen
+terms and points at the canary that pins them; its offline-decode paragraph
+says CUDA, which is what `VideoDecoder.cpp:203` requests; and every
+`runtime-lock.json` entry names its release, the archive digest verified
+before extraction and the per-file digest verified after staging, so the copy
+`SECURITY.md` points auditors at is the true one.
 
 ---
 
@@ -1490,7 +1502,7 @@ interpolation (SVP does it **live** for $25 into five players).
 
 ---
 
-### [~] 3.2 · Named presets — the quality ladder lives here
+### [x] 3.2 · Named presets — the quality ladder lives here
 
 `FEATURE` · **effort: XS** · **impact: highest polish-per-hour on the list**
 
@@ -1511,11 +1523,14 @@ resolution-based recommendations in a carousel.
       silently change what a user had selected
 - [x] **Default is the near-best rung and says so** — `"Natural (recommended)"`,
       `kDefaultPresetIndex = 0`, every control at its default
-- [ ] **Print the measured cost beside every rung.** The descriptions say what
-      each one *moves* and explicitly not how good it is, so a user still
-      cannot see what a rung costs or buys. This is the half of the quality
-      rule that is not yet implemented. The existing NVENC tooltip is the
-      model:
+- [x] **The measured cost is printed beside the ladder.** Measured, not
+      assumed: `tools/verification/preset-cost.cpp` runs the same range
+      render three times per preset with the player's own add-on overrides.
+      natural 6.29/6.30/6.35 s, detail-only 6.27/6.31/6.40 s, gentle
+      6.28/6.30/6.33 s, strong 6.31/6.31/6.35 s - 0.6% between presets,
+      less than the spread between passes of one. "They all cost the same" is
+      the answer worth printing: without it "Strong" reads as the expensive
+      rung and nobody picks it. The existing NVENC tooltip is the model:
 
   > *"Measured at 2560x1440 on an RTX 5090: p7 takes twice the encode time of
   > p5 and buys 0.12 VMAF on ordinary content, 0.53 on noise-heavy content, at
@@ -1682,35 +1697,45 @@ Current: `waveOut` (winmm) fed by an `ffmpeg.exe` subprocess
 (`AudioPlayer.cpp:67`). No WASAPI, no device-change handling, no passthrough, no
 drift correction.
 
-**One of six landed.** `src/WasapiRenderer.{h,cpp}` replaced `waveOut`; the
-rest of this list is untouched, which is why the heading is `[~]` and not
-`[x]`.
+**Four of six landed.** Still `[~]` for the two that are genuinely absent:
+drift correction and bitstream passthrough.
 
 - [x] **Shared-mode WASAPI, event-driven, float32 at the mix format.** ffmpeg
       now emits `pcm_f32le` at the endpoint's own rate, so the two format
       conversions are gone. The renderer **refuses** a non-float32 mix format
       rather than guessing at one. Queue depth 682 ms → 22 ms, drift over 5 s
       −0.074 ms → −0.003 ms, position after a seek to 20 s 20.047 s → 20.000 s
-- [~] **Device change** — recovery exists but is *polled*, not notified:
-      `ServiceDeviceChanges()` runs each tick, latches on
-      `AUDCLNT_E_DEVICE_INVALIDATED` and restarts via `Seek(m_lastKnownPosition)`.
-      **No `IMMNotificationClient`** (so no `OnDefaultDeviceChanged`, no
-      `PKEY_AudioEngine_DeviceFormat`), **no `IAudioSessionEvents::OnSessionDisconnected`**,
-      **no dead-sink watchdog** on the render event. The drivers Kodi's
-      `WaitForSingleObject(needDataEvent, 1100)` guard exists for — ones that
-      stop signalling without erroring — are still unhandled.
-      **And the recovery path is unverified end-to-end:** exercising it means
-      changing the machine's default endpoint. The latch is asserted inert
-      (200 ticks restart nothing on a healthy endpoint); the recovery itself is
-      reasoned, not measured
+- [x] **Device change, notified rather than polled.** `IMMNotificationClient`
+      (including `OnPropertyValueChanged` for `PKEY_AudioEngine_DeviceFormat`)
+      and `IAudioSessionEvents::OnSessionDisconnected` both run, plus the
+      dead-sink watchdog at Kodi's 1100 ms for drivers that stop signalling
+      without erroring. `AudioEndpointPolicy.h` holds the decisions, so which
+      roles the player follows is arguable in a test rather than by
+      unplugging things — it follows console and multimedia and deliberately
+      not communications, or taking a call would move a film's audio.
+      `ServiceDeviceChanges` consults the renderer's latch as well as the
+      reader's, without which a default-device change is never serviced at
+      all: the old endpoint keeps working, so nothing ever fails.
+      **Verified end to end**, which is the gap this list has carried since
+      the WASAPI change. The handler is the same entry point the OS calls, so
+      `AudioClockSmoke` delivers a default-device change through it and
+      asserts the whole path: 56 ms to recover, resuming at 8.00465 s from
+      8.00465 s, then advancing at real time. No machine's audio settings are
+      touched to do it
 - [ ] **Drift correction** — the clock is `IAudioClock`-based, but there is no
       `swr_set_compensation` resampling. Nothing corrects a crystal offset over
       a long film; it is only *measured* not to be present over 5 s
-- [ ] **Multi-track** — no disposition filtering anywhere. Nothing stops the
-      player auto-selecting `AV_DISPOSITION_COMMENT` / `_VISUAL_IMPAIRED` /
-      `_DESCRIPTIONS` / `_HEARING_IMPAIRED`
-- [ ] A 2-5 ms cosine fade on every seek/pause. Not implemented — seeks and
-      pauses still cut the stream at an arbitrary sample
+- [x] **Multi-track** — `AudioTrackPolicy.h` reads the four dispositions and
+      never opens on one, preferring the container's default among the
+      ordinary tracks. Playback > Audio track lists them with labels that
+      distinguish two English tracks. The old `-map 0:a:0?` played whatever
+      was listed first, so a rip with the commentary first played the
+      commentary with no way out
+- [x] A 4 ms raised-cosine fade on every seek, pause and resume.
+      `AudioFadePolicy.h`; measured with `tools/verification/fade-probe.cpp`
+      at 0.910 → ~0.32 largest sample-to-sample step, 9.6 dB off the
+      discontinuity. The residual is the audio engine's own teardown
+      transient: a ten-times-longer ramp does not move it
 - [ ] Bitstream passthrough behind a toggle — use FFmpeg's `spdif` muxer, do not
       hand-roll MAT framing.
 
@@ -1723,7 +1748,7 @@ switches display refresh, dropping the HDMI audio sink → access violation.
 
 ---
 
-### [ ] 3.9 · Detect VFR and refuse frame generation on it
+### [x] 3.9 · Detect VFR and refuse frame generation on it
 
 `BASELINE` · **effort: S** · **impact: sharper for this product than for a normal player**
 
@@ -2095,3 +2120,53 @@ when measured, and both had been repeated to the user before being checked:
 - **1.12 residue** — `verify_package.ps1` still is not in its own `$expected`
   allowlist, so it does not ship inside the zip and a user cannot verify a
   download without cloning the repository.
+
+---
+
+## Round three — the release gate
+
+Six items chosen for what a viewer hits on the first evening, plus three
+smaller ones. All nine landed. `ctest` is **23/23** with 9 `gpu` and 1
+`audio`; portable **13/13**; clean rebuild 1m35s, zero warnings.
+
+**Corrected claim.** One more statement of mine that measurement disproved,
+recorded beside the other three:
+
+| Claim | Measured |
+| --- | --- |
+| `FrameGenerationRefusal::VariableFrameRate` is unreachable dead code | **False.** `SourceCadence` is aggregate-initialised positionally at `main.cpp:1670`, so a grep on the field name missed it; `VideoDecoder::ConstantFrameRate()` does feed it. The real gap was narrower and is what **3.9** always said: the signal it used - `avg_frame_rate` against `r_frame_rate` - is wrong in both directions on the sources the question is asked about. |
+
+**What landed**
+
+| Item | | |
+| --- | --- | --- |
+| 3.9 | ✔ | Frame-rate constancy decided from packet spacing, not the two declared rates. Wrong in both directions before: a capture declaring a flat 60/60 was called constant, and a film declaring 23 against 24 was called variable |
+| 3.8 | ½ | The 4 ms raised-cosine de-click; track selection that never opens on the commentary; endpoint notifications with the dead-sink watchdog, **verified end to end** |
+| 1.11 | ✔ | `YouTubeResolver` says which of five refusals happened, and logs |
+| 3.2 | ✔ | The measured cost printed beside the ladder |
+| 2.9 | ½ | The source hashed once per loaded media instead of once per job |
+| 1.12 | ✔ | `verify_package.ps1` ships inside the package it checks |
+| 2.22 | ½ | Three of four remaining drift rows corrected |
+
+**Measured**
+
+| | before | after |
+| --- | ---: | ---: |
+| largest discontinuity at a stop | 0.910 | ~0.32 (9.6 dB off) |
+| device-change recovery | unverified | 56 ms, resumes at the same position |
+| audio track on a commentary-first rip | the commentary | the feature |
+| VFR capture declaring 60/60 | frame generation allowed | refused, with the reason |
+| source hashes per job on one file | one each | one per file |
+| `YouTubeResolver` log lines | 0 | every refusal, named |
+| preset render cost | unknown | 6.30-6.31 s median, all four within 0.6% |
+
+**Still open after this pass**
+
+- **2.14 · the self-hosted runner.** Unchanged: it needs the owner's
+  credentials.
+- **3.8 residue** — `swr_set_compensation` drift correction and bitstream
+  passthrough. Neither is a first-evening problem; drift is the one that
+  matters over a two-hour film.
+- **3.1** — the competitive review, which `RELATED_PROJECTS.md` now warns
+  about rather than pretending currency.
+- **2.19, 2.21 residue** and the untestable `SizeBytes` path, all unchanged.
