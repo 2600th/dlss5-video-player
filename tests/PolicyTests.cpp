@@ -1,5 +1,6 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
+#include "AudioFadePolicy.h"
 #include "PlatformPaths.h"
 #include "RendererRecoveryPolicy.h"
 #include "TestSupport.h"
@@ -8075,6 +8076,116 @@ void constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test()
     CHECK(!silent->ConstantFrameRate());
 }
 
+// A seek tears the stream down mid-waveform and the next one starts mid-
+// waveform, so the endpoint sees a step from some arbitrary sample value to
+// zero and back. That step is the click, and it is on every seek, every pause
+// and every resume - the controls a viewer uses most.
+//
+// A raised cosine rather than a straight line: its slope is zero at both ends,
+// so the ramp does not replace one discontinuity in the signal with a smaller
+// one in its derivative.
+void audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test()
+{
+    using namespace audio_fade;
+
+    // Four milliseconds at the two rates a mix format actually uses.
+    CHECK_EQ(uint32_t{192}, FrameCount(48000));
+    CHECK_EQ(uint32_t{176}, FrameCount(44100));
+    // No rate, no ramp - and never a division by zero.
+    CHECK_EQ(uint32_t{0}, FrameCount(0));
+
+    constexpr uint32_t fade = 192;
+    CHECK_EQ(0.0f, RampInGain(0, fade));
+    CHECK_EQ(1.0f, RampInGain(fade, fade));
+    // Past the end it stays open rather than wrapping back down.
+    CHECK_EQ(1.0f, RampInGain(fade * 4, fade));
+    CHECK(std::abs(RampInGain(fade / 2, fade) - 0.5f) < 1e-5f);
+    // A zero-length fade is "no fade", not "silence".
+    CHECK_EQ(1.0f, RampInGain(0, 0));
+
+    // Monotonic, and flat at both ends: the first and last steps are far
+    // smaller than the step through the middle, which is what a straight line
+    // would not give.
+    float previous = -1.0f;
+    for (uint32_t frame = 0; frame <= fade; ++frame) {
+        const float gain = RampInGain(frame, fade);
+        CHECK(gain >= previous);
+        previous = gain;
+    }
+    const float firstStep = RampInGain(1, fade) - RampInGain(0, fade);
+    const float middleStep = RampInGain(fade / 2 + 1, fade) - RampInGain(fade / 2, fade);
+    const float lastStep = RampInGain(fade, fade) - RampInGain(fade - 1, fade);
+    CHECK(firstStep * 10.0f < middleStep);
+    CHECK(lastStep * 10.0f < middleStep);
+
+    // The out-ramp is the in-ramp reflected, so a fade out into a fade in
+    // sums to unity and neither end has a step.
+    for (uint32_t frame = 0; frame <= fade; ++frame)
+        CHECK(std::abs(RampOutGain(frame, fade) + RampInGain(frame, fade) - 1.0f) < 1e-5f);
+}
+
+// Applied to real interleaved frames: every channel of a frame gets the same
+// gain, or the ramp would swing the stereo image while it runs.
+void audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test()
+{
+    using namespace audio_fade;
+    constexpr uint16_t channels = 2;
+    constexpr uint32_t fade = 8;
+
+    std::vector<float> samples(16, 1.0f);   // 8 frames, both channels at full scale
+    uint64_t faded = 0;
+    ApplyFadeIn(samples.data(), 8, channels, fade, faded);
+    CHECK_EQ(uint64_t{8}, faded);
+    CHECK_EQ(0.0f, samples[0]);
+    CHECK_EQ(0.0f, samples[1]);
+    for (size_t frame = 0; frame < 8; ++frame)
+        CHECK_EQ(samples[frame * 2], samples[frame * 2 + 1]);
+    // Strictly opening.
+    for (size_t frame = 1; frame < 8; ++frame) CHECK(samples[frame * 2] > samples[(frame - 1) * 2]);
+
+    // The next block is past the ramp and must be untouched, not scaled again.
+    std::vector<float> after(16, 0.25f);
+    ApplyFadeIn(after.data(), 8, channels, fade, faded);
+    CHECK_EQ(uint64_t{16}, faded);
+    for (const float sample : after) CHECK_EQ(0.25f, sample);
+
+    // A zero-length fade leaves the very first block alone.
+    std::vector<float> none(4, 0.5f);
+    uint64_t untouched = 0;
+    ApplyFadeIn(none.data(), 2, channels, 0, untouched);
+    for (const float sample : none) CHECK_EQ(0.5f, sample);
+}
+
+// The tail cannot be built from source that has not been decoded, so it decays
+// the last frame the endpoint was actually handed. Starting anywhere else
+// would insert the step it exists to remove.
+void audio_fade_out_tail_decays_from_the_last_frame_to_silence_test()
+{
+    using namespace audio_fade;
+    constexpr uint16_t channels = 2;
+    constexpr uint32_t fade = 8;
+    const float last[channels] = {0.5f, -0.25f};
+
+    std::vector<float> tail;
+    BuildFadeOutTail(last, channels, fade, tail);
+    CHECK_EQ(size_t{8 * 2}, tail.size());
+    // Continuous with what came before: the first tail frame IS the last frame.
+    CHECK_EQ(0.5f, tail[0]);
+    CHECK_EQ(-0.25f, tail[1]);
+    // And it reaches silence, so the step at the end is into zero.
+    CHECK(std::abs(tail[tail.size() - 2]) < 0.05f);
+    CHECK(std::abs(tail[tail.size() - 1]) < 0.05f);
+    // Both channels decay by the same factor throughout.
+    for (size_t frame = 0; frame < 8; ++frame)
+        CHECK(std::abs(tail[frame * 2] * -0.5f - tail[frame * 2 + 1]) < 1e-6f);
+
+    // Silence in, nothing to do.
+    const float quiet[channels] = {0.0f, 0.0f};
+    std::vector<float> none;
+    BuildFadeOutTail(quiet, channels, fade, none);
+    CHECK(none.empty());
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8322,6 +8433,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(swapchain_never_asks_for_the_frame_latency_waitable_object_test),
     TEST_CASE(variable_frame_rate_is_classified_from_the_spacing_not_the_declared_rates_test),
     TEST_CASE(constant_frame_rate_is_decided_by_the_spacing_not_the_declared_rates_test),
+    TEST_CASE(audio_fade_is_a_raised_cosine_that_starts_and_ends_flat_test),
+    TEST_CASE(audio_fade_in_scales_whole_frames_and_stops_once_it_is_open_test),
+    TEST_CASE(audio_fade_out_tail_decays_from_the_last_frame_to_silence_test),
 };
 
 

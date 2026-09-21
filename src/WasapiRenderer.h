@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 // The audio output endpoint, shared-mode and event-driven.
 //
@@ -68,6 +69,16 @@ public:
 
     bool Start();
     bool Stop();
+
+    // Stops after decaying the last frame to silence and letting the queue
+    // play out, rather than cutting it mid-waveform. Bounded: the endpoint
+    // holds one engine period, so the wait is tens of milliseconds at worst
+    // and returns regardless.
+    //
+    // Writes are refused from the moment the tail is queued, so the reader
+    // thread cannot append after it and re-introduce the step. Start() and
+    // Reset() open them again.
+    bool FadeOutAndStop();
     // Discards anything queued and zeroes the played-frame count. Used by seek
     // and stop, never at end of stream: zeroing there would make the
     // audio-master clock jump backwards during the last frames.
@@ -97,8 +108,19 @@ private:
     uint64_t clockFrequency_ = 0;
     std::atomic<bool> deviceLost_{false};
     bool started_ = false;
+    // De-click state. See AudioFadePolicy.h for why the ramps exist and why
+    // they are raised cosines.
+    uint32_t fadeFrames_ = 0;
+    uint64_t framesFadedIn_ = 0;
+    uint64_t framesWritten_ = 0;
+    // The last frame handed to the endpoint, which is where a fade-out has to
+    // start from: the samples after it were never decoded.
+    std::vector<float> lastFrame_;
+    std::vector<float> fadeTail_;
+    bool refusingWrites_ = false;
 
     // Records a device-invalidated result and returns whether it was one, so
     // every call site handles it the same way.
     bool NoteDeviceLoss(HRESULT result);
+    bool WriteLocked(const void* frames, uint32_t framesToWrite, bool fadeIn);
 };

@@ -1,5 +1,6 @@
 #include "WasapiRenderer.h"
 
+#include "AudioFadePolicy.h"
 #include "Log.h"
 
 #include <audiopolicy.h>
@@ -89,6 +90,12 @@ bool WasapiRenderer::Open()
     result = client_->GetBufferSize(&bufferFrames_);
     if (FAILED(result)) { LOG("Audio: GetBufferSize failed hr=0x" << std::hex << result); return false; }
 
+    fadeFrames_ = audio_fade::FrameCount(format_.sampleRate);
+    lastFrame_.assign(format_.channels, 0.0f);
+    framesFadedIn_ = 0;
+    framesWritten_ = 0;
+    refusingWrites_ = false;
+
     result = client_->GetService(IID_PPV_ARGS(&render_));
     if (FAILED(result)) { LOG("Audio: IAudioRenderClient failed hr=0x" << std::hex << result); return false; }
 
@@ -159,12 +166,32 @@ bool WasapiRenderer::Write(const void* frames, uint32_t framesToWrite)
     if (!framesToWrite) return true;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!render_) return false;
+    // A tail has been queued and the stream is on its way down. Accepting more
+    // would put a step back in after the ramp that removed it.
+    if (refusingWrites_) return true;
+    return WriteLocked(frames, framesToWrite, true);
+}
+
+// The caller holds mutex_. `fadeIn` is false for the fade-out tail, which is
+// already shaped and must not be re-scaled by a ramp that is still opening.
+bool WasapiRenderer::WriteLocked(const void* frames, uint32_t framesToWrite, bool fadeIn)
+{
     BYTE* destination = nullptr;
     HRESULT result = render_->GetBuffer(framesToWrite, &destination);
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
     std::memcpy(destination, frames, size_t(framesToWrite) * format_.BytesPerFrame());
+    // Safe to treat as float: Open refuses any mix format that is not 32-bit
+    // float rather than guessing at a conversion.
+    float* const samples = reinterpret_cast<float*>(destination);
+    if (fadeIn)
+        audio_fade::ApplyFadeIn(samples, framesToWrite, format_.channels, fadeFrames_, framesFadedIn_);
+    if (format_.channels) {
+        const float* const last = samples + size_t(framesToWrite - 1) * format_.channels;
+        lastFrame_.assign(last, last + format_.channels);
+    }
     result = render_->ReleaseBuffer(framesToWrite, 0);
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+    framesWritten_ += framesToWrite;
     return true;
 }
 
@@ -175,6 +202,11 @@ bool WasapiRenderer::Start()
     const HRESULT result = client_->Start();
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
     started_ = true;
+    // Whatever stopped this stream either decayed it to silence or cut it, so
+    // the next samples start from zero either way and want opening. A resume
+    // that came straight back up would click exactly as the old path did.
+    framesFadedIn_ = 0;
+    refusingWrites_ = false;
     return true;
 }
 
@@ -199,6 +231,93 @@ bool WasapiRenderer::Reset()
     }
     const HRESULT result = client_->Reset();
     if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+    // Reset zeroes the played-frame count, so everything measured against it
+    // has to go with it.
+    framesFadedIn_ = 0;
+    framesWritten_ = 0;
+    refusingWrites_ = false;
+    std::fill(lastFrame_.begin(), lastFrame_.end(), 0.0f);
+    return true;
+}
+
+bool WasapiRenderer::FadeOutAndStop()
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!client_) return false;
+        // Nothing is playing, so there is no waveform to be cut in half.
+        if (!started_) return true;
+        // Close the door first. Once this is set, lastFrame_ cannot change
+        // under the polling below, so the tail is guaranteed to start from
+        // the frame the endpoint will actually have played last.
+        if (refusingWrites_) return true;
+        refusingWrites_ = true;
+        audio_fade::BuildFadeOutTail(lastFrame_.data(), format_.channels, fadeFrames_, fadeTail_);
+    }
+
+    // Wait for room before writing the tail.
+    //
+    // The reader fills whatever WaitForSpace reported, so at the moment a
+    // seek or a pause arrives the endpoint buffer is typically FULL - which
+    // is exactly when a tail is needed and exactly when there is no room for
+    // one. Checking once and giving up, which this did at first, meant the
+    // tail was almost never written in the player even though it was always
+    // written in a test that had just started. The buffer drains on its own
+    // in one engine period, so waiting for the room costs that and nothing.
+    constexpr int kRoomPolls = 40;
+    bool wroteTail = false;
+    if (!fadeTail_.empty()) {
+        for (int poll = 0; poll < kRoomPolls; ++poll) {
+            bool settled = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!client_ || !render_) break;
+                uint32_t padding = 0;
+                if (FAILED(client_->GetCurrentPadding(&padding))) break;
+                if (bufferFrames_ > padding && bufferFrames_ - padding >= fadeFrames_) {
+                    wroteTail = WriteLocked(fadeTail_.data(), fadeFrames_, false);
+                    settled = true;
+                }
+            }
+            if (settled) break;
+            Sleep(1);
+        }
+    }
+
+    uint64_t queuedThrough = 0;
+    { std::lock_guard<std::mutex> lock(mutex_); queuedThrough = framesWritten_; }
+    LOG("Audio: ramped stop - tail " << (fadeTail_.empty() ? "not needed (already silent)"
+                                        : wroteTail ? "queued" : "REFUSED (no room in the endpoint buffer)")
+        << ", " << fadeFrames_ << " frames, draining through " << queuedThrough << ".");
+
+    // Let what is queued reach the speaker before the clock is stopped;
+    // stopping first would cut the tail off along with everything else.
+    // Bounded by the endpoint's own buffer plus generous slack.
+    constexpr int kDrainPolls = 40;
+    for (int poll = 0; poll < kDrainPolls; ++poll) {
+        uint64_t played = 0;
+        if (!PlayedFrames(played) || played >= queuedThrough) break;
+        Sleep(2);
+    }
+    // IAudioClock leads the speaker. GetPosition reports what the engine has
+    // consumed, not what has been converted, so stopping the instant it
+    // reaches the end still truncates the last of the ramp - measured as a
+    // residual step of 0.32 where the ramp should have left 0.0005. One more
+    // buffer's worth of grace covers the difference. It is tens of
+    // milliseconds, on a seek that already costs sixty.
+    {
+        uint32_t graceMs = 0;
+        { std::lock_guard<std::mutex> lock(mutex_);
+          if (format_.sampleRate)
+              graceMs = uint32_t(uint64_t(bufferFrames_) * 1000u / format_.sampleRate) + 2u; }
+        if (graceMs) Sleep(graceMs);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!client_ || !started_) return true;
+    const HRESULT result = client_->Stop();
+    if (FAILED(result)) { NoteDeviceLoss(result); return false; }
+    started_ = false;
     return true;
 }
 

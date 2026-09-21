@@ -342,10 +342,12 @@ void AudioPlayer::Pause(bool paused) {
     const auto state=m_reader;if(!state)return;
     state->paused = paused;
     if (!state->renderer) return;
-    // Stop holds the clock where it is and keeps the queued frames; Start
-    // resumes from there. Neither discards anything, so the position does not
-    // move across a pause.
-    if(!(paused?state->renderer->Stop():state->renderer->Start()))
+    // Pausing decays the last frame to silence and lets the queue play out
+    // before the clock stops, so the endpoint is never cut mid-waveform.
+    // Nothing is discarded - the frames drain instead of being thrown away -
+    // so the position ends up at the end of what was queued rather than in the
+    // middle of it, and resuming opens with a matching ramp.
+    if(!(paused?state->renderer->FadeOutAndStop():state->renderer->Start()))
         LOG("Audio: pause/resume was refused by the endpoint.");
 }
 
@@ -387,11 +389,15 @@ void AudioPlayer::Stop() {
     state->hasAudioData = false;
     state->paused = false;
 
-    // Discard anything queued, then stop the owned writer/process tree.
+    // Ramp the endpoint down to silence before stopping it, then stop the
+    // owned writer/process tree. A stop is a seek's first half as well as a
+    // stop, so cutting here is the click a viewer hears on every seek.
+    // The renderer is destroyed with the reader state, so the queue does not
+    // need discarding afterwards - it has already been played out.
     // ReaderState keeps every handle alive if a failed wait forces a detach;
     // the availability-driven reader then retires and closes them.
-    if (state->renderer && !state->renderer->Reset())
-        LOG("Audio: the endpoint refused a reset during stop.");
+    if (state->renderer && !state->renderer->FadeOutAndStop())
+        LOG("Audio: the endpoint refused a ramped stop.");
     StopProcess(state);
     if (m_thread.joinable()) {
         HANDLE readerThread=reinterpret_cast<HANDLE>(m_thread.native_handle());

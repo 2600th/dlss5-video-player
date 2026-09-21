@@ -75,6 +75,21 @@ int wmain(int argc, wchar_t** argv)
     double peak = 0.0, sumSquares = 0.0;
     uint64_t samples = 0, silentFrames = 0, totalFrames = 0;
 
+    // A click is a discontinuity: one sample to the next jumps by far more
+    // than a waveform at that frequency can. Tracking the largest step, and
+    // how many exceed a threshold, is how a de-click ramp is measured rather
+    // than assumed. A full-scale sine's own largest step is 2*pi*f/fs, which
+    // is 0.13 for the 1 kHz tone the audio harness generates at 48 kHz, so
+    // the threshold has to sit above ordinary programme material and below
+    // the step a mid-waveform cut produces. 0.2 is roughly a 1.5 kHz tone at
+    // full scale, which no real content sustains.
+    constexpr double kStepThreshold = 0.2;
+    double largestStep = 0.0;
+    uint64_t largestStepFrame = 0;
+    uint64_t largeSteps = 0;
+    std::vector<float> previous(channels, 0.0f);
+    bool havePrevious = false;
+
     const auto started = std::chrono::steady_clock::now();
     while (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() < seconds) {
         uint32_t packet = 0;
@@ -85,8 +100,14 @@ int wmain(int argc, wchar_t** argv)
         DWORD flags = 0;
         if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
         totalFrames += frames;
+        // The timeline jumped, so the first sample of this packet is not the
+        // one that followed the last sample of the previous packet. Measuring
+        // a step across that boundary measures the capture, not the player -
+        // and it is what made a ramped stop look no better than a cut one.
+        if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) havePrevious = false;
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
             silentFrames += frames;
+            havePrevious = false;
         } else if (isFloat && mix->wBitsPerSample == 32) {
             const auto* values = reinterpret_cast<const float*>(data);
             for (uint32_t i = 0; i < frames * channels; ++i) {
@@ -95,6 +116,33 @@ int wmain(int argc, wchar_t** argv)
                 sumSquares += value * value;
                 ++samples;
             }
+            for (uint32_t frame = 0; frame < frames; ++frame) {
+                const float* current = values + size_t(frame) * channels;
+                if (havePrevious) {
+                    for (uint32_t channel = 0; channel < channels; ++channel) {
+                        const double step = std::abs(double(current[channel]) - double(previous[channel]));
+                        if (step > largestStep) {
+                            largestStep = step;
+                            largestStepFrame = totalFrames - frames + frame;
+                        }
+                        if (step > kStepThreshold) {
+                            ++largeSteps;
+                            // Where, not just how big: a step at the join is
+                            // the player's, one in the middle is not.
+                            if (channel == 0)
+                                std::printf("  step %.4f at frame %llu (%.3f s)\n", step,
+                                            (unsigned long long)(totalFrames - frames + frame),
+                                            double(totalFrames - frames + frame) / double(mix->nSamplesPerSec));
+                        }
+                    }
+                }
+                for (uint32_t channel = 0; channel < channels; ++channel) previous[channel] = current[channel];
+                havePrevious = true;
+            }
+        } else {
+            // Silence resets the continuity: the gap itself is not a step the
+            // player put there.
+            havePrevious = false;
         }
         capture->ReleaseBuffer(frames);
     }
@@ -106,6 +154,9 @@ int wmain(int argc, wchar_t** argv)
     std::printf("frames=%llu silent=%llu peak=%.6f rms=%.6f (%.1f dBFS)\n",
                 (unsigned long long)totalFrames, (unsigned long long)silentFrames,
                 peak, rms, rms > 0 ? 20.0 * std::log10(rms) : -999.0);
+    std::printf("largest sample-to-sample step=%.6f at frame %llu, steps over %.2f=%llu\n",
+                largestStep, (unsigned long long)largestStepFrame, kStepThreshold,
+                (unsigned long long)largeSteps);
 
     // -60 dBFS is far below anything audible as content and far above the
     // numerical floor of a genuinely silent stream.
