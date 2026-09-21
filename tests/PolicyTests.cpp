@@ -8383,6 +8383,65 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
     DestroyMenu(menu);
 }
 
+// Five distinct causes shared one opaque string, and the 1,143-line module
+// most exposed to upstream breakage logged nothing at all. "YouTube helper
+// files are missing beside the app" was wrong for four of the five: on a
+// read-only install the files are present and the cache cannot be created,
+// and a reparse point where a helper should be is a junction attack being
+// refused, not an absence.
+void youtube_helper_refusals_each_say_which_one_happened_test()
+{
+    MediaFixture fixture;
+    std::error_code error;
+    const auto outsideDirectory = fixture.directory.parent_path() / L"outside-helper-detail";
+    std::filesystem::create_directories(outsideDirectory, error);
+    CHECK(!error);
+
+    std::vector<std::wstring> details;
+    const auto refusalDetail = [&] {
+        auto resolver = YouTubeResolverTestAccess::Create(fixture.directory);
+        const auto result = resolver->Resolve(L"https://youtu.be/dQw4w9WgXcQ?success", {});
+        CHECK_EQ(ResolveError::HelperMissing, result.error);
+        CHECK(!result.detail.empty());
+        details.push_back(result.detail);
+    };
+
+    // Absent, which is the one the old wording described correctly.
+    std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    refusalDetail();
+
+    // A reparse point where a helper should be: a junction attack refused.
+    CHECK(create_reparse_file(fixture.directory / L"yt-dlp.exe"));
+    refusalDetail();
+
+    // A directory where a helper should be.
+    std::filesystem::remove(fixture.directory / L"yt-dlp.exe", error);
+    error.clear();
+    std::filesystem::create_directory(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    refusalDetail();
+
+    // Helpers fine, cache directory redirected out of the package.
+    std::filesystem::remove_all(fixture.directory / L"yt-dlp.exe", error);
+    CHECK(!error);
+    CHECK(CopyFileW(current_test_executable().c_str(),
+                    (fixture.directory / L"yt-dlp.exe").c_str(), FALSE) != FALSE);
+    const std::filesystem::path cacheLink = fixture.directory / L"youtube-helper-cache";
+    CHECK(create_junction(cacheLink, outsideDirectory));
+    refusalDetail();
+    CHECK(RemoveDirectoryW(cacheLink.c_str()) != FALSE);
+
+    // Four causes, four different things said to the viewer, so a bug report
+    // can name which one happened.
+    CHECK_EQ(size_t{4}, details.size());
+    for (size_t first = 0; first + 1 < details.size(); ++first)
+        for (size_t second = first + 1; second < details.size(); ++second)
+            CHECK(details[first] != details[second]);
+
+    std::filesystem::remove_all(outsideDirectory, error);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -8637,6 +8696,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
+    TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
 };
 
 

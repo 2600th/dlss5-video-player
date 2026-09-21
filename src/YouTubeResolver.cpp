@@ -1,6 +1,8 @@
 #include "YouTubeResolver.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "NarrowText.h"
+#include "Log.h"
 
 #include <winhttp.h>
 
@@ -196,29 +198,85 @@ std::optional<std::vector<wchar_t>> child_environment_with_package_cache(
     return result;
 }
 
+// Why a helper could not be used. Five causes shared one message and no log
+// line, so "YouTube helper files are missing beside the app" was shown for a
+// read-only install whose files were all present and for a junction attack
+// being correctly refused. A bug report could not distinguish them, and
+// neither could the person writing it.
+enum class HelperFailure {
+    None,
+    DirectoryNotAbsolute,
+    DirectoryUnopenable,
+    DirectoryNotADirectory,
+    DirectoryNotCanonical,
+    HelperAbsent,
+    HelperUnreadable,
+    HelperNotAFile,
+    HelperIsReparsePoint,
+    HelperOutsideDirectory,
+    CacheUnavailable,
+};
+
+const char* describe_helper_failure(HelperFailure failure)
+{
+    switch (failure) {
+        case HelperFailure::None: return "none";
+        case HelperFailure::DirectoryNotAbsolute: return "the helper directory is a relative path";
+        case HelperFailure::DirectoryUnopenable: return "the helper directory could not be opened";
+        case HelperFailure::DirectoryNotADirectory: return "the helper directory is not a directory";
+        case HelperFailure::DirectoryNotCanonical: return "the helper directory has no canonical path";
+        case HelperFailure::HelperAbsent: return "a helper file is not there";
+        case HelperFailure::HelperUnreadable: return "a helper file could not be opened";
+        case HelperFailure::HelperNotAFile: return "a helper name is a directory, not a file";
+        case HelperFailure::HelperIsReparsePoint: return "a helper name is a reparse point";
+        case HelperFailure::HelperOutsideDirectory: return "a helper resolves outside the package";
+        case HelperFailure::CacheUnavailable: return "the package-local helper cache could not be created";
+    }
+    return "unknown";
+}
+
 bool open_verified_helper(const std::filesystem::path& requestedPath,
                           const std::filesystem::path& canonicalDirectory,
                           UniqueHandle& heldHandle,
-                          std::filesystem::path& canonicalPath)
+                          std::filesystem::path& canonicalPath,
+                          HelperFailure& failure)
 {
     UniqueHandle candidate(CreateFileW(
         requestedPath.c_str(), GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_EXECUTE,
         FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    if (!candidate) return false;
-    if (GetFileType(candidate.get()) != FILE_TYPE_DISK) return false;
+    if (!candidate) {
+        const DWORD reason = GetLastError();
+        // Not there and cannot be read are different problems with different
+        // remedies: one is a broken install, the other is usually antivirus
+        // or an ACL.
+        failure = (reason == ERROR_FILE_NOT_FOUND || reason == ERROR_PATH_NOT_FOUND)
+                      ? HelperFailure::HelperAbsent : HelperFailure::HelperUnreadable;
+        return false;
+    }
+    if (GetFileType(candidate.get()) != FILE_TYPE_DISK) {
+        failure = HelperFailure::HelperNotAFile;
+        return false;
+    }
 
     FILE_ATTRIBUTE_TAG_INFO tagInfo{};
     if (!GetFileInformationByHandleEx(candidate.get(), FileAttributeTagInfo,
-                                      &tagInfo, sizeof(tagInfo)) ||
-        (tagInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-        (tagInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        tagInfo.ReparseTag != 0) {
+                                      &tagInfo, sizeof(tagInfo))) {
+        failure = HelperFailure::HelperUnreadable;
+        return false;
+    }
+    if ((tagInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        failure = HelperFailure::HelperNotAFile;
+        return false;
+    }
+    if ((tagInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || tagInfo.ReparseTag != 0) {
+        failure = HelperFailure::HelperIsReparsePoint;
         return false;
     }
 
     canonicalPath = final_normalized_path(candidate.get());
     if (canonicalPath.empty() ||
         !same_path_case_insensitive(canonicalPath.parent_path(), canonicalDirectory)) {
+        failure = HelperFailure::HelperOutsideDirectory;
         return false;
     }
     heldHandle = std::move(candidate);
@@ -226,31 +284,49 @@ bool open_verified_helper(const std::filesystem::path& requestedPath,
 }
 
 bool verify_beside_app_helpers(const std::filesystem::path& requestedDirectory,
-                               VerifiedHelpers& verified)
+                               VerifiedHelpers& verified,
+                               HelperFailure& failure,
+                               std::wstring& failedHelper)
 {
-    if (!requestedDirectory.is_absolute()) return false;
+    failure = HelperFailure::None;
+    failedHelper.clear();
+    if (!requestedDirectory.is_absolute()) {
+        failure = HelperFailure::DirectoryNotAbsolute;
+        return false;
+    }
     UniqueHandle directory(CreateFileW(
         requestedDirectory.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-    if (!directory || GetFileType(directory.get()) != FILE_TYPE_DISK) return false;
+    if (!directory || GetFileType(directory.get()) != FILE_TYPE_DISK) {
+        failure = HelperFailure::DirectoryUnopenable;
+        return false;
+    }
     FILE_ATTRIBUTE_TAG_INFO directoryInfo{};
     if (!GetFileInformationByHandleEx(directory.get(), FileAttributeTagInfo,
                                       &directoryInfo, sizeof(directoryInfo)) ||
         (directoryInfo.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        failure = HelperFailure::DirectoryNotADirectory;
         return false;
     }
     const std::filesystem::path canonicalDirectory =
         final_normalized_path(directory.get());
-    if (canonicalDirectory.empty()) return false;
+    if (canonicalDirectory.empty()) {
+        failure = HelperFailure::DirectoryNotCanonical;
+        return false;
+    }
 
     UniqueHandle ytDlp;
     UniqueHandle deno;
     std::filesystem::path canonicalYtDlp;
     std::filesystem::path canonicalDeno;
     if (!open_verified_helper(requestedDirectory / L"yt-dlp.exe", canonicalDirectory,
-                              ytDlp, canonicalYtDlp) ||
-        !open_verified_helper(requestedDirectory / L"deno.exe", canonicalDirectory,
-                              deno, canonicalDeno)) {
+                              ytDlp, canonicalYtDlp, failure)) {
+        failedHelper = L"yt-dlp.exe";
+        return false;
+    }
+    if (!open_verified_helper(requestedDirectory / L"deno.exe", canonicalDirectory,
+                              deno, canonicalDeno, failure)) {
+        failedHelper = L"deno.exe";
         return false;
     }
 
@@ -258,6 +334,7 @@ bool verify_beside_app_helpers(const std::filesystem::path& requestedDirectory,
     std::filesystem::path canonicalCacheDirectory;
     if (!create_verified_package_cache(canonicalDirectory, cacheDirectory,
                                        canonicalCacheDirectory)) {
+        failure = HelperFailure::CacheUnavailable;
         return false;
     }
 
@@ -271,11 +348,37 @@ bool verify_beside_app_helpers(const std::filesystem::path& requestedDirectory,
     return true;
 }
 
+const char* describe_resolve_error(ResolveError error)
+{
+    switch (error) {
+        case ResolveError::None: return "none";
+        case ResolveError::InvalidUrl: return "invalid-url";
+        case ResolveError::HelperMissing: return "helper-missing";
+        case ResolveError::StartFailed: return "start-failed";
+        case ResolveError::TimedOut: return "timed-out";
+        case ResolveError::Cancelled: return "cancelled";
+        case ResolveError::OutputTooLarge: return "output-too-large";
+        case ResolveError::ExtractionFailed: return "extraction-failed";
+        case ResolveError::InvalidOutput: return "invalid-output";
+    }
+    return "unknown";
+}
+
+// Every refusal in this module goes through here, which is why the log line
+// lives here rather than at twenty-five call sites. The module is the one
+// most exposed to upstream breakage - yt-dlp and YouTube both change without
+// notice - and it used to produce no diagnostic at all: not one LOG line in
+// 1,143 lines, so a failure left nothing for a bug report to carry.
 ResolveResult resolver_error(ResolveError error, std::wstring detail)
 {
     ResolveResult result;
     result.error = error;
     result.detail = std::move(detail);
+    // Cancellation is the user's own doing and happens on every abandoned
+    // paste; logging it would bury the failures that matter.
+    if (error != ResolveError::Cancelled)
+        LOG("YouTube: " << describe_resolve_error(error) << " - "
+            << narrow_text::LossyAscii(result.detail));
     return result;
 }
 
@@ -868,9 +971,52 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     }
 
     VerifiedHelpers verifiedHelpers;
-    if (!verify_beside_app_helpers(helperDirectory_, verifiedHelpers)) {
-        return resolver_error(ResolveError::HelperMissing,
-                              L"YouTube helper files are missing beside the app.");
+    HelperFailure helperFailure = HelperFailure::None;
+    std::wstring failedHelper;
+    if (!verify_beside_app_helpers(helperDirectory_, verifiedHelpers, helperFailure, failedHelper)) {
+        // One opaque string used to cover all of these. A read-only install
+        // whose files are all present was told they were missing; a junction
+        // attack being refused was told the same thing.
+        std::wstring detail;
+        switch (helperFailure) {
+            case HelperFailure::HelperAbsent:
+                detail = failedHelper + L" is not beside the app. Reinstall the complete package, "
+                                        L"or run tools/fetch_youtube_helpers.ps1.";
+                break;
+            case HelperFailure::HelperUnreadable:
+                detail = failedHelper + L" is there but could not be opened. Antivirus or file "
+                                        L"permissions are the usual cause.";
+                break;
+            case HelperFailure::HelperNotAFile:
+                detail = failedHelper + L" is a directory, not a program. The install is damaged.";
+                break;
+            case HelperFailure::HelperIsReparsePoint:
+                detail = failedHelper + L" is a link rather than a file, so it was refused. "
+                                        L"Replace it with the real program.";
+                break;
+            case HelperFailure::HelperOutsideDirectory:
+                detail = failedHelper + L" resolves to somewhere outside the app's folder, so it "
+                                        L"was refused.";
+                break;
+            case HelperFailure::CacheUnavailable:
+                detail = L"The YouTube helpers are present, but their cache folder beside the app "
+                         L"could not be created. A read-only install folder is the usual cause.";
+                break;
+            case HelperFailure::DirectoryNotAbsolute:
+            case HelperFailure::DirectoryUnopenable:
+            case HelperFailure::DirectoryNotADirectory:
+            case HelperFailure::DirectoryNotCanonical:
+                detail = L"The app's own folder could not be read, so the YouTube helpers beside "
+                         L"it could not be checked.";
+                break;
+            case HelperFailure::None:
+                detail = L"YouTube helper files are missing beside the app.";
+                break;
+        }
+        LOG("YouTube: refusing to resolve - " << describe_helper_failure(helperFailure)
+            << (failedHelper.empty() ? std::string{} : " (" + narrow_text::LossyAscii(failedHelper) + ")")
+            << ", winerr=" << GetLastError() << '.');
+        return resolver_error(ResolveError::HelperMissing, detail);
     }
 
     SECURITY_ATTRIBUTES pipeSecurity{sizeof(pipeSecurity), nullptr, TRUE};
