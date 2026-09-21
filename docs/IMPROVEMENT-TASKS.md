@@ -12,12 +12,15 @@ code audits (correctness, performance, build & release), one duplication sweep.
 | ✅ | Read back against source and confirmed during the review |
 | 🔍 | Audit finding, cited to file:line, not independently re-read |
 
-**Checkbox state:** `[x]` done on branch `fix/tier1-correctness-and-perf`, `[~]`
-partly done (what remains is stated in the task), `[ ]` not started. All 21
-tests - 13 portable and 8 GPU-labelled on an RTX 5090 - pass at every commit.
+**Checkbox state:** `[x]` done, `[~]` partly done, `[ ]` not started, on branch
+`fix/tier1-correctness-and-perf`. The nested `- [ ]` boxes inside a task are
+audited against source as of 2026-09-21, so a `[~]` heading tells you exactly
+which sub-items are left. All **23** tests - 13 portable, 9 `gpu` and 1 `audio`
+- pass at every commit.
 
 **Measured on this machine** (2560x1440 23.976 fps, plain playback), before
-and after the branch:
+and after the branch. These are **round one** only; round two's measurements
+are in the last section:
 
 | | main (ee1f393) | branch |
 | --- | ---: | ---: |
@@ -365,25 +368,32 @@ into the same directory.
 
 ---
 
-### [ ] 1.10 · Restore the deleted release script
+### [x] 1.10 · Restore the deleted release script
 
 `BLOCKER` · ✅ verified · **effort: XS**
 
-`tools/package_release.ps1` is **deleted in the working tree, uncommitted**
-(`git status` → ` D tools/package_release.ps1`).
+Worse than first recorded: the deletion had been **committed**, swept into
+`6ab4267` (a swapchain commit). Merging the branch would have silently removed
+the release packager, which is referenced by `package_release.bat`,
+`package_public_release.bat`, `.github/workflows/release.yml` and
+`docs/BUILDING.md`.
 
-Referenced by:
+**Restored in `b796901`**, byte-identical to `main`
+(`git cat-file -e HEAD:tools/package_release.ps1`;
+`git diff --diff-filter=D main..HEAD` is empty).
 
-- `package_release.bat`
-- `package_public_release.bat`
-- `.github/workflows/release.yml:121`
-- `docs/BUILDING.md:161`
-
-**Fix** — `git restore tools/package_release.ps1` before pushing anything.
+> ⚠️ **`git restore` does not work for this file on the maintainer's machine.**
+> Something local refuses to *create* a file at that path — `git checkout main
+> -- tools/package_release.ps1` returns "Permission denied" while the identical
+> bytes write fine under any other name. It was restored into the index with
+> `git update-index --add --cacheinfo`, so the committed tree is correct and a
+> fresh clone gets the file, but `git status` on that machine keeps reporting
+> ` D tools/package_release.ps1`. **Do not "fix" that by committing the
+> deletion again.**
 
 ---
 
-### [x] 1.11 · Make a bug report possible at all
+### [~] 1.11 · Make a bug report possible at all
 
 `HIGH` · 🔍 reported · **effort: M** · **impact: every future debug session**
 
@@ -414,13 +424,15 @@ Also `MediaPipeline.cpp`, `SynchronizedPlayback.cpp`, `NeuralWorker.cpp`,
 
 **Fix**
 
-- [ ] `ios::app` + a session banner instead of `ios::trunc`
-- [ ] `%LOCALAPPDATA%` fallback on open failure, mirroring `NeuralCache.cpp:791`
-- [ ] Cap and roll at ~8 MB
-- [ ] `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` in `wWinMain`
-      (`main.cpp:7010`) **and** in `NeuralWorkerMain.cpp`, writing beside the log
-- [ ] Add `LOG` lines to `YouTubeResolver.cpp` — every refusal path currently
-      returns the same opaque string for five distinct causes
+- [x] `ios::app` + a session banner instead of `ios::trunc` — `Log.h:85`, `:90`
+- [x] `%LOCALAPPDATA%` fallback on open failure — `Log.h:49`
+- [x] Cap and roll at ~8 MB — `Log.h:43` `kMaxBytes`, `Roll()` at `:94`
+- [x] `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` — `src/CrashDump.h`,
+      installed in both processes (`main.cpp:7184`, `NeuralWorkerMain.cpp:513`)
+- [ ] **Add `LOG` lines to `YouTubeResolver.cpp`** — every refusal path still
+      returns the same opaque string for five distinct causes.
+      `grep -c 'LOG(' src/YouTubeResolver.cpp` → **0**. The 1,143-line module
+      most exposed to upstream breakage still logs nothing.
 
 ---
 
@@ -459,11 +471,13 @@ zip. A user cannot verify what they downloaded without cloning the repo. And
 
 **Fix**
 
-- [ ] Move the complete-zip build into `release.yml` behind a gated job, **or**
-      add a `workflow_dispatch` "attest an uploaded asset" job
-- [ ] Add `verify_package.ps1` to `$expected` so it ships inside the zip
-- [ ] Add a `gh attestation verify` + `sha256sum -c` block to `README.md`
-      under `## Download`
+- [x] `workflow_dispatch` "attest an uploaded asset" job —
+      `.github/workflows/attest-release-asset.yml`, which is explicit in-file
+      about being a signed statement rather than build provenance
+- [ ] **Add `verify_package.ps1` to `$expected`** so it ships inside the zip —
+      still absent from both allowlists (`tools/verify_package.ps1:16`, `:24`),
+      so a user still cannot verify a download without cloning
+- [x] `gh attestation verify` + `sha256sum -c` block in `README.md:44-48`
 
 ---
 ---
@@ -537,11 +551,16 @@ immediately when the frame is not due, so the loop free-runs.
 (`VideoDecoder.cpp:41`) wraps `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
 sub-millisecond, without touching global timer resolution.
 
-- [ ] Replace `Sleep(TickSleepMs())` with `MsgWaitForMultipleObjectsEx` on that
-      timer armed to `min(due - now, 2 ms)` — see **2.6** for the better signal
-- [ ] Cache `CoveredRanges()` against `m_liveSegments->Revision()` (already
-      tracked at `main.cpp:5311`)
-- [ ] Hoist the `NeuralCacheManager` construction behind the memo
+- [x] `WaitForNextTick` (`main.cpp:1367`) blocks on `PrecisionSleeper`'s
+      high-resolution waitable timer at 2 ms while playing. **113% → 18% of one
+      core.** Note this is *not* the swapchain's frame-latency object the
+      original fix proposed — see **2.6**, that route kills neural rendering
+- [ ] Cache `CoveredRanges()` against `m_liveSegments->Revision()` — still
+      recomputed per call at `main.cpp:4884`. Much less pressure now the loop
+      no longer free-runs, but the allocation and `MergeSpans` sort remain
+- [x] `NeuralCacheManager` construction hoisted out of the tick — it is now
+      built only in `RenderRangeOfCurrentSource` (`main.cpp:4815`), once per
+      render start, with the reason in-comment
 
 ---
 
@@ -588,7 +607,7 @@ a 0..255 LUT instead of `std::lround`, and wrap the row loop in
 
 ---
 
-### [x] 2.4 · Guides and two full-res GPU passes run every frame with DLSS off
+### [~] 2.4 · Guides and two full-res GPU passes run every frame with DLSS off
 
 🔍 reported · **effort: S** · **gain: 0.6 ms/frame CPU + ~44 MB/frame GPU**
 
@@ -623,11 +642,20 @@ fresh local — a real 230 KB malloc every frame.
 
 **Fix**
 
-- [ ] Gate `m_guides.Generate` on `m_renderer->DLSSEnabled()`, substituting a
-      zeroed grid and `hasHistory=false`
-- [ ] Gate the two guide passes on `DLSSEnabled() || m_debugView != Final`
-- [ ] Promote the five `Generate` scratch vectors to generator members
-- [ ] Keep a reusable `GuideFrame` in `PlayerApp`
+- [x] `m_guides.Generate` gated on `GuidesRequired()` (`main.cpp:3863`), with a
+      `m_guidesSkipped` latch that declares the history discontinuity on resume
+- [x] Both guide passes gated on the same predicate —
+      `D3D12Renderer.h:317` `GuidesRequired() = DLSSEnabled() || m_debugView != Final`,
+      used at `D3D12Renderer.cpp:894` and `:972`
+- [ ] Promote the five `Generate` scratch vectors to generator members —
+      `cur`, `fx`, `fy`, `confidence`, `depthGrid` are still per-call locals
+      (`TemporalGuides.cpp:546-606`). Only the history buffers are members
+- [ ] Keep a reusable `GuideFrame` in `PlayerApp` — still a fresh local at
+      `main.cpp:3848`, so `guideGridRGBA32F.assign` is still a ~230 KB malloc
+      on every guided frame
+
+**Measured:** guide work per frame with SR off went 0.84 ms → 0.0001 ms. The
+two unticked items are allocation churn on the frames that *do* use guides.
 
 Guide history already resets when SR is toggled on, so no extra work there.
 
@@ -663,17 +691,23 @@ that slice's scope.
 
 **Fix** — three independent low-risk changes:
 
-- [ ] Add `bool capture` to `Initialize`, defaulted off, set by
-      `OfflineNeuralRenderer.cpp:1829`. Skips `m_cacheOutput` + `m_cacheReadback[]`.
+- [x] `bool captureOutput` added to `Initialize` (`D3D12Renderer.h:179`,
+      default `false`), gating `m_cacheOutput` + `m_cacheReadback[]`
+      (`D3D12Renderer.cpp:782`). **Saves 73.7 MB at 1440p / 166 MB at 4K in the
+      player process.**
 - [ ] Allocate `m_reference` + uploads lazily on the first non-neural
-      comparison mode
-- [ ] Cut reference uploads from 6 to 3
+      comparison mode — still unconditional at `D3D12Renderer.cpp:795`, `:799`
+- [ ] Cut reference uploads from 6 to 3 — `FrameCount` is still 6
+      (`D3D12Renderer.h:379`)
+
+Remaining: **103 MB at 1440p / 232 MB at 4K**, all in the comparison reference
+path that a plain-playback session never touches.
 
 ---
 
-### [x] 2.6 · `SetMaximumFrameLatency(2)` is a silent no-op
+### [x] 2.6 · `SetMaximumFrameLatency(2)` is a silent no-op — ~~fixed by adding the flag~~, fixed by deleting the call
 
-🔍 reported · **effort: S** · **gain: small directly, unlocks 2.2**
+🔍 reported · **effort: S** · `THE PRESCRIBED FIX WAS WRONG AND WAS REVERTED`
 
 **Where** — `src/D3D12Renderer.cpp:230`
 
@@ -689,16 +723,36 @@ with `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT`. Otherwise it returns
 `DXGI_ERROR_INVALID_CALL` — and the return value is discarded. Latency stays at
 DXGI's default of 3.
 
-**Why it matters more than it looks** — `GetFrameLatencyWaitableObject()` gives
-a handle the main loop can wait on. That is the *correct* fix for **2.2** and
-removes the need to guess a sleep interval.
+**The diagnosis was right. The prescribed fix broke the product.**
 
-**Fix**
+Adding `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` shipped, and
+**stopped neural rendering producing a single frame.** Bisected to that one
+line. With the flag set, the RenoDX add-on's inline NR path allocates a fresh
+workset per evaluation instead of reusing one and exhausts its pool within
+three frames; `ReShade.log` reads *"NR workset pool exhausted; preserving game
+output for this evaluation"*, every later frame is the untouched source, the
+helper reports `frames=0/0`, and the player refuses the render with *"A frame
+was not produced by feature 18"*.
 
-- [ ] Add the flag at `:230` (compatible with `ALLOW_TEARING`)
-- [ ] Check the HRESULT at `:233`
-- [ ] Store `GetFrameLatencyWaitableObject()`, wait on it in `wWinMain`
-- [ ] Pass the flag in the resize path too
+**The add-on hooks this swapchain, so its flags are part of the contract with
+it, not a private presentation detail.** Reverted in `6ab4267`.
+
+**What actually landed**
+
+- [x] `SetMaximumFrameLatency` is **not called at all** — without the flag it
+      can only return `DXGI_ERROR_INVALID_CALL`, and a call that can only fail
+      is worse than none. Latency stays at DXGI's default of 3
+- [x] A `DO NOT ADD THIS FLAG` comment with the bisect result at
+      `D3D12Renderer.cpp:232`, mirrored in `D3D12Renderer.h:25` and
+      `PrecisionSleeper.h:25`
+- [x] `d3d12_renderer_detail::SwapchainFlags` — the flag set is now one
+      device-free function the `NeuralRangeRenderSmoke` failure message names
+- [x] **2.2 got its own signal instead**: a high-resolution waitable timer,
+      which needs nothing from the presentation path
+
+> ⚠️ **Do not re-propose the waitable swapchain.** It is a correct DXGI
+> technique that this product cannot use while the neural path is an add-on
+> hooking the same swapchain.
 
 ---
 
@@ -736,13 +790,14 @@ frames become due at once, then none.
 
 **Fix**
 
-- [ ] **Cheap:** drop `BytesPerBuffer` to 4096 (171 ms of queue). Removes ~64 ms
-      of prefill from every seek. Re-measure the "Seek timing" log line — this
-      changes the cadence policy's whole cost model.
-- [ ] **Structural:** WASAPI shared-mode with `IAudioClock::GetPosition` +
-      `GetFrequency` + `IAudioClient::GetStreamLatency`. Sub-ms,
-      latency-corrected clock, and a seek flushes in one call instead of a
-      process respawn. See **3.7**.
+- [x] ~~**Cheap:** drop `BytesPerBuffer` to 4096~~ — **superseded.** The
+      premise was measured false (see the corrected-claims table at the end):
+      seek cost is 60 ms, and `Seek` respawns ffmpeg rather than draining the
+      queue, so buffer size was never in that path.
+- [x] **Structural:** `src/WasapiRenderer.{h,cpp}` — shared-mode, event-driven,
+      float32 at the mix format, clocked from `IAudioClock`. Queue depth
+      682 ms → 22 ms; drift over 5 s −0.074 ms → −0.003 ms. See **3.8** for
+      what the WASAPI work did *not* cover.
 
 ---
 
@@ -841,7 +896,7 @@ measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
 
 ---
 
-### [x] 2.11 · A reachable path to a fully unoptimized shipping binary
+### [~] 2.11 · A reachable path to a fully unoptimized shipping binary
 
 🔍 reported · **effort: S** · **impact: measurement integrity**
 
@@ -881,14 +936,17 @@ this carefully, that is a correctness-of-measurement hazard.**
 
 **Fix, in order**
 
-- [ ] `if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
-      set(CMAKE_BUILD_TYPE Release) endif()`
-- [ ] `Test-Path` check on the output in `build_windows.bat`
-- [ ] `add_compile_options(/MP)`
+- [x] `CMakeLists.txt:34-37` defaults `CMAKE_BUILD_TYPE` to Release on a
+      single-config generator, and offers the `STRINGS` property
+- [x] Existence check on the output in `build_windows.bat:131`, which now names
+      the single-config generator as the likely cause
+- [x] `add_compile_options(/MP)` — `CMakeLists.txt:49`. **Clean rebuild
+      103.2 s → 52.4 s**
 - [ ] `set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)` behind
       `check_ipo_supported` — LTCG inlines across `NeuralCache.cpp` ↔ `main.cpp`
-      and `SynchronizedPlayback.cpp` ↔ `VideoDecoder.cpp`; typically 2-5%
-- [ ] `/Gy` + `/OPT:ICF`
+      and `SynchronizedPlayback.cpp` ↔ `VideoDecoder.cpp`; typically 2-5%.
+      **Not started** (zero hits for `check_ipo_supported`)
+- [ ] `/Gy` + `/OPT:ICF` — **not started** (zero hits)
 
 > ⚠️ **Leave `/arch:AVX2` and `/fp:fast` alone.** The first excludes pre-Haswell
 > CPUs. The second would perturb the bit-identical-render property the
@@ -896,7 +954,7 @@ this carefully, that is a correctness-of-measurement hazard.**
 
 ---
 
-### [~] 2.12 · 5.2× compile amplification — there is no `add_library` anywhere
+### [ ] 2.12 · 5.2× compile amplification — there is no `add_library` anywhere
 
 🔍 reported · **effort: M** · **gain: ~halve a 10-minute CI**
 
@@ -926,6 +984,11 @@ Roughly 104k TU-lines against 27.8k lines of source — an undercount, since
 
 No source references `__cplusplus`, so the `/Zc:__cplusplus` inconsistency at
 `:274`/`:376` is harmless.
+
+**Not started.** `grep -c add_library CMakeLists.txt` → still **0**. `/MP`
+(**2.11**) cut the wall time roughly in half by parallelising the redundant
+work; it did not remove the redundancy, and it does nothing for a single-core
+CI runner.
 
 **Fix** — three `OBJECT` libraries:
 
@@ -965,26 +1028,38 @@ measurement, no clock-master test, no resync-after-seek assertion.
 2-hour film. A typical 50 ppm consumer crystal drifts **360 ms**, past ITU-R
 BT.1359-1's acceptability window (+90/-185 ms).
 
-**Fix** — generate a clip with a 1 kHz tone burst on the frame where a marker
-appears (FFmpeg `lavfi`, the same way `CMakeLists.txt:403` already generates the
-phase-probe clip). Assert `|AudioPlayer position − video PTS| < one frame` at:
+**Landed as `tests/AudioClockSmoke.cpp`** — its own target under the `audio`
+label with `SKIP_RETURN_CODE 125`, rather than folded into `CachedExportTests`,
+because it needs a real render endpoint and the portable suite must not
+require one. Tolerance is one frame at 24 fps, the player's own acceptance
+bound for a paired frame.
 
-- [ ] start
-- [ ] after a forward seek
-- [ ] after a backward seek
-- [ ] after pause/resume
+- [x] start — clock answers, then advances at real time from standing start
+- [x] after a forward seek — at or past 20 s, and not run away past it
+- [x] after a backward seek — the assertion that catches a clock which never
+      rebased, since it would still read ~20 s
+- [x] after pause/resume — holds still while paused, resumes from where it
+      paused
+- [x] **beyond the original scope:** drift over 5 s, EOF (the clock never runs
+      backwards as the queue drains), `ServiceDeviceChanges` inertness over 200
+      ticks, and a stopped player reporting no clock
 
-Add it to `CachedExportTests`, which already has real media staged.
+**What it does not prove** — acoustic sync. It asserts the *clock contract*,
+which every video frame's due time is computed from. Correlating samples
+leaving the endpoint against a marked frame is a different harness;
+`tools/verification/loopback-probe.cpp` is the instrument for the part of that
+gap that matters most — that the renderer is not silently outputting zeroes.
 
 ---
 
-### [x] 2.14 · 8 GPU tests never run anywhere, and hard-fail instead of skipping
+### [~] 2.14 · 8 GPU tests never run anywhere, and hard-fail instead of skipping
 
 🔍 reported · **effort: S for the skip, M for the runner**
 
-`CMakeLists.txt` registers 21 tests: 13 portable, **8 labelled `gpu`** (`:420`,
-`:450`, `:515`, `:518`). CI runs `ctest -LE gpu` (`build.yml:67`,
-`release.yml:77`). **No self-hosted or GPU runner exists.**
+_As audited:_ `CMakeLists.txt` registered 21 tests, 13 portable and **8
+labelled `gpu`**; CI ran `ctest -LE gpu`, and **no self-hosted or GPU runner
+existed.** _Today it registers **23**: 13 portable, **9 `gpu`**, **1 `audio`**.
+The runner still does not exist._
 
 Two modules live almost entirely behind that label:
 
@@ -1006,11 +1081,23 @@ runner is missing.**
 
 **Fix**
 
-- [ ] Give the 5 GPU smokes `SKIP_RETURN_CODE 2` — do this first, it is minutes
-- [ ] Self-hosted runner on the RTX 4080 SUPER, `schedule:` +
-      `workflow_dispatch`, running `ctest -L gpu`
-- [ ] Fix `docs/BUILDING.md:45` — it tells contributors to run `ctest` with
-      **no `-LE gpu`**, contradicting `:72` on the same page
+- [x] `SKIP_RETURN_CODE 125` on every hardware smoke, each opening with a
+      no-adapter check. `ctest -L "gpu|audio"` on a GPU-less box now skips
+      rather than hard-failing
+- [x] `docs/BUILDING.md:45` now runs `-LE "gpu|audio"`, matching `:79`;
+      `CONTRIBUTING.md:21`/`:24` agree
+- [x] **New coverage, not in the original fix:** `NeuralRangeRenderSmoke`. Every
+      existing GPU test rendered *whole-source*; only a *range* render runs the
+      60-frame preroll that exhausts the add-on's workset pool, which is what
+      live playback always does. It is the test that would have caught
+      **2.6**'s reverted fix
+- [ ] **Self-hosted runner on the RTX 4080 SUPER.** `.github/workflows/gpu-tests.yml`
+      is written and takes `gpu` and `audio`, with `timeout-minutes` set, and
+      refuses a run in which anything reported itself skipped. **It needs a
+      runner registered against the repository, which needs the owner's GitHub
+      credentials and means that machine accepts CI jobs — a decision for the
+      owner, not for this branch.** Until then the 10 hardware tests run only
+      when a human runs them.
 
 ---
 
@@ -1032,16 +1119,15 @@ And the gap is already live: `NeuralPrerenderTests.cpp:267` sets
 
 **Fix**
 
-- [ ] Add a canary near `BuildNeuralCacheKey:581`:
-
-```cpp
-static_assert(sizeof(NeuralCacheIdentity) == /*pinned*/,
-    "NeuralCacheIdentity changed: add the field to BuildNeuralCacheKey and to "
-    "published_render_is_not_reused_across_identity_changes_test.");
-```
-
-- [ ] Vary `identity.height` in the mutation loop at
-      `NeuralPrerenderTests.cpp:288`
+- [x] A canary near `BuildNeuralCacheKey`. **Not the `static_assert(sizeof(...))`
+      prescribed here** — `sizeof` moves with `_ITERATOR_DEBUG_LEVEL` because
+      the struct holds a `std::string`, so the pin would fire on a Debug build
+      and say nothing about field *count*. It is a **structured binding** that
+      destructures all thirteen fields: adding a fourteenth fails to compile,
+      with the instruction in the adjacent comment.
+- [x] `identity.height` varied in the mutation loop — and `quality`, `range`
+      and `guides`, which were also never varied. Proved by deleting those four
+      terms from the key and watching exactly four assertions fail.
 
 ---
 
@@ -1071,10 +1157,16 @@ the rest of the case*. There is no `REQUIRE`.
 
 **Fix**
 
-- [ ] Lift `TestCase` / `TEST_CASE` / `run_case_guarded` from
-      `PolicyTests.cpp:7104` into `tests/TestSupport.h`
-- [ ] Split `Run()` into named cases
-- [ ] Add a fatal `REQUIRE` macro
+- [x] `TestCase` / `TEST_CASE` / `run_case_guarded` lifted into
+      `tests/TestSupport.h`, which includes `<excpt.h>` rather than
+      `<windows.h>` because 6 of the 13 targets lack `NOMINMAX`
+- [x] `Run()` split into **33 named cases over an explicit fixture, at an
+      identical 798 assertions.** Verified by faulting one case: all 33 still
+      run, the failing one is named, 775 assertions survive. Deleting the
+      `__try` reproduces the old behaviour — exit 139, no name
+- [x] Fatal `REQUIRE` added — throws `RequirementFailed` after counting and
+      reporting, so a failed precondition ends its case instead of silently
+      abandoning the rest of it
 
 ---
 
@@ -1177,10 +1269,19 @@ renders too.
 
 **Fix**
 
-- [ ] On startup, enumerate `renders/` and delete entries whose manifest schema
-      / application / driver / model terms no longer match
-- [ ] Or a size cap with LRU eviction, guarded against active jobs
-- [ ] Correct `ARCHITECTURE.md:444`
+- [x] `NeuralCacheManager::Evict` runs at startup on its own thread, removing
+      entries this build can never serve again — retired schema, unparsable
+      manifest — unconditionally
+- [x] LRU eviction, **triggered by a free-space floor rather than a size cap**
+      (`CacheEvictionPolicy.h`, `kDefaultFreeFloorBytes` = 20 GiB). A cap would
+      have to be either small enough to delete renders on a half-empty disk or
+      large enough never to fire on the machine that needed it. Entries owned
+      by an active job are never targets
+- [x] `ARCHITECTURE.md` corrected — the displaced-keys claim is replaced by a
+      description of the actual rules
+
+**Verified against the real cache:** a planted retired entry was removed on one
+launch, the good entry survived, and the removal was logged.
 
 **Related smaller cache bugs:**
 
@@ -1251,19 +1352,26 @@ ffmpeg that the other two deliberately refuse.**
 
 ---
 
-### [ ] 2.22 · Documentation drift
+### [~] 2.22 · Documentation drift
 
-🔍 reported · **effort: XS**
+🔍 reported · **effort: XS** · _re-checked 2026-09-21_
+
+**Fixed**
+
+| Doc | Now |
+| --- | --- |
+| `docs/BUILDING.md:79`, `CONTRIBUTING.md:21`/`:24` | Say **nine `gpu` + one `audio`**, and name `NeuralRangeRenderSmoke` as the one to run for renderer/swapchain/helper changes |
+| `docs/BUILDING.md:45` | Runs `-LE "gpu\|audio"`, matching `:79` |
+| `docs/ARCHITECTURE.md` (displaced keys) | Replaced by a description of `NeuralCacheManager::Evict` and the free-space floor |
+
+**Still wrong**
 
 | Doc | Says | Reality |
 | --- | --- | --- |
-| `packaging/runtime-lock.json` | 10 of 12 `provenance` strings say *"user-supplied matching pack"* | `fetch_neural_runtime.ps1:36`, `:61` have real URLs + digests. `SECURITY.md:16` and `THIRD_PARTY.md:7` point auditors **at the stale copy**. `docs/BUILDING.md:123` has the correct table |
-| `docs/BUILDING.md:70`, `CONTRIBUTING.md:23` | *"the two `gpu`-labelled smokes"* | There are **8** |
-| `docs/BUILDING.md:45` | `ctest ... --output-on-failure` | Missing `-LE gpu`; hard-fails on a GPU-less box, contradicting `:72` |
-| `docs/ARCHITECTURE.md:385` | omits `range` and `guides` | Both **are** keyed |
-| `docs/ARCHITECTURE.md:444` | claims displaced keys are removed | They are not — see **2.19** |
-| `docs/ARCHITECTURE.md` | says offline uses software decode | Offline uses `-hwaccel cuda` too (`VideoDecoder.cpp:238`) |
-| `docs/RELATED_PROJECTS.md` | reviewed 2026-09-01 | **Four weeks and nine competitor releases stale** — see **3.1** |
+| `docs/ARCHITECTURE.md:385` | *"Source, application version, GPU path, runtime digest, native dimensions, quality, upscaling state, and a canonical neural-settings digest"* | Omits `range` and `guides`. Both **are** keyed — **2.15**'s canary now pins all thirteen fields, so this list is checkable and should be made to match |
+| `docs/ARCHITECTURE.md:432` | *"Sequential offline decoding uses software FFmpeg"* | Offline requests **CUDA** (`VideoDecoder.cpp:203`), with an in-code comment explaining the change. The doc describes the behaviour that was replaced |
+| `packaging/runtime-lock.json` | **8** `provenance` strings still say *"user-supplied matching pack"* | `fetch_neural_runtime.ps1` has real URLs + digests. `SECURITY.md:16` and `THIRD_PARTY.md:7` point auditors **at the stale copy**; `docs/BUILDING.md:123` has the correct table |
+| `docs/RELATED_PROJECTS.md:5` | reviewed 2026-09-01 | **Three weeks stale** — see **3.1** |
 
 ---
 
@@ -1382,7 +1490,7 @@ interpolation (SVP does it **live** for $25 into five players).
 
 ---
 
-### [x] 3.2 · Named presets — the quality ladder lives here
+### [~] 3.2 · Named presets — the quality ladder lives here
 
 `FEATURE` · **effort: XS** · **impact: highest polish-per-hour on the list**
 
@@ -1398,10 +1506,16 @@ resolution-based recommendations in a carousel.
 
 **This is where the quality rule gets implemented.**
 
-- [ ] Ship named presets (e.g. Detail-Only / Natural / Cinematic)
-- [ ] **Default to the near-best rung, and label it as the recommended one**
-- [ ] Print the measured cost beside every rung — you already have the numbers.
-      The existing NVENC tooltip is the model:
+- [x] Named presets shipped — `src/NeuralPresets.h`: Natural, Detail only,
+      Gentle, Strong, each with a stable ini key so renaming a label cannot
+      silently change what a user had selected
+- [x] **Default is the near-best rung and says so** — `"Natural (recommended)"`,
+      `kDefaultPresetIndex = 0`, every control at its default
+- [ ] **Print the measured cost beside every rung.** The descriptions say what
+      each one *moves* and explicitly not how good it is, so a user still
+      cannot see what a rung costs or buys. This is the half of the quality
+      rule that is not yet implemented. The existing NVENC tooltip is the
+      model:
 
   > *"Measured at 2560x1440 on an RTX 5090: p7 takes twice the encode time of
   > p5 and buys 0.12 VMAF on ordinary content, 0.53 on noise-heavy content, at
@@ -1560,7 +1674,7 @@ perspective, no subtitle support for that content.
 
 ---
 
-### [x] 3.8 · WASAPI audio
+### [~] 3.8 · WASAPI audio
 
 `BASELINE` · **effort: L** · **impact: severe, affects everyone**
 
@@ -1568,23 +1682,35 @@ Current: `waveOut` (winmm) fed by an `ffmpeg.exe` subprocess
 (`AudioPlayer.cpp:67`). No WASAPI, no device-change handling, no passthrough, no
 drift correction.
 
-- [ ] **Shared-mode WASAPI, event-driven, float32 at the mix format** as the
-      default. Microsoft's 2026 guidance actively steers *away* from exclusive
-      mode.
-- [ ] **Device change** — register **both** `IMMNotificationClient`
-      (`OnDefaultDeviceChanged`, `OnDeviceStateChanged`, and the forgotten
-      `OnPropertyValueChanged` for `PKEY_AudioEngine_DeviceFormat`) **and**
-      `IAudioSessionEvents::OnSessionDisconnected`. Add a watchdog — Kodi treats
-      `WaitForSingleObject(needDataEvent, 1100) != WAIT_OBJECT_0` as a dead sink
-      because some drivers stop signalling without erroring.
-- [ ] **A/V sync** — audio-master, clocked from `IAudioClock::GetPosition` + QPC.
-      Correct drift by resampling with `swr_set_compensation`, capped at mpv's
-      0.125% default.
-- [ ] **Multi-track** — never auto-select `AV_DISPOSITION_COMMENT`,
-      `_VISUAL_IMPAIRED`, `_DESCRIPTIONS`, `_HEARING_IMPAIRED`. Auto-picking the
-      director's commentary is a top-tier complaint.
-- [ ] A 2-5 ms cosine fade on every seek/pause kills essentially all click
-      complaints.
+**One of six landed.** `src/WasapiRenderer.{h,cpp}` replaced `waveOut`; the
+rest of this list is untouched, which is why the heading is `[~]` and not
+`[x]`.
+
+- [x] **Shared-mode WASAPI, event-driven, float32 at the mix format.** ffmpeg
+      now emits `pcm_f32le` at the endpoint's own rate, so the two format
+      conversions are gone. The renderer **refuses** a non-float32 mix format
+      rather than guessing at one. Queue depth 682 ms → 22 ms, drift over 5 s
+      −0.074 ms → −0.003 ms, position after a seek to 20 s 20.047 s → 20.000 s
+- [~] **Device change** — recovery exists but is *polled*, not notified:
+      `ServiceDeviceChanges()` runs each tick, latches on
+      `AUDCLNT_E_DEVICE_INVALIDATED` and restarts via `Seek(m_lastKnownPosition)`.
+      **No `IMMNotificationClient`** (so no `OnDefaultDeviceChanged`, no
+      `PKEY_AudioEngine_DeviceFormat`), **no `IAudioSessionEvents::OnSessionDisconnected`**,
+      **no dead-sink watchdog** on the render event. The drivers Kodi's
+      `WaitForSingleObject(needDataEvent, 1100)` guard exists for — ones that
+      stop signalling without erroring — are still unhandled.
+      **And the recovery path is unverified end-to-end:** exercising it means
+      changing the machine's default endpoint. The latch is asserted inert
+      (200 ticks restart nothing on a healthy endpoint); the recovery itself is
+      reasoned, not measured
+- [ ] **Drift correction** — the clock is `IAudioClock`-based, but there is no
+      `swr_set_compensation` resampling. Nothing corrects a crystal offset over
+      a long film; it is only *measured* not to be present over 5 s
+- [ ] **Multi-track** — no disposition filtering anywhere. Nothing stops the
+      player auto-selecting `AV_DISPOSITION_COMMENT` / `_VISUAL_IMPAIRED` /
+      `_DESCRIPTIONS` / `_HEARING_IMPAIRED`
+- [ ] A 2-5 ms cosine fade on every seek/pause. Not implemented — seeks and
+      pauses still cut the stream at an arbitrary sample
 - [ ] Bitstream passthrough behind a toggle — use FFmpeg's `spdif` muxer, do not
       hand-roll MAT framing.
 
@@ -1911,21 +2037,24 @@ when measured, and both had been repeated to the user before being checked:
 | --- | --- |
 | 2.7: 682 ms of `waveOut` buffering "sets the seek cost" | **60 ms.** `Seek` restarts ffmpeg and resets the device, so the queue depth was never in that path. The 682 ms was buffering the clock does not read. |
 | "No automated test renders a frame through feature 18" | **False.** `MediaGpuSmoke` does, and asserts on the runtime evidence. It passed with the regression reinstated. The real gap was that every GPU test rendered *whole-source*, and only a *range* render runs the preroll that exhausts the add-on's workset pool. |
+| 2.6: add `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` and wait on the frame-latency object | **The fix was shipped and it killed neural rendering.** The add-on hooks this swapchain; with the flag set it exhausts its workset pool in three frames and every later frame is the untouched source. Reverted in `6ab4267`. The diagnosis (the call is a no-op) was right; the prescription was harmful. 2.2 uses a waitable timer instead. |
 
-**Closed**
+**What landed** — `✔` closed, `½` partly, with the remainder in the task and in
+"Still open" below.
 
-| Item | What landed |
-| --- | --- |
-| 2.13 | `AudioClockSmoke`: the audio clock asserted against a real endpoint at start, forward seek, backward seek, pause, resume, drift and EOF |
-| 2.14 | `NeuralRangeRenderSmoke` — a range render, the shape nothing covered |
-| 2.15 | Structured binding pinning all thirteen identity fields; `height`, `quality`, `range`, `guides` added to the mutation loop |
-| 2.16 | `REQUIRE`, the SEH case guard and `TestCase` lifted into `TestSupport.h`; `Run()` split into 33 named cases at an identical 798 assertions |
-| 2.18 | `renderer_recovery::Rebuild` — recovery makes a fresh child window instead of reusing the dead one |
-| 2.19 | `NeuralCacheManager::Evict` + `CacheEvictionPolicy.h`; `Clear()`/`SizeBytes()` agree |
-| 2.20 | `PlatformPaths.h`; all fourteen `GetModuleFileNameW` sites converted, two truncation bugs gone |
-| 2.21 | The one divergence that bites: `PreflightIdentity` gave two GPUs one identity. `NarrowText.h` names all three conversions |
-| 2.23 | The two hangs (`ReadAvailable`, `EndHelper`) and the exit-code 259 misreport |
-| 3.8 | WASAPI shared-mode, event-driven, at the endpoint's mix format, with device-change recovery |
+| Item | | What landed |
+| --- | --- | --- |
+| 2.13 | ✔ | `AudioClockSmoke`: the audio clock asserted against a real endpoint at start, forward seek, backward seek, pause, resume, drift and EOF |
+| 2.14 | ½ | `NeuralRangeRenderSmoke` — a range render, the shape nothing covered — plus `SKIP_RETURN_CODE` on every hardware smoke. **The runner is still unregistered** |
+| 2.15 | ✔ | Structured binding pinning all thirteen identity fields; `height`, `quality`, `range`, `guides` added to the mutation loop |
+| 2.16 | ✔ | `REQUIRE`, the SEH case guard and `TestCase` lifted into `TestSupport.h`; `Run()` split into 33 named cases at an identical 798 assertions |
+| 2.18 | ✔ | `renderer_recovery::Rebuild` — recovery makes a fresh child window instead of reusing the dead one |
+| 2.19 | ✔ | `NeuralCacheManager::Evict` + `CacheEvictionPolicy.h`; `Clear()`/`SizeBytes()` agree |
+| 2.20 | ✔ | `PlatformPaths.h`; all fourteen `GetModuleFileNameW` sites converted, two truncation bugs gone |
+| 2.21 | ½ | The one divergence that bites: `PreflightIdentity` gave two GPUs one identity. `NarrowText.h` names all three conversions |
+| 2.23 | ½ | The two hangs (`ReadAvailable`, `EndHelper`) and the exit-code 259 misreport |
+| 1.10 | ✔ | `tools/package_release.ps1` restored — the deletion had been committed into an unrelated commit |
+| 3.8 | ½ | WASAPI shared-mode, event-driven, at the endpoint's mix format. **Device-change recovery is polled, not notified, and five of six sub-items are untouched** |
 
 **Measured**
 
@@ -1942,17 +2071,27 @@ when measured, and both had been repeated to the user before being checked:
 
 **Still open**
 
-- **1.2 · Register the self-hosted runner.** `gpu-tests.yml` takes `gpu` and
+- **2.14 · Register the self-hosted runner.** `gpu-tests.yml` takes `gpu` and
   `audio` and refuses a run in which anything skipped. It needs a runner
-  registered against the repository, which needs the owner's credentials.
+  registered against the repository, which needs the owner's credentials and
+  means that machine accepts CI jobs. _(This bullet previously cited "1.2",
+  which is the heap over-read. The runner is 2.14.)_
+- **3.8 residue** — five of six WASAPI sub-items: no `IMMNotificationClient`
+  or `IAudioSessionEvents`, no dead-sink watchdog, no `swr_set_compensation`
+  drift correction, no track-disposition filtering, no seek/pause fade, no
+  passthrough. Device-change recovery is polled and **unverified end to end**.
 - **2.19 residue** — `SweepStaging`'s uninterruptible `remove_all` on the UI
   thread, no `FlushFileBuffers` before the publishing rename, quarantine's
   missing forensic window.
 - **2.21 residue** — the 18 wide/narrow converters outside the helper channel,
   `JsonEscape`, hex formatting, `CreateKillOnCloseJob`, `QuoteArgument`.
-- **Device-change recovery is unverified end-to-end.** Exercising it means
-  changing the machine's default audio endpoint. The latch is asserted inert;
-  the recovery itself is reasoned, not measured.
+- **1.11 residue** — `YouTubeResolver.cpp` still has **zero** log lines, and
+  still returns one opaque string for five distinct refusal causes.
+- **3.2 residue** — the presets ship, but no rung prints its measured cost, so
+  half the quality rule is still unimplemented in the UI.
 - **`SizeBytes` unreadable-entry handling has no test.** A denied ACL does not
   make `file_size` fail on Windows — the size comes from the directory entry —
   and no portable injection was found.
+- **1.12 residue** — `verify_package.ps1` still is not in its own `$expected`
+  allowlist, so it does not ship inside the zip and a user cannot verify a
+  download without cloning the repository.
