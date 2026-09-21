@@ -382,8 +382,13 @@ helper job at all, which is correct and is not this measurement. See
 `NeuralCacheManager` stages source and render artifacts in `cache/v1` beside the
 executable, which is the default root; LocalAppData is the legacy fallback used
 only when the portable directory is not writable. Source, application version,
-GPU path, runtime digest, native dimensions, quality, upscaling state, and a
-canonical neural-settings digest form the render identity.
+GPU path, driver version, runtime digest, model-store digest, native
+dimensions, quality, upscaling state, the rendered range, the guide
+description, and a canonical neural-settings digest form the render identity -
+thirteen terms. A structured binding beside `BuildNeuralCacheKey`
+destructures all thirteen, so a fourteenth field cannot be added to
+`NeuralCacheIdentity` without the compiler objecting; this list is checkable
+against that one.
 
 **The identity covers the driver and the weights, as of 2026-09-14.** It did not,
 and the gap was a correctness defect rather than a performance rider: `gpuPath` is
@@ -429,8 +434,11 @@ captured is refused at render time and its entry is never reusable - plus the
 NGX-only inline interception contract armed before frame capture, a feature-18
 success checkpoint that advances after the captured sequence, and no feature-18
 failure, skip, or pass-through marker in the stabilized job log segment.
-Sequential offline decoding uses software FFmpeg to avoid competing with the
-D3D12 neural and NVENC workloads; playback still prefers hardware decode. Cache
+Sequential offline decoding requests CUDA, the same as playback. It used
+software FFmpeg, on the reasoning that it would otherwise compete with the
+D3D12 neural and NVENC workloads; decode and encode are separate engines and
+the GPU sits idle during export, so that was burning CPU time for nothing.
+The existing CUDA to D3D11VA to software fallback downgrades per codec. Cache
 hits retain full content-hash verification and use header-only metadata probes.
 Before promotion the joined entry is counted by demuxing it - one packet per
 coded frame, so the count and the video span come out of the container rather

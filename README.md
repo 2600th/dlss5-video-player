@@ -48,6 +48,14 @@ sha256sum -c DLSSVideoPlayer-v0.24.0-core-win64.zip.sha256
 gh attestation verify DLSSVideoPlayer-v0.24.0-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
+Once unpacked, `verify_package.ps1` ships inside the zip and checks the
+contents against an exact allowlist, each file's Authenticode state, and the
+zip-bomb guards:
+
+```powershell
+.\verify_package.ps1 -StageDirectory .
+```
+
 > [!NOTE]
 > Provenance covers the **core** package today. The complete package is
 > assembled on the maintainer's machine, because CI does not fetch the neural

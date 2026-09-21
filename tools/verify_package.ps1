@@ -21,7 +21,11 @@ if ($PublicCore) {
         'THIRD_PARTY_LICENSES/nvidia-optical-flow-MIT.txt',
         'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
         'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
-        'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt'
+        'docs/TROUBLESHOOTING.md', 'PACKAGE_MANIFEST.txt',
+        # This script ships inside the package it checks. README tells a user
+        # to verify what they downloaded; without the checker in the zip they
+        # would have to clone the repository to do it.
+        'verify_package.ps1'
     )
 }
 else {
@@ -41,7 +45,9 @@ else {
         'THIRD_PARTY_LICENSES/tabler-MIT.txt', 'docs/ARCHITECTURE.md',
         'docs/BUILDING.md', 'docs/DLSS5_SETUP.md', 'docs/RELATED_PROJECTS.md',
         'docs/TROUBLESHOOTING.md',
-        'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt'
+        'EXPERIMENTAL_RUNTIME_NOTICE.txt', 'PACKAGE_MANIFEST.txt',
+        # Ships inside the package it checks, for the same reason as above.
+        'verify_package.ps1'
     )
 }
 $expected += @('docs/USAGE.md', 'docs/EXAMPLE_VIDEOS.md')

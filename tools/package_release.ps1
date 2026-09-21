@@ -228,7 +228,11 @@ if ($PublicCore) {
         @('docs/BUILDING.md', (Join-Path $repositoryRoot 'docs\BUILDING.md')),
         @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
         @('docs/RELATED_PROJECTS.md', (Join-Path $repositoryRoot 'docs\RELATED_PROJECTS.md')),
-        @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md'))
+        @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md')),
+        # Ships inside the package so a user can verify what they
+        # downloaded without cloning the repository, which is what
+        # README's verification block asks them to do.
+        @('verify_package.ps1', (Join-Path $repositoryRoot 'tools\verify_package.ps1'))
     )
 }
 else {
@@ -273,6 +277,10 @@ else {
         @('docs/DLSS5_SETUP.md', (Join-Path $repositoryRoot 'docs\DLSS5_SETUP.md')),
         @('docs/RELATED_PROJECTS.md', (Join-Path $repositoryRoot 'docs\RELATED_PROJECTS.md')),
         @('docs/TROUBLESHOOTING.md', (Join-Path $repositoryRoot 'docs\TROUBLESHOOTING.md')),
+        # Ships inside the package so a user can verify what they
+        # downloaded without cloning the repository, which is what
+        # README's verification block asks them to do.
+        @('verify_package.ps1', (Join-Path $repositoryRoot 'tools\verify_package.ps1')),
         @('EXPERIMENTAL_RUNTIME_NOTICE.txt', (Join-Path $repositoryRoot 'packaging\EXPERIMENTAL_RUNTIME_NOTICE.txt'))
     )
 }

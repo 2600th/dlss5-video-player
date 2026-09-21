@@ -21,7 +21,7 @@
       "fileVersion": "310.8.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed DLSS SR runtime from the matching user-supplied Streamline pack.",
+      "provenance": "NVIDIA-signed DLSS SR 310.8.0 runtime from the RankFTW/rhi-repo release dlss-310.8.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest fb481660f7e952b87f91760e3afd7f9dc14cd2c3361b470e948d6346e4323009 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
     },
     {
@@ -32,7 +32,7 @@
       "fileVersion": "6.8.0.2155",
       "signatureStatus": "NotSigned",
       "signerContains": "",
-      "provenance": "Locally supplied ReShade proxy previously verified with the RenoDX pack.",
+      "provenance": "ReShade 6.8.0 with add-on support, proxy DLL taken from ReShade_Setup_6.8.0_Addon.exe, fetched by tools/fetch_neural_runtime.ps1 and verified against installer digest afe4c8f13048306307983b8b3d41d5bf00a86820440b0e57dea10950e1176445 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#reshade"
     },
     {
@@ -54,7 +54,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -65,7 +65,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -76,7 +76,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -87,7 +87,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -98,7 +98,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -109,7 +109,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -120,7 +120,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     },
     {
@@ -131,7 +131,7 @@
       "fileVersion": "2.13.0.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed Streamline 2.13 runtime from the user-supplied matching pack.",
+      "provenance": "NVIDIA-signed Streamline 2.13.0.0 runtime from the RankFTW/rhi-repo release streamline-2.13.0.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest 7f38b5b2b7cc83ae859ccb3266160b8e5e517f379f81987fe3c758ae5c9e8c02 before extraction and against the per-file digest above after staging.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-streamline"
     }
   ]
