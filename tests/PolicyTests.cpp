@@ -30,6 +30,8 @@
 #include "FrameRatePolicy.h"
 #include "PlaybackCadence.h"
 #include "NeuralCoverage.h"
+#include "RangeSelection.h"
+#include "ExportPipeline.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
@@ -3653,16 +3655,347 @@ void render_range_residual_below_one_frame_is_coverage_not_work_test()
 {
     // The re-toggled session: a head accumulated from integer per-frame
     // segment ends against a range end taken from the probed source duration.
+    const double fps=30.0;
     const int64_t head=947333000;
-    const int64_t frame=333334;
-    CHECK(RenderRangeIsCovered(head,head,30.0));
-    CHECK(RenderRangeIsCovered(head,head+1,30.0));
-    CHECK(RenderRangeIsCovered(head,head+frame-1,30.0));
-    CHECK(!RenderRangeIsCovered(head,head+frame,30.0));
-    CHECK(!RenderRangeIsCovered(head,head+30*frame,30.0));
+    // The head sits 333 ticks below the frame that follows it, which is the
+    // whole shape of this case: everything short of that boundary is residual.
+    const int64_t next=FramePts(2842,fps);
+    CHECK_EQ(int64_t{947333333},next);
+    CHECK(RenderRangeIsCovered(head,head,fps));
+    CHECK(RenderRangeIsCovered(head,head+1,fps));
+    CHECK(RenderRangeIsCovered(head,next,fps));
+    // One tick further and the frame is inside the range. That is work however
+    // narrow the range is, and measuring a WIDTH instead is what refused it:
+    // this range is 334 ticks wide against a frame duration of 333333.
+    CHECK(!RenderRangeIsCovered(head,next+1,fps));
+    CHECK(!RenderRangeIsCovered(head,head+30*333334,fps));
     // Without a frame rate a residual of unknown length stays work.
     CHECK(!RenderRangeIsCovered(head,head+1,0.0));
     CHECK(RenderRangeIsCovered(head+1,head,0.0));
+}
+
+// The hole a live session refused to render and never let go of.
+//
+// Two predicates decide whether a span of timeline is work, and until this case
+// existed nothing compared them. UncoveredSpans drops holes narrower than the
+// frame duration its caller supplies, while RenderRangeIsCovered measured the
+// same question against ceil(1e7/fps) - so a hole holding exactly one real
+// frame was a hole to the first and "shorter than one frame" to the second.
+// StartLiveRenderTarget refuses such a target, returns success and changes
+// nothing, so the very same hole is selected again on the next tick: the
+// session never renders it, never counts a failure and never reaches finished,
+// which is the flag that ends a rebuffer. A 59.94 fps source logged that
+// refusal 40850 times in six minutes with playback paused behind it and every
+// frame of the video already rendered.
+//
+// No width constant can settle it, which is why this sweeps the grid rather
+// than picking one. FramePts truncates a floating-point division, so steps run
+// floor(1e7/fps) wide wherever the truncation does not carry - and one tick
+// narrower still where the division loses a unit in the last place, which 25
+// fps does at frame 41. ceil is wrong at 59.94, floor is wrong at 25.
+// The export plan: which passes run, at what size, in what order.
+//
+// The order is not a choice the plan makes - it is NVIDIA's, and the dialog
+// offers no way to reorder it - so what is tested here is the refusals and the
+// geometry, which are the two things a user can get wrong from the dialog.
+// The DLSS menu's shape, measured against the guidance it was restructured to.
+//
+// Microsoft's menu guidelines: separators between logical groups, no more than
+// six of them, two to seven items per group. NN/g's is the reason it matters -
+// "groups of unrelated options reduce clarity, decrease findability, hinder
+// spatial memorability, and increase cognitive load". The menu this replaced
+// opened with seven items spanning three different features, and put Neural
+// Rendering's toggle six rows above its own presets and settings.
+//
+// Pinned because a menu drifts one convenient append at a time, and the append
+// that breaks it always looks harmless on its own.
+// The three feature pills must not look alike, and a pill must be able to say
+// it is busy.
+//
+// The toolbar drops to icon-only at its two narrow widths - the comment beside
+// UiIcon::FrameGeneration says so, and says why it matters: "three identical
+// sparkles hid which one starts a minutes-long conversion". That note was
+// written, acted on for frame generation, and then left Neural Rendering and
+// DLSS Upscaling both on sparkles, so two of the three stayed identical at
+// exactly the width the note was about. Asserting distinctness is cheaper than
+// noticing it twice.
+void feature_pills_are_visually_distinguishable_test()
+{
+    const wchar_t neural = GlyphForIcon(UiIcon::Sparkles);
+    const wchar_t upscaling = GlyphForIcon(UiIcon::Upscaling);
+    const wchar_t framegen = GlyphForIcon(UiIcon::FrameGeneration);
+    CHECK(neural != upscaling);
+    CHECK(neural != framegen);
+    CHECK(upscaling != framegen);
+    // And none of them may collide with another control in the same bar.
+    for (const UiIcon other : {UiIcon::Open, UiIcon::Play, UiIcon::Pause, UiIcon::Stop,
+                               UiIcon::Volume, UiIcon::VolumeOff, UiIcon::Crop,
+                               UiIcon::Adjustments, UiIcon::Debug, UiIcon::Maximize}) {
+        CHECK(GlyphForIcon(other) != neural);
+        CHECK(GlyphForIcon(other) != upscaling);
+        CHECK(GlyphForIcon(other) != framegen);
+    }
+
+    // Four states, four fills. With only enabled/active, "running a conversion"
+    // and "switched on" painted the same - and at icon-only widths the label
+    // that distinguished them is not drawn at all.
+    const ButtonVisual off = ResolveButtonVisual(ButtonState{true, false, false, false, false, false});
+    const ButtonVisual on = ResolveButtonVisual(ButtonState{true, true, false, false, false, false});
+    const ButtonVisual working = ResolveButtonVisual(ButtonState{true, false, true, false, false, false});
+    const ButtonVisual unavailable = ResolveButtonVisual(ButtonState{false, false, false, false, false, false});
+    CHECK(off.fill != on.fill);
+    CHECK(on.fill != working.fill);
+    CHECK(off.fill != working.fill);
+    CHECK(unavailable.fill != on.fill);
+    CHECK(unavailable.fill != working.fill);
+    // Working outranks on: a conversion that is running is the more urgent
+    // thing to report, and a pill can be both.
+    CHECK_EQ(working.fill, ResolveButtonVisual(ButtonState{true, true, true, false, false, false}).fill);
+    // Unavailable outranks everything, because a control you cannot press must
+    // never look like one that is doing something.
+    CHECK_EQ(unavailable.fill, ResolveButtonVisual(ButtonState{false, true, true, false, false, false}).fill);
+}
+
+void menus_group_two_to_seven_related_items_per_block_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    if (!menu) return;
+    // Every top-level menu is held to the same rule, not just the one that
+    // prompted the work. `Exit` alone behind a separator is the documented
+    // exception: it is the convention every Windows File menu follows, and a
+    // guideline that argues with a convention that strong loses.
+    for (const wchar_t* name : {L"File", L"Playback", L"Video", L"DLSS", L"Advanced"}) {
+        HMENU top = find_top_level_submenu(menu, name);
+        CHECK(top != nullptr);
+        if (!top) continue;
+        std::vector<UINT> sizes{0};
+        std::vector<UINT> lastOfGroup;
+        const int items = GetMenuItemCount(top);
+        UINT previous = 0;
+        for (int index = 0; index < items; ++index) {
+            MENUITEMINFOW entry{};
+            entry.cbSize = sizeof(entry);
+            entry.fMask = MIIM_FTYPE | MIIM_ID;
+            if (!GetMenuItemInfoW(top, UINT(index), TRUE, &entry)) continue;
+            if (entry.fType & MFT_SEPARATOR) { lastOfGroup.push_back(previous); sizes.push_back(0); continue; }
+            ++sizes.back();
+            previous = entry.wID;
+        }
+        lastOfGroup.push_back(previous);
+        CHECK(sizes.size() <= 7);   // no more than six separators
+        for (size_t group = 0; group < sizes.size(); ++group) {
+            const bool exitAlone = sizes[group] == 1 && group < lastOfGroup.size() &&
+                                   lastOfGroup[group] == app_menu::IDM_EXIT;
+            CHECK(sizes[group] >= 2 || exitAlone);
+            CHECK(sizes[group] <= 7);
+        }
+    }
+
+    HMENU dlss = find_top_level_submenu(menu, L"DLSS");
+    CHECK(dlss != nullptr);
+    if (!dlss) { DestroyMenu(menu); return; }
+
+    // Walk the DLSS top level only: what a viewer sees when the menu opens.
+    std::vector<UINT> groupSizes;
+    std::vector<std::vector<UINT>> groups;
+    groupSizes.push_back(0);
+    groups.emplace_back();
+    const int count = GetMenuItemCount(dlss);
+    for (int index = 0; index < count; ++index) {
+        MENUITEMINFOW item{};
+        item.cbSize = sizeof(item);
+        item.fMask = MIIM_FTYPE | MIIM_ID | MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(dlss, UINT(index), TRUE, &item)) continue;
+        if (item.fType & MFT_SEPARATOR) { groupSizes.push_back(0); groups.emplace_back(); continue; }
+        ++groupSizes.back();
+        groups.back().push_back(item.wID);
+    }
+
+    // No more than six separators, and every group between two and seven.
+    CHECK(groupSizes.size() >= 2);
+    CHECK(groupSizes.size() <= 7);          // <= 6 separators
+    for (const UINT size : groupSizes) {
+        CHECK(size >= 2);
+        CHECK(size <= 7);
+    }
+
+    // Each feature's toggle sits in the same block as its own controls, which
+    // is the whole point of the restructure.
+    const auto blockOf = [&](UINT command) -> int {
+        for (size_t block = 0; block < groups.size(); ++block)
+            for (const UINT id : groups[block])
+                if (id == command) return int(block);
+        return -1;
+    };
+    const int neuralBlock = blockOf(app_menu::IDM_NEURAL_SETTINGS);
+    CHECK(neuralBlock >= 0);
+    CHECK_EQ(neuralBlock, blockOf(app_menu::IDM_NEURAL_RENDERING));
+    const int upscaleBlock = blockOf(app_menu::IDM_DLSS_UPSCALING);
+    CHECK(upscaleBlock >= 0);
+    CHECK(upscaleBlock != neuralBlock);
+    // Frame generation is its own block, not wedged between the other two.
+    const int framegenBlock = blockOf(app_menu::IDM_FRAME_GENERATION);
+    CHECK(framegenBlock >= 0);
+    CHECK(framegenBlock != neuralBlock);
+    CHECK(framegenBlock != upscaleBlock);
+    // Neural first, then upscaling, then generation: the order the stages run
+    // in, so the menu reads the same way the pipeline does.
+    CHECK(neuralBlock < upscaleBlock);
+    CHECK(upscaleBlock < framegenBlock);
+
+    DestroyMenu(menu);
+}
+
+void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
+{
+    const auto plan = [](bool upscale, bool neural, bool framegen, uint32_t rung = 1440,
+                         uint32_t multiplier = 2, uint32_t maxMultiplier = 2,
+                         bool still = false) {
+        ExportSelection selection;
+        selection.upscale = upscale; selection.neural = neural;
+        selection.frameGeneration = framegen;
+        selection.targetHeight = rung; selection.multiplier = multiplier;
+        return PlanExport(selection, 1280, 720, 30.0, maxMultiplier, still);
+    };
+
+    // Neural alone: one worker pass, source geometry, verdicts on.
+    const ExportPlan n = plan(false, true, false);
+    CHECK(n.valid); CHECK(n.workerStage); CHECK(n.requireNeural); CHECK(!n.frameGenStage);
+    CHECK_EQ(uint32_t{1280}, n.outputWidth); CHECK_EQ(uint32_t{720}, n.outputHeight);
+    CHECK_EQ(uint32_t{1}, ExportStageCount(n));
+
+    // Super Resolution alone is REFUSED, and this is the case that matters.
+    //
+    // It was offered at first, on the reading that `requireNeural=false` made
+    // the pass skip the neural model. It does not: the helper enables the
+    // add-on for every job and the pre-capture check demands feature 18
+    // regardless, so the flag only skips the verdicts AFTER a render that was
+    // neural anyway. Measured - an upscale-only and an upscale-plus-neural
+    // export of one clip came back byte-identical at 9,548,373 bytes. A
+    // checkbox that changes nothing is worse than a missing one.
+    const ExportPlan u = plan(true, false, false);
+    CHECK(!u.valid);
+    CHECK(u.refusal == ExportRefusal::UpscaleNeedsNeural);
+
+    // Both: still one pass. Two would run the model at source size and upscale
+    // after, which is the Neural Upstream order rather than the reference one.
+    const ExportPlan un = plan(true, true, false);
+    CHECK(un.valid); CHECK_EQ(uint32_t{1}, ExportStageCount(un));
+    CHECK(un.requireNeural);
+    CHECK_EQ(uint32_t{2560}, un.outputWidth);
+
+    // Frame generation alone: no worker pass at all.
+    const ExportPlan f = plan(false, false, true);
+    CHECK(f.valid); CHECK(!f.workerStage); CHECK(f.frameGenStage);
+    CHECK_EQ(uint32_t{1280}, f.outputWidth);
+    CHECK_EQ(60.0, f.outputFps);
+
+    // All three: two passes, grown and doubled.
+    const ExportPlan unf = plan(true, true, true);
+    CHECK(unf.valid); CHECK_EQ(uint32_t{2}, ExportStageCount(unf));
+    CHECK_EQ(uint32_t{2560}, unf.outputWidth); CHECK_EQ(uint32_t{1440}, unf.outputHeight);
+    CHECK_EQ(60.0, unf.outputFps);
+
+    // Refusals, each naming its own cause so the dialog can say which control
+    // to change rather than "export failed".
+    CHECK(!plan(false, false, false).valid);
+    CHECK(plan(false, false, false).refusal == ExportRefusal::NothingSelected);
+    // 1080p rung on a 1440p source is not an upscale.
+    CHECK(PlanExport({true, false, false, 1080, 2}, 2560, 1440, 30.0, 2, false).refusal ==
+          ExportRefusal::AlreadyAtTarget);
+    // An Ada card admits 2x only; 3x must refuse rather than quietly write 2x.
+    CHECK(plan(false, false, true, 1440, 3, 2).refusal == ExportRefusal::MultiplierUnsupported);
+    CHECK(plan(false, false, true, 1440, 2, 0).refusal == ExportRefusal::MultiplierUnsupported);
+    CHECK(plan(false, false, true, 1440, 2, 2, /*still=*/true).refusal == ExportRefusal::StillImage);
+    CHECK(PlanExport({false, true, false}, 0, 0, 30.0, 2, false).refusal ==
+          ExportRefusal::SourceGeometryUnknown);
+    // A still image may still be upscaled and neural rendered; only generation
+    // needs a successor frame.
+    CHECK(PlanExport({true, true, false, 1440, 2}, 1280, 720, 30.0, 2, /*still=*/true).valid);
+
+    // Blackwell's higher multiples are admitted when the runtime says so.
+    const ExportPlan quad = plan(false, false, true, 1440, 4, 4);
+    CHECK(quad.valid); CHECK_EQ(uint32_t{4}, quad.multiplier); CHECK_EQ(120.0, quad.outputFps);
+}
+
+void one_step_of_the_frame_grid_is_always_work_test()
+{
+    for (const double fps : {60000.0 / 1001.0, 59.9401, 30000.0 / 1001.0, 29.97,
+                             24000.0 / 1001.0, 23.976, 15.0, 25.0, 30.0, 50.0, 60.0}) {
+        // The first grid step the predicate gets wrong, so a failure names the
+        // frame rather than printing one line per frame of a 100 s video.
+        int64_t refused = -1;
+        for (uint64_t index = 0; index < 6000 && refused < 0; ++index)
+            if (RenderRangeIsCovered(FramePts(index, fps), FramePts(index + 1, fps), fps))
+                refused = static_cast<int64_t>(index);
+        CHECK_EQ(int64_t{-1}, refused);
+    }
+}
+
+// The invariant the session actually runs on: every hole it keeps is a hole a
+// job can be started on.
+//
+// LiveHoles() hands NextRenderTarget a set of spans and StartLiveRenderTarget
+// snaps the chosen one to where a render may begin before asking whether it
+// holds anything. If those two can disagree the session has no exit - it will
+// not render the hole and it will not stop selecting it - so they are swept
+// against each other here across the grid, at hole widths from a sliver to
+// several frames, starting a tick to a frame below each boundary the way a
+// retained region's last segment ends.
+void every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test()
+{
+    for (const double fps : {60000.0 / 1001.0, 59.9401, 30000.0 / 1001.0, 25.0, 30.0, 60.0}) {
+        const int64_t frame = static_cast<int64_t>(std::llround(10000000.0 / fps));
+        int64_t strandedIndex = -1, strandedBack = -1, strandedWidth = -1;
+        for (uint64_t index = 1; index < 2200 && strandedIndex < 0; ++index)
+            for (const int64_t back : {int64_t{0}, int64_t{1}, int64_t{59}, frame / 2, frame - 1})
+                for (const int64_t width : {int64_t{1}, frame / 3, frame - 1, frame, frame + 1,
+                                            3 * frame, 3 * frame + 7}) {
+                    const int64_t start = FramePts(index, fps) - back;
+                    const CoverageSpan hole{start, start + width};
+                    // Not a hole the session would keep: nothing to reconcile.
+                    if (UncoveredSpans({}, hole, frame).empty()) continue;
+                    if (!RenderRangeIsCovered(
+                            FramePts(FrameIndexAtOrBefore(hole.start100ns, fps), fps),
+                            hole.end100ns, fps))
+                        continue;
+                    strandedIndex = static_cast<int64_t>(index);
+                    strandedBack = back;
+                    strandedWidth = width;
+                    break;
+                }
+        CHECK_EQ(int64_t{-1}, strandedIndex);
+        CHECK_EQ(int64_t{-1}, strandedBack);
+        CHECK_EQ(int64_t{-1}, strandedWidth);
+    }
+}
+
+// Why the unfillable hole was there to be refused.
+//
+// A retained region ends where its last segment's container timestamps ran out,
+// which sits a few ticks below the grid boundary of the frame that follows it.
+// StartLiveRenderTarget snapped that hole start to the NEAREST frame, and
+// nearest rounds forward - past the one frame the hole contains. The worker
+// seeks to a timestamp after that frame, its first output is the frame after
+// it, and the job started to fill the hole leaves the hole exactly as it found
+// it. Snapping to the frame the timestamp falls inside cannot step over it, and
+// the resulting overlap is what merges the two regions back into one.
+void render_start_snaps_into_the_frame_it_lands_in_not_past_it_test()
+{
+    const double fps = 60000.0 / 1001.0;
+    const int64_t boundary = FramePts(2016, fps);
+    const int64_t holeStart = boundary - 59;
+    CHECK(FramePts(FrameIndexNearest(holeStart, fps), fps) > holeStart);
+    CHECK(FramePts(FrameIndexAtOrBefore(holeStart, fps), fps) <= holeStart);
+    // And the snapped target still holds a frame to render, which is the whole
+    // point: the predicate above must call it work.
+    CHECK(!RenderRangeIsCovered(FramePts(FrameIndexAtOrBefore(holeStart, fps), fps),
+                                FramePts(2017, fps), fps));
+    // A start already on a boundary is left where it is - no frame is rendered
+    // twice for the sake of the snap.
+    CHECK_EQ(boundary, FramePts(FrameIndexAtOrBefore(boundary, fps), fps));
 }
 
 // 100ns source timestamps: the units the segment index, the renderer and the
@@ -8785,6 +9118,12 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(neural_completion_publishes_only_after_probe_and_manifest_validation_test),
     TEST_CASE(neural_publish_tolerance_admits_one_muxer_rounding_per_joined_segment_test),
     TEST_CASE(render_range_residual_below_one_frame_is_coverage_not_work_test),
+    TEST_CASE(feature_pills_are_visually_distinguishable_test),
+    TEST_CASE(menus_group_two_to_seven_related_items_per_block_test),
+    TEST_CASE(export_plan_runs_super_resolution_and_neural_as_one_pass_test),
+    TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
+    TEST_CASE(every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test),
+    TEST_CASE(render_start_snaps_into_the_frame_it_lands_in_not_past_it_test),
     TEST_CASE(coverage_merge_sorts_drops_degenerate_and_joins_touching_spans_test),
     TEST_CASE(uncovered_spans_of_nothing_is_everything_and_of_everything_is_nothing_test),
     TEST_CASE(uncovered_spans_find_the_hole_between_regions_and_the_lead_in_before_the_first_test),

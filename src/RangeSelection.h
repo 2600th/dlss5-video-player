@@ -20,6 +20,30 @@ struct RangeMarkers {
 int64_t FramePts(uint64_t index, double fps);
 // Frame whose timestamp is nearest to pts (the decoder's frameNumber rule).
 uint64_t FrameIndexNearest(int64_t pts100ns, double fps);
+// Largest frame index whose timestamp is <= pts: the frame a timestamp falls
+// inside. This is the rule for anything that becomes the START of a render -
+// RangeFromMarkers already snaps the in marker with it - because rounding to
+// the nearest boundary instead can step FORWARD over the frame the caller is
+// pointing at, and a render that begins after a frame never produces it.
+uint64_t FrameIndexAtOrBefore(int64_t pts100ns, double fps);
+// Smallest frame index whose timestamp is >= pts.
+uint64_t FrameIndexAtOrAfter(int64_t pts100ns, double fps);
+
+// Whether [renderFrom, rangeEnd) holds no frame the worker could produce. The
+// render head is accumulated from per-frame segment ends while the range end is
+// a probed source duration, so the two land a few ticks apart and that residual
+// is coverage, not work - handing it to a worker only earns a range refusal.
+//
+// This asks the grid, not the width, because the grid is not evenly spaced.
+// FramePts truncates a floating-point division, so consecutive frames sit
+// floor(1e7/fps) apart wherever the truncation does not carry - and one tick
+// closer still where it loses a unit in the last place, which 25 fps does at
+// frame 41. Every width constant is therefore wrong somewhere: ceil(1e7/fps)
+// called a span holding one real frame "shorter than one frame" at 59.94, and
+// floor(1e7/fps) does the same at 25. Asking whether a frame timestamp lies
+// inside the range is exact at every rate. An unreadable frame rate leaves a
+// residual of unknown length as work.
+bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps);
 
 // Half-open [in, out) snapped to the frame grid: the in marker snaps down to
 // the frame containing it, the out marker snaps up so any partially covered

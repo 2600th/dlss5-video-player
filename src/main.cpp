@@ -96,6 +96,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
 #include "UpscalingPolicy.h"
+#include "ExportPipeline.h"
 #include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
 #include "resources.h"
@@ -4947,9 +4948,31 @@ private:
     int64_t LiveFrame100ns()const{return static_cast<int64_t>(std::llround(1e7/std::max(1.0,m_decoder.FrameRate())));}
     // What is left to render inside the session's range. A residual narrower than
     // one frame is coverage rather than work: a job handed it refuses the range.
+    //
+    // A hole this returns that no job will start on is a hole the session
+    // selects again on the very next tick, forever: StartLiveRenderTarget
+    // refuses it, reports success and changes nothing, so nothing renders,
+    // nothing fails, and `finished` - the flag that ends a rebuffer - is never
+    // reached. One 59.94 fps session logged that refusal 40850 times in six
+    // minutes with playback paused behind it and every frame of the video
+    // already rendered.
+    //
+    // So every hole is asked the question StartLiveRenderTarget will ask it,
+    // against the start it will ask it about. Snapping DOWN is what settles it
+    // today - a boundary at or below the hole start always leaves a frame
+    // inside a non-empty hole - which makes this filter drop nothing as the two
+    // rules currently stand. It is here because those are two rules in two
+    // places: either one changing alone is enough to strand a hole again, and
+    // the failure mode is not a wrong picture but a player that never resumes.
     std::vector<CoverageSpan> LiveHoles()const{
         if(!m_liveSegments)return {};
-        return UncoveredSpans(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns},LiveFrame100ns());
+        const double fps=m_decoder.FrameRate();
+        std::vector<CoverageSpan> holes=UncoveredSpans(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns},LiveFrame100ns());
+        holes.erase(std::remove_if(holes.begin(),holes.end(),[&](const CoverageSpan& hole){
+                        return RenderRangeIsCovered(SnapRenderStart(hole.start100ns),hole.end100ns,fps);
+                    }),
+                    holes.end());
+        return holes;
     }
     // How far the running job has rendered inside its own target: the end of the
     // coverage that starts where the target does, or the target's start when it
@@ -5075,10 +5098,17 @@ private:
     // Points the render at one hole. Coverage already on disk is never touched:
     // that is the whole difference between this and the old rebase.
     bool StartLiveRenderTarget(CoverageSpan hole){
-        const NeuralRenderRange target{SnapToFrame(hole.start100ns),hole.end100ns};
+        const NeuralRenderRange target{SnapRenderStart(hole.start100ns),hole.end100ns};
         const size_t holes=LiveHoles().size();
         if(RenderRangeIsCovered(target.start100ns,target.end100ns,m_decoder.FrameRate())){
-            // A sub-frame residual is coverage, not work.
+            // A sub-frame residual is coverage, not work. Unreachable for any
+            // non-empty hole while the start above snaps down: a boundary at or
+            // below the hole start leaves a frame inside the range by
+            // construction. It stays as a guard for a caller that hands over a
+            // span this never measured - and it must never again be the only
+            // thing between the session and a target it keeps reselecting,
+            // because reporting success while changing no state is a spin, and
+            // it spun: 40850 refusals of one frame, playback paused throughout.
             LOG("Active neural session target ["<<double(target.start100ns)*1e-7<<","
                 <<double(target.end100ns)*1e-7<<") s is shorter than one frame; nothing to render.");
             m_liveTarget=target;return true;
@@ -5627,6 +5657,18 @@ private:
     // Markers sit on the decoder's frame grid so their timecodes and the
     // rendered range name exact frames.
     int64_t SnapToFrame(int64_t pts)const{const double fps=m_decoder.FrameRate();return fps>0?FramePts(FrameIndexNearest(pts,fps),fps):pts;}
+    // Where a render may BEGIN, which is not the same question. SnapToFrame
+    // rounds to the nearest boundary, and nearest rounds forward from anything
+    // past the half-frame - over the frame the caller is pointing at. A hole
+    // begins where a retained region's last segment ran out of container
+    // timestamps, a few ticks below the grid boundary of the frame that follows
+    // it; nearest snapped the job's start past that frame, the worker's seek
+    // landed on the frame after it, and the job started to fill the hole left
+    // the hole exactly as it found it. Down is the rule RangeFromMarkers
+    // already gives an in marker, and the overlap it leaves against the region
+    // behind is what merges the two back into one instead of parting them with
+    // a frame nobody renders.
+    int64_t SnapRenderStart(int64_t pts)const{const double fps=m_decoder.FrameRate();return fps>0?FramePts(FrameIndexAtOrBefore(pts,fps),fps):pts;}
     // A marker always stays inside the source: the CFR grid runs up to one frame
     // past the container duration, and a marker in that remainder describes a
     // range with nothing to decode. In names a frame, so it stops at the last

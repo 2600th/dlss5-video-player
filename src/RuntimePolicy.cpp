@@ -463,11 +463,3 @@ bool NeuralPublishDurationsMatch(
            std::llabs(resultDuration100ns - expectedDuration100ns) <= tolerance100ns;
 }
 
-bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps)
-{
-    if (renderFrom100ns >= rangeEnd100ns) return true;
-    // A residual of unknown length is work: without a frame rate there is no
-    // way to tell coverage from a missing frame.
-    if (!std::isfinite(fps) || fps <= 0.0) return false;
-    return rangeEnd100ns - renderFrom100ns < static_cast<int64_t>(std::ceil(10000000.0 / fps));
-}

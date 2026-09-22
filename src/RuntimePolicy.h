@@ -202,13 +202,6 @@ bool NeuralPublishDurationsMatch(
     int64_t expectedDuration100ns,
     int64_t tolerance100ns);
 
-// Whether a render range has nothing renderable left. The render head is an
-// integer multiple of a frame duration built from per-frame segment ends,
-// while the range end is a probed source duration: a residual shorter than
-// one frame is coverage, not work, and handing it to a worker only earns a
-// range refusal. An unreadable frame rate falls back to the plain comparison.
-bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps);
-
 GpuGeneration ClassifyGpu(uint32_t vendorId, std::wstring_view description);
 bool NeuralAddonDesired(GpuGeneration gpu, bool safeMode);
 NeuralRenderDefaults ResolveNeuralRenderDefaults(

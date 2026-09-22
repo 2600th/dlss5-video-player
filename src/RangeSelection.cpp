@@ -20,7 +20,12 @@ uint32_t NominalFrameRate(double fps) noexcept
     return static_cast<uint32_t>(nominal);
 }
 
-// Largest frame index whose timestamp is <= pts.
+} // namespace
+
+// Largest frame index whose timestamp is <= pts. Declared in the header rather
+// than kept here: the live session's render start needs the same snapping rule
+// RangeFromMarkers gives the in marker, and reaching for FrameIndexNearest
+// instead is what let a job begin one frame past the frame it was started for.
 uint64_t FrameIndexAtOrBefore(int64_t pts100ns, double fps)
 {
     if (pts100ns <= 0) return 0;
@@ -41,6 +46,15 @@ uint64_t FrameIndexAtOrAfter(int64_t pts100ns, double fps)
     while (FramePts(index, fps) < pts100ns) ++index;
     return index;
 }
+
+bool RenderRangeIsCovered(int64_t renderFrom100ns, int64_t rangeEnd100ns, double fps)
+{
+    if (renderFrom100ns >= rangeEnd100ns) return true;
+    if (!ValidFps(fps)) return false;
+    return FramePts(FrameIndexAtOrAfter(renderFrom100ns, fps), fps) >= rangeEnd100ns;
+}
+
+namespace {
 
 // Number of frames the source actually emits. A rounded duration and a rounded
 // frame rate can place a grid frame just inside the end that never exists (a

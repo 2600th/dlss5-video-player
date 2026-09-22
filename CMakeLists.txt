@@ -613,6 +613,11 @@ if(BUILD_TESTING)
         src/GpuPreference.h
         src/RuntimePolicy.cpp
         src/RuntimePolicy.h
+        # The frame grid the coverage predicates are measured against. Both live
+        # here so a test can ask whether one step of the grid is work, which is
+        # the question two sibling cases in this file used to answer differently.
+        src/RangeSelection.cpp
+        src/RangeSelection.h
         src/ReShadeConfig.cpp
         src/ReShadeConfig.h
         src/YouTubeResolver.cpp
