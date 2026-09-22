@@ -2,6 +2,275 @@
 
 ## Unreleased
 
+### Found in review, before shipping
+
+A verification pass over the whole change set turned up five defects. All five
+are fixed; each one is noted here because the reason it was missed is worth
+more than the fix.
+
+- **Super Resolution on its own did nothing.** The export offered it as a
+  separate tick, on the reading that `requireNeural=false` made the pass skip
+  the neural model. It does not. The helper turns the add-on on for every job
+  it runs and the pre-capture check demands feature 18 regardless, so the flag
+  only skipped the verdicts *after* a render that was neural anyway. Measured:
+  an upscale-only and an upscale-plus-neural export of the same clip came back
+  byte-for-byte identical, 9,548,373 bytes each. The dialog now says so instead
+  of showing a checkbox that changes nothing.
+
+  The matrix test passed 21 of 21 while this was broken, because it compared
+  geometry and frame counts - which are identical either way. It compares the
+  bytes now, and that comparison is what any future attempt to offer the
+  combination will have to overturn.
+
+- **A cancelled export left its progress panel over the video forever.**
+  Cancelling clears the completion registry, so the queued completion finds
+  nothing and the handler returns before reaching the line that clears the
+  panel. It only recovered if some later export ran to the end.
+
+- **The export panel never animated.** The predicate that arms the repaint
+  timer did not count an export as activity, so the spinner sat still and the
+  elapsed clock read zero for the whole job.
+
+- **The preflight probe could contradict itself.** It polls the add-on's log
+  every fourth frame, so arming in the last three frames of the budget was
+  invisible to it - and the settled read afterwards would then say armed while
+  the verdict said it never happened. The verdict is taken from the settled
+  read now, so the two cannot disagree.
+
+- **Ctrl+E was already taken.** The export menu item advertised it; Ctrl+E has
+  opened Image adjustments since long before that command existed. Export is
+  Ctrl+S now, which is free and is the usual key for writing a file out. A test
+  checks that every accelerator a menu label advertises routes to that command.
+
+- **The three feature pills no longer look alike.** The note beside
+  `UiIcon::FrameGeneration` already said why it matters - the toolbar drops to
+  icon-only at its two narrow widths, and "three identical sparkles hid which
+  one starts a minutes-long conversion" - then gave frame generation its own
+  glyph and left Neural Rendering and DLSS Upscaling both on sparkles. Two of
+  the three stayed identical at exactly the width the note was about. Super
+  Resolution now uses arrows-maximize (U+EA28, verified present in the
+  committed font's cmap), sparkles stays with the model that earns it, and a
+  test asserts all three differ from each other and from every other control in
+  the bar.
+
+- **A pill can say it is busy.** `ResolveButtonVisual` had `enabled` and
+  `active`, so "running a conversion" painted exactly like "switched on" - and
+  at icon-only widths the label that distinguished them is not drawn at all.
+  There is now a fourth state in the same teal the timeline already uses for
+  rendered coverage, because the two places the player says "this is being made
+  right now" should not say it in two different colours. Precedence is
+  unavailable, then working, then on, then off, and the test pins it.
+
+- **Hover text on the toolbar.** Each control that has a state worth explaining
+  carries a sentence saying what it does and why it is where it is - "DLSS
+  Super Resolution... unavailable when the source already fills the panel,
+  there is nothing to upscale then". The buttons are painted rather than child
+  windows, so the tips are registered by rectangle and the rectangles are
+  refreshed from the same layout the painter uses; resize is handled by
+  construction rather than by a second code path that can drift.
+
+- **The export shows its progress.** `RunNeuralWorker` has always accepted a
+  progress callback and `FrameGenerationPass::Run` an `onProgress`; the export
+  passed nothing to either, so a multi-minute job showed a busy cursor and
+  nothing else. Both are wired now, into the activity panel the neural render
+  already uses: "Pass 1 of 2 - Super Resolution and neural rendering", a
+  percentage, frames done of total, elapsed, and an ETA once there are enough
+  frames for one to mean anything. Two passes are reported as two, rather than
+  one bar that jumps backwards when the second stage starts counting from zero.
+
+- **Every menu is grouped one subject per block.** The DLSS menu opened with
+  seven items spanning three different features, and put Neural Rendering's
+  toggle six rows above its own presets and settings with all of upscaling and
+  all of frame generation in between. Microsoft's menu guidance asks for two to
+  seven related items per group and no more than six separators; NN/g gives the
+  reason - "groups of unrelated options reduce clarity, decrease findability,
+  hinder spatial memorability, and increase cognitive load". Measured against
+  that, four of the five menus had groups of a single row, and Advanced had
+  three separators for five items.
+
+  DLSS now reads neural, then Super Resolution, then frame generation - the
+  order the stages actually run in - each block holding its own toggle, submenu
+  and settings. Playback keeps its audio track with the transport it belongs to.
+  Video is window geometry, then what the picture is made of, then which image
+  is on screen. Advanced is two groups instead of four. `Exit` alone in File
+  stays: a guideline that argues with a convention that strong loses.
+
+- **No more permanently greyed cancel rows.** "Generate frames..." becomes
+  "Cancel frame generation" while a conversion runs, and the export row does the
+  same - which is what the toolbar pill has always done, so the two surfaces now
+  agree. A row greyed in every state the user normally sees teaches them the
+  menu is full of things that do nothing.
+
+- **"Neural settings" and "Encoder settings" lost their ellipses**, per
+  Microsoft's own rule: Settings "must display another window when clicked, but
+  don't require additional information from the user. Therefore they don't need
+  ellipses." Export keeps its ellipsis - it asks which stages first.
+
+- **The settings dialogs are grouped under headings.** Nine controls at one
+  visual level is a list; "Look", "Quality and render time" and "Guides sent to
+  the model" is a structure, and it tells you which controls answer the same
+  question before you read any of their labels.
+
+- **DLSS > Convert & save > Export with DLSS stages...** writes a file with any
+  combination of Super Resolution, neural rendering and frame generation. Three
+  checkboxes, an output-height rung and a frame-rate multiple, with a summary
+  line that reads back the geometry and frame rate the file will actually have.
+
+  The order is fixed at Super Resolution -> neural -> frame generation and the
+  dialog offers no way to change it. That is NVIDIA's arrangement, not a
+  preference: their DLSS 5 neural rendering runs on the upscaled frame, DLSS-G
+  consumes the finished picture, and an order the user can get wrong is a
+  support case with no upside. The panel says so in a line under the controls.
+
+  The first two stages are ONE pass - the offline renderer takes a source size
+  and an output size separately - and frame generation is a second pass over the
+  finished file. Refusals are named rather than generic: a rung at or below the
+  source says there is nothing to upscale, a multiple the runtime will not admit
+  says so before the render rather than minutes into it, and the Export button
+  stays unavailable until the selection describes a real job.
+
+  This deliberately does not touch the neural cache. A cache entry is a playback
+  carrier keyed on the source and the settings; this is a one-off at a size and
+  a rate the viewer picked. "Save converted video" is still how you keep the
+  render you are already watching.
+
+- **The export plan is pure policy** in `ExportPipeline.h`, so every refusal is
+  tested without a GPU or a file, and the dialog's own regression test drives
+  every control it builds - including turning stages back OFF, since a checkbox
+  that only latches on is the inert-control bug wearing a hat.
+
+- **DLSS Super Resolution can now be baked into a rendered file.** The offline
+  pass takes an output size; 0 still means "the source size", which is every
+  caller that does not upscale. `D3D12Renderer::Initialize` has always taken a
+  source size and an output size separately and this pass handed it the source
+  size twice, so the carrier was a 1:1 DLAA feature. Given a real output size it
+  becomes a true Super Resolution pass - and because RenoDX's `NRPreUpscale`
+  defaults to 0, neural AFTER the upscale, the neural model then runs on the
+  upscaled frame without any further plumbing.
+
+  That order is NVIDIA's, and it is the opposite of what this project first
+  reached for. Their DLSS 5 neural rendering "normally runs last, on the fully
+  upscaled frame"; the community Neural Upstream mod moves it earlier precisely
+  because doing so is faster (RTX 4080, 4K: 31 -> 50 fps), which makes early the
+  deviation and late the reference. Streamline's guides put Super Resolution
+  "before all other post-processing" and hand DLSS-G the final post-processed
+  buffer, so frame generation stays last. An export has no frame budget to
+  defend, so it takes the reference order: **Upscale -> Neural -> FrameGen**.
+
+- **`requireNeural`** renders the carrier alone - Super Resolution with no
+  neural pass - and drops the four feature-18 verdicts with it. Those verdicts
+  exist to stop un-denoised frames being published as neural output; a job that
+  never asked for neural makes no such claim, and holding it to them would fail
+  every upscale-only render by design.
+
+- **`ExportMatrixSmoke`** renders all seven combinations of the three stages
+  through a 3.5 s 720p30 clip and checks geometry and frame count at each one.
+  It earned its place on the first run: the output size was plumbed through the
+  request, the IPC, the encoder and the byte accounting, and *not* into the
+  renderer's feature create, so NGX kept reporting `output=1280x720` while every
+  single-stage test stayed green. Confirmed independently with ffprobe -
+  1280x720/30 in, 2560x1440/60 out with all three enabled.
+
+- **New request fields go at the END of `NeuralRenderRequest`.** Added in the
+  middle, `outputWidth`/`outputHeight` silently re-bound the positional
+  initialisers two smokes use: `{..., kFps, kSourceSeconds}` became a 24x6
+  output size with no frame rate, and the compiler said only "possible loss of
+  data". The struct now says so where the next person will add a field.
+
+- **The preflight probe waits for the runtime to inject, not for our own
+  carrier to exist.** RenoDX 6.x installs a compute-state shadow on the first
+  NGX evaluate and declines to inject until that shadow has observed a
+  command-list Reset - a real render is admitted "after 2 incomplete-target
+  decline(s)". The probe stopped as soon as the player's own DLSS/DLAA carrier
+  was created, two frames in, and then waited up to two seconds for the add-on
+  to report feature 18: it had stopped submitting the only thing that could
+  make that report appear. It reported `created:false evaluated:false` with an
+  empty observation list, the player latched that as "this runtime and driver
+  already failed", and neural rendering was off for the whole session with a
+  message blaming other DLSS injectors. 4.70 armed feature 18 inside the
+  carrier's own evaluate, which is why stopping there used to be enough. The
+  probe now renders to its existing 120-frame budget, polling a non-blocking
+  snapshot of the add-on's log every fourth frame; it settles at five. The
+  empty `dlssnr` field in the receipt was the same wound - the runtime version
+  is logged when NR first initializes, which had not happened yet - and now
+  reads `310.8.0` again.
+
+- **`NeuralPreflightSmoke` runs that probe in the test suite.** The harness had
+  existed as a hand-run `--real-preflight` mode and was never a ctest, which is
+  precisely how the above shipped: every other neural test renders long enough
+  to clear the warm-up, so nothing exercised the one path that stops after two
+  frames. A probe that fails takes neural rendering out for the session, so it
+  belongs in the gate. Gated and labelled `gpu` like its neighbours.
+
+- **Neural passes and Keep temporal history per pass were inert in the
+  dialog.** Both controls were built, populated and read back correctly, but
+  the `WM_COMMAND` router named only the older control ids - so changing either
+  moved the widget and updated nothing. Caught by extending the neural settings
+  dialog regression test to drive them, which is now also where an off-by-one
+  between the combo index and the pass count would be caught.
+
+- **DLSS SR moved to 310.9.1**, NVIDIA-signed, from 310.8.0. It is the one
+  module in the locked set whose version a neural render can feel: RenoDX
+  detours `nvngx_dlss.dll` to observe the player's DLSS/DLAA create and builds
+  feature 18 after it. Verified on hardware rather than assumed - the add-on
+  still detours the new module, the DLSS/DLAA create still returns success, and
+  feature 18 still evaluates at native 1:1, sixty times, with no warning beyond
+  the startup retry a healthy run always logs.
+
+- **Streamline stays at 2.13.0.0, and DLSS NR stays at 310.8.SF-v2.** NR is
+  already the newest published. Streamline 2.14.1.0 exists but drops
+  `sl.dlss_nr.dll` - the Streamline plugin for the one NGX feature this player
+  exists to drive - and buys nothing back: the add-on runs at `EnableHooks=2`,
+  which leaves Streamline unpatched, and no `sl.*` module appears in any render
+  log. The upgrade would be newer version numbers on files that are never
+  loaded, paid for with the file that would matter if the `EnableHooks=1`
+  fallback path were ever needed. ReShade stays at 6.8.0.2155: it comes from
+  the ReShade installer rather than the runtime mirror, and RenoDX 6.5.3
+  registers against its add-on API 18 as shipped.
+
+- **Neural runtime moved to RenoDX DLSS 5 6.5.3**, three major versions on from
+  the pinned 4.70. It is not a drop-in, and the way it is not a drop-in is
+  silent: 6.x deleted `NREnableUpscaling` and dropped the startup architecture
+  banners, which between them were both halves of the evidence a rendered frame
+  had to satisfy before it counted as neural. Taken as-is, every render would
+  have been rejected as unverified with nothing in the log naming why. Upstream
+  publishes no release notes for any tag between the two, so the contract was
+  re-derived from the add-on's own strings and then confirmed against a real
+  render's log. The proof now reads what the add-on reports building and
+  evaluating - inline NR resources at `(native 1:1)`, an evaluate line ending
+  `[native]` - rather than a settings echo, which is both accurate on 6.x and
+  still true on 4.70, so the next lock move does not break it again.
+
+- **Neural passes, 1 to 4, in Neural settings.** RenoDX 6.x can run the model
+  over a frame more than once. Its own overlay warns games away from that,
+  because each extra pass is another full neural evaluate against a frame
+  budget - but a conversion has no frame budget, so the cost lands on render
+  time, which the pace forecast already measures. Measured over the 72-frame
+  range clip: two passes took 9.81 s against 8.01 s and wrote 932,019 bytes of
+  output against 780,048. It clears the bar the dialog already applies to
+  colour strength and render preset, which stay hidden because they measurably
+  change nothing. **Keep temporal history per pass** sits beside it, enabled,
+  and greys out at a single pass where it has nothing to govern.
+
+- **The neural working resolution is pinned by two keys instead of one.**
+  `NRFollowInputRes=0` with `NRResolutionScale=1` replaces `NREnableUpscaling=0`.
+  Written first as `NRResolutionScale=100` on the reading that the add-on's
+  `%.0f%%` overlay implied a percentage, it came back from the add-on's own
+  config rewrite as `1`, with no warning logged - it had landed on native only
+  because the clamp's destination happened to be the default. The value is a
+  multiplier. A leftover `NREnableUpscaling` is now left alone rather than
+  rewritten, because 6.x treats writing it as a pre-v4 config and re-runs a
+  migration that backs up `ReShade.ini` beside the add-on each time.
+
+- **A startup retry is no longer read as a failed render.** 6.5.3 logs
+  `NR skipped (after-upscale): compute-state restore target incomplete` and
+  `compute-state shadow: ... retrying with backoff` on a healthy run, and
+  answers both a moment later with `injection admitted after 2 incomplete-target
+  decline(s)`. The terminal `NR skipped:` form is still a failure; the
+  parenthesised one is a notice. The failure vocabulary otherwise gained 6.x's
+  new create-exception, pre-SR decline and workset-rejection lines, and kept
+  4.70's so a re-pin stays covered.
+
 - **Seeking, pausing and resuming no longer click.** A seek tore the stream
   down mid-waveform and the next one started mid-waveform, so the endpoint saw
   a step from an arbitrary sample value to zero and back. A step is a

@@ -31,6 +31,17 @@ relicensed by this project.
 
 Source and terms: https://github.com/NVIDIA-RTX/Streamline
 
+Streamline is pinned at 2.13.0.0 rather than the newer 2.14.1.0, and the
+reason is a removal rather than a risk: 2.14.x no longer ships
+`sl.dlss_nr.dll`, the Streamline plugin for the one NGX feature this player
+exists to drive. Nothing is lost by staying: the add-on runs at
+`EnableHooks=2`, which leaves Streamline unpatched, and no `sl.*` module is
+mapped in any render log - the upgrade would be new version numbers on files
+that are never loaded, bought by dropping the one that would matter if the
+`EnableHooks=1` fallback were ever needed. DLSS SR moved to 310.9.1 on its own
+because that module *is* loaded: RenoDX detours it to observe the player's
+DLSS/DLAA create before building feature 18.
+
 The matching package includes the exact NVIDIA-signed Streamline 2.13 files in
 the runtime lock. NVIDIA files remain subject to NVIDIA's applicable terms.
 
@@ -59,7 +70,7 @@ The packaged `dxgi.dll` is ReShade 6.8.0 and is unsigned.
 
 Source and license information: https://github.com/clshortfuse/renodx
 
-The selected `renodx-dlss5.addon64` 4.70 asset comes from the
+The selected `renodx-dlss5.addon64` 6.5.3 asset comes from the
 `RankFTW/rhi-repo` release mirror. It is unsigned and enabled by default on
 every detected NVIDIA RTX GPU. Redistribution permission for the combined
 experimental runtime set remains unresolved.

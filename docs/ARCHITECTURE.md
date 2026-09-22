@@ -800,9 +800,10 @@ so the separately supplied experimental RenoDX/ReShade DLSS 5 add-on can
 intercept real feature creation and evaluation calls. Successful native NGX
 evaluation therefore does not prove that the neural add-on loaded or evaluated.
 
-RenoDX 4.70 can create and evaluate feature 18 inline after observing the
+RenoDX 6.5.3 can create and evaluate feature 18 inline after observing the
 player's DLSS/DLAA contract. Bootstrap explicitly enables its hooks and neural
-uplift while leaving `NREnableUpscaling=0`. The player does not also instantiate
+uplift while holding the neural working resolution at the source's own
+(`NRFollowInputRes=0`, `NRResolutionScale=1`). The player does not also instantiate
 a direct feature-18 bridge: that would duplicate the neural pass and require an
 additional undocumented NGX/caller-shim lifetime beside the existing add-on.
 

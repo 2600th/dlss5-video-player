@@ -35,7 +35,7 @@ than publish an unverified one. Turing and Ampere lack native FP8 tensor
 math, so the same network runs several times slower there; the offline cache
 still completes, and a live session simply buffers when it cannot keep up.
 
-The runtime lock currently selects RenoDX DLSS 5 add-on 4.70. Normal-mode
+The runtime lock currently selects RenoDX DLSS 5 add-on 6.5.3. Normal-mode
 helper bootstrap atomically enforces only these managed values in
 `neural-runtime/ReShade.ini`:
 
@@ -43,12 +43,23 @@ helper bootstrap atomically enforces only these managed values in
 [RenoDX.DLSS5]
 EnableHooks=2
 NeuralUplift=1
-NREnableUpscaling=0
+NRFollowInputRes=0
+NRResolutionScale=1
 ```
 
 `EnableHooks=2` selects RenoDX's raw-NGX-only path. The player calls NGX
 directly and does not use Streamline, so this avoids installing an unnecessary
 Streamline hook.
+
+`NRFollowInputRes=0` with `NRResolutionScale=1` holds the neural pass at the
+source's own resolution. These replace 4.70's single `NREnableUpscaling=0`,
+which 6.x removed when it split the working resolution into a mode and a
+scale. The scale is a multiplier, not a percentage - the add-on's overlay
+merely renders it as a percentage - and writing `100` there is silently
+normalised to `1` with nothing logged. A leftover `NREnableUpscaling` in an
+existing `ReShade.ini` is left alone at whatever value it holds; 6.x ignores
+it, and rewriting a key it classifies as pre-v4 would re-run its config
+migration, which backs the file up beside the add-on every time it fires.
 
 Other RenoDX controls—including preset, style, intensity, automatic mask, and
 guide overrides—are preserved. Safe mode skips the neural helper entirely and

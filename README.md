@@ -93,8 +93,15 @@ Next time, **File > Recent videos** reopens it with the render already done.
   MKV for video. MKV keeps the source audio, subtitles and chapters without
   re-encoding.
 - Optional DLSS Super Resolution on either view, at 1080p, 1440p or 2160p -
-  taken from your monitor by default, or pinned. The render itself stays at
-  source resolution.
+  taken from your monitor by default, or pinned. On playback the render itself
+  stays at source resolution; to bake the larger size into a file, use the
+  export below.
+- Exports with the stages combined. **DLSS > Convert & export > Export with
+  DLSS stages** (`Ctrl+S`) writes one file with Super Resolution, neural
+  rendering and frame generation in any combination you tick. They run in
+  NVIDIA's order - Super Resolution first, the neural model on the upscaled
+  frame, generated frames last - and the panel shows which pass is running,
+  how far along it is and roughly how long is left.
 - Neural settings at `Ctrl+N`. Change one while paused and that frame is
   re-rendered, so you judge on the picture. They are saved with the render and
   are part of its cache identity.
@@ -293,6 +300,7 @@ pinned runtime hashes and a safe-mode escape hatch.
 | Render one frame / four seconds / the marked clip | `F` / `Shift+F` / `Ctrl+R` |
 | Generate frames; cancel a conversion | **DLSS > Generate frames**; `Esc` |
 | Neural settings | `Ctrl+N` |
+| Export with DLSS stages | `Ctrl+S` |
 | Image adjustments | `Ctrl+E` |
 | Volume, mute | Mouse wheel; `M` |
 | Fit or fill; fullscreen | `A`; `F11` |
@@ -486,8 +494,15 @@ screen, so it costs a present rather than a render.
   of a stream before it can start.
 - Depth is estimated from the picture, and so is motion on a card without the
   optical flow engine. Artifacts happen.
-- Export copies the cached 8-bit render. Image adjustments and upscaling are not
-  baked in, and HDR or lost source precision is not restored.
+- **Save converted video** copies the cached 8-bit render as it is: image
+  adjustments and upscaling are not baked in, and HDR or lost source precision
+  is not restored. **Export with DLSS stages** is the one that does bake the
+  larger size in, by rendering again at that size.
+- Super Resolution on its own is not offered in that export. The helper turns
+  the neural add-on on for every job it runs, so a render asked for without the
+  neural pass comes back with it anyway - measurably so: the two files came out
+  byte-for-byte identical. The dialog says as much rather than showing a
+  checkbox that changes nothing.
 - Subtitles stay as separate tracks. No in-player subtitle display, no burn-in,
   no queue, no HDR, no resume of an interrupted render across restarts.
 - YouTube: public, non-DRM videos only, no login, and availability can change.

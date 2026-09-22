@@ -72,10 +72,20 @@ frame identity, update checks, the release API surface, prerender, playback and
 native UI regressions. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
-Nine more are registered under the `gpu` label and need an RTX card with the
+Ten more are registered under the `gpu` label and need an RTX card with the
 neural runtime staged beside the executable: `UpscalingGpuSmoke`,
 `MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `DlssgProbeSmoke`,
-`DlssgEvaluateSmoke` and the four `FrameGenerationSmoke` registrations.
+`DlssgEvaluateSmoke`, the four `FrameGenerationSmoke` registrations and
+`NetworkPreparedRendererSmoke`. That last one is the `--gpu` case set of the
+`PlayerUiRegressionTests` binary rather than a target of its own: it drives the
+prepared network renderer path - the one a YouTube open commits through - which
+nothing else in the suite reaches.
+
+Two of the ten skip on hardware that is working correctly.
+`DlssgEvaluateSmoke` needs three generated frames per source pair, and
+multi-frame generation is Blackwell-only, so every RTX 40 and earlier reports
+it skipped. `FrameGenerationSmoke` needs `external/test-media/dlaa-smoke.mp4`,
+which is fetched by no script; a checkout without it skips rather than failing.
 `ctest -LE "gpu|audio"` is the portable run CI performs; `ctest -L "gpu|audio"`
 runs the hardware set. `AudioClockSmoke` is the `audio` one: it asserts the
 audio clock every video frame's due time is computed from, against a real
@@ -141,9 +151,9 @@ largest download is the 111 MiB neural runtime archive. The lock's
 | Locked file | Public source |
 | --- | --- |
 | `nvngx_dlssnr.dll` | `RankFTW/rhi-repo` release `dlssnr-310.8.SF-v2` |
-| `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.8.0` |
-| `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-4.70` |
-| `sl.*.dll` (8 files) | `RankFTW/rhi-repo` release `streamline-2.13.0.0` |
+| `nvngx_dlss.dll` | `RankFTW/rhi-repo` release `dlss-310.9.1` |
+| `renodx-dlss5.addon64` | `RankFTW/rhi-repo` release `renodx-dlss5-6.5.3` |
+| `sl.*.dll` (8 files) | `RankFTW/rhi-repo` release `streamline-2.13.0.0` (deliberately not 2.14.x - see THIRD_PARTY.md) |
 | `dxgi.dll` | `ReShade64.dll` inside `ReShade_Setup_6.8.0_Addon.exe` from reshade.me; the installer is a ZIP container |
 
 Fetching them for your own build is you obtaining the files from their

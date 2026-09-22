@@ -15,8 +15,9 @@ code audits (correctness, performance, build & release), one duplication sweep.
 **Checkbox state:** `[x]` done, `[~]` partly done, `[ ]` not started, on branch
 `fix/tier1-correctness-and-perf`. The nested `- [ ]` boxes inside a task are
 audited against source as of 2026-09-21, so a `[~]` heading tells you exactly
-which sub-items are left. All **23** tests - 13 portable, 9 `gpu` and 1 `audio`
-- pass at every commit.
+which sub-items are left. All **24** tests - 13 portable, 10 `gpu` and 1
+`audio` - pass at every commit, with two `gpu` skips on Ada hardware that are
+explained in 2.14.
 
 **Measured on this machine** (2560x1440 23.976 fps, plain playback), before
 and after the branch. These are **round one** only; round two's measurements
@@ -61,7 +62,7 @@ One blocker sits directly on this rule and is listed first in Tier 1.
 | --- | --- | --- | --- |
 | [1](#tier-1--now) | Correctness + free wins | 12 | Days |
 | [2](#tier-2--next) | Perf, build, tests | 23 | Weeks |
-| [3](#tier-3--strategic) | Features and positioning | 14 | Months |
+| [3](#tier-3--strategic) | Features and positioning | 15 | Months |
 | [4](#tier-4--parked) | Deliberately not doing | 8 | Never |
 
 **Do not re-suggest:** [What is already strong](#what-is-already-strong).
@@ -501,7 +502,7 @@ Baseline for judging these: 16.68 ms at 59.94 fps, 8.34 ms at 119.88 fps.
 
 ---
 
-### [ ] 2.1 · Four full-frame CPU deep copies per presented pair
+### [~] 2.1 · Four full-frame CPU deep copies per presented pair
 
 🔍 reported · **effort: M** · **gain: 1.8-2.8 ms/pair @1440p, 4.1-6.2 ms @4K**
 
@@ -525,6 +526,25 @@ private copy. Hand out `std::shared_ptr<const VideoFrame>` from
 
 **Start here (lowest risk):** delete copy 2 and have `RecoverUnusableRenderer`
 re-read from the pair.
+
+- [x] **Copies 3 and 4 deleted — half the total, 11 MB/pair at 1440p NV12.**
+      `SynchronizedPlayback::Impl::current` is now
+      `std::shared_ptr<const SynchronizedFramePair>` and
+      `CurrentPairShared()` hands it out, so `RememberRenderedCachedPair`
+      retains the pair by reference count instead of deep-copying both members
+      on every presented frame. `CurrentPair()` keeps its signature and its
+      meaning — a pointer the next read invalidates — so no other caller moved.
+      Cost is one control-block allocation per pair against two full-frame
+      memcpys per presented frame.
+      The two consumers were only ever read on a paused redraw and a view
+      toggle. The one neural frame that does **not** come from a pair — a
+      paused settings preview — keeps its own storage in
+      `m_previewNeuralFrame` and supersedes the pair's neural member while set,
+      which is what overwriting `m_lastNeuralFrame` used to do
+- [ ] Copies 1 and 2 (`m_next=*visible`, `m_lastPlaybackFrame=f`) are coupled:
+      `m_lastPlaybackFrame` can only alias if `m_next` is shared too, and
+      `m_next` is the core of every playback mode, not just the cached pair.
+      That is the larger half of this task and is not started
 
 ---
 
@@ -559,9 +579,13 @@ sub-millisecond, without touching global timer resolution.
       high-resolution waitable timer at 2 ms while playing. **113% → 18% of one
       core.** Note this is *not* the swapchain's frame-latency object the
       original fix proposed — see **2.6**, that route kills neural rendering
-- [ ] Cache `CoveredRanges()` against `m_liveSegments->Revision()` — still
-      recomputed per call at `main.cpp:4884`. Much less pressure now the loop
-      no longer free-runs, but the allocation and `MergeSpans` sort remain
+- [x] `CoveredRanges()` memoised against `revision_` **inside**
+      `NeuralSegmentIndex`, not in `PlayerApp`: `PlayableSpan` and the retained
+      index call it too, so caching at one call site would have missed them.
+      All three mutators already bumped `revision_` under the same mutex. The
+      merge no longer sorts already-sorted data on every call; the result is
+      still returned by value, because a reference to storage that mutex guards
+      would outlive the lock
 - [x] `NeuralCacheManager` construction hoisted out of the tick — it is now
       built only in `RenderRangeOfCurrentSource` (`main.cpp:4815`), once per
       render start, with the reason in-comment
@@ -878,7 +902,11 @@ measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
       session, keyed on `(path, size, mtime, promotionSequence)`. The
       correctness objection in `NeuralCache.h:104` is about *user* content — a
       just-promoted payload is not that.
-- [ ] `FILE_FLAG_SEQUENTIAL_SCAN`, 4 MiB buffer
+- [x] `FILE_FLAG_SEQUENTIAL_SCAN`, 4 MiB buffer — `Sha256File` now reads
+      through `CreateFileW`/`ReadFile` instead of `ifstream`, which was layering
+      its own buffering under a 1 MiB read. The flag matters because this hashes
+      whole media files: without it a multi-GB source is retained in the standby
+      list on the way past
 - [ ] Delete the joined `staging/neural.mkv` copy, or delete the segments after
       the join
 
@@ -894,7 +922,7 @@ measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
 | Capture fence wait is on the **render** thread | `OfflineNeuralRenderer.cpp:2020` | Only the memcpy is offloaded; any GPU hiccup lands on the loop. Move `BeginResolveOldestCapture` into the `DeferredCapture` worker |
 | Recycle pool is 4 buffers against a ~30-frame queue | `:444` vs `:318` | A miss makes `CopyCaptureView`'s `resize` zero-fill a whole frame first — **33 MB memset at 4K.** Size the pool to the queue depth, as the single-file path already does (`:2189`) |
 | First-frame receipt gate polls a log file at 100 ms, up to 2 s, needing 3 stable samples | `:1379` → `:2264` | Seconds on frame 0 of a cold job, re-reading up to 4 MiB with a `LowerAscii` copy each time. Use `ReadDirectoryChangesW` or a tail read from the last offset |
-| `ChildProcess::Wait` polls at 25 ms | `MediaPipeline.cpp:223` | Up to 25 ms per segment publish. `WaitForSingleObject(process, INFINITE)` with the existing deadline as timeout |
+| ~~`ChildProcess::Wait` polls at 25 ms~~ **done** | `MediaPipeline.cpp:223` | Up to 25 ms per segment publish. Now `WaitForMultipleObjects(process, cancelEvent, INFINITE)` with a `std::stop_callback` setting the event — the same pattern already used at `:909`. The 25 ms timeout existed only to look at the stop token; cancellation is now observed by the wait itself, so the token is no less responsive. Keeps the old poll as a fallback if the event cannot be created |
 | Telemetry vectors: 10 `push_back`/frame, no `reserve` | `OfflineNeuralRenderer.cpp:116`, `:1220` | ~7 MB at 100k frames + realloc-and-copy on the render thread |
 | `SelectSegment` returns `NeuralSegment` **by value** per decoded pair | `SynchronizedPlayback.cpp:429` | A `std::filesystem::path` wide-string allocation per frame **under the index mutex**. Return the index or a `string_view` |
 
@@ -1051,6 +1079,16 @@ bound for a paired frame.
 - [x] **beyond the original scope:** drift over 5 s, EOF (the clock never runs
       backwards as the queue drains), `ServiceDeviceChanges` inertness over 200
       ticks, and a stopped player reporting no clock
+- [x] **Corrected 2026-09-21: as landed, this test could not pass anywhere
+      ffmpeg was not already on `PATH`.** It took the helper directory as
+      `argv[1]`, used it to generate the clip, then constructed a default
+      `AudioPlayer` — which finds ffmpeg beside its own module or on `PATH`,
+      and this target stages neither. Every `Start()` returned false with
+      `Audio: ffmpeg.exe not found.` in `AudioClockSmoke.log` and all eight
+      assertions failed on a machine whose audio was fine. `Settings::
+      helperDirectory` existed for exactly this and was never set. Now passes
+      on hardware: start 46 ms, forward seek 53 ms, backward seek 49 ms,
+      **drift 0.027 ms over 5 s**, device-change recovery 45 ms
 
 **What it does not prove** — acoustic sync. It asserts the *clock contract*,
 which every video frame's due time is computed from. Correlating samples
@@ -1066,7 +1104,7 @@ gap that matters most — that the renderer is not silently outputting zeroes.
 
 _As audited:_ `CMakeLists.txt` registered 21 tests, 13 portable and **8
 labelled `gpu`**; CI ran `ctest -LE gpu`, and **no self-hosted or GPU runner
-existed.** _Today it registers **23**: 13 portable, **9 `gpu`**, **1 `audio`**.
+existed.** _Today it registers **24**: 13 portable, **10 `gpu`**, **1 `audio`**.
 The runner still does not exist._
 
 Two modules live almost entirely behind that label:
@@ -1092,6 +1130,40 @@ runner is missing.**
 - [x] `SKIP_RETURN_CODE 125` on every hardware smoke, each opening with a
       no-adapter check. `ctest -L "gpu|audio"` on a GPU-less box now skips
       rather than hard-failing
+- [x] **The gate covered "no adapter" but not "this adapter cannot be asked".**
+      `DlssgEvaluateSmoke` exited 5 on every RTX 40 and earlier: multi-frame
+      generation is Blackwell-only, so `MultiFrameCountMax()` is 1 and the
+      three phase indices it separates are unreachable. Measured here on an
+      RTX 4080 SUPER — the single-frame evaluate above it still runs and still
+      asserts, only the phase table skips. `FrameGenerationSmoke` had the same
+      shape for a different reason: its default clip lives under the gitignored
+      `external/` tree, is fetched by no script and named in no document, so a
+      fresh checkout hard-failed a test whose input cannot be obtained. It now
+      skips on `!exists` only — a file that is present but unreadable still
+      exits 2
+- [x] **`NetworkPreparedRendererSmoke` — nothing in the suite opened a network
+      source.** The prepared-renderer commit path is reached by nothing else,
+      and four defects lived in it at once while 23 tests stayed green: the
+      open did not ask for NV12, the candidate renderer was never told the
+      layout, the geometry check measured every frame at four bytes per pixel,
+      and the guide generator was handed the frame without its layout. The new
+      cases drive the real `PrepareYouTubeMedia`, `CreateRendererCandidate` and
+      `ValidatePreparedFrame` against generated clips and assert the layout
+      each stage settled on — BT.709 limited must reach NV12 end to end, and
+      BT.601 must fall back to BGRA and still validate. Registered as the
+      `--gpu` case set of the existing `PlayerUiRegressionTests` binary rather
+      than a new target, because a second target compiles `main.cpp` again,
+      which is the amplification **2.12** is about.
+      One production change was needed to make it reachable: `NetworkInputOptions`
+      applied `-protocol_whitelist https,tls,tcp` to every `YouTube`-kind open,
+      URL or not, so no local clip could ever be opened through that path. It is
+      now conditioned on the path actually being an `http(s)://` URL — the check
+      `AudioPlayer::StartProcess` has always made on the same option set. A URL
+      gets the identical string it got before
+- [x] `gpu-tests.yml` refused *any* skip, which was right when a skip could
+      only mean a lost adapter. With the two above it would fail on correct
+      hardware, so it now allowlists exactly those two by name and still throws
+      for every other skip — verified both ways against real `ctest` output
 - [x] `docs/BUILDING.md:45` now runs `-LE "gpu|audio"`, matching `:79`;
       `CONTRIBUTING.md:21`/`:24` agree
 - [x] **New coverage, not in the original fix:** `NeuralRangeRenderSmoke`. Every
@@ -1431,6 +1503,44 @@ before extraction and the per-file digest verified after staging, so the copy
 # Tier 3 — Strategic
 
 Features, positioning, and the subsystems that need real design.
+
+---
+
+### [ ] 3.0 · Let the helper render its carrier without the neural add-on
+
+`FEATURE` · ✅ measured 2026-09-22 · **effort: M** · **impact: unlocks one export combination**
+
+The export dialog offers Super Resolution, neural rendering and frame
+generation in any combination — except Super Resolution on its own, which is
+refused with a message saying why.
+
+The refusal is honest rather than lazy. `NeuralRenderRequest::requireNeural`
+looks like it should skip the neural pass, but it only skips the four verdicts
+that run *after* the render. The render itself is neural regardless, for two
+reasons that both live in the helper:
+
+- `NeuralWorkerMain.cpp` calls `ConfigureNeuralAddon(ini, /*enable=*/true)` for
+  every job it runs, so RenoDX is loaded and intercepting whatever happens.
+- `OfflineNeuralRenderer.cpp` refuses to start capture unless feature 18 is
+  armed, and that check is not conditional on anything the request says.
+
+Measured, not assumed: an upscale-only and an upscale-plus-neural export of the
+same clip came back byte-for-byte identical at 9,548,373 bytes.
+`ExportMatrixSmoke` asserts that equality, so whoever fixes this will see the
+assertion fail and know to drop `ExportRefusal::UpscaleNeedsNeural` with it.
+
+**What it needs.** The add-on has to be off for that job, which means passing
+`requireNeural` into `ConfigureNeuralAddon`, gating the pre-capture arming check
+and the priming loop on it, and reporting `verifiedNeuralFrames` and
+`feature18ArmedBeforeCapture` honestly when it is off. The awkward part is that
+ReShade reads its ini when the proxy loads, so flipping the add-on means the
+helper has to relaunch — the code already does that dance when it repairs the
+config, and this would reuse it. A resident helper alternating between neural
+and non-neural jobs would pay a relaunch each time it switches.
+
+**Why it is worth doing.** Plain DLSS Super Resolution on a video, with no
+neural look applied, is a reasonable thing to want, and it is the only one of
+the seven combinations the player cannot produce.
 
 ---
 
