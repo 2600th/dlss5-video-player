@@ -67,21 +67,26 @@ experimental runtime, a source build uses the native playback path.
 
 The thirteen portable suites cover recent history, settings/cache integrity,
 real-media export and cached comparison playback through the real decoders,
-runtime lock and worker protocols, runtime and upscaling policy, range selection,
+runtime lock and worker protocols, runtime, upscaling and export policy, range selection,
 frame identity, update checks, the release API surface, prerender, playback and
 native UI regressions. Every test carries a time limit, and the real-media suite
 reports itself skipped rather than failed when FFmpeg is not staged.
 
-Ten more are registered under the `gpu` label and need an RTX card with the
+Twelve more are registered under the `gpu` label and need an RTX card with the
 neural runtime staged beside the executable: `UpscalingGpuSmoke`,
-`MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `DlssgProbeSmoke`,
-`DlssgEvaluateSmoke`, the four `FrameGenerationSmoke` registrations and
-`NetworkPreparedRendererSmoke`. That last one is the `--gpu` case set of the
-`PlayerUiRegressionTests` binary rather than a target of its own: it drives the
-prepared network renderer path - the one a YouTube open commits through - which
-nothing else in the suite reaches.
+`MediaGpuSmoke`, `NeuralRangeRenderSmoke`, `NeuralPreflightSmoke`,
+`ExportMatrixSmoke`, `DlssgProbeSmoke`, `DlssgEvaluateSmoke`, the four
+`FrameGenerationSmoke` registrations and `NetworkPreparedRendererSmoke`. That
+last one is the `--gpu` case set of the `PlayerUiRegressionTests` binary rather
+than a target of its own: it drives the prepared network renderer path - the one
+a YouTube open commits through - which nothing else in the suite reaches.
+`NeuralPreflightSmoke` is the same arrangement around `NeuralWorkerTests`, and
+it is in the gate because the probe it runs can take neural rendering out for a
+whole session on its own. `ExportMatrixSmoke` renders all seven combinations of
+Super Resolution, neural rendering and frame generation through a 3.5 s 720p30
+clip and checks the geometry, the frame count and the bytes of each.
 
-Two of the ten skip on hardware that is working correctly.
+Two of the twelve skip on hardware that is working correctly.
 `DlssgEvaluateSmoke` needs three generated frames per source pair, and
 multi-frame generation is Blackwell-only, so every RTX 40 and earlier reports
 it skipped. `FrameGenerationSmoke` needs `external/test-media/dlaa-smoke.mp4`,

@@ -81,7 +81,7 @@ predicted rate and asks before starting. Once a session has been running for a
 few seconds the status line reports the rate it is actually achieving whenever
 that falls behind.
 
-**Convert to a file** with the DLSS menu's **Convert & save** submenu:
+**Convert to a file** with the DLSS menu's **Convert & export** submenu:
 `Ctrl+R` converts the marked clip, **Convert whole video** the whole source,
 and **Save converted video** writes the result out. `F` and `Shift+F` still
 render just the current frame or a four-second clip as a quick look. Each
@@ -101,6 +101,15 @@ restarts an active session at the playhead or re-previews the paused frame —
 and never starts a whole-video render. Saving a converted video refuses an
 entry that was rendered with settings you have since changed, and offers to
 convert that range again.
+
+The three feature buttons in the bottom bar each carry their own icon and
+colour, so the bar still tells them apart when it narrows to icons only and the
+labels are gone. A button is grey when the feature is unavailable, plain when it
+is off, highlighted when it is on, and teal while it is working - the same teal
+the timeline uses for rendered coverage, because both mean "this is being made
+right now". Hovering one says what it does and, when it is unavailable, why: a
+source that already fills the panel has nothing to upscale, and the button says
+so instead of only greying out.
 
 The timeline shows both states at once: the marked range is a solid violet block
 between a green In tick and an orange Out tick, played progress is blue, and
@@ -132,14 +141,25 @@ whole view between original and neural. The modes gray out on the original
 view or outside cached playback and are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
-local structure, local tone, skin structure, style and automatic mask, plus the
-motion-vector and depth guide switches. These change
+local structure, local tone, skin structure, style and automatic mask, the
+number of neural passes and whether temporal history carries between them, plus
+the motion-vector and depth guide switches. The controls are grouped under
+**Look**, **Quality and render time** and **Guides sent to the model**, so which
+ones answer the same question is visible before you read their labels. These change
 the render identity: **Apply** restarts an active session at the playhead, or
 re-previews the paused frame, while playback image adjustments remain instant.
-Writing a file is a separate action under **Convert & save**. The guide
+Writing a file is a separate action under **Convert & export**. The guide
 switches also drive the live debug views immediately. Hovering any control shows
 what it does, including which effects were measured on this runtime and what a
 change costs.
+
+**Neural passes** runs the model over each frame more than once, 1 to 4. The
+add-on's own overlay warns games away from it because every extra pass is
+another full neural evaluate against a frame budget - but a conversion has no
+frame budget, so the cost lands on render time, which the pace forecast already
+measures. Measured over a 72-frame range: two passes took 9.81 s against 8.01 s
+and wrote 932,019 bytes against 780,048. **Keep temporal history per pass** sits
+beside it and greys out at a single pass, where it has nothing to govern.
 
 Color strength and the render preset are deliberately not in that dialog. Each
 was measured against the pinned runtime and changes nothing - the add-on echoes
@@ -385,17 +405,62 @@ and to, and where the result will be written, before anything starts.
 The converted file carries the source's audio, subtitle and chapter streams by
 copy. The conversion adds frames without changing the length, so those streams
 still line up with no retime; a source that had audio and came back silent is
-reported as a failure rather than opened. **DLSS > Convert & save > Save
+reported as a failure rather than opened. **DLSS > Convert & export > Save
 converted video** then writes a copy wherever you want one.
+
+## Export with the DLSS stages combined
+
+**DLSS > Convert & export > Export with DLSS stages** (`Ctrl+S`) writes one file
+with any combination of Super Resolution, neural rendering and frame
+generation. Tick the stages you want, pick an output height and a frame rate,
+and the summary line reads back the geometry and frame rate the file will
+actually have before anything starts.
+
+The order is fixed - Super Resolution, then neural rendering on the upscaled
+frame, then frame generation on the result - and the dialog offers no way to
+change it. That is NVIDIA's own arrangement rather than a preference: DLSS 5
+neural rendering runs on the upscaled frame, and DLSS-G consumes the finished
+picture. The first two stages are one pass over the video; frame generation is a
+second pass over what that pass wrote.
+
+Refusals are named rather than generic, and they appear as you tick:
+
+- *Choose at least one stage* - nothing is selected.
+- *Already at or above that height* - the rung does not grow the source, and
+  DLSS will not run an output that does not grow.
+- *This GPU's runtime does not admit that frame rate* - the multiple is beyond
+  what the runtime reports, said before the render rather than minutes into it.
+- *A still image has no successor frame to generate toward.*
+- *Super Resolution on its own is not available yet* - see below.
+- *Open a local video first* - a stream has to finish copying before it can be
+  exported.
+
+**Super Resolution cannot currently be exported without the neural pass.** The
+helper turns the add-on on for every job it runs, so an upscale-only export was
+measurably a neural export wearing a different label: the two came back
+byte-for-byte identical. Rather than show a tick that changes nothing, the
+dialog asks you to tick Neural rendering as well. This is a limitation of how
+the helper is launched, not of DLSS.
+
+While it runs, the panel over the video names the pass, the percentage, frames
+done of total, elapsed time and an ETA once enough frames have gone through for
+one to mean anything. Two passes are reported as two rather than one bar that
+jumps backwards. The export row becomes **Cancel export** while it runs, and so
+does the toolbar pill.
+
+This does not touch the neural cache. A cache entry is a playback carrier keyed
+on the source and its settings; this is a one-off at a size and a rate you
+picked. **Save converted video** is still how you keep the render you are
+already watching.
 
 ## Save a converted video
 
 1. Open a photo, GIF or video and wait for validated cached playback, or
    convert a clip or the whole video first.
-2. Choose **DLSS > Convert & save > Save converted video**.
+2. Choose **DLSS > Convert & export > Save converted video**.
 3. Choose a format and a new filename. Existing files are not overwritten.
-4. Continue playback while saving runs, or use **DLSS > Convert & save > Cancel
-   saving**.
+4. Continue playback while saving runs. While it runs, the export row reads
+   **Cancel export** - one row cancels whichever write is in flight.
 
 After a live session, the item is offered only once a single render covered the
 whole video; while coverage is still a set of regions filled by separate jobs

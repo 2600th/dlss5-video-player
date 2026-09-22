@@ -11,7 +11,7 @@ claimed. Exact packaged binaries are pinned in `packaging/runtime-lock.json` and
 
 Source and terms: https://github.com/NVIDIA/DLSS
 
-The package uses NVIDIA-signed DLSS SR 310.8 (`nvngx_dlss.dll`) and the
+The package uses NVIDIA-signed DLSS SR 310.9.1 (`nvngx_dlss.dll`) and the
 NVIDIA-signed DLSS Frame Generation snippet `nvngx_dlssg.dll` (`310.7.0.0`,
 taken unmodified from the pinned official NVIDIA/DLSS SDK checkout `a291cc7`
 and used by the offline frame-generation conversion pass), together with

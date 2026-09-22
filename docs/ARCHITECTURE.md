@@ -33,6 +33,8 @@ Original + validated neural cache -> synchronized decoded frame pairs
   +-> chosen view -> optional playback SR -> image adjustments -> D3D12 display
   |
   +-> cached neural frames -> PNG/JPEG/GIF or MP4/MKV export
+  |
+  +-> stage export: Super Resolution -> neural -> frame generation -> one file
 ```
 
 Opening media never starts a whole-video render and never waits for a download.
@@ -806,6 +808,52 @@ uplift while holding the neural working resolution at the source's own
 (`NRFollowInputRes=0`, `NRResolutionScale=1`). The player does not also instantiate
 a direct feature-18 bridge: that would duplicate the neural pass and require an
 additional undocumented NGX/caller-shim lifetime beside the existing add-on.
+
+## Stage export
+
+`DLSS > Convert & export > Export with DLSS stages` writes a single file with
+any combination of Super Resolution, neural rendering and frame generation. It
+is separate from the cache: a cache entry is a playback carrier keyed on the
+source and its settings, while this is a one-off at a size and a rate the viewer
+picked, so it publishes nothing and evicts nothing.
+
+The plan is pure policy in `ExportPipeline.h`. `PlanExport` takes the selection,
+the source geometry and frame rate, the runtime's maximum multiplier and whether
+the source is a still, and returns either a plan or one named refusal. Nothing in
+it touches a GPU, a file or a window, so every refusal is covered by
+`PolicyTests` and the dialog's own regression case set drives the controls that
+produce them - including turning stages back off, because a checkbox that only
+latches on is an inert control wearing a hat.
+
+A plan is at most two passes. The first is the neural worker, which carries
+Super Resolution and the neural pass together: `NeuralRenderRequest` takes a
+source size and an output size separately, and `D3D12Renderer::Initialize` has
+always accepted both, so handing it a larger output turns the 1:1 DLAA carrier
+into a true Super Resolution pass. RenoDX's `NRPreUpscale` defaults to 0 -
+neural after the upscale - so the model then runs on the upscaled frame with no
+further plumbing. The second pass is frame generation over the file the first
+one wrote. `ExportStageCount` is what the progress panel divides by.
+
+The order is fixed and the dialog exposes no way to change it. It is NVIDIA's:
+DLSS 5 neural rendering runs on the fully upscaled frame, and Streamline hands
+DLSS-G the final post-processed buffer. The community Neural Upstream mod moves
+the neural pass earlier because doing so is faster, which makes early the
+deviation rather than the reference - and an export has no frame budget to
+defend, so it takes the reference order.
+
+One combination is refused rather than offered. `requireNeural=false` drops the
+four feature-18 verdicts a neural render is held to, but it does not make the
+render non-neural: the helper enables the add-on for every job it launches and
+the pre-capture arming check is ungated. Measured, not assumed - an upscale-only
+and an upscale-plus-neural export of the same clip came back byte-identical at
+9,548,373 bytes each. `ExportRefusal::UpscaleNeedsNeural` says so. Lifting it
+means teaching the helper to render its carrier without the add-on.
+
+`ExportMatrixSmoke` renders all seven combinations through a 3.5 s 720p30 clip
+and checks geometry, frame count and bytes. It earned that last check twice: the
+output size was once plumbed through the request, the IPC, the encoder and the
+byte accounting but not into the renderer's feature create, and a comparison of
+geometry alone stayed green through both that and the upscale-only defect above.
 
 ## Final image adjustments
 

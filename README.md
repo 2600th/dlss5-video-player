@@ -71,7 +71,7 @@ zip-bomb guards:
    something from **File > Game trailers**.
 4. Press `D`. It buffers for a few seconds, then plays rendered.
 5. **Video > Compare** shows before and after as a split, a wipe or a blend.
-6. **DLSS > Convert & save** writes the rendered video to a file.
+6. **DLSS > Convert & export** writes the rendered video to a file.
 
 Next time, **File > Recent videos** reopens it with the render already done.
 

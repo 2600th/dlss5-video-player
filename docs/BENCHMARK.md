@@ -25,6 +25,11 @@ runs in `runs/<clip>__<profile>__<repeat>/`, the report in
 `analysis/report.md`, blind pairs in `blind/pairs/` with a sealed
 `blind/key.json`.
 
+Every measurement on this page was taken against RenoDX 4.70 and DLSS-NR
+310.8.0. The pinned runtime is now RenoDX 6.5.3 with DLSS SR 310.9.1, so the
+numbers here are the last known state rather than the current one; the pages
+below say per section which of them a rerun would be expected to move.
+
 Prerequisites: Python 3.12 with `tools/benchmark/requirements.txt`,
 `external/ffmpeg/bin`, a built `build-upscaling/Release/neural-runtime/`
 (worker plus RenoDX/ReShade runtime), an NVIDIA GPU. Copy `Release/neural-runtime`
@@ -548,7 +553,7 @@ To A/B a guide against the **upscaling** feature rather than neural rendering,
 writes every captured output frame as raw BGRA, so two runs can be compared byte
 for byte. That is how the mask question was settled for DLSS-SR.
 
-## Which neural settings change the image (2026-09-09, same stack)
+## Which neural settings change the image (2026-09-09, RenoDX 4.70)
 
 Measured through the player, not the benchmark driver: with playback paused, each
 control was changed one at a time and the debounced single-frame preview it
@@ -594,6 +599,15 @@ The depth guide only matters while motion vectors are on: with `mv=0`, toggling
 depth changes nothing (0 %), which is what a temporal consumer with no
 reprojection to perform should do. An earlier reading that called depth inert had
 motion vectors already off.
+
+**This table was measured on RenoDX 4.70 and has not been re-run on 6.5.3.** It
+is what keeps colour strength and the render preset out of the settings dialog,
+so it is a live product decision resting on a superseded runtime - and 6.x is a
+three-major-version move that renamed the working-resolution control and changed
+what the add-on reports. Two controls the table does not cover were added with
+6.5.3: `NRPasses` and `NRChainedHistory`, whose effect was measured on render
+time and output size rather than per-control byte deltas. Re-running this table
+is the cheapest way to find out whether the two hidden controls are still inert.
 
 Cost of a change: settings and guides are part of the render identity, so every
 distinct combination is rendered from scratch — 16 cold single-frame previews

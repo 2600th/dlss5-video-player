@@ -26,7 +26,7 @@ Game trailers**. Rendering can also run behind playback: a session collects a
 four-second lead and then plays the rendered frames while the render continues
 ahead of the playhead. Press `D` to turn a session on, or to compare original
 and neural views once a render is cached. Recent history reuses valid downloads
-and renders. **DLSS > Convert & save > Save converted video** writes PNG/JPEG
+and renders. **DLSS > Convert & export > Save converted video** writes PNG/JPEG
 photos, animated GIFs, or MP4/MKV videos. MKV preserves compatible source
 streams. The cache prefers
 `cache/v1` beside the EXE and falls back to LocalAppData when unwritable.
@@ -68,7 +68,10 @@ from different packages. See [runtime setup](docs/DLSS5_SETUP.md).
    Image adjustments are applied during presentation.
 5. **Export.** The validated neural video is stream-copied with available source
    audio, compatible subtitles, attachments, metadata and chapters. Export never
-   overwrites an existing destination.
+   overwrites an existing destination. **Export with DLSS stages** is the other
+   route: it writes one file with any combination of Super Resolution, neural
+   rendering and frame generation, in NVIDIA's own order, without touching the
+   cache.
 
 Neural cache output preserves source resolution. Playback upscaling and image
 adjustments do not change the cache or export. The cache is 8-bit; changing its
@@ -88,9 +91,10 @@ diagnostics are in `neural-runtime/DLSSVideoPlayer.log` and
 `neural-runtime/ReShade.log`. **Advanced > Restart in DLSS SR safe mode** skips
 the neural helper for that launch. See [troubleshooting](docs/TROUBLESHOOTING.md).
 
-The portable CTest suites cover cache/history/settings, export, worker protocols,
-runtime policy, cached comparison playback through the real decoders, and
-native UI regressions; two further GPU smokes run on an RTX card. Real-media
+Thirteen portable CTest suites cover cache/history/settings, export, worker
+protocols, runtime policy, cached comparison playback through the real decoders,
+and native UI regressions; twelve GPU smokes and an audio-clock smoke run on an
+RTX card with an audio endpoint. Real-media
 GPU checks and their limits are recorded per machine and date in the
 repository's [hardware records](https://github.com/2600th/dlss5-video-player/blob/main/README.md#building-and-contributing).
 These checks are not visual-quality benchmarks or proof of compatibility with
