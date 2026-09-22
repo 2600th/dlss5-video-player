@@ -78,7 +78,12 @@ struct SynchronizedPlayback::Impl {
     bool ownsSources{};
     std::optional<Pending> pendingOriginal;
     std::optional<Pending> pendingNeural;
-    std::optional<SynchronizedFramePair> current;
+    // Shared, not optional-by-value: PlayerApp retains the presented pair for
+    // paused redraws and the neural toggle, and copying two full frames out of
+    // it per presented frame was 11 MB of memcpy at 1440p against a 16.7 ms
+    // budget. One small control-block allocation per pair buys both retentions
+    // an alias. const so no holder can mutate a pair another holder is reading.
+    std::shared_ptr<const SynchronizedFramePair> current;
     ComparisonView view{ComparisonView::Original};
     bool opened{};
     bool paused{};
@@ -660,7 +665,7 @@ SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token s
     if(impl_->paused&&!impl_->stepRequested)return SynchronizedReadResult::NotReady;
     SynchronizedFramePair pair;
     const auto result=impl_->live?impl_->BuildLivePair(pair,stop):impl_->BuildPair(pair,stop);
-    if(result==SynchronizedReadResult::PairReady)impl_->current=std::move(pair);
+    if(result==SynchronizedReadResult::PairReady)impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(pair));
     // WaitingForRender produced no frame, so a requested step is still pending.
     if(impl_->stepRequested&&result!=SynchronizedReadResult::NotReady&&
        result!=SynchronizedReadResult::WaitingForRender)impl_->stepRequested=false;
@@ -694,7 +699,7 @@ bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         if(result==SynchronizedReadResult::PairReady){
-            impl_->current=std::move(candidate);impl_->stepRequested=false;return true;
+            impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(candidate));impl_->stepRequested=false;return true;
         }
         // Container/audio duration may round past the last video PTS. At the
         // tail only, retry one frame earlier instead of unloading a valid pair.
@@ -746,7 +751,7 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
     for(;;){
         const auto result=impl_->BuildLivePair(candidate,stop);
         if(result==SynchronizedReadResult::PairReady){
-            impl_->current=std::move(candidate);impl_->stepRequested=false;
+            impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(candidate));impl_->stepRequested=false;
             impl_->fault=Impl::Fault{};
             return true;
         }
@@ -777,7 +782,9 @@ const VideoFrame* SynchronizedPlayback::VisibleFrame()const
     return impl_->view==ComparisonView::Neural?&impl_->current->neural:&impl_->current->original;
 }
 const SynchronizedFramePair* SynchronizedPlayback::CurrentPair()const
-{return impl_->current?&*impl_->current:nullptr;}
+{return impl_->current.get();}
+std::shared_ptr<const SynchronizedFramePair> SynchronizedPlayback::CurrentPairShared()const
+{return impl_->current;}
 void SynchronizedPlayback::SetPaused(bool paused){impl_->paused=paused;if(!paused)impl_->stepRequested=false;}
 bool SynchronizedPlayback::Paused()const{return impl_->paused;}
 bool SynchronizedPlayback::Step(){if(!impl_->opened||!impl_->paused)return false;impl_->stepRequested=true;return true;}

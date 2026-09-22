@@ -254,14 +254,26 @@ public:
     // Every rendered region, sorted and joined where they touch. This is the
     // whole answer to "what is rendered": a session that has been retargeted
     // holds several, and the holes between them are what is left to do.
+    // Memoised against revision_, which every one of the three mutators bumps
+    // under this same mutex. This was rebuilt and re-sorted from all segments on
+    // every call, several times per tick, under the lock the metadata reader
+    // needs to append - and the input is already in order, so MergeSpans was
+    // sorting sorted data. A five-minute live session at 2 s/segment holds about
+    // 150 of them. The result is still returned by value: handing out a
+    // reference to storage this mutex guards would outlive the lock.
     std::vector<CoverageSpan> CoveredRanges() const
     {
         const std::lock_guard lock(mutex_);
-        std::vector<CoverageSpan> spans;
-        spans.reserve(segments_.size());
-        for (const NeuralSegment& segment : segments_)
-            spans.push_back({segment.firstTimestamp100ns, segment.end100ns});
-        return MergeSpans(std::move(spans));
+        if (coverageRevision_ != revision_ || !coverageValid_) {
+            std::vector<CoverageSpan> spans;
+            spans.reserve(segments_.size());
+            for (const NeuralSegment& segment : segments_)
+                spans.push_back({segment.firstTimestamp100ns, segment.end100ns});
+            coverage_ = MergeSpans(std::move(spans));
+            coverageRevision_ = revision_;
+            coverageValid_ = true;
+        }
+        return coverage_;
     }
 
     // The coverage playback can reach from here without crossing a hole. A
@@ -298,6 +310,12 @@ private:
     std::vector<NeuralSegment> segments_;
     uint64_t totalFrames_{};
     uint64_t revision_{};
+    // Guarded by mutex_ like everything else here; mutable because CoveredRanges
+    // is const and is where the memo is filled. coverageValid_ distinguishes
+    // "never computed" from "computed at revision 0", which an empty index is.
+    mutable std::vector<CoverageSpan> coverage_;
+    mutable uint64_t coverageRevision_{};
+    mutable bool coverageValid_{};
     std::optional<std::chrono::steady_clock::time_point> paceStart_;
     std::chrono::steady_clock::time_point paceLatest_{};
     uint64_t paceBaseFrames_{};

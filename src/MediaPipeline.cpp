@@ -218,17 +218,44 @@ struct ChildProcess {
     {
         cancelled = false;
         if (!process) return static_cast<DWORD>(-1);
-        for (;;) {
-            const DWORD wait = WaitForSingleObject(process, 25);
-            if (wait == WAIT_OBJECT_0) break;
-            if (wait != WAIT_TIMEOUT) return static_cast<DWORD>(-1);
-            if (stop.stop_requested()) {
+        // Blocked, not polled. The 25 ms timeout existed only so the loop could
+        // look at the stop token, and it cost up to 25 ms on every segment
+        // publish - latency that lands directly in the live session's buffer
+        // budget, where a segment becoming visible late is a frame the playhead
+        // does not have. Cancellation arrives as an event this same wait
+        // observes, so the token stays exactly as responsive as it was.
+        const HANDLE cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (cancelEvent) {
+            // Fires immediately if stop was already requested before this was
+            // constructed, which is the case the old loop caught on its first
+            // timeout.
+            std::stop_callback wake(stop, [cancelEvent] { SetEvent(cancelEvent); });
+            const HANDLE waited[2] = { process, cancelEvent };
+            const DWORD wait = WaitForMultipleObjects(2, waited, FALSE, INFINITE);
+            if (wait == WAIT_OBJECT_0 + 1) {
                 cancelled = true;
                 if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
                 WaitForSingleObject(process, 2000);
-                break;
+            } else if (wait != WAIT_OBJECT_0) {
+                CloseHandle(cancelEvent);
+                return static_cast<DWORD>(-1);
+            }
+        } else {
+            // An event could not be created: keep the original poll rather than
+            // fail a publish over it.
+            for (;;) {
+                const DWORD wait = WaitForSingleObject(process, 25);
+                if (wait == WAIT_OBJECT_0) break;
+                if (wait != WAIT_TIMEOUT) return static_cast<DWORD>(-1);
+                if (stop.stop_requested()) {
+                    cancelled = true;
+                    if (job) TerminateJobObject(job, 1); else TerminateProcess(process, 1);
+                    WaitForSingleObject(process, 2000);
+                    break;
+                }
             }
         }
+        if (cancelEvent) CloseHandle(cancelEvent);
         DWORD exitCode = static_cast<DWORD>(-1);
         GetExitCodeProcess(process, &exitCode);
         CloseHandle(process); process = nullptr;

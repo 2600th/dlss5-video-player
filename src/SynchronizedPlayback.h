@@ -114,6 +114,11 @@ public:
     ComparisonView View() const;
     const VideoFrame* VisibleFrame() const;
     const SynchronizedFramePair* CurrentPair() const;
+    // The same pair, for a caller that needs it to OUTLIVE the next read.
+    // CurrentPair()'s pointer is invalidated by ReadNextAvailable; this is not,
+    // which is what lets PlayerApp retain the presented pair without copying
+    // two full frames out of it on every presented frame.
+    std::shared_ptr<const SynchronizedFramePair> CurrentPairShared() const;
     void SetPaused(bool paused);
     bool Paused() const;
     bool Step();

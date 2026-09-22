@@ -523,19 +523,32 @@ std::optional<std::string> Sha256File(const std::filesystem::path& path, std::st
 {
     std::error_code error;
     if (!std::filesystem::is_regular_file(path, error) || error) return std::nullopt;
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) return std::nullopt;
+    // Read through the OS rather than ifstream's own buffering, with
+    // FILE_FLAG_SEQUENTIAL_SCAN so the cache manager trims behind us instead of
+    // retaining a multi-GB source in the standby list. This hashes whole media
+    // files - the code's own measurements are 40-80 ms on a 60 MB render and
+    // seconds on a multi-GB source - so the read pattern is the cost, and
+    // ifstream was layering a second copy under a 1 MiB buffer to do it.
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return std::nullopt;
     Sha256Hasher hasher;
-    std::vector<uint8_t> buffer(1024 * 1024);
-    while (input) {
-        if (stop.stop_requested()) return std::nullopt;
-        input.read(reinterpret_cast<char*>(buffer.data()),
-                   static_cast<std::streamsize>(buffer.size()));
-        const auto count = input.gcount();
-        if (count > 0 && !hasher.Update(std::span{buffer.data(), static_cast<size_t>(count)}))
+    std::vector<uint8_t> buffer(4 * 1024 * 1024);
+    for (;;) {
+        if (stop.stop_requested()) { CloseHandle(file); return std::nullopt; }
+        DWORD read = 0;
+        if (!ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) {
+            CloseHandle(file);
             return std::nullopt;
+        }
+        if (read == 0) break;
+        if (!hasher.Update(std::span{buffer.data(), static_cast<size_t>(read)})) {
+            CloseHandle(file);
+            return std::nullopt;
+        }
     }
-    if (!input.eof()) return std::nullopt;
+    CloseHandle(file);
     return hasher.Finish();
 }
 

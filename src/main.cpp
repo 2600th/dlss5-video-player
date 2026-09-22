@@ -2675,7 +2675,15 @@ private:
         // interval instead; see ReportPlaybackHealth.
         return true;
     }
-    void RememberRenderedCachedPair(){if(!m_cachedPlayback)return;if(const auto* pair=m_synchronizedPlayback.CurrentPair()){m_lastOriginalFrame=pair->original;m_lastNeuralFrame=pair->neural;m_havePresentedPair=true;}}
+    // Retains the presented pair by reference count. A newly presented pair
+    // supersedes a paused settings preview, which is what overwriting
+    // m_lastNeuralFrame used to do.
+    void RememberRenderedCachedPair(){if(!m_cachedPlayback)return;if(auto pair=m_synchronizedPlayback.CurrentPairShared()){m_lastPair=std::move(pair);m_previewNeuralValid=false;m_havePresentedPair=true;}}
+    // Null until a pair has been presented; every caller already gates on
+    // m_havePresentedPair or checks for null.
+    const VideoFrame* LastOriginalFrame()const{return m_lastPair?&m_lastPair->original:nullptr;}
+    const VideoFrame* LastNeuralFrame()const{return m_previewNeuralValid?&m_previewNeuralFrame:(m_lastPair?&m_lastPair->neural:nullptr);}
+    void ForgetRenderedCachedPair(){m_lastPair.reset();m_previewNeuralValid=false;m_previewNeuralFrame=VideoFrame{};}
     NetworkReadAction ApplyNetworkRead(VideoReadResult result,NetworkReadPosition position){
         const NetworkReadDecision decision=m_networkReadState.Resolve(result,position);
         switch(decision.action){
@@ -2997,7 +3005,7 @@ private:
     void ApplyComparison(bool refreshPaused=true){
         if(m_renderer){
             m_renderer->SetComparison(EffectiveComparison());
-            if(refreshPaused&&!m_playing&&!m_seeking){if(m_havePresentedPair)UploadComparisonReference(m_lastOriginalFrame);if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+            if(refreshPaused&&!m_playing&&!m_seeking){if(m_havePresentedPair){if(const VideoFrame* original=LastOriginalFrame())UploadComparisonReference(*original);}if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
         }
         SyncFeatureMenuState();
     }
@@ -3684,7 +3692,7 @@ private:
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
         m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
-        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
+        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -5188,7 +5196,7 @@ private:
         CancelNeuralJob(false);
         if(attached){
             m_haveNext=false;m_next=VideoFrame{};
-            m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
+            m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;ForgetRenderedCachedPair();m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
             if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         }
         ReleaseLiveSession(true);
@@ -5391,7 +5399,7 @@ private:
             if(preview.Open(completion.neuralPath.wstring(),MediaSourceKind::LocalFile)&&preview.ReadNext(frame)){
                 frame.timestamp100ns=m_previewRange.start100ns;
                 m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
-                if(RenderVideoFrame(frame,true)){m_lastNeuralFrame=frame;m_previewShown=true;LOG("Neural settings preview presented for the paused frame.");}
+                if(RenderVideoFrame(frame,true)){m_previewNeuralFrame=frame;m_previewNeuralValid=true;m_previewShown=true;LOG("Neural settings preview presented for the paused frame.");}
                 m_guideReset=false;m_dlssReset=false;
             }else LOG("Neural settings preview could not decode its rendered frame.");
             preview.Close();
@@ -5404,7 +5412,7 @@ private:
     void DetachLivePlayback(){
         if(!m_liveAttached)return;
         m_liveAttached=false;m_haveNext=false;m_next=VideoFrame{};
-        m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
+        m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;ForgetRenderedCachedPair();m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
     }
     // Wall clock since the user last moved the playhead. Never having seeked
@@ -6416,7 +6424,7 @@ private:
         if(m_liveSession){CancelNeuralJob(false);ReleaseLiveSession(true);}
         m_synchronizedPlayback.Close();
         m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;
-        m_lastOriginalFrame={};m_lastNeuralFrame={};m_cachedRange={};m_cachedReceiptPath.clear();
+        ForgetRenderedCachedPair();m_cachedRange={};m_cachedReceiptPath.clear();
         m_cachedSettings={};m_cachedGuides={};m_neuralPath.clear();m_markers={};
         const std::wstring source=std::move(completion.result.mediaUrl),audioSource=std::move(completion.result.audioUrl),pageUrl=std::move(completion.pageUrl),title=std::move(completion.displayTitle);const bool shouldPlay=completion.commitKind==NetworkCommitKind::InitialOpen?true:completion.resumeAfterSeek;HWND oldRenderWindow=nullptr;D3D12RendererOwner oldRenderer;std::unique_ptr<AudioPlayer> oldNetworkAudio;
         const bool viewportWasVisible=IsWindowVisible(m_viewport)!=FALSE;
@@ -6806,7 +6814,12 @@ private:
         // entry it writes is what the toggle then switches between.
         if(!m_cachedPlayback&&m_decoder.IsStillImage()){PreviewCurrentFrame();return;}
         if(!m_cachedPlayback){StartLiveNeuralSession();return;}
-        m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;if(m_renderer)m_renderer->SetComparison(EffectiveComparison());const VideoFrame* presented=next==ComparisonView::Neural?&m_lastNeuralFrame:&m_lastOriginalFrame;m_guides.Reset();m_guideReset=true;m_dlssReset=true;RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();
+        m_neuralRequested=!m_neuralRequested;const ComparisonView next=m_neuralRequested?ComparisonView::Neural:ComparisonView::Original;if(!m_synchronizedPlayback.SetView(next)){m_neuralRequested=!m_neuralRequested;return;}m_comparisonView=next;if(m_renderer)m_renderer->SetComparison(EffectiveComparison());const VideoFrame* presented=next==ComparisonView::Neural?LastNeuralFrame():LastOriginalFrame();m_guides.Reset();m_guideReset=true;m_dlssReset=true;
+        // Null only before any pair has been presented. The value members this
+        // replaced were never null, so this used to render a default-constructed
+        // frame - an empty buffer the renderer rejected. Skip the render it would
+        // have failed anyway and keep every state update that followed it.
+        if(presented)RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();
     }
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
@@ -7122,7 +7135,13 @@ case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEI
     // Shared with the job thread by value, never through `this`: the neural
     // worker deliberately captures nothing owned by the window.
     std::shared_ptr<SharedSourceDigest> m_sourceDigestMemo=std::make_shared<SharedSourceDigest>();
-    NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;VideoFrame m_lastOriginalFrame,m_lastNeuralFrame;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
+    NeuralPlaybackLifecycle m_neuralLifecycle;NeuralRenderProgress m_neuralProgress;CompletionRegistry<NeuralProgressMessage>m_neuralProgressMessages;CompletionRegistry<NeuralJobCompletion>m_neuralCompletions;std::jthread m_neuralWorker;SynchronizedPlayback m_synchronizedPlayback;ComparisonView m_comparisonView=ComparisonView::Original;bool m_cachedPlayback=false,m_havePresentedPair=false;uint64_t m_cachedPresentedFrames=0;// The presented pair is ALIASED, not copied: RememberRenderedCachedPair ran on
+    // every presented frame and took a deep copy of both members - 11 MB per pair
+    // at 1440p NV12 against a 16.7 ms budget - for two consumers that only ever
+    // read on a paused redraw or a view toggle. m_previewNeuralFrame is the one
+    // neural frame that does NOT come from a pair (a paused settings preview), so
+    // it keeps its own storage and supersedes the pair's neural member while set.
+    std::shared_ptr<const SynchronizedFramePair> m_lastPair;VideoFrame m_previewNeuralFrame;bool m_previewNeuralValid=false;RECT m_neuralCancelBounds{};uint32_t m_neuralSourceWidth=0,m_neuralSourceHeight=0;
     // Progress-watchdog state: the last progress the job reported and when it
     // moved, so a phase that stops reporting can be told from a slow one.
     Clock::time_point m_neuralProgressAt{};NeuralRenderPhase m_watchedPhase{};uint64_t m_watchedFrames=0,m_watchedBytes=0;
