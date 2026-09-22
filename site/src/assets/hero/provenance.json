@@ -1,13 +1,13 @@
 ﻿{
-    "psnrBetweenCrops":  30.69,
-    "crop":  "x=380 y=100 w=920 h=518 in the 1442x932 capture",
+    "psnrBetweenCrops":  31.72,
+    "crop":  "x=0 y=144 w=1920 h=1080 in the 2560x1440 frame",
     "generatedBy":  "site/tools/make-hero-crops.ps1",
     "operations":  "crop only; no scaling, colour adjustment or sharpening",
     "provenance":  "docs/screenshots/README.md",
-    "cropBoxChosenBy":  "mean absolute difference between the two captures averaged into a 12x7 grid over the video area",
+    "cropBoxChosenBy":  "the active (non-letterbox) picture, with the face at the page seam",
     "sources":  [
-                    "docs/screenshots/current/godfather-original.jpg",
-                    "docs/screenshots/current/godfather-neural.jpg"
+                    "docs/screenshots/current/gta6-lucia-original.jpg",
+                    "docs/screenshots/current/gta6-lucia-neural.jpg"
                 ],
-    "note":  "Frames of The Godfather, captured in the player. See docs/screenshots/README.md for full provenance."
+    "note":  "Grand Theft Auto VI Trailer 2, source frame 1940, and the same frame from the v0.25.0 player render. See docs/screenshots/README.md."
 }

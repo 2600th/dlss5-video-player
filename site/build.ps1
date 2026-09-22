@@ -276,7 +276,7 @@ foreach ($rel in $mediaFiles) {
 
 if ($SkipMedia) {
     # test.ps1 asserts every local reference resolves; a placeholder keeps that
-    # check honest without copying 5.3 MB on every run.
+    # check honest without copying 7.2 MB on every run.
     Write-TextFile -Path (Join-Path $mediaOut 'neural-comparison-demo.mp4') -Text ''
 }
 

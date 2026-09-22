@@ -16,14 +16,14 @@
 <meta property="og:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
 <meta property="og:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame. Free and open source, for Windows.">
 <meta property="og:url" content="{{SITE_URL}}">
-<meta property="og:image" content="{{SITE_URL}}assets/hero/hero-neural.jpg">
-<meta property="og:image:width" content="920">
-<meta property="og:image:height" content="518">
-<meta property="og:image:alt" content="One frame of The Godfather split down the face: the original on the left, the DLSS 5 neural render on the right.">
+<meta property="og:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
 <meta name="twitter:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame.">
-<meta name="twitter:image" content="{{SITE_URL}}assets/hero/hero-neural.jpg">
+<meta name="twitter:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
 
 <link rel="icon" href="assets/favicon.ico" sizes="any">
 <link rel="preload" as="font" type="font/woff2" href="assets/fonts/archivo-latin.woff2" crossorigin>
@@ -53,7 +53,7 @@
       "releaseNotes": "{{REPO_URL}}/blob/main/CHANGELOG.md",
       "license": "https://opensource.org/licenses/MIT",
       "isAccessibleForFree": true,
-      "image": "{{SITE_URL}}assets/hero/hero-neural.jpg",
+      "image": "{{SITE_URL}}assets/hero/social-card.jpg",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
       "featureList": [
         "Neural rendering while playback continues",
@@ -131,10 +131,10 @@
          below it on a phone, without either overlapping the other. -->
     <div class="compare__frame">
       <img class="compare__plate compare__plate--neural" src="assets/hero/hero-neural.jpg"
-           width="920" height="518" alt="One frame of The Godfather rendered through the DLSS 5 neural renderer."
+           width="1920" height="1080" alt="One frame of Grand Theft Auto VI Trailer 2 rendered through the DLSS 5 neural renderer."
            fetchpriority="high" decoding="async">
       <img class="compare__plate compare__plate--original" src="assets/hero/hero-original.jpg"
-           width="920" height="518" alt="The same frame with neural rendering switched off."
+           width="1920" height="1080" alt="The same frame as the source file decodes it."
            fetchpriority="high" decoding="async">
 
       <span class="compare__tag compare__tag--left" aria-hidden="true">Original</span>
@@ -150,8 +150,8 @@
     </div>
 
     <figcaption class="compare__caption" id="compare-caption">
-      <span class="compare__caption-line">The Godfather 50th Anniversary Trailer · Paramount Pictures</span>
-      <span class="compare__caption-data">2560×1440 source · paused at 73.98&nbsp;s · RTX 5090 · captured on v0.21.0 · crop 920×518 at 380,100 · one frame, only the view switched</span>
+      <span class="compare__caption-line">Grand Theft Auto VI Trailer 2 · Rockstar Games</span>
+      <span class="compare__caption-data">2560×1440 source · frame 1940 (64.67&nbsp;s) · RTX 4080 SUPER · rendered by v0.25.0 · native 1920×1080 crop at 0,144 · same pixels both sides</span>
     </figcaption>
   </figure>
 
@@ -182,21 +182,20 @@
   <div class="section__head">
     <h2 class="section__title">What the renderer actually changed</h2>
     <p class="section__note">
-      Both frames above come from one paused moment in a single live session:
-      the clip was rendered once, then the view was switched with
-      <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>D</kbd> without seeking. Nothing was
-      retouched, sharpened or colour-corrected. Measured across the player's
-      video area, the two captures differ by 29.8&nbsp;dB PSNR — the renderer is
-      rebuilding detail across the face, not applying a filter over the whole
-      picture.
+      Both plates above are one frame: on the left as the source file decodes
+      it, on the right the same frame out of the render the player wrote for
+      that file, cropped identically. Nothing was retouched, sharpened or
+      colour-corrected. The two differ by 31.7&nbsp;dB PSNR — the renderer is
+      rebuilding skin, hair and light across the face, not laying a filter over
+      the whole picture.
     </p>
   </div>
 
   <div class="readout">
-    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 23.976&nbsp;fps · 120.119&nbsp;s · 2,880 frames</span></p>
-    <p class="readout__row"><span class="readout__k">Session</span><span class="readout__v">2,875 of 2,875 frames verified · failure none · lock ok</span></p>
-    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 5090 · driver 616.64 · captured on player v0.21.0</span></p>
-    <p class="readout__row"><span class="readout__k">Capture</span><span class="readout__v">1442×932 window · JPEG q95, no chroma subsampling</span></p>
+    <p class="readout__row"><span class="readout__k">Source</span><span class="readout__v">2560×1440 VP9 · 30&nbsp;fps · 166.733&nbsp;s · 5,002 frames</span></p>
+    <p class="readout__row"><span class="readout__k">Session</span><span class="readout__v">4,948 of 4,948 frames verified, from 1.80&nbsp;s · failure none · lock ok</span></p>
+    <p class="readout__row"><span class="readout__k">Machine</span><span class="readout__v">RTX 4080 SUPER · driver 610.47 · player v0.25.0 · RenoDX 6.5.3 · DLSS-NR 310.8.0</span></p>
+    <p class="readout__row"><span class="readout__k">Settings</span><span class="readout__v">Intensity, Local tone and Local structure 2.0 (defaults 1.0) · upscaling off</span></p>
   </div>
 </section>
 
@@ -215,9 +214,9 @@
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/neural-playback.jpg" width="1442" height="932" loading="lazy" decoding="async"
-           alt="The player during playback with neural rendering attached, the status line reporting buffered seconds and frame rate.">
-      <figcaption>Grand Theft Auto VI, paused at 13.17&nbsp;s with the render attached<span class="beat__tick">2560×1440 source · 780 frames · session verified 702/702 · failure none</span></figcaption>
+      <img src="media/neural-playback.jpg" width="1440" height="930" loading="lazy" decoding="async"
+           alt="The player paused on Grand Theft Auto VI with neural rendering on, the status line reporting the live render running ahead.">
+      <figcaption>Grand Theft Auto VI, paused at 1:04 in a live session<span class="beat__tick">neural rendering from here · 22.6&nbsp;s buffered · v0.25.0 on an RTX 4080 SUPER</span></figcaption>
     </figure>
   </article>
 
@@ -232,9 +231,9 @@
       </p>
     </div>
     <figure class="beat__figure">
-      <img src="media/original-comparison.jpg" width="1442" height="932" loading="lazy" decoding="async"
+      <img src="media/original-comparison.jpg" width="1440" height="930" loading="lazy" decoding="async"
            alt="The same paused frame with neural rendering switched off, for comparison.">
-      <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1442×932 window · JPEG q95, no chroma subsampling</span></figcaption>
+      <figcaption>The same frame, Neural Rendering off<span class="beat__tick">no seek between the two captures · 1440×930 window · JPEG q95, no chroma subsampling</span></figcaption>
     </figure>
   </article>
 
@@ -250,7 +249,7 @@
     <figure class="beat__figure">
       <img src="media/neural-strength.jpg" width="1442" height="932" loading="lazy" decoding="async"
            alt="The image adjustments window open over a frame, showing the Neural strength dial.">
-      <figcaption>Neural strength, at its 1.00 default<span class="beat__tick">image adjustments over the same paused frame · captured on v0.21.0</span></figcaption>
+      <figcaption>Neural strength, at its 1.00 default<span class="beat__tick">image adjustments over a paused frame · captured on v0.21.0</span></figcaption>
     </figure>
   </article>
 
@@ -258,10 +257,10 @@
     <div class="beat__text">
       <h3 class="beat__title">Come back and it is still there</h3>
       <p>
-        Every render stays on disk until you clear it. Reopen a film weeks
-        later and its render is still attached, reused whenever the source, the
-        runtime and the neural settings all still match — so what you reopen
-        is what you rendered.
+        Renders stay on disk until you clear them or the drive runs low. Reopen
+        a film weeks later and a render of the whole film is still attached,
+        reused whenever the source, the runtime and the neural settings all
+        still match — so what you reopen is what you rendered.
       </p>
     </div>
     <figure class="beat__figure">
@@ -318,17 +317,17 @@
 
 <!-- ============================== demo ============================== -->
 <section class="section" id="demo">
-  <h2 class="section__title">Twenty-two seconds of it running</h2>
+  <h2 class="section__title">Twenty seconds of it running</h2>
   <p class="section__note">
-    Two live 1440p sessions recorded as they ran: each film paused and magnified
-    2× in the player, split down the face, then playback with the render running
-    ahead. No sound.
+    The Matrix and Grand Theft Auto VI, each source against the player's own
+    render of it: paused frames wiped across the face, then playback with the
+    divider held still. Same frames, same crop on both sides. No sound.
   </p>
 
   <div class="demo" data-video="media/neural-comparison-demo.mp4">
-    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1438" height="930"
+    <img class="demo__poster" src="assets/demo/demo-poster.jpg" width="1920" height="1080"
          loading="lazy" decoding="async"
-         alt="The player during playback with neural rendering attached, its status line reporting a live render of Grand Theft Auto VI.">
+         alt="A paused frame of The Matrix split down Trinity's face: the original on the left, the DLSS 5 neural render on the right.">
     <button class="demo__play" type="button">
       <!-- The backing is a plate behind the label, not a wash over the frame:
            this section's job is to show image quality, so the footage keeps
@@ -339,14 +338,14 @@
             <path d="M8 5.5v13l11-6.5z" stroke-linejoin="round"></path>
           </svg>
         </span>
-        <span class="demo__play-label">Play the 22-second demonstration</span>
-        <span class="demo__play-meta">5.3 MB · loads only when you ask</span>
+        <span class="demo__play-label">Play the 20-second demonstration</span>
+        <span class="demo__play-meta">7.2 MB · loads only when you ask</span>
       </span>
     </button>
   </div>
   <p class="demo__credit">
-    Poster: frame 460 of the video, cropped to the player window. Grand Theft
-    Auto VI — Rockstar Games, via Netflix's <i>Now Playing</i>.
+    Poster: frame 110 of the video. The Matrix — Warner Bros.; Grand Theft
+    Auto VI — Rockstar Games.
   </p>
 </section>
 
@@ -479,7 +478,7 @@
   <div class="footer__base">
     <p>
       MIT licensed. Not affiliated with, endorsed by, or a product of NVIDIA
-      Corporation. Footage is credited to Paramount Pictures and Rockstar Games
+      Corporation. Footage is credited to Warner Bros. and Rockstar Games
       and is shown to document the software; its inclusion is not an
       endorsement and the source licence does not relicense it.
     </p>
