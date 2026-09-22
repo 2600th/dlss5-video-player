@@ -445,10 +445,25 @@ ParsedUpdate UpdateExactIniKey(
     return {false, {}, std::move(content)};
 }
 
+// Deliberately narrow: the hook mode, the neural pass itself, and the working
+// resolution. Everything else belongs to the user.
+//
+// The resolution pair replaces RenoDX 4.70's single NREnableUpscaling=0. 6.x
+// removed that key and split the question in two - whether NR tracks a host
+// render resolution, and what it scales by - so "native 1:1" is now both of
+// them. The old key is NOT also written: 6.x migrates configs it recognises as
+// pre-v4 and backs the file up beside the add-on when it does, and a key this
+// player re-wrote on every launch would be a migration on every launch.
 constexpr std::pair<std::string_view, std::string_view> kManagedNeuralSettings[]{
     {"EnableHooks", "2"},
     {"NeuralUplift", "1"},
-    {"NREnableUpscaling", "0"},
+    {"NRFollowInputRes", "0"},
+    // A multiplier, not a percentage: 1 is native, and the add-on's overlay
+    // merely RENDERS it as "%.0f%%". Written as 100 first, this came back from
+    // the add-on's own config rewrite as 1 with no warning logged - it landed
+    // on native only because the clamp's destination happened to be the
+    // default. A silent normalisation is not a contract; 1 is.
+    {"NRResolutionScale", "1"},
 };
 
 bool ValidOverride(const NeuralAddonOverride& entry)
@@ -470,11 +485,12 @@ ParsedUpdate ParseAndUpdateNeural(std::string_view ini, bool enable,
 
     const bool addonEnabled = updated.addonEnabled;
     // RenoDX's persisted controls are documented and exercised by the
-    // MIT-licensed DLSS5-Feeder project. Keep the managed list deliberately
-    // narrow: use the raw-NGX-only hook mode, turn the neural pass on, keep
-    // neural upscaling off, and preserve every user-owned style/intensity/guide
-    // setting. This player does not use Streamline, so mode 2 avoids an
-    // unnecessary Streamline hook.
+    // MIT-licensed DLSS5-Feeder project, and confirmed against the add-on's own
+    // overlay strings for the pinned build. Keep the managed list deliberately
+    // narrow: use the raw-NGX-only hook mode, turn the neural pass on, hold the
+    // working resolution at native 1:1, and preserve every user-owned
+    // style/intensity/guide setting. This player does not use Streamline, so
+    // mode 2 avoids an unnecessary Streamline hook.
     for (const auto& [key, value] : kManagedNeuralSettings) {
         updated = UpdateExactIniKey(updated.content, kNeuralSettingsSection, key, value);
         if (updated.malformed) return updated;

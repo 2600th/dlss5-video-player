@@ -4817,7 +4817,12 @@ void disabled_addons_insertion_uses_target_section_line_ending_test()
     CHECK_EQ(std::string(expected), UpdateDisabledAddonsIni(input, kNeuralAddon, true));
 }
 
-void neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test()
+// NREnableUpscaling is a RenoDX 4.70 key that 6.x deleted, so it is no longer
+// managed - and a leftover copy in a user's ReShade.ini is left exactly where
+// it is, at exactly the value they had. The two keys that replaced it are
+// appended at the end of the section, which is where UpdateExactIniKey puts a
+// key the section does not already carry.
+void neural_addon_runtime_settings_enable_neural_and_hold_native_resolution_test()
 {
     constexpr std::string_view input =
         "[ADDON]\n"
@@ -4833,15 +4838,17 @@ void neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test()
         "[RenoDX.DLSS5]\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
-        "NREnableUpscaling=0\n"
-        "NRIntensity=1.25\n";
+        "NREnableUpscaling=1\n"
+        "NRIntensity=1.25\n"
+        "NRFollowInputRes=0\n"
+        "NRResolutionScale=1\n";
 
     const std::string updated = UpdateNeuralAddonIni(input, true);
     CHECK_EQ(std::string(expected), updated);
     CHECK_EQ(updated, UpdateNeuralAddonIni(updated, true));
 }
 
-void neural_addon_runtime_settings_are_created_without_enabling_upscaling_test()
+void neural_addon_runtime_settings_are_created_at_native_resolution_test()
 {
     constexpr std::string_view input =
         "[GENERAL]\r\n"
@@ -4854,7 +4861,8 @@ void neural_addon_runtime_settings_are_created_without_enabling_upscaling_test()
         "[RenoDX.DLSS5]\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
-        "NREnableUpscaling=0\r\n";
+        "NRFollowInputRes=0\r\n"
+        "NRResolutionScale=1\r\n";
 
     CHECK_EQ(std::string(expected), UpdateNeuralAddonIni(input, true));
 }
@@ -4892,7 +4900,8 @@ void reshade_trailing_section_text_uses_reshade_section_boundaries_test()
         "NRIntensity=1.25\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
-        "NREnableUpscaling=0\n"
+        "NRFollowInputRes=0\n"
+        "NRResolutionScale=1\n"
         "[OTHER] ; this must end the RenoDX section\n"
         "Foo=1\n";
 
@@ -4916,7 +4925,8 @@ void configure_neural_addon_is_idempotent_test()
         "[RenoDX.DLSS5]\n"
         "EnableHooks=2\n"
         "NeuralUplift=1\n"
-        "NREnableUpscaling=0\n";
+        "NRFollowInputRes=0\n"
+        "NRResolutionScale=1\n";
     write_binary_file(path, input);
 
     const ConfigUpdate first = ConfigureNeuralAddon(path, true);
@@ -4983,7 +4993,8 @@ void configure_neural_addon_safe_then_normal_observes_reshade_state_test()
         "[RenoDX.DLSS5]\r\n"
         "EnableHooks=2\r\n"
         "NeuralUplift=1\r\n"
-        "NREnableUpscaling=0\r\n";
+        "NRFollowInputRes=0\r\n"
+        "NRResolutionScale=1\r\n";
     write_binary_file(path, legacyInput);
 
     const ConfigUpdate safe = ConfigureNeuralAddon(path, false);
@@ -9160,8 +9171,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(reshade_68_section_and_key_lookup_are_case_sensitive_test),
     TEST_CASE(reshade_68_utf8_bom_is_ignored_for_lookup_and_preserved_test),
     TEST_CASE(disabled_addons_insertion_uses_target_section_line_ending_test),
-    TEST_CASE(neural_addon_runtime_settings_enable_neural_and_disable_upscaling_test),
-    TEST_CASE(neural_addon_runtime_settings_are_created_without_enabling_upscaling_test),
+    TEST_CASE(neural_addon_runtime_settings_enable_neural_and_hold_native_resolution_test),
+    TEST_CASE(neural_addon_runtime_settings_are_created_at_native_resolution_test),
     TEST_CASE(neural_addon_runtime_settings_fail_closed_on_duplicate_managed_keys_test),
     TEST_CASE(reshade_trailing_section_text_uses_reshade_section_boundaries_test),
     TEST_CASE(configure_neural_addon_is_idempotent_test),

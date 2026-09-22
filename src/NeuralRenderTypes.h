@@ -241,8 +241,20 @@ private:
 // produced something the player can show or has stopped trying.
 using NeuralColdStartCallback = std::function<void(const NeuralColdStartTimeline&)>;
 
+// What the add-on's own log has to say before a rendered frame counts as
+// neural. Every member is read out of ReShade.log rather than asserted by this
+// process, so a runtime that silently declined a frame cannot be published as
+// verified.
+//
+// `nativeResolution` was `upscalingOff` while the add-on echoed an
+// NREnableUpscaling setting. RenoDX 6.x deleted that key - the working
+// resolution became a mode plus a scale - so the proof moved to what the
+// add-on reports building and evaluating: inline NR resources at native 1:1,
+// and an evaluate line that ends `[native]`. Both 4.70 and 6.5.3 print those,
+// which is why the contract now holds across a lock move rather than breaking
+// on one.
 struct NeuralRuntimeEvidence {
-    bool upscalingOff{};
+    bool nativeResolution{};
     bool inlineInterceptionContract{};
     bool feature18Created{};
     bool feature18Evaluated{};
@@ -251,7 +263,7 @@ struct NeuralRuntimeEvidence {
 
     bool Valid() const noexcept
     {
-        return upscalingOff && inlineInterceptionContract && feature18Created && feature18Evaluated &&
+        return nativeResolution && inlineInterceptionContract && feature18Created && feature18Evaluated &&
                highestObservedEvaluation > 0 && !laterFailure;
     }
 };

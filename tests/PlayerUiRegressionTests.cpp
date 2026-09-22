@@ -1843,6 +1843,35 @@ struct PlayerAppTestAccess {
         SendMessageW(GetDlgItem(dialog, IDC_NS_AUTOMASK), BM_SETCHECK, BST_UNCHECKED, 0);
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_AUTOMASK, BN_CLICKED), 0);
         CHECK(!app.m_neuralSettings.autoMask);
+        // Stacking, which arrived with RenoDX 6.x. The combo lists 1..4 and the
+        // setting is the count, so index 2 must read back as three passes - an
+        // off-by-one here would silently render a different video than the one
+        // the dialog says it is rendering, and the cache would key it as that.
+        CHECK_EQ(app.m_neuralSettings.passes, 1);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_NS_CHAINED)) == FALSE);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_PASSES), CB_SETCURSEL, 2, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_PASSES, CBN_SELCHANGE), 0);
+        CHECK_EQ(app.m_neuralSettings.passes, 3);
+        // Chained history governs passes 2+, so it is dead UI at one pass and
+        // live above it rather than a switch that quietly does nothing.
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_NS_CHAINED)) != FALSE);
+        CHECK(app.m_neuralSettings.chainedHistory);
+        SendMessageW(GetDlgItem(dialog, IDC_NS_CHAINED), BM_SETCHECK, BST_UNCHECKED, 0);
+        app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CHAINED, BN_CLICKED), 0);
+        CHECK(!app.m_neuralSettings.chainedHistory);
+        // Both reach the add-on: the override list is what ConfigureNeuralAddon
+        // writes into the runtime's ReShade.ini, and a control the dialog edits
+        // but never sends is the failure this pins.
+        {
+            const auto overrides = NeuralAddonOverridesFor(app.m_neuralSettings);
+            const auto valueOf = [&](std::string_view key) {
+                for (const auto& entry : overrides)
+                    if (entry.first == key) return entry.second;
+                return std::string("<missing>");
+            };
+            CHECK_EQ(std::string("3"), valueOf("NRPasses"));
+            CHECK_EQ(std::string("0"), valueOf("NRChainedHistory"));
+        }
         // Guide switches persist for the next render and reach the live guide generator.
         CHECK(app.m_guides.Controls().depth);
         SendMessageW(GetDlgItem(dialog, IDC_NS_GUIDE_DEPTH), BM_SETCHECK, BST_UNCHECKED, 0);

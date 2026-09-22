@@ -16,12 +16,12 @@
     {
       "sourceName": "nvngx_dlss.dll",
       "destination": "nvngx_dlss.dll",
-      "size": 58956400,
-      "sha256": "C85F971CE023C9F3492FC7455F0B01A24BA18EA39636407A846902C4360B0B7E",
-      "fileVersion": "310.8.0.0",
+      "size": 58956912,
+      "sha256": "3975567B8943C53ACCE397F2B72380092F84F162D00B0D2C7D08A1025C563983",
+      "fileVersion": "310.9.1.0",
       "signatureStatus": "Valid",
       "signerContains": "NVIDIA Corporation",
-      "provenance": "NVIDIA-signed DLSS SR 310.8.0 runtime from the RankFTW/rhi-repo release dlss-310.8.0, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest fb481660f7e952b87f91760e3afd7f9dc14cd2c3361b470e948d6346e4323009 before extraction and against the per-file digest above after staging.",
+      "provenance": "NVIDIA-signed DLSS SR 310.9.1 runtime from the RankFTW/rhi-repo release dlss-310.9.1, fetched by tools/fetch_neural_runtime.ps1 and verified against archive digest aaba83b288bd145c3808e8d7a0ba03cc8c8676d18ad984b1bfa6563046a3ba37 before extraction and against the per-file digest above after staging. Replaces 310.8.0 (file C85F971C...). This is the module RenoDX detours to observe the player's DLSS/DLAA create before it builds feature 18, so it is the one runtime here whose version a neural render can actually feel; Streamline is deliberately NOT moved with it - see THIRD_PARTY.md.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#nvidia-dlss--ngx"
     },
     {
@@ -38,12 +38,12 @@
     {
       "sourceName": "renodx-dlss5.addon64",
       "destination": "renodx-dlss5.addon64",
-      "size": 1732608,
-      "sha256": "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952",
-      "fileVersion": "0.2026.0828.0517",
+      "size": 878080,
+      "sha256": "342341F669F1D64E0C70C8593A07A2FAB5075E073DFAE97C331C9A6776260A0A",
+      "fileVersion": "0.2026.0917.1432",
       "signatureStatus": "NotSigned",
       "signerContains": "",
-      "provenance": "RenoDX DLSS 5 add-on 4.70 from the RankFTW/rhi-repo release renodx-dlss5-4.70; GitHub verified archive digest d6e356d01b429af6288f488a4926c44f1d779a7d4586ee8c79d04d3a09a536e6.",
+      "provenance": "RenoDX DLSS 5 add-on 6.5.3 from the RankFTW/rhi-repo release renodx-dlss5-6.5.3; GitHub verified archive digest 553b1619b9e5ddfbcb4ebc7f2f3bffff9256a48a25b988f4817f5c63f4caa1de. Replaces 4.70 (archive d6e356d0..., file D5ADF82E...), whose [RenoDX.DLSS5] contract this player was written against: 6.x renames the upscaling control, drops the startup architecture banners the render evidence was proved from, and adds multi-pass stacking and an explicit HDR colour bridge.",
       "notice": "EXPERIMENTAL_RUNTIME_NOTICE.txt; THIRD_PARTY.md#renodx--experimental-dlss-5-runtime"
     },
     {

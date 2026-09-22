@@ -32,15 +32,15 @@ $sources = @(
         Members = @{ 'nvngx_dlssnr.dll' = 'nvngx_dlssnr.dll' }
     },
     @{
-        Name = 'nvngx_dlss_310.8.0.zip'
-        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.8.0/nvngx_dlss_310.8.0.zip'
-        Sha256 = 'FB481660F7E952B87F91760E3AFD7F9DC14CD2C3361B470E948D6346E4323009'
+        Name = 'nvngx_dlss_310.9.1.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/dlss-310.9.1/nvngx_dlss_310.9.1.zip'
+        Sha256 = 'AABA83B288BD145C3808E8D7A0BA03CC8C8676D18AD984B1BFA6563046A3BA37'
         Members = @{ 'nvngx_dlss.dll' = 'nvngx_dlss.dll' }
     },
     @{
-        Name = 'renodx-dlss5_4.70.zip'
-        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-4.70/renodx-dlss5_4.70.zip'
-        Sha256 = 'D6E356D01B429AF6288F488A4926C44F1D779A7D4586EE8C79D04D3A09A536E6'
+        Name = 'renodx-dlss5_6.5.3.zip'
+        Url = 'https://github.com/RankFTW/rhi-repo/releases/download/renodx-dlss5-6.5.3/renodx-dlss5_6.5.3.zip'
+        Sha256 = '553B1619B9E5DDFBCB4EBC7F2F3BFFFF9256A48A25B988F4817F5C63F4CAA1DE'
         Members = @{ 'renodx-dlss5.addon64' = 'renodx-dlss5.addon64' }
     },
     @{

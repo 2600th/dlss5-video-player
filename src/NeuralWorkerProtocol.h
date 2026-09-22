@@ -82,7 +82,7 @@ struct WireResult {
     uint8_t cancelled;
     uint8_t encoder;
     uint8_t feature18ArmedBeforeCapture;
-    uint8_t upscalingOff;
+    uint8_t nativeResolution;
     uint8_t inlineInterceptionContract;
     uint8_t feature18Created;
     uint8_t feature18Evaluated;
@@ -447,7 +447,7 @@ inline std::vector<std::byte> EncodeResult(const NeuralRenderResult& result)
     wire.cancelled = result.cancelled ? 1 : 0;
     wire.encoder = static_cast<uint8_t>(result.encoder);
     wire.feature18ArmedBeforeCapture = result.feature18ArmedBeforeCapture ? 1 : 0;
-    wire.upscalingOff = result.evidence.upscalingOff ? 1 : 0;
+    wire.nativeResolution = result.evidence.nativeResolution ? 1 : 0;
     wire.inlineInterceptionContract = result.evidence.inlineInterceptionContract ? 1 : 0;
     wire.feature18Created = result.evidence.feature18Created ? 1 : 0;
     wire.feature18Evaluated = result.evidence.feature18Evaluated ? 1 : 0;
@@ -493,7 +493,7 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
     };
     auto finite = [](double value) { return value == value && value >= 0.0 && value <= 1e12; };
     if (!IsBooleanByte(wire.ok) || !IsBooleanByte(wire.cancelled) || !IsKnownEncoder(wire.encoder) ||
-        !IsBooleanByte(wire.feature18ArmedBeforeCapture) || !IsBooleanByte(wire.upscalingOff) ||
+        !IsBooleanByte(wire.feature18ArmedBeforeCapture) || !IsBooleanByte(wire.nativeResolution) ||
         !IsBooleanByte(wire.inlineInterceptionContract) || !IsBooleanByte(wire.feature18Created) ||
         !IsBooleanByte(wire.feature18Evaluated) || !IsBooleanByte(wire.laterFailure) ||
         !IsKnownFailure(wire.failure) || !zeroed(wire.reserved) ||
@@ -512,7 +512,7 @@ inline std::optional<NeuralRenderResult> DecodeResult(std::span<const std::byte>
     result.nativeEvaluations = wire.nativeEvaluations;
     result.verifiedNeuralFrames = wire.verifiedNeuralFrames;
     result.feature18ArmedBeforeCapture = wire.feature18ArmedBeforeCapture != 0;
-    result.evidence = {wire.upscalingOff != 0, wire.inlineInterceptionContract != 0,
+    result.evidence = {wire.nativeResolution != 0, wire.inlineInterceptionContract != 0,
         wire.feature18Created != 0, wire.feature18Evaluated != 0, wire.laterFailure != 0,
         wire.highestObservedEvaluation};
     result.failure = static_cast<NeuralRenderFailure>(wire.failure);

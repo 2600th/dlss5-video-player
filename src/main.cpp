@@ -3384,28 +3384,48 @@ private:
     // while every change still costs a full re-render. They remain in
     // NeuralSettings and in DLSSVideoPlayer.ini so runtime-comparison work can
     // still drive them; see docs/BENCHMARK.md.
+    // A heading over each block of controls. Nine controls at one visual level
+    // is a list; three named groups is a structure, and the Gestalt common
+    // region is the whole reason a heading works - it tells you which controls
+    // answer the same question before you read any of their labels. "Look" is
+    // what the model does to the picture, "Quality and render time" is what it
+    // costs, "Guides" is what it is given to work from.
+    void CreateSettingsGroupHeading(HWND h,const wchar_t* key,int y){
+        HWND heading=CreateWindowExW(0,L"STATIC",T(key).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,
+                                     16,y,436,18,h,nullptr,nullptr,nullptr);
+        SendMessageW(heading,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);
+    }
+
     void BuildNeuralSettingControls(HWND h){
-        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",28,L"neural.tip.intensity");
-        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",78,L"neural.tip.structure");
-        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",128,L"neural.tip.tone");
-        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",178,L"neural.tip.skin");
-        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",228,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
-        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,266,236,L"neural.tip.automask");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_look",12);
+        CreateAdjustmentRow(h,IDC_NS_INTENSITY,L"neural.settings.intensity",38,L"neural.tip.intensity");
+        CreateAdjustmentRow(h,IDC_NS_STRUCTURE,L"neural.settings.structure",88,L"neural.tip.structure");
+        CreateAdjustmentRow(h,IDC_NS_TONE,L"neural.settings.tone",138,L"neural.tip.tone");
+        CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",188,L"neural.tip.skin");
+        CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",238,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
+        CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,276,236,L"neural.tip.automask");
         HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND guides=CreateWindowExW(0,L"STATIC",T(L"neural.settings.guides").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,304,116,20,h,nullptr,nullptr,nullptr);SendMessageW(guides,WM_SETFONT,(WPARAM)f,TRUE);
-        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,302,116,L"neural.tip.guide_mv");
-        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,302,80,L"neural.tip.guide_depth");
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,370,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
-        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,416,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,416,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
+        // Stacking, which arrived with RenoDX 6.x. Its own group because it
+        // costs render time rather than changing the model's look: a second
+        // pass measured 780,048 -> 932,019 bytes of output over the same
+        // 72-frame range and took 9.81 s against 8.01 s.
+        CreateSettingsGroupHeading(h,L"neural.settings.group_cost",316);
+        CreateNeuralCombo(h,IDC_NS_PASSES,L"neural.settings.passes",346,{L"1 (single pass)",L"2 passes",L"3 passes",L"4 passes"},L"neural.tip.passes");
+        CreateNeuralCheck(h,IDC_NS_CHAINED,L"neural.settings.chained",132,384,300,L"neural.tip.chained");
+        CreateSettingsGroupHeading(h,L"neural.settings.group_guides",424);
+        CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,452,116,L"neural.tip.guide_mv");
+        CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,452,80,L"neural.tip.guide_depth");
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,492,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,538,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
+        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,538,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,538,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
         SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kNeuralDesignW=466,kNeuralDesignH=500;
+    static constexpr int kNeuralDesignW=466,kNeuralDesignH=622;
 
     // A preset is a starting point, not a mode: it writes the same six controls
     // the dialog edits, so the dialog stays the place the values live and an

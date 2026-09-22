@@ -213,8 +213,8 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += ",\"feature18ArmedBeforeCapture\":";
     json += Bool(result.feature18ArmedBeforeCapture);
     const NeuralRuntimeEvidence& evidence = result.evidence;
-    json += ",\"evidence\":{\"upscalingOff\":";
-    json += Bool(evidence.upscalingOff);
+    json += ",\"evidence\":{\"nativeResolution\":";
+    json += Bool(evidence.nativeResolution);
     json += ",\"inlineInterceptionContract\":";
     json += Bool(evidence.inlineInterceptionContract);
     json += ",\"feature18Created\":";

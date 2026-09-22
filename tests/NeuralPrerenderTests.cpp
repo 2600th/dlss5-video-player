@@ -1362,7 +1362,7 @@ private:
 
 class FakeNeuralEvaluator final : public INeuralFrameEvaluator {
 public:
-    bool Initialize(HWND,uint32_t width,uint32_t height,double,const GuideControls& guides) override
+    bool Initialize(HWND,uint32_t width,uint32_t height,uint32_t,uint32_t,double,const GuideControls& guides) override
     { initialized=true;expectedBytes=size_t(width)*height*4u;controls=guides;return true; }
     bool Submit(const OfflineDecodedFrame& frame,const FrameIdentity& id,bool capture,
                 OfflineEvaluation& out) override
@@ -1434,20 +1434,32 @@ public:
     std::vector<EncoderKind> starts;std::vector<std::vector<std::vector<uint8_t>>> attempts;
 };
 
-std::string ValidNeuralEvidence()
-{
-    return "EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
-           "active settings: upscaling=OFF\nfeature 18 created\n"
-           "inline feature 18 evaluation succeeded evaluation count=5\n";
-}
+// The four lines the contract is proved from, transcribed from a real RenoDX
+// 6.5.3 render rather than paraphrased: this suite is the only thing standing
+// between a runtime bump and a job that publishes unrendered frames as
+// verified, so the strings it matches have to be the strings the add-on emits.
+//
+// 4.70 proved the same two facts with "active settings: upscaling=OFF" and the
+// "private feature-18 GPU ordering active" startup banner. 6.x prints neither -
+// the upscaling key is gone and the architecture banners were dropped - so the
+// proof moved to what the add-on reports building and evaluating.
+constexpr const char* kHooksLine =
+    "EnableHooks=2: NGX hooks only, Streamline modules left unpatched\n";
+constexpr const char* kResourcesLine =
+    "created inline NR resources ws1 640x360 -> 640x360 (native 1:1) format=10 "
+    "hdr=v6/linear relative (workset 1/4, 11 MiB)\n";
+constexpr const char* kCreateLine =
+    "feature 18 created via the signed snippet after DLSS/DLAA for NR input "
+    "640x360 -> output 640x360 with guides 640x360\n";
 
 std::string NeuralEvidenceWithCount(uint64_t count)
 {
-    return "EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
-           "active settings: upscaling=OFF\nfeature 18 created\n"
-           "inline feature 18 evaluation succeeded evaluation count="+
-           std::to_string(count)+"\n";
+    return std::string(kHooksLine) + kResourcesLine + kCreateLine +
+           "inline feature 18 evaluation succeeded (count=" + std::to_string(count) +
+           ", NR input 640x360 (guides 640x360), output 640x360, 1 stack pass(es) [native])\n";
 }
+
+std::string ValidNeuralEvidence() { return NeuralEvidenceWithCount(5); }
 
 std::function<std::string()> AdvancingNeuralEvidence()
 {
@@ -1476,9 +1488,8 @@ void offline_job_primes_feature_then_restarts_source_and_captures_every_frame_te
     OfflineNeuralRenderer job(source,evaluator,encoder,[&]{
         ++evidenceCalls;
         return evidenceCalls==1
-            ? std::string("EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
-                          "active settings: upscaling=OFF\nfeature 18 created\n"
-                          "inline feature 18 evaluation succeeded evaluation count=1\n")
+            ? std::string(std::string(kHooksLine)+kResourcesLine+kCreateLine+
+                          "inline feature 18 evaluation succeeded [native] evaluation count=1\n")
             : ValidNeuralEvidence();
     });
     const NeuralRenderResult result=job.Run(OfflineRequest(fixture.Path()),{},{});
@@ -1506,9 +1517,8 @@ void offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_
     OfflineNeuralRenderer job(source,evaluator,encoder,[&]{
         ++evidenceCalls;
         return evidenceCalls==1
-            ? std::string("EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
-                          "active settings: upscaling=OFF\nfeature 18 created\n"
-                          "inline feature 18 evaluation succeeded evaluation count=1\n")
+            ? std::string(std::string(kHooksLine)+kResourcesLine+kCreateLine+
+                          "inline feature 18 evaluation succeeded [native] evaluation count=1\n")
             : ValidNeuralEvidence();
     });
     const NeuralRenderResult result=job.Run(OfflineRequest(fixture.Path()),{},{});
@@ -1726,9 +1736,11 @@ void offline_job_rejects_when_inline_interception_was_not_armed_before_capture_t
     int calls=0;
     OfflineNeuralRenderer job(source,evaluator,encoder,[&]{
         ++calls;
-        if(calls==1)return std::string(
-            "active settings: upscaling=OFF\nfeature 18 created\n"
-            "inline feature 18 evaluation succeeded evaluation count=5\n");
+        // Evaluated and created, but no hook-mode line and no inline
+        // resources: the pass could have come through Streamline or at a
+        // scaled working resolution, and neither is what was asked for.
+        if(calls==1)return std::string(kCreateLine)+
+            "inline feature 18 evaluation succeeded (count=5) [native]\n";
         return ValidNeuralEvidence();
     });
     const auto result=job.Run(OfflineRequest(fixture.Path()),{},{});
@@ -2365,22 +2377,63 @@ void segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_tes
     }
 }
 
-void reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test()
+// Every proof the contract needs, and what happens when each one is missing.
+//
+// Dropping one line at a time rather than asserting one hand-built negative:
+// the failure this guards against is a runtime bump silently satisfying fewer
+// conditions than before, and that shows up as a line going missing.
+void reshade_evidence_requires_native_resolution_inline_path_create_and_evaluate_test()
 {
     const auto valid=ParseNeuralRuntimeEvidence(ValidNeuralEvidence());
-    CHECK(valid.Valid());CHECK(valid.upscalingOff);CHECK(valid.feature18Created);
+    CHECK(valid.Valid());CHECK(valid.nativeResolution);CHECK(valid.feature18Created);
     CHECK(valid.inlineInterceptionContract);
     CHECK(valid.feature18Evaluated);CHECK_EQ(uint64_t{5},valid.highestObservedEvaluation);
+
+    const std::string evaluate=
+        "inline feature 18 evaluation succeeded (count=17, NR input 2560x1440 "
+        "(guides 2560x1440), output 2560x1440, 1 stack pass(es) [native])\n";
     const auto productionLog=ParseNeuralRuntimeEvidence(
-        "EnableHooks=2: NGX hooks only\nprivate feature-18 GPU ordering active\n"
-        "DLSS5 active settings: upscaling=OFF\nfeature 18 created via the signed snippet\n"
-        "inline feature 18 evaluation succeeded (count=17, NR input 1920x1080)\n");
+        std::string(kHooksLine)+kResourcesLine+kCreateLine+evaluate);
     CHECK(productionLog.Valid());CHECK_EQ(uint64_t{17},productionLog.highestObservedEvaluation);
-    CHECK(!ParseNeuralRuntimeEvidence("feature 18 created\ninline feature 18 evaluation succeeded\n").Valid());
-    CHECK(!ParseNeuralRuntimeEvidence("active settings: upscaling=OFF\nfeature 18 created\n").Valid());
+
+    // No hook-mode line: the pass may have gone through Streamline.
     CHECK(!ParseNeuralRuntimeEvidence(
-        "active settings: upscaling=OFF\nfeature 18 created\n"
-        "inline feature 18 evaluation succeeded evaluation count=5\n").Valid());
+        std::string(kResourcesLine)+kCreateLine+evaluate).Valid());
+    // No inline resources: nothing says this feature's surfaces were ours.
+    CHECK(!ParseNeuralRuntimeEvidence(
+        std::string(kHooksLine)+kCreateLine+evaluate).Valid());
+    // Created but never evaluated - the frame was not denoised.
+    CHECK(!ParseNeuralRuntimeEvidence(
+        std::string(kHooksLine)+kResourcesLine+kCreateLine).Valid());
+    // Evaluated at a scaled working resolution rather than 1:1.
+    CHECK(!ParseNeuralRuntimeEvidence(
+        std::string(kHooksLine)+kResourcesLine+kCreateLine+
+        "inline feature 18 evaluation succeeded (count=17, NR input 1280x720 "
+        "(guides 1280x720), output 2560x1440, 1 stack pass(es))\n").Valid());
+    // The 6.x pre-SR evaluate is the same frame by another path, so it counts.
+    CHECK(ParseNeuralRuntimeEvidence(
+        std::string(kHooksLine)+kResourcesLine+kCreateLine+
+        "pre-SR feature 18 evaluation succeeded (count=17, NR input 2560x1440 "
+        "(guides 2560x1440), output 2560x1440, 1 stack pass(es) [native])\n").Valid());
+    // A startup retry notice is not a failure: 6.5.3 logs both of these on a
+    // healthy run and then verifies every frame.
+    CHECK(ParseNeuralRuntimeEvidence(
+        ValidNeuralEvidence()+
+        "NR skipped (after-upscale): compute-state restore target incomplete "
+        "(hooks=1 heaps=1 root_signature=0 root_arguments=0 pso=0)\n"
+        "compute-state restore target complete (after-upscale: hooks=1 heaps=1 "
+        "root_signature=1 root_arguments=1 pso=1); injection admitted after 2 "
+        "incomplete-target decline(s)\n").Valid());
+    // A terminal skip still is one.
+    CHECK(!ParseNeuralRuntimeEvidence(
+        ValidNeuralEvidence()+
+        "NR skipped: unsupported D3D12 command-list type 2\n").Valid());
+    // 6.x-only failures the 4.70 vocabulary had no word for.
+    for(const char* failure:{"feature 18 create raised an exception\n",
+                             "pre-SR NR declined: color geometry is unsupported (dim=2)\n",
+                             "NR workset request rejected (device=0x1)\n",
+                             "workset/codec setup failed\n"})
+        CHECK(!ParseNeuralRuntimeEvidence(ValidNeuralEvidence()+failure).Valid());
 }
 
 void reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test()
@@ -3982,7 +4035,7 @@ int wmain(int argc, wchar_t* argv[])
     segmented_offline_job_makes_only_the_first_file_short_test();
     segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test();
     segmented_offline_job_cancel_leaves_no_unpublished_file_or_live_encoder_test();
-    reshade_evidence_requires_upscaling_off_feature18_create_and_evaluate_test();
+    reshade_evidence_requires_native_resolution_inline_path_create_and_evaluate_test();
     reshade_evidence_rejects_a_later_feature18_failure_in_the_same_job_segment_test();
     reshade_evidence_rejects_any_failure_or_passthrough_in_the_job_segment_test();
     synchronized_playback_starts_original_and_switches_same_timestamp_test();

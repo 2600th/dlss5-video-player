@@ -251,7 +251,7 @@ constexpr std::string_view kSamplePreflight =
     "\"runtime\":{\"reshade\":\"6.8.0.2155\",\"addon\":\"0.2026.828.517\",\"addonApi\":\"18\",\"renodx\":\"4.7\","
     "\"renodxBuild\":\"Sep  2 2026 01:15:39\",\"dlssnr\":\"310.8.0\",\"activeSettings\":\"upscaling=OFF\"},"
     "\"modules\":[{\"name\":\"dxgi.dll\",\"present\":true,\"size\":5592064,\"fileVersion\":\"6.8.0.2155\",\"sha256\":\"00\"}],"
-    "\"feature18\":{\"created\":true,\"evaluated\":true,\"armed\":true,\"upscalingOff\":true,\"inlineInterception\":true,"
+    "\"feature18\":{\"created\":true,\"evaluated\":true,\"armed\":true,\"nativeResolution\":true,\"inlineInterception\":true,"
     "\"laterFailure\":false,\"highestEvaluation\":61,\"probeFrames\":61,\"carrierCreateResult\":\"0x00000001\","
     "\"createResult\":\"\",\"observations\":[]},\"diagnosis\":{\"cause\":\"none\",\"detail\":\"\"}}";
 
@@ -373,7 +373,7 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "\"idleLocalVramMiB\":406"));
     CHECK(Contains(json, "\"idleVramPolicy\":\"free\""));
     CHECK(Contains(json, "\"detail\":\"GPU stalled after 48 frames\""));
-    CHECK(Contains(json, "\"upscalingOff\":false"));
+    CHECK(Contains(json, "\"nativeResolution\":false"));
     CHECK(Contains(json, "\"valid\":false"));
 
     NeuralRenderReceiptInputs noProbe = inputs;

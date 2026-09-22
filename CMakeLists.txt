@@ -420,6 +420,20 @@ if(BUILD_TESTING)
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/neural-range-smoke")
+    # The preflight probe, which is what the player runs before its first render
+    # and latches the answer from. Every other neural test renders long enough to
+    # clear RenoDX 6.x's injection warm-up; this one stops as soon as the probe
+    # says it is satisfied, which is exactly the path a runtime bump can break
+    # without any of the others noticing.
+    add_test(NAME NeuralPreflightSmoke COMMAND NeuralWorkerTests
+        --real-preflight "$<TARGET_FILE:NeuralWorker>")
+    # All seven combinations of the three export stages on one 720p30 clip.
+    # The stages have separate tests; this is the only thing that proves they
+    # COMPOSE, and that the upscale actually reaches NGX - the first run of it
+    # caught the output size being plumbed everywhere except into the feature
+    # create, which every single-stage test was blind to.
+    add_test(NAME ExportMatrixSmoke COMMAND ExportMatrixSmoke
+        "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/export-matrix")
     add_test(NAME DlssgProbeSmoke COMMAND DlssgProbeSmoke)
     add_test(NAME DlssgEvaluateSmoke COMMAND DlssgEvaluateSmoke)
     add_test(NAME FrameGenerationSmoke COMMAND FrameGenerationSmoke

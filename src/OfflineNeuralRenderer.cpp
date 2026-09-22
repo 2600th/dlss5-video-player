@@ -2226,23 +2226,76 @@ std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDire
     return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},true);
 }
 
+std::string ReadNeuralRuntimeSessionLogSnapshot(const std::filesystem::path& runtimeDirectory)
+{
+    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},false);
+}
+
 
 NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegment)
 {
     NeuralRuntimeEvidence evidence;const std::string lower=LowerAscii(reshadeLogSegment);
-    evidence.upscalingOff=lower.find("active settings: upscaling=off")!=std::string::npos;
+    // Proof that the neural pass ran 1:1 rather than upscaling, taken from the
+    // resources and the evaluate rather than from a settings echo.
+    //
+    // 4.70 announced "active settings: upscaling=OFF", built from the
+    // NREnableUpscaling key. 6.x deleted that key - the working resolution is
+    // now a mode plus a scale - and the settings line it prints no longer
+    // mentions upscaling at all, so the old probe reads false on every 6.x log
+    // and Valid() rejects a render that was perfectly good. Both versions say
+    // what the resources and the evaluate actually were, which is the better
+    // evidence anyway: a config echo states an intention, "(native 1:1)" and
+    // "[native]" state an outcome. 4.70 writes "(native)", 6.5.3 "(native 1:1)".
+    evidence.nativeResolution=
+        lower.find("created inline nr resources")!=std::string::npos&&
+        lower.find("(native")!=std::string::npos&&
+        lower.find("[native]")!=std::string::npos;
+    // That the pass came through this player's own inline NGX path and not the
+    // host's Streamline route. 4.70's half of this was the startup banner
+    // "private feature-18 GPU ordering active"; 6.x prints no architecture
+    // banners at all, so the surviving proof is the hook mode the add-on
+    // reports plus the inline resources it created for our feature.
     evidence.inlineInterceptionContract=
         lower.find("enablehooks=2: ngx hooks only")!=std::string::npos&&
-        lower.find("private feature-18 gpu ordering active")!=std::string::npos;
+        lower.find("created inline nr resources")!=std::string::npos;
     const size_t created=lower.find("feature 18 created");
-    const size_t evaluated=lower.find("inline feature 18 evaluation succeeded");
+    // 6.x splits the evaluate log by path: the inline line stayed, and a
+    // "pre-SR" line joined it for NR ahead of a host upscale. This player owns
+    // both sides of its own pipeline, so either line is the frame it asked for.
+    const bool evaluated=
+        lower.find("inline feature 18 evaluation succeeded")!=std::string::npos||
+        lower.find("pre-sr feature 18 evaluation succeeded")!=std::string::npos;
     evidence.feature18Created=created!=std::string::npos;
-    evidence.feature18Evaluated=evaluated!=std::string::npos;
-    const std::array<std::string_view,9> failures{
+    evidence.feature18Evaluated=evaluated;
+    // Both vocabularies, so pinning either add-on keeps its own failures
+    // detected. The 4.70-only entries cost a string search and catch a
+    // downgrade; the 6.x entries are the ones that would otherwise let a
+    // declined or exception-thrown frame be published as verified.
+    const std::array<std::string_view,18> failures{
+        // Shared.
         "feature 18 create failed","feature 18 evaluation failed",
         "inline feature 18 evaluation failed","feature 18 evaluate raised an exception",
-        "nr skipped:","nr declined an evaluate:","nr workset pool exhausted",
-        "the game dlss output was retained","nr is paused for this feature"};
+        "nr skipped:","nr declined an evaluate:",
+        "the game dlss output was retained",
+        // 4.70 only - gone from 6.x, kept so a re-pin stays covered.
+        "nr workset pool exhausted","nr is paused for this feature",
+        // 6.x additions. The create path gained an exception log of its own,
+        // the evaluate path gained pre-SR and Streamline decline reasons, and
+        // the workset pool reports exhaustion as a rejected request now.
+        "feature 18 create raised an exception","feature 18 create failed with",
+        "feature 18 evaluate failed with","pre-sr feature 18 evaluate raised an exception",
+        "pre-sr feature 18 evaluate failed with","pre-sr nr declined:",
+        "streamline nr declined:","nr workset request rejected",
+        "workset/codec setup failed"};
+    // Deliberately NOT in that list, because 6.5.3 says both on a healthy run:
+    //   "NR skipped (after-upscale): compute-state restore target incomplete"
+    //   "compute-state shadow: ... NR declines frames until the shadow installs"
+    // Each is a retry notice whose own next line is "injection admitted after N
+    // incomplete-target decline(s)" - the observed render logged two of them and
+    // then verified every frame. The colon form "NR skipped:" that IS listed is
+    // the terminal one (unsupported list type, no guide dimensions); the
+    // parenthesised form is the transient. The frame counts are the real guard
+    // here, and a list that fires on a startup retry rejects good renders.
     for(const auto failure:failures){
         if(lower.find(failure)!=std::string::npos)evidence.laterFailure=true;
     }
