@@ -124,7 +124,7 @@ in its settings snapshot. The same run logged successful inline feature-18
 creation/evaluation, and the manifest contains 5,002 native evaluations and
 5,002 verified neural frames with interception armed before capture.
 
-![Original face and neural output at default intensity](screenshots/current/face-comparison.png)
+![Original face and neural output at default intensity](screenshots/2026-09-03/face-comparison.png)
 
 The matched face shows visible changes to cheek/nose shading, hair and local
 contrast; it is not an unchanged source image. The figure uses identical native
