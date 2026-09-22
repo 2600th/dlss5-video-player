@@ -1,8 +1,8 @@
 """Generates the repeatable benchmark corpus (lossless FFV1 MKV, 1920x1080, 30 fps).
 
 Every synthetic clip is produced by deterministic FFmpeg sources with explicit
-seeds; the ``real`` clips are cut from this repository's own demo capture
-(``docs/media/neural-comparison-demo.mp4``), which is tracked in git, so they are
+seeds; the ``real`` clips are cut from this repository's own 12 September demo capture
+(``tools/benchmark/fixtures/demo-capture-20260912.mp4``), which is tracked in git, so they are
 reproducible from a clean checkout too. ``manifest.json`` records per-clip
 category, hard-cut frame indices, burned-in ground-truth text and an rgb24
 frame-hash digest so a regenerated corpus can be proven identical (``--check``).
@@ -30,8 +30,11 @@ ENCODE_NATIVE_RATE = ["-c:v", "ffv1", "-level", "3", "-coder", "1", "-context", 
 FONT_MONO = "C\\\\:/Windows/Fonts/consola.ttf"
 FONT_UI = "C\\\\:/Windows/Fonts/segoeui.ttf"
 FACE_FIXTURE = BUILD / "runtime-comparison-20260907" / "fixtures" / "mafia-60s.mkv"
-DEMO = REPO / "docs" / "media" / "neural-comparison-demo.mp4"
-DEMO_RELATIVE = "docs/media/neural-comparison-demo.mp4"
+# The 12 September screen capture, kept byte-identical (the same git blob) when the
+# README demonstration was replaced on 22 September: the real-* labels, cut frames and
+# digests below are indices into this file, not into whatever the README shows.
+DEMO = REPO / "tools" / "benchmark" / "fixtures" / "demo-capture-20260912.mp4"
+DEMO_RELATIVE = "tools/benchmark/fixtures/demo-capture-20260912.mp4"
 # The demo is a 1920x1080 screen capture of the player, so only part of each frame is
 # footage. This rectangle is that part: the columns and rows whose temporal standard
 # deviation is nonzero while the capture plays back video (501-1863 x 126-892, trimmed

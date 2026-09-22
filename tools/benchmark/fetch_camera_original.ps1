@@ -50,7 +50,7 @@ if (-not $YtDlp) { $YtDlp = Join-Path $repositoryRoot 'external\youtube\yt-dlp.e
 $ffprobe = Join-Path $repositoryRoot 'external\ffmpeg\bin\ffprobe.exe'
 
 # Name, selector and expectations. The two 1440p VP9 sources are the upstreams of
-# docs/media/neural-comparison-demo.mp4 and are documented in docs/media/README.md;
+# tools/benchmark/fixtures/demo-capture-20260912.mp4 and are documented in its README.md;
 # the third is here for the cross-dissolve neither of them contains.
 $sources = @(
     [pscustomobject]@{

@@ -81,7 +81,7 @@ must never reset.
 | `orig-film-motion-b` | camera-original | **Camera-original**: 258 frames, 10.8 s, one continuous exterior tracking shot and the **strongest sustained motion** of any clip here (median \|dY\| 4.72 against 3.9 for `orig-game-motion`). Foliage streaming past with real motion blur. Two caveats: the letterbox geometry of its source (884 active rows scaled UP to 1080) and a burned-in title card over the first half |
 
 The four `real` clips are **not camera-original footage.** They are cut from
-`docs/media/neural-comparison-demo.mp4`, a screen capture of this player recorded
+`fixtures/demo-capture-20260912.mp4` (formerly `docs/media/neural-comparison-demo.mp4`), a screen capture of this player recorded
 with neural rendering *on*, so their pixels have been through: source → DLSS-NR →
 the player's window → `gdigrab` → an h264 encode → `crop` → a lanczos upscale — and
 then the neural pass again when the benchmark renders them. That is sound for an A/B

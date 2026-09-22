@@ -46,8 +46,10 @@ everywhere. Camera-original clips are downloaded by video id through
 source is absent, as `faces` - which needs an external fixture - always has.
 The `"category": "real"`, `"synthetic": false` clips are cut from this
 repository's own demo capture,
-`docs/media/neural-comparison-demo.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
-git). They exist because every quality conclusion here used to rest on mandelbrot
+`tools/benchmark/fixtures/demo-capture-20260912.mp4` (1920×1080, 30 fps, h264, 22.6 s, tracked in
+git). Until 22 September 2026 that file was `docs/media/neural-comparison-demo.mp4`; the
+README demonstration was then replaced, and the capture moved here byte-identical (git
+blob `dc9527b7`, SHA-256 `ac46f10a…`), so reports that name the old path mean this file. They exist because every quality conclusion here used to rest on mandelbrot
 zooms and cellular automata, and because they need no fixture to fetch and add
 nothing to redistribute that the tree does not already carry.
 
