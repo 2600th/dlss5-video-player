@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.25.0 - 2026-09-22
 
 ### Found in review, before shipping
 
@@ -111,7 +111,7 @@ more than the fix.
   the model" is a structure, and it tells you which controls answer the same
   question before you read any of their labels.
 
-- **DLSS > Convert & save > Export with DLSS stages...** writes a file with any
+- **DLSS > Convert & export > Export with DLSS stages...** writes a file with any
   combination of Super Resolution, neural rendering and frame generation. Three
   checkboxes, an output-height rung and a frame-rate multiple, with a summary
   line that reads back the geometry and frame rate the file will actually have.

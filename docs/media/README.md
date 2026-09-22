@@ -1,6 +1,6 @@
 # Player demonstration
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.25.0 (1988cac) on 2026-09-22._
 
 [Watch the 22-second MP4](neural-comparison-demo.mp4) ·
 [Looping preview](neural-comparison-preview.webp) ·

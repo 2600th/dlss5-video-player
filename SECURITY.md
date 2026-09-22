@@ -1,6 +1,6 @@
 # Security
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.25.0 (1988cac) on 2026-09-22._
 
 The player launches only its package-local `ffmpeg.exe`, `ffprobe.exe`,
 `yt-dlp.exe`, and `deno.exe` helpers without a command shell. YouTube support is

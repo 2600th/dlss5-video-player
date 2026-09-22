@@ -1,6 +1,6 @@
 # Using DLSS 5 Video Player
 
-_Verified against 0.24.0+ (ddce653) on 2026-09-21._
+_Verified against 0.25.0 (1988cac) on 2026-09-22._
 
 This guide covers whole-video session coverage and seeking,
 recent history, settings-aware cache identity, media export and

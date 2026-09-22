@@ -1,6 +1,6 @@
 # Related DLSS 5 neural-rendering implementations
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.25.0 (1988cac) on 2026-09-22._
 
 These projects were reviewed on September 1, 2026 to avoid duplicating solved
 integration work and to compare real-time performance strategies.

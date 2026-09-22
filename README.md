@@ -1,6 +1,6 @@
 # DLSS 5 Video Player
 
-_Verified against 0.24.0 (918c0b0) on 2026-09-20._
+_Verified against 0.25.0 (1988cac) on 2026-09-22._
 
 Run a video, photo or GIF through NVIDIA's DLSS 5 neural renderer, then look at
 the result next to the original on the same frame. Windows only. Needs an RTX
@@ -25,12 +25,12 @@ ahead. Live 2560x1440 sessions, recorded as they ran, no sound.
 
 ## Download
 
-**v0.24.0** (2026-09-20): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.24.0)
+**v0.25.0** (2026-09-22): [release page](https://github.com/2600th/dlss5-video-player/releases/tag/dlss5-video-player-v0.25.0)
 
 | Package | What is in it | Size |
 | --- | --- | --- |
-| `dlss5-video-player-v0.24.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 312 MB |
-| `DLSSVideoPlayer-v0.24.0-core-win64.zip` | Player only, no neural runtime. | 35 MB |
+| `dlss5-video-player-v0.25.0-win64.zip` | Player plus the pinned neural runtime. This is the one you want. | 312 MB |
+| `DLSSVideoPlayer-v0.25.0-core-win64.zip` | Player only, no neural runtime. | 35 MB |
 
 Both have a `.sha256` beside them on the release page. GitHub's "Source code"
 zip does not run: no runtime in it.
@@ -42,10 +42,10 @@ check both:
 
 ```sh
 # Intact: the .sha256 sits beside the zip on the release page.
-sha256sum -c DLSSVideoPlayer-v0.24.0-core-win64.zip.sha256
+sha256sum -c DLSSVideoPlayer-v0.25.0-core-win64.zip.sha256
 
 # Built here: signed SLSA provenance, verified against this repository.
-gh attestation verify DLSSVideoPlayer-v0.24.0-core-win64.zip --repo 2600th/dlss5-video-player
+gh attestation verify DLSSVideoPlayer-v0.25.0-core-win64.zip --repo 2600th/dlss5-video-player
 ```
 
 Once unpacked, `verify_package.ps1` ships inside the zip and checks the
@@ -114,6 +114,45 @@ Next time, **File > Recent videos** reopens it with the render already done.
 ## What changed
 
 The short version. Every detail is in [CHANGELOG.md](CHANGELOG.md).
+
+**0.25.0** (2026-09-22). **One file, all three stages.** **DLSS > Convert &
+export > Export with DLSS stages** (`Ctrl+S`) writes a video with any
+combination of Super Resolution, neural rendering and frame generation. Tick
+what you want, pick an output height and a frame rate, and a summary line reads
+back the geometry and frame rate the file will actually have before anything
+starts. The stages run in NVIDIA's own order - upscale, then the neural model on
+the upscaled frame, then generated frames on the result - and refusals are
+named: a height that does not grow the source, a frame rate this GPU will not
+admit, a stream that has not finished copying. Progress is shown per pass, with
+frames done, elapsed time and an ETA.
+
+**The neural runtime moved to RenoDX 6.5.3**, three major versions on from 4.70,
+and DLSS Super Resolution to 310.9.1. The upgrade is not a drop-in and the way
+it is not one is silent - 6.x removed both halves of the evidence a rendered
+frame had to satisfy - so the proof was re-derived from the add-on's own output
+and confirmed against a real render. **Neural passes** is new with it: run the
+model over each frame up to four times, paid for in render time rather than
+quality guesswork.
+
+**Neural rendering no longer switches itself off for a whole session.** The
+startup probe stopped after two frames and then waited for a report it had
+stopped producing frames for, so on 6.x it decided feature 18 was unavailable
+and blamed other DLSS injectors. It now renders until the runtime actually
+injects, and that probe is in the test suite instead of being a thing you could
+run by hand.
+
+**The menus and settings dialogs were rebuilt around one subject per block.**
+The DLSS menu now reads neural, then Super Resolution, then frame generation -
+the order the stages run in - each with its own toggle, presets and settings
+instead of scattered six rows apart. Cancel rows that were greyed out in every
+state you normally see are gone; a running job turns its own row into the cancel
+for it.
+
+**The three feature buttons in the bottom bar stopped looking alike.** Each has
+its own icon and colour, a teal busy state for "this is being made right now",
+and hover text that says what it does and why it is unavailable when it is.
+Two of the three used to be identical sparkles at exactly the narrow widths
+where the labels are not drawn.
 
 **0.24.0** (2026-09-20). **Frame generation.** **DLSS > Generate frames**
 converts a video to a higher frame rate - 2x by default, up to 5x - writes it as
