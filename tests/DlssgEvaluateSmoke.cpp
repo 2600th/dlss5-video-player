@@ -842,11 +842,24 @@ int wmain()
               << "phase3_tolerance=" << kPhaseTolerance << "\n";
     if (backend.MultiFrameCountMax() < kPhaseCount) {
         // Not a finding about phase placement: the question could not be asked
-        // at all, which is the only kind of case this program exits non-zero
-        // for besides an assertion that broke.
+        // at all. That is a property of the CARD, not of this code - multi-frame
+        // generation is Blackwell-only, so every RTX 40 and earlier admits
+        // exactly one generated frame per pair and can never reach the three
+        // indices these cases separate. A machine that cannot be asked reports
+        // the same skip, and for the same reason, as one with no adapter; the
+        // alternative is a suite that is permanently red on correct hardware,
+        // which teaches everyone to ignore it.
+        //
+        // Everything above this line has already run and printed its findings,
+        // including the midpoint verdict - so the single-frame evaluate is still
+        // fully asserted on these cards. Only the multi-index phase table is
+        // out of reach. A genuine fault below (readback allocation, a broken
+        // assertion) still exits 5.
         std::cout << "phase3=unreachable reason=runtime admits fewer than " << kPhaseCount
-                  << " generated frames per source pair\n";
-        return 5;
+                  << " generated frames per source pair (multi-frame generation needs Blackwell)\n"
+                  << "skipped: this adapter cannot generate " << kPhaseCount
+                  << " frames per pair; the phase table cannot be measured here\n";
+        return gpu_test_gate::kSkipExitCode;
     }
 
     // The honest pixel-units buffer for every case below, which is what this

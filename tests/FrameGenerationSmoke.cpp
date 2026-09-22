@@ -430,6 +430,23 @@ int wmain(int argc, wchar_t** argv)
     std::error_code directoryError;
     fs::create_directories(output.parent_path(), directoryError);
 
+    // A source that is not on this machine is not a broken player. The default
+    // clip lives under the gitignored `external/` tree, no script fetches it and
+    // no document says how to obtain it, so a fresh checkout fails this one
+    // registration while the three generated-clip registrations beside it pass.
+    // Report that as the skip it is, for the same reason and with the same exit
+    // code the no-adapter gate above uses.
+    //
+    // Deliberately `exists` and nothing more: a file that IS here but cannot be
+    // read, or has no listable streams, still returns 2 below. This hides a
+    // missing FILE, never a broken one.
+    std::error_code sourceError;
+    if (!fs::exists(source, sourceError)) {
+        std::cout << "skipped: " << Narrow(source.wstring())
+                  << " is not on this machine; nothing was asked of the converter\n";
+        return gpu_test_gate::kSkipExitCode;
+    }
+
     // The source the conversion is actually run on. Carrying the source's audio
     // is the second question this harness asks, because the player starts audio
     // from the file it loaded and a video-only conversion therefore plays

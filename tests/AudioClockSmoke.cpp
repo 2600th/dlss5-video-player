@@ -152,7 +152,15 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 
-    AudioPlayer audio;
+    // The player finds ffmpeg for itself - next to its own module, then PATH -
+    // and this test executable has neither beside it. argv[1] was used to
+    // GENERATE the clip and then dropped, so every Start() failed with
+    // "Audio: ffmpeg.exe not found." and all eight clock assertions failed on a
+    // machine whose audio is fine. Hand the player the same directory the
+    // harness was given.
+    AudioPlayer::Settings settings;
+    settings.helperDirectory = helpers.wstring();
+    AudioPlayer audio(std::move(settings));
 
     // ---- start -------------------------------------------------------------
     Check(audio.Start(clip.wstring(), 0.0), "Start from zero");
