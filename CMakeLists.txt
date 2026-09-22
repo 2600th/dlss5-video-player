@@ -374,6 +374,19 @@ if(BUILD_TESTING)
     # decoded pixels - so it needs FFmpeg staged, the same way CachedExportTests
     # does, and now needs it for the measurement itself rather than only for
     # the conversion.
+    # Every combination of the three export stages on one clip. Links the frame
+    # generation pass directly and reaches the other two through NeuralWorker,
+    # which is how the player drives them.
+    add_executable(ExportMatrixSmoke tests/ExportMatrixSmoke.cpp
+        src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
+        src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp src/NeuralWorker.cpp)
+    target_include_directories(ExportMatrixSmoke PRIVATE src "${DLSS_SDK}/include")
+    target_compile_definitions(ExportMatrixSmoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(ExportMatrixSmoke PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_link_directories(ExportMatrixSmoke PRIVATE "${DLSS_LIB_DIR}")
+    target_link_libraries(ExportMatrixSmoke PRIVATE ${player_libraries})
+    add_dependencies(ExportMatrixSmoke NeuralWorker)
+
     add_executable(FrameGenerationSmoke tests/FrameGenerationSmoke.cpp
         src/FrameGenerationPass.cpp src/DLSSGBackend.cpp src/NeuralPreflight.cpp src/NeuralCache.cpp
         src/MediaPipeline.cpp src/VideoDecoder.cpp src/MediaSource.cpp)

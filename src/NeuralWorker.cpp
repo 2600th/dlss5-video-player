@@ -630,6 +630,10 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
 
 bool ValidRequest(const NeuralRenderRequest& request)
 {
+    if ((request.outputWidth || request.outputHeight) &&
+        (!request.outputWidth || !request.outputHeight ||
+         request.outputWidth < request.width || request.outputHeight < request.height))
+        return false;
     if (request.sourcePath.empty() || request.stagingVideoPath.empty() || !request.width || !request.height ||
         !std::isfinite(request.fps) || request.fps <= 0.0 || !std::isfinite(request.durationSeconds) ||
         request.durationSeconds <= 0.0) return false;
@@ -950,6 +954,19 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         L"--range-end-100ns", std::to_wstring(request.range.end100ns),
         L"--preroll-frames", std::to_wstring(request.prerollFrames),
         L"--frame-retry-limit", std::to_wstring(request.frameRetryLimit)};
+    // Emitted only when they differ from the defaults, so an upscale-free job's
+    // command line is byte-identical to the one this helper has always taken.
+    if (request.outputWidth && request.outputHeight &&
+        (request.outputWidth != request.width || request.outputHeight != request.height)) {
+        arguments.emplace_back(L"--output-width");
+        arguments.emplace_back(std::to_wstring(request.outputWidth));
+        arguments.emplace_back(L"--output-height");
+        arguments.emplace_back(std::to_wstring(request.outputHeight));
+    }
+    if (!request.requireNeural) {
+        arguments.emplace_back(L"--require-neural");
+        arguments.emplace_back(L"0");
+    }
     const std::string guides = CanonicalGuideControls(request.guides);
     arguments.emplace_back(L"--guides");
     arguments.emplace_back(guides.begin(), guides.end());
@@ -1039,13 +1056,18 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
 
     enum Key { Metadata, Source, Staging, Width, Height, Fps, Duration, JobId, RangeStart, RangeEnd, Preroll,
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
-               GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram, KeyCount };
+               GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
+               OutputWidth, OutputHeight, RequireNeural, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
         L"--guides", L"--segment-frames", L"--pause-event", L"--gpu-color-conversion", L"--nvenc-preset",
         L"--gpu-source-conversion", L"--first-segment-frames", L"--command-handle", L"--parent-process",
-        kIdleVramPolicyFlag};
+        kIdleVramPolicyFlag,
+        // Absent on every helper invocation that does not upscale, which keeps
+        // an older helper binary compatible with a newer player for the jobs
+        // that binary can actually do.
+        L"--output-width", L"--output-height", L"--require-neural"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1145,6 +1167,25 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         if (!ParseUnsigned(*values[FirstSegmentFrames], firstFrames) || firstFrames > UINT32_MAX)
             return std::nullopt;
         request.firstSegmentFrames = static_cast<uint32_t>(firstFrames);
+    }
+    // Both or neither: a width without a height is a malformed request, not a
+    // half-specified one to be guessed at.
+    if (values[OutputWidth] || values[OutputHeight]) {
+        if (!values[OutputWidth] || !values[OutputHeight]) return std::nullopt;
+        uint64_t outputWidth = 0, outputHeight = 0;
+        if (!ParseUnsigned(*values[OutputWidth], outputWidth) || outputWidth > UINT32_MAX ||
+            !ParseUnsigned(*values[OutputHeight], outputHeight) || outputHeight > UINT32_MAX)
+            return std::nullopt;
+        request.outputWidth = static_cast<uint32_t>(outputWidth);
+        request.outputHeight = static_cast<uint32_t>(outputHeight);
+    }
+    // Absent means neural is required, which is what every job before Super
+    // Resolution joined this pass asked for.
+    if (values[RequireNeural]) {
+        uint64_t neuralRequired = 0;
+        if (!ParseUnsigned(*values[RequireNeural], neuralRequired) || neuralRequired > 1)
+            return std::nullopt;
+        request.requireNeural = neuralRequired == 1;
     }
     if (values[GpuColorConversion]) {
         uint64_t enabled = 0;

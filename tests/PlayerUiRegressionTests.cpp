@@ -493,6 +493,13 @@ struct PlayerAppTestAccess {
         CheckNeuralToggleQueuedDuringSeek(app);
     }
 
+    static void export_stages_dialog_test()
+    {
+        PlayerApp& app = fixture->app;
+
+        CheckExportStagesDialog(app);
+    }
+
     static void neural_settings_dialog_test()
     {
         PlayerApp& app = fixture->app;
@@ -990,6 +997,7 @@ struct PlayerAppTestAccess {
         UI_CASE(neural_strength_dial_test),
         UI_CASE(live_buffering_play_intent_test),
         UI_CASE(neural_toggle_queued_during_seek_test),
+        UI_CASE(export_stages_dialog_test),
         UI_CASE(neural_settings_dialog_test),
         UI_CASE(settings_ahead_notice_test),
         UI_CASE(encoder_settings_dialog_test),
@@ -1821,6 +1829,87 @@ struct PlayerAppTestAccess {
         CHECK(app.m_adjustWnd == nullptr);
         CHECK(!IsWindow(dialog));
         app.m_comparison = {}; app.m_cachedPlayback = cachedPlayback;
+    }
+
+    // The export dialog, driven the way a user drives it.
+    //
+    // Every control is clicked and read back, because a control this dialog
+    // builds but leaves out of its WM_COMMAND router is drawn, movable and
+    // inert - which is exactly what shipped when stacking was added to the
+    // neural settings dialog, and was invisible until a test pressed it.
+    static void CheckExportStagesDialog(PlayerApp& app)
+    {
+        app.m_exportSelection = {};
+        app.ShowExportStages();
+        CHECK(app.m_exportStagesWnd != nullptr);
+        if (!app.m_exportStagesWnd) return;
+        const HWND dialog = app.m_exportStagesWnd;
+        const auto click = [&](int id) {
+            HWND box = GetDlgItem(dialog, id);
+            CHECK(box != nullptr);
+            if (!box) return;
+            SendMessageW(box, BM_SETCHECK,
+                         SendMessageW(box, BM_GETCHECK, 0, 0) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
+            app.ExportStagesWndProc(dialog, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
+        };
+        const auto select = [&](int id, int index) {
+            HWND combo = GetDlgItem(dialog, id);
+            CHECK(combo != nullptr);
+            if (!combo) return;
+            SendMessageW(combo, CB_SETCURSEL, static_cast<WPARAM>(index), 0);
+            app.ExportStagesWndProc(dialog, WM_COMMAND, MAKEWPARAM(id, CBN_SELCHANGE), 0);
+        };
+
+        // Nothing selected is a refusal, and the Export button says so by being
+        // unavailable rather than by failing minutes into a render.
+        CHECK(!app.CurrentExportPlan().valid);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_EX_RUN)) == FALSE);
+
+        click(IDC_EX_NEURAL);
+        CHECK(app.m_exportSelection.neural);
+        // The plan's own arithmetic is pinned in PolicyTests against explicit
+        // geometry. What belongs HERE is that the dialog's controls reach the
+        // selection the plan is built from - this fixture has no media loaded,
+        // so every plan it can build is refused for want of a source, which
+        // would make a validity assertion here a test of the fixture.
+        const auto planFor = [&](uint32_t sourceWidth, uint32_t sourceHeight) {
+            return PlanExport(app.m_exportSelection, sourceWidth, sourceHeight, 30.0, 2, false);
+        };
+        CHECK(planFor(1280, 720).valid);
+        CHECK_EQ(uint32_t{1280}, planFor(1280, 720).outputWidth);   // neural alone does not grow
+
+        // The rung is dead UI until there is something to upscale.
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_EX_RESOLUTION)) == FALSE);
+        click(IDC_EX_UPSCALE);
+        CHECK(app.m_exportSelection.upscale);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_EX_RESOLUTION)) != FALSE);
+        select(IDC_EX_RESOLUTION, 2);   // 2160p
+        CHECK_EQ(uint32_t{2160}, app.m_exportSelection.targetHeight);
+
+        // Both stages are still ONE pass: two would run the model at source
+        // size and upscale afterwards, which is the Neural Upstream order
+        // rather than NVIDIA's.
+        const ExportPlan both = planFor(1280, 720);
+        CHECK(both.valid);
+        CHECK(both.requireNeural);
+        CHECK_EQ(uint32_t{3840}, both.outputWidth);   // the 2160p rung just chosen
+        CHECK_EQ(uint32_t{1}, ExportStageCount(both));
+
+        click(IDC_EX_FRAMEGEN);
+        CHECK(app.m_exportSelection.frameGeneration);
+        const ExportPlan all = planFor(1280, 720);
+        CHECK_EQ(uint32_t{2}, ExportStageCount(all));
+        CHECK_EQ(60.0, all.outputFps);
+
+        // Turning a stage back off has to reach the plan too; a checkbox that
+        // only ever latches on is the same inert-control bug wearing a hat.
+        click(IDC_EX_UPSCALE);
+        CHECK(!app.m_exportSelection.upscale);
+        CHECK_EQ(uint32_t{1280}, planFor(1280, 720).outputWidth);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_EX_RESOLUTION)) == FALSE);
+
+        DestroyWindow(dialog);
+        CHECK(app.m_exportStagesWnd == nullptr);
     }
 
     static void CheckNeuralSettingsDialog(PlayerApp& app)

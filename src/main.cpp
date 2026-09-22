@@ -320,6 +320,14 @@ static constexpr int IDC_ES_GPU_SOURCE = 7402;
 static constexpr int IDC_ES_NVENC_PRESET = 7403;
 static constexpr int IDC_ES_RESET = 7404;
 static constexpr int IDC_ES_CLOSE = 7405;
+static constexpr int IDC_EX_UPSCALE = 7501;
+static constexpr int IDC_EX_NEURAL = 7502;
+static constexpr int IDC_EX_FRAMEGEN = 7503;
+static constexpr int IDC_EX_RESOLUTION = 7504;
+static constexpr int IDC_EX_MULTIPLIER = 7505;
+static constexpr int IDC_EX_SUMMARY = 7506;
+static constexpr int IDC_EX_RUN = 7507;
+static constexpr int IDC_EX_CLOSE = 7508;
 
 static constexpr int IDC_TIMECODE_EDIT = 7501;
 static constexpr int IDC_TIMECODE_SET_IN = 7502;
@@ -336,6 +344,7 @@ static constexpr UINT WM_NEURAL_COMPLETE = WM_APP + 43;
 static constexpr UINT WM_EXPORT_COMPLETE = WM_APP + 44;
 static constexpr UINT WM_UPDATE_CHECKED = WM_APP + 45;
 static constexpr UINT WM_FRAMEGEN_PROGRESS = WM_APP + 46;
+static constexpr UINT WM_STAGE_EXPORT_PROGRESS = WM_APP + 48;
 static constexpr UINT WM_FRAMEGEN_COMPLETE = WM_APP + 47;
 
 struct YouTubeUrlDialogState {
@@ -1427,7 +1436,11 @@ private:
     // burst of render work - and short enough that a source this machine simply
     // cannot follow says so within a few seconds instead of hitching for ever.
     static constexpr int kCadenceReanchorLimit=3;
-    bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving();}
+    // A stage export belongs here for the same reason the other two do: it is
+    // minutes of work with a panel on screen, and this predicate is what arms
+    // the repaint timer that animates it. Without it the spinner never moved
+    // and the elapsed clock read zero.
+    bool ActivityBusy()const{return NeuralJobActive()||m_youtubeLifecycle.IsResolving()||m_stageExport.running;}
     // A job that renders behind the loaded media: the player keeps the window,
     // and only its own panel and lanes report progress.
     bool JobBehindPlayback()const{return m_liveSession||m_previewJob;}
@@ -1526,8 +1539,15 @@ private:
         catch(const std::system_error&){MessageBoxW(m_hwnd,T(L"export.worker_failed").c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);return;}
         SyncFeatureMenuState();UpdateCachedStatus();
     }
-    void CancelExport(){if(m_exportWorker.joinable()){m_exportWorker.request_stop();m_exportWorker.join();m_exportWorker=std::jthread{};}m_exportCompletions.Clear();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
-    void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),T(L"export.title.complete").c_str(),MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);}
+    void CancelExport(){if(m_exportWorker.joinable()){m_exportWorker.request_stop();m_exportWorker.join();m_exportWorker=std::jthread{};}m_exportCompletions.Clear();
+        // Cleared HERE and not only in CompleteExport: clearing the registry is
+        // what makes the queued completion find nothing, so CompleteExport
+        // returns before its own reset runs. Without this the export panel
+        // covers the video until some later export happens to finish.
+        m_stageExport={};SyncActivityFeedback();if(m_hwnd&&IsWindow(m_hwnd)){SyncFeatureMenuState();UpdateCachedStatus();}}
+    void CompleteExport(uint64_t token){auto completion=m_exportCompletions.Take(token);if(!completion)return;
+        // Whatever happened, the export is over and the panel says so.
+        m_stageExport={};SyncActivityFeedback();if(m_exportWorker.joinable()){m_exportWorker.join();m_exportWorker=std::jthread{};}SyncFeatureMenuState();UpdateCachedStatus();if(completion->result.ok){const std::wstring message=L"Exported to:\n"+completion->output.wstring();MessageBoxW(m_hwnd,message.c_str(),T(L"export.title.complete").c_str(),MB_OK|MB_ICONINFORMATION);}else if(completion->result.error!=MaterializeError::Cancelled)MessageBoxW(m_hwnd,completion->result.detail.c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);}
 
     // Frame generation runs as a conversion, not as live presentation: the pass
     // writes a new file at the planned multiple of the source rate, the user
@@ -4756,6 +4776,48 @@ private:
         HBRUSH windowBg=CreateSolidBrush(ui_palette::Window);FillRect(dc,&c,windowBg);DeleteObject(windowBg);
         // An active session renders behind live playback, so it never takes the
         // window: its feedback is the buffering panel and the coverage lane.
+        // The export gets the same panel. It is a minutes-long job that writes a
+        // file, which is exactly what this surface was built to report, and a
+        // second progress widget for the same shape of work would be a second
+        // thing to keep consistent for no benefit.
+        if(m_stageExport.running){
+            const PreRenderSurfaceLayout surface=LayoutPreRenderSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));
+            const uint64_t total=m_stageExport.totalFrames,done=std::min(m_stageExport.completedFrames,total?total:m_stageExport.completedFrames);
+            const auto visual=ResolveActivityVisual(surface.progressTrack,ActivityElapsedMs(),done,total,total>0,m_activityMotionEnabled);
+            DrawActivitySpinner(dc,surface.spinner,visual.spinnerStep);
+            SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(242,243,245));HGDIOBJ oldFont=SelectObject(dc,m_font);
+            RECT row=surface.title;const std::wstring title=T(L"export.progress.title");
+            DrawTextW(dc,title.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            SelectObject(dc,m_fontSmall);SetTextColor(dc,ui_palette::SecondaryText);
+            // "Pass 1 of 2 - Super Resolution and neural rendering": which of
+            // the two long things is happening, and how many are left.
+            wchar_t phase[256];
+            swprintf_s(phase,L"Pass %u of %u · %s",m_stageExport.pass,std::max<uint32_t>(1,m_stageExport.passes),
+                       T(m_stageExport.passKey?m_stageExport.passKey:L"export.progress.writing").c_str());
+            row=surface.phase;DrawTextW(dc,phase,-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            std::wstring frames;
+            if(total>0){
+                wchar_t line[128];swprintf_s(line,L"%u%% · %llu / %llu frames",visual.percent,
+                                             static_cast<unsigned long long>(done),static_cast<unsigned long long>(total));
+                frames=line;
+            }
+            row=surface.frameCount;DrawTextW(dc,frames.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            // Elapsed from this export's own start, and an estimate only once
+            // there are enough frames for one to mean anything.
+            const double elapsedSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-m_stageExport.started).count();
+            std::wstring timing=L"Elapsed "+TimeText(elapsedSeconds);
+            if(total>0&&done>4&&elapsedSeconds>2.0){
+                const double remaining=elapsedSeconds/double(done)*double(total-done);
+                if(remaining>0.0)timing+=L" · ETA "+TimeText(remaining);
+            }
+            row=surface.elapsedEta;DrawTextW(dc,timing.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            row=surface.size;const std::wstring hint=T(L"menu.cancel_export_running");
+            DrawTextW(dc,hint.c_str(),-1,&row,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+            HBRUSH track=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&surface.progressTrack,track);DeleteObject(track);
+            HBRUSH fill=CreateSolidBrush(ui_palette::NeuralCoverage);FillRect(dc,&visual.fill,fill);DeleteObject(fill);
+            SelectObject(dc,oldFont);
+            return;
+        }
         if((NeuralJobActive()&&!JobBehindPlayback())||(!m_loaded&&m_youtubeLifecycle.IsResolving())){
             const bool neural=NeuralJobActive();
             const PreRenderSurfaceLayout surface=LayoutPreRenderSurface(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd));m_neuralCancelBounds=surface.cancelButton;
@@ -6074,6 +6136,14 @@ private:
         MessageBoxW(m_hwnd,notice.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONWARNING);
         return true;
     }
+    // The progress updates own heap memory, so the queued ones are taken and
+    // deleted rather than left for USER32 to discard with the window. Safe to
+    // call only after the worker is joined, which WM_DESTROY does first.
+    void DrainStageExportMessages(){
+        if(!m_hwnd)return;MSG message{};
+        while(PeekMessageW(&message,m_hwnd,WM_STAGE_EXPORT_PROGRESS,WM_STAGE_EXPORT_PROGRESS,PM_REMOVE))
+            delete reinterpret_cast<StageExportProgress*>(message.lParam);
+    }
     void DrainNeuralMessages(){m_neuralProgressMessages.Clear();m_neuralCompletions.Clear();if(!m_hwnd)return;MSG message{};while(PeekMessageW(&message,m_hwnd,WM_NEURAL_PROGRESS,WM_NEURAL_COMPLETE,PM_REMOVE)){};}
     // One line per render, in the same terse register as the receipt summary,
     // so a user's log carries the whole breakdown without the receipt file.
@@ -7278,6 +7348,19 @@ private:
         case WM_YOUTUBE_RESOLVED:CompleteYouTubeResolution(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_PROGRESS:CompleteNeuralProgress(static_cast<uint64_t>(w));return 0;
         case WM_NEURAL_COMPLETE:CompleteNeuralJob(static_cast<uint64_t>(w));return 0;
+        case WM_STAGE_EXPORT_PROGRESS:{
+            std::unique_ptr<StageExportProgress> update(reinterpret_cast<StageExportProgress*>(l));
+            if(update){
+                // The clock starts with the first report of a run, so the
+                // elapsed figure is the export's, not the process's.
+                const bool starting=update->running&&!m_stageExport.running;
+                const auto started=starting?std::chrono::steady_clock::now():m_stageExport.started;
+                m_stageExport=*update;m_stageExport.started=started;
+                SyncActivityFeedback();UpdateCachedStatus();InvalidateControls();
+                InvalidateRect(h,nullptr,FALSE);
+            }
+            return 0;
+        }
         case WM_EXPORT_COMPLETE:CompleteExport(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
@@ -7293,7 +7376,7 @@ private:
             break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
-        case WM_DESTROY:CancelExport();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
+        case WM_DESTROY:CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
         case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);CancelSourcePrefetch();CancelUpdateCheck();DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
@@ -7378,7 +7461,7 @@ private:
         // Handled before the switch would reach an unknown id, because the
         // presets are a contiguous range rather than named commands.
         case IDM_NEURAL_PRESET_CUSTOM:break;// reports state; not selectable
-case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
+case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         case IDM_COMPARE_NEURAL:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Blend);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
@@ -7389,6 +7472,20 @@ case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEI
     std::unique_ptr<RecentMediaHistory> m_recent;
     std::filesystem::path m_cacheRoot;
     std::filesystem::path m_neuralPath;
+    // What the export is doing right now, posted from the worker thread and
+    // read by the activity panel. Two passes at most, so "pass N of M" is the
+    // honest shape rather than one bar that jumps backwards when stage two
+    // starts counting its own frames from zero.
+    struct StageExportProgress{
+        bool running{};
+        uint32_t pass{},passes{};
+        const wchar_t* passKey{};
+        uint64_t completedFrames{},totalFrames{};
+        std::chrono::steady_clock::time_point started{};
+    };
+    StageExportProgress m_stageExport{};
+    HWND m_exportStagesWnd{};
+    ExportSelection m_exportSelection{};
     CompletionRegistry<ExportCompletion> m_exportCompletions;
     std::jthread m_exportWorker;
     CompletionRegistry<FrameGenerationCompletion> m_frameGenCompletions;

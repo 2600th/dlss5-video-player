@@ -912,7 +912,17 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     }
     const uint64_t totalFrames = std::max<uint64_t>(1, static_cast<uint64_t>(
         std::llround(double(rangeEnd - rangeStart) / 10000000.0 * request.fps)));
-    const uint64_t expectedBytes64 = uint64_t{request.width} * request.height * 4u;
+    // The capture size, resolved once. 0 means "no upscale", which is every
+    // caller that predates Super Resolution being part of an export.
+    const uint32_t outputWidth = request.outputWidth ? request.outputWidth : request.width;
+    const uint32_t outputHeight = request.outputHeight ? request.outputHeight : request.height;
+    // An output SMALLER than the source is not an upscale, and DLSS refuses it.
+    // Caught here rather than at the renderer so the refusal names the request.
+    if (outputWidth < request.width || outputHeight < request.height) {
+        return fail(NeuralRenderFailure::Source,
+                    L"The neural render output size is smaller than the source, which is not an upscale.");
+    }
+    const uint64_t expectedBytes64 = uint64_t{outputWidth} * outputHeight * 4u;
     if (expectedBytes64 > std::numeric_limits<size_t>::max()) {
         return fail(NeuralRenderFailure::Source, L"Neural render dimensions are too large.");
     }
@@ -1004,7 +1014,8 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(NeuralRenderFailure::Source, L"The source video could not be opened.");
     }
     emit(NeuralRenderPhase::Decoding, 0, 0, false);
-    if (!evaluator.Initialize(request.renderWindow, request.width, request.height, request.fps,
+    if (!evaluator.Initialize(request.renderWindow, request.width, request.height,
+                              outputWidth, outputHeight, request.fps,
                               request.guides, source.Layout(), source.ColorDescription())) {
         source.Close();
         return fail(NeuralRenderFailure::Neural, L"The neural renderer could not be initialized.");
@@ -1028,7 +1039,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // whatever the injected evaluator vouches for in the tests.
     auto neuralEvaluations = [&]() -> uint64_t { return evaluator.NeuralEvaluations(); };
     expectedBytes = static_cast<size_t>(
-        EncoderFrameBytes(evaluator.CapturePixelFormat(), request.width, request.height));
+        EncoderFrameBytes(evaluator.CapturePixelFormat(), outputWidth, outputHeight));
 
     const bool singleFrameSource = totalFrames == 1;
     const uint64_t primeLimit = singleFrameSource
@@ -1134,7 +1145,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         // evaluated without being captured.
         uint64_t neuralEvaluationsBefore = neuralEvaluations();
         AttemptResult attempt;
-        EncoderSpec spec{request.width, request.height, request.fps, kind,
+        // The captured frames, not the source: an upscaling job encodes what
+        // came out of Super Resolution.
+        EncoderSpec spec{outputWidth, outputHeight, request.fps, kind,
                          evaluator.CapturePixelFormat()};
         spec.nvencPreset = request.nvencPreset;
         if (writer) {
@@ -1509,7 +1522,12 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // Summarized before the verdicts below so a refusal carries the numbers it
     // was based on into the receipt.
     result.timing=SummarizeTiming(attempt,evaluator.PeakLocalVideoMemoryMiB());
-    if(!result.evidence.Valid()){
+    // Everything from here to the timing floor judges the NEURAL pass, so a job
+    // that asked for Super Resolution alone is not held to any of it. Each one
+    // exists to stop frames that never went through feature 18 being published
+    // as neural output; an upscale-only job makes no such claim, and its
+    // manifest records neural=false so nothing downstream can infer one.
+    if(request.requireNeural&&!result.evidence.Valid()){
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence was incomplete or contained a later failure.");
     }
@@ -1519,24 +1537,24 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // held to the backend's own count as well, which is per process, monotonic,
     // and has to have advanced at least once for every frame this attempt
     // captured - the count the cache entry then carries as its own evidence.
-    if(!evaluatorReused&&
+    if(request.requireNeural&&!evaluatorReused&&
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
         return fail(NeuralRenderFailure::Neural,
                     L"Feature 18 runtime evidence did not advance after captured rendering.");
     }
-    if(attempt.neuralEvaluations<attempt.frames){
+    if(request.requireNeural&&attempt.neuralEvaluations<attempt.frames){
         std::wostringstream detail;
         detail<<L"The neural backend evaluated "<<attempt.neuralEvaluations
               <<L" frames while "<<attempt.frames<<L" were captured, so the captured frames "
               <<L"are not all neural output.";
         return fail(NeuralRenderFailure::Neural,detail.str());
     }
-    if(!NeuralTimingClearsFloor(result.timing,request.width,request.height)){
+    if(request.requireNeural&&!NeuralTimingClearsFloor(result.timing,outputWidth,outputHeight)){
         std::wostringstream detail;
         detail<<std::fixed<<std::setprecision(2)
               <<L"The neural pass did not run: median neural GPU time was "<<result.timing.neuralGpuMsP50
-              <<L" ms per frame at "<<request.width<<L"x"<<request.height<<L", below the "
-              <<NeuralGpuMsFloor(request.width,request.height)
+              <<L" ms per frame at "<<outputWidth<<L"x"<<outputHeight<<L", below the "
+              <<NeuralGpuMsFloor(outputWidth,outputHeight)
               <<L" ms floor for that geometry, so the frames are upscaler output. "
               <<L"Check that the neural add-on is loaded and that feature 18 stays armed, then render again.";
         return fail(NeuralRenderFailure::Neural,detail.str());
@@ -1577,9 +1595,9 @@ struct InjectedEvaluatorAdapter {
     // The injected interface stays synchronous; these shims give RunJob the same async shape
     // the production adapter has, so the pipelined control flow is what the caller runs.
     std::deque<JobEvaluation> captured{};
-    bool Initialize(HWND window,uint32_t width,uint32_t height,double fps,const GuideControls& guides,
+    bool Initialize(HWND window,uint32_t width,uint32_t height,uint32_t outputWidth,uint32_t outputHeight,double fps,const GuideControls& guides,
                     PixelLayout,const SourceColorDescription&){
-        return evaluator.Initialize(window,width,height,fps,guides);
+        return evaluator.Initialize(window,width,height,outputWidth,outputHeight,fps,guides);
     }
     // A test evaluator owns no device and is constructed per Run, so it never
     // inherits an armed feature. Answered here rather than left to RunJob's
@@ -1703,7 +1721,12 @@ using DeferredCapture=DeferredCaptureWorker<D3D12Renderer::CaptureReadbackView,D
 struct ProductionEvaluatorAdapter {
     D3D12RendererOwner renderer;uint64_t successfulEvaluations{};
     TemporalGuideGenerator guides;
-    uint32_t width{},height{};double fps{};
+    uint32_t width{},height{};
+    // Capture size. Equal to width/height unless the job upscales, and part of
+    // the reuse comparison because D3D12Renderer sizes the swapchain, the NGX
+    // feature and the readback from it and can resize none of them.
+    uint32_t outputWidth{},outputHeight{};
+    double fps{};
     NeuralRenderFailure lastFailure{NeuralRenderFailure::None};
     // Requested before Initialize; the renderer decides what it can actually deliver.
     bool gpuColorConversion{false};
@@ -1727,8 +1750,9 @@ struct ProductionEvaluatorAdapter {
     // is the whole trade the FreeFeature arm makes.
     bool featureReleasedWhileIdle=false;
     bool Reused()const{return reused;}
-    bool Initialize(HWND window,uint32_t w,uint32_t h,double rate,const GuideControls& controls,
+    bool Initialize(HWND window,uint32_t w,uint32_t h,uint32_t ow,uint32_t oh,double rate,const GuideControls& controls,
                     PixelLayout layout,const SourceColorDescription& color){
+        if(!ow||!oh){ow=w;oh=h;}
         const SourceNv12Conversion conversion=layout==PixelLayout::Nv12
             ?SourceNv12ConversionFor(color):SourceNv12Conversion::Unsupported;
         // Everything compared here is fixed at bring-up and has no setter: the
@@ -1742,7 +1766,7 @@ struct ProductionEvaluatorAdapter {
         // device holds changed, only the workset, so the job re-arms it rather
         // than rebuilding everything underneath it.
         reused=renderer&&(renderer->DLSSFeatureCreated()||featureReleasedWhileIdle)&&
-               width==w&&height==h&&fps==rate&&
+               width==w&&height==h&&outputWidth==ow&&outputHeight==oh&&fps==rate&&
                sourceLayout==layout&&sourceConversion==conversion&&
                builtGpuColorConversion==gpuColorConversion;
         // Answered, so spent: this job either re-arms the released feature or
@@ -1755,7 +1779,7 @@ struct ProductionEvaluatorAdapter {
             guides.SetControls(controls);return true;
         }
         Release();
-        width=w;height=h;fps=rate;sourceLayout=layout;sourceConversion=conversion;
+        width=w;height=h;outputWidth=ow;outputHeight=oh;fps=rate;sourceLayout=layout;sourceConversion=conversion;
         const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;

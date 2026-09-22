@@ -58,6 +58,34 @@ struct NeuralRenderRequest {
     // BT.601, full-range, undeclared or BT.2020 source falls back to the CPU
     // conversion with one log line rather than reaching the model mis-decoded.
     bool gpuSourceConversion{false};
+    // ---- Appended, deliberately, at the end. ----------------------------
+    // Several callers build this struct with a positional initialiser list
+    // (`{nullptr, source, output, w, h, fps, seconds}`). Adding a member in the
+    // middle silently re-binds every initialiser after it onto the wrong
+    // member - inserted above `fps`, these two turned a 24 fps 6 s smoke into a
+    // 24x6 output size with no frame rate, and the compiler said only
+    // "possible loss of data". New members go here.
+    // What the captured frames come out at. 0 means "the source size", which is
+    // every caller that does not upscale and is what this pass did exclusively
+    // before DLSS Super Resolution became part of an export.
+    //
+    // The renderer has always taken a source size and an output size
+    // separately; this pass passed the source size for both. Handing it a real
+    // output size makes the carrier a true Super Resolution pass, and because
+    // RenoDX's NRPreUpscale defaults to 0 - neural AFTER the upscale - the
+    // neural model then runs on the upscaled frame. That is NVIDIA's own DLSS 5
+    // order: their neural rendering "normally runs last, on the fully upscaled
+    // frame", and the community Neural Upstream mod exists precisely because
+    // moving it earlier is faster and therefore NOT what stock does. An export
+    // has no frame budget to protect, so it takes the stock order.
+    uint32_t outputWidth{};
+    uint32_t outputHeight{};
+    // False renders the carrier alone - Super Resolution with no neural pass -
+    // and drops the four feature-18 verdicts with it. Those verdicts exist to
+    // stop un-denoised frames being published as neural; a job that never asked
+    // for neural has nothing to misrepresent, and holding it to them would fail
+    // every upscale-only export by design.
+    bool requireNeural{true};
 };
 
 struct NeuralRenderProgress {
@@ -114,6 +142,14 @@ NeuralRuntimeEvidence ParseNeuralRuntimeEvidence(std::string_view reshadeLogSegm
 // the offline job and the preflight probe so both judge feature 18 from the
 // same evidence rules.
 std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory);
+// The same log, read once and returned as it stands. For a caller that is
+// mid-render and wants to know whether the add-on has armed feature 18 YET:
+// the stabilizing read above waits for arming to appear, and a caller that
+// stops submitting frames in order to wait has stopped producing the only
+// thing that can make it appear. RenoDX 6.x will not inject until its
+// compute-state shadow has observed a command-list Reset, which is another
+// evaluate away, so the probe polls with this between frames instead.
+std::string ReadNeuralRuntimeSessionLogSnapshot(const std::filesystem::path& runtimeDirectory);
 // The log file selected by that rule; empty when neither candidate belongs to
 // this process's session.
 std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& runtimeDirectory);
@@ -149,7 +185,10 @@ public:
 class INeuralFrameEvaluator {
 public:
     virtual ~INeuralFrameEvaluator() = default;
-    virtual bool Initialize(HWND renderWindow, uint32_t width, uint32_t height, double fps,
+    // `outputWidth`/`outputHeight` are the capture size; they equal the source
+    // size unless the job upscales.
+    virtual bool Initialize(HWND renderWindow, uint32_t width, uint32_t height,
+                            uint32_t outputWidth, uint32_t outputHeight, double fps,
                             const GuideControls& guides) = 0;
     virtual bool Submit(const OfflineDecodedFrame& frame, const FrameIdentity& id, bool capture,
                         OfflineEvaluation& out) = 0;
