@@ -3,6 +3,7 @@
 #include "NeuralWorkerProtocol.h"
 #include "ResidentWorkerLoop.h"
 #include "TestSupport.h"
+#include "GpuTestGate.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -439,8 +440,17 @@ bool ParsePositiveDouble(std::wstring_view text, double& value)
     return end == copy.c_str() + copy.size() && std::isfinite(value) && value > 0.0;
 }
 
+// The preflight probe against the real helper, the real add-on and this GPU.
+//
+// It existed as a hand-run mode for a long time before it was a ctest, and the
+// gap is what let a runtime bump ship: every automated neural test renders long
+// enough to pass RenoDX 6.x's injection warm-up, so nothing exercised the one
+// code path that stops after two frames. The player calls this before its first
+// render and latches the answer, so a probe that fails here turns neural
+// rendering off for the whole session.
 int RunRealPreflight(int argc, wchar_t** argv)
 {
+    if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
     if (argc != 3) {
         std::wcerr << L"Usage: NeuralWorkerTests --real-preflight <workerexe>\n";
         return EXIT_FAILURE;
@@ -524,7 +534,7 @@ int RunRealWorker(int argc, wchar_t** argv)
         << L" duration100ns=" << result.duration100ns << L" nativeEvaluations=" << result.nativeEvaluations
         << L" verifiedNeuralFrames=" << result.verifiedNeuralFrames
         << L" armed=" << result.feature18ArmedBeforeCapture
-        << L" evidence={upscalingOff=" << result.evidence.upscalingOff
+        << L" evidence={nativeResolution=" << result.evidence.nativeResolution
         << L", inline=" << result.evidence.inlineInterceptionContract
         << L", created=" << result.evidence.feature18Created
         << L", evaluated=" << result.evidence.feature18Evaluated
@@ -956,7 +966,7 @@ void valid_result_preserves_all_verification_fields_test()
     CHECK(result.nativeEvaluations == 60);
     CHECK(result.verifiedNeuralFrames == 60);
     CHECK(result.feature18ArmedBeforeCapture);
-    CHECK(result.evidence.upscalingOff);
+    CHECK(result.evidence.nativeResolution);
     CHECK(result.evidence.inlineInterceptionContract);
     CHECK(result.evidence.feature18Created);
     CHECK(result.evidence.feature18Evaluated);

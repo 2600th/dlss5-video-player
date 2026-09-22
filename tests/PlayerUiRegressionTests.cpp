@@ -1,7 +1,10 @@
 #include <windows.h>
 #include <string>
+#include <string_view>
+#include <filesystem>
 #include <vector>
 #include "TestSupport.h"
+#include "GpuTestGate.h"
 
 namespace {
 std::vector<std::wstring> drawnText;
@@ -2472,8 +2475,21 @@ int main(int argc, char** argv)
         // one function.
         PlayerAppTestAccess::Fixture fixture;
         PlayerAppTestAccess::fixture = &fixture;
-        ran = ::test_support::run_cases(PlayerAppTestAccess::kCases,
-                                        std::size(PlayerAppTestAccess::kCases), {}).ran;
+        if (gpuOnly) {
+            // Opened here, not at the top: the gate needs COM, and a machine
+            // with no adapter must report the skip rather than fail.
+            if (const int skip = gpu_test_gate::SkipWithoutGpu()) {
+                PlayerAppTestAccess::fixture = nullptr;
+                MFShutdown();
+                CoUninitialize();
+                return skip;
+            }
+            ran = ::test_support::run_cases(PlayerAppTestAccess::kGpuCases,
+                                            std::size(PlayerAppTestAccess::kGpuCases), {}).ran;
+        } else {
+            ran = ::test_support::run_cases(PlayerAppTestAccess::kCases,
+                                            std::size(PlayerAppTestAccess::kCases), {}).ran;
+        }
         PlayerAppTestAccess::fixture = nullptr;
     }
 

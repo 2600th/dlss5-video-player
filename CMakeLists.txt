@@ -598,7 +598,9 @@ if(BUILD_TESTING)
     target_include_directories(NeuralWorkerTests PRIVATE src)
     target_compile_definitions(NeuralWorkerTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(NeuralWorkerTests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-    target_link_libraries(NeuralWorkerTests PRIVATE shell32)
+    # dxgi for GpuTestGate: --real-preflight needs a GPU, so it has to be able
+    # to ask whether there is one before it decides to skip.
+    target_link_libraries(NeuralWorkerTests PRIVATE shell32 dxgi)
     add_test(NAME NeuralWorkerTests COMMAND NeuralWorkerTests)
     add_executable(UpscalingTests tests/UpscalingTests.cpp)
     target_include_directories(UpscalingTests PRIVATE src)
@@ -773,6 +775,9 @@ if(BUILD_TESTING)
     set_tests_properties(FrameIdentityTests CachedExportTests PlayerUiRegressionTests DlssgProbeSmoke
         PROPERTIES TIMEOUT 300)
     set_tests_properties(NeuralWorkerTests PolicyTests NeuralPrerenderTests PROPERTIES TIMEOUT 600)
+    set_tests_properties(NeuralPreflightSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
+    # Seven renders of a 3.5 s clip, two of them at 1440p. Measured at 96 s.
+    set_tests_properties(ExportMatrixSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 900)
     # FrameGenerationSmoke decodes, generates and encodes a whole clip, so it
     # belongs with the two smokes that render rather than with the 300 s probes.
     set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke FrameGenerationSmoke PROPERTIES TIMEOUT 900)

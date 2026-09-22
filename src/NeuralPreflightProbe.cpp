@@ -20,6 +20,11 @@ constexpr uint32_t kProbeWidth = 1280;
 constexpr uint32_t kProbeHeight = 720;
 constexpr double kProbeFps = 30.0;
 constexpr uint32_t kProbeFrameLimit = 120;
+// How often the probe re-reads the add-on's log while it renders. The file is
+// read whole, and the answer cannot change faster than the add-on can evaluate
+// a frame, so every frame would be waste; a real injection is admitted within
+// a handful of evaluates, so this resolves in well under a tenth of the budget.
+constexpr uint32_t kEvidencePollFrames = 4;
 
 // Moving diagonal gradient so the reconstructed guides carry real motion.
 void FillProbeFrame(std::vector<uint8_t>& bgra, uint32_t index)
@@ -70,7 +75,21 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             TemporalGuideGenerator guides;
             std::vector<uint8_t> frame;
             GuideFrame guide;
-            for (; attempts < kProbeFrameLimit && !renderer->DLSSFeatureCreated(); ++attempts) {
+            // Runs to the budget rather than to our own carrier feature.
+            //
+            // The carrier existing means the add-on has something to intercept,
+            // not that it has intercepted it. RenoDX 6.x installs a
+            // compute-state shadow on the first evaluate and declines to inject
+            // until that shadow has observed a command-list Reset - a real
+            // render is admitted "after 2 incomplete-target decline(s)". That
+            // Reset only arrives on a LATER evaluate, so a probe that stops on
+            // the carrier and then waits for the log has stopped producing the
+            // only thing that could change it. 4.70 armed feature 18 inside the
+            // carrier's own evaluate, which is why stopping there used to work
+            // and why this shipped: it fails on two frames with an empty
+            // evidence chain and blames the runtime.
+            bool armed = false;
+            for (; attempts < kProbeFrameLimit; ++attempts) {
                 FillProbeFrame(frame, attempts);
                 const FrameIdentity probeFrame{attempts, static_cast<int64_t>(double(attempts) * 1e7 / kProbeFps),
                                                0, 0, 0, attempts == 0 ? HistoryReset::FirstFrame : HistoryReset::None};
@@ -84,10 +103,29 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
                     ++attempts;
                     break;
                 }
+                if (!renderer->DLSSFeatureCreated()) continue;
+                // Snapshot, never the stabilizing read: this is inside the loop
+                // that has to keep running for the thing being polled for to
+                // happen. Every few frames, because the file is re-read whole.
+                if (attempts % kEvidencePollFrames != 0) continue;
+                const NeuralRuntimeEvidence sofar =
+                    ParseNeuralRuntimeEvidence(ReadNeuralRuntimeSessionLogSnapshot(moduleDirectory));
+                if (sofar.Valid() || sofar.laterFailure) {
+                    armed = sofar.Valid();
+                    ++attempts;
+                    break;
+                }
             }
             created = renderer->DLSSFeatureCreated();
             ngxResult = renderer->DLSSLastResult();
             if (!created && failure.empty()) failure = L"Feature 18 was not created within the probe budget.";
+            // The "did not inject" verdict is NOT decided here. The in-loop poll
+            // runs every fourth frame, so arming in the last three frames of the
+            // budget is invisible to it - and the authoritative read below would
+            // then say armed while this said it never happened, which is a
+            // receipt that contradicts itself. `armed` is kept only to stop the
+            // loop early; the verdict is taken from the settled log.
+            (void)armed;
         }
     }
     const std::string segment = ReadNeuralRuntimeSessionLog(moduleDirectory);
@@ -96,6 +134,11 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     const NeuralRuntimeBanner banner = ParseNeuralRuntimeBanner(logPath.empty() ? segment : ReadWholeFile(logPath));
     const auto observations = CollectFeature18Observations(segment);
     const auto modules = DescribeRuntimeModules(moduleDirectory, LockedRuntimeFileNames());
+    // Decided from the settled whole-log read, which is the same evidence `ok`
+    // is computed from, so the two can never disagree.
+    if (created && failure.empty() && !evidence.Valid())
+        failure = L"The neural runtime did not inject feature 18 within " +
+                  std::to_wstring(attempts) + L" probe frames.";
     const bool ok = failure.empty() && created && evidence.Valid();
     const NeuralPreflightDiagnosis diagnosis =
         DiagnoseNeuralPreflight(gpu, observations, created, evidence.Valid(), failure);
@@ -136,7 +179,7 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
     json += ",\"feature18\":{\"created\":" + std::string(evidence.feature18Created ? "true" : "false") +
             ",\"evaluated\":" + (evidence.feature18Evaluated ? "true" : "false") +
             ",\"armed\":" + (evidence.Valid() ? "true" : "false") +
-            ",\"upscalingOff\":" + (evidence.upscalingOff ? "true" : "false") +
+            ",\"nativeResolution\":" + (evidence.nativeResolution ? "true" : "false") +
             ",\"inlineInterception\":" + (evidence.inlineInterceptionContract ? "true" : "false") +
             ",\"laterFailure\":" + (evidence.laterFailure ? "true" : "false") +
             ",\"highestEvaluation\":" + std::to_string(evidence.highestObservedEvaluation) +
