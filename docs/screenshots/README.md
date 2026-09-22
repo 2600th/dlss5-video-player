@@ -1,145 +1,99 @@
 # Screenshot provenance
 
-## September 3, 2026 refresh
+Where every image in this folder came from. All of them are real output of the
+player: nothing is mocked up, retouched, sharpened or colour-corrected. Records
+for images that have since been replaced are in the git history of this file.
 
-The four media-bearing JPEGs in `current/` are authentic Windows captures of
-DLSS 5 Video Player v0.13.0 on an NVIDIA RTX 5090. Each captures the complete
-1442 × 932 player window, including the title, menus, controls and status.
-FFmpeg captured the visible desktop region established by computer-use window
-inspection. The files use one high-quality JPEG encoding; no UI replacement,
-face retouching, sharpening or color adjustment was applied. The captured
-computer-use pointer indicator is retained.
+## Current images
 
-The footage is [The Witcher IV — Cinematic Reveal Trailer](https://www.youtube.com/watch?v=54dabgZJ5YA),
-published by The Witcher / CD PROJEKT RED. The daylight village close-up of Ciri
-is at **01:52.611** (the player's counter rounds this to 01:53). Contact sheets and consecutive frames were inspected for
-gaze, expression, open eyes, blur and occlusion. The selected scene contains
-fully clothed characters and no sexual content. The original/neural pair was
-captured while paused, switching only Neural Rendering. DLSS Upscaling was off,
-fit mode was active, audio was muted, and playback image adjustments were neutral.
+| File | What it shows | Made |
+| --- | --- | --- |
+| `current/face-comparison.png` | The Matrix, source frame 2116, beside the same frame from the player's render. Identical unscaled 700x880 crops | 22 Sep 2026, v0.25.0 |
+| `current/face-comparison-gta6.png` | GTA VI Trailer 2, source frame 1940, the same way | 22 Sep 2026, v0.25.0 |
+| `current/gta6-lucia-original.jpg`, `gta6-lucia-neural.jpg` | That GTA VI frame, whole (2560x1440). The site hero and link card are cut from these | 22 Sep 2026, v0.25.0 |
+| `current/matrix-neural.jpg`, `matrix-original.jpg` | The player paused on Trinity at 1:28, neural view on, then off | 22 Sep 2026, v0.25.0 |
+| `current/neural-playback.jpg`, `original-comparison.jpg` | The player paused on GTA VI at 1:04, neural view on, then off | 22 Sep 2026, v0.25.0 |
+| `current/neural-strength.jpg` | The image adjustments window with the Neural strength dial at 1.00, over a paused Godfather frame | 12 Sep 2026, v0.21.0 |
+| `current/recent-videos.jpg` | The File menu with Recent videos. The history submenu is closed, which keeps local paths out of frame | 3 Sep 2026, v0.13.0 |
+| `current/player-start.jpg` | The start screen | 3 Sep 2026, v0.13.0 |
+| `2026-09-03/face-comparison.png` | The Witcher IV, frame 3375, source beside render. Kept because the 2 September verification report shows it | 3 Sep 2026, v0.13.0 |
 
-The complete official H.264 video-only format 137 was downloaded with the
-bundled yt-dlp, then opened as a local file through the player's normal render
-and cache-validation path. The source is **1920 × 1080, 30000/1001 fps,
-10,868 frames**. No source rescaling, retiming or image adjustment was applied.
-The completed render manifest reports 10,868 native evaluations and 10,868
-verified neural frames, with neural upscaling disabled.
+## 22 September 2026 images
 
-| Provenance field | Value |
-| --- | --- |
-| Source SHA-256 | `ef4926c0da4451ff879b7b0e5e32d3f3b35fb06a542b179b0689735094fbefdf` |
-| Render cache key | `f7ae512a647acee09aba1a38da5e269ce1cf6ae13c239ef95fa853ea9491f609` |
-| Neural SHA-256 | `7a21fc81cc95c2aded299c960f19531ae8974c810347069b8c1a43fdfdea502a` |
-| Neural settings | `EnableHooks=2`, `NREnableUpscaling=0`, `NeuralUplift=1` |
+**Hardware and runtime.** RTX 4080 SUPER, driver 610.47 (`32.0.16.1047`),
+ReShade 6.8.0.2155, RenoDX 6.5.3, DLSS-NR 310.8.0.
 
-`current/face-comparison.png` uses zero-based frame **3375 (112.6125 seconds)**
-from this source and its synchronized neural cache. Both 700 × 880 source-pixel
-crops use x=670, y=0, with labels outside the image. There is no scaling,
-retouching or color correction. [Reproduction script](../../tools/demo-video/make-face-comparison.py).
+**Settings.** Intensity, Local tone and Local structure at 2.0 (the defaults are
+1.0). Everything else at its default, upscaling off.
 
-| File | State |
-| --- | --- |
-| `current/neural-playback.jpg` | Was this session's paused cached neural view; **replaced on 12 September 2026** by the GTA VI capture recorded below, so the Witcher IV pair is no longer in the tree |
-| `current/original-comparison.jpg` | Was the original at the identical paused moment; **replaced on 12 September 2026** the same way |
-| `current/upcoming-games.jpg` | Was the expanded File submenu with five official examples; **removed on 15 September 2026** - the menu ships six trailers now, and no document embedded the capture |
-| `current/recent-videos.jpg` | File menu with Recent videos and Export cached video; history submenu closed to keep local paths out of the capture |
-| `current/player-start.jpg` | Retained September 3 start-screen capture from the v0.13.0 feature implementation before its version bump |
-| `current/face-comparison.png` | Unscaled matched crops from the source and render |
+**Sources.** Two official uploads, both with age limit 0, fetched at the
+player's YouTube **Auto** rung:
 
-The [30-second demonstration](../media/README.md) uses the same Witcher IV
-source and actual application recordings. The toggle compares original and
-prepared cached neural video; it does not execute live neural rendering.
-The linked demonstration was itself **replaced on 12 September 2026**: it is now
-the 22.6 s / 678-frame GTA VI and Godfather video recorded below, which the later
-sections here call "the 22-second video", not the 30-second Witcher IV cut.
+| Source | Video | SHA-256 |
+| --- | --- | --- |
+| [The Matrix \| 4K Trailer](https://www.youtube.com/watch?v=nUEQNVV3Gfs) (Warner Bros.) | 2560x1440 VP9, 23.976 fps, 147.271 s | `559ad1772b90adeedad54cd9257abffeddb34d91a2f90d8d8204669fbffc531e` |
+| [Grand Theft Auto VI Trailer 2](https://www.youtube.com/watch?v=VQRLujxTm3c) (Rockstar Games) | 2560x1440 VP9, 30 fps, 166.733 s | `269585e3a8ed7d2b77b2869ee7fb575a8be2266f7e96bcd07298be6260307680` |
 
-## September 12, 2026: GTA VI and The Godfather, live 1440p sessions
+**Renders.** Each source was opened in the player with neural rendering on and
+left to finish. The cache entries:
 
-Everything in this section was captured from the shipping **v0.21.0** player on
-an RTX 5090 (driver `616.64`, DXGI `32.0.16.1664`, ReShade 6.8.0.2155, RenoDX
-4.7, DLSS-NR 310.8.0). Two sources, both fetched with the bundled yt-dlp at the
-rung this version's YouTube **Auto** now selects - the tallest up to 1440p:
-
-| Source | Video | Stream | Frames | SHA-256 |
+| Source | Range | Verified | Render key | Neural SHA-256 |
 | --- | --- | --- | --- | --- |
-| [Grand Theft Auto VI: An Extended Look - Now Playing](https://www.youtube.com/watch?v=uphThaa97ig) (Netflix, age limit 0) | 2560x1440 VP9, 30 fps, 26.0 s, 5.26 Mbps | `bv*[height<=1440]` | 780 | `2b43b5ce5865b396db03a008bdbaeb078f1799d3f89a37bbb8e2657a916a854d` |
-| [THE GODFATHER 50th Anniversary Trailer](https://www.youtube.com/watch?v=UaVTIH8mujA) (Paramount Pictures, age limit 0) | 2560x1440 VP9, 23.976 fps, 120.119 s, 3.92 Mbps | `bv*[height<=1440]` | 2880 | `036afadb30d470ae575270c6f10de307cde43c0196df8ae4a350bb2c626d59c8` |
+| The Matrix | 2.502 s to end | 3,472 / 3,472, failure none, lock ok | `cd868340cb59c649…` | `537dc9aa996283b1025442b174c49f858e0a395fd32ab1900be61824a25b4798` |
+| GTA VI | 1.800 s to end | 4,948 / 4,948, failure none, lock ok | `edc64443cf32a761…` | `bc99b9528ba2824b97f23cab42cc2fb48eb9ae8f231e012664125a2850234680` |
 
-Rockstar's own 26-minute *An Extended Look* (`tJbzMqJGH4k`) is age-restricted:
-every anonymous client is refused outright, and so is the GameSpot mirror, so no
-unauthenticated session can fetch it at any resolution. Netflix's *Now Playing*
-cut is the same footage without the gate. That is the defect this version added a
-notice for, met in its strongest form.
+A render starts at its range's first frame, so source frame *n* is render frame
+*n* − 60 for The Matrix and *n* − 54 for GTA VI. A picture check confirmed both
+offsets: each pair differs least at that offset.
 
-### The player captures
+**Face comparisons.** Made with `tools/demo-video/make-face-comparison.py`:
 
-Each pair is one paused frame with only the view switched: the clip was rendered
-once by a live session, the toggle was turned off so the frames stayed retained,
-the timeline was pressed to land on the frame, and `Ctrl+Alt+D` then switched
-between the retained neural frame and the original. No seek happens between the
-two captures.
+```powershell
+python tools/demo-video/make-face-comparison.py matrix.mp4 <matrix render>/neural.mkv `
+    --frame 2116 --neural-frame 2056 --crop 960,186,700,880 --output docs/screenshots/current/face-comparison.png
+python tools/demo-video/make-face-comparison.py gta6.mp4 <gta6 render>/neural.mkv `
+    --frame 1940 --neural-frame 1886 --crop 740,144,700,880 --output docs/screenshots/current/face-comparison-gta6.png
+```
 
-The captured rectangle is the window's **visible** frame from
-`DWMWA_EXTENDED_FRAME_BOUNDS` - 1442 x 932 - not `GetWindowRect`, which includes
-an invisible resize border and drags a strip of the desktop into the shot. Each
-file is one JPEG encoding at quality 95 with no chroma subsampling; no UI
-replacement, face retouching, sharpening or colour adjustment was applied.
+**Player captures.** Each pair is one paused frame in a live session, with only
+the view switched:
 
-| File | State |
-| --- | --- |
-| `current/neural-playback.jpg` | GTA VI paused at 13.17 s with the neural view attached; also the demo poster |
-| `current/original-comparison.jpg` | The same paused frame with Neural Rendering off |
-| `current/godfather-neural.jpg` | The Godfather paused at 73.98 s with the neural view attached |
-| `current/godfather-original.jpg` | The same paused frame with Neural Rendering off |
-| `current/neural-strength.jpg` | The image adjustments window over that frame, showing this version's new **Neural strength** dial at its 1.00 default |
+1. Send the player to 0:00 and step forward 10 s at a time with its own command.
+2. Turn neural rendering on, so the session renders ahead of the paused playhead.
+3. Play onto rendered frames and pause. Capture the neural view.
+4. Turn neural rendering off (the frame stays where it is) and capture the original.
 
-The sessions behind them, from the player's own log: 702/702 and 2875/2875 frames
-verified, `failure=none`, `lock=ok`, both published their cache entry. The
-Godfather session is also the one that proved this version's publish fix - it
-published *after 20 rename attempts* while a file handle was deliberately held on
-the finished entry.
+Commands went to the window as `WM_COMMAND`, as
+`tools/verification/drive-neural-toggle.ps1` does. The window was captured by
+handle with `tools/verification/capture-window.ps1` and cropped to its visible
+frame (1440x930), then saved once as JPEG at quality 95 with no chroma
+subsampling.
 
-### The demonstration takes
+The pairs really are one frame each. Across the video area, the GTA VI pair
+differs by a mean of 9.5 levels and the Matrix pair by 5.2. A wipe taken in the
+same session matched the original left of its divider (0.16) and the render to
+the right (0.0).
 
-The five takes behind [the 22-second video](../media/README.md) were recorded the
-same day from the same two sources, on the build that carries this version's
-attach fix. Each comparison take is one paused frame inspected with the player's
-own controls - `Z` for 2x magnification centred on the pointer, then
-**Video ▸ Compare ▸ Wipe** for the divider, then a drag to put that divider down
-the middle of the face - so both halves are the same source pixels at the same
-instant. The playback takes are continuous: playback was confirmed to be
-advancing by measuring the picture, not by trusting the toolbar.
+## Earlier images
 
-| Take | Source | Frame or window | What it shows |
-| --- | --- | --- | --- |
-| Title shot | The Godfather | from 72.06 s | 3.4 s of playback with the render attached |
-| Comparison 1 | The Godfather | paused at 74.02 s | zoom at 1.71 s, divider at 3.48 s into the take |
-| Comparison 2 | GTA VI | paused at 13.17 s | zoom at 1.57 s, divider at 3.33 s into the take |
-| Playback | GTA VI | from 11.30 s | 5 s continuous, neural on throughout |
+**12 September 2026** (`neural-strength.jpg`). v0.21.0 on an RTX 5090, driver
+616.64, RenoDX 4.7. The frame is *The Godfather 50th Anniversary Trailer*
+(Paramount Pictures) paused at 73.98 s, from a live session that verified
+2,875 of 2,875 frames. The window's visible frame (1442x932), JPEG quality 95,
+no chroma subsampling.
 
-The zoom and divider instants are the capture driver's own report of when it
-pressed each control, measured from the first recorded byte, so the labels in the
-edit sit on the frames where the picture actually changed.
+**3 September 2026** (`recent-videos.jpg`, `player-start.jpg`,
+`2026-09-03/face-comparison.png`). v0.13.0 on an RTX 5090, full 1442x932
+windows captured with FFmpeg. The face comparison uses *The Witcher IV* Cinematic
+Reveal Trailer (CD PROJEKT RED), 1920x1080 at 30000/1001 fps, zero-based frame
+3375 (112.6 s). Both 700x880 crops are at x=670, y=0 from the source and its
+fully verified render (10,868 of 10,868 frames).
 
-`current/upcoming-games.jpg`, `current/recent-videos.jpg` and
-`current/player-start.jpg` are unchanged September 3 captures of menus and the
-start screen: they carry no video footage, and the commands they show are the
-same. The September 3 and September 9 figures above are left exactly as they were
-recorded.
+## Rights
 
-Footage is credited to Rockstar Games (via Netflix's *Now Playing* upload) and
-Paramount Pictures. Including it here documents a feature; it is not an
-endorsement, and the source-code licence does not relicense it.
-
-These images document feature states, not an image-quality benchmark or an
-official NVIDIA integration. A fixed example selection is not a popularity
-ranking. See [example provenance](../EXAMPLE_VIDEOS.md),
-[functional verification](../VERIFICATION-2026-09-02.md) and the
-[12 September RTX 5090 record](../VERIFICATION-2026-09-12-RTX5090.md).
-
-Rights to NVIDIA components belong to NVIDIA. Other third-party components, game
-and film footage and trademarks belong to their respective owners: The Witcher IV
-to CD PROJEKT RED, Hellblade II to Ninja Theory/Xbox Game Studios, Cyberpunk 2077
-to CD PROJEKT RED, Mafia: The Old Country to Hangar 13/2K, Grand Theft Auto VI to
-Rockstar Games and The Godfather to Paramount Pictures. The source-code licence
-does not relicense this media or imply endorsement.
+These images document the software. They are not an image-quality benchmark,
+an official NVIDIA integration, or an endorsement by anyone shown. Footage
+belongs to its owners: The Matrix to Warner Bros., Grand Theft Auto VI to
+Rockstar Games, The Godfather to Paramount Pictures and The Witcher IV to CD
+PROJEKT RED. NVIDIA components belong to NVIDIA. The source-code licence
+doesn't relicense any of it.
