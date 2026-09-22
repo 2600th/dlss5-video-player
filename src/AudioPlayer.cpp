@@ -481,7 +481,6 @@ uint64_t AudioPlayer::SubmittedBuffers() const
 }
 
 bool AudioPlayer::Active() const {const auto state=m_reader;return state&&state->renderer!=nullptr;}
-bool AudioPlayer::HasAudioData() const {const auto state=m_reader;return state&&state->hasAudioData.load();}
 bool AudioPlayer::Paused() const {const auto state=m_reader;return state&&state->paused.load();}
 
 void AudioPlayer::Pause(bool paused) {

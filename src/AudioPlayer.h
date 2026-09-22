@@ -61,7 +61,6 @@ public:
     float Volume() const { return m_volume; }
     void Stop();
     bool Active() const;
-    bool HasAudioData() const;
     bool Paused() const;
     double PositionSeconds() const;
     // Seek position the current helper process was started at.

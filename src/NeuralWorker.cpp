@@ -194,7 +194,6 @@ public:
     // the first job over without waiting for it, because the command pipe holds
     // the frame until the helper's runtime is up and reading, and blocking on a
     // round trip would spend the cold start residency exists to remove.
-    bool Announced() const { return announced_; }
 
 private:
     bool Consume()

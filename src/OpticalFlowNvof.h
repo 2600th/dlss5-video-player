@@ -63,7 +63,6 @@ public:
     GlobalFlow LastGlobalFlow() const { return m_global; }
     // False until two distinct frames have been captured, i.e. until a flow field can
     // exist at all. The caller must emit zero motion while this is false.
-    bool HasPrevious() const { return m_hasPrevious; }
 
     // Discards the previous frame, so the next Submit() produces no flow. Used for the
     // first frame of a stream and for every scene cut. The global flow estimate goes

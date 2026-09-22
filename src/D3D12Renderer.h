@@ -332,7 +332,6 @@ public:
         DWORD budgetMilliseconds = d3d12_renderer_detail::TeardownFenceWaitMilliseconds);
     bool PresentCurrent();
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; }
-    const ColorSettings& GetColorSettings() const { return m_colorSettings; }
     void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; }
     const ComparisonSettings& GetComparison() const { return m_comparison; }
     // Source-size BGRA reference (the original member of the current pair). May be

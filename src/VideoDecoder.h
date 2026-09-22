@@ -230,7 +230,6 @@ public:
     double DisplayAspectRatio() const { return m_source.displayAspect > 0.0 ? m_source.displayAspect : (m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0); }
     const std::wstring& Path() const { return m_path; }
     bool Ready() const { return m_backend != Backend::None && m_source.width != 0 && m_source.height != 0; }
-    const wchar_t* BackendName() const;
     // Bgra unless the open ASKED for Nv12 - OpenSequential(preferNv12=true, its
     // default) or a playback Open/OpenKnown(preferNv12=true) - and then only
     // when the geometry is even and the stream declared a colour description the

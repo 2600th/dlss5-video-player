@@ -152,14 +152,6 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     if(restartOther)other.StartFrameQueue();
 }
 
-const wchar_t* VideoDecoder::BackendName() const {
-    switch (m_backend) {
-    case Backend::FFmpeg: return L"FFmpeg";
-    case Backend::MediaFoundation: return L"Media Foundation";
-    default: return L"None";
-    }
-}
-
 void VideoDecoder::Close() {
     StopFrameQueue();
     StopFFmpeg();
