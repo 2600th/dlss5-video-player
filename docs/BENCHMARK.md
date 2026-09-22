@@ -76,7 +76,7 @@ the toggle reads `Neural Rendering · On` and the status bar `Neural rendered ·
 2560×1440` - so the video surface is the player's own DLSS-NR output on an RTX 5090.
 The full chain a `real` clip's pixels have been through is: source video → DLSS-NR →
 the player's 1442×932 window → `gdigrab` screen capture → an x264 re-encode at crf 17
-(`tools/demo-video/prepare-inputs.ps1`) → Remotion's own h264 encode → `crop` →
+(by the since-replaced `prepare-inputs.ps1`) → Remotion's own h264 encode → `crop` →
 lanczos upscale to 1920×1080 → FFV1 → **and then the neural pass again** when the
 benchmark renders it. That is two h264 generations before the corpus encode, not one.
 Re-rendering therefore measures the pass on pixels it has already touched, at a

@@ -15,7 +15,7 @@
 .EXAMPLE
   ./tools/verification/drive-neural-toggle.ps1 `
       -Player build-upscaling/Release/DLSSVideoPlayer.exe `
-      -Media  build/media-refresh-20260912/godfather-source.mp4
+      -Media  path/to/source.mp4
 #>
 [CmdletBinding()]
 param(
