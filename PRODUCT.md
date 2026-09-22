@@ -10,8 +10,7 @@ web
 
 Static HTML/CSS/JS, rendered by a PowerShell build script, deployed to GitHub
 Pages. User-selected on 2026-09-18 over Astro and a Node-based build, to keep a
-C++ repository free of an npm dependency tree. Recorded in
-`docs/superpowers/specs/2026-09-18-project-website-design.md`.
+C++ repository free of an npm dependency tree.
 
 ## Users
 
@@ -90,14 +89,18 @@ Confirmed from `README.md` and `CHANGELOG.md` at 0.23.0:
 
 Real, in the repository, usable without fabrication:
 
-- `docs/screenshots/current/godfather-original.jpg` and `godfather-neural.jpg` -
-  one frame, only Neural Rendering switched between the two captures.
+- `docs/screenshots/current/matrix-original.jpg` / `matrix-neural.jpg` and
+  `original-comparison.jpg` / `neural-playback.jpg` - one paused frame each,
+  only Neural Rendering switched between the two captures (v0.25.0).
   Provenance in `docs/screenshots/README.md`.
-- `docs/screenshots/current/face-comparison.png`, `neural-playback.jpg`,
-  `neural-strength.jpg`, `original-comparison.jpg`, `recent-videos.jpg`,
-  `player-start.jpg`.
-- `docs/media/neural-comparison-demo.mp4` (22s, 1080p) with poster and WebP
-  preview.
+- `docs/screenshots/current/face-comparison.png` (The Matrix) and
+  `face-comparison-gta6.png` (GTA VI) - unscaled matched crops of a source frame
+  and the player's render of it; `gta6-lucia-original.jpg` / `-neural.jpg`, the
+  full frames behind the site hero.
+- `docs/screenshots/current/neural-strength.jpg`, `recent-videos.jpg`,
+  `player-start.jpg` (older UI captures).
+- `docs/media/neural-comparison-demo.mp4` (19.7 s, 1080p) with poster and WebP
+  preview; `site/src/assets/hero/social-card.jpg` (1200x630 link preview).
 - Release telemetry, read live on 2026-09-18: 4,959 zip downloads across 17
   releases; 127 stars; 12 forks.
 - Seven verification reports under `docs/` and measurement data under
@@ -107,8 +110,8 @@ Absent, and not to be invented: testimonials, named users, press coverage,
 pricing, benchmark claims beyond the measured numbers already published in
 CHANGELOG.md and the verification documents.
 
-The screenshots are frames of commercially released trailers (The Godfather,
-GTA VI, The Witcher IV). Provenance is documented; the usage matches what the
+The screenshots are frames of official trailers (The Matrix, GTA VI Trailer 2;
+older UI shots show The Godfather and The Witcher IV). Provenance is documented; the usage matches what the
 README already does.
 
 ## Product Principles

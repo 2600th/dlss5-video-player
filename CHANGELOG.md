@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### New media for the README and site
+
+- **A new demonstration video.** 19.7 seconds of *The Matrix* and *GTA VI*
+  Trailer 2, each source frame split against the player's own render of it.
+  The comparison is on screen from the first frame; the old cut spent five
+  seconds on a title and a zoom first. It was rendered on an RTX 4080 SUPER
+  with Intensity, Local tone and Local structure at 2.0, and the video says so.
+- **Face comparisons up front.** The README now opens with the unscaled Trinity
+  side-by-side, and gains a second one from GTA VI.
+- **Fresh player screenshots from 0.25.0.** A GTA VI pair and a Matrix pair,
+  each one paused frame with only the view switched. They replace the Godfather
+  pair.
+- **A sharper site hero and a proper link preview.** The hero is now a native
+  1920x1080 crop. The old one was 920x518 stretched to full width. Shared links
+  now show a real 1200x630 card instead of the undersized hero.
+- **The benchmark still reproduces.** Its `real-*` clips are cut from the old
+  video, so that file moved unchanged to `tools/benchmark/fixtures/`. All four
+  clips rebuild with their recorded digests.
+
+### Documentation
+
+- **The README is shorter and reorganised.** It dropped from 593 to about 250
+  lines. Release history now lives only in this file, and the frame-generation
+  and quality details only in `docs/USAGE.md`.
+- **Corrected cache claims.** The README said the cache never deletes anything
+  and that every render is reused. In fact it removes the least recently used
+  renders when the drive falls below 20 GB free. And a session started partway
+  into a video leaves partial renders that aren't joined yet, so reopening that
+  video renders it again.
+- **Removed stale files:** the design spec for the already-shipped website, and
+  a screenshot provenance history for images that no longer exist (it's still
+  in git).
+
 ## 0.25.0 - 2026-09-22
 
 ### Found in review, before shipping
