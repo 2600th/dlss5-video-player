@@ -432,7 +432,7 @@ void overrides_follow_managed_keys_and_replace_existing_values()
         {"NRIntensity", "1.000000"}, {"NRPreset", "3"}};
     constexpr std::string_view expected =
         "[RenoDX.DLSS5]\nNRIntensity=1.000000\nNRStyle=2\nFutureTuning=red,blue\n"
-        "EnableHooks=2\nNeuralUplift=1\nNREnableUpscaling=0\nNRPreset=3\n"
+        "EnableHooks=2\nNeuralUplift=1\nNRFollowInputRes=0\nNRResolutionScale=1\nNRPreset=3\n"
         "[ADDON]\nDisabledAddons=\n";
     const std::string updated = UpdateNeuralAddonIni(input, true, overrides);
     CHECK_EQ(std::string(expected), updated);
@@ -444,7 +444,8 @@ void overrides_follow_managed_keys_and_replace_existing_values()
     CHECK(UpdateNeuralAddonIni(input, false, overrides).find("NRPreset") == std::string::npos);
     for (const auto& bad : std::vector<NeuralAddonOverride>{
             {"", "1"}, {"NR=Style", "1"}, {" NRStyle", "1"}, {"[NRStyle", "1"},
-            {"NRStyle", "1\nNRIntensity=2"}, {"NREnableUpscaling", "1"},
+            {"NRStyle", "1\nNRIntensity=2"}, {"NRResolutionScale", "2"},
+            {"NRFollowInputRes", "1"},
             {"EnableHooks", "3"}, {"NeuralUplift", "0"}}) {
         bool rejected = false;
         try { (void)UpdateNeuralAddonIni(input, true, std::span{&bad, 1}); }
@@ -517,11 +518,14 @@ void neural_settings_round_trip_and_format_renodx_overrides()
         {"NRIntensity", "1.000000"}, {"NRLocalTone", "1.000000"},
         {"NRLocalStructure", "1.000000"}, {"NRSkinStructure", "-1.000000"},
         {"NRColorStrength", "1.000000"}, {"NRPreset", "0"}, {"NRStyle", "0"},
-        {"NRAutoMask", "1"}};
+        {"NRAutoMask", "1"}, {"NRPasses", "1"}, {"NRChainedHistory", "1"}};
     CHECK(expected == defaults);
+    // The canonical form is the neural cache key, so every field belongs in it:
+    // a render at two stack passes is a different render, and one that keyed the
+    // same as a single-pass render would be served from the wrong cache entry.
     CHECK_EQ(std::string("intensity=1.000000 localTone=1.000000 localStructure=1.000000 "
                          "skinStructure=-1.000000 colorStrength=1.000000 preset=0 style=0 "
-                         "autoMask=1"),
+                         "autoMask=1 passes=1 chainedHistory=1"),
              CanonicalNeuralSettings(NeuralSettings{}));
 
     NeuralSettings tuned;
@@ -533,11 +537,15 @@ void neural_settings_round_trip_and_format_renodx_overrides()
     tuned.preset = 2;
     tuned.style = 1;
     tuned.autoMask = false;
+    tuned.passes = 3;
+    tuned.chainedHistory = false;
     const auto tunedOverrides = NeuralAddonOverridesFor(tuned);
     CHECK_EQ(std::string("1.050000"), tunedOverrides[0].second);
     CHECK_EQ(std::string("0.250000"), tunedOverrides[3].second);
     CHECK_EQ(std::string("2"), tunedOverrides[5].second);
     CHECK_EQ(std::string("0"), tunedOverrides[7].second);
+    CHECK_EQ(std::string("3"), tunedOverrides[8].second);
+    CHECK_EQ(std::string("0"), tunedOverrides[9].second);
     CHECK(CanonicalNeuralSettings(tuned) != CanonicalNeuralSettings(NeuralSettings{}));
 
     TempDirectory temp;

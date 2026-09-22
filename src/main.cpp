@@ -306,6 +306,8 @@ static constexpr int IDC_NS_SKIN = 7304;
 // both removed after measurement showed the runtime ignores them.
 static constexpr int IDC_NS_STYLE = 7307;
 static constexpr int IDC_NS_AUTOMASK = 7308;
+static constexpr int IDC_NS_PASSES = 7309;
+static constexpr int IDC_NS_CHAINED = 7310;
 static constexpr int IDC_NS_GUIDE_MV = 7311;
 static constexpr int IDC_NS_GUIDE_DEPTH = 7312;
 // 7313-7315 were the encoder controls, moved to their own dialog below.
@@ -3338,8 +3340,15 @@ private:
         SetTrack(h,IDC_NS_SKIN,0,200,int(std::lround((m_neuralSettings.skinStructure+1.0f)*100.0f)));
         const auto select=[&](int id,int index){if(HWND combo=GetDlgItem(h,id))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
         select(IDC_NS_STYLE,std::clamp(m_neuralSettings.style,0,2));
+        // The combo lists 1..4 and the setting IS the pass count, so the
+        // index is one below it.
+        select(IDC_NS_PASSES,std::clamp(m_neuralSettings.passes,1,4)-1);
         const auto check=[&](int id,bool on){if(HWND box=GetDlgItem(h,id))SendMessageW(box,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
         check(IDC_NS_AUTOMASK,m_neuralSettings.autoMask);check(IDC_NS_GUIDE_MV,m_renderGuides.motionVectors);check(IDC_NS_GUIDE_DEPTH,m_renderGuides.depth);
+        check(IDC_NS_CHAINED,m_neuralSettings.chainedHistory);
+        // Chained history only governs passes 2+, so it is dead UI at one
+        // pass rather than a setting that quietly does nothing.
+        if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         UpdateNeuralSettingValueLabels(h);
     }
 
@@ -3353,6 +3362,9 @@ private:
         m_neuralSettings.skinStructure=float(pos(IDC_NS_SKIN))/100.0f-1.0f;
         m_neuralSettings.style=sel(IDC_NS_STYLE,m_neuralSettings.style);
         m_neuralSettings.autoMask=checked(IDC_NS_AUTOMASK);
+        m_neuralSettings.passes=std::clamp(sel(IDC_NS_PASSES,m_neuralSettings.passes-1)+1,1,4);
+        m_neuralSettings.chainedHistory=checked(IDC_NS_CHAINED);
+        if(HWND chained=GetDlgItem(h,IDC_NS_CHAINED))EnableWindow(chained,m_neuralSettings.passes>1);
         const GuideControls guides{checked(IDC_NS_GUIDE_MV),checked(IDC_NS_GUIDE_DEPTH)};
         if(guides!=m_renderGuides){m_renderGuides=guides;ApplyLiveGuideControls();}
         UpdateNeuralSettingValueLabels(h);
@@ -3526,7 +3538,13 @@ private:
             if(id==IDC_NS_RESET){m_neuralSettings={};m_renderGuides={};ApplyLiveGuideControls();SyncNeuralSettingControls(h);SaveVideoSettings();SchedulePausedSettingsPreview();return 0;}
             if(id==IDC_NS_APPLY){ApplyNeuralSettings();return 0;}
             if(id==IDC_NS_CLOSE){DestroyWindow(h);return 0;}
-            if((id==IDC_NS_STYLE&&code==CBN_SELCHANGE)||((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
+            // Every combo and box the dialog builds has to be named here or it
+            // is drawn, movable and inert: the control changes, nothing reads
+            // it back, and the setting the user thinks they picked never
+            // reaches the render. Adding a control without adding it to this
+            // line is the one mistake this dialog invites, and it is silent.
+            if(((id==IDC_NS_STYLE||id==IDC_NS_PASSES)&&code==CBN_SELCHANGE)||
+               ((id==IDC_NS_AUTOMASK||id==IDC_NS_GUIDE_MV||id==IDC_NS_GUIDE_DEPTH||id==IDC_NS_CHAINED)&&code==BN_CLICKED)){ReadNeuralSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -3606,6 +3624,295 @@ private:
         case WM_DESTROY:SaveVideoSettings();m_settingsDesignLayout.erase(h);ReleaseDialogTips(h);if(h==m_encoderWnd)m_encoderWnd=nullptr;return 0;
         }
         return DefWindowProcW(h,m,w,l);
+    }
+
+    // ---- Export with DLSS stages ----------------------------------------
+    //
+    // One dialog for the three stages, because the interesting thing about them
+    // is which COMBINATION you want and the combination is what the file
+    // records. The order is fixed and stated on the panel rather than offered:
+    // NVIDIA's DLSS 5 runs neural rendering on the upscaled frame and DLSS-G
+    // consumes the finished picture, so Super Resolution -> neural -> frame
+    // generation is the reference arrangement and there is no reading of the
+    // evidence where letting the user reorder it helps them.
+    //
+    // This writes a file and nothing else. It deliberately does not touch the
+    // neural cache: a cache entry is a playback carrier keyed on the source and
+    // the settings, while this is a one-off at a size and a rate the viewer
+    // picked. "Save converted video" remains the way to keep the render you are
+    // already watching.
+    static constexpr int kExportDesignW=470,kExportDesignH=368;
+
+    uint32_t ExportMaxMultiplier()const{
+        // 1 + the runtime's generated-frames-per-pair. Unmeasured reads as 2, the
+        // floor every DLSS-G capable card admits; the plan re-checks against the
+        // measured value once the user actually presses Export.
+        if(!m_frameGenCapability)return 2;
+        return m_frameGenCapability->available?1u+m_frameGenCapability->multiFrameCountMax:0u;
+    }
+
+    ExportPlan CurrentExportPlan()const{
+        return PlanExport(m_exportSelection,m_decoder.Width(),m_decoder.Height(),
+                          m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage());
+    }
+
+    static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
+        switch(refusal){
+        case ExportRefusal::NothingSelected:return L"export.stages.refusal.nothing";
+        case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
+        case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
+        case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
+        case ExportRefusal::StillImage:return L"export.stages.refusal.still";
+        case ExportRefusal::UpscaleNeedsNeural:return L"export.stages.refusal.upscale_needs_neural";
+        case ExportRefusal::None:break;
+        }
+        return L"export.stages.refusal.nothing";
+    }
+
+    // The file this export reads. A stream has to have finished copying first:
+    // the passes hand a path to ffmpeg and to a decoder of their own, exactly as
+    // frame generation does, so they cannot read a URL.
+    std::filesystem::path ExportSourceFile()const{
+        if(!m_loaded)return {};
+        if(m_sourceKind==MediaSourceKind::LocalFile||m_cachedSourceFile)return std::filesystem::path(m_path);
+        if(const std::filesystem::path* copy=FrameGenerationAcquiredCopy())return *copy;
+        return {};
+    }
+
+    void ShowExportStages(){
+        if(m_exportStagesWnd&&IsWindow(m_exportStagesWnd)){ShowWindow(m_exportStagesWnd,SW_SHOWNORMAL);SetForegroundWindow(m_exportStagesWnd);return;}
+        static constexpr const wchar_t* kClassName=L"DLSSVideoExportStagesClassV1";
+        WNDCLASSW n{};n.lpfnWndProc=ExportStagesWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
+        constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
+        const RECT wr=SettingsWindowRect(kExportDesignW,kExportDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
+        const int w=int(wr.right-wr.left),h=int(wr.bottom-wr.top);
+        RECT pr{};GetWindowRect(m_hwnd,&pr);const int pw=int(pr.right-pr.left),ph=int(pr.bottom-pr.top);
+        m_exportStagesWnd=CreateWindowExW(WS_EX_TOOLWINDOW,kClassName,T(L"export.stages.title").c_str(),
+            style,int(pr.left)+std::max(0,(pw-w)/2),int(pr.top)+std::max(0,(ph-h)/2),w,h,
+            m_hwnd,nullptr,GetModuleHandleW(nullptr),this);
+    }
+
+    void BuildExportStageControls(HWND h){
+        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        CreateSettingsGroupHeading(h,L"export.stages.group_stages",8);
+        CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
+        CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
+        CreateNeuralCheck(h,IDC_EX_NEURAL,L"export.stages.neural",16,112,300,L"export.tip.neural");
+        CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,152,300,L"export.tip.framegen");
+        CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",190,{L"2×",L"3×",L"4×",L"5×"});
+        CreateSettingsGroupHeading(h,L"export.stages.group_result",230);
+        HWND summary=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_LEFT,16,254,436,34,h,(HMENU)(INT_PTR)IDC_EX_SUMMARY,nullptr,nullptr);
+        SendMessageW(summary,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND note=CreateWindowExW(0,L"STATIC",T(L"export.stages.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,288,436,34,h,nullptr,nullptr,nullptr);
+        SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND run=CreateWindowExW(0,L"BUTTON",T(L"export.stages.run").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,232,330,120,30,h,(HMENU)(INT_PTR)IDC_EX_RUN,nullptr,nullptr);
+        HWND close=CreateWindowExW(0,L"BUTTON",T(L"export.stages.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,362,330,90,30,h,(HMENU)(INT_PTR)IDC_EX_CLOSE,nullptr,nullptr);
+        SendMessageW(run,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        SyncExportStageControls(h);
+        CaptureSettingsDesignLayout(h);
+    }
+
+    void SyncExportStageControls(HWND h){
+        const auto check=[&](int id,bool on){if(HWND b=GetDlgItem(h,id))SendMessageW(b,BM_SETCHECK,on?BST_CHECKED:BST_UNCHECKED,0);};
+        const auto select=[&](int id,int index){if(HWND c=GetDlgItem(h,id))SendMessageW(c,CB_SETCURSEL,static_cast<WPARAM>(index),0);};
+        check(IDC_EX_UPSCALE,m_exportSelection.upscale);
+        check(IDC_EX_NEURAL,m_exportSelection.neural);
+        check(IDC_EX_FRAMEGEN,m_exportSelection.frameGeneration);
+        int rung=1;for(size_t i=0;i<std::size(kUpscaleRungHeights);++i)if(kUpscaleRungHeights[i]==m_exportSelection.targetHeight)rung=int(i);
+        select(IDC_EX_RESOLUTION,rung);
+        select(IDC_EX_MULTIPLIER,std::clamp(int(m_exportSelection.multiplier),2,5)-2);
+        // A rung you cannot choose and a rate you cannot reach are greyed, not
+        // hidden: the control staying visible is what tells the user the stage
+        // exists and why it is unavailable here.
+        if(HWND c=GetDlgItem(h,IDC_EX_RESOLUTION))EnableWindow(c,m_exportSelection.upscale);
+        if(HWND c=GetDlgItem(h,IDC_EX_MULTIPLIER))EnableWindow(c,m_exportSelection.frameGeneration&&ExportMaxMultiplier()>2);
+        const ExportPlan plan=CurrentExportPlan();
+        std::wstring summary;
+        if(!plan.valid)summary=T(ExportRefusalKey(plan.refusal));
+        else{
+            wchar_t line[256];
+            swprintf_s(line,L"%u × %u at %.4g fps · %u pass%s",plan.outputWidth,plan.outputHeight,
+                       plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
+            summary=line;
+        }
+        SetDlgItemTextW(h,IDC_EX_SUMMARY,summary.c_str());
+        if(HWND run=GetDlgItem(h,IDC_EX_RUN))EnableWindow(run,plan.valid&&!ExportStagesBusy());
+    }
+
+    void ReadExportStageControls(HWND h){
+        const auto checked=[&](int id){HWND b=GetDlgItem(h,id);return b&&SendMessageW(b,BM_GETCHECK,0,0)==BST_CHECKED;};
+        const auto sel=[&](int id,int fallback){HWND c=GetDlgItem(h,id);const int i=c?int(SendMessageW(c,CB_GETCURSEL,0,0)):CB_ERR;return i==CB_ERR?fallback:i;};
+        m_exportSelection.upscale=checked(IDC_EX_UPSCALE);
+        m_exportSelection.neural=checked(IDC_EX_NEURAL);
+        m_exportSelection.frameGeneration=checked(IDC_EX_FRAMEGEN);
+        m_exportSelection.targetHeight=kUpscaleRungHeights[std::clamp(sel(IDC_EX_RESOLUTION,1),0,int(std::size(kUpscaleRungHeights))-1)];
+        m_exportSelection.multiplier=uint32_t(std::clamp(sel(IDC_EX_MULTIPLIER,0),0,3)+2);
+        SyncExportStageControls(h);
+    }
+
+    bool ExportStagesBusy()const{return m_exportWorker.joinable()||m_frameGenWorker.joinable()||NeuralJobActive();}
+
+    LRESULT ExportStagesWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        switch(m){
+        case WM_CREATE:BuildExportStageControls(h);return 0;
+        case WM_GETMINMAXINFO:{
+            const RECT wr=SettingsWindowRect(kExportDesignW,kExportDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
+            auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
+        }
+        case WM_SIZE:ResizeSettingsChildren(h,kExportDesignW,kExportDesignH);return 0;
+        case WM_COMMAND:{
+            const int id=LOWORD(w);const int code=HIWORD(w);
+            if(id==IDC_EX_CLOSE){DestroyWindow(h);return 0;}
+            if(id==IDC_EX_RUN){StartStageExport();SyncExportStageControls(h);return 0;}
+            // Every control the dialog builds is named here. One left out is
+            // drawn, movable and inert - the exact failure the neural settings
+            // dialog shipped with when stacking was added.
+            if(((id==IDC_EX_UPSCALE||id==IDC_EX_NEURAL||id==IDC_EX_FRAMEGEN)&&code==BN_CLICKED)||
+               ((id==IDC_EX_RESOLUTION||id==IDC_EX_MULTIPLIER)&&code==CBN_SELCHANGE)){ReadExportStageControls(h);return 0;}
+            break;
+        }
+        case WM_CLOSE:DestroyWindow(h);return 0;
+        case WM_DESTROY:m_settingsDesignLayout.erase(h);ReleaseDialogTips(h);if(h==m_exportStagesWnd)m_exportStagesWnd=nullptr;return 0;
+        }
+        return DefWindowProcW(h,m,w,l);
+    }
+
+    static LRESULT CALLBACK ExportStagesWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(m==WM_NCCREATE){SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));return DefWindowProcW(h,m,w,l);}
+        auto* self=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+        return self?self->ExportStagesWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
+    }
+
+    // Runs the plan on the export thread, one stage at a time, and hands the
+    // last stage's file to the destination the user picked. The intermediate
+    // file lives in the cache root beside the other derived carriers and is
+    // removed whichever way this ends.
+    void StartStageExport(){
+        const std::wstring title=T(L"export.stages.title");
+        if(ExportStagesBusy()){MessageBoxW(m_hwnd,T(L"export.stages.busy").c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        const std::filesystem::path source=ExportSourceFile();
+        if(source.empty()){MessageBoxW(m_hwnd,T(L"export.stages.no_source").c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        // Measured inside the user's own action, with the cursor that says so,
+        // exactly as frame generation does - a background probe beside the
+        // renderer froze playback once already.
+        if(m_exportSelection.frameGeneration&&!m_frameGenCapability){
+            const HCURSOR previous=SetCursor(LoadCursorW(nullptr,IDC_WAIT));
+            m_frameGenCapability=QueryFrameGenerationCapability();
+            SetCursor(previous);
+        }
+        const ExportPlan plan=CurrentExportPlan();
+        if(!plan.valid){MessageBoxW(m_hwnd,T(ExportRefusalKey(plan.refusal)).c_str(),title.c_str(),MB_OK|MB_ICONINFORMATION);return;}
+        NeuralCacheManager cache(m_cacheRoot);
+        if(!cache.Valid()){MessageBoxW(m_hwnd,CacheFailureText().DescribeRoot(cache.LastFailure()).c_str(),title.c_str(),MB_OK|MB_ICONERROR);return;}
+        const std::filesystem::path scratch=cache.Root()/L"export-stages";
+        std::error_code directoryError;std::filesystem::create_directories(scratch,directoryError);
+        if(directoryError){MessageBoxW(m_hwnd,T(L"framegen.cache_failed").c_str(),title.c_str(),MB_OK|MB_ICONERROR);return;}
+        const std::filesystem::path destination=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());
+        if(destination.empty())return;
+
+        LOG("Stage export starting: upscale="<<m_exportSelection.upscale
+            <<" neural="<<m_exportSelection.neural<<" framegen="<<m_exportSelection.frameGeneration
+            <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
+            <<" passes="<<ExportStageCount(plan)<<" source="<<WideToUtf8(source.wstring()));
+
+        const auto helpers=ExecutableDirectory();
+        const auto worker=helpers/L"neural-runtime"/L"NeuralWorker.exe";
+        const double fps=m_decoder.FrameRate(),duration=m_decoder.DurationSeconds();
+        const uint32_t sourceWidth=m_decoder.Width(),sourceHeight=m_decoder.Height();
+        const uint32_t nvencPreset=m_nvencPreset;
+        HWND target=m_hwnd;auto* completions=&m_exportCompletions;
+        try{
+            m_exportWorker=std::jthread([=](std::stop_token stop){
+                auto completion=std::make_unique<ExportCompletion>();
+                completion->output=destination;
+                const uint64_t tag=GetTickCount64();
+                const auto stageOne=scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
+                const auto stageTwo=scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
+                std::filesystem::path produced=source;
+                const auto sweep=[&]{std::error_code ec;
+                    if(stageOne!=produced)std::filesystem::remove(stageOne,ec);
+                    if(stageTwo!=produced)std::filesystem::remove(stageTwo,ec);};
+                if(plan.workerStage){
+                    NeuralRenderRequest request{};
+                    request.sourcePath=produced;request.stagingVideoPath=stageOne;
+                    request.width=sourceWidth;request.height=sourceHeight;
+                    request.fps=fps;request.durationSeconds=duration;
+                    request.nvencPreset=nvencPreset;
+                    request.requireNeural=plan.requireNeural;
+                    if(plan.outputWidth!=sourceWidth||plan.outputHeight!=sourceHeight){
+                        request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
+                    }
+                    // The callback this used to pass empty. The worker has
+                    // always reported frames; nothing was listening.
+                    const uint32_t passes=(plan.workerStage?1u:0u)+(plan.frameGenStage?1u:0u);
+                    const wchar_t* passKey=plan.requireNeural
+                        ?(plan.outputWidth!=sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
+                        :L"export.progress.pass_sr";
+                    const auto post=[&](uint32_t pass,const wchar_t* key,uint64_t done,uint64_t total){
+                        auto* update=new StageExportProgress{true,pass,passes,key,done,total,{}};
+                        if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(update)))delete update;
+                    };
+                    post(1,passKey,0,0);
+                    const NeuralRenderResult result=RunNeuralWorker(worker,request,
+                        [&](const NeuralRenderProgress& p){post(1,passKey,p.completedFrames,p.totalFrames);},stop);
+                    if(!result.ok){
+                        completion->result={false,result.cancelled?MaterializeError::Cancelled:MaterializeError::ProcessFailed,result.detail};
+                        sweep();
+                        completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
+                        return;
+                    }
+                    produced=stageOne;
+                }
+                if(plan.frameGenStage){
+                    FrameGenerationRequest request{};
+                    request.source=produced;
+                    // Audio, subtitles and chapters come from the original: every
+                    // carrier this project writes is video-only.
+                    request.streamSource=source;
+                    request.output=stageTwo;
+                    request.multiplier=plan.multiplier;
+                    request.nvencPreset=nvencPreset;
+                    const uint32_t generatePass=plan.workerStage?2u:1u;
+                    const uint32_t generatePasses=(plan.workerStage?1u:0u)+1u;
+                    const auto postGenerate=[&](uint64_t done,uint64_t total){
+                        auto* update=new StageExportProgress{true,generatePass,generatePasses,
+                                                             L"export.progress.pass_framegen",done,total,{}};
+                        if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(update)))delete update;
+                    };
+                    postGenerate(0,0);
+                    const FrameGenerationResult result=FrameGenerationPass(helpers).Run(request,stop,
+                        [&](const FrameGenerationProgress& p){postGenerate(p.sourceFramesRead,p.sourceFramesTotal);});
+                    if(!result.ok){
+                        completion->result={false,result.error==FrameGenerationError::Cancelled?MaterializeError::Cancelled:MaterializeError::ProcessFailed,result.detail};
+                        sweep();
+                        completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
+                        return;
+                    }
+                    produced=stageTwo;
+                }
+                std::error_code moveError;
+                std::filesystem::remove(destination,moveError);
+                std::filesystem::rename(produced,destination,moveError);
+                if(moveError){
+                    // A rename across volumes fails; a copy is the fallback the
+                    // user's chosen folder may require.
+                    moveError.clear();
+                    std::filesystem::copy_file(produced,destination,std::filesystem::copy_options::overwrite_existing,moveError);
+                }
+                {
+                    auto* done=new StageExportProgress{};
+                    if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(done)))delete done;
+                }
+                completion->result={!moveError,moveError?MaterializeError::ProcessFailed:MaterializeError::None,
+                                    moveError?L"The finished export could not be written to the chosen file.":std::wstring{}};
+                sweep();
+                completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
+            });
+        }catch(const std::system_error&){
+            MessageBoxW(m_hwnd,T(L"export.worker_failed").c_str(),T(L"export.title.failed").c_str(),MB_OK|MB_ICONERROR);return;
+        }
+        SyncFeatureMenuState();UpdateCachedStatus();
     }
 
     static LRESULT CALLBACK EncoderWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {

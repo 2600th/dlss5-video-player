@@ -1891,7 +1891,7 @@ struct PlayerAppTestAccess {
             CHECK(tools >= 12);
             for (const int id : {IDC_NS_INTENSITY, IDC_NS_STRUCTURE, IDC_NS_TONE, IDC_NS_SKIN,
                                  IDC_NS_STYLE, IDC_NS_AUTOMASK, IDC_NS_GUIDE_MV, IDC_NS_GUIDE_DEPTH,
-                                 IDC_NS_APPLY, IDC_NS_RESET}) {
+                                 IDC_NS_PASSES, IDC_NS_CHAINED, IDC_NS_APPLY, IDC_NS_RESET}) {
                 wchar_t text[512] = {};
                 TTTOOLINFOW info{};
                 info.cbSize = TTTOOLINFOW_V2_SIZE;
@@ -1914,6 +1914,10 @@ struct PlayerAppTestAccess {
         }
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_RESET, BN_CLICKED), 0);
         CHECK(app.m_neuralSettings == NeuralSettings{});
+        CHECK_EQ(app.m_neuralSettings.passes, 1);
+        CHECK(app.m_neuralSettings.chainedHistory);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_PASSES), CB_GETCURSEL, 0, 0)), 0);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_NS_CHAINED)) == FALSE);
         CHECK(app.m_renderGuides.IsDefault());
         CHECK(app.m_guides.Controls().depth);
         CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_NS_INTENSITY), TBM_GETPOS, 0, 0)), 100);

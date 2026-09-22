@@ -89,6 +89,8 @@ std::vector<NeuralAddonOverride> NeuralAddonOverridesFor(const NeuralSettings& s
         {"NRPreset", std::to_string(settings.preset)},
         {"NRStyle", std::to_string(settings.style)},
         {"NRAutoMask", settings.autoMask ? "1" : "0"},
+        {"NRPasses", std::to_string(settings.passes)},
+        {"NRChainedHistory", settings.chainedHistory ? "1" : "0"},
     };
 }
 
@@ -104,6 +106,8 @@ bool LoadNeuralSettings(const std::filesystem::path& ini, NeuralSettings& settin
         ReadInt(path, L"Preset", settings.preset, 0, 3),
         ReadInt(path, L"Style", settings.style, 0, 2),
         ReadBool(path, L"AutoMask", settings.autoMask),
+        ReadInt(path, L"Passes", settings.passes, 1, 4),
+        ReadBool(path, L"ChainedHistory", settings.chainedHistory),
     };
     return std::ranges::any_of(present, [](bool value) { return value; });
 }
@@ -120,6 +124,8 @@ bool SaveNeuralSettings(const std::filesystem::path& ini, const NeuralSettings& 
         WriteKey(path, L"Preset", std::to_string(settings.preset)),
         WriteKey(path, L"Style", std::to_string(settings.style)),
         WriteKey(path, L"AutoMask", settings.autoMask ? "1" : "0"),
+        WriteKey(path, L"Passes", std::to_string(settings.passes)),
+        WriteKey(path, L"ChainedHistory", settings.chainedHistory ? "1" : "0"),
     };
     return std::ranges::all_of(written, [](bool value) { return value; });
 }
@@ -133,5 +139,7 @@ std::string CanonicalNeuralSettings(const NeuralSettings& settings)
         " colorStrength=" + FormatFloat(settings.colorStrength) +
         " preset=" + std::to_string(settings.preset) +
         " style=" + std::to_string(settings.style) +
-        " autoMask=" + (settings.autoMask ? "1" : "0");
+        " autoMask=" + (settings.autoMask ? "1" : "0") +
+        " passes=" + std::to_string(settings.passes) +
+        " chainedHistory=" + (settings.chainedHistory ? "1" : "0");
 }
