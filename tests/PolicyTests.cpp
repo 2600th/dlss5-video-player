@@ -1797,6 +1797,45 @@ void youtube_renderer_transaction_validates_every_open_seek_and_quality_candidat
     }
 }
 
+// The byte count a prepared network frame is checked against is layout
+// dependent, and for most of this project's life it could only ever be BGRA -
+// so the check hardcoded four bytes per pixel. The moment a playback open
+// achieved NV12 it delivered w*h*3/2 bytes, the check compared those against
+// w*h*4, and a perfectly good frame was refused: the prepared renderer
+// transaction rolled back and the open reported that no video frame could be
+// decoded. Both layouts are pinned here, in both directions, so neither can be
+// made to stand in for the other again.
+void network_prepared_geometry_accepts_both_source_layouts_test()
+{
+    const auto config=render_configuration(1);
+    const size_t bgraBytes=static_cast<size_t>(1280)*720*4;
+    const size_t nv12Bytes=static_cast<size_t>(1280)*720*3/2;
+
+    // Each layout accepts exactly its own size.
+    CHECK(NetworkPreparedGeometryIsValid(config,1280,720,bgraBytes,PixelLayout::Bgra));
+    CHECK(NetworkPreparedGeometryIsValid(config,1280,720,nv12Bytes,PixelLayout::Nv12));
+
+    // ...and refuses the other's, which is the defect this covers. Without the
+    // layout argument the second of these was the shipped behaviour.
+    CHECK(!NetworkPreparedGeometryIsValid(config,1280,720,nv12Bytes,PixelLayout::Bgra));
+    CHECK(!NetworkPreparedGeometryIsValid(config,1280,720,bgraBytes,PixelLayout::Nv12));
+
+    // The default stays BGRA, so every caller that predates the argument keeps
+    // the meaning it was written with.
+    CHECK(NetworkPreparedGeometryIsValid(config,1280,720,bgraBytes));
+    CHECK(!NetworkPreparedGeometryIsValid(config,1280,720,nv12Bytes));
+
+    // Geometry still outranks layout: the right byte count for the wrong frame
+    // size is still wrong.
+    CHECK(!NetworkPreparedGeometryIsValid(config,1282,720,nv12Bytes,PixelLayout::Nv12));
+    CHECK(!NetworkPreparedGeometryIsValid(config,1280,720,nv12Bytes-1,PixelLayout::Nv12));
+
+    // Odd geometry has no half-resolution chroma plane, so PixelLayoutFrameBytes
+    // hands back the BGRA size for it and an NV12-sized buffer is refused.
+    auto odd=config;odd.decodeWidth=1281;odd.inputWidth=1281;
+    CHECK(NetworkPreparedGeometryIsValid(odd,1281,720,static_cast<size_t>(1281)*720*4,PixelLayout::Nv12));
+}
+
 void youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test()
 {
     struct Candidate{int id;};
@@ -8653,6 +8692,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_completion_registry_is_scalar_once_only_and_spoof_safe_test),
     TEST_CASE(youtube_completion_registry_post_failure_and_concurrency_are_owned_test),
     TEST_CASE(youtube_renderer_transaction_validates_every_open_seek_and_quality_candidate_geometry_test),
+    TEST_CASE(network_prepared_geometry_accepts_both_source_layouts_test),
     TEST_CASE(youtube_renderer_transaction_validates_before_atomic_handoff_and_rolls_back_test),
     TEST_CASE(youtube_candidate_seek_render_failure_preserves_all_active_state_before_commit_test),
     TEST_CASE(youtube_network_read_decisions_are_identical_and_once_only_at_both_positions_test),

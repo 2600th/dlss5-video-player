@@ -1767,7 +1767,10 @@ struct ProductionEvaluatorAdapter {
         // present per frame; no one ever looks at it, and holding presents to the display
         // refresh would cap an export that already runs below real time.
         renderer->SetPresentTearing(true);
-        if(!renderer->Initialize(window,w,h,w,h,gridW,gridH,DefaultNeuralCarrierQuality(),false,true))return false;
+        // ow/oh, not w/h: this is where Super Resolution either happens or does
+        // not. They are equal for every job that does not upscale, which is how
+        // this read for as long as the pass could only render at source size.
+        if(!renderer->Initialize(window,w,h,ow,oh,gridW,gridH,DefaultNeuralCarrierQuality(),false,true))return false;
         // Both sides apply the same even-size rule, so this only fires if that rule drifts.
         if(renderer->ActiveSourceLayout()!=layout){
             LOG("Renderer could not take the decoder's "<<(layout==PixelLayout::Nv12?"NV12":"BGRA")<<" source layout.");

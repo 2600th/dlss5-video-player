@@ -38,10 +38,16 @@ inline bool NetworkConfigurationMatchesExceptInput(const NetworkRenderConfigurat
     auto a=left,b=right;a.inputWidth=b.inputWidth=0;a.inputHeight=b.inputHeight=0;return a==b;
 }
 
+// `layout` defaults to BGRA because that is what every caller meant while BGRA
+// was the only layout a prepared network frame could arrive in. A playback open
+// that achieved NV12 delivers w*h*3/2 bytes, and checking those against w*h*4
+// rejects a perfectly good frame - which is exactly how a prepared YouTube
+// renderer came to roll back with "no video frame can be decoded".
 inline bool NetworkPreparedGeometryIsValid(const NetworkRenderConfiguration& configuration,
                                            uint32_t frameWidth,
                                            uint32_t frameHeight,
-                                           size_t frameBytes)
+                                           size_t frameBytes,
+                                           PixelLayout layout = PixelLayout::Bgra)
 {
     if (!configuration.sourceWidth || !configuration.sourceHeight ||
         !configuration.decodeWidth || !configuration.decodeHeight ||
@@ -52,13 +58,16 @@ inline bool NetworkPreparedGeometryIsValid(const NetworkRenderConfiguration& con
         frameHeight != configuration.decodeHeight) {
         return false;
     }
+    // The overflow guard stays at 4 bytes per pixel whatever the layout asks
+    // for: it is the larger of the two, so clearing it clears NV12 as well, and
+    // PixelLayoutFrameBytes below cannot then wrap.
     constexpr size_t bytesPerPixel = 4;
     if (frameWidth > std::numeric_limits<size_t>::max() / bytesPerPixel ||
         frameHeight > std::numeric_limits<size_t>::max() /
                           (static_cast<size_t>(frameWidth) * bytesPerPixel)) {
         return false;
     }
-    return frameBytes == static_cast<size_t>(frameWidth) * frameHeight * bytesPerPixel;
+    return frameBytes == PixelLayoutFrameBytes(layout, frameWidth, frameHeight);
 }
 
 template<class Candidate, class Factory, class Validator, class Committer>

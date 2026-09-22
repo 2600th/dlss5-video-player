@@ -44,8 +44,17 @@ static constexpr size_t kCaptureLimit = 1024 * 1024;
 // a direct or HLS googlevideo https stream reaches (https -> tls -> tcp):
 // anything else - file, http, concat, data - is refused by the child itself.
 // Empty for a local file, which a whitelist without "file" would refuse.
-static std::wstring NetworkInputOptions(MediaSourceKind kind) {
-    return kind == MediaSourceKind::YouTube
+// Conditioned on the PATH being a URL, not on the kind alone. The whitelist
+// exists to bound what a resolved googlevideo address may reach; a filesystem
+// path is not a protocol it constrains, and applying it to one only makes
+// ffmpeg refuse the open - which is what stopped the prepared-network path
+// from being testable against a local clip at all. AudioPlayer::StartProcess
+// has always made exactly this check on exactly this option set. A URL still
+// gets the identical string it got before.
+static std::wstring NetworkInputOptions(MediaSourceKind kind, const std::wstring& path) {
+    const bool networkUrl = _wcsnicmp(path.c_str(), L"https://", 8) == 0 ||
+                            _wcsnicmp(path.c_str(), L"http://", 7) == 0;
+    return (kind == MediaSourceKind::YouTube && networkUrl)
         ? std::wstring(L"-tls_verify 1 -protocol_whitelist https,tls,tcp ") : std::wstring();
 }
 
@@ -405,7 +414,7 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     // the child is told to verify the certificate and to refuse every protocol
     // the URL cannot legitimately need. Absent for a local file, which the
     // whitelist would refuse.
-    const std::wstring inputOptions=NetworkInputOptions(m_sourceKind);
+    const std::wstring inputOptions=NetworkInputOptions(m_sourceKind,path);
     std::wstring args =
         L"-v error -select_streams v:0 "
         L"-show_entries stream=width,height,codec_name,pix_fmt,color_space,color_range,color_primaries,color_transfer,display_aspect_ratio,sample_aspect_ratio,avg_frame_rate,r_frame_rate,duration:stream_tags=DURATION:format=duration,format_name "
@@ -799,7 +808,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if (seekSeconds > 0.0)
         args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
     if (m_source.gif) args << L"-ignore_loop 1 ";
-    args << NetworkInputOptions(m_sourceKind) << L"-i " << Quote(m_path)
+    args << NetworkInputOptions(m_sourceKind,m_path) << L"-i " << Quote(m_path)
          << L" -map 0:v:0 -an -sn -dn ";
     // NV12 (the export's session layout, chosen in OpenFFmpeg) is already the
     // decoder's working format up to hwdownload, so it only takes dropping the

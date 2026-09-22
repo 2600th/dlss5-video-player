@@ -6252,7 +6252,16 @@ private:
     static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,[[maybe_unused]] uint32_t maxW,[[maybe_unused]] uint32_t maxH,[[maybe_unused]] bool qualityExplicit,[[maybe_unused]] NVSDK_NGX_PerfQuality_Value explicitQuality){
         if(!completion.result.ok||stop.stop_requested())return;
         completion.decoder=std::make_unique<VideoDecoder>();
-        if(!completion.decoder->Open(completion.result.mediaUrl,MediaSourceKind::YouTube,stop)){completion.mediaErrorKey=stop.stop_requested()?L"youtube.error.cancelled":L"youtube.error.ffmpeg";return;}
+        // preferNv12 for the same reason LoadOriginal asks for it: this decoder
+        // becomes m_decoder, and PairPrefersNv12() reads its layout back for both
+        // members of a neural pair. Omitting it took the `false` default, so a
+        // network source shipped 14.7 MB BGRA frames down both pipes - 29.5 MB
+        // per pair against a 16.7 ms budget at 59.94 fps - and no YouTube source
+        // could ever hold live neural playback. The request is still only a
+        // request: OpenFFmpeg refuses any colour description the GPU pass does
+        // not implement, so a non-BT.709-limited stream decodes to BGRA exactly
+        // as before.
+        if(!completion.decoder->Open(completion.result.mediaUrl,MediaSourceKind::YouTube,stop,/*preferNv12=*/true)){completion.mediaErrorKey=stop.stop_requested()?L"youtube.error.cancelled":L"youtube.error.ffmpeg";return;}
         double dar=completion.decoder->DisplayAspectRatio();if(!std::isfinite(dar)||dar<0.2)dar=double(completion.decoder->Width())/std::max(1u,completion.decoder->Height());
         const auto ow=completion.decoder->Width(),oh=completion.decoder->Height();
         const auto quality=DefaultNeuralCarrierQuality();
@@ -6338,16 +6347,41 @@ private:
         if(!candidate->window)return{};
         candidate->renderer=MakeD3D12Renderer();
         const auto quality=static_cast<NVSDK_NGX_PerfQuality_Value>(completion.configuration.quality);
+        // From completion.decoder, NOT m_decoder: the swap into m_decoder happens
+        // in InstallPreparedYouTube, after this candidate has been built and
+        // validated, so m_decoder here still describes the media being replaced.
+        // ConfigureRendererSource()/RendererTookSourceLayout() read m_decoder and
+        // are therefore the wrong helpers for this one path.
+        //
+        // Omitting this left the candidate on its Bgra default while the decoder
+        // delivered NV12, and ValidatePreparedFrame rejected every frame - the
+        // transaction rolled back and the open reported that no video frame could
+        // be decoded. Setting it before Initialize is what fixes the layout; the
+        // check after is because SetSourceLayout is a request (odd geometry falls
+        // back), and a silent disagreement uploads a quarter of a BGRA image as a
+        // Y plane rather than failing.
+        candidate->renderer->SetSourceLayout(completion.decoder->PixelLayout());
+        candidate->renderer->SetSourceColor(completion.decoder->ColorDescription());
         if(!candidate->renderer->Initialize(candidate->window,completion.configuration.decodeWidth,completion.configuration.decodeHeight,completion.configuration.outputWidth,completion.configuration.outputHeight,completion.configuration.guideWidth,completion.configuration.guideHeight,quality))return{};
+        if(candidate->renderer->ActiveSourceLayout()!=completion.decoder->PixelLayout()){
+            LOG("Prepared renderer refused the decoder's "
+                <<(completion.decoder->PixelLayout()==VideoPixelLayout::Nv12?"NV12":"BGRA")
+                <<" source layout; this open fails rather than presenting garbage.");
+            return{};
+        }
         candidate->renderer->SetDLSS(false);candidate->renderer->SetColorSettings(m_colorSettings);candidate->renderer->SetComparison(EffectiveComparison());
         if(m_renderer)candidate->renderer->SetDebugView(m_renderer->GetDebugView());
         candidate->configuration.inputWidth=candidate->renderer->DLSSInputW();candidate->configuration.inputHeight=candidate->renderer->DLSSInputH();
         return candidate;
     }
     bool ValidatePreparedFrame(const YouTubeCompletion& completion,D3D12Renderer& renderer,TemporalGuideGenerator& guides){
-        if(!NetworkPreparedGeometryIsValid(completion.configuration,completion.decoder->Width(),completion.decoder->Height(),completion.firstFrame.bgra.size()))return false;
+        // The frame's own layout on both, for the same reason RenderVideoFrame
+        // passes f.layout: the byte count the geometry check expects and the
+        // planes the guide generator reads are both layout-dependent, and both
+        // defaulted to BGRA here while the decoder could only ever produce BGRA.
+        if(!NetworkPreparedGeometryIsValid(completion.configuration,completion.decoder->Width(),completion.decoder->Height(),completion.firstFrame.bgra.size(),completion.firstFrame.layout))return false;
         const FrameIdentity identity=IdentityOf(completion.firstFrame,0,0,HistoryReset::FirstFrame);
-        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),identity,guide))return false;
+        GuideFrame guide;if(!guides.Generate(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),completion.configuration.decodeWidth,completion.configuration.decodeHeight,renderer.DLSSInputW(),renderer.DLSSInputH(),completion.decoder->FrameRate(),identity,guide,completion.firstFrame.layout))return false;
         const float frameMs=float(1000.0/std::max(1.0,completion.decoder->FrameRate()));
         return renderer.RenderFrame(completion.firstFrame.bgra.data(),completion.firstFrame.bgra.size(),identity,guide,frameMs);
     }

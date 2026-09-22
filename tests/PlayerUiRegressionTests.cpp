@@ -142,6 +142,10 @@ struct PlayerAppTestAccess {
         HMENU featureMenu = nullptr;
     };
     static inline Fixture* fixture = nullptr;
+    // Set from argv by the --gpu run; empty on the portable run, which never
+    // reaches the cases that read them.
+    static inline std::filesystem::path gpuFfmpegDirectory;
+    static inline std::filesystem::path gpuWorkDirectory;
 
     static void cache_settings_round_trip_test()
     {
@@ -826,6 +830,149 @@ struct PlayerAppTestAccess {
     {
         CheckFullscreenLifecycle();
     }
+
+    // ---- gpu: the prepared network renderer path ---------------------------
+    // Registered as NetworkPreparedRendererSmoke, run by passing --gpu to this
+    // same binary rather than by compiling main.cpp into a second target.
+    //
+    // Why these exist: nothing in this suite opened a network source, and the
+    // prepared-renderer commit path is reached by NOTHING ELSE. Four defects
+    // lived there at once - the open did not ask for NV12, the candidate
+    // renderer was never told the layout, the geometry check measured every
+    // frame at four bytes per pixel, and the guide generator was handed the
+    // frame without its layout - and every one of them was invisible to 23
+    // green tests. The kind is YouTube on both cases because that is the kind
+    // the real path passes; the source is a local clip because the transport
+    // is not what broke.
+    static std::filesystem::path GpuWorkDirectory()
+    {
+        return gpuWorkDirectory.empty() ? std::filesystem::path(L"network-prepared") : gpuWorkDirectory;
+    }
+
+    // A clip with a colour description this project's GPU conversion either
+    // implements or deliberately refuses. Generated rather than committed: two
+    // ffmpeg filters describe it completely.
+    static bool GenerateClip(const std::filesystem::path& out, bool bt709Limited)
+    {
+        std::error_code error;
+        std::filesystem::create_directories(out.parent_path(), error);
+        if (std::filesystem::exists(out, error)) return true;
+        const std::wstring colour = bt709Limited
+            ? std::wstring(L"-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv")
+            // Not merely "different": BT.601 limited is a description
+            // SourceNv12ConversionFor ACCEPTS for an export, but the PLAYBACK
+            // gate refuses it because only the BT.709 limited inverse is
+            // written. That is the branch this clip has to land on.
+            : std::wstring(L"-colorspace smpte170m -color_primaries smpte170m -color_trc smpte170m -color_range tv");
+        std::wstring command = L"\"" + (gpuFfmpegDirectory / L"ffmpeg.exe").wstring() + L"\""
+            L" -v error -nostdin -y -f lavfi -i testsrc2=s=1280x720:r=30:d=1"
+            L" -c:v libx264 -pix_fmt yuv420p " + colour + L" \"" + out.wstring() + L"\"";
+        std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+        mutableCommand.push_back(L'\0');
+        STARTUPINFOW si{}; si.cb = sizeof(si); PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
+        WaitForSingleObject(pi.hProcess, 60000);
+        DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return code == 0 && std::filesystem::exists(out, error);
+    }
+
+    // Everything CreateRendererCandidate needs from a PlayerApp that never ran
+    // Create(): the render window class it instantiates, and a parent for it.
+    static bool PrepareViewport(PlayerApp& app)
+    {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSW r{}; r.style = CS_DBLCLKS | CS_OWNDC;
+            r.lpfnWndProc = PlayerApp::RenderWndProcStatic;
+            r.hInstance = GetModuleHandleW(nullptr);
+            r.lpszClassName = L"DLSSVideoRenderClassV11";
+            r.hCursor = LoadCursor(nullptr, IDC_ARROW);
+            // A class this process already registered is not an error.
+            registered = RegisterClassW(&r) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+        }
+        if (!registered) return false;
+        if (!app.m_viewport) {
+            app.m_viewport = CreateWindowExW(0, L"STATIC", nullptr, WS_POPUP,
+                                             0, 0, 320, 180, nullptr, nullptr,
+                                             GetModuleHandleW(nullptr), nullptr);
+        }
+        return app.m_viewport != nullptr;
+    }
+
+    // Drives the REAL preparation function, then the real candidate build and
+    // the real validation, and reports the layout each stage settled on.
+    static bool RunPreparedPath(const std::filesystem::path& clip,
+                                VideoPixelLayout& decoderLayout,
+                                VideoPixelLayout& rendererLayout,
+                                bool& validated)
+    {
+        PlayerApp app{AppOptions{}};
+        if (!PrepareViewport(app)) { std::cerr << "stage=viewport winerr=" << GetLastError() << '\n'; return false; }
+        YouTubeCompletion completion;
+        completion.result.ok = true;
+        completion.result.mediaUrl = clip.wstring();
+        // PrepareYouTubeMedia is what a dropped preferNv12 would regress, so
+        // this calls it rather than opening a decoder itself.
+        PlayerApp::PrepareYouTubeMedia(completion, {}, 0, 0, false, DefaultNeuralCarrierQuality());
+        if (!completion.mediaErrorKey.empty() || !completion.decoder ||
+            completion.firstFrame.bgra.empty()) {
+            std::wcerr << L"stage=prepare error=" << completion.mediaErrorKey
+                       << L" decoder=" << (completion.decoder != nullptr)
+                       << L" frameBytes=" << completion.firstFrame.bgra.size() << L'\n';
+            return false;
+        }
+        decoderLayout = completion.decoder->PixelLayout();
+        auto candidate = app.CreateRendererCandidate(completion);
+        if (!candidate || !candidate->renderer) { std::cerr << "stage=candidate\n"; return false; }
+        rendererLayout = candidate->renderer->ActiveSourceLayout();
+        TemporalGuideGenerator guides;
+        validated = app.ValidatePreparedFrame(completion, *candidate->renderer, guides);
+        return true;
+    }
+
+    static void network_prepared_pair_agrees_on_nv12_test()
+    {
+        const auto clip = GpuWorkDirectory() / L"prepared-bt709.mp4";
+        REQUIRE(GenerateClip(clip, true));
+        VideoPixelLayout decoderLayout = VideoPixelLayout::Bgra;
+        VideoPixelLayout rendererLayout = VideoPixelLayout::Bgra;
+        bool validated = false;
+        REQUIRE(RunPreparedPath(clip, decoderLayout, rendererLayout, validated));
+        // The open asked for NV12 and a BT.709 limited even-geometry source
+        // qualifies, so this is the assertion a dropped preferNv12 fails.
+        CHECK(decoderLayout == VideoPixelLayout::Nv12);
+        // The candidate was told the layout before Initialize. Without that it
+        // stays on its Bgra default and every frame is refused below.
+        CHECK(rendererLayout == VideoPixelLayout::Nv12);
+        // The geometry check measured w*h*3/2, and the guide generator was
+        // handed the frame's own layout.
+        CHECK(validated);
+    }
+
+    static void network_prepared_falls_back_to_bgra_off_bt709_test()
+    {
+        const auto clip = GpuWorkDirectory() / L"prepared-bt601.mp4";
+        REQUIRE(GenerateClip(clip, false));
+        VideoPixelLayout decoderLayout = VideoPixelLayout::Nv12;
+        VideoPixelLayout rendererLayout = VideoPixelLayout::Nv12;
+        bool validated = false;
+        REQUIRE(RunPreparedPath(clip, decoderLayout, rendererLayout, validated));
+        // The playback gate takes BT.709 limited and nothing else, because that
+        // is the only inverse written for the comparison reference. This pins
+        // the refusal so NV12 cannot be made unconditional later.
+        CHECK(decoderLayout == VideoPixelLayout::Bgra);
+        CHECK(rendererLayout == VideoPixelLayout::Bgra);
+        // ...and the path still works, which is the half of a fallback that is
+        // easy to break and easy to forget to assert.
+        CHECK(validated);
+    }
+
+    static constexpr ::test_support::TestCase kGpuCases[] = {
+        UI_CASE(network_prepared_pair_agrees_on_nv12_test),
+        UI_CASE(network_prepared_falls_back_to_bgra_off_bt709_test),
+    };
 
     static constexpr ::test_support::TestCase kCases[] = {
         UI_CASE(cache_settings_round_trip_test),
@@ -2269,8 +2416,18 @@ struct PlayerAppTestAccess {
     }
 };
 
-int main()
+int main(int argc, char** argv)
 {
+    // --gpu selects the prepared-network-renderer cases, registered separately
+    // as NetworkPreparedRendererSmoke. Same binary deliberately: a second target
+    // would compile main.cpp again, and this file is already the reason the
+    // build amplifies (see 2.12). Remaining arguments are ffmpeg's directory and
+    // a scratch directory, which only those cases read.
+    const bool gpuOnly = argc > 1 && std::string_view(argv[1]) == "--gpu";
+    if (gpuOnly) {
+        if (argc > 2) PlayerAppTestAccess::gpuFfmpegDirectory = std::filesystem::path(argv[2]);
+        if (argc > 3) PlayerAppTestAccess::gpuWorkDirectory = std::filesystem::path(argv[3]);
+    }
     // The decoder describes a file through Media Foundation when no ffprobe
     // is beside it; the player starts both of these before its first window.
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)) ||

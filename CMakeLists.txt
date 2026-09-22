@@ -717,7 +717,31 @@ if(BUILD_TESTING)
     # The player persists settings beside its executable; isolate test settings.
     set_target_properties(PlayerUiRegressionTests PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ui-regressions/$<CONFIG>")
+    # NetworkPreparedRendererSmoke drives the real PrepareYouTubeMedia, and the
+    # VideoDecoder it builds finds its helpers beside its own module - which for
+    # this target is the test's own output directory, not the player's. Staged
+    # the same way the player stages them; without it the decoder reports
+    # "Bundled/system FFmpeg tools not found" and the smoke cannot open anything.
+    if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe" AND EXISTS "${FFMPEG_STAGED_DIR}/ffprobe.exe")
+        add_custom_command(TARGET PlayerUiRegressionTests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFMPEG_STAGED_DIR}/ffmpeg.exe"
+                "$<TARGET_FILE_DIR:PlayerUiRegressionTests>/ffmpeg.exe"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${FFMPEG_STAGED_DIR}/ffprobe.exe"
+                "$<TARGET_FILE_DIR:PlayerUiRegressionTests>/ffprobe.exe"
+        )
+    endif()
     add_test(NAME PlayerUiRegressionTests COMMAND PlayerUiRegressionTests)
+    # The same binary, its `--gpu` case set. Nothing in this suite opened a
+    # network source, and the prepared-renderer commit path is reached by
+    # nothing else - four defects lived there at once while 23 tests stayed
+    # green. A second target would compile main.cpp a second time, which is the
+    # amplification 2.12 is about, so this registers the existing one again.
+    add_test(NAME NetworkPreparedRendererSmoke COMMAND PlayerUiRegressionTests
+        --gpu "${FFMPEG_STAGED_DIR}" "${CMAKE_BINARY_DIR}/network-prepared")
+    set_tests_properties(NetworkPreparedRendererSmoke PROPERTIES
+        LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 300)
 
     # Every test ends: a hung helper child or a deadlocked wait fails the run
     # instead of stalling it. Each budget is several times its measured Release
