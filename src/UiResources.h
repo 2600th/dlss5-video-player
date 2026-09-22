@@ -12,6 +12,7 @@ enum class UiIcon {
     Volume,
     VolumeOff,
     Sparkles,
+    Upscaling,
     FrameGeneration,
     Crop,
     Adjustments,
@@ -38,9 +39,19 @@ inline constexpr COLORREF NeuralCoverage = RGB(72, 196, 178);
 
 } // namespace ui_palette
 
+// `working` is the state this had no way to say. A feature pill has four:
+// unavailable, off, on, and busy doing something that takes minutes - and with
+// only `enabled` and `active` the last one looked exactly like the one before
+// it. That matters most at the narrow widths where the toolbar drops to icons
+// and the label, which is the only other thing carrying state, is gone.
+//
+// Precedence is unavailable, then working, then on, then off: a conversion
+// that is running is the most important thing the pill can tell you, and a
+// control you cannot use is the only thing that outranks it.
 struct ButtonState {
     bool enabled{true};
     bool active{false};
+    bool working{false};
     bool hover{false};
     bool pressed{false};
     bool focus{false};

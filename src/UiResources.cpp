@@ -18,6 +18,17 @@ wchar_t GlyphForIcon(UiIcon icon)
     case UiIcon::Volume: return L'\xeb51';           // volume
     case UiIcon::VolumeOff: return L'\xf1c3';        // volume-off
     case UiIcon::Sparkles: return L'\xf6d7';         // sparkles
+    // arrows-maximize: four arrows pushing outward from a centre, which is what
+    // Super Resolution does to a picture. Verified present in the committed
+    // tabler-icons.ttf cmap (U+EA28, glyph 341).
+    //
+    // It must not be sparkles. The comment on FrameGeneration below already
+    // established why - the feature pills collapse to icon-only at 44/36 dip -
+    // and then left Neural Rendering and DLSS Upscaling BOTH on sparkles, so
+    // two of the three were still indistinguishable at exactly the width the
+    // note was written about. Sparkles stays with the neural model, which is
+    // the one that earns it.
+    case UiIcon::Upscaling: return L'\xea28';        // arrows-maximize
     // copy-plus: a duplicated frame with a plus, the one glyph in the embedded
     // 3.46.0 set that reads as "more frames out of one frame". Verified present
     // in the committed tabler-icons.ttf cmap (U+FDAE, 15 contours), so it needs
@@ -47,6 +58,13 @@ ButtonVisual ResolveButtonVisual(ButtonState state)
     if (state.pressed) {
         return {ui_palette::ControlSurface, ui_palette::PrimaryBlue,
                 ui_palette::PrimaryText, state.focus};
+    }
+    // Teal rather than blue, and the same teal the timeline already uses for
+    // rendered coverage: the two places the player says "this is being made
+    // right now" should not say it in two different colours.
+    if (state.working) {
+        return {ui_palette::NeuralCoverage, RGB(120, 226, 208),
+                ui_palette::Window, state.focus};
     }
     if (state.active) {
         return {ui_palette::PrimaryBlue, RGB(103, 179, 245),

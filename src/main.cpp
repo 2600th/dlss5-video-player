@@ -3144,7 +3144,9 @@ private:
     }
 
     void InvalidateControls(){
-        if(!m_hwnd)return;SyncFeatureMenuState();RECT c{};GetClientRect(m_hwnd,&c);
+        // The one place every state change already funnels through, which makes
+        // it the one place the tip rectangles cannot fall behind the layout.
+        if(!m_hwnd)return;SyncFeatureMenuState();RefreshToolbarTips();RECT c{};GetClientRect(m_hwnd,&c);
         if(!m_loaded){InvalidateRect(m_hwnd,nullptr,FALSE);return;}
         RECT bar{0,std::max<LONG>(0,c.bottom-ControlHeight()),c.right,c.bottom};InvalidateRect(m_hwnd,&bar,FALSE);
     }
@@ -3221,6 +3223,59 @@ private:
     // The host is a popup owned by the dialog, so Windows destroys it with its
     // owner; only this dialog's strings are dropped, never another dialog's.
     void ReleaseDialogTips(HWND dialog){m_tipHosts.erase(dialog);m_tipText.erase(dialog);}
+
+    // Which sentence a toolbar control gets on hover. Null means the control
+    // says everything it needs to in its own label - "10s" does not need a
+    // paragraph - so only the ones with a state worth explaining carry one.
+    static const wchar_t* ToolbarTipKey(ToolbarAction action){
+        switch(action){
+        case ToolbarAction::ToggleNeuralRendering:return L"toolbar.tip.neural";
+        case ToolbarAction::ToggleUpscaling:return L"toolbar.tip.upscaling";
+        case ToolbarAction::ToggleFrameGeneration:return L"toolbar.tip.framegen";
+        case ToolbarAction::Open:return L"toolbar.tip.open";
+        case ToolbarAction::PlayPause:return L"toolbar.tip.playpause";
+        case ToolbarAction::Mute:return L"toolbar.tip.mute";
+        case ToolbarAction::Aspect:return L"toolbar.tip.aspect";
+        case ToolbarAction::Adjustments:return L"toolbar.tip.color";
+        case ToolbarAction::DebugView:return L"toolbar.tip.debug";
+        case ToolbarAction::Fullscreen:return L"toolbar.tip.fullscreen";
+        default:return nullptr;
+        }
+    }
+
+    // Toolbar buttons are painted, not child windows, so their tips are
+    // registered by RECTANGLE. The rectangles move on every resize and whenever
+    // the bar drops items, so they are re-registered from the same layout the
+    // painter uses - a tip pinned to a stale rect is worse than no tip, because
+    // it describes whatever control has moved into that space.
+    void RefreshToolbarTips(){
+        if(!m_hwnd||!IsWindow(m_hwnd))return;
+        const auto items=ToolbarItems();
+        HWND host=EnsureTipHost(m_hwnd);
+        if(!host)return;
+        auto& text=m_tipText[m_hwnd];
+        // Tool ids are the action value, so a re-registration replaces the tool
+        // for that action rather than stacking a second one on top of it.
+        for(const auto& item:items){
+            const wchar_t* key=ToolbarTipKey(item.action);
+            if(!key)continue;
+            const UINT_PTR id=static_cast<UINT_PTR>(item.action);
+            TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
+            info.hwnd=m_hwnd;info.uId=id;info.rect=item.bounds;
+            // Present already: move it. The control moved, the sentence did not.
+            if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
+                info.rect=item.bounds;
+                SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));
+                continue;
+            }
+            text.push_back(std::make_unique<std::wstring>(T(key)));
+            info.lpszText=text.back()->data();
+            info.rect=item.bounds;
+            SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+        }
+        // Multi-line tips need a width or comctl draws one long line.
+        SendMessageW(host,TTM_SETMAXTIPWIDTH,0,LPARAM(Dip(320)));
+    }
     void AddTip(HWND dialog,HWND control,const wchar_t* tipKey){
         if(!tipKey||!control)return;
         HWND host=EnsureTipHost(dialog);if(!host)return;
@@ -4669,7 +4724,10 @@ private:
         ToggleNeuralRendering();
     }
 
-    struct ToolbarButtonContent{UiIcon icon;std::wstring label;bool enabled;bool active;};
+    // `working` is the fourth state: a conversion or a render is running. It
+    // defaults false, so every control that is simply on or off says so by
+    // saying nothing.
+    struct ToolbarButtonContent{UiIcon icon;std::wstring label;bool enabled;bool active;bool working{false};};
 
     ToolbarButtonContent ButtonContent(ToolbarAction action,bool idleSurface=false)const{
         const bool rendererReady=m_renderer!=nullptr;
@@ -4684,14 +4742,14 @@ private:
         case ToolbarAction::PlayPause:{const bool playing=m_playing||LiveResumePending();return{playing?UiIcon::Pause:UiIcon::Play,playing?L"Pause":L"Play",enabled,playing};}
         // A toggle pressed during a seek is queued rather than dropped, and the
         // label says so: a dead-looking key is how it read before.
-        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active};}
+        case ToolbarAction::ToggleNeuralRendering:{const bool active=(m_cachedPlayback&&m_comparisonView==ComparisonView::Neural)||m_previewShown;const bool cachedPair=m_cachedPlayback&&m_havePresentedPair&&rendererReady;const std::wstring label=m_neuralToggleDeferred?L"Neural Rendering · Queued for the seek":m_previewJob?L"Neural Rendering · Previewing settings":m_previewShown?L"Neural Rendering · Settings preview":enabled?(active?L"Neural Rendering · On":L"Neural Rendering · Off"):(cachedPair?std::wstring(L"Neural Rendering · Seeking · ")+(active?L"On":L"Off"):(NeuralJobActive()?L"Neural Rendering · Preparing cache":L"Neural Rendering · No cache"));return{UiIcon::Sparkles,label,enabled,active,m_previewJob!=0||NeuralJobActive()};}
         case ToolbarAction::Stop:return{UiIcon::Stop,L"Stop",enabled,false};
         case ToolbarAction::Forward10:return{UiIcon::FastForward,L"10s",enabled,false};
         case ToolbarAction::Mute:return{m_muted?UiIcon::VolumeOff:UiIcon::Volume,m_muted?L"Sound":L"Mute",enabled,m_muted};
         // The unavailable arm carries the reason, not the verdict: a pill that
         // says only "Unavailable" sends a viewer looking for a broken toggle
         // when the answer is usually that their source already fills the panel.
-        case ToolbarAction::ToggleUpscaling:return{UiIcon::Sparkles,
+        case ToolbarAction::ToggleUpscaling:return{UiIcon::Upscaling,
             UpscalingAvailable()?(UpscalingActive()?std::wstring(L"DLSS Upscaling \u00b7 On")
                                                    :std::wstring(L"DLSS Upscaling \u00b7 Off"))
                                 :std::wstring(L"DLSS Upscaling \u00b7 ")+UpscalingUnavailableReason(),
@@ -4705,14 +4763,14 @@ private:
             const auto ui=FrameGenerationUiNow();
             using S=FrameGenerationUiState;
             switch(ui.state){
-                case S::Converting:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),true,true};
-                case S::Stopping:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),false,true};
+                case S::Converting:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),true,true,true};
+                case S::Stopping:return{UiIcon::FrameGeneration,T(L"framegen.pill.cancel"),false,true,true};
                 case S::Busy:return{UiIcon::FrameGeneration,T(L"framegen.pill.busy"),false,false};
                 // The stream cases: one offers the copy, the other says it is
                 // being fetched. Neither is "Unavailable" - the first is the
                 // only unavailable-looking state the user can act on.
                 case S::NeedsSourceCopy:return{UiIcon::FrameGeneration,T(L"framegen.pill.get_copy"),enabled,false};
-                case S::CopyingSource:return{UiIcon::FrameGeneration,T(L"framegen.pill.copying"),false,true};
+                case S::CopyingSource:return{UiIcon::FrameGeneration,T(L"framegen.pill.copying"),false,true,true};
                 case S::NoLocalCopy:
                 case S::Refused:return{UiIcon::FrameGeneration,T(L"framegen.pill.unavailable"),false,false};
                 // Unchecked reads "Generate" like Ready: the click is what
@@ -4733,8 +4791,8 @@ private:
 
     bool ToolbarActionEnabled(ToolbarAction action)const{return IsToolbarActionEnabled(action,ToolbarState());}
 
-    void DrawButton(HDC dc,ToolbarAction action,UiIcon icon,const std::wstring&label,const RECT&r,bool enabled,bool active,bool hover,bool pressed,bool focus,bool compact){
-        const ButtonVisual visual=ResolveButtonVisual(ButtonState{enabled,active,hover,pressed,focus});
+    void DrawButton(HDC dc,ToolbarAction action,UiIcon icon,const std::wstring&label,const RECT&r,bool enabled,bool active,bool hover,bool pressed,bool focus,bool compact,bool working=false){
+        const ButtonVisual visual=ResolveButtonVisual(ButtonState{enabled,active,working,hover,pressed,focus});
         HBRUSH brush=CreateSolidBrush(visual.fill);HPEN pen=CreatePen(PS_SOLID,1,visual.border);
         const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
         const int radius=std::max(1,Dip(kToolbarCornerRadiusDip));
@@ -4872,7 +4930,7 @@ private:
         if(!ControlsVisible())return;
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
         const auto toolbarItems=ToolbarItems();
-        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact);}
+        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact,content.working);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
         double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec);RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
         const auto markerX=[&](int64_t pts){return tr.left+int(std::lround((tr.right-tr.left)*(d>0?std::clamp(double(pts)*1e-7/d,0.0,1.0):0.0)));};
@@ -7408,7 +7466,7 @@ private:
         // has to be dropped here. Switching a 4K panel to 1080p is exactly this
         // case, and it moves the Auto rung.
         case WM_DISPLAYCHANGE:InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
-        case WM_SIZE:Layout();SyncActivityFeedback();return 0;
+        case WM_SIZE:Layout();SyncActivityFeedback();RefreshToolbarTips();return 0;
         case WM_PAINT:Paint();return 0;
         case WM_NCMOUSEMOVE:{
             POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};
