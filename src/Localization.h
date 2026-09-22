@@ -38,7 +38,8 @@ private:
             {L"menu.upscale_1080", L"1080p"}, {L"menu.upscale_1440", L"1440p"}, {L"menu.upscale_2160", L"2160p (4K)"},
             {L"menu.frame_generation", L"Generate frames (higher frame rate)..."},
             {L"menu.cancel_frame_generation", L"Cancel frame generation"},
-            {L"menu.show_framegen_output", L"Show converted file"},
+            {L"menu.cancel_export_running", L"Cancel export"},
+            {L"menu.show_framegen_output", L"Show last generated file"},
             // 2x is the default because a conversion costs minutes of GPU work
             // and a large file; the rest are opt-in, and "as many as the
             // display allows" is what the first version did automatically.

@@ -60,64 +60,67 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
-    add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop"); add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10"); add(play, IDM_MUTE, L"menu.mute"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
+    // Transport, and the audio track is part of it: which track is playing is a
+    // property of playback, and alone behind its own separator it was a group of
+    // one - below the two-to-seven Microsoft's guidance asks for, and a rule this
+    // menu broke twice.
+    add(play, IDM_PLAY, L"menu.playpause"); add(play, IDM_STOP, L"menu.stop");
+    add(play, IDM_BACK10, L"menu.back10"); add(play, IDM_FWD10, L"menu.forward10");
+    add(play, IDM_MUTE, L"menu.mute");
     HMENU audioTracks = CreatePopupMenu();
     AppendMenuW(audioTracks, MF_STRING | MF_GRAYED, IDM_AUDIO_TRACK_FIRST, L"No audio tracks");
     AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(audioTracks),
                 localizer.Get(L"menu.audio_track").c_str());
     AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
-    add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out"); add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode"); AppendMenuW(play, MF_SEPARATOR, 0, nullptr); add(play, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
+    // The range tools. IDM_PAUSE_NEURAL_RENDER used to sit alone below these:
+    // it is a control over the neural RENDER, not over playback, and it now
+    // lives in the DLSS menu beside the rest of neural rendering.
+    add(play, IDM_MARK_IN, L"menu.mark_in"); add(play, IDM_MARK_OUT, L"menu.mark_out");
+    add(play, IDM_CLEAR_MARKS, L"menu.clear_marks"); add(play, IDM_GOTO_TIMECODE, L"menu.goto_timecode");
     add(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, L"menu.youtube_quality_auto"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_2160, L"menu.youtube_quality_2160"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1440, L"menu.youtube_quality_1440"); add(youtubeQuality, IDM_YOUTUBE_QUALITY_1080, L"menu.youtube_quality_1080"); CheckMenuRadioItem(youtubeQuality, IDM_YOUTUBE_QUALITY_AUTO, IDM_YOUTUBE_QUALITY_1080, IDM_YOUTUBE_QUALITY_AUTO, MF_BYCOMMAND);
-    const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill"); add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+    // How the picture sits in the window. Fullscreen belongs here rather than
+    // alone at the bottom: it is the third answer to the same question the two
+    // aspect commands answer.
+    add(video, IDM_ASPECT_FIT, L"menu.aspectfit"); add(video, IDM_ASPECT_FILL, L"menu.aspectfill");
+    add(video, IDM_FULLSCREEN, L"menu.fullscreen");
+    AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
+    // What the picture is made of: the resolution it was fetched at, and the
+    // colour controls applied to it.
+    const std::wstring youtubeQualityName = localizer.Get(L"menu.youtube_quality");
+    AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(youtubeQuality), youtubeQualityName.c_str());
+    add(video, IDM_VIDEO_ADJUSTMENTS, L"menu.adjustments");
+    AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_NEURAL, L"menu.compare_neural"); add(compare, IDM_COMPARE_BLEND, L"menu.compare_blend"); add(compare, IDM_COMPARE_SPLIT, L"menu.compare_split"); add(compare, IDM_COMPARE_WIPE, L"menu.compare_wipe"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_BLEND_LESS, L"menu.compare_blend_less"); add(compare, IDM_COMPARE_BLEND_MORE, L"menu.compare_blend_more"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr); add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom");
-    const std::wstring compareName = localizer.Get(L"menu.compare"); AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str()); AppendMenuW(video, MF_SEPARATOR, 0, nullptr);
-    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input"); add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth"); AppendMenuW(video, MF_SEPARATOR, 0, nullptr); add(video, IDM_FULLSCREEN, L"menu.fullscreen");
+    // Which image is on screen: the comparison modes and the four debug views
+    // are the same question asked two ways, so they are one group.
+    const std::wstring compareName = localizer.Get(L"menu.compare");
+    AppendMenuW(video, MF_POPUP, reinterpret_cast<UINT_PTR>(compare), compareName.c_str());
+    add(video, IDM_VIEW_FINAL, L"menu.final"); add(video, IDM_VIEW_INPUT, L"menu.input");
+    add(video, IDM_VIEW_MV, L"menu.mv"); add(video, IDM_VIEW_DEPTH, L"menu.depth");
+    // The DLSS menu, grouped one feature per block.
+    //
+    // Microsoft's own menu guidance is the measure here: separators between
+    // logical groups, no more than six of them, two to seven items per group.
+    // NN/g's is the reason it matters - "groups of unrelated options reduce
+    // clarity, decrease findability, hinder spatial memorability, and increase
+    // cognitive load" - and that is exactly what this menu used to be. Neural
+    // Rendering was the first row and its presets and settings were rows ten
+    // and eleven, with all of upscaling and all of frame generation in between,
+    // so the one feature a viewer touches most was split across the full height
+    // of the menu by two features they may never touch.
+    //
+    // Now: neural, then upscaling, then frame generation, then the two preview
+    // commands, then everything that writes a file. Each block is one feature
+    // and holds its own toggle, its own submenu and its own settings, so a
+    // viewer who wants one thing reads one block and stops.
+
+    // --- Neural rendering: the toggle, its looks, its controls. ------------
     add(dlss, IDM_NEURAL_RENDERING, L"menu.neural_rendering");
-    add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
-    HMENU upscaleOutput=CreatePopupMenu();
-    add(upscaleOutput, IDM_UPSCALE_AUTO, L"menu.upscale_auto");
-    add(upscaleOutput, IDM_UPSCALE_1080, L"menu.upscale_1080");
-    add(upscaleOutput, IDM_UPSCALE_1440, L"menu.upscale_1440");
-    add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
-    CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
-    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
-    add(dlss, IDM_CANCEL_FRAME_GENERATION, L"menu.cancel_frame_generation");
-    // The multiple is a preference, not an automatic maximum: a conversion is
-    // minutes of GPU work and a large file, so the default doubles the rate and
-    // anything beyond that is asked for. "As many as the display allows" is the
-    // old behaviour, kept for whoever wants it.
-    HMENU framegenMultiple=CreatePopupMenu();
-    add(framegenMultiple, IDM_FRAMEGEN_2X, L"menu.framegen_2x");
-    add(framegenMultiple, IDM_FRAMEGEN_3X, L"menu.framegen_3x");
-    add(framegenMultiple, IDM_FRAMEGEN_4X, L"menu.framegen_4x");
-    add(framegenMultiple, IDM_FRAMEGEN_5X, L"menu.framegen_5x");
-    add(framegenMultiple, IDM_FRAMEGEN_MAX, L"menu.framegen_max");
-    CheckMenuRadioItem(framegenMultiple,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,IDM_FRAMEGEN_2X,MF_BYCOMMAND);
-    AppendMenuW(framegenMultiple, MF_SEPARATOR, 0, nullptr);
-    // A constraint on the multiple, not a choice of one: with it on, nothing is
-    // generated unless the generated rate divides the display's refresh.
-    add(framegenMultiple, IDM_FRAMEGEN_EVEN_ONLY, L"menu.framegen_even_only");
-    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
-                localizer.Get(L"menu.framegen_multiple").c_str());
-    // Grayed on creation like IDM_CANCEL_EXPORT below: main.cpp enables it once
-    // a converted file exists. Without it the output is unreachable after the
-    // confirmation dialog closes - the export item beside it is gated on a
-    // neural cache path a frame-generation output never has.
-    AppendMenuW(dlss, MF_STRING | MF_GRAYED, IDM_SHOW_FRAMEGEN_OUTPUT,
-                localizer.Get(L"menu.show_framegen_output").c_str());
-    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
-    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame"); add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip"); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
-    // Conversion writes a neural video to disk with the settings in the neural
-    // settings dialog; it is deliberately separate from watching with the
-    // rendering turned on.
-    add(convert, IDM_RENDER_RANGE, L"menu.render_range"); add(convert, IDM_RENDER_WHOLE, L"menu.render_whole"); AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, localizer.Get(L"menu.export_cached").c_str());
-    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_CANCEL_EXPORT, localizer.Get(L"menu.cancel_export").c_str());
-    const std::wstring convertName = localizer.Get(L"menu.convert");
-    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str()); AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+    // Pausing the background render is a neural command, so it belongs to the
+    // neural block. In Playback it was a group of one under a separator, and it
+    // asked the viewer to look for a render control in the transport menu.
+    add(dlss, IDM_PAUSE_NEURAL_RENDER, L"menu.pause_neural_render");
     // Presets before the controls they set: six sliders with measured tooltips
     // are the right surface for an expert and the wrong first contact. Every
     // preset is one neural evaluation at the same resolution, so this is a
@@ -148,12 +151,83 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     const std::wstring presetsName = localizer.Get(L"menu.neural_presets");
     AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(presets), presetsName.c_str());
     add(dlss, IDM_NEURAL_SETTINGS, L"menu.neural_settings");
+    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+
+    // --- DLSS Super Resolution: the toggle and the size it targets. --------
+    add(dlss, IDM_DLSS_UPSCALING, L"menu.dlss_upscaling");
+    HMENU upscaleOutput=CreatePopupMenu();
+    add(upscaleOutput, IDM_UPSCALE_AUTO, L"menu.upscale_auto");
+    add(upscaleOutput, IDM_UPSCALE_1080, L"menu.upscale_1080");
+    add(upscaleOutput, IDM_UPSCALE_1440, L"menu.upscale_1440");
+    add(upscaleOutput, IDM_UPSCALE_2160, L"menu.upscale_2160");
+    CheckMenuRadioItem(upscaleOutput,IDM_UPSCALE_AUTO,IDM_UPSCALE_2160,IDM_UPSCALE_AUTO,MF_BYCOMMAND);
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(upscaleOutput),localizer.Get(L"menu.upscale_output").c_str());
+    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+
+    // --- Frame generation: the verb and the rate it targets. ---------------
+    //
+    // IDM_FRAME_GENERATION's label swaps to "Cancel frame generation" while a
+    // conversion runs, which is what the toolbar pill has always done. A
+    // separate permanently-greyed cancel row was two rows of dead menu and one
+    // more place for the two surfaces to disagree.
+    add(dlss, IDM_FRAME_GENERATION, L"menu.frame_generation");
+    // The multiple is a preference, not an automatic maximum: a conversion is
+    // minutes of GPU work and a large file, so the default doubles the rate and
+    // anything beyond that is asked for. "As many as the display allows" is the
+    // old behaviour, kept for whoever wants it.
+    HMENU framegenMultiple=CreatePopupMenu();
+    add(framegenMultiple, IDM_FRAMEGEN_2X, L"menu.framegen_2x");
+    add(framegenMultiple, IDM_FRAMEGEN_3X, L"menu.framegen_3x");
+    add(framegenMultiple, IDM_FRAMEGEN_4X, L"menu.framegen_4x");
+    add(framegenMultiple, IDM_FRAMEGEN_5X, L"menu.framegen_5x");
+    add(framegenMultiple, IDM_FRAMEGEN_MAX, L"menu.framegen_max");
+    CheckMenuRadioItem(framegenMultiple,IDM_FRAMEGEN_2X,IDM_FRAMEGEN_MAX,IDM_FRAMEGEN_2X,MF_BYCOMMAND);
+    AppendMenuW(framegenMultiple, MF_SEPARATOR, 0, nullptr);
+    // A constraint on the multiple, not a choice of one: with it on, nothing is
+    // generated unless the generated rate divides the display's refresh.
+    add(framegenMultiple, IDM_FRAMEGEN_EVEN_ONLY, L"menu.framegen_even_only");
+    AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(framegenMultiple),
+                localizer.Get(L"menu.framegen_multiple").c_str());
+    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+
+    // --- Look before you commit. ------------------------------------------
+    add(dlss, IDM_PREVIEW_FRAME, L"menu.preview_frame");
+    add(dlss, IDM_PREVIEW_CLIP, L"menu.preview_clip");
+    AppendMenuW(dlss, MF_SEPARATOR, 0, nullptr);
+
+    // --- Everything that writes a file, plus how it is encoded. ------------
+    //
+    // The combined export leads because it is the one that answers "give me a
+    // file with the stages I picked"; the two cache conversions below it are
+    // about what PLAYBACK will use, which is a different question wearing
+    // similar words.
+    add(convert, IDM_EXPORT_STAGES, L"menu.export_stages");
+    AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
+    // Conversion writes a neural video to disk with the settings in the neural
+    // settings dialog; it is deliberately separate from watching with the
+    // rendering turned on.
+    add(convert, IDM_RENDER_RANGE, L"menu.render_range");
+    add(convert, IDM_RENDER_WHOLE, L"menu.render_whole");
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_EXPORT_CACHED_VIDEO, localizer.Get(L"menu.export_cached").c_str());
+    AppendMenuW(convert, MF_SEPARATOR, 0, nullptr);
+    // Grayed on creation: main.cpp enables it once a converted file exists.
+    // Without it the output is unreachable after the confirmation dialog
+    // closes - the export item above it is gated on a neural cache path a
+    // frame-generation output never has.
+    AppendMenuW(convert, MF_STRING | MF_GRAYED, IDM_SHOW_FRAMEGEN_OUTPUT,
+                localizer.Get(L"menu.show_framegen_output").c_str());
+    const std::wstring convertName = localizer.Get(L"menu.convert");
+    AppendMenuW(dlss, MF_POPUP, reinterpret_cast<UINT_PTR>(convert), convertName.c_str());
     add(dlss, IDM_ENCODER_SETTINGS, L"menu.encoder_settings");
+    // What this render left behind, and what it reported.
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
     add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
     AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
-    add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode"); AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_REHOOK, L"menu.rehook");
-    AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr); add(advanced, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
+    // Getting the runtime and the app back into a known state. Three separators
+    // for five items made four groups, three of them a single row each.
+    add(advanced, IDM_ADVANCED_SAFE_MODE, L"menu.safe_mode");
+    add(advanced, IDM_REHOOK, L"menu.rehook");
+    add(advanced, IDM_CHECK_FOR_UPDATES, L"menu.check_updates");
     const std::wstring fileName = localizer.Get(L"menu.file"), playName = localizer.Get(L"menu.playback"), videoName = localizer.Get(L"menu.video"), dlssName = localizer.Get(L"menu.dlss"), advancedName = localizer.Get(L"menu.advanced");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), fileName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(play), playName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(video), videoName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(dlss), dlssName.c_str()); AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(advanced), advancedName.c_str());
     UpdateFeatureAvailability(bar, true, false, false, false, false, false, false);
@@ -314,7 +388,7 @@ bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality)
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
-                               bool frameGenerationAvailable, bool /*frameGenerationActive*/)
+                               bool frameGenerationAvailable, bool frameGenerationRunning)
 {
     const auto update = [&](UINT command, bool available, bool checked) {
         const HMENU menu = find_menu_containing_command(menuBar, command);
@@ -328,15 +402,35 @@ bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
     };
     // Frame generation gets its enable state and no checkmark: a check states a
     // persistent mode, and this item is a one-shot action that starts a
-    // minutes-long conversion - the cancel item beside it is what reports that
-    // a conversion is running. The two real toggles keep their checkmarks.
+    // minutes-long conversion. It reports that a conversion is running by
+    // becoming the cancel command, the way the toolbar pill does; a separate
+    // permanently-greyed cancel row was a dead row and a second place for the
+    // two surfaces to disagree. The two real toggles keep their checkmarks.
     const HMENU frameGeneration = find_menu_containing_command(menuBar, IDM_FRAME_GENERATION);
     return update(IDM_NEURAL_RENDERING, neuralAvailable, neuralActive) &&
            update(IDM_DLSS_UPSCALING, upscalingAvailable, upscalingActive) &&
            frameGeneration &&
            EnableMenuItem(frameGeneration, IDM_FRAME_GENERATION,
-               MF_BYCOMMAND | (frameGenerationAvailable ? MF_ENABLED : MF_GRAYED)) !=
+               MF_BYCOMMAND | ((frameGenerationAvailable || frameGenerationRunning) ? MF_ENABLED : MF_GRAYED)) !=
                static_cast<UINT>(-1);
+}
+
+HMENU FindMenuContainingCommand(HMENU menuBar, UINT command)
+{
+    return find_menu_containing_command(menuBar, command);
+}
+
+// Replaces one command's text in place, keeping its id, position and state.
+// ModifyMenuW with MF_BYCOMMAND resets the item's type flags, so the text is
+// set through MENUITEMINFO instead - a menu item that silently lost MF_GRAYED
+// when it was relabelled would be worse than the dead row this replaced.
+bool SetMenuCommandText(HMENU menu, UINT command, const std::wstring& text)
+{
+    MENUITEMINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = MIIM_STRING;
+    info.dwTypeData = const_cast<wchar_t*>(text.c_str());
+    return SetMenuItemInfoW(menu, command, FALSE, &info) != FALSE;
 }
 
 bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool rangeRenderAvailable,
@@ -377,6 +471,10 @@ std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDo
         case 'G': return IDM_GOTO_TIMECODE;
         case 'R': return IDM_RENDER_RANGE;
         case 'N': return IDM_NEURAL_SETTINGS;
+        // Ctrl+S, not Ctrl+E: Ctrl+E has opened Image adjustments since long
+        // before this command existed, and the menu label claimed it anyway.
+        // Bare S stops playback and is matched later, without the modifier.
+        case 'S': return IDM_EXPORT_STAGES;
         default: return std::nullopt;
         }
     }

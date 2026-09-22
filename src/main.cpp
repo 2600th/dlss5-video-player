@@ -3085,8 +3085,13 @@ private:
             app_menu::UpdateFeatureAvailability(menu,m_neuralRequested,neuralAvailable,neuralActive,
                                                 ToolbarActionEnabled(ToolbarAction::ToggleUpscaling),UpscalingActive(),
                                                 FrameGenerationAvailable(),m_frameGenWorker.joinable());
-            EnableMenuItem(menu,IDM_CANCEL_FRAME_GENERATION,
-                           MF_BYCOMMAND|(m_frameGenWorker.joinable()?MF_ENABLED:MF_GRAYED));
+            // Both one-shot conversions report themselves by becoming their own
+            // cancel command, which is what the toolbar pill has always done.
+            // A separate cancel row was a permanently greyed row and a second
+            // place for the menu and the toolbar to disagree.
+            if(const HMENU owner=app_menu::FindMenuContainingCommand(menu,IDM_FRAME_GENERATION))
+                app_menu::SetMenuCommandText(owner,IDM_FRAME_GENERATION,
+                    T(m_frameGenWorker.joinable()?L"menu.cancel_frame_generation":L"menu.frame_generation"));
             // The converted file outlives the dialog that announced it, so the
             // command that opens it is live exactly while that file exists.
             EnableMenuItem(menu,IDM_SHOW_FRAMEGEN_OUTPUT,
@@ -3123,7 +3128,14 @@ private:
             // reverse guard was missing, so both could run at once and the
             // export's status line hid the conversion's progress for minutes.
             EnableMenuItem(menu,IDM_EXPORT_CACHED_VIDEO,MF_BYCOMMAND|((m_cachedPlayback&&!m_neuralPath.empty()&&!m_exportWorker.joinable()&&!m_frameGenWorker.joinable()&&!ActivityBusy())?MF_ENABLED:MF_GRAYED));
-            EnableMenuItem(menu,IDM_CANCEL_EXPORT,MF_BYCOMMAND|(m_exportWorker.joinable()?MF_ENABLED:MF_GRAYED));
+            // Same swap for the export row: while a job runs it IS the cancel
+            // command, so the menu never shows a row that does nothing.
+            if(const HMENU convert=app_menu::FindMenuContainingCommand(menu,IDM_EXPORT_STAGES)){
+                app_menu::SetMenuCommandText(convert,IDM_EXPORT_STAGES,
+                    T(m_exportWorker.joinable()?L"menu.cancel_export_running":L"menu.export_stages"));
+                EnableMenuItem(convert,IDM_EXPORT_STAGES,
+                    MF_BYCOMMAND|((m_exportWorker.joinable()||(m_loaded&&!ActivityBusy()&&!m_frameGenWorker.joinable()))?MF_ENABLED:MF_GRAYED));
+            }
             CheckMenuRadioItem(menu,IDM_ASPECT_FIT,IDM_ASPECT_FILL,m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT,MF_BYCOMMAND);
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_comparison.zoomScale>1.0f);
@@ -7017,7 +7029,7 @@ private:
     std::wstring BuildStatusText()const{
         // The menu path the hint names has to be the one the menu has: the
         // cancel item lives under DLSS > Convert & save, not under File.
-        if(m_exportWorker.joinable())return L"Exporting processed media \u00b7 DLSS > Convert & save > Cancel saving to stop";
+        if(m_exportWorker.joinable())return L"Exporting processed media \u00b7 DLSS > Convert & export > Cancel export to stop";
         // The conversion is the one activity that owns the whole status line:
         // it is minutes long, it is the reason the picture is not changing, and
         // a percentage is the only thing that distinguishes progress from a
@@ -7442,8 +7454,7 @@ private:
         case IDM_UPSCALE_1080:SetUpscaleTarget(1080);break;
         case IDM_UPSCALE_1440:SetUpscaleTarget(1440);break;
         case IDM_UPSCALE_2160:SetUpscaleTarget(2160);break;
-        case IDM_FRAME_GENERATION:StartFrameGeneration();break;
-        case IDM_CANCEL_FRAME_GENERATION:CancelFrameGeneration();break;
+        case IDM_FRAME_GENERATION:if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();break;
         case IDM_SHOW_FRAMEGEN_OUTPUT:ShowFrameGenerationOutput();break;
         case IDM_FRAMEGEN_2X:SetFrameGenerationPreference(1);break;
         case IDM_FRAMEGEN_3X:SetFrameGenerationPreference(2);break;
@@ -7452,7 +7463,6 @@ private:
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
-        case IDM_CANCEL_EXPORT:CancelExport();break;
         case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;

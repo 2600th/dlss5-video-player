@@ -21,7 +21,9 @@ inline constexpr UINT IDM_OPEN_YOUTUBE = 102;
 inline constexpr UINT IDM_EXAMPLE_VIDEO_FIRST = 110;
 inline constexpr UINT IDM_RECENT_VIDEO_FIRST = 130;
 inline constexpr UINT IDM_EXPORT_CACHED_VIDEO = 140;
-inline constexpr UINT IDM_CANCEL_EXPORT = 141;
+// Export with any combination of the three neural stages, as against
+// IDM_EXPORT_CACHED_VIDEO, which writes out the render already in the cache.
+inline constexpr UINT IDM_EXPORT_STAGES = 142;
 inline constexpr UINT IDM_PLAY = 200;
 inline constexpr UINT IDM_STOP = 201;
 inline constexpr UINT IDM_BACK10 = 202;
@@ -58,7 +60,6 @@ inline constexpr UINT IDM_UPSCALE_AUTO = 334;
 inline constexpr UINT IDM_UPSCALE_1080 = 335;
 inline constexpr UINT IDM_UPSCALE_1440 = 336;
 inline constexpr UINT IDM_UPSCALE_2160 = 337;
-inline constexpr UINT IDM_CANCEL_FRAME_GENERATION = 338;
 // Outside 334..337 for the same reason, and the only surface that can reach a
 // converted file once its confirmation dialog is gone.
 inline constexpr UINT IDM_SHOW_FRAMEGEN_OUTPUT = 339;
@@ -126,15 +127,24 @@ std::optional<YouTubeSourceQuality> YouTubeQualityForCommand(UINT command);
 UINT CommandForYouTubeQuality(YouTubeSourceQuality quality);
 bool UpdateYouTubeQualitySelection(HMENU menuBar, YouTubeSourceQuality quality);
 // The two toggles carry a checkmark for their active state; frame generation
-// does not, so frameGenerationActive is accepted and ignored - the item is a
-// one-shot conversion, and a check on it stated a mode the player never has.
+// does not - the item is a one-shot conversion, and a check on it stated a mode
+// the player never has. `frameGenerationRunning` keeps its row live while a
+// conversion runs, because the row IS the cancel command then.
 bool UpdateFeatureAvailability(HMENU menuBar, bool neuralRequested,
                                bool neuralAvailable, bool neuralActive,
                                bool upscalingAvailable, bool upscalingActive,
-                               bool frameGenerationAvailable, bool frameGenerationActive);
+                               bool frameGenerationAvailable, bool frameGenerationRunning);
 // Range, preview and render commands, the render pause item and the receipt
 // item. markersAvailable: a source is loaded; rangeRenderAvailable: that source
 // can be range-rendered now (local/cached source, no active job).
+// The popup that holds `command`, or null. Exported because a caller that
+// relabels a command needs the menu the command lives in.
+HMENU FindMenuContainingCommand(HMENU menuBar, UINT command);
+// Replaces one command's text in place, keeping its id, position and state.
+// A command that reports what it will do next - "Generate frames..." becoming
+// "Cancel frame generation" - is one live row where a separate cancel item was
+// a permanently greyed one.
+bool SetMenuCommandText(HMENU menu, UINT command, const std::wstring& text);
 bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool rangeRenderAvailable,
                                     bool jobActive, bool jobPaused, bool receiptAvailable);
 // Video > Compare: the mode radio group is enabled only while modesAvailable;

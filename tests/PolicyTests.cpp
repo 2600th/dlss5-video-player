@@ -1256,14 +1256,17 @@ void feature_menu_uses_distinct_controls_and_honest_availability_test()
     CHECK(has_menu_entry(entries, L"Neural Rendering\tD", app_menu::IDM_NEURAL_RENDERING));
     CHECK(has_menu_entry(entries, L"DLSS Upscaling",
                          app_menu::IDM_DLSS_UPSCALING));
-    // Frame generation is a command now, not a permanently disabled label, and
-    // the cancel item beside it is what makes a minutes-long conversion
-    // stoppable. The old entry read "Unavailable in this build", which was
-    // honest while no backend existed and would now be a lie.
+    // Frame generation is a command, not a permanently disabled label. The old
+    // entry read "Unavailable in this build", which was honest while no backend
+    // existed and would now be a lie.
     CHECK(has_menu_entry(entries, L"Generate frames (higher frame rate)...",
                          app_menu::IDM_FRAME_GENERATION));
-    CHECK(has_menu_entry(entries, L"Cancel frame generation",
-                         app_menu::IDM_CANCEL_FRAME_GENERATION));
+    // And there is no separate cancel row: the action reports a running
+    // conversion by BECOMING the cancel command, which is what the toolbar pill
+    // does. A row that is greyed in every state the user normally sees is a row
+    // that teaches them the menu is full of things that do nothing.
+    CHECK(!has_menu_text(entries, L"Cancel frame generation"));
+    CHECK(!has_menu_text(entries, L"Cancel saving"));
     CHECK(!has_menu_text(entries, L"Enable DLSS\tD"));
     CHECK(!has_menu_text(entries, L"Frame Generation\tUnavailable in this build"));
 
@@ -1337,8 +1340,21 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(has_menu_entry(entries, L"Convert marked clip to neural video\tCtrl+R", app_menu::IDM_RENDER_RANGE));
     CHECK(has_menu_entry(entries, L"Convert whole video to neural video", app_menu::IDM_RENDER_WHOLE));
     CHECK(has_menu_entry(entries, L"Save converted video...", app_menu::IDM_EXPORT_CACHED_VIDEO));
-    CHECK(has_menu_entry(entries, L"Cancel saving", app_menu::IDM_CANCEL_EXPORT));
-    CHECK(has_menu_entry(entries, L"Neural settings...\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
+    // Microsoft's own rule: "About, Advanced, Help, Options, Properties, and
+    // Settings must display another window when clicked, but don't require
+    // additional information from the user. Therefore they don't need
+    // ellipses." Export DOES take one - it asks which stages before it runs.
+    CHECK(has_menu_entry(entries, L"Neural settings\tCtrl+N", app_menu::IDM_NEURAL_SETTINGS));
+    CHECK(has_menu_entry(entries, L"Encoder settings", app_menu::IDM_ENCODER_SETTINGS));
+    // Ctrl+S, not Ctrl+E. Ctrl+E has opened Image adjustments since long before
+    // this command existed, and the label claimed it anyway - a menu that
+    // advertises a key which does something else is worse than one with none.
+    CHECK(has_menu_entry(entries, L"Export with DLSS stages...\tCtrl+S", app_menu::IDM_EXPORT_STAGES));
+    // Every accelerator a label advertises must route to that command.
+    CHECK(app_menu::CommandForPlayerKey('S', true, false) == app_menu::IDM_EXPORT_STAGES);
+    CHECK(app_menu::CommandForPlayerKey('N', true, false) == app_menu::IDM_NEURAL_SETTINGS);
+    // Bare S stops playback, so the modifier is what tells them apart.
+    CHECK(!app_menu::CommandForPlayerKey('S', false, false).has_value());
     CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
     CHECK(has_menu_entry(entries, L"Zoom 2x\tZ", app_menu::IDM_COMPARE_ZOOM));
     // Depth is a persisted guide switch in the neural settings dialog now.
