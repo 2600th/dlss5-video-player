@@ -3481,6 +3481,11 @@ struct LiveFrameLibrary {
         // process start on the thread that presents frames.
         bool known{};
         std::thread::id thread{};
+        // The duration the last known open declared, and where the last seek
+        // landed: a known open clamps its seeks to what it was told, exactly
+        // as VideoDecoder::SeekSeconds does.
+        double knownDuration{};
+        size_t landedIndex{};
     };
     Stream& Add(const std::filesystem::path& path,uint64_t frameCount)
     {
@@ -3509,6 +3514,8 @@ struct LiveFrameLibrary {
         return false;
     }
     bool OpenedKnown(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].known;}
+    double KnownDuration(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].knownDuration;}
+    size_t LandedIndex(const std::filesystem::path& path){std::lock_guard lock(mutex);return streams[path].landedIndex;}
     std::thread::id OpenThread(const std::filesystem::path& path)
     {
         std::lock_guard lock(mutex);return streams[path].thread;
@@ -3530,7 +3537,11 @@ public:
         // Real segments after the first arrive here, with the geometry and frame
         // rate the first one probed rather than a probe of their own.
         if(!media.Valid())return false;
-        return OpenRecording(path,stop,true);
+        if(!OpenRecording(path,stop,true))return false;
+        knownDuration_=media.durationSec;
+        std::lock_guard lock(library_.mutex);
+        stream_->knownDuration=media.durationSec;
+        return true;
     }
     void Close() override
     {
@@ -3551,9 +3562,11 @@ public:
         std::lock_guard lock(library_.mutex);
         if(!stream_)return false;
         ++stream_->seeks;
+        if(knownDuration_>0.0)seconds=std::min(seconds,knownDuration_);
         const int64_t target=static_cast<int64_t>(seconds*10000000.0);
         index_=0;
         while(index_<stream_->frames.size()&&stream_->frames[index_].timestamp100ns<target)++index_;
+        stream_->landedIndex=index_;
         return true;
     }
     uint32_t Width() const override { return 4; }
@@ -3568,7 +3581,7 @@ private:
     bool OpenRecording(const std::filesystem::path& path,std::stop_token stop,bool known)
     {
         std::lock_guard lock(library_.mutex);
-        stream_=nullptr;
+        stream_=nullptr;knownDuration_=0.0;
         const auto found=library_.streams.find(path);
         if(found==library_.streams.end()||found->second.failOpen||stop.stop_requested())return false;
         stream_=&found->second;++stream_->opens;index_=0;
@@ -3578,6 +3591,7 @@ private:
     LiveFrameLibrary& library_;
     LiveFrameLibrary::Stream* stream_{};
     size_t index_{};
+    double knownDuration_{};
 };
 
 NeuralSegment LiveSegmentRecord(std::filesystem::path path,uint64_t index,uint64_t firstFrame,
@@ -3949,6 +3963,37 @@ void live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test()
     }
     CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
     if(const auto* forward=playback.CurrentPair())CHECK_EQ(uint64_t{12},forward->frameNumber);
+}
+
+// A session's first segment is deliberately short (kLiveFirstSegmentSeconds)
+// and the ones behind it are not, yet every later file used to be opened with
+// the first one's probed duration. A known open clamps its seeks to that, so a
+// seek deep into a later segment landed at the first segment's length - frame
+// 2 of 10 here - and the pair was only rebuilt by decoding up to the playhead.
+void live_seek_into_a_later_segment_lands_on_the_frame_not_the_first_segments_length_test()
+{
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"neural-00000.mkv",2);library.Add(L"neural-00001.mkv",10);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,2));
+    segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,12,10));
+    CHECK(playback.OpenLive(L"original.mkv",segments,SynchronizedRange{10*kLiveFrame100ns,0},{}));
+    // The first segment is the one that pays for the probe.
+    CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+    CHECK(!library.OpenedKnown(L"neural-00000.mkv"));
+    CHECK(playback.SeekSeconds(double(19*kLiveFrame100ns)*1e-7,{}));
+    if(const auto* pair=playback.CurrentPair()){
+        CHECK_EQ(uint64_t{19},pair->frameNumber);
+        CHECK_EQ(uint64_t{19},pair->neural.frameNumber);
+    }
+    CHECK(library.OpenedKnown(L"neural-00001.mkv"));
+    // Its own ten frames, not the first file's two.
+    const double declared=library.KnownDuration(L"neural-00001.mkv");
+    CHECK(declared>10.0/30.0-1e-9&&declared<10.0/30.0+1e-9);
+    CHECK_EQ(size_t{7},library.LandedIndex(L"neural-00001.mkv"));
+    CHECK(playback.LastFault().empty());
 }
 
 // A session renders in runs, and a backward seek makes the next run start
@@ -4944,6 +4989,7 @@ int wmain(int argc, wchar_t* argv[])
     live_playback_crosses_a_segment_boundary_without_a_gap_or_stall_test();
     live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
+    live_seek_into_a_later_segment_lands_on_the_frame_not_the_first_segments_length_test();
     neural_segment_index_keeps_two_disjoint_rendered_regions_test();
     neural_segment_index_after_finds_the_next_region_from_a_hole_test();
     neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head_test();

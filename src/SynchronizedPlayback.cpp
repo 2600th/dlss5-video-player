@@ -227,6 +227,22 @@ struct SynchronizedPlayback::Impl {
         pendingOpen.reset();
     }
 
+    // What `wanted` is opened with once the first segment was probed. Geometry,
+    // rate, codec and colour are the render's and carry over; the duration is
+    // the file's own. Carrying the first segment's - half a second, where every
+    // later one holds two - clamped each seek into a later file to that half
+    // second, so a seek deep into a segment landed early and the matcher had to
+    // decode its way back up to the playhead, and a helper that died past it
+    // read as a clean end of the file.
+    VideoDecoder::KnownMedia MediaFor(const NeuralSegment& wanted)const
+    {
+        VideoDecoder::KnownMedia media=segmentMedia;
+        if(wanted.frameCount&&media.fps>0.0)media.durationSec=double(wanted.frameCount)/media.fps;
+        else if(wanted.end100ns>wanted.firstTimestamp100ns)
+            media.durationSec=double(wanted.end100ns-wanted.firstTimestamp100ns)*1e-7;
+        return media;
+    }
+
     // Starts the open of `wanted` on another thread. Failures are silent: the
     // boundary itself opens the file if this never produces one.
     void StartAsyncOpen(NeuralSegment wanted)
@@ -236,7 +252,7 @@ struct SynchronizedPlayback::Impl {
         pending.segment=wanted;
         // The worker touches nothing this object owns: it gets its own copies.
         auto factory=makeSegmentSource;
-        const VideoDecoder::KnownMedia media=segmentMedia;
+        const VideoDecoder::KnownMedia media=MediaFor(wanted);
         const std::filesystem::path path=wanted.path;
         const bool nv12=preferNv12;
         try{
@@ -473,7 +489,7 @@ struct SynchronizedPlayback::Impl {
         auto source=makeSegmentSource?makeSegmentSource():nullptr;
         if(!source)return SynchronizedReadResult::Error;
         source->PreferNv12(preferNv12);
-        const bool ready=segmentMedia.Valid()?source->OpenKnown(wanted.path,segmentMedia,stop)
+        const bool ready=segmentMedia.Valid()?source->OpenKnown(wanted.path,MediaFor(wanted),stop)
                                              :source->Open(wanted.path,stop);
         if(!ready)
             return stop.stop_requested()?SynchronizedReadResult::Cancelled:SynchronizedReadResult::Error;
