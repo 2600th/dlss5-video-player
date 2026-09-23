@@ -1050,6 +1050,179 @@ struct PlayerAppTestAccess {
         CHECK_EQ(fullscreen, app.m_fullscreen);
     }
 
+    // Every settings dialog is laid out in design units at its own dpi, draws
+    // in its own dialog font, is dark, and follows a move to another dpi.
+    static void settings_dialogs_are_dpi_scaled_and_dark_test()
+    {
+        PlayerApp& app = fixture->app;
+        struct DialogCase { void (PlayerApp::*show)(); HWND PlayerApp::*window; int designW, designH; int button; int defaultButton; };
+        const std::array cases{
+            DialogCase{&PlayerApp::ShowAdjustments, &PlayerApp::m_adjustWnd, PlayerApp::kAdjustDesignW, PlayerApp::kAdjustDesignH, IDC_ADJ_RESET, IDC_ADJ_CLOSE},
+            DialogCase{&PlayerApp::ShowNeuralSettings, &PlayerApp::m_neuralWnd, PlayerApp::kNeuralDesignW, PlayerApp::kNeuralDesignH, IDC_NS_RESET, IDC_NS_APPLY},
+            DialogCase{&PlayerApp::ShowEncoderSettings, &PlayerApp::m_encoderWnd, PlayerApp::kEncoderDesignW, PlayerApp::kEncoderDesignH, IDC_ES_RESET, IDC_ES_CLOSE},
+            DialogCase{&PlayerApp::ShowExportStages, &PlayerApp::m_exportStagesWnd, PlayerApp::kExportDesignW, PlayerApp::kExportDesignH, IDC_EX_CLOSE, IDC_EX_RUN},
+        };
+        for (const auto& dialogCase : cases) {
+            (app.*dialogCase.show)();
+            const HWND dialog = app.*dialogCase.window;
+            REQUIRE(dialog != nullptr);
+            const UINT dpi = ActiveWindowDpi(dialog);
+            RECT client{};
+            GetClientRect(dialog, &client);
+            CHECK_EQ(LONG(MulDiv(dialogCase.designW, int(dpi), 96)), client.right);
+            CHECK_EQ(LONG(MulDiv(dialogCase.designH, int(dpi), 96)), client.bottom);
+            // Its own font at its own dpi, never the 96-dpi stock one.
+            const HWND button = GetDlgItem(dialog, dialogCase.button);
+            REQUIRE(button != nullptr);
+            const HFONT font = reinterpret_cast<HFONT>(SendMessageW(button, WM_GETFONT, 0, 0));
+            CHECK(font != GetStockObject(DEFAULT_GUI_FONT));
+            LOGFONTW logical{};
+            CHECK(GetObjectW(font, sizeof(logical), &logical) != 0);
+            CHECK_EQ(LONG(dark_mode::DialogFontHeight(dpi)), logical.lfHeight);
+            // Owner-drawn and dark; the default button is marked for the accent.
+            CHECK_EQ(LONG_PTR(BS_OWNERDRAW), GetWindowLongPtrW(button, GWL_STYLE) & BS_TYPEMASK);
+            CHECK(GetPropW(GetDlgItem(dialog, dialogCase.defaultButton), kDefaultButtonProperty) != nullptr);
+            CHECK(GetPropW(button, kDefaultButtonProperty) == nullptr);
+            HDC dc = CreateCompatibleDC(nullptr);
+            REQUIRE(dc != nullptr);
+            const LRESULT brush = SendMessageW(dialog, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc), 0);
+            CHECK_EQ(reinterpret_cast<LRESULT>(DarkDialogBrush()), brush);
+            CHECK_EQ(dark_mode::Text, GetTextColor(dc));
+            const HDC screen = GetDC(nullptr);
+            HBITMAP bitmap = CreateCompatibleBitmap(screen, 200, 60);
+            ReleaseDC(nullptr, screen);
+            const HGDIOBJ previous = SelectObject(dc, bitmap);
+            DRAWITEMSTRUCT item{};
+            item.CtlType = ODT_BUTTON; item.CtlID = UINT(dialogCase.button); item.hwndItem = button; item.hDC = dc;
+            item.rcItem = RECT{0, 0, 120, 40};
+            drawnText.clear();
+            CHECK_EQ(LRESULT{TRUE}, SendMessageW(dialog, WM_DRAWITEM, WPARAM(dialogCase.button), reinterpret_cast<LPARAM>(&item)));
+            CHECK(!drawnText.empty());
+            SelectObject(dc, previous);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+
+            // Moving to a monitor at 1.5x: the controls, the font and the
+            // client all follow, from the dialog's own baseline.
+            const UINT larger = dpi * 3 / 2;
+            RECT button96{};
+            GetWindowRect(button, &button96);
+            RECT window{};
+            GetWindowRect(dialog, &window);
+            const DWORD style = DWORD(GetWindowLongPtrW(dialog, GWL_STYLE)), exStyle = DWORD(GetWindowLongPtrW(dialog, GWL_EXSTYLE));
+            // What Windows would suggest: the client scaled to the new dpi. The
+            // frame is added at the monitor's real dpi, because only the
+            // message is faked here and the frame Windows draws is not.
+            RECT suggested{0, 0, MulDiv(dialogCase.designW, int(larger), 96), MulDiv(dialogCase.designH, int(larger), 96)};
+            AdjustWindowRectForDpi(suggested, style, FALSE, exStyle, dpi);
+            OffsetRect(&suggested, window.left - suggested.left, window.top - suggested.top);
+            SendMessageW(dialog, WM_DPICHANGED, MAKEWPARAM(larger, larger), reinterpret_cast<LPARAM>(&suggested));
+            RECT buttonLarger{};
+            GetWindowRect(button, &buttonLarger);
+            CHECK(std::abs((buttonLarger.right - buttonLarger.left) - MulDiv(button96.right - button96.left, int(larger), int(dpi))) <= 1);
+            const HFONT largerFont = reinterpret_cast<HFONT>(SendMessageW(button, WM_GETFONT, 0, 0));
+            CHECK(GetObjectW(largerFont, sizeof(logical), &logical) != 0);
+            CHECK_EQ(LONG(dark_mode::DialogFontHeight(larger)), logical.lfHeight);
+            GetClientRect(dialog, &client);
+            CHECK(std::abs(client.right - MulDiv(dialogCase.designW, int(larger), 96)) <= 1);
+            // And the bottom-right buttons stayed anchored to the new corner.
+            POINT corner{buttonLarger.right, buttonLarger.bottom};
+            ScreenToClient(dialog, &corner);
+            CHECK(corner.x <= client.right && corner.y <= client.bottom);
+            CHECK(client.bottom - corner.y <= MulDiv(60, int(larger), 96));
+            DestroyWindow(dialog);
+            CHECK(app.*dialogCase.window == nullptr);
+            CHECK(app.m_dialogFonts.find(dialog) == app.m_dialogFonts.end());
+        }
+    }
+
+    // The modal prompts share the chrome: owner-drawn buttons, dark colours,
+    // and a font of their own once a dpi change replaces the one lent to them.
+    static void modal_prompts_are_dark_and_follow_the_dpi_test()
+    {
+        PlayerApp& app = fixture->app;
+        WNDCLASSW prompt{};
+        prompt.lpfnWndProc = TimecodeDialogProc;
+        prompt.hInstance = GetModuleHandleW(nullptr);
+        prompt.lpszClassName = L"DLSSPlayerUiRegressionTimecode";
+        prompt.hbrBackground = DarkDialogBrush();
+        CHECK(RegisterClassW(&prompt) != 0);
+        TimecodeDialogState state{&app.m_loc, app.m_font, L"00:00:01:00", [](const std::wstring&, TimecodeAction) { return true; }};
+        const HWND dialog = CreateWindowExW(0, prompt.lpszClassName, L"Timecode", WS_POPUP | WS_CAPTION,
+                                            0, 0, 440, 190, nullptr, nullptr, prompt.hInstance, &state);
+        REQUIRE(dialog != nullptr);
+        const HWND go = GetDlgItem(dialog, IDOK);
+        REQUIRE(go != nullptr);
+        CHECK_EQ(LONG_PTR(BS_OWNERDRAW), GetWindowLongPtrW(go, GWL_STYLE) & BS_TYPEMASK);
+        CHECK(GetPropW(go, kDefaultButtonProperty) != nullptr);
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        CHECK_EQ(reinterpret_cast<LRESULT>(DarkDialogBrush()),
+                 SendMessageW(dialog, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(state.error)));
+        CHECK_EQ(dark_mode::ErrorText, GetTextColor(dc));
+        CHECK_EQ(reinterpret_cast<LRESULT>(DarkFieldBrush()),
+                 SendMessageW(dialog, WM_CTLCOLOREDIT, reinterpret_cast<WPARAM>(dc), reinterpret_cast<LPARAM>(state.edit)));
+        DeleteDC(dc);
+        RECT before{};
+        GetWindowRect(go, &before);
+        const UINT from = state.dpi, to = from * 2;
+        RECT window{};
+        GetWindowRect(dialog, &window);
+        SendMessageW(dialog, WM_DPICHANGED, MAKEWPARAM(to, to), reinterpret_cast<LPARAM>(&window));
+        RECT after{};
+        GetWindowRect(go, &after);
+        CHECK_EQ(before.right - before.left, (after.right - after.left) / 2);
+        CHECK(state.ownedFont != nullptr);
+        CHECK_EQ(reinterpret_cast<LRESULT>(state.ownedFont), SendMessageW(go, WM_GETFONT, 0, 0));
+        CHECK_EQ(to, state.dpi);
+        DestroyWindow(dialog);
+        CHECK(state.done);
+        CHECK(state.ownedFont == nullptr);
+        UnregisterClassW(prompt.lpszClassName, prompt.hInstance);
+    }
+
+    // The menu bar is drawn dark through the undocumented UAH messages, and a
+    // message that does not check out hands the bar back to Windows for good.
+    static void dark_menu_bar_test()
+    {
+        PlayerApp& app = fixture->app;
+        app.m_darkMenuFailed = false;
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        const HDC screen = GetDC(nullptr);
+        HBITMAP bitmap = CreateCompatibleBitmap(screen, 200, 40);
+        ReleaseDC(nullptr, screen);
+        const HGDIOBJ previous = SelectObject(dc, bitmap);
+        dark_mode::UAHDRAWMENUITEM item{};
+        item.um.hmenu = GetMenu(app.m_hwnd);
+        item.um.hdc = dc;
+        item.umi.iPosition = 0;
+        item.dis.rcItem = RECT{0, 0, 60, 20};
+        item.dis.itemState = ODS_HOTLIGHT;
+        drawnText.clear();
+        CHECK_EQ(LRESULT{TRUE}, app.WndProc(app.m_hwnd, dark_mode::WM_UAHDRAWMENUITEM, 0, reinterpret_cast<LPARAM>(&item)));
+        CHECK(Contains(L"File"));
+        CHECK_EQ(ui_palette::Hover, GetPixel(dc, 2, 2));
+        dark_mode::UAHMENU bar{GetMenu(app.m_hwnd), dc, 0};
+        CHECK(app.WndProc(app.m_hwnd, dark_mode::WM_UAHDRAWMENU, 0, reinterpret_cast<LPARAM>(&bar)) == TRUE);
+        CHECK(!app.m_darkMenuFailed);
+        // A structure that names another menu is not trusted, and latches the
+        // dark drawing off: the next well-formed message is not drawn either.
+        HMENU stranger = CreateMenu();
+        item.um.hmenu = stranger;
+        drawnText.clear();
+        CHECK(app.WndProc(app.m_hwnd, dark_mode::WM_UAHDRAWMENUITEM, 0, reinterpret_cast<LPARAM>(&item)) != TRUE);
+        CHECK(app.m_darkMenuFailed);
+        item.um.hmenu = GetMenu(app.m_hwnd);
+        CHECK(app.WndProc(app.m_hwnd, dark_mode::WM_UAHDRAWMENUITEM, 0, reinterpret_cast<LPARAM>(&item)) != TRUE);
+        CHECK(!Contains(L"File"));
+        DestroyMenu(stranger);
+        app.m_darkMenuFailed = false;
+        SelectObject(dc, previous);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1480,6 +1653,9 @@ struct PlayerAppTestAccess {
         UI_CASE(status_chips_and_narrow_pills_fit_test),
         UI_CASE(timeline_render_map_test),
         UI_CASE(keyboard_cheat_sheet_test),
+        UI_CASE(settings_dialogs_are_dpi_scaled_and_dark_test),
+        UI_CASE(modal_prompts_are_dark_and_follow_the_dpi_test),
+        UI_CASE(dark_menu_bar_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
@@ -2564,10 +2740,12 @@ struct PlayerAppTestAccess {
         // frame conversion, so the client area must come back exactly - on a scaled
         // monitor the 96-dpi conversion left it ~30px short and the bottom-anchored
         // buttons overlapped the note text.
+        // The design size is in 96-dpi units, so it is scaled to the dialog's dpi.
         RECT client{};
         CHECK(GetClientRect(dialog, &client) != FALSE);
-        CHECK_EQ(int(client.right), PlayerApp::kEncoderDesignW);
-        CHECK_EQ(int(client.bottom), PlayerApp::kEncoderDesignH);
+        const int dpi = static_cast<int>(ActiveWindowDpi(dialog));
+        CHECK_EQ(int(client.right), MulDiv(PlayerApp::kEncoderDesignW, dpi, 96));
+        CHECK_EQ(int(client.bottom), MulDiv(PlayerApp::kEncoderDesignH, dpi, 96));
         CHECK(GetDlgItem(dialog, IDC_ES_NVENC_PRESET) != nullptr);
         SendMessageW(GetDlgItem(dialog, IDC_ES_GPU_SOURCE), BM_SETCHECK, BST_CHECKED, 0);
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_GPU_SOURCE, BN_CLICKED), 0);

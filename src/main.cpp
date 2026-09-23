@@ -108,6 +108,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "StatusChipPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
+#include "DarkModePolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -360,6 +361,10 @@ static constexpr UINT WM_TIMELINE_MEDIA = WM_APP + 49;
 struct YouTubeUrlDialogState {
     const Localizer* localizer{};
     HFONT font{};
+    // The dpi the controls were laid out at, and a font of our own once a
+    // dpi change has replaced the one the owner lent.
+    UINT dpi{};
+    HFONT ownedFont{};
     HWND edit{};
     HWND error{};
     bool accepted{false};
@@ -402,6 +407,171 @@ static void PasteClipboardText(HWND edit)
     CloseClipboard();
 }
 
+// ---- Dialog chrome: DPI and dark ----------------------------------------
+//
+// Shared by the two modal prompts below and the four settings dialogs in
+// PlayerApp, so every dialog the player opens is sized for the monitor it is
+// on and drawn in the player's own colours.
+
+// AdjustWindowRectEx reports 96-dpi frame metrics to a per-monitor-aware
+// process, which leaves the client short on a scaled monitor; the ForDpi form
+// is resolved at run time because it needs Windows 10 1607.
+static BOOL AdjustWindowRectForDpi(RECT& rect, DWORD style, BOOL menu, DWORD exStyle, UINT dpi)
+{
+    using AdjustForDpiFn=BOOL(WINAPI*)(LPRECT,DWORD,BOOL,DWORD,UINT);
+    static const auto adjustForDpi=reinterpret_cast<AdjustForDpiFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"),"AdjustWindowRectExForDpi"));
+    const RECT original=rect;
+    if(adjustForDpi&&adjustForDpi(&rect,style,menu,exStyle,dpi))return TRUE;
+    rect=original;
+    return AdjustWindowRectEx(&rect,style,menu,exStyle);
+}
+
+// Segoe UI at `heightDip` device-independent pixels. The player's own text
+// and the dialogs' come from here, so both scale the same way.
+static HFONT CreateUiFont(int heightDip, UINT dpi)
+{
+    return CreateFontW(-MulDiv(heightDip,static_cast<int>(dpi==0?USER_DEFAULT_SCREEN_DPI:dpi),USER_DEFAULT_SCREEN_DPI),
+                       0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+}
+
+// The same face as `font`, scaled from one dpi to another; null when `font`
+// cannot be read, and the caller keeps the one it has.
+static HFONT ScaleFontForDpi(HFONT font, UINT from, UINT to)
+{
+    LOGFONTW logical{};
+    if(!font||!GetObjectW(font,sizeof(logical),&logical))return nullptr;
+    logical.lfHeight=MulDiv(logical.lfHeight,static_cast<int>(to?to:USER_DEFAULT_SCREEN_DPI),static_cast<int>(from?from:USER_DEFAULT_SCREEN_DPI));
+    logical.lfWidth=0;
+    return CreateFontIndirectW(&logical);
+}
+
+// Every child of `parent` carried from one dpi to the next and given `font`.
+// Windows resizes the dialog itself (WM_DPICHANGED's suggested rectangle);
+// the controls inside are the dialog's job.
+static void ScaleChildWindows(HWND parent, UINT from, UINT to, HFONT font)
+{
+    struct Context{HWND parent;UINT from,to;HFONT font;};
+    Context context{parent,from,to,font};
+    EnumChildWindows(parent,[](HWND child,LPARAM parameter)->BOOL{
+        const auto& c=*reinterpret_cast<const Context*>(parameter);
+        if(GetParent(child)!=c.parent)return TRUE;
+        RECT r{};GetWindowRect(child,&r);MapWindowPoints(nullptr,c.parent,reinterpret_cast<POINT*>(&r),2);
+        const RECT scaled=dark_mode::ScaleRectForDpi(r,c.from,c.to);
+        SetWindowPos(child,nullptr,scaled.left,scaled.top,scaled.right-scaled.left,scaled.bottom-scaled.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        if(c.font)SendMessageW(child,WM_SETFONT,reinterpret_cast<WPARAM>(c.font),TRUE);
+        return TRUE;
+    },reinterpret_cast<LPARAM>(&context));
+}
+
+// The player's title bar is dark (DWMWA_USE_IMMERSIVE_DARK_MODE, attribute
+// 20); a dialog it opens should not be the one light frame on the screen.
+static void ApplyDarkTitleBar(HWND window)
+{
+    BOOL dark=TRUE;DwmSetWindowAttribute(window,20,&dark,sizeof(dark));
+}
+
+static HBRUSH DarkDialogBrush(){static const HBRUSH brush=CreateSolidBrush(dark_mode::DialogBackground);return brush;}
+static HBRUSH DarkFieldBrush(){static const HBRUSH brush=CreateSolidBrush(dark_mode::FieldBackground);return brush;}
+
+// WM_CTLCOLOR* for a dark dialog. The app runs on comctl32 v5 - there is no
+// v6 manifest - so SetWindowTheme(L"DarkMode_Explorer") has nothing to act
+// on; these messages are the classic controls' own way to be recoloured.
+// Statics, check boxes and trackbars sit on the dialog; edits and lists on
+// the field surface. Returns null for a message it does not own.
+static HBRUSH DarkControlColor(UINT message, WPARAM wParam, COLORREF text)
+{
+    const HDC dc=reinterpret_cast<HDC>(wParam);
+    switch(message){
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        SetTextColor(dc,text);SetBkColor(dc,dark_mode::DialogBackground);return DarkDialogBrush();
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        SetTextColor(dc,dark_mode::Text);SetBkColor(dc,dark_mode::FieldBackground);return DarkFieldBrush();
+    default:return nullptr;
+    }
+}
+
+// Push buttons are owner-drawn, because a classic push button is painted in
+// system grey whatever its parent says. The dialog's default button is marked
+// with this property and drawn in the accent, as the toolbar draws a control
+// that is on: BS_DEFPUSHBUTTON cannot be combined with BS_OWNERDRAW.
+static constexpr const wchar_t* kDefaultButtonProperty=L"DLSSVideo.DefaultButton";
+static void MarkDefaultButton(HWND button){if(button)SetPropW(button,kDefaultButtonProperty,reinterpret_cast<HANDLE>(1));}
+// Window properties are not freed with the window, so a dialog takes its
+// children's off before they go (WM_DESTROY reaches the parent first).
+static void RemoveChildProperties(HWND parent, std::initializer_list<const wchar_t*> names)
+{
+    struct Context{HWND parent;std::initializer_list<const wchar_t*> names;};
+    Context context{parent,names};
+    EnumChildWindows(parent,[](HWND child,LPARAM parameter)->BOOL{
+        for(const wchar_t* name:reinterpret_cast<const Context*>(parameter)->names)RemovePropW(child,name);
+        return TRUE;
+    },reinterpret_cast<LPARAM>(&context));
+}
+static void DrawDarkPushButton(const DRAWITEMSTRUCT& item)
+{
+    const bool enabled=(item.itemState&ODS_DISABLED)==0,pressed=(item.itemState&ODS_SELECTED)!=0;
+    const bool isDefault=GetPropW(item.hwndItem,kDefaultButtonProperty)!=nullptr;
+    const ButtonVisual visual=ResolveButtonVisual(ButtonState{enabled,isDefault,false,false,pressed,(item.itemState&ODS_FOCUS)!=0});
+    const UINT dpi=ActiveWindowDpi(item.hwndItem);
+    const int radius=MulDiv(4,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI);
+    const HBRUSH background=DarkDialogBrush();FillRect(item.hDC,&item.rcItem,background);
+    HBRUSH brush=CreateSolidBrush(visual.fill);HPEN pen=CreatePen(PS_SOLID,1,visual.border);
+    const HGDIOBJ oldBrush=SelectObject(item.hDC,brush),oldPen=SelectObject(item.hDC,pen);
+    RoundRect(item.hDC,item.rcItem.left,item.rcItem.top,item.rcItem.right,item.rcItem.bottom,radius*2,radius*2);
+    SelectObject(item.hDC,oldBrush);SelectObject(item.hDC,oldPen);DeleteObject(brush);DeleteObject(pen);
+    wchar_t text[128]{};GetWindowTextW(item.hwndItem,text,static_cast<int>(std::size(text)));
+    const HFONT font=reinterpret_cast<HFONT>(SendMessageW(item.hwndItem,WM_GETFONT,0,0));
+    const HGDIOBJ oldFont=font?SelectObject(item.hDC,font):nullptr;
+    SetBkMode(item.hDC,TRANSPARENT);SetTextColor(item.hDC,visual.text);
+    RECT label=item.rcItem;DrawTextW(item.hDC,text,-1,&label,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|
+                                     ((item.itemState&ODS_NOACCEL)?DT_HIDEPREFIX:0u));
+    if(oldFont)SelectObject(item.hDC,oldFont);
+    if(visual.drawFocus){RECT focus=item.rcItem;const int inset=MulDiv(3,static_cast<int>(dpi),USER_DEFAULT_SCREEN_DPI);InflateRect(&focus,-inset,-inset);DrawFocusRect(item.hDC,&focus);}
+}
+
+// The two modal prompts' share of the dark chrome and the dpi handling: the
+// colours, the owner-drawn buttons, and a move to a monitor at another dpi,
+// which scales the controls and replaces the font the owner lent. `error` is
+// the one static drawn in the error colour. Returns whether it answered.
+template<class State>
+static bool ModalDialogChrome(HWND window, UINT message, WPARAM wParam, LPARAM lParam, State& state, LRESULT& result)
+{
+    switch(message){
+    case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORBTN:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORDLG:
+        result=reinterpret_cast<LRESULT>(DarkControlColor(message,wParam,
+            reinterpret_cast<HWND>(lParam)==state.error?dark_mode::ErrorText:dark_mode::Text));
+        return true;
+    case WM_DRAWITEM:{
+        const auto* item=reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+        if(!item||item->CtlType!=ODT_BUTTON)return false;
+        DrawDarkPushButton(*item);result=TRUE;return true;
+    }
+    case WM_DPICHANGED:{
+        const UINT dpi=HIWORD(wParam);
+        HFONT font=ScaleFontForDpi(state.ownedFont?state.ownedFont:state.font,state.dpi,dpi);
+        ScaleChildWindows(window,state.dpi,dpi,font);
+        if(font){if(state.ownedFont)DeleteObject(state.ownedFont);state.ownedFont=font;}
+        state.dpi=dpi;
+        if(const auto* suggested=reinterpret_cast<const RECT*>(lParam))
+            SetWindowPos(window,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,
+                         suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);
+        result=0;return true;
+    }
+    case WM_DESTROY:
+        RemoveChildProperties(window,{kDefaultButtonProperty});
+        return false;
+    case WM_NCDESTROY:
+        if(state.ownedFont){DeleteObject(state.ownedFont);state.ownedFont=nullptr;}
+        return false;
+    default:return false;
+    }
+}
+
 static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
 {
     auto* state = reinterpret_cast<YouTubeUrlDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -411,9 +581,12 @@ static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM w
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     if (!state) return DefWindowProcW(window, message, wParam, lParam);
+    if (LRESULT result = 0; ModalDialogChrome(window, message, wParam, lParam, *state, result)) return result;
 
     switch (message) {
     case WM_CREATE: {
+        state->dpi = ActiveWindowDpi(window);
+        ApplyDarkTitleBar(window);
         const int pad = DialogDip(window, 20);
         const int labelHeight = DialogDip(window, 22);
         const int editHeight = DialogDip(window, 30);
@@ -430,7 +603,7 @@ static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM w
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_URL)), nullptr, nullptr);
         SendMessageW(state->edit, EM_SETLIMITTEXT, 2048, 0);
         HWND paste = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.paste").c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             client.right - pad - buttonWidth, pad + labelHeight, buttonWidth, editHeight,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_PASTE)), nullptr, nullptr);
         HWND note = CreateWindowExW(0, L"STATIC", state->localizer->Get(L"youtube.dialog.note").c_str(),
@@ -442,16 +615,17 @@ static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM w
             DialogDip(window, 38), window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_ERROR)), nullptr, nullptr);
         HWND play = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.play").c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             client.right - pad - buttonWidth * 2 - DialogDip(window, 10), client.bottom - pad - buttonHeight,
             buttonWidth, buttonHeight, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), nullptr, nullptr);
         HWND cancel = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.cancel").c_str(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             client.right - pad - buttonWidth, client.bottom - pad - buttonHeight,
             buttonWidth, buttonHeight, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDCANCEL)), nullptr, nullptr);
         for (HWND control : {label, state->edit, paste, note, state->error, play, cancel}) {
             SetControlFont(control, state->font);
         }
+        MarkDefaultButton(play);
         SetFocus(state->edit);
         return 0;
     }
@@ -483,13 +657,6 @@ static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM w
             return 0;
         }
         break;
-    case WM_CTLCOLORSTATIC:
-        if (reinterpret_cast<HWND>(lParam) == state->error) {
-            SetTextColor(reinterpret_cast<HDC>(wParam), RGB(180, 36, 36));
-            SetBkColor(reinterpret_cast<HDC>(wParam), GetSysColor(COLOR_WINDOW));
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
-        }
-        break;
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
@@ -513,12 +680,12 @@ static bool RunOwnedModalDialog(HWND owner, const wchar_t* className, WNDPROC wi
     dialogClass.hInstance = instance;
     dialogClass.lpszClassName = className;
     dialogClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    dialogClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    dialogClass.hbrBackground = DarkDialogBrush();
     if (!RegisterClassW(&dialogClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
     RECT bounds{0, 0, DialogDip(owner, clientWidth), DialogDip(owner, clientHeight)};
-    AdjustWindowRectEx(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
-                       WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT);
+    AdjustWindowRectForDpi(bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
+                           WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT, ActiveWindowDpi(owner));
     RECT ownerBounds{};
     GetWindowRect(owner, &ownerBounds);
     const int width = bounds.right - bounds.left;
@@ -602,6 +769,10 @@ struct TimecodeDialogState {
     HWND edit{};
     HWND error{};
     bool done{false};
+    // The dpi the controls were laid out at, and a font of our own once a
+    // dpi change has replaced the one the owner lent.
+    UINT dpi{};
+    HFONT ownedFont{};
 };
 
 static LRESULT CALLBACK TimecodeDialogProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -613,9 +784,12 @@ static LRESULT CALLBACK TimecodeDialogProc(HWND window, UINT message, WPARAM wPa
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
     if (!state) return DefWindowProcW(window, message, wParam, lParam);
+    if (LRESULT result = 0; ModalDialogChrome(window, message, wParam, lParam, *state, result)) return result;
 
     switch (message) {
     case WM_CREATE: {
+        state->dpi = ActiveWindowDpi(window);
+        ApplyDarkTitleBar(window);
         const int pad = DialogDip(window, 20);
         const int labelHeight = DialogDip(window, 22);
         const int editHeight = DialogDip(window, 30);
@@ -644,10 +818,11 @@ static LRESULT CALLBACK TimecodeDialogProc(HWND window, UINT message, WPARAM wPa
             right -= buttonWidth + gap;
             return control;
         };
-        HWND cancel = button(L"timecode.cancel", IDCANCEL, BS_PUSHBUTTON);
-        HWND setOut = button(L"timecode.set_out", IDC_TIMECODE_SET_OUT, BS_PUSHBUTTON);
-        HWND setIn = button(L"timecode.set_in", IDC_TIMECODE_SET_IN, BS_PUSHBUTTON);
-        HWND go = button(L"timecode.go", IDOK, BS_DEFPUSHBUTTON);
+        HWND cancel = button(L"timecode.cancel", IDCANCEL, BS_OWNERDRAW);
+        HWND setOut = button(L"timecode.set_out", IDC_TIMECODE_SET_OUT, BS_OWNERDRAW);
+        HWND setIn = button(L"timecode.set_in", IDC_TIMECODE_SET_IN, BS_OWNERDRAW);
+        HWND go = button(L"timecode.go", IDOK, BS_OWNERDRAW);
+        MarkDefaultButton(go);
         for (HWND control : {label, state->edit, state->error, go, setIn, setOut, cancel}) {
             SetControlFont(control, state->font);
         }
@@ -669,13 +844,6 @@ static LRESULT CALLBACK TimecodeDialogProc(HWND window, UINT message, WPARAM wPa
         DestroyWindow(window);
         return 0;
     }
-    case WM_CTLCOLORSTATIC:
-        if (reinterpret_cast<HWND>(lParam) == state->error) {
-            SetTextColor(reinterpret_cast<HDC>(wParam), RGB(180, 36, 36));
-            SetBkColor(reinterpret_cast<HDC>(wParam), GetSysColor(COLOR_WINDOW));
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
-        }
-        break;
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
@@ -2979,8 +3147,8 @@ private:
     int ControlHeight()const{return ControlsVisible()?Dip(CONTROL_H_DIP):0;}
     void UpdateFontsForDpi(UINT dpi){
         const UINT activeDpi=dpi==0?USER_DEFAULT_SCREEN_DPI:dpi;
-        HFONT regular=CreateFontW(-MulDiv(16,static_cast<int>(activeDpi),USER_DEFAULT_SCREEN_DPI),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
-        HFONT smallFont=CreateFontW(-MulDiv(14,static_cast<int>(activeDpi),USER_DEFAULT_SCREEN_DPI),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        HFONT regular=CreateUiFont(16,activeDpi);
+        HFONT smallFont=CreateUiFont(14,activeDpi);
         HFONT icons=m_uiResources.CreateIconFont(activeDpi);
         if(regular){if(m_font)DeleteObject(m_font);m_font=regular;}
         if(smallFont){if(m_fontSmall)DeleteObject(m_fontSmall);m_fontSmall=smallFont;}
@@ -3482,7 +3650,7 @@ private:
         HWND host=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
             CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,dialog,nullptr,GetModuleHandleW(nullptr),nullptr);
         if(host){
-            SendMessageW(host,TTM_SETMAXTIPWIDTH,0,420);
+            SendMessageW(host,TTM_SETMAXTIPWIDTH,0,Sd(dialog,420));
             SendMessageW(host,TTM_SETDELAYTIME,TTDT_AUTOPOP,MAKELPARAM(30000,0));
             m_tipHosts[dialog]=host;
         }
@@ -3555,12 +3723,43 @@ private:
         info.uId=reinterpret_cast<UINT_PTR>(control);info.lpszText=text.back()->data();
         SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
     }
+    // ---- Settings dialogs: design units, fonts, anchoring ----------------
+    //
+    // Every settings dialog is laid out in design units - 96-dpi pixels - and
+    // placed through Sd at the dpi of the monitor it opens on. They used to be
+    // raw pixels in DEFAULT_GUI_FONT with an unscaled client, so at 200% a
+    // 466x502 dialog was a quarter of the size it was designed to be.
+    static int Sd(HWND h,int value){return MulDiv(value,static_cast<int>(ActiveWindowDpi(h)),USER_DEFAULT_SCREEN_DPI);}
+    // How a control follows its dialog when the dialog is resized, recorded
+    // on the control when it is made. The old rule guessed the role from the
+    // control's pixel width, which stops working the moment widths scale.
+    enum class DialogAnchor:int{Fixed=0,StretchTrack,RightValue,StretchNote,BottomRight};
+    static constexpr const wchar_t* kDialogAnchorProperty=L"DLSSVideo.DialogAnchor";
+    HFONT DialogFont(HWND h){
+        const auto found=m_dialogFonts.find(h);if(found!=m_dialogFonts.end())return found->second;
+        HFONT font=CreateUiFont(12,ActiveWindowDpi(h));
+        if(font)m_dialogFonts[h]=font;
+        return font?font:static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    }
+    HWND DialogControl(HWND h,const wchar_t* className,const wchar_t* text,DWORD style,int x,int y,int width,int height,int id=0,DialogAnchor anchor=DialogAnchor::Fixed){
+        HWND control=CreateWindowExW(0,className,text,WS_CHILD|WS_VISIBLE|style,Sd(h,x),Sd(h,y),Sd(h,width),Sd(h,height),h,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),nullptr,nullptr);
+        if(!control)return nullptr;
+        SendMessageW(control,WM_SETFONT,reinterpret_cast<WPARAM>(DialogFont(h)),TRUE);
+        if(anchor!=DialogAnchor::Fixed)SetPropW(control,kDialogAnchorProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(anchor)));
+        return control;
+    }
+    // Owner-drawn so it can be dark (DrawDarkPushButton); `isDefault` is what
+    // BS_DEFPUSHBUTTON said before and is drawn in the accent.
+    HWND DialogButton(HWND h,const wchar_t* textKey,int id,int x,int y,int width,int height,bool isDefault=false){
+        HWND button=DialogControl(h,L"BUTTON",T(textKey).c_str(),WS_TABSTOP|BS_OWNERDRAW,x,y,width,height,id,DialogAnchor::BottomRight);
+        if(isDefault)MarkDefaultButton(button);
+        return button;
+    }
     void CreateAdjustmentRow(HWND h,int id,const wchar_t* labelKey,int y,const wchar_t* tipKey=nullptr){
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND label=CreateWindowExW(0,L"STATIC",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,y,116,20,h,nullptr,nullptr,nullptr);
-        HWND track=CreateWindowExW(0,TRACKBAR_CLASSW,L"",WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_NOTICKS,132,y-6,236,30,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
-        HWND value=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_RIGHT,370,y,64,20,h,(HMENU)(INT_PTR)(id+100),nullptr,nullptr);
-        SendMessageW(label,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(track,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(value,WM_SETFONT,(WPARAM)f,TRUE);
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16,y,116,20);
+        HWND track=DialogControl(h,TRACKBAR_CLASSW,L"",TBS_HORZ|TBS_NOTICKS,132,y-6,236,30,id,DialogAnchor::StretchTrack);
+        HWND value=DialogControl(h,L"STATIC",L"",SS_RIGHT,370,y,64,20,id+100,DialogAnchor::RightValue);
         AddTip(h,label,tipKey);AddTip(h,track,tipKey);AddTip(h,value,tipKey);
     }
 
@@ -3569,12 +3768,12 @@ private:
     // WM_SIZE handling has a stable baseline to reposition from instead of
     // compounding drift onto whatever the previous resize left behind.
     void CaptureSettingsDesignLayout(HWND h){
-        std::vector<std::pair<HWND,RECT>> items;
+        SettingsDesignLayout items;items.dpi=ActiveWindowDpi(h);
         EnumChildWindows(h,[](HWND child,LPARAM lp)->BOOL{
             RECT r{};GetWindowRect(child,&r);
             POINT pts[2]={{r.left,r.top},{r.right,r.bottom}};
             MapWindowPoints(nullptr,GetParent(child),pts,2);
-            reinterpret_cast<std::vector<std::pair<HWND,RECT>>*>(lp)->push_back({child,RECT{pts[0].x,pts[0].y,pts[1].x,pts[1].y}});
+            reinterpret_cast<SettingsDesignLayout*>(lp)->items.push_back({child,RECT{pts[0].x,pts[0].y,pts[1].x,pts[1].y}});
             return TRUE;
         },reinterpret_cast<LPARAM>(&items));
         m_settingsDesignLayout[h]=std::move(items);
@@ -3589,41 +3788,74 @@ private:
         if(it==m_settingsDesignLayout.end())return;
         RECT cr{};GetClientRect(h,&cr);
         const int W=int(cr.right-cr.left),H=int(cr.bottom-cr.top);
-        for(const auto&[child,design]:it->second){
+        // Margins are design units at the dpi the layout was captured at.
+        const auto S=[&](int value){return MulDiv(value,static_cast<int>(it->second.dpi),USER_DEFAULT_SCREEN_DPI);};
+        for(const auto&[child,design]:it->second.items){
             if(!IsWindow(child))continue;
-            wchar_t cls[32]{};GetClassNameW(child,cls,32);
             const int dx=int(design.left),dy=int(design.top),dw=int(design.right-design.left),dh=int(design.bottom-design.top);
-            if(_wcsicmp(cls,TRACKBAR_CLASSW)==0){
-                SetWindowPos(child,nullptr,0,0,std::max(20,W-132-16-70),dh,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOMOVE);
-            }else if(_wcsicmp(cls,L"static")==0&&dw==64&&dx>=370){
-                // Trackbar value label: fixed width, anchored to the right edge.
-                SetWindowPos(child,nullptr,W-16-64,dy,0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);
-            }else if(_wcsicmp(cls,L"static")==0&&dw==418){
-                // Note static: stretches with the window, left edge fixed.
-                SetWindowPos(child,nullptr,dx,dy,std::max(20,W-32),dh,SWP_NOZORDER|SWP_NOACTIVATE);
-            }else if(_wcsicmp(cls,L"button")==0){
-                const LONG_PTR style=GetWindowLongPtrW(child,GWL_STYLE);
-                const LONG_PTR type=style&BS_TYPEMASK;
-                if(type==BS_PUSHBUTTON||type==BS_DEFPUSHBUTTON)
-                    SetWindowPos(child,nullptr,dx+(W-designWidth),H-(designHeight-dy),0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);
+            switch(static_cast<DialogAnchor>(reinterpret_cast<INT_PTR>(GetPropW(child,kDialogAnchorProperty)))){
+            // A trackbar grows with the window, leaving room for its value label.
+            case DialogAnchor::StretchTrack:SetWindowPos(child,nullptr,0,0,std::max(S(20),W-dx-S(86)),dh,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOMOVE);break;
+            // Its value label keeps its width and follows the right edge.
+            case DialogAnchor::RightValue:SetWindowPos(child,nullptr,W-S(16)-dw,dy,0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);break;
+            // A note stretches with the window, left edge fixed.
+            case DialogAnchor::StretchNote:SetWindowPos(child,nullptr,dx,dy,std::max(S(20),W-S(32)),dh,SWP_NOZORDER|SWP_NOACTIVATE);break;
+            case DialogAnchor::BottomRight:SetWindowPos(child,nullptr,dx+(W-S(designWidth)),H-(S(designHeight)-dy),0,0,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOSIZE);break;
+            case DialogAnchor::Fixed:break;
             }
         }
         InvalidateRect(h,nullptr,TRUE);
+    }
+    // A settings dialog dragged to a monitor at another dpi: the controls,
+    // the captured design layout and the font follow it, and then the dialog
+    // takes the rectangle Windows suggests, which lays the anchored controls
+    // out again through WM_SIZE.
+    void RescaleSettingsDialog(HWND h,UINT dpi,const RECT* suggested){
+        auto layout=m_settingsDesignLayout.find(h);
+        const UINT from=layout!=m_settingsDesignLayout.end()?layout->second.dpi:ActiveWindowDpi(h);
+        if(from==dpi&&!suggested)return;
+        HFONT font=CreateUiFont(12,dpi);
+        ScaleChildWindows(h,from,dpi,font);
+        if(font){const auto old=m_dialogFonts.find(h);if(old!=m_dialogFonts.end())DeleteObject(old->second);m_dialogFonts[h]=font;}
+        if(layout!=m_settingsDesignLayout.end()){
+            for(auto& item:layout->second.items)item.second=dark_mode::ScaleRectForDpi(item.second,from,dpi);
+            layout->second.dpi=dpi;
+        }
+        if(const auto host=m_tipHosts.find(h);host!=m_tipHosts.end())SendMessageW(host->second,TTM_SETMAXTIPWIDTH,0,MulDiv(420,int(dpi),USER_DEFAULT_SCREEN_DPI));
+        if(suggested)SetWindowPos(h,nullptr,suggested->left,suggested->top,suggested->right-suggested->left,suggested->bottom-suggested->top,SWP_NOZORDER|SWP_NOACTIVATE);
+    }
+    // What the four settings dialogs share before their own messages: the dark
+    // colours, the owner-drawn buttons, a change of dpi, and the font they own.
+    bool SettingsDialogChrome(HWND h,UINT m,WPARAM w,LPARAM l,LRESULT& result){
+        switch(m){
+        case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:case WM_CTLCOLORBTN:case WM_CTLCOLORLISTBOX:case WM_CTLCOLORDLG:
+            result=reinterpret_cast<LRESULT>(DarkControlColor(m,w,dark_mode::Text));return true;
+        case WM_DRAWITEM:{
+            const auto* item=reinterpret_cast<const DRAWITEMSTRUCT*>(l);
+            if(!item||item->CtlType!=ODT_BUTTON)return false;
+            DrawDarkPushButton(*item);result=TRUE;return true;
+        }
+        case WM_DPICHANGED:RescaleSettingsDialog(h,HIWORD(w),reinterpret_cast<const RECT*>(l));result=0;return true;
+        case WM_DESTROY:RemoveChildProperties(h,{kDefaultButtonProperty,kDialogAnchorProperty});return false;
+        case WM_NCDESTROY:
+            if(const auto font=m_dialogFonts.find(h);font!=m_dialogFonts.end()){DeleteObject(font->second);m_dialogFonts.erase(font);}
+            return false;
+        default:return false;
+        }
     }
 
     // Resizable settings dialogs share this style/rect math: the caller
     // passes the design client size, and gets back a window rect sized so
     // its client area equals that design size under the given styles.
     static RECT SettingsWindowRect(int clientW,int clientH,DWORD style,DWORD exStyle,UINT dpi){
-        RECT rc{0,0,clientW,clientH};
-        // The process is PER_MONITOR_AWARE_V2, so AdjustWindowRectEx reports 96-dpi
-        // frame metrics and leaves the client short of the design size on a scaled
-        // monitor - the bottom-anchored buttons then overlap the note text.
-        using AdjustForDpiFn=BOOL(WINAPI*)(LPRECT,DWORD,BOOL,DWORD,UINT);
-        static const auto adjustForDpi=reinterpret_cast<AdjustForDpiFn>(
-            GetProcAddress(GetModuleHandleW(L"user32.dll"),"AdjustWindowRectExForDpi"));
-        if(adjustForDpi&&adjustForDpi(&rc,style,FALSE,exStyle,dpi))return rc;
-        rc={0,0,clientW,clientH};AdjustWindowRectEx(&rc,style,FALSE,exStyle);return rc;
+        // The design client is in 96-dpi units, so it is scaled first; then the
+        // frame is added at the same dpi. The process is PER_MONITOR_AWARE_V2,
+        // so AdjustWindowRectEx alone reports 96-dpi frame metrics and leaves
+        // the client short on a scaled monitor - the bottom-anchored buttons
+        // then overlap the note text.
+        const int d=static_cast<int>(dpi==0?USER_DEFAULT_SCREEN_DPI:dpi);
+        RECT rc{0,0,MulDiv(clientW,d,USER_DEFAULT_SCREEN_DPI),MulDiv(clientH,d,USER_DEFAULT_SCREEN_DPI)};
+        AdjustWindowRectForDpi(rc,style,FALSE,exStyle,dpi);return rc;
     }
 
     void BuildAdjustmentControls(HWND h){
@@ -3634,11 +3866,9 @@ private:
         CreateAdjustmentRow(h,IDC_ADJ_TEMPERATURE,L"adjustments.temperature",228);
         CreateAdjustmentRow(h,IDC_ADJ_TINT,L"adjustments.tint",278);
         CreateAdjustmentRow(h,IDC_ADJ_NEURAL_STRENGTH,L"adjustments.neural_strength",328,L"adjustments.neural_strength.tip");
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"adjustments.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,372,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"adjustments.reset").c_str(),WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON,252,418,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_RESET,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"adjustments.close").c_str(),WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON,348,418,86,30,h,(HMENU)(INT_PTR)IDC_ADJ_CLOSE,nullptr,nullptr);
-        SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        DialogControl(h,L"STATIC",T(L"adjustments.note").c_str(),SS_LEFT,16,372,418,38,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"adjustments.reset",IDC_ADJ_RESET,252,418,86,30);
+        DialogButton(h,L"adjustments.close",IDC_ADJ_CLOSE,348,418,86,30,true);
         SyncAdjustmentControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -3652,7 +3882,7 @@ private:
         // named the class V11 while this call asked for V12, so the window was never
         // created and the whole dialog was unreachable.
         static constexpr const wchar_t* kClassName=L"DLSSVideoAdjustmentsClassV12";
-        WNDCLASSW a{};a.lpfnWndProc=AdjustWndProcStatic;a.hInstance=GetModuleHandleW(nullptr);a.lpszClassName=kClassName;a.hCursor=LoadCursor(nullptr,IDC_ARROW);a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        WNDCLASSW a{};a.lpfnWndProc=AdjustWndProcStatic;a.hInstance=GetModuleHandleW(nullptr);a.lpszClassName=kClassName;a.hCursor=LoadCursor(nullptr,IDC_ARROW);a.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&a)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
         const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
@@ -3663,8 +3893,9 @@ private:
     }
 
     LRESULT AdjustWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
-        case WM_CREATE:BuildAdjustmentControls(h);return 0;
+        case WM_CREATE:ApplyDarkTitleBar(h);BuildAdjustmentControls(h);return 0;
         case WM_HSCROLL:ReadAdjustmentControls(h);return 0;
         case WM_GETMINMAXINFO:{
             const RECT wr=SettingsWindowRect(kAdjustDesignW,kAdjustDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
@@ -3732,17 +3963,15 @@ private:
     void ApplyLiveGuideControls(){m_guides.SetControls(m_renderGuides);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
 
     void CreateNeuralCombo(HWND h,int id,const wchar_t* labelKey,int y,std::initializer_list<const wchar_t*> items,const wchar_t* tipKey=nullptr){
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND label=CreateWindowExW(0,L"STATIC",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,y,116,20,h,nullptr,nullptr,nullptr);
-        HWND combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST,132,y-3,160,200,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
+        HWND label=DialogControl(h,L"STATIC",T(labelKey).c_str(),SS_LEFT,16,y,116,20);
+        HWND combo=DialogControl(h,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST,132,y-3,160,200,id);
         for(const wchar_t* item:items)SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(item));
-        SendMessageW(label,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(combo,WM_SETFONT,(WPARAM)f,TRUE);
         AddTip(h,label,tipKey);AddTip(h,combo,tipKey);
     }
 
     HWND CreateNeuralCheck(HWND h,int id,const wchar_t* labelKey,int x,int y,int width,const wchar_t* tipKey=nullptr){
-        HWND box=CreateWindowExW(0,L"BUTTON",T(labelKey).c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,x,y,width,22,h,(HMENU)(INT_PTR)id,nullptr,nullptr);
-        SendMessageW(box,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);AddTip(h,box,tipKey);return box;
+        HWND box=DialogControl(h,L"BUTTON",T(labelKey).c_str(),WS_TABSTOP|BS_AUTOCHECKBOX,x,y,width,22,id);
+        AddTip(h,box,tipKey);return box;
     }
 
     // Color strength and render preset are deliberately absent: measured on the
@@ -3758,9 +3987,7 @@ private:
     // what the model does to the picture, "Quality and render time" is what it
     // costs, "Guides" is what it is given to work from.
     void CreateSettingsGroupHeading(HWND h,const wchar_t* key,int y){
-        HWND heading=CreateWindowExW(0,L"STATIC",T(key).c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,
-                                     16,y,436,18,h,nullptr,nullptr,nullptr);
-        SendMessageW(heading,WM_SETFONT,(WPARAM)GetStockObject(DEFAULT_GUI_FONT),TRUE);
+        DialogControl(h,L"STATIC",T(key).c_str(),SS_LEFT,16,y,436,18);
     }
 
     void BuildNeuralSettingControls(HWND h){
@@ -3771,7 +3998,6 @@ private:
         CreateAdjustmentRow(h,IDC_NS_SKIN,L"neural.settings.skin",188,L"neural.tip.skin");
         CreateNeuralCombo(h,IDC_NS_STYLE,L"neural.settings.style",238,{L"Default",L"Natural",L"Cinematic"},L"neural.tip.style");
         CreateNeuralCheck(h,IDC_NS_AUTOMASK,L"neural.settings.automask",132,276,236,L"neural.tip.automask");
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
         // Stacking, which arrived with RenoDX 6.x. Its own group because it
         // costs render time rather than changing the model's look: a second
         // pass measured 780,048 -> 932,019 bytes of output over the same
@@ -3782,11 +4008,10 @@ private:
         CreateSettingsGroupHeading(h,L"neural.settings.group_guides",424);
         CreateNeuralCheck(h,IDC_NS_GUIDE_MV,L"neural.settings.guide_mv",132,452,116,L"neural.tip.guide_mv");
         CreateNeuralCheck(h,IDC_NS_GUIDE_DEPTH,L"neural.settings.guide_depth",252,452,80,L"neural.tip.guide_depth");
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"neural.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,492,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,120,538,86,30,h,(HMENU)(INT_PTR)IDC_NS_RESET,nullptr,nullptr);
-        HWND apply=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.apply").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,216,538,122,30,h,(HMENU)(INT_PTR)IDC_NS_APPLY,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"neural.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,348,538,86,30,h,(HMENU)(INT_PTR)IDC_NS_CLOSE,nullptr,nullptr);
-        SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(apply,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        DialogControl(h,L"STATIC",T(L"neural.settings.note").c_str(),SS_LEFT,16,492,418,38,0,DialogAnchor::StretchNote);
+        HWND reset=DialogButton(h,L"neural.settings.reset",IDC_NS_RESET,120,538,86,30);
+        HWND apply=DialogButton(h,L"neural.settings.apply",IDC_NS_APPLY,216,538,122,30,true);
+        DialogButton(h,L"neural.settings.close",IDC_NS_CLOSE,348,538,86,30);
         AddTip(h,reset,L"neural.tip.reset");AddTip(h,apply,L"neural.tip.apply");
         SyncNeuralSettingControls(h);
         CaptureSettingsDesignLayout(h);
@@ -3815,7 +4040,7 @@ private:
     void ShowNeuralSettings(){
         if(m_neuralWnd&&IsWindow(m_neuralWnd)){ShowWindow(m_neuralWnd,SW_SHOWNORMAL);SetForegroundWindow(m_neuralWnd);return;}
         static constexpr const wchar_t* kClassName=L"DLSSVideoNeuralSettingsClassV14";
-        WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        WNDCLASSW n{};n.lpfnWndProc=NeuralWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
         const RECT wr=SettingsWindowRect(kNeuralDesignW,kNeuralDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
@@ -3880,8 +4105,9 @@ private:
     }
 
     LRESULT NeuralWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
-        case WM_CREATE:BuildNeuralSettingControls(h);return 0;
+        case WM_CREATE:ApplyDarkTitleBar(h);BuildNeuralSettingControls(h);return 0;
         case WM_HSCROLL:ReadNeuralSettingControls(h);return 0;
         case WM_GETMINMAXINFO:{
             const RECT wr=SettingsWindowRect(kNeuralDesignW,kNeuralDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
@@ -3936,11 +4162,9 @@ private:
         CreateNeuralCheck(h,IDC_ES_GPU_CONVERT,L"encoder.settings.gpu_convert",132,28,236,L"encoder.tip.gpu_convert");
         CreateNeuralCheck(h,IDC_ES_GPU_SOURCE,L"encoder.settings.gpu_source",132,52,236,L"encoder.tip.gpu_source");
         CreateNeuralCombo(h,IDC_ES_NVENC_PRESET,L"encoder.settings.nvenc_preset",84,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"encoder.tip.nvenc_preset");
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"encoder.settings.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,120,418,38,h,nullptr,nullptr,nullptr);SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND reset=CreateWindowExW(0,L"BUTTON",T(L"encoder.settings.reset").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,252,166,86,30,h,(HMENU)(INT_PTR)IDC_ES_RESET,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"encoder.settings.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,348,166,86,30,h,(HMENU)(INT_PTR)IDC_ES_CLOSE,nullptr,nullptr);
-        SendMessageW(reset,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,120,418,38,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,166,86,30);
+        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,166,86,30,true);
         SyncEncoderSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -3950,7 +4174,7 @@ private:
     void ShowEncoderSettings(){
         if(m_encoderWnd&&IsWindow(m_encoderWnd)){ShowWindow(m_encoderWnd,SW_SHOWNORMAL);SetForegroundWindow(m_encoderWnd);return;}
         static constexpr const wchar_t* kClassName=L"DLSSVideoEncoderSettingsClassV1";
-        WNDCLASSW n{};n.lpfnWndProc=EncoderWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        WNDCLASSW n{};n.lpfnWndProc=EncoderWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
         const RECT wr=SettingsWindowRect(kEncoderDesignW,kEncoderDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
@@ -3961,8 +4185,9 @@ private:
     }
 
     LRESULT EncoderWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
-        case WM_CREATE:BuildEncoderSettingControls(h);return 0;
+        case WM_CREATE:ApplyDarkTitleBar(h);BuildEncoderSettingControls(h);return 0;
         case WM_GETMINMAXINFO:{
             const RECT wr=SettingsWindowRect(kEncoderDesignW,kEncoderDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
             auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
@@ -4037,7 +4262,7 @@ private:
     void ShowExportStages(){
         if(m_exportStagesWnd&&IsWindow(m_exportStagesWnd)){ShowWindow(m_exportStagesWnd,SW_SHOWNORMAL);SetForegroundWindow(m_exportStagesWnd);return;}
         static constexpr const wchar_t* kClassName=L"DLSSVideoExportStagesClassV1";
-        WNDCLASSW n{};n.lpfnWndProc=ExportStagesWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
+        WNDCLASSW n{};n.lpfnWndProc=ExportStagesWndProcStatic;n.hInstance=GetModuleHandleW(nullptr);n.lpszClassName=kClassName;n.hCursor=LoadCursor(nullptr,IDC_ARROW);n.hbrBackground=DarkDialogBrush();
         if(!RegisterClassW(&n)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
         constexpr DWORD style=(WS_OVERLAPPEDWINDOW&~WS_MAXIMIZEBOX)|WS_VISIBLE;
         const RECT wr=SettingsWindowRect(kExportDesignW,kExportDesignH,style,WS_EX_TOOLWINDOW,ActiveWindowDpi(m_hwnd));
@@ -4049,7 +4274,6 @@ private:
     }
 
     void BuildExportStageControls(HWND h){
-        HFONT f=(HFONT)GetStockObject(DEFAULT_GUI_FONT);
         CreateSettingsGroupHeading(h,L"export.stages.group_stages",8);
         CreateNeuralCheck(h,IDC_EX_UPSCALE,L"export.stages.upscale",16,32,300,L"export.tip.upscale");
         CreateNeuralCombo(h,IDC_EX_RESOLUTION,L"export.stages.resolution",70,{L"1080p",L"1440p",L"2160p"});
@@ -4057,13 +4281,10 @@ private:
         CreateNeuralCheck(h,IDC_EX_FRAMEGEN,L"export.stages.framegen",16,152,300,L"export.tip.framegen");
         CreateNeuralCombo(h,IDC_EX_MULTIPLIER,L"export.stages.multiplier",190,{L"2×",L"3×",L"4×",L"5×"});
         CreateSettingsGroupHeading(h,L"export.stages.group_result",230);
-        HWND summary=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_LEFT,16,254,436,34,h,(HMENU)(INT_PTR)IDC_EX_SUMMARY,nullptr,nullptr);
-        SendMessageW(summary,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND note=CreateWindowExW(0,L"STATIC",T(L"export.stages.note").c_str(),WS_CHILD|WS_VISIBLE|SS_LEFT,16,288,436,34,h,nullptr,nullptr,nullptr);
-        SendMessageW(note,WM_SETFONT,(WPARAM)f,TRUE);
-        HWND run=CreateWindowExW(0,L"BUTTON",T(L"export.stages.run").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,232,330,120,30,h,(HMENU)(INT_PTR)IDC_EX_RUN,nullptr,nullptr);
-        HWND close=CreateWindowExW(0,L"BUTTON",T(L"export.stages.close").c_str(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,362,330,90,30,h,(HMENU)(INT_PTR)IDC_EX_CLOSE,nullptr,nullptr);
-        SendMessageW(run,WM_SETFONT,(WPARAM)f,TRUE);SendMessageW(close,WM_SETFONT,(WPARAM)f,TRUE);
+        DialogControl(h,L"STATIC",L"",SS_LEFT,16,254,436,34,IDC_EX_SUMMARY);
+        DialogControl(h,L"STATIC",T(L"export.stages.note").c_str(),SS_LEFT,16,288,436,34);
+        DialogButton(h,L"export.stages.run",IDC_EX_RUN,232,330,120,30,true);
+        DialogButton(h,L"export.stages.close",IDC_EX_CLOSE,362,330,90,30);
         SyncExportStageControls(h);
         CaptureSettingsDesignLayout(h);
     }
@@ -4109,8 +4330,9 @@ private:
     bool ExportStagesBusy()const{return m_exportWorker.joinable()||m_frameGenWorker.joinable()||NeuralJobActive();}
 
     LRESULT ExportStagesWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        if(LRESULT result=0;SettingsDialogChrome(h,m,w,l,result))return result;
         switch(m){
-        case WM_CREATE:BuildExportStageControls(h);return 0;
+        case WM_CREATE:ApplyDarkTitleBar(h);BuildExportStageControls(h);return 0;
         case WM_GETMINMAXINFO:{
             const RECT wr=SettingsWindowRect(kExportDesignW,kExportDesignH,DWORD(GetWindowLongPtrW(h,GWL_STYLE)),DWORD(GetWindowLongPtrW(h,GWL_EXSTYLE)),ActiveWindowDpi(h));
             auto* mmi=reinterpret_cast<MINMAXINFO*>(l);mmi->ptMinTrackSize={wr.right-wr.left,wr.bottom-wr.top};return 0;
@@ -4938,6 +5160,49 @@ private:
     // instead of 3: that lane is the render map, the one thing on this bar no
     // other player has, and at 3 dip it read as a hairline.
     RECT TimelineRect()const{if(!ControlsVisible())return {};RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(18),c.bottom-Dip(30),c.right-Dip(18),c.bottom-Dip(12)};}
+    // ---- The dark menu bar ------------------------------------------------
+    //
+    // Drawn through user32's undocumented UAH menu messages (DarkModePolicy.h
+    // names them and explains the guard). Anything that does not check out
+    // latches this off for the window and hands the bar back to Windows, so
+    // the worst case is the light bar it always was.
+    bool FailDarkMenuBar(HWND h,const char* why){
+        if(!m_darkMenuFailed){m_darkMenuFailed=true;LOG("Dark menu bar disabled for this window: "<<why<<"; drawing the system menu bar.");DrawMenuBar(h);}
+        return false;
+    }
+    bool DrawDarkMenuBar(HWND h,const dark_mode::UAHMENU* menu){
+        if(m_darkMenuFailed)return false;
+        if(!menu||!menu->hdc||!menu->hmenu||menu->hmenu!=GetMenu(h))return FailDarkMenuBar(h,"the bar message named another menu");
+        MENUBARINFO info{sizeof(info)};
+        if(!GetMenuBarInfo(h,OBJID_MENU,0,&info))return FailDarkMenuBar(h,"GetMenuBarInfo failed");
+        RECT window{};GetWindowRect(h,&window);
+        RECT bar=info.rcBar;OffsetRect(&bar,-window.left,-window.top);
+        FillRect(menu->hdc,&bar,DarkDialogBrush());
+        return true;
+    }
+    bool DrawDarkMenuBarItem(HWND h,const dark_mode::UAHDRAWMENUITEM* item){
+        if(m_darkMenuFailed)return false;
+        if(!item||!item->um.hdc||!item->um.hmenu||item->um.hmenu!=GetMenu(h))return FailDarkMenuBar(h,"the item message named another menu");
+        wchar_t text[256]{};
+        MENUITEMINFOW info{sizeof(info)};info.fMask=MIIM_STRING;info.dwTypeData=text;info.cch=static_cast<UINT>(std::size(text));
+        if(item->umi.iPosition<0||!GetMenuItemInfoW(item->um.hmenu,static_cast<UINT>(item->umi.iPosition),TRUE,&info))
+            return FailDarkMenuBar(h,"the item message named no item of the bar");
+        const auto colors=dark_mode::MenuBarItemColors(item->dis.itemState);
+        HBRUSH fill=CreateSolidBrush(colors.fill);FillRect(item->um.hdc,&item->dis.rcItem,fill);DeleteObject(fill);
+        SetBkMode(item->um.hdc,TRANSPARENT);SetTextColor(item->um.hdc,colors.text);
+        RECT label=item->dis.rcItem;DrawTextW(item->um.hdc,text,-1,&label,dark_mode::MenuBarTextFormat(item->dis.itemState));
+        return true;
+    }
+    // Windows draws a one-pixel light rule between the menu bar and the client
+    // area outside both messages above; it is painted over after the frame.
+    void PaintMenuBarSeparator(HWND h){
+        if(m_darkMenuFailed||!GetMenu(h))return;
+        RECT client{};GetClientRect(h,&client);MapWindowPoints(h,nullptr,reinterpret_cast<POINT*>(&client),2);
+        RECT window{};GetWindowRect(h,&window);OffsetRect(&client,-window.left,-window.top);
+        const RECT line{client.left,client.top-1,client.right,client.top};
+        if(HDC dc=GetWindowDC(h)){FillRect(dc,&line,DarkDialogBrush());ReleaseDC(h,dc);}
+    }
+
     // ---- The keyboard cheat sheet (? / F1) -------------------------------
     //
     // Every row comes from the live menu bar (app_menu::CollectShortcuts),
@@ -8232,6 +8497,9 @@ private:
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
         case WM_TIMELINE_MEDIA:CompleteTimelineMedia();return 0;
+        case dark_mode::WM_UAHDRAWMENU:if(DrawDarkMenuBar(h,reinterpret_cast<const dark_mode::UAHMENU*>(l)))return TRUE;break;
+        case dark_mode::WM_UAHDRAWMENUITEM:if(DrawDarkMenuBarItem(h,reinterpret_cast<const dark_mode::UAHDRAWMENUITEM*>(l)))return TRUE;break;
+        case WM_NCPAINT:case WM_NCACTIVATE:{const LRESULT result=DefWindowProcW(h,m,w,l);PaintMenuBarSeparator(h);return result;}
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
@@ -8549,6 +8817,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     timeline::PreviewLayout m_previewLayout{};HWND m_previewWnd=nullptr;
     // The keyboard cheat sheet: whether it is up, its popup, and the rows and
     // layout it was last shown with.
+    // Latched when the undocumented menu-bar drawing does not check out.
+    bool m_darkMenuFailed=false;
     bool m_shortcutSheetOpen=false;HWND m_shortcutWnd=nullptr;std::vector<ShortcutGroup> m_shortcutGroups;
     shortcut_sheet::Metrics m_shortcutMetrics{};shortcut_sheet::Layout m_shortcutLayout{};
     // Drives Tick while a modal loop owns the thread; see StartModalTick.
@@ -8616,7 +8886,12 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Design-time (unresized) child positions for each resizable settings
     // dialog, captured once when its controls are built so WM_SIZE can
     // recompute layout without drifting across repeated resizes.
-    std::map<HWND,std::vector<std::pair<HWND,RECT>>> m_settingsDesignLayout;
+    // Each settings dialog's controls where they were built, and the dpi they
+    // were built at, so a resize or a dpi change works from a fixed baseline.
+    struct SettingsDesignLayout{UINT dpi{USER_DEFAULT_SCREEN_DPI};std::vector<std::pair<HWND,RECT>> items;};
+    std::map<HWND,SettingsDesignLayout> m_settingsDesignLayout;
+    // The font each open dialog draws in, made at its dpi and freed with it.
+    std::map<HWND,HFONT> m_dialogFonts;
     POINT m_renderMouse{};
     bool m_renderMouseKnown=false,m_dragSplit=false;
     // Settings the playing cache entry was rendered with (its receipt has the full record).

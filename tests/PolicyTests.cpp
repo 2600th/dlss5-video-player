@@ -54,6 +54,7 @@
 #include "StatusChipPolicy.h"
 #include "TimelinePolicy.h"
 #include "ShortcutSheetPolicy.h"
+#include "DarkModePolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -1061,6 +1062,38 @@ void keyboard_cheat_sheet_flows_whole_groups_into_columns_test()
     CHECK(narrow.groups[0].visible);
     CHECK(narrow.groups[1].visible);
     CHECK(!narrow.groups[2].visible);
+}
+
+void dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test()
+{
+    // At rest an item sits on the bar; hot or open lifts it to the toolbar's
+    // hover surface; disabled is the quiet grey whatever else is set.
+    const auto rest = dark_mode::MenuBarItemColors(0);
+    CHECK_EQ(dark_mode::DialogBackground, rest.fill);
+    CHECK_EQ(dark_mode::Text, rest.text);
+    CHECK_EQ(ui_palette::Hover, dark_mode::MenuBarItemColors(ODS_HOTLIGHT).fill);
+    CHECK_EQ(ui_palette::Hover, dark_mode::MenuBarItemColors(ODS_SELECTED).fill);
+    const auto disabled = dark_mode::MenuBarItemColors(ODS_GRAYED | ODS_HOTLIGHT);
+    CHECK_EQ(dark_mode::DialogBackground, disabled.fill);
+    CHECK_EQ(dark_mode::QuietText, disabled.text);
+    CHECK((dark_mode::MenuBarTextFormat(ODS_NOACCEL) & DT_HIDEPREFIX) != 0);
+    CHECK((dark_mode::MenuBarTextFormat(0) & DT_HIDEPREFIX) == 0);
+    // The dialog font is Segoe UI 9 pt at every dpi, not 8 pt at 96 only.
+    CHECK_EQ(-12, dark_mode::DialogFontHeight(96));
+    CHECK_EQ(-18, dark_mode::DialogFontHeight(144));
+    CHECK_EQ(-24, dark_mode::DialogFontHeight(192));
+    CHECK_EQ(-12, dark_mode::DialogFontHeight(0));
+    // Carried per edge, so neighbours that met still meet.
+    const RECT scaled = dark_mode::ScaleRectForDpi(RECT{16, 28, 132, 48}, 96, 144);
+    CHECK_EQ(24L, scaled.left);
+    CHECK_EQ(42L, scaled.top);
+    CHECK_EQ(198L, scaled.right);
+    CHECK_EQ(72L, scaled.bottom);
+    const RECT neighbour = dark_mode::ScaleRectForDpi(RECT{132, 22, 368, 52}, 96, 144);
+    CHECK_EQ(scaled.right, neighbour.left);
+    const RECT back = dark_mode::ScaleRectForDpi(scaled, 144, 96);
+    CHECK_EQ(16L, back.left);
+    CHECK_EQ(132L, back.right);
 }
 
 void status_chips_carry_the_rate_the_drops_and_the_render_test()
@@ -10573,6 +10606,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(timeline_thumbnails_are_bucketed_cached_and_cheap_to_ask_for_test),
     TEST_CASE(keyboard_cheat_sheet_is_read_from_the_menus_test),
     TEST_CASE(keyboard_cheat_sheet_flows_whole_groups_into_columns_test),
+    TEST_CASE(dark_menu_bar_and_dialog_scaling_follow_the_palette_and_the_dpi_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

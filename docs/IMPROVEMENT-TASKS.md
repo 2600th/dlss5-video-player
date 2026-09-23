@@ -74,7 +74,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.17](#p217) | A difference view | S-M | Player | |
 | [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
-| [P2.22](#p222) | Dark, DPI-aware menus and dialogs | M | Player | |
 | [P2.24](#p224) | Media controls and taskbar buttons | S-M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
@@ -464,20 +463,6 @@ Save the composed split exactly as shown, with labels and a provenance footer
 (frame, settings digest, runtime), and later a short wipe clip. The demo video
 is assembled by hand today (`docs/media/README.md`). This turns every user
 into a source of verifiable evidence.
-
----
-
-<a id="p222"></a>
-### P2.22 · Dark, DPI-aware menus and dialogs
-
-`M` · **Player**
-
-The title bar is dark (`main.cpp:1268`), but the menu bar and the dialogs
-are light Win32 classics. The dialogs use raw pixel positions, the 96-dpi
-`DEFAULT_GUI_FONT` and an unscaled client size (`main.cpp:3291`, `:3390`), so
-they are tiny at 200%. Scale the dialogs to DPI first; that is a correctness
-fix. Then darken them, and draw the menu bar via `WM_UAHDRAWMENU` (an
-undocumented API; guard it).
 
 ---
 
