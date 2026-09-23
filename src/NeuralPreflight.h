@@ -56,6 +56,19 @@ std::vector<Feature18Observation> CollectFeature18Observations(std::string_view 
 // has its own result and routinely reports success while feature 18 refuses.
 std::optional<uint32_t> ParseFeature18CreateResult(std::span<const Feature18Observation> observations);
 
+// The receipt's `"observations":[...]` member, bounded. The metadata pipe
+// refuses any frame over 64 KiB (neural_worker_protocol::kMaximumPayloadBytes),
+// and a probe that fails every frame logs an observation per frame, so the
+// whole list reached the player as "malformed metadata" instead of the
+// diagnosis it carried. The first and last kReportedObservationsPerEnd are
+// kept - how it started failing and what it settled into - each line cut to
+// kReportedObservationLineBytes on a UTF-8 boundary and marked "...", and an
+// `"observationsOmitted":N` member follows when any were dropped. A list that
+// fits is written exactly as before. Diagnosis still reads the full list.
+inline constexpr size_t kReportedObservationsPerEnd = 8;
+inline constexpr size_t kReportedObservationLineBytes = 256;
+std::string ReportedFeature18ObservationsJson(std::span<const Feature18Observation> observations);
+
 // Why feature 18 is unavailable, in the order that decides what the user is
 // told. A driver below the floor outranks the platform refusal it causes,
 // because updating the driver is the action that fixes it.

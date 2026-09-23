@@ -622,6 +622,34 @@ std::string JsonEscapeWide(std::wstring_view text)
     return JsonEscape(Utf8(text));
 }
 
+std::string ReportedFeature18ObservationsJson(std::span<const Feature18Observation> observations)
+{
+    const size_t count = observations.size();
+    const bool trimmed = count > kReportedObservationsPerEnd * 2;
+    std::string json = "\"observations\":[";
+    bool first = true;
+    for (size_t index = 0; index < count; ++index) {
+        if (trimmed && index == kReportedObservationsPerEnd) index = count - kReportedObservationsPerEnd;
+        const Feature18Observation& observation = observations[index];
+        std::string_view line = observation.line;
+        std::string cut;
+        if (line.size() > kReportedObservationLineBytes) {
+            size_t end = kReportedObservationLineBytes;
+            while (end && (static_cast<unsigned char>(line[end]) & 0xC0) == 0x80) --end;
+            cut.assign(line.substr(0, end));
+            cut += "...";
+            line = cut;
+        }
+        if (!first) json += ',';
+        first = false;
+        json += "{\"failure\":" + std::string(observation.failure ? "true" : "false") + ",\"line\":\"" +
+                JsonEscape(line) + "\"}";
+    }
+    json += "]";
+    if (trimmed) json += ",\"observationsOmitted\":" + std::to_string(count - kReportedObservationsPerEnd * 2);
+    return json;
+}
+
 std::string NeuralModelStoreJson(const NeuralModelStore& store)
 {
     std::string json = "{\"source\":\"";

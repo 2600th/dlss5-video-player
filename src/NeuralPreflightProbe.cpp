@@ -186,18 +186,24 @@ neural_worker_protocol::PreflightPayload RunNeuralPreflightProbe(
             ",\"probeFrames\":" + std::to_string(attempts) +
             ",\"carrierCreateResult\":\"" + HexResultText(static_cast<uint32_t>(ngxResult)) + "\"" +
             ",\"createResult\":\"" +
-            (diagnosis.ngxResult ? HexResultText(*diagnosis.ngxResult) : std::string()) + "\"" +
-            ",\"observations\":[";
-    for (size_t index = 0; index < observations.size(); ++index) {
-        if (index) json += ',';
-        json += "{\"failure\":" + std::string(observations[index].failure ? "true" : "false") + ",\"line\":\"" +
-                JsonEscape(observations[index].line) + "\"}";
-    }
-    json += "]}";
+            (diagnosis.ngxResult ? HexResultText(*diagnosis.ngxResult) : std::string()) + "\",";
+    const size_t observationsAt = json.size();
+    const std::string reported = ReportedFeature18ObservationsJson(observations);
+    json += reported;
+    json += "}";
     json += ",\"diagnosis\":{\"cause\":\"" + std::string(NeuralPreflightCauseName(diagnosis.cause)) +
             "\",\"detail\":\"" + JsonEscapeWide(diagnosis.detail) + "\"}";
     if (!error.empty()) json += ",\"error\":\"" + JsonEscapeWide(error) + "\"";
     json += "}";
+    // The bounded list keeps the receipt far inside one pipe frame in every
+    // case seen so far; if the rest of it ever grows enough to cross anyway,
+    // the observations go, not the verdict and the diagnosis the user reads.
+    constexpr size_t kReceiptBudget =
+        neural_worker_protocol::kMaximumPayloadBytes - sizeof(neural_worker_protocol::WirePreflight);
+    if (json.size() > kReceiptBudget) {
+        json.replace(observationsAt, reported.size(),
+                     "\"observations\":[],\"observationsOmitted\":" + std::to_string(observations.size()));
+    }
 
     neural_worker_protocol::PreflightPayload payload;
     payload.ok = ok;

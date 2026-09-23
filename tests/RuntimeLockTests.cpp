@@ -604,6 +604,41 @@ void neural_preflight_diagnosis_blames_the_actionable_cause_test()
     CHECK_EQ(std::string_view("none"), std::string_view(NeuralPreflightCauseName(armed.cause)));
 }
 
+// P1.12: a probe that fails every frame logs an observation per frame, and the
+// metadata pipe refuses a frame over 64 KiB. The receipt keeps the two ends of
+// the list and counts the middle; a short list is written exactly as before.
+void preflight_observations_are_bounded_to_fit_one_pipe_frame_test()
+{
+    const std::vector<Feature18Observation> few{{"feature 18 created", false},
+                                                {"say \"hi\"", true}};
+    CHECK_EQ(std::string("\"observations\":[{\"failure\":false,\"line\":\"feature 18 created\"},"
+                         "{\"failure\":true,\"line\":\"say \\\"hi\\\"\"}]"),
+             ReportedFeature18ObservationsJson(few));
+    CHECK_EQ(std::string("\"observations\":[]"), ReportedFeature18ObservationsJson({}));
+
+    std::vector<Feature18Observation> flood;
+    for (int index = 0; index < 5000; ++index) {
+        flood.push_back({"line " + std::to_string(index) + " " + std::string(4000, 'x'), true});
+    }
+    const std::string bounded = ReportedFeature18ObservationsJson(flood);
+    CHECK(bounded.size() < 8 * 1024);
+    CHECK(Contains(bounded, "\"line 0 x"));
+    CHECK(Contains(bounded, "\"line 7 x"));
+    CHECK(!Contains(bounded, "\"line 8 x"));
+    CHECK(!Contains(bounded, "\"line 4991 x"));
+    CHECK(Contains(bounded, "\"line 4992 x"));
+    CHECK(Contains(bounded, "\"line 4999 x"));
+    CHECK(Contains(bounded, "x...\"}"));
+    CHECK(Contains(bounded, "],\"observationsOmitted\":4984"));
+
+    // Cut on a UTF-8 boundary: the two-byte character straddling the limit
+    // goes whole rather than leaving half of it in the receipt.
+    const std::string straddle = std::string(kReportedObservationLineBytes - 1, 'a') + "\xC3\xA9" + "tail";
+    const std::string cut = ReportedFeature18ObservationsJson(std::vector<Feature18Observation>{{straddle, true}});
+    CHECK(Contains(cut, std::string(kReportedObservationLineBytes - 1, 'a') + "...\""));
+    CHECK(!Contains(cut, "\xC3"));
+}
+
 void receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test()
 {
     NeuralRenderReceiptInputs inputs = SampleInputs();
@@ -655,5 +690,6 @@ int wmain()
     receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test();
     feature18_create_result_is_read_out_of_the_runtime_log_test();
     neural_preflight_diagnosis_blames_the_actionable_cause_test();
+    preflight_observations_are_bounded_to_fit_one_pipe_frame_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
