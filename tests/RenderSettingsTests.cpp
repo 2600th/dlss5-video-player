@@ -360,6 +360,9 @@ void encoder_settings_that_change_the_written_pixels_change_the_render_key()
 
 void capture_dither_changes_the_render_key_and_names_its_map()
 {
+    // On by default, so the default terms name it.
+    CHECK(kDefaultCaptureDither);
+    CHECK_EQ(std::string("|dither-bayer8-v1|standard-cq16-uncapped-v1"), CaptureQualityIdentityTerm(CaptureQualityTerms{}));
     // The dither leaves the picture where it was and changes the bytes of every
     // captured frame, so a dithered render must never be served for an
     // undithered request or the other way round. The term follows every other

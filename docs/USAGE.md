@@ -497,9 +497,10 @@ to persist preferences.
 **DLSS > Encoder settings** holds the `[Encoding]` keys, kept apart from the
 model settings because they apply to the next render. Every one that changes the
 written pixels is part of the render identity, so changing one re-renders
-instead of serving a cached range made under the other value. At their defaults
-they add nothing to the key, so a default render keeps the cache entries it
-already has:
+instead of serving a cached range made under the other value. Most add nothing
+to the key at their defaults; the two that changed the default bytes - the
+constant-quality Standard rung and the capture dither, both on by default -
+retire the cache entries written before them, so a range is rendered once more:
 
 - `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
@@ -537,14 +538,15 @@ already has:
   synthetic clips it did change very slightly worse, so it is off; see
   `docs/measurements/exposure-ab-20260923/`. The key carries
   `exposure-key018-p20-cut-v1` while it is on.
-- `CaptureDither` (default off). Dithers each rendered frame against a static
+- `CaptureDither` (default on). Dithers each rendered frame against a static
   8x8 ordered map where it is cut to 8 bits for the cache, so a smooth dark
   gradient is written as a fine mix of two levels instead of flat bands.
-  Measured on five 1080p clips it removed 44-63 % of the Standard rung's
-  banding (CAMBI) on the three that had any, at the same size and within 0.04
-  VMAF; it stays off because those deltas are not all zero. The key carries
-  `dither-bayer8-v1` while it is on. The player window always dithers what it
-  shows (blue noise), independently of this key and at no cost to the cache.
+  Measured on five 1080p clips it removed 45-71 % of the Standard rung's
+  banding (CAMBI) on the three that had any, at about the same size and within
+  0.05 VMAF. Turn it off to write exactly what the model produced. It acts only on
+  the Standard rung. The key carries `dither-bayer8-v1` while it is on. The player
+  window always dithers what it shows (blue noise), independently of this key
+  and at no cost to the cache.
 - `GpuColorConversion` (default off). Converts the rendered frame to NV12 on the
   GPU instead of letting ffmpeg do it on the CPU. Off because with the neural
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an

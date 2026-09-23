@@ -187,7 +187,8 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 // `captureDither` is the ordered dither at the 8-bit capture store
 // (DitherPolicy.h): the same picture, different bytes in every frame. The term names
 // the map as well as the switch: a different map or amplitude is a different set of
-// bytes and gets a new version, never this term.
+// bytes and gets a new version, never this term. It is on by default, so the default
+// key carries it; off leaves it out.
 //
 // `quality` is the rung of the ladder (EncoderQuality). A 10-bit rung captures P010
 // and has no 8-bit store, so the dither term is dropped there: flipping an inert
@@ -202,12 +203,12 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 // `suppliedExposure` replaces the feature's AutoExposure with a smoothed meter
 // (ExposurePolicy.h), which changes what the model produces.
 struct CaptureQualityTerms {
-    bool captureDither{false};
+    bool captureDither{true};
     EncoderQuality quality{EncoderQuality::Standard};
     bool sourceDeband{false};
     bool suppliedExposure{false};
 };
-inline constexpr bool kDefaultCaptureDither = false;
+inline constexpr bool kDefaultCaptureDither = true;
 inline constexpr EncoderQuality kDefaultCacheQuality = EncoderQuality::Standard;
 inline constexpr bool kDefaultSourceDeband = false;
 inline constexpr bool kDefaultSuppliedExposure = false;

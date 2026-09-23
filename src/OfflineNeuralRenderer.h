@@ -112,11 +112,12 @@ struct NeuralRenderRequest {
     // estimator forced, or the guides dumped. Only the helper's own command line
     // can set them, never the player, and only the production evaluator reads them.
     guide_files::Sources guideFiles{};
-    // Ordered dither at the 8-bit capture store (DitherPolicy.h). Off by
-    // default: it changes the captured bytes, which makes it a cache-key term
-    // (CaptureQualityIdentityTerm), and it ships on only on a measurement.
-    // Only the Standard rung has an 8-bit store to dither; the 10-bit rungs
-    // ignore it.
+    // Ordered dither at the 8-bit capture store (DitherPolicy.h). It changes the
+    // captured bytes, which makes it a cache-key term (CaptureQualityIdentityTerm).
+    // False here, and absent on the helper's command line, because a request says
+    // what it wants and an older parent must keep getting the bytes it keyed for;
+    // the player's default is ON, in [Encoding] CaptureDither. Only the Standard
+    // rung has an 8-bit store to dither; the 10-bit rungs ignore it.
     bool captureDither{false};
     // The rung of the quality ladder the frames are written at (EncoderQuality in
     // MediaPipeline.h). The 10-bit rungs capture P010 on the GPU whatever

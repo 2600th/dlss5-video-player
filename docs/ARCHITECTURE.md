@@ -399,7 +399,7 @@ offset is scaled by one minus the subtitles' coverage, which is dithering the
 picture before the subtitle layer goes over it, so the video around the text is
 dithered and the glyphs are not speckled. It is presentation-only and always on. The cache capture can dither its
 own 8-bit store (`SetCaptureDither`, Encoder settings > Dither the cached
-frames), but against an 8x8 ordered (Bayer) map rather than blue noise: its
+frames, on by default), but against an 8x8 ordered (Bayer) map rather than blue noise: its
 frames go on to HEVC, whose quantiser removes exactly the high frequencies blue
 noise lives in, while a period-8 tile survives it (the measurement is in
 `DitherPolicy.h`). That path compiles separate entry points

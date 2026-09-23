@@ -49,13 +49,13 @@
 // quantiser. The window has no encoder after it, so it keeps blue noise, which
 // leaves the least visible pattern.
 //
-// Through the worker the ordered capture dither cut the Standard rung's CAMBI
-// by 44-63 % on the three fixture clips with banding (10.6 -> 4.5 on the
-// gradients) at an unchanged size, with VMAF within -0.04..+0.03 and output
-// flicker within 0.007 codes. It stays off by default because those deltas,
-// though far below visibility, are not all zero, and the bar for defaulting a
-// cache-changing switch on is no regression at all. The High rung removes the
-// banding at its source instead. docs/measurements/cache-quality-20260923/.
+// Through the worker the ordered capture dither cut the constant-quality
+// Standard rung's CAMBI by 45-71 % on the three fixture clips with banding
+// (11.0 -> 4.4 on the gradients) at a size within -6..+3 %, with VMAF within
+// -0.03..+0.05 and output flicker within 0.013 codes. It is on by default on that trade (a review
+// ruling: the banding cut outweighs a VMAF change far below visibility), and a
+// cache-key term. The High rung removes the banding at its source instead.
+// docs/measurements/cache-quality-20260923/.
 //
 // The table is written ONCE, below, as a macro, and reaches both consumers from
 // here: the HLSL present program pastes it into a `static const uint` array

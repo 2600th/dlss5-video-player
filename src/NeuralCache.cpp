@@ -928,7 +928,9 @@ std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
 {
     std::string term;
     const bool tenBit = EncoderQualityIsTenBit(terms.quality);
-    if (terms.captureDither != kDefaultCaptureDither && !tenBit) term += "|dither-bayer8-v1";
+    // Named whenever the capture dithers, default or not: the term says what the
+    // bytes are, and undithered bytes are what every key without it describes.
+    if (terms.captureDither && !tenBit) term += "|dither-bayer8-v1";
     if (terms.quality == EncoderQuality::Standard) term += "|standard-cq16-uncapped-v1";
     else if (terms.quality == EncoderQuality::High)
         term += "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1";

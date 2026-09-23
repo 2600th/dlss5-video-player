@@ -21,8 +21,8 @@ at Standard before the ladder existed (21:13) and after every change in the pack
 (22:20) decoded to the same frame digest. The worker's own High renders, run after the ceiling was lifted,
 match the re-encoded `main10u` CQ 14 arm below to within 0.03 VMAF and 2 % in size.
 
-The capture dither is off by default on a strict reading of the brief's bar, with a
-recommendation to turn it on; see the P2.2 section.
+The capture dither was measured off by default on a strict reading of the brief's bar,
+with a recommendation to turn it on; the review ruled it on (section "Ruling B").
 
 ## Environment and instruments
 
@@ -239,6 +239,30 @@ what CQ 16 asks for and the error that flickered frame to frame fell with it (te
 3.63 -> 1.93 on `fine-detail`). Worker throughput was unchanged: 101.6-104.4 frames a second
 capped, 101.8-104.7 uncapped. Frame generation's encoder shares these arguments, so its
 conversions are constant quality now too; they are not cached, so no key moves for them.
+
+## Ruling B: the capture dither on by default
+
+The review ruled that the 44-63 % banding cut outweighs a VMAF change of 0.04, so the
+ordered capture dither is on by default (`[Encoding] CaptureDither` defaults to 1; the
+toggle stays). The key names it whenever it is on (`dither-bayer8-v1`), so the default
+key changed and undithered renders are not served for it. The helper's wire contract is
+unchanged: a request without `--capture-dither 1` is undithered, as it always was.
+
+Measured on the rebased tree after Ruling A, Standard rung, same five clips and reference
+as the Ruling A section, undithered -> dithered (VMAF, CAMBI and temporal error against
+the Lossless render; flicker is the output's mean |Y(t) - Y(t-1)| in 8-bit codes with cut
+frames skipped):
+
+| clip | VMAF | CAMBI | temporal error | flicker | Mbit/s |
+|---|---:|---:|---:|---:|---:|
+| highlights-gradients | 93.88 -> 93.93 | 11.02 -> 4.37 | 0.383 -> 0.392 | 1.187 -> 1.189 | 9.4 -> 9.5 |
+| fine-detail | 96.81 -> 96.78 | 1.57 -> 1.25 | 1.934 -> 1.940 | 7.080 -> 7.080 | 42.8 -> 42.6 |
+| text-subtitles | 97.32 -> 97.35 | 10.25 -> 2.96 | 0.169 -> 0.158 | 0.238 -> 0.225 | 4.0 -> 3.8 |
+| real-film-cuts | 96.98 -> 96.97 | 8.76 -> 4.84 | 0.304 -> 0.304 | 1.273 -> 1.268 | 9.1 -> 9.2 |
+| real-game-motion | 99.44 -> 99.43 | 1.96 -> 1.20 | 0.647 -> 0.654 | 5.617 -> 5.617 | 17.9 -> 18.5 |
+
+Mean CAMBI 6.71 -> 2.92 (-56 %), VMAF 96.89 -> 96.89, size within -6..+3 %. Worker
+throughput 101.4-104.3 frames a second, unchanged.
 
 ## Reproducing
 
