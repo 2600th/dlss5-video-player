@@ -9092,6 +9092,40 @@ void deferred_capture_serves_a_second_job_after_a_shutdown_test()
     delete worker;
 }
 
+// The capture's fence wait runs on the worker with the copy, so what the wait
+// found - and which frame the slot held - has to come back to the renderer's
+// thread with the bytes. Join hands back the view as the copy left it, per
+// post, and a Join that finds nothing posted touches neither output.
+void deferred_capture_join_returns_the_view_the_copy_updated_test()
+{
+    struct View { int id{}; int waited{}; bool completed{}; };
+    struct Copy {
+        void operator()(View& view, std::vector<uint8_t>& pixels) const
+        {
+            view.waited = view.id * 10;
+            view.completed = view.id != 2;
+            pixels.assign(4, static_cast<uint8_t>(view.id));
+        }
+    };
+    DeferredCaptureWorker<View, Copy> worker;
+    for (int id = 1; id <= 3; ++id) {
+        worker.Post(View{id}, std::vector<uint8_t>(4));
+        std::vector<uint8_t> pixels;
+        View joined;
+        CHECK(worker.Join(pixels, &joined));
+        CHECK_EQ(id, joined.id);
+        CHECK_EQ(id * 10, joined.waited);
+        CHECK_EQ(id != 2, joined.completed);
+        CHECK_EQ(size_t{4}, pixels.size());
+        if (!pixels.empty()) CHECK_EQ(id, int(pixels[0]));
+    }
+    std::vector<uint8_t> untouched{9};
+    View unchanged{7, 7, true};
+    CHECK(!worker.Join(untouched, &unchanged));
+    CHECK_EQ(7, unchanged.id);
+    CHECK_EQ(size_t{1}, untouched.size());
+}
+
 // A screen recording's spacing is the evidence; its two declared rates are
 // not. r_frame_rate is the largest interval the container could express and
 // avg_frame_rate is frames over duration, so a capture that ran at 60 and
@@ -10179,6 +10213,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(playback_cadence_phase_presents_exactly_one_pair_in_stride_test),
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
+    TEST_CASE(deferred_capture_join_returns_the_view_the_copy_updated_test),
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
     TEST_CASE(audio_clock_carries_through_a_stall_and_slews_back_instead_of_jumping_test),
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),

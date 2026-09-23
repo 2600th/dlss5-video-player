@@ -7,11 +7,13 @@
 #include <utility>
 #include <vector>
 
-// Runs a capture's readback copy off the render loop.
+// Runs a capture's readback copy off the render loop, and the wait for the GPU to finish
+// writing it.
 //
 // The copy is around 10 MiB of memcpy per frame and, taken inline, it was the largest
 // single item in the loop. It depends on nothing the loop does next, so it happens here
-// while the loop decodes, builds guides and submits the following frame. The readback slot
+// while the loop decodes, builds guides and submits the following frame. So does the wait
+// on the capture's fence, which used to block the loop at every Post. The readback slot
 // the view points into stays reserved by the renderer until Join returns, so the GPU
 // cannot land the next capture on top of the memory being copied.
 //
@@ -20,10 +22,12 @@
 // same reason the parallel passes share a pool rather than spawning.
 //
 // `View` is the readback description the copy reads from and `Copy` is a callable
-// `void(const View&, std::vector<uint8_t>&)`. Both are template parameters so the
-// lifecycle can be exercised without a D3D12 device: the Post/Join/Shutdown state
-// machine is where this class has historically gone wrong, and it is independent
-// of what the copy does.
+// `void(View&, std::vector<uint8_t>&)`; it may record what happened in the view (how
+// the wait went, how long it took), and Join hands that view back with the bytes, so
+// what the renderer must learn about the copy travels with it rather than beside it.
+// Both are template parameters so the lifecycle can be exercised without a D3D12
+// device: the Post/Join/Shutdown state machine is where this class has historically
+// gone wrong, and it is independent of what the copy does.
 template <class View, class Copy>
 class DeferredCaptureWorker {
 public:
@@ -61,14 +65,16 @@ public:
         m_wake.notify_one();
     }
 
-    // Blocks until the posted copy has finished and moves its bytes into `pixels`.
-    // False when nothing was posted, which leaves `pixels` alone.
-    bool Join(std::vector<uint8_t>& pixels)
+    // Blocks until the posted copy has finished and moves its bytes into `pixels`, and
+    // the view as the copy left it into `view` when one is asked for. False when nothing
+    // was posted, which leaves both alone.
+    bool Join(std::vector<uint8_t>& pixels, View* view = nullptr)
     {
         std::unique_lock lock(m_mutex);
         if (!m_posted) return false;
         m_idle.wait(lock, [this] { return !m_busy; });
         pixels = std::move(m_pixels); m_pixels.clear(); m_posted = false;
+        if (view) *view = m_view;
         return true;
     }
 
@@ -89,12 +95,12 @@ private:
             // A copy already posted is finished before quitting, so a Join racing the
             // shutdown still gets its bytes rather than blocking forever.
             if (!m_busy) { m_finished = true; return; }
-            const View view = m_view;
+            View view = m_view;
             std::vector<uint8_t> pixels = std::move(m_pixels);
             lock.unlock();
             m_copy(view, pixels);
             lock.lock();
-            m_pixels = std::move(pixels); m_busy = false;
+            m_view = view; m_pixels = std::move(pixels); m_busy = false;
             lock.unlock();
             m_idle.notify_one();
         }

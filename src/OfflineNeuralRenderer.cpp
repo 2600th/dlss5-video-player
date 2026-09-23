@@ -1814,11 +1814,11 @@ NeuralRenderFailure ClassifyRendererFailure(const D3D12Renderer& renderer)
     return renderer.GpuUnusable()?NeuralRenderFailure::DeviceRemoved:NeuralRenderFailure::Neural;
 }
 
-// The readback copy itself. Kept beside the alias so DeferredCaptureWorker
+// The fence wait and the readback copy. Kept beside the alias so DeferredCaptureWorker
 // stays free of D3D12 and its lifecycle can be tested without a device.
 struct D3D12CaptureCopy {
-    void operator()(const D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>& pixels)const{
-        D3D12Renderer::CopyCaptureView(view,pixels);
+    void operator()(D3D12Renderer::CaptureReadbackView& view,std::vector<uint8_t>& pixels)const{
+        D3D12Renderer::WaitAndCopyCaptureView(view,pixels);
     }
 };
 using DeferredCapture=DeferredCaptureWorker<D3D12Renderer::CaptureReadbackView,D3D12CaptureCopy>;
@@ -1962,9 +1962,6 @@ struct ProductionEvaluatorAdapter {
     // Set when a readback slot could not be opened. The slot is gone by then, so every
     // later capture would answer for the wrong frame; the drain has to stop instead.
     bool resolveBroken=false;
-    // The identity of the slot the posted copy is reading, handed to the drain that
-    // joins it.
-    FrameIdentity postedId{};
     // Guide generation cost, split out of the submit stage for the stage log.
     // Shared by the synchronous and the pipelined submit paths, which differ
     // only in how the capture is read back.
@@ -2023,7 +2020,9 @@ struct ProductionEvaluatorAdapter {
               <<" + present-slot "
               <<NanosPerFrameMillis(renderer->PresentSlotWaitNanos(),frames)
               <<" = total "<<NanosPerFrameMillis(renderer->FenceWaitNanos(),frames)
-              <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)<<" ms.";
+              <<" ms, Present "<<NanosPerFrameMillis(renderer->PresentNanos(),frames)
+              <<" ms; capture fence wait on the copy worker "
+              <<NanosPerFrameMillis(renderer->CaptureWorkerWaitNanos(),frames)<<" ms, overlapped.";
         return detail.str();
     }
     // Records the capture without waiting for the GPU. The pixels come back later from
@@ -2066,9 +2065,12 @@ struct ProductionEvaluatorAdapter {
         const auto captureStart=SteadyClock::now();
         bool ok;
         if(deferred.Posted()){
-            ok=deferred.Join(pixels);
-            id=postedId;postedId={};
-            renderer->EndResolveOldestCapture();
+            // The view comes back as the worker left it: the identity its slot recorded,
+            // and how the fence wait it ran went.
+            D3D12Renderer::CaptureReadbackView view;
+            const bool joined=deferred.Join(pixels,&view);
+            ok=joined&&renderer->CompleteReservedCapture(view);
+            id=view.id;
         }else{
             // The job's first drain, and the tail flush once the ring has run dry: with
             // nothing posted there is nothing to overlap, so this one is copied inline.
@@ -2087,27 +2089,28 @@ struct ProductionEvaluatorAdapter {
         PostNextResolve(std::move(spare));
         return true;
     }
-    // Reserves the oldest remaining capture's readback slot and starts its copy on the
-    // worker. A slot that cannot be opened has already been retired by the renderer, which
-    // would slide every later frame's pixels one place against the job's deque, so the
-    // failure is latched and the next drain reports it instead.
+    // Reserves the oldest remaining capture's readback slot and starts its wait and copy
+    // on the worker, so the render thread no longer parks on that capture's fence here. A
+    // slot that cannot be opened has already been retired by the renderer, which would
+    // slide every later frame's pixels one place against the job's deque, so the failure
+    // is latched and the next drain reports it instead.
     void PostNextResolve(std::vector<uint8_t>&& scratch){
         if(!renderer||!renderer->PendingCaptureCount())return;
         D3D12Renderer::CaptureReadbackView view;
-        if(!renderer->BeginResolveOldestCapture(view)){
+        if(!renderer->ReserveOldestCapture(view)){
             resolveBroken=true;
             lastFailure=ClassifyRendererFailure(*renderer);
             return;
         }
-        postedId=view.id;
         deferred.Post(view,std::move(scratch));
     }
     void DiscardPending(){
         if(!renderer)return;
         // The posted copy holds a slot, so it has to be joined before the ring can drain.
         std::vector<uint8_t> dropped;
-        if(deferred.Join(dropped))renderer->EndResolveOldestCapture();
-        resolveBroken=false;postedId={};
+        D3D12Renderer::CaptureReadbackView view;
+        if(deferred.Join(dropped,&view))renderer->CompleteReservedCapture(view);
+        resolveBroken=false;
         while(renderer->PendingCaptureCount()){
             CapturedVideoFrame discarded;
             if(!renderer->ResolveOldestCapture(discarded))break;

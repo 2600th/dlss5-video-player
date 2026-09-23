@@ -215,6 +215,15 @@ public:
         // queued. It is the only thing that says which frame the bytes are: the job
         // compares it with the frame it queued in that position.
         FrameIdentity id{};
+        // What the copy waits on before it may read `base`. A view from
+        // BeginResolveOldestCapture has already been waited for; one from
+        // ReserveOldestCapture is waited for by WaitAndCopyCaptureView, on whatever
+        // thread runs the copy, which records the outcome in the last two fields for
+        // CompleteReservedCapture to account for on the renderer's thread.
+        ID3D12Fence* fence = nullptr;
+        uint64_t fenceValue = 0;
+        d3d12_renderer_detail::FenceWaitResult waitResult = d3d12_renderer_detail::FenceWaitResult::Completed;
+        uint64_t waitNanos = 0;
     };
 
     // Asynchronous capture. EnqueueEvaluatedFrameCapture records the cache draw and the
@@ -239,6 +248,16 @@ public:
     // then not call End. Only CopyCaptureView is safe to run off the renderer's thread.
     bool BeginResolveOldestCapture(CaptureReadbackView& view);
     void EndResolveOldestCapture();
+    // BeginResolveOldestCapture without the fence wait, so the wait can leave the
+    // renderer's thread along with the copy. The slot is reserved exactly as Begin
+    // reserves it, and retired by Reserve itself when it fails. WaitAndCopyCaptureView
+    // then waits and copies on any thread, touching no renderer state, and
+    // CompleteReservedCapture - called on the renderer's thread for every successful
+    // reservation, whatever the wait did - accounts for the wait, latches a device the
+    // wait found lost, and retires the slot.
+    bool ReserveOldestCapture(CaptureReadbackView& view);
+    static bool WaitAndCopyCaptureView(CaptureReadbackView& view, std::vector<uint8_t>& pixels);
+    bool CompleteReservedCapture(const CaptureReadbackView& view);
     // Unpacks a view into tightly packed BGRA. Touches no renderer state, so it may run
     // on any thread while the renderer keeps working, and it fans out on its own worker
     // pool rather than the default one for that reason.
@@ -310,6 +329,10 @@ public:
     uint64_t CaptureResolveWaitNanos() const { return m_captureResolveWaitNanos; }
     uint64_t PresentSlotWaitNanos() const { return m_presentSlotWaitNanos; }
     uint64_t PresentNanos() const { return m_presentNanos; }
+    // Fence waits a copy worker ran for reserved captures (CompleteReservedCapture). Not
+    // part of FenceWaitNanos: the renderer's thread was working while they ran, and only
+    // the Join that outlasted them shows up in the caller's own resolve stage.
+    uint64_t CaptureWorkerWaitNanos() const { return m_captureWorkerWaitNanos; }
     // Zeroed at the start of each export attempt so a libx264 retry after an NVENC
     // failure is measured on its own, not on the sum of both passes.
     void ResetStageCounters() {
@@ -319,6 +342,7 @@ public:
         m_captureResolveWaitNanos = 0;
         m_presentSlotWaitNanos = 0;
         m_presentNanos = 0;
+        m_captureWorkerWaitNanos = 0;
     }
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
@@ -544,6 +568,7 @@ private:
     uint64_t m_captureSubmitSlotWaitNanos = 0;
     uint64_t m_captureResolveWaitNanos = 0;
     uint64_t m_presentSlotWaitNanos = 0;
+    uint64_t m_captureWorkerWaitNanos = 0;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;

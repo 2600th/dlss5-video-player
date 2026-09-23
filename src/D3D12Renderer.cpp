@@ -1420,6 +1420,14 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
 }
 
 bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
+    if(!ReserveOldestCapture(view))return false;
+    if(!WaitForFenceValue(view.fenceValue, &m_captureResolveWaitNanos)){
+        EndResolveOldestCapture();view=CaptureReadbackView{};return false;
+    }
+    return true;
+}
+
+bool D3D12Renderer::ReserveOldestCapture(CaptureReadbackView&view){
     view=CaptureReadbackView{};
     if(!m_captureOutput)return false;
     if(!m_capturePending)return false;
@@ -1430,11 +1438,9 @@ bool D3D12Renderer::BeginResolveOldestCapture(CaptureReadbackView&view){
     if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
         EndResolveOldestCapture();return false;
     }
-    if(!WaitForFenceValue(m_captureFence[readbackSlot], &m_captureResolveWaitNanos)){
-        EndResolveOldestCapture();return false;
-    }
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
-    if(!base){EndResolveOldestCapture();return false;}
+    if(!base||!m_fence){EndResolveOldestCapture();return false;}
+    view.fence=m_fence.Get();view.fenceValue=m_captureFence[readbackSlot];
     const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=nv12?m_lumaFootprint:m_cacheFootprint;
     view.base=base+plane.Offset;
     view.rowPitch=size_t(plane.Footprint.RowPitch);
@@ -1453,6 +1459,55 @@ void D3D12Renderer::EndResolveOldestCapture(){
     if(!m_capturePending)return;
     m_captureRead=(m_captureRead+1u)%CaptureSlots;
     --m_capturePending;
+}
+
+namespace {
+// The fence event a copy thread waits on. The renderer's own event belongs to the
+// renderer's thread: two threads registering one auto-reset event would each be able
+// to consume the wake-up meant for the other.
+struct CaptureWaitEvent {
+    HANDLE handle=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    ~CaptureWaitEvent(){if(handle)CloseHandle(handle);}
+    CaptureWaitEvent()=default;
+    CaptureWaitEvent(const CaptureWaitEvent&)=delete;
+    CaptureWaitEvent& operator=(const CaptureWaitEvent&)=delete;
+};
+}
+
+// static
+bool D3D12Renderer::WaitAndCopyCaptureView(CaptureReadbackView&view,std::vector<uint8_t>&pixels){
+    using d3d12_renderer_detail::FenceWaitResult;
+    view.waitResult=FenceWaitResult::Completed;view.waitNanos=0;
+    if(view.fence&&view.fenceValue){
+        thread_local CaptureWaitEvent event;
+        if(!event.handle){view.waitResult=FenceWaitResult::EventRegistrationFailed;pixels.clear();return false;}
+        // ID3D12Fence is free-threaded, so this wait needs nothing from the renderer
+        // while its thread keeps signalling the same fence for the frames behind this one.
+        const auto waited=std::chrono::steady_clock::now();
+        view.waitResult=d3d12_renderer_detail::WaitForGPUFenceCompletion(
+            view.fenceValue,
+            GetTickCount64(),
+            d3d12_renderer_detail::RenderFenceWaitMilliseconds,
+            [&]{return view.fence->GetCompletedValue();},
+            [&](uint64_t v){return view.fence->SetEventOnCompletion(v,event.handle);},
+            [&](DWORD timeout){return WaitForSingleObject(event.handle,timeout);});
+        view.waitNanos=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now()-waited).count());
+        if(view.waitResult!=FenceWaitResult::Completed){pixels.clear();return false;}
+    }
+    CopyCaptureView(view,pixels);
+    return true;
+}
+
+bool D3D12Renderer::CompleteReservedCapture(const CaptureReadbackView&view){
+    m_captureWorkerWaitNanos+=view.waitNanos;
+    EndResolveOldestCapture();
+    if(view.waitResult==d3d12_renderer_detail::FenceWaitResult::Completed)return true;
+    // The same verdict WaitForFenceValue reaches, reached here because only this
+    // thread may read the device's removal reason and latch the renderer.
+    const HRESULT reason=DeviceRemovedReason();
+    LatchGpuUnusable(d3d12_renderer_detail::ClassifyFenceWaitFailure(view.waitResult,[=]{return reason;}),reason);
+    return false;
 }
 
 // static
