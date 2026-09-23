@@ -24,6 +24,9 @@ namespace {
 constexpr size_t kMaximumInputCharacters = 2048;
 constexpr size_t kMaximumOutputBytes = 16 * 1024;
 constexpr size_t kMaximumCapturedBytes = 64 * 1024;
+// How much of yt-dlp's stderr is kept for the log. The rest is still read, so
+// a chatty helper never blocks on a full pipe, but only counted.
+constexpr size_t kMaximumStderrBytes = 4 * 1024;
 constexpr double kMaximumDurationSeconds = 30.0 * 24.0 * 60.0 * 60.0;
 
 class UniqueHandle {
@@ -663,6 +666,27 @@ std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error)
     return L"youtube.error.extraction";
 }
 
+std::string SummarizeResolverStderr(std::string_view captured, size_t totalBytes)
+{
+    std::string summary;
+    summary.reserve(captured.size());
+    bool lineBreak = false;
+    for (const char raw : captured) {
+        const auto character = static_cast<unsigned char>(raw);
+        if (character == '\r' || character == '\n') {
+            lineBreak = !summary.empty();
+            continue;
+        }
+        if (lineBreak) summary += " | ";
+        lineBreak = false;
+        summary.push_back(character >= 0x20 && character < 0x7F ? static_cast<char>(character) : '?');
+    }
+    if (!summary.empty() && totalBytes > captured.size()) {
+        summary += " ... (" + std::to_string(totalBytes - captured.size()) + " more bytes)";
+    }
+    return summary;
+}
+
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
 {
     if (exitCode != 0) {
@@ -1028,13 +1052,25 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     }
     UniqueHandle readPipe(rawReadPipe);
     UniqueHandle writePipe(rawWritePipe);
+    // stderr gets a pipe of its own. It used to share stdout's, and the parser
+    // accepts only the metadata and URL lines, so a single Python warning
+    // turned a good run into "invalid output" - and was never seen.
+    HANDLE rawErrorRead = nullptr;
+    HANDLE rawErrorWrite = nullptr;
+    if (!CreatePipe(&rawErrorRead, &rawErrorWrite, &pipeSecurity, 0)) {
+        return resolver_error(ResolveError::StartFailed,
+                              L"Could not start the YouTube resolver.");
+    }
+    UniqueHandle errorReadPipe(rawErrorRead);
+    UniqueHandle errorWritePipe(rawErrorWrite);
 #ifdef YOUTUBE_RESOLVER_TESTING
     if (failureStage_ == FailureStage::PipeHandlesOwned) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }
 #endif
-    if (!SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0)) {
+    if (!SetHandleInformation(readPipe.get(), HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(errorReadPipe.get(), HANDLE_FLAG_INHERIT, 0)) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }
@@ -1071,10 +1107,10 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     const std::unique_ptr<std::remove_pointer_t<LPPROC_THREAD_ATTRIBUTE_LIST>,
                           decltype(deleteAttributes)>
         attributes(attributeList, deleteAttributes);
-    HANDLE inheritedOutput = writePipe.get();
+    HANDLE inheritedOutputs[] = {writePipe.get(), errorWritePipe.get()};
     if (!UpdateProcThreadAttribute(
             attributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            &inheritedOutput, sizeof(inheritedOutput), nullptr, nullptr)) {
+            inheritedOutputs, sizeof(inheritedOutputs), nullptr, nullptr)) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }
@@ -1098,7 +1134,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.StartupInfo.hStdInput = nullptr;
     startup.StartupInfo.hStdOutput = writePipe.get();
-    startup.StartupInfo.hStdError = writePipe.get();
+    startup.StartupInfo.hStdError = errorWritePipe.get();
     startup.lpAttributeList = attributeList;
     PROCESS_INFORMATION rawProcess{};
     const DWORD creationFlags = CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT |
@@ -1115,6 +1151,7 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
     UniqueHandle process(rawProcess.hProcess);
     UniqueHandle processThread(rawProcess.hThread);
     writePipe.reset();
+    errorWritePipe.reset();
 
     bool assignedToJob = false;
 #ifdef YOUTUBE_RESOLVER_TESTING
@@ -1175,13 +1212,15 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
         const std::scoped_lock stateLock(stateMutex_);
         return cancelRequested_;
     };
-    const auto drainAvailable = [&] {
-#ifdef YOUTUBE_RESOLVER_TESTING
-        if (failureStage_ == FailureStage::PipeRead) return Completion::PipeFailed;
-#endif
+    std::string errors;
+    size_t errorBytes = 0;
+    // Everything waiting in `pipe`, appended to `into` up to `keep` bytes.
+    // Past it, stdout is an overflow; stderr is only counted.
+    const auto drainPipe = [](HANDLE pipe, std::string& into, size_t keep, bool overflowFails,
+                              size_t& total) {
         for (;;) {
             DWORD available = 0;
-            if (!PeekNamedPipe(readPipe.get(), nullptr, 0, nullptr, &available, nullptr)) {
+            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
                 if (GetLastError() == ERROR_BROKEN_PIPE) return Completion::Running;
                 return Completion::PipeFailed;
             }
@@ -1189,16 +1228,31 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
             char buffer[4096];
             const DWORD wanted = std::min<DWORD>(available, sizeof(buffer));
             DWORD received = 0;
-            if (!ReadFile(readPipe.get(), buffer, wanted, &received, nullptr)) {
+            if (!ReadFile(pipe, buffer, wanted, &received, nullptr)) {
                 if (GetLastError() == ERROR_BROKEN_PIPE) return Completion::Running;
                 return Completion::PipeFailed;
             }
             if (received == 0) return Completion::Running;
-            if (output.size() + received > kMaximumCapturedBytes) {
-                return Completion::Overflow;
+            total += received;
+            if (into.size() + received > keep) {
+                if (overflowFails) return Completion::Overflow;
+                into.append(buffer, std::min<size_t>(received, keep - into.size()));
+                continue;
             }
-            output.append(buffer, received);
+            into.append(buffer, received);
         }
+    };
+    const auto drainAvailable = [&] {
+#ifdef YOUTUBE_RESOLVER_TESTING
+        if (failureStage_ == FailureStage::PipeRead) return Completion::PipeFailed;
+#endif
+        size_t outputBytes = 0;
+        const Completion drained =
+            drainPipe(readPipe.get(), output, kMaximumCapturedBytes, true, outputBytes);
+        if (drained != Completion::Running) return drained;
+        // A failure to read the diagnostics is not a failure to resolve.
+        drainPipe(errorReadPipe.get(), errors, kMaximumStderrBytes, false, errorBytes);
+        return Completion::Running;
     };
 
     while (completion == Completion::Running) {
@@ -1238,6 +1292,13 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
         TerminateJobObject(job, ERROR_PROCESS_ABORTED);
         WaitForSingleObject(process.get(), static_cast<DWORD>(shutdownWait_.count()));
     }
+    // One bounded line per resolve, whatever the outcome: a warning on a run
+    // that worked is still worth having the day the next one does not.
+    const std::string stderrSummary = SummarizeResolverStderr(errors, errorBytes);
+    if (!stderrSummary.empty()) LOG("YouTube: yt-dlp stderr: " << stderrSummary);
+#ifdef YOUTUBE_RESOLVER_TESTING
+    lastStderrSummary_ = stderrSummary;
+#endif
 
     if (completion == Completion::Cancelled) {
         return resolver_error(ResolveError::Cancelled,

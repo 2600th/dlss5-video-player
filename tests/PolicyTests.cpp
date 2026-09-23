@@ -80,6 +80,10 @@ struct YouTubeResolverTestAccess {
         settings.failureStage = failureStage;
         return std::unique_ptr<YouTubeResolver>(new YouTubeResolver(std::move(settings)));
     }
+    static const std::string& LastStderrSummary(const YouTubeResolver& resolver)
+    {
+        return resolver.lastStderrSummary_;
+    }
 };
 
 struct VideoDecoderTestAccess {
@@ -6819,6 +6823,37 @@ void youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_
     CHECK(result.detail.empty());
 }
 
+// P1.6: yt-dlp's stderr shared stdout's pipe, and the parser accepts only the
+// metadata and URL lines, so one Python warning turned a good run into
+// "invalid output" - here 2000 of them would also have overrun stdout's cap.
+// stderr now has its own pipe, is drained alongside, and is logged bounded.
+void youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test()
+{
+    ResolverFixture fixture;
+    auto resolver = YouTubeResolverTestAccess::Create(fixture.directory, std::chrono::seconds{10});
+    const ResolveResult result = resolver->Resolve(
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&stderrnoise", {});
+    CHECK(result.ok);
+    CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=noisy"), result.mediaUrl);
+    CHECK_EQ(std::wstring(L"https://r1.googlevideo.com/videoplayback?id=noisy-audio"), result.audioUrl);
+    const std::string& logged = YouTubeResolverTestAccess::LastStderrSummary(*resolver);
+    CHECK(logged.starts_with("WARNING: [youtube] a Python warning, line 0 ??? noise | "
+                             "WARNING: [youtube] a Python warning, line 1 "));
+    CHECK(logged.find(" more bytes)") != std::string::npos);
+    CHECK(logged.size() < 4096 + 4096 / 2 + 64);
+
+    CHECK_EQ(std::string("a | b | c?"), SummarizeResolverStderr("a\r\nb\n\nc\xff\n", 9));
+    CHECK_EQ(std::string("x ... (5 more bytes)"), SummarizeResolverStderr("x", 6));
+    CHECK(SummarizeResolverStderr("\r\n", 2).empty());
+    CHECK(SummarizeResolverStderr({}, 0).empty());
+
+    // A quiet run leaves nothing to log.
+    const ResolveResult quiet = resolver->Resolve(
+        L"https://youtube.com/watch?v=dQw4w9WgXcQ&success", {});
+    CHECK(quiet.ok);
+    CHECK(YouTubeResolverTestAccess::LastStderrSummary(*resolver).empty());
+}
+
 void youtube_resolver_waits_until_both_selected_streams_are_available_test()
 {
     ResolverFixture fixture;
@@ -7321,6 +7356,21 @@ int run_fake_resolver_child(int argc, wchar_t* argv[])
     }
 
     const std::wstring_view url = argv[16];
+    if (url.find(L"stderrnoise") != std::wstring_view::npos) {
+        // What a Python interpreter prints around a run that works: warnings
+        // on stderr, far more of them than stdout's whole cap, with the real
+        // answer on stdout in between.
+        for (int line = 0; line < 2000; ++line) {
+            std::cerr << "WARNING: [youtube] a Python warning, line " << line << " \xE2\x80\x94 noise\r\n";
+            if (line == 1000) {
+                std::cout << "duration=167;live_status=not_live\n"
+                             "https://r1.googlevideo.com/videoplayback?id=noisy\n"
+                             "https://r1.googlevideo.com/videoplayback?id=noisy-audio\n" << std::flush;
+            }
+        }
+        std::cerr << std::flush;
+        return 0;
+    }
     if (url.find(L"availability_") != std::wstring_view::npos) {
         const auto times = url.substr(url.find(L"availability_") + 13);
         const auto separator = times.find(L'_');
@@ -9346,6 +9396,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_source_quality_selectors_pin_exact_rungs_and_cap_auto_at_1440_test),
     TEST_CASE(resolver_metadata_reports_selected_height_video_bitrate_and_age_limit_test),
     TEST_CASE(youtube_resolver_success_uses_beside_app_helpers_and_exact_child_arguments_test),
+    TEST_CASE(youtube_resolver_keeps_stderr_out_of_the_answer_and_logs_it_test),
     TEST_CASE(youtube_resolver_waits_until_both_selected_streams_are_available_test),
     TEST_CASE(youtube_resolver_availability_wait_is_cancellable_and_deadline_bounded_test),
     TEST_CASE(youtube_resolver_waits_for_fractional_stream_availability_test),

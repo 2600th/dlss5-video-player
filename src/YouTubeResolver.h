@@ -59,6 +59,10 @@ std::string StableYouTubeStreamIdentity(std::wstring_view mediaUrl,
                                         std::wstring_view audioUrl);
 std::wstring_view YouTubeResolveErrorMessageKey(ResolveError error);
 ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode);
+// yt-dlp's stderr as one log line: at most the bytes captured (the rest are
+// only counted in `totalBytes`), line breaks folded to " | ", anything outside
+// printable ASCII shown as '?'. Empty when there was nothing.
+std::string SummarizeResolverStderr(std::string_view captured, size_t totalBytes);
 std::wstring_view YouTubeFormatSelector(YouTubeSourceQuality quality);
 #ifdef YOUTUBE_RESOLVER_TESTING
 std::wstring QuoteWindowsArgument(std::wstring_view argument);
@@ -112,6 +116,8 @@ private:
     std::chrono::milliseconds shutdownWait_{std::chrono::seconds{2}};
 #ifdef YOUTUBE_RESOLVER_TESTING
     FailureStage failureStage_{FailureStage::None};
+    // What the last Resolve logged of the helper's stderr.
+    std::string lastStderrSummary_;
 #endif
     std::mutex resolveMutex_;
     std::mutex stateMutex_;
