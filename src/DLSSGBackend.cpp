@@ -220,10 +220,25 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
         << " MultiFrameCountMax=" << capability.multiFrameCountMax
         << " HwSchMode=" << (hwSchMode ? std::to_string(*hwSchMode) : std::string("absent")));
 
+    // A probe whose feature is still held has create work that may not have
+    // retired, and a second create would lose the handle that has to wait
+    // for it.
+    if (m_probeHandle) {
+        m_lastResult = NVSDK_NGX_Result_FAIL_InvalidParameter;
+        capability.createResult = m_lastResult;
+        capability.detail = L"The previous probe's feature has not been released yet.";
+        return capability;
+    }
+    // CreateFeature writes m_handle; the probe's feature is kept apart from
+    // the one Initialize holds, so Evaluate can never run on it.
+    NVSDK_NGX_Handle* const kept = m_handle;
+    m_handle = nullptr;
     m_lastResult = CreateFeature(cmd, width, height, backbufferFormat);
+    m_probeHandle = NVSDK_NGX_FAILED(m_lastResult) ? nullptr : m_handle;
+    m_handle = kept;
     capability.createResult = m_lastResult;
-    if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
-        m_handle = nullptr;
+    if (NVSDK_NGX_FAILED(m_lastResult) || !m_probeHandle) {
+        m_probeHandle = nullptr;
         Append(capability.detail,
                L"CreateFeature(FrameGeneration) refused: " + HexResultTextWide(uint32_t(m_lastResult)));
         if (NVSDK_NGX_FAILED(advertisedRead)) {
@@ -256,21 +271,10 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
         return capability;
     }
 
-    // Released at once: this entry point answers admission and holds nothing.
-    // Initialize is the one that keeps a feature, and it takes a command list
-    // whose submission the caller commits to; the create here was recorded on
-    // a list this class does not own and cannot flush.
-    const NVSDK_NGX_Result releaseResult = NVSDK_NGX_D3D12_ReleaseFeature(m_handle);
-    m_handle = nullptr;
-    if (NVSDK_NGX_FAILED(releaseResult)) {
-        m_lastResult = releaseResult;
-        capability.createResult = releaseResult;
-        Append(capability.detail, L"CreateFeature(FrameGeneration) succeeded but ReleaseFeature refused: " +
-                                      HexResultTextWide(uint32_t(releaseResult)));
-        LOG("RAW NGX D3D12 ReleaseFeature(FrameGeneration) failed result=" << HexText(releaseResult));
-        return capability;
-    }
-
+    // Not released here. The create was recorded on `cmd`, which the caller
+    // has yet to submit; releasing the feature first - as this used to - freed
+    // it before the GPU ran the work that initializes it. The caller submits,
+    // waits and calls ReleaseProbedFeature (or Shutdown).
     if (!capability.multiFrameCountMax) capability.multiFrameCountMax = 1;
     if (!capability.hagsEnabled) {
         Append(capability.detail, HardwareSchedulingSentence(hwSchMode) +
@@ -280,8 +284,21 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
     m_available = true;
     LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) SUCCESS at " << std::dec << width << "x" << height
         << " format=" << int(backbufferFormat) << " multiFrameCountMax=" << capability.multiFrameCountMax
-        << "; released cleanly");
+        << "; held until the create work on the caller's command list retires");
     return capability;
+}
+
+NVSDK_NGX_Result DLSSGBackend::ReleaseProbedFeature()
+{
+    if (!m_probeHandle) return NVSDK_NGX_Result_Success;
+    const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_ReleaseFeature(m_probeHandle);
+    m_probeHandle = nullptr;
+    if (NVSDK_NGX_FAILED(result)) {
+        m_lastResult = result;
+        if (!m_handle) m_available = false;
+        LOG("RAW NGX D3D12 ReleaseFeature(FrameGeneration) of the probe failed result=" << HexText(result));
+    }
+    return result;
 }
 
 bool DLSSGBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
@@ -522,11 +539,12 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
 
 void DLSSGBackend::Abandon()
 {
-    if (m_handle || m_params || m_sessionLeaseAcquired) {
+    if (m_handle || m_probeHandle || m_params || m_sessionLeaseAcquired) {
         LOG("DLSS-G feature abandoned without release: the GPU never retired the work it was recorded "
             "into, so the feature, its parameters and the NGX session are deliberately leaked.");
     }
     m_handle = nullptr;
+    m_probeHandle = nullptr;
     m_params = nullptr;
     m_sessionLeaseAcquired = false;
     m_sessionKey = nullptr;
@@ -535,6 +553,7 @@ void DLSSGBackend::Abandon()
 
 void DLSSGBackend::Shutdown()
 {
+    ReleaseProbedFeature();
     if (m_handle) {
         NVSDK_NGX_D3D12_ReleaseFeature(m_handle);
         m_handle = nullptr;

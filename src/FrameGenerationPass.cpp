@@ -1045,18 +1045,27 @@ FrameGenerationCapability QueryFrameGenerationCapability() noexcept
         DLSSGBackend backend;
         const DLSSGCapability probed = backend.Probe(gpu.device.Get(), gpu.cmd.Get(), kCapabilityProbeWidth,
                                                      kCapabilityProbeHeight, kBackbufferFormat);
-        // Probe releases the feature but the create work it recorded is still
-        // on this list, so it is submitted and waited out: a create the runtime
-        // accepted but the GPU could not execute has to surface here rather
-        // than be reported as an admission.
+        // The create work Probe recorded is still on this list and references
+        // the feature Probe holds, so it is submitted and waited out before
+        // that feature is released: a create the runtime accepted but the GPU
+        // could not execute has to surface here rather than be reported as an
+        // admission, and a feature released under its own create is a fault.
         const bool flushed = gpu.Flush();
-        if (gpu.stuck) backend.Abandon();
-        else backend.Shutdown();
+        NVSDK_NGX_Result released = NVSDK_NGX_Result_Success;
+        if (gpu.stuck) {
+            backend.Abandon();
+        } else {
+            released = backend.ReleaseProbedFeature();
+            backend.Shutdown();
+        }
 
-        capability.available = probed.available && flushed;
+        capability.available = probed.available && flushed && !NVSDK_NGX_FAILED(released);
         capability.multiFrameCountMax = capability.available ? probed.multiFrameCountMax : 0;
         capability.detail = probed.detail;
-        if (!capability.available) {
+        if (NVSDK_NGX_FAILED(released)) {
+            Append(capability.detail, L"CreateFeature(FrameGeneration) succeeded but ReleaseFeature refused: " +
+                                          HexResultTextWide(uint32_t(released)));
+        } else if (!capability.available) {
             Append(capability.detail,
                    (probed.available ? L"the feature was admitted but the GPU did not retire its create: "
                                      : L"CreateFeature(FrameGeneration) did not admit the feature: ") +

@@ -173,7 +173,8 @@ struct FrameGenerationCapability {
 
 // Creates a throwaway D3D12 device on the same adapter the pass would convert
 // on, runs DLSSGBackend::Probe at 1920x1080 B8G8R8A8_UNORM - which creates the
-// feature, reads the cap and releases it again - and tears everything down.
+// feature and reads the cap - then submits and retires the create before it
+// releases the feature, and tears everything down.
 // Safe on a worker thread and never throws: any failure returns available=false
 // with the hex NVSDK_NGX_Result in detail. The answer cannot change without a
 // driver or GPU change, so a caller is expected to ask once and cache it for

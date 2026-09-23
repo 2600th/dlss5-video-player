@@ -141,6 +141,13 @@ int wmain()
             CloseHandle(done);
         }
     }
+    // Probe holds the feature its create referenced; it is released only once
+    // that work has retired, and forgotten if it never did.
+    // Read first: Abandon forgets the session along with the feature.
+    const bool sessionEstablished = backend.SessionEstablished();
+    NVSDK_NGX_Result released = NVSDK_NGX_Result_Success;
+    if (fence->GetCompletedValue() >= 1) released = backend.ReleaseProbedFeature();
+    else backend.Abandon();
 
     std::cout << "adapter=" << Narrow(adapterDesc.Description) << "\n"
               << "probeGeometry=" << kProbeWidth << "x" << kProbeHeight << " format=" << int(kProbeFormat) << "\n"
@@ -148,6 +155,7 @@ int wmain()
               << "multiFrameCountMax=" << capability.multiFrameCountMax << "\n"
               << "hagsEnabled=" << (capability.hagsEnabled ? "true" : "false") << "\n"
               << "createResult=" << HexResultText(uint32_t(capability.createResult)) << "\n"
+              << "releaseResult=" << HexResultText(uint32_t(released)) << "\n"
               << "detail=" << Narrow(capability.detail) << "\n"
               << "dlssgSnippet=" << LoadedDlssgSnippet() << "\n"
               << "streamlineModules=" << LoadedStreamlineModules() << "\n"
@@ -157,7 +165,7 @@ int wmain()
 
     // NGX never coming up is the one outcome that is not an answer about Frame
     // Generation, so it is the only failure this probe reports.
-    if (!backend.SessionEstablished()) {
+    if (!sessionEstablished) {
         std::cout << "probe=unreachable reason=NGX did not initialize on this device\n";
         return 3;
     }

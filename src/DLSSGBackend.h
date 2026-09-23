@@ -12,7 +12,7 @@
 // machine. Every field is measured: nothing here is inferred from the GPU
 // name, the driver version or the presence of nvngx_dlssg.dll.
 struct DLSSGCapability {
-    bool available = false;          // feature created and released cleanly
+    bool available = false;          // feature created (the caller releases it: ReleaseProbedFeature)
     uint32_t multiFrameCountMax = 0; // generated frames per source pair the runtime admits (1 => 2x)
     bool hagsEnabled = false;        // HwSchMode == 2
     NVSDK_NGX_Result createResult = NVSDK_NGX_Result_Fail;
@@ -29,10 +29,11 @@ struct DLSSGCapability {
 // feature it admits actually produces an intermediate image is a second one:
 // NVSDK_NGX_Result_Success with an untouched output texture is a negative
 // result, not a working feature. So there are two entry points here, in the
-// order the two measurements had to be made. Probe creates the feature,
-// records the NVSDK_NGX_Result and releases it again, answering admission and
-// holding nothing. Initialize creates the same feature and keeps it, so
-// Evaluate can run on it and a caller can read the interpolated frame back.
+// order the two measurements had to be made. Probe creates the feature and
+// records the NVSDK_NGX_Result, answering admission; the caller releases that
+// feature once the create work has retired. Initialize creates the same
+// feature and keeps it, so Evaluate can run on it and a caller can read the
+// interpolated frame back.
 //
 // What Probe measured on 2026-09-17 (RTX 5090, driver 616.64, Windows 11 26200,
 // no Streamline module loaded): the create returns NVSDK_NGX_Result_Success
@@ -69,10 +70,19 @@ class DLSSGBackend {
 public:
     ~DLSSGBackend();
 
-    // Creates the FrameGeneration feature at the given backbuffer geometry and
-    // releases it again. Answers only whether the runtime admits the feature.
+    // Creates the FrameGeneration feature at the given backbuffer geometry to
+    // answer whether the runtime admits it. The create records work on `cmd`
+    // that references the feature, so the feature is NOT released here: it is
+    // held apart from the one Initialize keeps (Evaluate never sees it) until
+    // the caller has submitted `cmd`, waited for it to retire and called
+    // ReleaseProbedFeature - or Shutdown, which releases it too. Releasing it
+    // here, as Probe did, freed the feature before the GPU ran its create.
     DLSSGCapability Probe(ID3D12Device* device, ID3D12GraphicsCommandList* cmd,
                           uint32_t width, uint32_t height, DXGI_FORMAT backbufferFormat);
+    // Releases the feature Probe created and answers with the release's own
+    // result, Success when there is none. Only after the command list Probe
+    // recorded into has retired; for one that never did, Abandon forgets it.
+    NVSDK_NGX_Result ReleaseProbedFeature();
 
     // Geometry and format the feature is created for; backbuffer-resolution inputs.
     // Unlike Probe the feature is kept, so the create work this records on `cmd`
@@ -138,9 +148,9 @@ public:
     // be executing is the one thing worse than leaking them. Logged.
     void Abandon();
 
-    // Whether the runtime admitted the feature: set by a Probe whose create and
-    // release both succeeded, and by an Initialize that is holding a live
-    // feature. False until one of them succeeds and false again after
+    // Whether the runtime admitted the feature: set by a Probe whose create
+    // succeeded (and cleared again if its release is refused), and by an
+    // Initialize that is holding a live feature. False until one of them succeeds and false again after
     // Shutdown, so no caller may read admission out of a call that did not run.
     bool Available() const { return m_available; }
     // True once NGX itself came up on the probe device and handed over a
@@ -160,6 +170,7 @@ private:
     const void* m_sessionKey = nullptr;
     NVSDK_NGX_Parameter* m_params = nullptr;
     NVSDK_NGX_Handle* m_handle = nullptr;
+    NVSDK_NGX_Handle* m_probeHandle = nullptr;  // Probe's, until ReleaseProbedFeature
     uint32_t m_width = 0, m_height = 0;
     DXGI_FORMAT m_backbufferFormat = DXGI_FORMAT_UNKNOWN;
     uint32_t m_multiFrameCountMax = 0;
