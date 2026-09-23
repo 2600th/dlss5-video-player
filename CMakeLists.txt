@@ -171,6 +171,15 @@ if(DLSS_VIDEO_PLAYER_IPO AND NOT DLSS_VIDEO_PLAYER_ASAN AND NOT DLSS_VIDEO_PLAYE
     check_ipo_supported(RESULT DLSS_VIDEO_PLAYER_IPO OUTPUT DLSS_VIDEO_PLAYER_IPO_OUTPUT LANGUAGES CXX)
     if(DLSS_VIDEO_PLAYER_IPO)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        # Full, not incremental, link-time code generation. With whole-program
+        # optimization on and nothing stated, MSBuild links with
+        # /LTCG:INCREMENTAL and keeps a .iobj/.ipdb database between builds.
+        # On 2026-09-23 a stale database made an incremental relink of
+        # PolicyTests produce a binary that failed a decoder test on every run
+        # and passed on every run once the database was deleted, and later
+        # crashed the linker outright (C1001, LNK1000). A shipped binary built
+        # the same way could be just as wrong, so no build here reuses one.
+        add_link_options($<$<CONFIG:Release>:/LTCG>)
     else()
         message(STATUS "Interprocedural optimization is not available: ${DLSS_VIDEO_PLAYER_IPO_OUTPUT}")
     endif()
