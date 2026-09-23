@@ -1,3 +1,4 @@
+#include "CrashDump.h"
 #include "NarrowText.h"
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -1189,6 +1191,59 @@ void a_stored_preflight_verdict_is_whole_or_absent_test()
     std::filesystem::remove_all(root, error);
 }
 
+// P1.12: the handler works from what Install prepared. It builds no path and
+// writes its line straight to the log file rather than through LOG, whose
+// mutex a fault inside Log::Write would still be holding.
+void crash_handler_writes_its_dump_and_line_from_prepared_paths_test()
+{
+    const auto directory = std::filesystem::temp_directory_path() /
+        (L"crash-dump-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    std::filesystem::create_directories(directory, error);
+    const std::filesystem::path logPath = directory / L"NeuralWorker.log";
+    {
+        std::ofstream log(logPath, std::ios::binary);
+        log << "[00:00:00.000] earlier line\n";
+    }
+    crash_dump::detail::Prepare(logPath);
+
+    EXCEPTION_RECORD record{};
+    record.ExceptionCode = EXCEPTION_ACCESS_VIOLATION;
+    record.ExceptionAddress = reinterpret_cast<void*>(uintptr_t{0x1234abcd});
+    CONTEXT context{};
+    RtlCaptureContext(&context);
+    EXCEPTION_POINTERS pointers{&record, &context};
+    CHECK_EQ(LONG{EXCEPTION_EXECUTE_HANDLER}, crash_dump::detail::Handler(&pointers));
+
+    std::vector<std::filesystem::path> dumps;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        if (entry.path().extension() == L".dmp") dumps.push_back(entry.path());
+    }
+    CHECK_EQ(size_t{1}, dumps.size());
+    const std::wstring expectedTail = L"-" + std::to_wstring(GetCurrentProcessId()) + L".dmp";
+    if (dumps.size() == 1) {
+        const std::wstring name = dumps[0].filename().wstring();
+        CHECK(name.starts_with(L"NeuralWorker-crash-"));
+        CHECK(name.ends_with(expectedTail));
+        CHECK(std::filesystem::file_size(dumps[0], error) > 0);
+    }
+    std::ifstream input(logPath, std::ios::binary);
+    const std::string log{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>{}};
+    input.close();
+    CHECK(log.starts_with("[00:00:00.000] earlier line\n["));
+    CHECK(log.find("] Unhandled exception 0xc0000005 at 0x1234abcd; minidump written to ") != std::string::npos);
+    CHECK(log.ends_with(".dmp\n"));
+
+    // A log path too long for the prepared buffers costs the dump, never the
+    // handler: it still returns, and there is nowhere it may write.
+    crash_dump::detail::Prepare(directory / std::wstring(crash_dump::detail::kPathCapacity, L'x'));
+    wchar_t path[crash_dump::detail::kPathCapacity + 64];
+    CHECK(!crash_dump::detail::ComposeDumpPath(path, std::size(path), SYSTEMTIME{}, 1));
+    CHECK_EQ(LONG{EXCEPTION_EXECUTE_HANDLER}, crash_dump::detail::Handler(&pointers));
+    std::filesystem::remove_all(directory, error);
+}
+
 void preflight_latch_holds_one_verdict_per_runtime_identity_test()
 {
     const NeuralPreflightKey key{L"NVIDIA GeForce RTX 3060 Laptop GPU", L"32.0.15.6614", "runtime-digest-a"};
@@ -2260,6 +2315,7 @@ int wmain(int argc, wchar_t** argv)
     identity_encoding_keeps_different_names_different_test();
     a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test();
     a_stored_preflight_verdict_is_whole_or_absent_test();
+    crash_handler_writes_its_dump_and_line_from_prepared_paths_test();
     preflight_latch_holds_one_verdict_per_runtime_identity_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
