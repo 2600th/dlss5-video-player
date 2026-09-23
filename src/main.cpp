@@ -4635,7 +4635,11 @@ private:
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
-    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
+    void SetPaused(bool pause){if(!m_loaded||m_seeking)return;if(pause==!m_playing)return;if(pause){m_currentSec=playback_timing::PausePosition(m_currentSec);m_playing=false;Audio().Pause(true);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(true);}else{if(!m_cachedPlayback&&!NetworkPlayback()&&!m_haveNext&&m_decoder.DurationSeconds()>0){RequestSeek(0,true);return;}m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}InvalidateControls();InvalidatePlaybackProgress();}
+    // Frame steps stop audio rather than respawning it per step. Anything that
+    // started it since (a seek, a scrub) leaves it active, and then a resume
+    // is only a resume.
+    void ResumeAudio(){const bool restart=m_audioStaleAfterStep&&!Audio().Active();m_audioStaleAfterStep=false;if(!restart){Audio().Pause(false);return;}if(Audio().Start(m_path,m_currentSec))Audio().SetVolume(m_muted?0.0f:m_volume);}
     // Space pauses playback during an active session; the render behind it keeps
     // filling the buffer, and only an offline job takes the pause event.
     void TogglePause(){if(NeuralJobActive()&&!JobBehindPlayback()){SetNeuralJobPaused(!NeuralJobPaused());return;}if(m_liveBuffering){m_liveResumePlaying=!m_liveResumePlaying;InvalidateControls();return;}CancelPausedSettingsPreview();SetPaused(m_playing);}
@@ -4655,10 +4659,9 @@ private:
         if(!RenderVideoFrame(frame,frame.discontinuity))return;
         RememberRenderedCachedPair();++m_cachedPresentedFrames;
         m_currentSec=double(frame.timestamp100ns)*1e-7;
-        Audio().Stop();
-        if(Audio().Start(m_path,m_currentSec)){
-            Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(true);
-        }
+        // Restarting here spawned ffmpeg and reopened the endpoint on every
+        // step; audio is restarted once, at the frame playback resumes from.
+        Audio().Stop();m_audioStaleAfterStep=true;
         m_playStartSec=m_currentSec;m_playStart=Clock::now();
         InvalidatePlaybackProgress();UpdateCachedStatus();
     }
@@ -5856,7 +5859,7 @@ private:
         if(!m_liveBuffering)return;
         LOG("Neural buffer filled at "<<m_currentSec<<" s with "<<LiveLeadSeconds()<<" s ahead; resume="<<m_liveResumePlaying);
         m_liveBuffering=false;HideBufferOverlay();
-        if(m_liveResumePlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;Audio().Pause(false);if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
+        if(m_liveResumePlaying){m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=true;ResumeAudio();if(m_cachedPlayback)m_synchronizedPlayback.SetPaused(false);}
         m_liveResumePlaying=false;InvalidateControls();UpdateCachedStatus();
     }
     // Neural settings preview -------------------------------------------------
@@ -7684,6 +7687,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Timeline scrubbing: what playback was doing before the drag, and when the
     // last preview seek went out so a drag cannot queue one per mouse move.
     bool m_dragWasPlaying=false;
+    // Set by a frame step, which stops audio; the next resume restarts it.
+    bool m_audioStaleAfterStep=false;
     Clock::time_point m_lastScrubSeek{};
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
     HMENU m_fullscreenMenu=nullptr;
