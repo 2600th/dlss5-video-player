@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
-| [P0.3](#p03) | WASAPI teardown races the endpoint callbacks | S | Player | ✅ |
 | [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
@@ -140,32 +139,6 @@ nobody can verify what they downloaded.
 **Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
 or the folder name, and checks against the manifest's hashes. Have CI run it
 from an extracted zip with no repository around it. Correct the README command.
-
----
-
-<a id="p03"></a>
-### P0.3 · WASAPI teardown races the endpoint callbacks
-
-`S` · **Player** · ✅ race · 🔍 deadlock
-
-**Where** — `WasapiRenderer.cpp:283-298` (`Close`), `:84-113` (callbacks),
-`:63` (`Detach`), `:126`
-
-`owner_` is a plain pointer. `Detach()` clears it under the renderer's mutex,
-but the callbacks read it without the lock. That is a data race.
-`Close()` also calls `Unregister*Notification` while holding `mutex_`, and
-each callback locks the same mutex. If Unregister waits for callbacks already
-running, the UI thread deadlocks.
-
-**Scenario** — a default-device change fires a burst of notifications (one
-per role, plus a property change). The first sets the lost flag, and
-`ServiceDeviceChanges` tears the renderer down while the rest are still
-running.
-
-**Impact** — Player: a hang or a crash when switching headphones or HDMI.
-
-**Fix** — make `owner_` `std::atomic`, and unregister outside `mutex_`. Keep
-the watcher alive, reference-counted, until Unregister has returned.
 
 ---
 

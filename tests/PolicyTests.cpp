@@ -9488,6 +9488,75 @@ void source_digest_is_computed_once_per_file_and_never_survives_a_change_test()
     CHECK_EQ(std::optional<std::string>("digest-6"), Lookup(entry, L"gone.mkv", 1, 1, compute));
 }
 
+// The endpoint callbacks run on the OS's threads. Their back pointer was a
+// plain pointer cleared under the renderer's mutex and read with no lock, and
+// Close held that mutex across Unregister while every handler takes it - a
+// data race, and a deadlock if Unregister waits for a callback in flight. A
+// default-device change fires a burst of them (one per role, plus a property
+// change) exactly when ServiceDeviceChanges is tearing the renderer down.
+void audio_endpoint_callbacks_never_reach_a_detached_renderer_test()
+{
+    struct Owner {
+        std::atomic<bool> destroyed{false};
+        std::atomic<bool> touchedAfterDestroy{false};
+        std::atomic<uint64_t> calls{0};
+    };
+
+    // A storm of callbacks on several threads while the owner detaches: after
+    // Detach returns nothing may reach the owner, and the owner is treated as
+    // destroyed from that instant.
+    {
+        Owner owner;
+        audio_endpoint::CallbackGate<Owner> gate(&owner);
+        std::atomic<bool> stop{false};
+        std::vector<std::thread> callers;
+        for (int index = 0; index < 4; ++index)
+            callers.emplace_back([&] {
+                while (!stop.load())
+                    gate.Forward([&](Owner& reached) {
+                        if (reached.destroyed.load()) reached.touchedAfterDestroy = true;
+                        ++reached.calls;
+                        std::this_thread::yield();
+                    });
+            });
+        while (owner.calls.load() < 1000) std::this_thread::yield();
+        gate.Detach();
+        owner.destroyed = true;
+        const uint64_t atDetach = owner.calls.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        stop = true;
+        for (auto& caller : callers) caller.join();
+        CHECK(!owner.touchedAfterDestroy.load());
+        CHECK_EQ(atDetach, owner.calls.load());
+    }
+
+    // A callback already inside the owner holds Detach until it leaves: that
+    // is the wait Close relies on before it frees anything.
+    {
+        Owner owner;
+        audio_endpoint::CallbackGate<Owner> gate(&owner);
+        std::atomic<bool> entered{false}, release{false}, detached{false};
+        std::thread callback([&] {
+            gate.Forward([&](Owner&) {
+                entered = true;
+                while (!release.load()) std::this_thread::yield();
+            });
+        });
+        while (!entered.load()) std::this_thread::yield();
+        std::thread closer([&] { gate.Detach(); detached = true; });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK(!detached.load());
+        release = true;
+        callback.join();
+        closer.join();
+        CHECK(detached.load());
+        // And afterwards a late notification is a no-op rather than a call.
+        bool reached = false;
+        gate.Forward([&](Owner&) { reached = true; });
+        CHECK(!reached);
+    }
+}
+
 // Device-change recovery was polled: the renderer only noticed an endpoint
 // had gone when a call to it returned AUDCLNT_E_DEVICE_INVALIDATED. That
 // covers an endpoint that disappears and nothing else. A default-device
@@ -9848,6 +9917,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),
     TEST_CASE(audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test),
+    TEST_CASE(audio_endpoint_callbacks_never_reach_a_detached_renderer_test),
     TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
 };
 

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 
@@ -49,18 +50,19 @@ WasapiRenderer::Format DescribeFormat(const WAVEFORMATEX& wave)
 // question - has the stream this player is on gone away - and splitting them
 // would double the boilerplate for no separation of concern.
 //
-// The back pointer is raw and that is deliberate: the renderer unregisters
-// both callbacks inside Close before any of its own members are torn down, so
-// the watcher can never outlive what it points at. A weak reference would
-// imply the opposite lifetime and hide the ordering requirement.
+// Lifetime: the back pointer sits behind an audio_endpoint::CallbackGate,
+// whose note says why Close detaches it and unregisters without mutex_. The
+// watcher itself is a COM object: the renderer keeps its reference until both
+// Unregister calls have returned, and any reference the OS still holds after
+// that keeps alive an object whose callbacks only ever see a null owner.
 class WasapiRenderer::EndpointWatcher final : public IMMNotificationClient,
                                               public IAudioSessionEvents {
 public:
-    explicit EndpointWatcher(WasapiRenderer* owner) : owner_(owner) {}
+    explicit EndpointWatcher(WasapiRenderer* owner) : gate_(owner) {}
 
-    // Called under the renderer's lock before it releases us, so no
-    // notification in flight can reach a half-torn-down renderer.
-    void Detach() { owner_ = nullptr; }
+    // Called WITHOUT the renderer's lock: a callback in flight may be waiting
+    // for it. Returns once no callback can reach the renderer any more.
+    void Detach() { gate_.Detach(); }
 
     ULONG STDMETHODCALLTYPE AddRef() override { return references_.fetch_add(1) + 1; }
     ULONG STDMETHODCALLTYPE Release() override
@@ -84,32 +86,35 @@ public:
     HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role,
                                                      LPCWSTR deviceId) override
     {
-        if (owner_) owner_->OnDefaultEndpointChanged(flow, role, deviceId);
+        Forward([&](WasapiRenderer& owner) { owner.OnDefaultEndpointChanged(flow, role, deviceId); });
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR deviceId, DWORD newState) override
     {
-        if (owner_) owner_->OnEndpointStateChanged(deviceId, newState);
+        Forward([&](WasapiRenderer& owner) { owner.OnEndpointStateChanged(deviceId, newState); });
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR deviceId, const PROPERTYKEY key) override
     {
         // The one that is routinely forgotten: the engine's mix format
         // changing under a stream that was opened at the old one.
-        if (owner_)
-            owner_->OnEndpointFormatChanged(deviceId, key == kDeviceFormatKey);
+        Forward([&](WasapiRenderer& owner) {
+            owner.OnEndpointFormatChanged(deviceId, key == kDeviceFormatKey);
+        });
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR deviceId) override
     {
-        if (owner_) owner_->OnEndpointStateChanged(deviceId, DEVICE_STATE_NOTPRESENT);
+        Forward([&](WasapiRenderer& owner) {
+            owner.OnEndpointStateChanged(deviceId, DEVICE_STATE_NOTPRESENT);
+        });
         return S_OK;
     }
 
     HRESULT STDMETHODCALLTYPE OnSessionDisconnected(AudioSessionDisconnectReason) override
     {
-        if (owner_) owner_->OnSessionDisconnected();
+        Forward([](WasapiRenderer& owner) { owner.OnSessionDisconnected(); });
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnDisplayNameChanged(LPCWSTR, LPCGUID) override { return S_OK; }
@@ -121,9 +126,12 @@ public:
 
 private:
     ~EndpointWatcher() = default;
+
+    template <typename Handler>
+    void Forward(Handler&& handler) { gate_.Forward(std::forward<Handler>(handler)); }
+
     std::atomic<ULONG> references_{1};
-    // Raw, and cleared by Detach before the renderer tears down.
-    WasapiRenderer* owner_ = nullptr;
+    audio_endpoint::CallbackGate<WasapiRenderer> gate_;
 };
 
 WasapiRenderer::~WasapiRenderer() { Close(); }
@@ -282,20 +290,36 @@ bool WasapiRenderer::Open()
 
 void WasapiRenderer::Close()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
     // Unregister before anything else is released, and detach before that:
     // a notification already in flight must not reach a renderer that is
-    // halfway through tearing itself down.
-    if (watcher_) {
-        watcher_->Detach();
-        if (watchingSession_ && session_) session_->UnregisterAudioSessionNotification(watcher_);
-        if (watchingEndpoints_ && enumerator_)
-            enumerator_->UnregisterEndpointNotificationCallback(watcher_);
-        watchingSession_ = false;
-        watchingEndpoints_ = false;
-        watcher_->Release();
-        watcher_ = nullptr;
+    // halfway through tearing itself down. None of it under mutex_ - every
+    // handler takes mutex_, so holding it here while Detach waits for them,
+    // or while Unregister possibly does, would deadlock against a burst of
+    // notifications (one per role on a default-device change). See the
+    // lifetime note on EndpointWatcher.
+    EndpointWatcher* watcher = nullptr;
+    ComPtr<IAudioSessionControl> session;
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    bool watchingSession = false, watchingEndpoints = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        watcher = std::exchange(watcher_, nullptr);
+        session = session_;
+        enumerator = enumerator_;
+        watchingSession = std::exchange(watchingSession_, false);
+        watchingEndpoints = std::exchange(watchingEndpoints_, false);
     }
+    if (watcher) {
+        watcher->Detach();
+        if (watchingSession && session) session->UnregisterAudioSessionNotification(watcher);
+        if (watchingEndpoints && enumerator) enumerator->UnregisterEndpointNotificationCallback(watcher);
+        // Only now: the watcher had to outlive both Unregister calls.
+        watcher->Release();
+    }
+    session.Reset();
+    enumerator.Reset();
+
+    std::lock_guard<std::mutex> lock(mutex_);
     session_.Reset();
     if (client_ && started_) client_->Stop();
     started_ = false;

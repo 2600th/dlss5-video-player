@@ -2,6 +2,7 @@
 
 #include <mmdeviceapi.h>
 
+#include <atomic>
 #include <string_view>
 
 // Which endpoint notifications mean "the stream this player is on has gone".
@@ -56,6 +57,50 @@ inline bool FormatChangeAffectsUs(std::wstring_view changedId, std::wstring_view
     if (ourId.empty() || changedId != ourId) return false;
     return isDeviceFormatKey;
 }
+
+// The door between the OS's notification threads and the renderer they
+// report to.
+//
+// The OS calls endpoint notifications on its own threads, at any moment up to
+// and possibly past the Unregister call, and nothing documents that
+// Unregister waits for a callback already running. The back pointer used to
+// be a plain pointer cleared under the renderer's mutex while callbacks read
+// it with no lock at all - a data race - and Close held that mutex across
+// Unregister while every handler takes it, which deadlocks if Unregister does
+// wait.
+//
+// Each call counts itself in `inFlight_` BEFORE reading the owner, and Detach
+// clears the owner and then waits for the count to drain. Both sides are
+// sequentially consistent, so a call either counted itself before Detach
+// looked at the count - and Detach waits for it - or reads the null Detach
+// stored and touches nothing. Once Detach returns, no call can reach the
+// owner, which is what makes it safe to unregister with no lock held and
+// destroy the owner afterwards. Detach must not be called while holding a
+// lock the handlers take, and a handler must never call Detach.
+template <typename Owner>
+class CallbackGate {
+public:
+    explicit CallbackGate(Owner* owner) : owner_(owner) {}
+
+    template <typename Handler>
+    void Forward(Handler&& handler)
+    {
+        inFlight_.fetch_add(1);
+        if (Owner* const owner = owner_.load()) handler(*owner);
+        if (inFlight_.fetch_sub(1) == 1) inFlight_.notify_all();
+    }
+
+    void Detach()
+    {
+        owner_.store(nullptr);
+        for (unsigned running = inFlight_.load(); running; running = inFlight_.load())
+            inFlight_.wait(running);
+    }
+
+private:
+    std::atomic<Owner*> owner_;
+    std::atomic<unsigned> inFlight_{0};
+};
 
 } // namespace audio_endpoint
 
