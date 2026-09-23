@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
-| [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
@@ -189,28 +188,6 @@ that position.
 
 ---
 
-<a id="p010"></a>
-### P0.10 · The swapchain is never resized, so DWM scales bilinearly
-
-`M` · **Player** · ✅
-
-**Where** — `D3D12Renderer.cpp:230-231` (`DXGI_SCALING_STRETCH`, sized to the
-output), no `ResizeBuffers` anywhere in `src/`; `main.cpp:4641`
-
-The backbuffers stay at the video's size, and the compositor stretches them
-to the window. A 4K source in the default 1440×880 window is downscaled about
-2.7× by a bilinear filter and aliases, and fullscreen upscaling is bilinear
-too.
-
-**Impact** — Player: in a product about fine detail, the last scaling step is
-the cheapest filter available. This softens and aliases exactly what the
-comparison is meant to show.
-
-**Fix** — resize the backbuffers to the client area on `WM_SIZE`, then scale
-in `PSPresent` with a proper filter (Catmull-Rom or a Mitchell-type
-downscale). Keep a 1:1 pixel mode for P2.16.
-
----
 ---
 
 # P1 — Next

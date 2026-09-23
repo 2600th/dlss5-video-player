@@ -4433,6 +4433,8 @@ private:
         if(!renderer)return;
         renderer->SetSourceLayout(m_decoder.PixelLayout());
         renderer->SetSourceColor(m_decoder.ColorDescription());
+        // Every renderer the player shows presents at its window's size.
+        renderer->SetPresentFollowsWindow(true);
     }
     void ConfigureRendererSource(){ConfigureRendererSource(m_renderer.get());}
     bool RendererTookSourceLayout(D3D12Renderer* renderer){
@@ -7086,6 +7088,7 @@ private:
         // Y plane rather than failing.
         candidate->renderer->SetSourceLayout(completion.decoder->PixelLayout());
         candidate->renderer->SetSourceColor(completion.decoder->ColorDescription());
+        candidate->renderer->SetPresentFollowsWindow(true);
         if(!candidate->renderer->Initialize(candidate->window,completion.configuration.decodeWidth,completion.configuration.decodeHeight,completion.configuration.outputWidth,completion.configuration.outputHeight,completion.configuration.guideWidth,completion.configuration.guideHeight,quality))return{};
         if(candidate->renderer->ActiveSourceLayout()!=completion.decoder->PixelLayout()){
             LOG("Prepared renderer refused the decoder's "

@@ -195,6 +195,10 @@ struct D3D12RendererTestAccess {
     {
         return D3D12Renderer::CompileSourceNv12(conversion,blob);
     }
+    static bool CompilePresentProgram(const char* entry,Microsoft::WRL::ComPtr<ID3DBlob>& blob)
+    {
+        return D3D12Renderer::CompilePresentProgram(entry,"ps_5_1",blob);
+    }
 
     static void ConfigureWait(D3D12Renderer& renderer,
                               d3d12_renderer_detail::FenceWaitResult result,
@@ -6533,6 +6537,40 @@ void source_nv12_conversion_compiles_a_distinct_program_per_arm_test()
     CHECK(refused==nullptr);
 }
 
+// The last scaling step. The backbuffers follow the player's window and the present
+// pass resamples into them; the offline carrier, and a window that is the output's
+// size, keep the 1:1 PSPresent path the cache capture shares.
+void present_scale_follows_the_window_only_where_it_should_test()
+{
+    using present_scale::Choose;
+    // A 4K output in the default window: scaled, at the window's size.
+    auto target=Choose(true,true,1440,810,3840,2160);
+    CHECK(target.scaled);CHECK_EQ(1440u,target.width);CHECK_EQ(810u,target.height);
+    // The same window at the output's size is PSPresent at 1:1.
+    target=Choose(true,true,3840,2160,3840,2160);
+    CHECK(!target.scaled);CHECK_EQ(3840u,target.width);CHECK_EQ(2160u,target.height);
+    // The offline carrier never follows its hidden window, whatever it measures.
+    target=Choose(false,false,100,100,2560,1440);
+    CHECK(!target.scaled);CHECK_EQ(2560u,target.width);CHECK_EQ(1440u,target.height);
+    // No scaled program, or no backbuffer yet: the output's size.
+    CHECK(!Choose(true,false,1440,810,3840,2160).scaled);
+    CHECK(!Choose(true,true,0,0,3840,2160).scaled);
+    // One tap magnifying, then one per texel of footprint, capped.
+    CHECK_EQ(1u,present_scale::FootprintTaps(0.5f));
+    CHECK_EQ(1u,present_scale::FootprintTaps(1.0f));
+    CHECK_EQ(2u,present_scale::FootprintTaps(2.0f));
+    CHECK_EQ(3u,present_scale::FootprintTaps(3840.0f/1440.0f));
+    CHECK_EQ(8u,present_scale::FootprintTaps(40.0f));
+    // Both presents compile from the one program text, and they are different
+    // programs: the scaled one is not the capture's.
+    Microsoft::WRL::ComPtr<ID3DBlob> plain,scaled;
+    CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSPresent",plain));
+    CHECK(D3D12RendererTestAccess::CompilePresentProgram("PSPresentScaled",scaled));
+    if(plain&&scaled)
+        CHECK(std::string(static_cast<const char*>(plain->GetBufferPointer()),plain->GetBufferSize())!=
+              std::string(static_cast<const char*>(scaled->GetBufferPointer()),scaled->GetBufferSize()));
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -9936,6 +9974,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
+    TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

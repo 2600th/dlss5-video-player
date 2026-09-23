@@ -14,6 +14,7 @@
 #include "FrameIdentity.h"
 #include "NgxSession.h"
 #include "OpticalFlowNvof.h"
+#include "PresentScalePolicy.h"
 
 #include <functional>
 
@@ -277,6 +278,18 @@ public:
     // out whole frames. Selected before Initialize, which creates the swapchain.
     void SetPresentTearing(bool allow) { m_requestedTearing = allow; }
 
+    // The visible player's renderer presents at its window's size: before each frame
+    // and each re-present, a client area that no longer matches the backbuffers
+    // drains the queue and resizes them, and the present pass scales the output
+    // into them itself (PSPresentScaled: bilinear up, area-averaged down). Without
+    // it the backbuffers stayed at the output's size and DWM stretched them with a
+    // bilinear filter. The offline carrier never sets it, so its hidden window,
+    // its presents and its captures are exactly as they were. Selected before
+    // Initialize, which compiles the scaled present only when it is asked for.
+    void SetPresentFollowsWindow(bool follow) { m_followWindow = follow; }
+    uint32_t BackbufferW() const { return m_backbufferW; }
+    uint32_t BackbufferH() const { return m_backbufferH; }
+
     // Coarse accounting for the offline export, which otherwise cannot tell a slow GPU
     // apart from a swapchain that is pacing it. Both counters only ever move on the
     // thread that drives the renderer, so they need no synchronisation.
@@ -334,6 +347,10 @@ public:
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; m_presentStale = true; }
     void SetComparison(const ComparisonSettings& settings) { m_comparison = settings; m_presentStale = true; }
     const ComparisonSettings& GetComparison() const { return m_comparison; }
+    // Compiles one entry point of the presentation program the way CreatePipelines
+    // does, without a device, so a test can check the text on any machine.
+    static bool CompilePresentProgram(const char* entry, const char* target,
+                                      Microsoft::WRL::ComPtr<ID3DBlob>& blob);
     // Source-size BGRA reference (the original member of the current pair). May be
     // called before RenderFrame or PresentCurrent; the copy rides on that submission.
     bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes);
@@ -474,7 +491,14 @@ private:
     bool CaptureEvaluatedFrame(CapturedVideoFrame& capture);
     void RecordReferenceUpload(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     void SetPresentConstants(ID3D12GraphicsCommandList* cmd, const ColorSettings& colors,
-                             const ComparisonSettings& comparison, bool useReference);
+                             const ComparisonSettings& comparison, bool useReference,
+                             uint32_t targetWidth = 0);
+    // What the backbuffer pass draws into: the window-sized backbuffer through the
+    // scaled present, or - when the sizes agree, or the renderer does not follow its
+    // window - the output's size through PSPresent, exactly as before.
+    present_scale::Target CurrentPresentTarget() const;
+    void FollowWindowSize();
+    bool ResizeSwapchain(uint32_t width, uint32_t height);
     void HarvestNeuralTimings();
     void SampleLocalVideoMemory();
     d3d12_renderer_detail::FenceWaitResult DrainForRetirement();
@@ -526,6 +550,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentScaled; // only when m_followWindow
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCacheCapture; // present shader into a BGRA8 target
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureLuma;   // present shader into an R8 Y plane
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureChroma; // ...and a half-size R8G8 UV plane
@@ -608,6 +633,8 @@ private:
     bool m_outputInUAV = true;
     bool m_dlssEnabled = true;
     bool m_requestedTearing = false;
+    bool m_followWindow = false;
+    uint32_t m_backbufferW = 0, m_backbufferH = 0;
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
     bool m_preserveSource = false;

@@ -216,7 +216,16 @@ have a second reader, and it is Python.
 - DLSS output UAV;
 - final presentation/debug pipelines.
 
-Normal playback does not flush the GPU every frame. Fence waits happen only when a frame slot is reused before completion or during operations that require a hard synchronization point such as seek/reinitialization.
+Normal playback does not flush the GPU every frame. Fence waits happen only when a frame slot is reused before completion or during operations that require a hard synchronization point such as seek/reinitialization, or a window resize.
+
+The player's renderer presents at its window's size (`SetPresentFollowsWindow`):
+before each frame and each re-present, a client area that no longer matches
+the backbuffers drains the queue and resizes them, and `PSPresentScaled`
+scales the output into them - bilinear when magnifying, a box average over
+each pixel's footprint when minifying - instead of DWM stretching an
+output-sized backbuffer bilinearly. `PSPresent` is unchanged byte for byte:
+the cache capture runs it, and the offline carrier never follows its hidden
+window, so captures stay at the output's size.
 
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
 dedicated readback resource and emits tightly packed BGRA frames to a bounded
@@ -225,7 +234,8 @@ across the sequence; an add-on-requested feature recreation does not break the
 job's monotonic successful-submission count.
 
 The renderer also holds a source-size reference texture (the original member
-of a synchronized pair) so the presentation shader can show Blend, Split, Wipe
+of a synchronized pair), allocated on the first upload with three upload
+buffers, so the presentation shader can show Blend, Split, Wipe
 and Zoom comparisons instantly without re-rendering; cache capture always
 samples the neural output with identity constants. Timestamp queries around
 the DLSS evaluation and a per-frame local VRAM sample feed the render receipt.

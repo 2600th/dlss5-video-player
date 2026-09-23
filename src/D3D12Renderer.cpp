@@ -256,6 +256,7 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     sd.Flags=d3d12_renderer_detail::SwapchainFlags(m_allowTearing);
     ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
+    m_backbufferW=sd.Width;m_backbufferH=sd.Height;
     if(!HR(m_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&m_fence)),"CreateFence"))return false;
     m_fenceEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);return m_fenceEvent!=nullptr;
 }
@@ -363,6 +364,58 @@ float4 PSPresent(V i):SV_Target{
         // a white shirt or a sky was invisible, which is the one thing this mode
         // exists to show. A white core inside a dark edge always leaves one of
         // the two with contrast against whatever it lands on.
+        if(d<Misc.x*2.5)c=0.0;
+        if(d<Misc.x)c=1.0;
+    }
+    return float4(LinearToSRGB(c),1);
+}
+// The present into a window-sized backbuffer when that is not the output's size.
+// PSPresent above is left character for character as it was: the cache capture runs
+// it, so its bytecode is part of every cached render on disk. This is its copy with
+// the one change that matters once the sizes differ - how T and Ref are read.
+//
+// The backbuffer used to stay at the output's size and DWM stretched it to the window
+// with a bilinear filter: a 4K frame in a 1440-wide window was decimated about 2.7x
+// with no prefilter and aliased, in a player whose whole point is fine detail.
+// Magnification is still one bilinear tap. Minification averages a grid of bilinear
+// taps spread across the pixel's footprint in the texture - a box filter the size of
+// the footprint - so detail is area-averaged instead of skipped. The footprint comes
+// from the derivatives of the zoomed UV, so the zoom needs no second path.
+float3 SampleFootprint(Texture2D tex,float2 uv,float2 footprint,bool srgb){
+    float w,h;tex.GetDimensions(w,h);
+    int2 taps=clamp(int2(ceil(footprint*float2(w,h)-0.01)),1,8);
+    float3 sum=0;
+    for(int y=0;y<taps.y;++y){
+        for(int x=0;x<taps.x;++x){
+            float2 o=((float2(x,y)+0.5)/float2(taps)-0.5)*footprint;
+            float3 t=tex.SampleLevel(S,uv+o,0).rgb;
+            sum+=srgb?SRGBToLinear(t):t;
+        }
+    }
+    return sum/float(taps.x*taps.y);
+}
+float4 PSPresentScaled(V i):SV_Target{
+    float zoom=max(Misc.y,0.01);
+    float2 zc=Compare.zw;
+    float2 zoomed=(i.uv-zc)/zoom+zc;
+    float2 footprint=abs(ddx(zoomed))+abs(ddy(zoomed));
+    float2 uv=saturate(zoomed);
+    float3 c=SampleFootprint(T,uv,footprint,false);
+    int mode=int(Compare.x+0.5);
+    float strength=ColorB.z;
+    if(mode!=0||strength!=1.0){
+        float3 ref=SampleFootprint(Ref,uv,footprint,true);
+        if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
+        if(mode==1)c=ref;
+        else if(mode==2)c=lerp(ref,c,saturate(Compare.y));
+        else if(mode!=0)c=uv.x<Compare.y?ref:c;
+    }
+    c=ApplyVideoAdjustments(c);
+    if(mode==4){
+        // Misc.x is one BACKBUFFER pixel here, so the divider stays a fixed width
+        // on screen whatever the output's size.
+        float screenSplit=(Compare.y-zc.x)*zoom+zc.x;
+        float d=abs(i.uv.x-screenSplit);
         if(d<Misc.x*2.5)c=0.0;
         if(d<Misc.x)c=1.0;
     }
@@ -479,10 +532,12 @@ bool D3D12Renderer::CompileSourceNv12(SourceNv12Conversion conversion,ComPtr<ID3
 
 bool D3D12Renderer::CreatePipelines(){
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
-    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12;
+    ComPtr<ID3DBlob>captureLuma,captureChroma,sourceNv12,presentScaled;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand)||
        !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
+    // Only a renderer that presents to a window it follows ever scales the present.
+    if(m_followWindow&&!C("PSPresentScaled","ps_5_1",presentScaled))return false;
     // Only a renderer that will actually be handed NV12 source frames compiles the
     // conversion, and it compiles exactly the one conversion the source's declared
     // description names. A BGRA source never reaches that draw, so it needs no program
@@ -526,6 +581,10 @@ bool D3D12Renderer::CreatePipelines(){
     // Cache capture runs the same present shader into a BGRA8 target, so the
     // readback rows already carry the caller's byte order and need no CPU swizzle.
     p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCacheCapture)),"Create cache-capture PSO"))return false;
+    if(presentScaled){
+        p.PS={presentScaled->GetBufferPointer(),presentScaled->GetBufferSize()};
+        p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresentScaled)),"Create scaled present PSO"))return false;
+    }
     p.PS={captureLuma->GetBufferPointer(),captureLuma->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
     p.PS={captureChroma->GetBufferPointer(),captureChroma->GetBufferSize()};
@@ -870,6 +929,8 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const FrameIdent
 
 bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,bool motionGuides,float frameTimeMs,const FrameIdentity*identity){
     if(m_gpuUnusable)return false;
+    FollowWindowSize();
+    if(m_gpuUnusable)return false;
     const bool nv12Source=m_sourceLayout==PixelLayout::Nv12;
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
     // Guides exist for the NGX evaluate and the two debug views that draw them.
@@ -1088,9 +1149,12 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // skipped presents past the feature recreate rendered 900/900 "verified" frames with
     // DLAA only (0.46 ms neural GPU time against 5.7 ms), bit-for-bit non-neural.
     {
-        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const present_scale::Target target=CurrentPresentTarget();
+        D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
-        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
+        SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width);
+        ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
         // debug/fallback presentation pass is temporarily made pixel-shader readable.
         ID3D12Resource* debugPixelResource=nullptr;
@@ -1098,8 +1162,8 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         switch(m_debugView){
             case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
             case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-            case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
-            default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
+            case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
+            default:cmd->SetPipelineState(presentPso);if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
         }
         if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         cmd->DrawInstanced(3,1,0,0);
@@ -1117,6 +1181,57 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
     capture.pixels.clear();capture.width=0;capture.height=0;capture.id=guide.id;
     if(!RenderFrame(bgra,bytes,frame,guide,frameTimeMs))return false;
     return CaptureEvaluatedFrame(capture);
+}
+
+present_scale::Target D3D12Renderer::CurrentPresentTarget()const{
+    return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH);
+}
+
+bool D3D12Renderer::CompilePresentProgram(const char*entry,const char*target,ComPtr<ID3DBlob>&blob){
+    ComPtr<ID3DBlob>err;
+    const HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,
+                                D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&err);
+    if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}
+    return true;
+}
+
+void D3D12Renderer::FollowWindowSize(){
+    if(!m_followWindow||!m_hwnd)return;
+    RECT client{};
+    if(!GetClientRect(m_hwnd,&client))return;
+    const LONG width=client.right-client.left,height=client.bottom-client.top;
+    // A minimised or collapsed window keeps the buffers it had.
+    if(width<=0||height<=0)return;
+    ResizeSwapchain(uint32_t(width),uint32_t(height));
+}
+
+bool D3D12Renderer::ResizeSwapchain(uint32_t width,uint32_t height){
+    if(!m_swapchain||!m_device||!m_rtvHeap||!width||!height)return false;
+    if(width==m_backbufferW&&height==m_backbufferH)return true;
+    if(m_gpuUnusable)return false;
+    // ResizeBuffers needs every reference to the old buffers gone, and the frames in
+    // flight draw into them. The only drain on the present path, and only on a resize:
+    // frame pacing never waits here otherwise.
+    if(!WaitGPUForContinuedUse())return false;
+    for(auto& buffer:m_backbuffers)buffer.Reset();
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    m_swapchain->GetDesc1(&desc);
+    const HRESULT hr=m_swapchain->ResizeBuffers(SwapchainBuffers,width,height,DXGI_FORMAT_R8G8B8A8_UNORM,desc.Flags);
+    if(FAILED(hr)){
+        const HRESULT reason=DeviceRemovedReason();
+        if(FAILED(reason))return DeviceHR(hr,"ResizeBuffers");
+        // Not a lost device: the swapchain is as it was, so take its buffers back and
+        // go on presenting at the old size.
+        LOG("ResizeBuffers to "<<width<<"x"<<height<<" failed hr=0x"<<std::hex<<hr<<std::dec<<"; keeping "
+            <<m_backbufferW<<"x"<<m_backbufferH);
+        width=desc.Width;height=desc.Height;
+    }
+    for(uint32_t i=0;i<SwapchainBuffers;++i){
+        if(!DeviceHR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get resized backbuffer"))return false;
+        m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));
+    }
+    m_backbufferW=width;m_backbufferH=height;m_presentStale=true;
+    return SUCCEEDED(hr);
 }
 
 bool D3D12Renderer::CreateReferenceResources(){
@@ -1177,7 +1292,10 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
 // amount|splitX, zoomCenterX, zoomCenterY}, [16..17] Capture.xy = one chroma texel in UV.
 // Also binds the comparison reference at t1. Without an uploaded reference every
 // comparison mode degrades to Neural so the shader never selects the black texture.
-void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference){
+void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const ColorSettings&cs,const ComparisonSettings&cmp,bool useReference,uint32_t targetWidth){
+    // One target pixel in UV, which is what the wipe divider is drawn in. The capture
+    // passes draw at the output's size and pass nothing.
+    const uint32_t dividerWidth=targetWidth?targetWidth:m_outputW;
     const ComparisonMode mode=useReference?cmp.mode:ComparisonMode::Neural;
     const float select=(mode==ComparisonMode::Blend)?cmp.amount:cmp.splitX;
     // The dial composites against the reference, so without one it falls back to exactly
@@ -1186,7 +1304,7 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     const float strength=useReference?std::clamp(cmp.strength,0.0f,2.0f):1.0f;
     const float ratioGuard=std::max(cmp.ratioGuard,1.0f);
     const float params[PresentConstantCount]={
-        0,0,m_outputW?1.0f/float(m_outputW):0.0f,std::max(cmp.zoomScale,0.01f),
+        0,0,dividerWidth?1.0f/float(dividerWidth):0.0f,std::max(cmp.zoomScale,0.01f),
         cs.brightness,cs.contrast,cs.saturation,cs.gamma,
         cs.temperature,cs.tint,strength,ratioGuard,
         float(static_cast<int>(mode)),select,cmp.zoomCenterX,cmp.zoomCenterY,
@@ -1380,6 +1498,8 @@ bool D3D12Renderer::PresentCurrent(){
     // device loss the caller recovers from or nothing a retry per Tick would fix.
     m_presentStale=false;
     if(m_gpuUnusable||!m_swapchain||!m_queue||!m_rootSig)return false;
+    FollowWindowSize();
+    if(m_gpuUnusable)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_presentSlotWaitNanos))return false;
     if(!DeviceHR(m_allocators[slot]->Reset(),"Reset static-present allocator"))return false;
@@ -1391,23 +1511,25 @@ bool D3D12Renderer::PresentCurrent(){
 
     uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    D3D12_VIEWPORT ovp{0,0,float(m_outputW),float(m_outputH),0,1};
-    D3D12_RECT osc{0,0,LONG(m_outputW),LONG(m_outputH)};
+    const present_scale::Target target=CurrentPresentTarget();
+    D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
+    D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};
     cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);
     auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const bool finalView=(m_debugView==DebugView::Final);
-    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference);
+    SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width);
+    ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
 
     ID3D12Resource* debugPixelResource=nullptr;
     D3D12_RESOURCE_STATES debugBefore=GuideReadState;
     switch(m_debugView){
         case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
         case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
-        case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
+        case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
         default:
-            cmd->SetPipelineState(m_psoPresent.Get());
+            cmd->SetPipelineState(presentPso);
             if(m_lastDLSSUsed&&DLSSEnabled())cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));
             else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}
             break;
