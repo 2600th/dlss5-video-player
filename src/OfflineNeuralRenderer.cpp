@@ -133,6 +133,17 @@ struct StageSamples {
         loop.push_back(loopMs);loopDrain.push_back(drainMs);
         loopResidual.push_back(loopMs - readMs - evalMs - drainMs);
     }
+
+    // Nine series of one double per frame. Growing them doubling by doubling
+    // reallocates and copies each about log2(frames) times on the render thread,
+    // a full series at a time, so they are sized once for the frames the attempt
+    // expects to capture.
+    void Reserve(size_t frames)
+    {
+        for (auto* series : {&read, &guide, &render, &write, &eval, &latency, &loop, &loopDrain,
+                             &loopResidual})
+            series->reserve(frames);
+    }
 };
 
 struct AttemptResult {
@@ -1184,6 +1195,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         // evaluated without being captured.
         uint64_t neuralEvaluationsBefore = neuralEvaluations();
         AttemptResult attempt;
+        {
+            // Capped so a nonsense duration cannot reserve gigabytes up front: past
+            // about 4.8 hours at 60 fps the series simply grow as they did before.
+            constexpr uint64_t kReservedFramesCap = uint64_t{1} << 20;
+            const size_t frames = static_cast<size_t>(std::min(totalFrames, kReservedFramesCap));
+            attempt.stages.Reserve(frames);attempt.neuralGpuMs.reserve(frames);
+        }
         // The captured frames, not the source: an upscaling job encodes what
         // came out of Super Resolution.
         EncoderSpec spec{outputWidth, outputHeight, request.fps, kind,
