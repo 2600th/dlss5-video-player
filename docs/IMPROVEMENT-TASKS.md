@@ -72,7 +72,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
-| [P1.12](#p112) | Helper robustness batch | S | Pipeline | 🔍 |
 | [P1.13](#p113) | Parent-side IPC polls at 20 ms | M | Pipeline, Player | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
@@ -547,32 +546,6 @@ runtime.
 
 **Fix** — allowlist the directory's contents (refuse unknown `.addon64` and
 `.dll` files) and fold the directory listing into the runtime digest.
-
----
-
-<a id="p112"></a>
-### P1.12 · Helper robustness batch
-
-`S` · **Pipeline** · 🔍
-
-- **Preflight JSON has no size cap**, but the pipe rejects frames over 64 KiB
-  (`NeuralPreflight.cpp:328-352`, `NeuralWorkerProtocol.h:548`,
-  `NeuralWorker.cpp:206`). A failing probe that logs every frame reaches the
-  player as "malformed metadata". Keep the first and last N observations.
-- **The preflight verdict is written without temp, flush and rename**
-  (`NeuralWorker.cpp:1755-1760`), and loading only searches for `"ok":true`
-  (`:1743`). A truncated file is accepted as a pass. Write it atomically, and
-  parse it on load.
-- **The crash handler allocates and takes the log mutex** (`CrashDump.h:41`,
-  `:68-73`). A fault inside `Log::Write` deadlocks the handler, and the GPU is
-  held until the 120 s watchdog. Build the dump path at install time, and
-  `try_lock` the log.
-- **Frame generation frees GPU resources after a failed wait**
-  (`FrameGenerationPass.cpp:128-131`, `DLSSGBackend.cpp:524-526`). Keep them
-  alive on timeout, or check for device removal first.
-- **The resident path ignores `GetExitCodeProcess`'s return**
-  (`NeuralWorker.cpp:1487`), so a real crash reads as exit 0 and becomes a
-  `Protocol` failure that is never relaunched.
 
 ---
 

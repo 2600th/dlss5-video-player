@@ -620,8 +620,14 @@ LaunchOutcome LaunchHelper(const std::filesystem::path& executable,
     // reported a helper that was still running as "exited with code 259" - a
     // number that reads like a crash, classifies as WorkerCrashed, and hides
     // the real diagnosis. The pump already knows which happened.
-    if (pump.exited) GetExitCodeProcess(started.helper.process, &outcome.exitCode);
-    else outcome.exitCode = 0;
+    if (pump.exited) {
+        // An unreadable code stays the -1 default: nonzero, so a crash.
+        outcome.exitCode = neural_worker_detail::ReadHelperExitCode([&](DWORD* code) {
+            return GetExitCodeProcess(started.helper.process, code) != FALSE;
+        }).value_or(outcome.exitCode);
+    } else {
+        outcome.exitCode = 0;
+    }
     // The old process is signalled and all its handles are closed here. Waiting
     // for full exit releases ReShade.log before the next proxy loads; overlapping
     // helpers otherwise put the real evidence in ReShade.log1.
@@ -1484,9 +1490,13 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
         }
 
         const PumpOutcome pump = Pump(session_->helper, reader, stop, true);
-        DWORD exitCode = 0;
         const bool exited = !session_->Alive();
-        if (exited) GetExitCodeProcess(session_->helper.process, &exitCode);
+        const HANDLE process = session_->helper.process;
+        const std::optional<DWORD> exitCode = exited
+            ? neural_worker_detail::ReadHelperExitCode([&](DWORD* code) {
+                  return GetExitCodeProcess(process, code) != FALSE;
+              })
+            : std::optional<DWORD>(0);
         if (pump.malformed) {
             // Nothing this helper says afterwards can be trusted either.
             session_->Drop();
@@ -1525,10 +1535,13 @@ NeuralRenderResult ResidentNeuralHelper::RunAttempt(const std::filesystem::path&
             result.detail = L"Neural rendering was cancelled.";
             return finish(std::move(result));
         }
-        if (exited && exitCode != 0) {
+        if (exited && exitCode != DWORD{0}) {
             result.failure = NeuralRenderFailure::WorkerCrashed;
-            result.detail = L"The isolated neural helper exited with code " + std::to_wstring(exitCode) +
-                            L" before producing a result.";
+            result.detail = exitCode
+                ? L"The isolated neural helper exited with code " + std::to_wstring(*exitCode) +
+                      L" before producing a result."
+                : std::wstring(L"The isolated neural helper exited before producing a result, and its exit "
+                               L"code could not be read.");
             return finish(std::move(result));
         }
         // An exit code of zero with no result is the helper walking away from a

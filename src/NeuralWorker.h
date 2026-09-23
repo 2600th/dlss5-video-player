@@ -260,6 +260,20 @@ namespace neural_worker_detail {
 // Only its hook-free parent may launch the replacement, at most once.
 inline constexpr unsigned long kConfigurationChangedExitCode = 75;
 
+// The exit code of a helper the parent has seen go, or nothing when there is
+// no code to read: `query` is GetExitCodeProcess, which can fail, and which
+// answers STILL_ACTIVE for a process that has not actually gone. Neither is an
+// exit code. The resident path ignored the call's result and kept its 0, so a
+// helper that died that way was judged a clean exit that walked away from its
+// job - a Protocol failure, which is never relaunched - instead of a crash.
+template <class Query>
+std::optional<DWORD> ReadHelperExitCode(Query&& query)
+{
+    DWORD code = 0;
+    if (!query(&code) || code == STILL_ACTIVE) return std::nullopt;
+    return code;
+}
+
 struct WorkerArguments {
     HANDLE metadata{};
     // Parent to helper. Present only in resident mode, where the helper takes

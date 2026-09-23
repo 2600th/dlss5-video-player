@@ -1244,6 +1244,30 @@ void crash_handler_writes_its_dump_and_line_from_prepared_paths_test()
     std::filesystem::remove_all(directory, error);
 }
 
+// P1.12: a helper whose exit code cannot be read is not a clean exit. The
+// resident path kept its 0 when GetExitCodeProcess failed, which judged a
+// crash a Protocol failure - and those are never relaunched.
+void an_unreadable_helper_exit_code_is_not_a_clean_exit_test()
+{
+    using neural_worker_detail::ReadHelperExitCode;
+    CHECK(!ReadHelperExitCode([](DWORD* code) { *code = 0; return false; }).has_value());
+    CHECK(!ReadHelperExitCode([](DWORD* code) { *code = STILL_ACTIVE; return true; }).has_value());
+    CHECK(ReadHelperExitCode([](DWORD* code) { *code = 0; return true; }) == DWORD{0});
+    CHECK(ReadHelperExitCode([](DWORD* code) { *code = 5; return true; }) == DWORD{5});
+
+    // Against a real process that has gone, the code it exited with.
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION child{};
+    std::wstring command = L"\"" + CurrentExecutable().wstring() + L"\" --exit-now";
+    REQUIRE(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                           nullptr, &startup, &child) != FALSE);
+    CloseHandle(child.hThread);
+    CHECK_EQ(DWORD{WAIT_OBJECT_0}, WaitForSingleObject(child.hProcess, 10000));
+    CHECK(ReadHelperExitCode([&](DWORD* code) { return GetExitCodeProcess(child.hProcess, code) != FALSE; }) ==
+          DWORD{0});
+    CloseHandle(child.hProcess);
+}
+
 void preflight_latch_holds_one_verdict_per_runtime_identity_test()
 {
     const NeuralPreflightKey key{L"NVIDIA GeForce RTX 3060 Laptop GPU", L"32.0.15.6614", "runtime-digest-a"};
@@ -2316,6 +2340,7 @@ int wmain(int argc, wchar_t** argv)
     a_preflight_verdict_is_not_shared_by_two_non_ascii_gpu_names_test();
     a_stored_preflight_verdict_is_whole_or_absent_test();
     crash_handler_writes_its_dump_and_line_from_prepared_paths_test();
+    an_unreadable_helper_exit_code_is_not_a_clean_exit_test();
     preflight_latch_holds_one_verdict_per_runtime_identity_test();
     runtime_lease_admits_one_holder_per_directory_test();
     protocol_rejects_inconsistent_results_test();
