@@ -1478,9 +1478,32 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
         return {false, MaterializeError::ProcessFailed, std::move(detail)};
     }
     if (stop.stop_requested()) return cancelled();
+    // Read back off the file before it is published, never inferred from the
+    // arguments - the same rule the frame-generation pass keeps, and for the
+    // same reason: an export that plays silent looks finished.
+    std::wstring note;
+    if (*container == ExportContainer::Matroska || *container == ExportContainer::Mp4) {
+        uint32_t audioKept = 0, subtitlesInSource = 0, subtitlesKept = 0;
+        for (const MediaStreamInfo& stream : sourceStreams) {
+            const bool kept = ExportStreamActionFor(*container, stream.type, stream.codec) != ExportStreamAction::Drop;
+            if (stream.type == "audio" && kept) ++audioKept;
+            if (stream.type == "subtitle") { ++subtitlesInSource; if (kept) ++subtitlesKept; }
+        }
+        const MediaStreamSummary carried = SummarizeMediaStreams(helperDirectory, staging.path, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!carried.ok)
+            return {false, MaterializeError::ProcessFailed, L"The finished export could not be inspected: " + carried.detail};
+        if (carried.audioStreams != audioKept)
+            return {false, MaterializeError::ProcessFailed,
+                L"The export carries " + std::to_wstring(carried.audioStreams) + L" of the source's " +
+                std::to_wstring(audioKept) + L" audio streams, so it would not play the source's sound."};
+        if (subtitlesKept < subtitlesInSource)
+            note = std::to_wstring(subtitlesInSource - subtitlesKept) +
+                   L" subtitle stream(s) this container cannot hold were left out.";
+    }
     if (!MoveFileExW(staging.path.c_str(), resolved.output.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         return {false, MaterializeError::ProcessFailed,
             L"The finished export could not be written to the chosen file. Check that it is not open in another program."};
     staging.path.clear();
-    return {true, MaterializeError::None, {}};
+    return {true, MaterializeError::None, std::move(note)};
 }

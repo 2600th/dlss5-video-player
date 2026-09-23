@@ -717,7 +717,14 @@ offers MKV (the default) and MP4 for a video, GIF (the default), MP4 and MKV
 for an animated GIF, and PNG (the default) or JPEG for a photo; a name typed
 with any other extension gets the selected type's extension added. MKV and MP4
 keep the video exactly as the passes encoded it - only the container changes -
-and an MP4 of HEVC is tagged `hvc1`, which Apple's players need. The dialog
+and an MP4 of HEVC is tagged `hvc1`, which Apple's players need.
+
+Whatever the stages, the file carries the source's audio, subtitles and
+chapters (only the part a range covers). MKV copies them as they are, turning
+MP4 timed text into SubRip. MP4 copies the audio it can hold and encodes the
+rest to AAC, turns text subtitles into MP4 timed text, and leaves out picture
+subtitles and font attachments, which it has no place for. An export whose
+audio did not all arrive is reported as failed rather than written. The dialog
 asks before replacing an existing file, and the replacement happens only once
 the new file is complete.
 
@@ -755,8 +762,8 @@ DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|216
 - `--range` renders part of the source, in the timecode forms **Go to
   timecode** accepts, for example `0:10-0:25` or `f0-f300`. It needs `sr` or
   `nr`: frame generation then converts that pass's result rather than the whole
-  film, and the file has no audio, as an export without frame generation never
-  does.
+  film, and the file carries the source's audio, subtitles and chapters for
+  that range.
 - `--out` names the file to write and replaces an existing one. Its extension
   picks the container, from the ones the dialog offers that source: `.mkv` or
   `.mp4` for a video, also `.gif` for an animated GIF, `.png` or `.jpg` for a

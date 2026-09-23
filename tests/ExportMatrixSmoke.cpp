@@ -24,6 +24,7 @@
 
 #include "FrameGenerationPass.h"
 #include "GpuTestGate.h"
+#include "MediaPipeline.h"
 #include "TestEnvironment.h"
 #include "NeuralWorker.h"
 #include "OfflineNeuralRenderer.h"
@@ -159,13 +160,15 @@ int wmain(int argc, wchar_t** argv)
     }
 
     // testsrc2 rather than a flat pattern: the models are given interior detail
-    // to work on, so a pass-through cannot read as a render.
+    // to work on, so a pass-through cannot read as a render. With a tone,
+    // because the finished export has to carry it whichever stages ran.
     const auto source = root / L"matrix-source.mp4";
     if (!RunFfmpeg(helpers / L"ffmpeg.exe",
                    {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi", L"-i",
                     std::format(L"testsrc2=s={}x{}:r={}:d={}", kSourceWidth, kSourceHeight,
                                 int(kFps), kSeconds),
-                    L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", source.wstring()},
+                    L"-f", L"lavfi", L"-i", std::format(L"sine=frequency=440:duration={}", kSeconds),
+                    L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", L"-c:a", L"aac", source.wstring()},
                    root / L"source-generation.log")) {
         std::wcerr << L"FAIL: could not generate the 720p30 source clip.\n";
         return 2;
@@ -240,7 +243,9 @@ int wmain(int argc, wchar_t** argv)
         std::wcout << label;
         FrameGenerationRequest request{};
         request.source = input;
-        request.streamSource = source;   // the carriers are written video-only
+        // Video only, as the stage export runs it: the last step below
+        // carries the original's streams onto every combination alike.
+        request.carryStreams = false;
         request.output = output;
         request.multiplier = 2;          // the only multiple an Ada card admits
         FrameGenerationPass pass(helpers);
@@ -267,6 +272,27 @@ int wmain(int argc, wchar_t** argv)
     if (upscaleNeural.ok)
         generate(L"[U+N+F] all three, stock order\n", root / L"un.mkv", root / L"unf.mkv",
                  target.width, target.height);
+
+    // --- The last step, on every combination. ------------------------------
+    // Exports without frame generation used to be silent: the worker writes
+    // its carrier video-only and the export moved it into place. The last
+    // step carries the original's audio onto whatever the passes produced, in
+    // the container the name asks for, so audio in must equal audio out for
+    // all seven.
+    const MediaStreamSummary sourceStreams = SummarizeMediaStreams(helpers, source, {});
+    Check(sourceStreams.ok && sourceStreams.audioStreams == 1, L"the source carries one audio stream");
+    for (const wchar_t* stem : {L"n", L"u", L"un", L"f", L"nf", L"uf", L"unf"}) {
+        const fs::path produced = root / (std::wstring(stem) + L".mkv");
+        if (!fs::is_regular_file(produced)) continue;
+        for (const wchar_t* extension : {L".mkv", L".mp4"}) {
+            const fs::path finished = root / (std::wstring(stem) + L"-final" + extension);
+            const MaterializeResult result = MuxStageExport(helpers, {produced, source, finished}, {});
+            if (!result.ok) std::wcerr << L"        mux detail: " << result.detail << L'\n';
+            const MediaStreamSummary carried = SummarizeMediaStreams(helpers, finished, {});
+            Check(result.ok && carried.ok && carried.audioStreams == sourceStreams.audioStreams,
+                  std::wstring(L"[") + stem + L"] " + extension + L" carries the source's audio");
+        }
+    }
 
     std::wcout << L"\n" << (failures ? L"FAILED" : L"OK") << L": " << failures
                << L" failed check(s). Evidence in " << root.wstring() << L'\n';

@@ -555,6 +555,114 @@ void StageExportContainerTests(const std::filesystem::path& helpers)
     CHECK_EQ(before, Files(fixture.path));
 }
 
+// An export without frame generation was silent: the neural worker writes its
+// carrier video-only and the stage export moved that carrier into place. A
+// ranged export was silent even with frame generation, which copied streams
+// from the carrier. The last step now carries the original's audio,
+// subtitles and chapters onto whatever the passes produced, trimmed to the
+// range - audio streams in must equal audio streams out, for every container
+// that holds audio.
+void StageExportCarriesSourceStreamsTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto log = fixture.path / L"tool.log";
+    const auto subtitle = fixture.path / L"captions.srt";
+    const auto metadata = fixture.path / L"chapters.txt";
+    Write(subtitle, "1\n00:00:00,500 --> 00:00:01,500\nFirst\n\n2\n00:00:02,000 --> 00:00:03,500\nSecond\n");
+    Write(metadata, ";FFMETADATA1\ntitle=Source title\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Opening\n");
+    // Two audio streams, PCM (which MP4 cannot hold as it stands) and AAC, each
+    // a tone only inside [1 s, 3 s) so a trim that slips shows as silence at
+    // an edge; two subtitle streams; one chapter.
+    const auto source = fixture.path / L"source.mkv";
+    const std::wstring tone = L"aevalsrc=0.5*sin(440*2*PI*t)*gte(t\\,1)*lt(t\\,3):s=44100:d=4";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"testsrc2=s=64x48:r=5:d=4", L"-f", L"lavfi", L"-i", tone,
+        L"-i", subtitle.wstring(), L"-f", L"ffmetadata", L"-i", metadata.wstring(),
+        L"-map", L"0:v", L"-map", L"1:a", L"-map", L"1:a", L"-map", L"2:s", L"-map", L"2:s",
+        L"-map_metadata", L"3", L"-map_chapters", L"3", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p",
+        L"-c:a:0", L"pcm_s16le", L"-c:a:1", L"aac", L"-c:s", L"srt", source.wstring()}, log));
+    // What the neural worker writes: the picture alone, the whole length or a range.
+    const auto whole = fixture.path / L"carrier-whole.mkv";
+    const auto ranged = fixture.path / L"carrier-range.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=5:d=4", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", whole.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"color=blue:s=64x48:r=5:d=2", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", ranged.wstring()}, log));
+    if (!std::filesystem::exists(source) || !std::filesystem::exists(whole) || !std::filesystem::exists(ranged)) return;
+    const auto sourceStreams = SummarizeMediaStreams(helpers, source, {});
+    CHECK(sourceStreams.ok);
+    CHECK_EQ(uint32_t{2}, sourceStreams.audioStreams);
+    CHECK_EQ(uint32_t{0}, SummarizeMediaStreams(helpers, whole, {}).audioStreams);
+
+    for (const auto* name : {L"whole.mkv", L"whole.mp4"}) {
+        const auto output = fixture.path / name;
+        const auto result = MuxStageExport(helpers, {whole, source, output}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        const auto carried = SummarizeMediaStreams(helpers, output, {});
+        CHECK(carried.ok);
+        CHECK_EQ(sourceStreams.audioStreams, carried.audioStreams);
+        CHECK_EQ(sourceStreams.subtitleStreams, carried.subtitleStreams);
+        const auto info = Probe(helpers, output, log, {L"-show_chapters", L"-show_format"});
+        CHECK_EQ(size_t{1}, Count(info, "[CHAPTER]"));
+        CHECK(info.find("TAG:title=Source title") != std::string::npos);
+    }
+    // MP4 holds no PCM: that stream is encoded to AAC rather than dropped.
+    {
+        const auto codecs = Probe(helpers, fixture.path / L"whole.mp4", log, {L"-select_streams", L"a",
+            L"-show_entries", L"stream=codec_name", L"-of", L"default=noprint_wrappers=1"});
+        CHECK_EQ(size_t{2}, Count(codecs, "codec_name=aac"));
+    }
+
+    // A ranged carrier gets the source's streams for that range, starting
+    // where the video does: the tone fills the exported audio edge to edge.
+    const auto peak = [](std::string_view pcm) {
+        int maximum = 0;
+        for (size_t i = 0; i + 1 < pcm.size(); i += 2)
+            maximum = std::max(maximum, std::abs(static_cast<int16_t>(static_cast<uint8_t>(pcm[i]) | (static_cast<uint8_t>(pcm[i + 1]) << 8))));
+        return maximum;
+    };
+    for (const auto* name : {L"range.mkv", L"range.mp4"}) {
+        const auto output = fixture.path / name;
+        const auto result = MuxStageExport(helpers, {ranged, source, output, 1.0, 2.0}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        CHECK_EQ(sourceStreams.audioStreams, SummarizeMediaStreams(helpers, output, {}).audioStreams);
+        const auto pcm = fixture.path / L"exported.pcm";
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", output.wstring(), L"-map", L"0:a:0",
+            L"-ac", L"1", L"-ar", L"44100", L"-f", L"s16le", pcm.wstring()}, log));
+        const auto samples = Read(pcm);
+        std::filesystem::remove(pcm);
+        constexpr size_t bytesPerSecond = 44100 * 2, window = bytesPerSecond / 10;
+        CHECK(samples.size() > bytesPerSecond * 19 / 10 && samples.size() < bytesPerSecond * 21 / 10);
+        if (samples.size() < 2 * window) continue;
+        CHECK(peak(std::string_view(samples).substr(0, window)) > 8000);
+        CHECK(peak(std::string_view(samples).substr(samples.size() - window)) > 8000);
+    }
+
+    // An MP4 source's timed text, which the cached export refuses to put in
+    // Matroska, becomes SubRip there rather than failing an hour-long export.
+    const auto timedText = fixture.path / L"timed-text.mp4";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-i", source.wstring(),
+        L"-map", L"0:v:0", L"-map", L"0:a:1", L"-map", L"0:s:0", L"-c:v", L"copy", L"-c:a", L"copy",
+        L"-c:s", L"mov_text", timedText.wstring()}, log));
+    const auto converted = fixture.path / L"timed-text.mkv";
+    CHECK(MuxStageExport(helpers, {whole, timedText, converted}, {}).ok);
+    const auto subtitles = Probe(helpers, converted, log, {L"-select_streams", L"s",
+        L"-show_entries", L"stream=codec_name", L"-of", L"default=noprint_wrappers=1"});
+    CHECK_EQ(size_t{1}, Count(subtitles, "codec_name=subrip"));
+    CHECK_EQ(uint32_t{1}, SummarizeMediaStreams(helpers, converted, {}).audioStreams);
+
+    // A source with nothing beside its video still exports.
+    const auto silent = fixture.path / L"silent.mp4";
+    const auto silentResult = MuxStageExport(helpers, {whole, whole, silent}, {});
+    CHECK(silentResult.ok);
+    CHECK_EQ(uint32_t{0}, SummarizeMediaStreams(helpers, silent, {}).audioStreams);
+}
+
 // The argument list for the stage export's last step, without FFmpeg: each
 // source stream is mapped by its own index, and codec options address output
 // indices, which shift whenever a stream is left out.
@@ -1361,6 +1469,7 @@ int wmain(int argc, wchar_t** argv)
     StageExportArgumentTests();
     ExportTests(helpers);
     StageExportContainerTests(helpers);
+    StageExportCarriesSourceStreamsTest(helpers);
     RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
     JoinedFrameCountMatchesDecodedCountTest(helpers);

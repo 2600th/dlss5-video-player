@@ -1068,7 +1068,14 @@ HEVC in MP4, `+faststart`) and encoding GIF, PNG or JPEG exactly as "Save
 converted video" does. It stages beside the output and replaces it only once
 the file is complete. `ExportContainerChoices` is what the dialog and `--render`
 offer for a video, an animation and a photo; the rename it replaced wrote
-Matroska under an `.mp4` name.
+Matroska under an `.mp4` name. The same step carries the original's audio,
+subtitles and chapters, trimmed to a range the way the cached-range export
+trims them, onto every combination: the worker's carrier is video-only, so an
+export without frame generation used to be silent, and frame generation now
+runs with `carryStreams=false` rather than muxing streams the last step would
+discard. `ExportStreamActionFor` decides per stream what each container can
+hold, and the step reads the audio count back off the staged file before it
+publishes it.
 
 The order is fixed and the dialog exposes no way to change it. It is NVIDIA's:
 DLSS 5 neural rendering runs on the fully upscaled frame, and Streamline hands

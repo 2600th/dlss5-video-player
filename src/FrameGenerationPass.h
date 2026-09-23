@@ -56,6 +56,13 @@ struct FrameGenerationRequest {
     // same source: the carrier is admissible only when it covers the whole
     // source, so both files have the same length and the copy needs no retime.
     std::filesystem::path streamSource;
+    // False writes the generated video alone and leaves `streamSource` unread:
+    // for "Export with DLSS stages", whose last step attaches the original's
+    // streams to whatever the passes produced, trimmed to the rendered range
+    // and in the container the user chose (MuxStageExport). Muxing them here
+    // as well was a second copy the last step discarded, and a source whose
+    // subtitles Matroska cannot hold (MP4 timed text) failed the pass.
+    bool carryStreams{true};
     std::filesystem::path output;
     uint32_t multiplier{};        // >= 2; generated frames per source frame is multiplier - 1
     // Default p5; the trade is measured beside EncoderSpec::nvencPreset in

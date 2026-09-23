@@ -1682,11 +1682,9 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
     if(plan.frameGenStage){
         FrameGenerationRequest request{};
         request.source=produced;
-        // Audio, subtitles and chapters come from the original: every carrier
-        // this project writes is video-only. A ranged carrier is shorter than
-        // the original, and the pass copies streams with no retime, so it
-        // takes them from the carrier - which has none - instead.
-        request.streamSource=job.range.Whole()?job.source:produced;
+        // Video only: the last step below attaches the original's streams to
+        // whatever the passes produced, trimmed to the range.
+        request.carryStreams=false;
         request.output=stageTwo;
         request.multiplier=plan.multiplier;
         request.nvencPreset=job.nvencPreset;
@@ -1705,14 +1703,28 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
     // whatever it was, so "clip.mp4" was a Matroska file under an MP4 name;
     // the last step now writes the container the name asks for, keeping the
     // video bitstream as the passes encoded it.
+    //
+    // It is also where the original's audio, subtitles and chapters come in,
+    // for every combination of stages. The neural worker writes its carrier
+    // video-only, so an export without frame generation used to be silent,
+    // and so was one with a range, because frame generation copied streams
+    // from that carrier. Every pass keeps the length of what it read, so the
+    // streams need no retime - only the trim a ranged carrier needs, which
+    // is the cached-range export's.
+    StageExportMuxRequest finish{produced,job.source,job.destination};
+    if(!job.range.Whole()){
+        finish.rangeStartSeconds=double(job.range.start100ns)*1e-7;
+        if(job.range.end100ns>job.range.start100ns)finish.rangeDurationSeconds=double(job.range.end100ns-job.range.start100ns)*1e-7;
+    }
     report({});
-    const MaterializeResult finished=MuxStageExport(job.helpers,{produced,produced,job.destination},stop);
+    const MaterializeResult finished=MuxStageExport(job.helpers,finish,stop);
     sweep();
     if(!finished.ok){
         if(finished.error==MaterializeError::Cancelled)return {StageExportStatus::Cancelled,{}};
         LOG("Stage export could not write "<<WideToUtf8(job.destination.wstring())<<": "<<WideToUtf8(finished.detail));
         return {StageExportStatus::Failed,finished.detail};
     }
+    LOG("Stage export wrote "<<WideToUtf8(job.destination.wstring())<<(finished.detail.empty()?"":" - ")<<WideToUtf8(finished.detail));
     return {StageExportStatus::Done,{}};
 }
 
