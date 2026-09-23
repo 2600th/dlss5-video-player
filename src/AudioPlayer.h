@@ -2,6 +2,7 @@
 #include <windows.h>
 
 #include "AudioClockPolicy.h"
+#include "AudioStderrPolicy.h"
 #include "AudioTrackPolicy.h"
 #include "WasapiRenderer.h"
 #include <vector>
@@ -105,6 +106,12 @@ private:
     struct ReaderState {
         HANDLE process = nullptr;
         HANDLE stdoutPipe = nullptr;
+        // The child's stderr, drained by the reader thread as it goes so the
+        // child can never block on it. Null if the pipe could not be made,
+        // in which case stderr goes to NUL as it always did.
+        HANDLE stderrPipe = nullptr;
+        // Read and written only by the reader thread.
+        audio_stderr::Tail stderrTail;
         HANDLE job = nullptr;
         HANDLE completed = nullptr;
         // Null when the device is disabled by fault injection: the pipe is

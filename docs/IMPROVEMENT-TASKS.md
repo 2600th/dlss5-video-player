@@ -61,7 +61,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
 | [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
-| [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
@@ -302,28 +301,6 @@ memory. The pixels do not change.
 | Closing the window joins the update check, whose WinHTTP stages each wait 8 s | `main.cpp:7430`, `:2357`; `UpdateCheck.cpp:306` | Close the WinHTTP handle from a `std::stop_callback` |
 | Dragging the split while paused converts and re-uploads the whole original on every mouse move | `main.cpp:3051-3055`, `:3019-3023` | Re-upload only when the pair changes |
 | Paused playback re-presents at 60 Hz | `main.cpp:1322-1327` | Present only when something invalidates the frame |
-
----
-
-<a id="p16"></a>
-### P1.6 · Failures that look like success
-
-`S` · **Player, Pipeline** · 🔍 · _includes old 1.5_
-
-- **ffmpeg's stderr goes to NUL** in the decoders and the audio child
-  (`VideoDecoder.cpp:315`, `:792`; `AudioPlayer.cpp:67`, `:232`), so every
-  decode failure goes undiagnosed. Send it to the log, rate-limited.
-- **A decode error mid-file looks like the end of the file.** `ReadNext`
-  returns a bool (`VideoDecoder.cpp:1041`), and `main.cpp:1359`, `:1381` stop
-  playback silently. Use `ReadNextBlocking`'s result and say what failed.
-- **yt-dlp's stderr is merged into stdout** (`YouTubeResolver.cpp:1100`), and
-  the parser at `:761-765` accepts only metadata and URL lines. A single
-  Python warning turns a good run into "invalid output". Give stderr its own
-  pipe.
-- **Seeking with an unknown duration always goes to 0.** `durationSec` stays 0
-  (`VideoDecoder.cpp:506`), and `SeekSeconds` clamps to `[0, 0]` (`:1647`),
-  which hits browser-recorded WebM. Skip the upper clamp and disable the
-  timeline when the duration is unknown.
 
 ---
 
@@ -887,6 +864,9 @@ the natural authoring view for P2.6's masks.
 
 Progressive whole-video coverage is the project's real advantage, yet on
 screen it is a thin teal line (`neural-playback.jpg`).
+
+**Also** — when the duration is unknown (browser-recorded WebM), grey out
+the timeline: seeking itself works since P1.6, but the bar shows nothing.
 
 **Do** — a thicker coverage band with a hatched "rendering now" segment at
 the render head, the time on hover, time-to-full-coverage, and chapter

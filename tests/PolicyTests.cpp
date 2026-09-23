@@ -23,6 +23,7 @@
 #include "CompletionRegistry.h"
 #include "VideoDecoder.h"
 #include "AudioPlayer.h"
+#include "Log.h"
 #include "NetworkMediaTransaction.h"
 #include "D3D12FenceWait.h"
 #include "FrameGenerationPass.h"
@@ -53,6 +54,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -7488,6 +7490,20 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
+    // The audio child failing after flooding stderr: 256 KiB, four times the
+    // pipe, so a parent that did not drain as it went would leave this child
+    // blocked in WriteFile for good. The last line names the input, which is
+    // how the test finds its own line in a shared log.
+    if(all.find(L"audiostderr_")!=std::wstring::npos){
+        const HANDLE error=GetStdHandle(STD_ERROR_HANDLE);
+        std::string flood(1024,'x');flood.back()='\n';
+        for(int block=0;block<256;++block){DWORD written=0;if(!WriteFile(error,flood.data(),DWORD(flood.size()),&written,nullptr))return 5;}
+        std::string last="[fake ffmpeg] decode failed:";
+        for(const wchar_t character:all)last.push_back(character<0x80?static_cast<char>(character):'?');
+        last+="\n";
+        DWORD written=0;WriteFile(error,last.data(),DWORD(last.size()),&written,nullptr);
+        return 3;
+    }
     // Mirrors FrameBytes(layout,w,h): OpenSequential's NV12 request shows up here as
     // `-pix_fmt nv12` on the command line, and the raw frame this fake child writes
     // has to match it exactly or the decoder's frameBytes-sized reads never complete.
@@ -9444,6 +9460,81 @@ void audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test()
     audio->Stop();
 }
 
+// The audio helpers' stderr went to NUL, so a failed decode was a bare exit
+// code in the log - or, mid-stream, just a clock that stopped. The tail is
+// kept, bounded, and logged once when the child ends badly.
+void audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test()
+{
+    using namespace audio_stderr;
+    Tail tail;
+    CHECK(tail.Empty());
+    tail.Append("\r\n  \n", 5);
+    CHECK(tail.Empty());
+    const std::string lines = "first problem\r\nsecond problem\n";
+    tail.Append(lines.data(), lines.size());
+    CHECK(!tail.Empty());
+    CHECK_EQ(std::string("first problem | second problem"), tail.Line());
+
+    // Bounded: a flood keeps its last kTailBytes, and says the start is gone.
+    Tail flood;
+    const std::string block(1000, 'x');
+    for (int index = 0; index < 100; ++index) flood.Append(block.data(), block.size());
+    const std::string end = "\nthe reason it stopped\n";
+    flood.Append(end.data(), end.size());
+    const std::string line = flood.Line();
+    CHECK(line.starts_with("... "));
+    CHECK(line.ends_with(" | the reason it stopped"));
+    CHECK(line.size() <= kTailBytes + 8);
+    // One append larger than the whole tail keeps its end too.
+    Tail single;
+    std::string huge(kTailBytes * 3, 'y');
+    huge += "\nlast words";
+    single.Append(huge.data(), huge.size());
+    CHECK(single.Line().ends_with(" | last words"));
+    // Control bytes are not written raw into the log.
+    Tail control;
+    control.Append("a\x1b[31mb", 7);
+    CHECK_EQ(std::string("a?[31mb"), control.Line());
+
+    CHECK(!ReportOnExit(0));
+    CHECK(!ReportOnExit(STILL_ACTIVE));
+    // A video-only source under `-map 0:a:N?`: a silent film, not a failure.
+    CHECK(!ReportOnExit(DWORD(-22)));
+    CHECK(ReportOnExit(1));
+    CHECK(ReportOnExit(DWORD(-5)));
+}
+
+// End to end: a child that floods stderr is never blocked by it, and what it
+// said last reaches the log once it fails.
+void audio_child_stderr_is_drained_and_logged_when_it_fails_test()
+{
+    MediaFixture fixture;
+    const std::wstring source = L"audiostderr_" + std::to_wstring(GetTickCount64());
+    auto audio = AudioPlayerTestAccess::Create(fixture.directory);
+    CHECK(audio->Start(source, 0.0, AudioStartState::Playing));
+    // The line is written only after the child has exited, and its last words
+    // come after all 256 KiB of flood: finding them proves nothing blocked.
+    // (Counting ffmpeg processes would say the same less reliably, on a
+    // machine where other suites run ffmpeg too.)
+    std::string needle = "Audio: ffmpeg said: ";
+    bool logged = false;
+    std::string sourceText;
+    for (const wchar_t character : source) sourceText.push_back(static_cast<char>(character));
+    for (int attempt = 0; attempt < 250 && !logged; ++attempt) {
+        std::ifstream log(Log::Path(), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+        for (size_t at = text.find(needle); at != std::string::npos && !logged; at = text.find(needle, at + 1)) {
+            const size_t lineEnd = text.find('\n', at);
+            const std::string line = text.substr(at, lineEnd == std::string::npos ? std::string::npos : lineEnd - at);
+            logged = line.find("[fake ffmpeg] decode failed:") != std::string::npos &&
+                     line.find(sourceText) != std::string::npos && line.starts_with(needle + "... ");
+        }
+        if (!logged) Sleep(20);
+    }
+    CHECK(logged);
+    audio->Stop();
+}
+
 // A track list a viewer cannot reach is not a fix. The menu carries the
 // labels, marks which one is playing, and disables itself when there is
 // nothing to choose between.
@@ -10037,6 +10128,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_track_labels_say_what_distinguishes_the_tracks_test),
     TEST_CASE(audio_player_enumerates_tracks_and_never_opens_on_the_commentary_test),
     TEST_CASE(audio_restarts_at_a_paused_seek_rather_than_the_last_clock_reading_test),
+    TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
+    TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
     TEST_CASE(youtube_helper_refusals_each_say_which_one_happened_test),
     TEST_CASE(source_digest_is_computed_once_per_file_and_never_survives_a_change_test),

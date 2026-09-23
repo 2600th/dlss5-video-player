@@ -20,6 +20,7 @@ AudioPlayer::~AudioPlayer() { Stop(); }
 AudioPlayer::ReaderState::~ReaderState()
 {
     if (stdoutPipe && !CloseHandle(stdoutPipe)) LOG("Audio: CloseHandle(stdout) failed winerr=" << GetLastError());
+    if (stderrPipe && !CloseHandle(stderrPipe)) LOG("Audio: CloseHandle(stderr) failed winerr=" << GetLastError());
     if (process && !CloseHandle(process)) LOG("Audio: CloseHandle(process) failed winerr=" << GetLastError());
     if (job && !CloseHandle(job)) LOG("Audio: CloseHandle(job) failed winerr=" << GetLastError());
     renderer.reset();
@@ -44,10 +45,43 @@ std::wstring AudioPlayer::FindTool(const wchar_t* name) const {
 
 namespace {
 
+// A pipe for a helper's stderr: the read end stays here, the write end is
+// inherited. False leaves both null, and the caller sends stderr to NUL.
+bool CreateStderrPipe(SECURITY_ATTRIBUTES& sa, HANDLE& readEnd, HANDLE& writeEnd)
+{
+    readEnd = writeEnd = nullptr;
+    if (!CreatePipe(&readEnd, &writeEnd, &sa, 64 * 1024)) { readEnd = writeEnd = nullptr; return false; }
+    if (!SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(readEnd); CloseHandle(writeEnd); readEnd = writeEnd = nullptr; return false;
+    }
+    return true;
+}
+
+// Reads only what is already in the pipe, so it can never block the caller -
+// which is the reader thread, whose next job is feeding the endpoint.
+void DrainAvailable(HANDLE pipe, audio_stderr::Tail& tail)
+{
+    if (!pipe) return;
+    char buffer[4096];
+    for (int round = 0; round < 64; ++round) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || !available) return;
+        DWORD got = 0;
+        if (!ReadFile(pipe, buffer, std::min<DWORD>(available, DWORD(sizeof(buffer))), &got, nullptr) || !got)
+            return;
+        tail.Append(buffer, got);
+    }
+}
+
 // Runs a helper and returns its standard output. Bounded in both directions:
 // a helper that never exits is killed with its job, and one that floods the
 // pipe is cut off. A track list is a few hundred bytes.
-bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments, std::string& out)
+//
+// Both pipes are polled rather than read blocking: a blocking read of stdout
+// never returned from a helper that hung, and could not be combined with
+// draining stderr, which a helper blocks on once its pipe fills.
+bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments, std::string& out,
+                         audio_stderr::Tail& errors)
 {
     constexpr size_t kOutputLimit = 1u << 20;
     constexpr DWORD kTimeoutMs = 10000;
@@ -62,9 +96,11 @@ bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments,
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+    HANDLE errorRead = nullptr, errorWrite = nullptr;
+    CreateStderrPipe(sa, errorRead, errorWrite);
 
     STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = nul; si.hStdOutput = writePipe; si.hStdError = nul;
+    si.hStdInput = nul; si.hStdOutput = writePipe; si.hStdError = errorWrite ? errorWrite : nul;
     std::wstring command = Q(exe) + L" " + arguments;
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
@@ -82,23 +118,40 @@ bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments,
     const BOOL started = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
                                                CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
+    if (errorWrite) CloseHandle(errorWrite);
     if (nul) CloseHandle(nul);
-    if (!started) { CloseHandle(readPipe); if (job) CloseHandle(job); return false; }
+    if (!started) { CloseHandle(readPipe); if (errorRead) CloseHandle(errorRead); if (job) CloseHandle(job); return false; }
     if (!AssignProcessToJobObject(job, pi.hProcess) || ResumeThread(pi.hThread) == DWORD(-1)) {
         TerminateProcess(pi.hProcess, 1);
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(readPipe); CloseHandle(job);
+        if (errorRead) CloseHandle(errorRead);
         return false;
     }
     CloseHandle(pi.hThread);
 
+    const ULONGLONG deadline = GetTickCount64() + kTimeoutMs;
     char buffer[8192];
-    DWORD got = 0;
-    while (ReadFile(readPipe, buffer, DWORD(sizeof(buffer)), &got, nullptr) && got) {
+    for (;;) {
+        DrainAvailable(errorRead, errors);
+        DWORD available = 0;
+        // Fails once the helper has closed stdout and everything is read.
+        if (!PeekNamedPipe(readPipe, nullptr, 0, nullptr, &available, nullptr)) break;
+        if (!available) {
+            if (GetTickCount64() >= deadline) break;
+            Sleep(1);
+            continue;
+        }
+        DWORD got = 0;
+        if (!ReadFile(readPipe, buffer, std::min<DWORD>(available, DWORD(sizeof(buffer))), &got, nullptr) || !got)
+            break;
         if (out.size() + got > kOutputLimit) break;
         out.append(buffer, got);
     }
     CloseHandle(readPipe);
-    const DWORD waited = WaitForSingleObject(pi.hProcess, kTimeoutMs);
+    const ULONGLONG now = GetTickCount64();
+    const DWORD waited = WaitForSingleObject(pi.hProcess, now < deadline ? DWORD(deadline - now) : 0);
+    DrainAvailable(errorRead, errors);
+    if (errorRead) CloseHandle(errorRead);
     DWORD code = 1;
     if (waited == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -125,12 +178,14 @@ void AudioPlayer::ProbeAudioTracks(const std::wstring& videoPath) {
         inputOptions = L"-tls_verify 1 -protocol_whitelist https,tls,tcp ";
 
     std::string text;
+    audio_stderr::Tail errors;
     if (!CaptureHelperOutput(ffprobe,
             L"-v error -select_streams a "
             L"-show_entries stream=index,codec_name,channels:stream_tags=language,title:"
             L"stream_disposition=default,comment,visual_impaired,descriptions,hearing_impaired "
-            L"-of default=noprint_wrappers=0 " + inputOptions + L"-i " + Q(videoPath), text)) {
+            L"-of default=noprint_wrappers=0 " + inputOptions + L"-i " + Q(videoPath), text, errors)) {
         LOG("Audio: the track list could not be read; playing the first stream.");
+        if (!errors.Empty()) LOG("Audio: ffprobe said: " << errors.Line());
         return;
     }
 
@@ -233,9 +288,12 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
+    HANDLE errorRead = nullptr, errorWrite = nullptr;
+    if (!CreateStderrPipe(sa, errorRead, errorWrite))
+        LOG("Audio: no pipe for ffmpeg's stderr winerr=" << GetLastError() << "; its errors go unrecorded.");
 
     STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = nul; si.hStdOutput = writePipe; si.hStdError = nul;
+    si.hStdInput = nul; si.hStdOutput = writePipe; si.hStdError = errorWrite ? errorWrite : nul;
     std::wostringstream args;
     args << L"-hide_banner -loglevel error -nostdin ";
     if (seekSeconds > 0.0) args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
@@ -265,11 +323,11 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
     const ScopedHardErrorSuppression noHardErrorDialog;
     BOOL ok = job&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED,
                              nullptr, nullptr, &si, &pi);
-    CloseHandle(writePipe); if (nul) CloseHandle(nul);
-    if (!ok) { CloseHandle(readPipe);if(job)CloseHandle(job); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << GetLastError()); return false; }
-    if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
-    if(ResumeThread(pi.hThread)==DWORD(-1)){LOG("Audio: ResumeThread failed winerr="<<GetLastError());if(!TerminateJobObject(job,1))LOG("Audio: failed to terminate suspended job winerr="<<GetLastError());WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);CloseHandle(job);return false;}
-    CloseHandle(pi.hThread);state->process=pi.hProcess;state->stdoutPipe=readPipe;state->job=job;
+    CloseHandle(writePipe); if (errorWrite) CloseHandle(errorWrite); if (nul) CloseHandle(nul);
+    if (!ok) { const DWORD error=GetLastError(); CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);if(job)CloseHandle(job); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << error); return false; }
+    if(!AssignProcessToJobObject(job,pi.hProcess)){if(!TerminateProcess(pi.hProcess,1))LOG("Audio: failed to terminate unassigned child winerr="<<GetLastError());const DWORD waited=WaitForSingleObject(pi.hProcess,500);if(waited!=WAIT_OBJECT_0)LOG("Audio: unassigned child did not exit within bound result="<<waited);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);CloseHandle(job);return false;}
+    if(ResumeThread(pi.hThread)==DWORD(-1)){LOG("Audio: ResumeThread failed winerr="<<GetLastError());if(!TerminateJobObject(job,1))LOG("Audio: failed to terminate suspended job winerr="<<GetLastError());WaitForSingleObject(pi.hProcess,500);CloseHandle(pi.hThread);CloseHandle(pi.hProcess);CloseHandle(readPipe);if(errorRead)CloseHandle(errorRead);CloseHandle(job);return false;}
+    CloseHandle(pi.hThread);state->process=pi.hProcess;state->stdoutPipe=readPipe;state->stderrPipe=errorRead;state->job=job;
     LOG("Audio: FFmpeg PCM path started at " << seekSeconds << " s.");
     return true;
 }
@@ -312,11 +370,13 @@ void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
 {
     try { ThreadMain(state); }
     catch (...) { LOG("Audio: reader thread stopped after an unexpected exception."); }
-    // The child's stderr goes to NUL and its exit code was never read, so a
+    // The child's exit code was never read and its stderr went to NUL, so a
     // failed decode produced no diagnostic at all - and because the position
     // it stopped advancing was still served as the master clock, the symptom
     // was frozen video rather than missing sound. A reader that ends while
-    // nobody asked it to is worth a line whatever the cause.
+    // nobody asked it to is worth a line whatever the cause, and one that
+    // ends badly is worth what ffmpeg said about it.
+    DrainAvailable(state->stderrPipe, state->stderrTail);
     if (!state->stop && state->process) {
         DWORD exitCode = 0;
         if (!GetExitCodeProcess(state->process, &exitCode))
@@ -331,6 +391,8 @@ void AudioPlayer::ReaderThread(std::shared_ptr<ReaderState> state) noexcept
             LOG("Audio: the source has no audio track (ffmpeg mapped no stream); playing silent.");
         else if (exitCode != 0)
             LOG("Audio: ffmpeg exited with code " << exitCode << "; there will be no sound from here.");
+        if (audio_stderr::ReportOnExit(exitCode) && !state->stderrTail.Empty())
+            LOG("Audio: ffmpeg said: " << state->stderrTail.Line());
     }
     if(state->completed&&!SetEvent(state->completed))LOG("Audio: SetEvent(reader completion) failed winerr="<<GetLastError());
 }
@@ -355,6 +417,9 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
     constexpr DWORD kNoDeviceSliceBytes = 16384;
 
     while (!state->stop) {
+        // Every round, paused or not, so a child writing errors can never
+        // fill the pipe and stall on it.
+        DrainAvailable(state->stderrPipe, state->stderrTail);
         uint32_t framesWanted = 0;
         if (renderer) {
             // A paused stream never signals, so the wait times out and the
