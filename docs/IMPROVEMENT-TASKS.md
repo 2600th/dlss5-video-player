@@ -57,7 +57,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
-| [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
@@ -217,30 +216,6 @@ downscale). Keep a 1:1 pixel mode for P2.16.
 # P1 — Next
 
 ## Player: reliability and quality-neutral performance
-
-<a id="p12"></a>
-### P1.2 · Remaining per-frame copies and allocations
-
-`M` · **Player** · 🔍 · _open parts of old 2.1, 2.4, 2.5_
-
-- **Copies 1 and 2** — `main.cpp:2541` `m_next=*visible` (this also runs for
-  pairs the cadence skips) and `:4372` `m_lastPlaybackFrame=f`. Together
-  about 11 MB per pair at 1440p. They are coupled: share `m_next` as
-  `shared_ptr<const VideoFrame>`, then `m_lastPlaybackFrame` can alias it.
-- **Guide allocations** — `GuideFrame g` is still a fresh local at
-  `main.cpp:4324`, a 230 KB allocation per guided frame. The `Generate` scratch
-  vectors `cur`, `fx`, `fy`, `confidence` and `depthGrid` are per-call locals
-  (`TemporalGuides.cpp:546-606`), and `:606` zero-fills a grid it then
-  overwrites. Promote them to members.
-- **Unused reference resources** — `m_reference` plus six upload buffers
-  (`D3D12Renderer.cpp:797-800`) are allocated on every load: 103 MB at 1440p,
-  232 MB at 4K. Allocate them lazily on the first non-neural comparison, and
-  use 3 uploads rather than 6.
-
-**Impact** — Player: headroom at 119.88 fps and 4K, and less VRAM and host
-memory. The pixels do not change.
-
----
 
 ## Pipeline: helper, cache, runtime
 

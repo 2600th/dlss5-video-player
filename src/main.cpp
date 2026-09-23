@@ -1439,9 +1439,10 @@ public:
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
         if(!m_haveNext){if(!NetworkPlayback()){m_playing=false;Audio().Pause(true);}InvalidateControls();InvalidatePlaybackProgress();UpdateCachedStatus();return;}
-        double due=double(m_next.timestamp100ns)*1e-7;
+        const VideoFrame& next=NextFrame();
+        double due=double(next.timestamp100ns)*1e-7;
         if(now+0.001<due) return;
-        if(RenderVideoFrame(m_next,m_next.discontinuity||m_guideReset)) {
+        if(RenderVideoFrame(next,next.discontinuity||m_guideReset)) {
             LeaveSettingsPreviewFrame();
             RememberRenderedCachedPair();
             // Counted for plain playback too: a viewer reporting choppy playback
@@ -1454,7 +1455,7 @@ public:
             if(fpsElapsed>=0.75){m_submitFps=double(m_fpsWindowFrames)/fpsElapsed;m_fpsWindowFrames=0;m_fpsWindowStart=fpsNow;}
         }else if(RecoverUnusableRenderer())return;
         m_currentSec=due; m_guideReset=false; m_dlssReset=false;
-        if(m_cachedPlayback)m_haveNext=false;
+        if(m_cachedPlayback){m_haveNext=false;m_nextPairFrame.reset();}
         else if(NetworkPlayback())ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::AfterRender);
         else if(!readLocal()){m_haveNext=false;m_playing=false;Audio().Pause(true);}
         InvalidatePlaybackProgress();
@@ -2616,8 +2617,8 @@ private:
         const auto read=m_synchronizedPlayback.ReadNextAvailable();
         if(read==SynchronizedReadResult::PairReady){
             m_pairStall={};
-            const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();if(!visible)return false;
-            m_next=*visible;m_haveNext=true;return true;
+            m_nextPairFrame=VisiblePairFrame();if(!m_nextPairFrame)return false;
+            m_haveNext=true;return true;
         }
         // NotReady is a decoder warming up: a segment source is reopened at
         // every boundary and after every seek, and that takes a few frames. It
@@ -2715,7 +2716,7 @@ private:
     // nothing else. That is the honest limit of this lever and the reason
     // re-anchoring exists beside it.
     bool CadenceAdvanceCachedFrame(double now,double frameDur){
-        const double due=double(m_next.timestamp100ns)*1e-7;
+        const double due=double(NextFrame().timestamp100ns)*1e-7;
         // Not due yet is not late; the ordinary wait below handles it.
         if(now+0.001<due)return true;
         const auto decision=playback_cadence::Decide(now-due,frameDur,m_presentStride,m_presentPhase);
@@ -2766,7 +2767,7 @@ private:
             // worth, and RenderVideoFrame already hands DLSS the real timestamp
             // delta. Resetting here would be the documented over-reset failure.
             ++m_droppedFrames;
-            m_currentSec=due;m_haveNext=false;
+            m_currentSec=due;m_haveNext=false;m_nextPairFrame.reset();
             InvalidatePlaybackProgress();
             return false;
         }
@@ -2776,6 +2777,37 @@ private:
         // picture hitched every 1.7 s. The count is cleared by a QUIET
         // interval instead; see ReportPlaybackHealth.
         return true;
+    }
+    // The member of the current pair on screen, sharing the pair rather than
+    // copying the frame out of it.
+    std::shared_ptr<const VideoFrame> VisiblePairFrame()const{
+        auto pair=m_synchronizedPlayback.CurrentPairShared();
+        const VideoFrame* visible=m_synchronizedPlayback.VisibleFrame();
+        if(!pair||!visible)return {};
+        return std::shared_ptr<const VideoFrame>(std::move(pair),visible);
+    }
+    // What Tick presents next: the pair member on a synchronized pair, the
+    // decoder's buffer otherwise.
+    const VideoFrame& NextFrame()const{return m_nextPairFrame?*m_nextPairFrame:m_next;}
+    bool HaveLastPlaybackFrame()const{return m_lastPlaybackFrame&&!m_lastPlaybackFrame->bgra.empty();}
+    // Keeps what was just rendered for a re-render (an upscaling toggle, a
+    // rebuilt renderer). It was a copy on every presented frame, and on a pair
+    // `m_next` had already been copied out of it: two full frames, about 11 MB
+    // per pair at 1440p. A pair member is shared with its pair, the decoder's
+    // buffer is taken by swap - Tick reads the next frame into `m_next` straight
+    // after, handing the decoder the old buffer - and anything else is copied.
+    void RememberPlaybackFrame(const VideoFrame& f){
+        if(m_lastPlaybackFrame.get()==&f)return;
+        if(m_nextPairFrame.get()==&f){m_lastPlaybackFrame=m_nextPairFrame;return;}
+        for(const auto& pair:{m_synchronizedPlayback.CurrentPairShared(),m_lastPair}){
+            if(pair&&&f==&pair->original){m_lastPlaybackFrame=std::shared_ptr<const VideoFrame>(pair,&pair->original);return;}
+            if(pair&&&f==&pair->neural){m_lastPlaybackFrame=std::shared_ptr<const VideoFrame>(pair,&pair->neural);return;}
+        }
+        m_lastPlaybackFrame.reset();
+        if(!m_ownedPlaybackFrame||m_ownedPlaybackFrame.use_count()!=1)m_ownedPlaybackFrame=std::make_shared<VideoFrame>();
+        if(&f==&m_next)std::swap(*m_ownedPlaybackFrame,m_next);
+        else *m_ownedPlaybackFrame=f;
+        m_lastPlaybackFrame=m_ownedPlaybackFrame;
     }
     // Retains the presented pair by reference count. A newly presented pair
     // supersedes a paused settings preview, which is what overwriting
@@ -4200,8 +4232,8 @@ private:
         // a settings preview still settling, or a neural toggle pressed during
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
-        m_lastPlaybackFrame={};m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
-        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
+        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;
+        m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
@@ -4252,7 +4284,7 @@ private:
     }
     bool UpscalingAvailable()const{
         return m_loaded&&m_renderer&&m_renderer->DLSSAvailable()&&
-            !m_lastPlaybackFrame.bgra.empty()&&
+            HaveLastPlaybackFrame()&&
             (UpscalingActive()||UpscalingTarget(m_decoder.Width(),m_decoder.Height(),EffectiveUpscaleHeight()).grows);
     }
     // Why upscaling is not on offer, in the two words a toolbar pill has room
@@ -4265,7 +4297,7 @@ private:
         if(!m_loaded)return L"No video";
         if(!m_renderer)return L"Starting up";
         if(!m_renderer->DLSSAvailable())return L"No DLSS";
-        if(m_lastPlaybackFrame.bgra.empty())return L"No frame yet";
+        if(!HaveLastPlaybackFrame())return L"No frame yet";
         // The remaining clause is a target that would not grow, which is two
         // opposite facts: a source that already fills the output, or a panel
         // with nowhere to put the pixels.
@@ -4299,7 +4331,8 @@ private:
         return L"DLSS Upscaling unavailable (waiting for the first frame)";
     }
     bool EnableUpscaling(uint32_t height){
-        if(!m_loaded||!m_renderer||m_lastPlaybackFrame.bgra.empty())return false;
+        if(!m_loaded||!m_renderer||!HaveLastPlaybackFrame())return false;
+        const std::shared_ptr<const VideoFrame> lastFrame=m_lastPlaybackFrame;const VideoFrame& last=*lastFrame;
         const auto size=UpscalingTarget(m_decoder.Width(),m_decoder.Height(),height);
         if(!size.grows)return false;
         // Pause only the clocks while building a replacement. Decoders, cache,
@@ -4325,11 +4358,11 @@ private:
                 // any even-dimension BT.709-limited source, which is most of
                 // them, so taking the Bgra default here read past the end of
                 // the buffer instead of building guides.
-                if(candidate->guides.Generate(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),m_decoder.Width(),m_decoder.Height(),
+                if(candidate->guides.Generate(last.bgra.data(),last.bgra.size(),m_decoder.Width(),m_decoder.Height(),
                     m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-                    IdentityOf(m_lastPlaybackFrame,m_historyGeneration,0,HistoryReset::FirstFrame),guide,
-                    m_lastPlaybackFrame.layout)){
-                    ready=candidate->renderer->RenderFrame(m_lastPlaybackFrame.bgra.data(),m_lastPlaybackFrame.bgra.size(),
+                    IdentityOf(last,m_historyGeneration,0,HistoryReset::FirstFrame),guide,
+                    last.layout)){
+                    ready=candidate->renderer->RenderFrame(last.bgra.data(),last.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
                         true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
                 }
@@ -4368,7 +4401,7 @@ private:
         if(!ToolbarActionEnabled(ToolbarAction::ToggleUpscaling))return;
         if(UpscalingActive()){
             m_upscalingRequested=false;m_renderer->SetDLSS(false);m_upscalingError.clear();
-            RenderVideoFrame(m_lastPlaybackFrame,true);UpdateCachedStatus();InvalidateControls();
+            if(const auto last=m_lastPlaybackFrame)RenderVideoFrame(*last,true);UpdateCachedStatus();InvalidateControls();
         }else if(!EnableUpscaling(EffectiveUpscaleHeight())){
             MessageBoxW(m_hwnd,L"DLSS upscaling could not start at this output size. Your current video is unchanged. See DLSSVideoPlayer.log for details.",L"DLSS Upscaling",MB_OK|MB_ICONINFORMATION);
         }
@@ -4382,7 +4415,7 @@ private:
         const uint32_t resolved=automatic?AutoUpscaleTargetHeight(MonitorModeCached().height):height;
         if(UpscalingActive()){
             if(UpscalingTarget(m_decoder.Width(),m_decoder.Height(),resolved).grows){if(!EnableUpscaling(resolved))return;}
-            else{m_renderer->SetDLSS(false);RenderVideoFrame(m_lastPlaybackFrame,true);}
+            else{m_renderer->SetDLSS(false);if(const auto last=m_lastPlaybackFrame)RenderVideoFrame(*last,true);}
         }
         m_upscaleAuto=automatic;if(!automatic)m_upscaleTargetHeight=height;
         m_upscalingError.clear();UpdateCachedStatus();InvalidateControls();
@@ -4415,7 +4448,9 @@ private:
     // take whatever the main decoder achieved rather than asking again.
     bool PairPrefersNv12()const{return m_decoder.PixelLayout()==VideoPixelLayout::Nv12;}
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
-        if(!m_renderer)return false; GuideFrame g;
+        // A member, not a local: its grid was a fresh 230 KB allocation on every
+        // guided frame. Generate rewrites every field it reports.
+        if(!m_renderer)return false; GuideFrame& g=m_guideFrame;
         // Translate the legacy reset flags into a named reason: a fresh load is
         // the first frame; a seek/reload reset outranks a decoder discontinuity,
         // which outranks a dropped frame.
@@ -4444,6 +4479,10 @@ private:
             m_historyGeneration=g.id.historyGeneration;
         } else {
             m_guidesSkipped=true;
+            // No guides this frame: what the renderer and the log below read is
+            // the default, as the fresh local was. The grid keeps its capacity.
+            std::vector<float> grid=std::move(g.guideGridRGBA32F);grid.clear();
+            g=GuideFrame{};g.guideGridRGBA32F=std::move(grid);
         }
         m_guideMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-guideStart).count();
         // This path renders without a frame identity, so the renderer never logs
@@ -4458,12 +4497,14 @@ private:
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
         bool r=m_dlssReset||!g.hasHistory;
         if(m_cachedPlayback){if(const auto* pair=m_synchronizedPlayback.CurrentPair())UploadComparisonReference(pair->original);}
+        // Read before RememberPlaybackFrame, which may take `f`'s storage.
+        const int64_t renderedTs=f.timestamp100ns;
         const auto renderStart=Clock::now();
         bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,g.motionVectors,ms);
         m_renderMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
         ++m_renderMsFrames;
         if(ok){
-            m_lastPlaybackFrame=f;
+            RememberPlaybackFrame(f);
             if(m_renderer->DLSSEnabled()&&!m_renderer->LastFrameUsedDLSS()){
                 m_renderer->SetDLSS(false);m_upscalingRequested=false;
                 m_upscalingError=L"SR failed; original scaling restored";
@@ -4471,7 +4512,7 @@ private:
                 InvalidateControls();
             }
         }
-        m_lastRenderedTs=f.timestamp100ns;m_lastGlobalX=g.globalMotionX;m_lastGlobalY=g.globalMotionY;return ok;
+        m_lastRenderedTs=renderedTs;m_lastGlobalX=g.globalMotionX;m_lastGlobalY=g.globalMotionY;return ok;
     }
 
     // The renderer latches itself unusable when a fence wait fails - the
@@ -4532,7 +4573,7 @@ private:
         Layout();ShowWindow(m_renderWnd,SW_SHOW);
         m_renderer->SetDLSS(false);m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetComparison(EffectiveComparison());
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
-        if(!m_lastPlaybackFrame.bgra.empty())RenderVideoFrame(m_lastPlaybackFrame,true);
+        if(HaveLastPlaybackFrame()){const auto last=m_lastPlaybackFrame;RenderVideoFrame(*last,true);}
         m_guideReset=false;m_dlssReset=false;
         RestoreUpscaling();
         m_neuralNotice=T(removed?L"renderer.removed.rebuilt":L"renderer.stalled.rebuilt");
@@ -4618,7 +4659,7 @@ private:
             return false;
         }
         if(m_cachedPlayback){
-            m_haveNext=false;m_next=VideoFrame{};m_synchronizedPlayback.SetPaused(false);
+            m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();m_synchronizedPlayback.SetPaused(false);
             if(!m_synchronizedPlayback.SeekSeconds(sec)||!m_synchronizedPlayback.VisibleFrame()){
                 // A live pair only holds what is rendered. Outside it the
                 // original takes the frame back and the session rebases there.
@@ -4647,7 +4688,7 @@ private:
                 }
                 LOG("Cached seek failed transactionally; invalidating synchronized playback.");Unload();return false;
             }
-            m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const VideoFrame frame=*m_synchronizedPlayback.VisibleFrame();
+            m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;const auto shown=VisiblePairFrame();if(!shown){LOG("Cached seek left no visible frame; invalidating synchronized playback.");Unload();return false;}const VideoFrame& frame=*shown;
             if(!RenderVideoFrame(frame,true)){
                 // Silent until now, and it leaves the frame that was on screen
                 // exactly where it was, with the position it already had: a seek
@@ -4663,7 +4704,7 @@ private:
             if(!m_dragSeek){const bool audioOk=Audio().Start(m_path,m_currentSec);if(audioOk){Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!resumeAfter);}}
             m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter;m_synchronizedPlayback.SetPaused(!resumeAfter);m_guideReset=false;m_dlssReset=false;SetSeeking(false);UpdateCachedStatus();InvalidateControls();InvalidatePlaybackProgress();return true;
         }
-        m_haveNext=false;m_next=VideoFrame{};
+        m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
         auto readAt=[&](double target,VideoFrame& frame)->bool{
             if(!m_decoder.SeekSeconds(target))return false;
             if(m_decoder.ReadNext(frame))return true;
@@ -4700,14 +4741,16 @@ private:
     void StepCachedFrame(){
         if(!m_loaded||!m_cachedPlayback||m_playing||m_seeking)return;
         Audio().Pause(true);
-        VideoFrame frame;
-        if(m_haveNext){frame=std::move(m_next);m_next={};m_haveNext=false;}
+        std::shared_ptr<const VideoFrame> held;
+        if(m_haveNext){held=std::move(m_nextPairFrame);m_next={};m_haveNext=false;}
         else{
             if(!m_synchronizedPlayback.Step())return;
             const auto read=m_synchronizedPlayback.ReadNextAvailable();
-            if(read!=SynchronizedReadResult::PairReady||!m_synchronizedPlayback.VisibleFrame())return;
-            frame=*m_synchronizedPlayback.VisibleFrame();
+            if(read!=SynchronizedReadResult::PairReady)return;
+            held=VisiblePairFrame();
         }
+        if(!held)return;
+        const VideoFrame& frame=*held;
         if(!RenderVideoFrame(frame,frame.discontinuity))return;
         RememberRenderedCachedPair();++m_cachedPresentedFrames;
         m_currentSec=double(frame.timestamp100ns)*1e-7;
@@ -5321,7 +5364,7 @@ private:
         }
         Audio().Stop();m_networkAudio.reset();
         m_decoder.Swap(local);local.Close();
-        m_networkReadState.Reset();m_waitingForNetworkFrame=false;m_haveNext=false;m_next=VideoFrame{};
+        m_networkReadState.Reset();m_waitingForNetworkFrame=false;m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
         m_cachedSourceFile=true;m_path=copy->wstring();
         LOG("Playback moved onto the acquired local copy of this stream; seeks are local from here.");
         return true;
@@ -5779,7 +5822,7 @@ private:
         m_liveSession=false;m_liveBuffering=false;HideBufferOverlay();
         CancelNeuralJob(false);
         if(attached){
-            m_haveNext=false;m_next=VideoFrame{};
+            m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
             m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;ForgetRenderedCachedPair();m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
             if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         }
@@ -5894,7 +5937,7 @@ private:
         const double at=double(at100)*1e-7;
         if(!m_liveSegments->Covered(at100))return false;
         const bool wasPlaying=m_playing||m_liveResumePlaying;
-        Audio().Stop();m_haveNext=false;m_next=VideoFrame{};
+        Audio().Stop();m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
         if(!m_synchronizedPlayback.OpenLive(m_path,m_liveSegments,SynchronizedRange{m_liveRange.start100ns,m_liveRange.end100ns},{},m_decoder.Media(),PairPrefersNv12())){LOG("Active neural playback could not open the live pair.");return false;}
         if(!m_synchronizedPlayback.SeekSeconds(at)||!m_synchronizedPlayback.VisibleFrame()){LOG("Active neural playback could not position the live pair at "<<at<<" s.");m_synchronizedPlayback.Close();return false;}
         // The view has to switch before the frame is read: VisibleFrame returns
@@ -5995,7 +6038,7 @@ private:
     // session keeps rendering and re-attaches when it covers the playhead again.
     void DetachLivePlayback(){
         if(!m_liveAttached)return;
-        m_liveAttached=false;m_haveNext=false;m_next=VideoFrame{};
+        m_liveAttached=false;m_haveNext=false;m_next=VideoFrame{};m_nextPairFrame.reset();
         m_synchronizedPlayback.Close();m_cachedPlayback=false;m_havePresentedPair=false;ForgetRenderedCachedPair();m_cachedRange={};m_cachedPresentedFrames=0;m_comparisonView=ComparisonView::Original;
         if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
     }
@@ -7122,7 +7165,7 @@ private:
             [&]{
                 m_activeQuality=static_cast<NVSDK_NGX_PerfQuality_Value>(completion.configuration.quality);m_opt.qualityExplicit=completion.requestedQualityExplicit;m_opt.quality=completion.requestedQuality;
                 m_dar=m_decoder.DisplayAspectRatio();if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
-                m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=completion.firstFrame.timestamp100ns;m_lastPlaybackFrame=completion.firstFrame;m_lastGlobalX=0;m_lastGlobalY=0;
+                m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=completion.firstFrame.timestamp100ns;RememberPlaybackFrame(completion.firstFrame);m_lastGlobalX=0;m_lastGlobalY=0;
                 m_currentSec=double(completion.firstFrame.timestamp100ns)*1e-7;m_haveNext=false;m_waitingForNetworkFrame=true;m_networkReadState.Reset();m_playing=shouldPlay;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=source;m_youtubeAudioUrl=audioSource;m_youtubePageUrl=pageUrl;m_youtubeSourceQuality=completion.sourceQuality;m_sourceKind=MediaSourceKind::YouTube;m_displayTitle=DisplayTitleForSource(MediaSourceKind::YouTube,title);m_droppedFrames=completion.commitKind==NetworkCommitKind::InitialOpen?0:m_droppedFrames;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
                 Audio().SetVolume(m_muted?0.0f:m_volume);Audio().Pause(!shouldPlay);
             });
@@ -7492,7 +7535,7 @@ private:
         // replaced were never null, so this used to render a default-constructed
         // frame - an empty buffer the renderer rejected. Skip the render it would
         // have failed anyway and keep every state update that followed it.
-        if(presented)RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(const auto* pair=m_synchronizedPlayback.CurrentPair())m_next=next==ComparisonView::Neural?pair->neural:pair->original;}UpdateCachedStatus();InvalidateControls();
+        if(presented)RenderVideoFrame(*presented,true);m_guideReset=false;m_dlssReset=false;if(m_haveNext){if(auto pair=m_synchronizedPlayback.CurrentPairShared()){const VideoFrame* member=next==ComparisonView::Neural?&pair->neural:&pair->original;m_nextPairFrame=std::shared_ptr<const VideoFrame>(std::move(pair),member);}}UpdateCachedStatus();InvalidateControls();
     }
     void Rehook(){if(!m_renderer)return;const std::wstring message=T(L"rehook.confirm"),title=T(L"rehook.title");const int answer=MessageBoxW(m_hwnd,message.c_str(),title.c_str(),MB_YESNOCANCEL|MB_ICONWARNING|MB_DEFBUTTON2);ExecuteGuardedRehook(answer,[&]{m_renderer->RequestDLSSRecreate();m_dlssReset=true;});}
     void SetYouTubeSourceQuality(YouTubeSourceQuality quality){if(quality==m_youtubeSourceQuality)return;if(m_loaded&&m_sourceKind==MediaSourceKind::YouTube&&!m_youtubePageUrl.empty()){StartYouTubeResolution(m_youtubePageUrl,m_displayTitle,quality,Position(),m_playing,NetworkCommitKind::QualityReload);return;}m_youtubeSourceQuality=quality;UpdateYouTubeQualitySelection(GetMenu(m_hwnd),quality);DrawMenuBar(m_hwnd);}
@@ -7915,7 +7958,13 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     mutable HMONITOR m_monitorModeHandle=nullptr;
     mutable bool m_monitorModeValid=false;
     std::wstring m_upscalingError;
-    VideoFrame m_lastPlaybackFrame;
+    // The frame last rendered; see RememberPlaybackFrame. Shared with its pair
+    // on a synchronized pair, or held in m_ownedPlaybackFrame otherwise.
+    std::shared_ptr<const VideoFrame> m_lastPlaybackFrame;std::shared_ptr<VideoFrame> m_ownedPlaybackFrame;
+    // The pair member Tick presents next on a synchronized pair; see NextFrame.
+    std::shared_ptr<const VideoFrame> m_nextPairFrame;
+    // RenderVideoFrame's guides, kept for their grid's capacity.
+    GuideFrame m_guideFrame;
     // Read when a job starts; changing them only affects the next render.
     GuideControls m_renderGuides;
     // Capture conversion: NV12 converted on the GPU, or BGRA converted by ffmpeg on

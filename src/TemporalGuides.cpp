@@ -543,11 +543,18 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
     // the reset itself, which Reset() has already done above.
     if (reset == HistoryReset::None && !repeat && m_framesSinceCut != UINT32_MAX) ++m_framesSinceCut;
 
-    std::vector<float> cur;
+    // Scratch kept between calls: at 119.88 fps these five grids were five heap
+    // allocations per frame. Every one is fully (re)written below before it is read,
+    // exactly as the fresh vectors were, so reusing them changes no output.
+    std::vector<float>& cur = m_curLuma;
     DownsampleLuma(bgra, sourceW, sourceH, gw, gh, cur, layout);
 
-    std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f);
-    std::vector<float> confidence(size_t(gw) * gh, 0.0f);
+    std::vector<float>& fx = m_flowX;
+    std::vector<float>& fy = m_flowY;
+    std::vector<float>& confidence = m_confidence;
+    fx.assign(size_t(gw) * gh, 0.0f);
+    fy.assign(size_t(gw) * gh, 0.0f);
+    confidence.assign(size_t(gw) * gh, 0.0f);
     float globalX = 0.0f, globalY = 0.0f;
     // A repeat re-evaluates against the same previous distinct frame; a new
     // frame's reference is whatever was evaluated last.
@@ -593,7 +600,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
     }
     if (reset != HistoryReset::None) ++m_historyGeneration;
 
-    std::vector<float> depthGrid;
+    std::vector<float>& depthGrid = m_depthGrid;
     if (m_controls.depth) BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
     else depthGrid.assign(size_t(gw) * gh, 0.75f);
     const bool emitMotion = history && m_controls.motionVectors;
@@ -603,7 +610,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
     // NGX depth resource.
     out.gridW = gw;
     out.gridH = gh;
-    out.guideGridRGBA32F.assign(size_t(gw) * gh * 4u, 0.0f);
+    // Every element is written by the loop below, A included, so a caller that
+    // hands the same GuideFrame back each frame pays neither an allocation nor a
+    // zero-fill of the grid it is about to overwrite.
+    out.guideGridRGBA32F.resize(size_t(gw) * gh * 4u);
     const float gridToRenderX = float(renderW) / float(gw);
     const float gridToRenderY = float(renderH) / float(gh);
 
@@ -617,6 +627,7 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
             out.guideGridRGBA32F[o + 2] = depthGrid[i];
             // A stays 0: the RGBA32F layout is kept because a 96-bit RGB32F
             // texture has no guaranteed bilinear filtering, which this grid needs.
+            out.guideGridRGBA32F[o + 3] = 0.0f;
         }
     }
     });
@@ -633,8 +644,10 @@ bool TemporalGuideGenerator::Generate(const uint8_t* pixels, size_t pixelBytes,
     out.id = frame;
     out.id.historyGeneration = m_historyGeneration;
     out.id.reset = reset;
-    if (!repeat) m_prevLuma = std::move(m_lastLuma);
-    m_lastLuma = std::move(cur);
+    // Rotated rather than moved, so the buffer that falls out of the history is the
+    // next frame's `cur` instead of a free followed by an allocation.
+    if (!repeat) std::swap(m_prevLuma, m_lastLuma);
+    std::swap(m_lastLuma, m_curLuma);
     m_havePrev = true;
     m_firstFrame = false;
     m_lastFrameNumber = frame.frameNumber;

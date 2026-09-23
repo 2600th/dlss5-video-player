@@ -143,6 +143,8 @@ private:
     std::vector<float> m_prevLuma;   // previous distinct frame (flow reference)
     std::vector<float> m_lastLuma;   // most recently evaluated frame
     std::vector<float> m_prevDepth;
+    // Per-call scratch for Generate, kept only for its capacity; see Generate.
+    std::vector<float> m_curLuma, m_flowX, m_flowY, m_confidence, m_depthGrid;
     uint32_t m_gridW = 0, m_gridH = 0;
     bool m_havePrev = false;
     bool m_firstFrame = true;

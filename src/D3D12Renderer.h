@@ -386,6 +386,11 @@ private:
     // so more backbuffers would only spend VRAM in the visible player.
     static constexpr uint32_t SwapchainBuffers = 3;
     static_assert(SwapchainBuffers <= FrameCount);
+    // Comparison-reference uploads, shared by frame slots ReferenceUploads apart. The
+    // reference changes at most once per presented frame, and DXGI's frame latency of
+    // three bounds the frames that can still be reading one.
+    static constexpr uint32_t ReferenceUploads = 3;
+    static_assert(FrameCount % ReferenceUploads == 0);
     // Root signature: [0] SRV table t0 (current view), [1] SRV table t1 (comparison
     // reference) and t2 (backward flow, read by the flow resolve alone), [2]
     // PresentConstantCount 32-bit constants (Params).
@@ -420,6 +425,8 @@ private:
     static bool CompileSourceNv12(SourceNv12Conversion conversion,
                                   Microsoft::WRL::ComPtr<ID3DBlob>& blob);
     bool CreateVideoResources();
+    // The comparison reference and its uploads, on first use; see CreateVideoResources.
+    bool CreateReferenceResources();
     bool InitializeDLSS(bool& gpuSynchronized);
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
                                 Microsoft::WRL::ComPtr<ID3D12Resource>& upload,
@@ -546,13 +553,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_captureChroma;  // NV12 only
     Microsoft::WRL::ComPtr<ID3D12Resource> m_cacheReadback[CaptureSlots];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
-    Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[FrameCount];
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
     Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_timestampHeap; // 2 timestamps per frame slot
     Microsoft::WRL::ComPtr<ID3D12Resource> m_timestampReadback;
 
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
-    uint8_t* m_referenceMapped[FrameCount]{};
+    uint8_t* m_referenceMapped[ReferenceUploads]{};
     uint8_t* m_cacheReadbackMapped[CaptureSlots]{};
     // Mapped for the renderer's lifetime like the capture readbacks beside it, and for
     // the same reason: the alternative is a Map/Unmap pair on every frame.

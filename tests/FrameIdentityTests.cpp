@@ -981,8 +981,79 @@ void identity_of_copies_the_decoded_frame_fields_test()
 
 } // namespace
 
+// Everything Generate reports, folded into one number: the grid bit for bit and
+// every scalar beside it.
+uint64_t GuideDigest(const GuideFrame& guide)
+{
+    uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&](const void* data, size_t bytes) {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ull; }
+    };
+    mix(guide.guideGridRGBA32F.data(), guide.guideGridRGBA32F.size() * sizeof(float));
+    const uint64_t size = guide.guideGridRGBA32F.size();
+    mix(&size, sizeof(size));
+    mix(&guide.gridW, sizeof(guide.gridW)); mix(&guide.gridH, sizeof(guide.gridH));
+    const uint8_t flags[] = {uint8_t(guide.hasHistory), uint8_t(guide.motionVectors),
+                             uint8_t(guide.sceneCut), uint8_t(guide.sceneCutSuppressed),
+                             uint8_t(guide.id.reset)};
+    mix(flags, sizeof(flags));
+    mix(&guide.globalMotionX, sizeof(float)); mix(&guide.globalMotionY, sizeof(float));
+    mix(&guide.globalMatchCost, sizeof(float)); mix(&guide.sceneCutResidual, sizeof(float));
+    mix(&guide.sceneCutHistogramOverlap, sizeof(float));
+    return hash;
+}
+
+// The generator keeps its per-frame scratch (luma, flow, confidence, depth) and
+// the player keeps one GuideFrame between frames rather than allocating them per
+// call. Neither may leak one frame into the next: a sequence through reused
+// storage - including storage last sized for another geometry - must report
+// exactly what fresh storage reports.
+void reused_guide_storage_reports_what_fresh_storage_does_test()
+{
+    struct Step { std::vector<uint8_t> bgra; FrameIdentity id; };
+    std::vector<Step> steps;
+    uint64_t number = 0;
+    for (int i = 0; i < 6; ++i) { steps.push_back({TexturedFrame(2 * i, i), Frame(number)}); ++number; }
+    steps.push_back({steps.back().bgra, Frame(number - 1)});                      // a repeat
+    steps.push_back({NoiseFrame(7), Frame(number)}); ++number;                    // a cut
+    for (int i = 0; i < 3; ++i) { steps.push_back({TexturedFrame(-3 * i, 2), Frame(number)}); ++number; }
+    steps.push_back({TexturedFrame(5, 5), Frame(number, 1, HistoryReset::Seek)}); ++number;
+    steps.push_back({TexturedFrame(7, 5), Frame(number)}); ++number;
+
+    std::vector<uint64_t> fresh;
+    {
+        TemporalGuideGenerator guides;
+        for (const Step& step : steps) {
+            GuideFrame out;
+            CHECK(Generate(guides, step.bgra, step.id, out));
+            fresh.push_back(GuideDigest(out));
+        }
+    }
+    // One generator, one GuideFrame, and a larger geometry through both first.
+    TemporalGuideGenerator guides;
+    GuideFrame out;
+    {
+        constexpr uint32_t wideW = 640, wideH = 360;
+        std::vector<uint8_t> wide(size_t(wideW) * wideH * 4u, 90);
+        for (uint64_t n = 0; n < 3; ++n) {
+            for (size_t i = 0; i < wide.size(); i += 4) wide[i] = wide[i + 1] = wide[i + 2] = uint8_t((i / 4 + n * 3) % 251);
+            CHECK(guides.Generate(wide.data(), wide.size(), wideW, wideH, wideW, wideH, kFps,
+                                  FrameIdentity{n, int64_t(n) * 333333, 9, 0, 0, HistoryReset::None}, out));
+        }
+    }
+    // A declared reset keeps the scratch - sized for the wider frames - and
+    // clears the history, so the sequence below starts where the fresh one did.
+    guides.Reset();
+    for (size_t i = 0; i < steps.size(); ++i) {
+        CHECK(Generate(guides, steps[i].bgra, steps[i].id, out));
+        CHECK_EQ(fresh[i], GuideDigest(out));
+    }
+}
+
 int main()
 {
+    reused_guide_storage_reports_what_fresh_storage_does_test();
     guide_controls_neutralize_disabled_guides_test();
     guide_generator_reports_reset_reasons_test();
     guide_generator_reevaluates_a_repeated_frame_without_reset_test();

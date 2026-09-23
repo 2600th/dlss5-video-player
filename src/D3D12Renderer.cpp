@@ -143,9 +143,11 @@ D3D12Renderer::~D3D12Renderer() {
     for (uint32_t i=0;i<FrameCount;++i) {
         if (m_upload[i] && m_uploadMapped[i]) m_upload[i]->Unmap(0,nullptr);
         if (m_guideUpload[i] && m_guideMapped[i]) m_guideUpload[i]->Unmap(0,nullptr);
-        if (m_referenceUpload[i] && m_referenceMapped[i]) m_referenceUpload[i]->Unmap(0,nullptr);
         m_uploadMapped[i]=nullptr;
         m_guideMapped[i]=nullptr;
+    }
+    for (uint32_t i=0;i<ReferenceUploads;++i) {
+        if (m_referenceUpload[i] && m_referenceMapped[i]) m_referenceUpload[i]->Unmap(0,nullptr);
         m_referenceMapped[i]=nullptr;
     }
     for (uint32_t i=0;i<CaptureSlots;++i) {
@@ -790,15 +792,13 @@ bool D3D12Renderer::CreateVideoResources(){
             "Map persistent cache readback buffer"))return false;
     }
 
-    // Comparison reference: the original member of the current pair at source size.
-    // Same layout as the decoded texture, so the decoded upload footprint applies.
-    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_reference)),"Create comparison reference"))return false;
-    m_reference->SetName(L"Comparison_Reference_BGRA_sRGB");
-    for(uint32_t i=0;i<FrameCount;++i) {
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
-        if(!CreateUploadForTexture(src,m_referenceUpload[i],m_referenceMapped[i],fp,rows,rowBytes,total,"Create comparison reference upload"))return false;
-    }
-    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(m_reference.Get(),&srv,SRVCPU(ReferenceSRV));
+    // Comparison reference: allocated by the first UploadReferenceFrame, not here. It
+    // is a source-size texture plus its uploads - 103 MB at 1440p and 232 MB at 4K
+    // with the six uploads it used to have - and only a comparison or a strength dial
+    // off its default ever reads it; the offline renderer never does. Until then the
+    // table slot holds a null view, which samples as the black the texture used to be
+    // cleared to, and SetPresentConstants degrades every mode to Neural anyway.
+    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(ReferenceSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -820,19 +820,6 @@ bool D3D12Renderer::CreateVideoResources(){
             "Map persistent timestamp readback buffer"))return false;
         m_timestampMapped=static_cast<const uint64_t*>(stamps);
     }
-
-    // Clear the reference to black before anything can sample it.
-    memset(m_referenceMapped[0],0,size_t(m_uploadBytes));
-    if(!HR(m_allocators[0]->Reset(),"Reset allocator for reference clear"))return false;
-    auto*cmd=m_cmds[0].Get();
-    if(!HR(cmd->Reset(m_allocators[0].Get(),nullptr),"Reset command list for reference clear"))return false;
-    D3D12_TEXTURE_COPY_LOCATION rd{};rd.pResource=m_reference.Get();rd.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_TEXTURE_COPY_LOCATION rs{};rs.pResource=m_referenceUpload[0].Get();rs.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;rs.PlacedFootprint=m_uploadFootprint;
-    cmd->CopyTextureRegion(&rd,0,0,0,&rs,nullptr);
-    Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_referenceInCopyDest=false;
-    if(!HR(cmd->Close(),"Close reference clear command list"))return false;
-    ID3D12CommandList*clearLists[]={cmd};m_queue->ExecuteCommandLists(1,clearLists);
-    if(!WaitGPUForContinuedUse())return false;
 
     LOG("DLSS resource contract ready: Color=R16G16B16A16_FLOAT " << m_renderW << "x" << m_renderH
         << ", MV=R16G16_FLOAT " << m_renderW << "x" << m_renderH
@@ -1132,15 +1119,44 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
     return CaptureEvaluatedFrame(capture);
 }
 
+bool D3D12Renderer::CreateReferenceResources(){
+    if(m_reference)return true;
+    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
+    // The descriptor below replaces the null view that frames still in flight may
+    // have bound, so nothing may be executing when it is written. Once per renderer.
+    if(!WaitGPUForContinuedUse())return false;
+    // Same layout as the decoded texture, so the decoded upload footprint applies.
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto src=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);
+    ComPtr<ID3D12Resource> reference;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&reference)),"Create comparison reference"))return false;
+    reference->SetName(L"Comparison_Reference_BGRA_sRGB");
+    for(uint32_t i=0;i<ReferenceUploads;++i){
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
+        if(!CreateUploadForTexture(src,m_referenceUpload[i],m_referenceMapped[i],fp,rows,rowBytes,total,"Create comparison reference upload")){
+            for(uint32_t j=0;j<=i;++j){if(m_referenceUpload[j]&&m_referenceMapped[j])m_referenceUpload[j]->Unmap(0,nullptr);m_referenceUpload[j].Reset();m_referenceMapped[j]=nullptr;}
+            return false;
+        }
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(reference.Get(),&srv,SRVCPU(ReferenceSRV));
+    m_reference=std::move(reference);m_referenceInCopyDest=true;
+    LOG("Comparison reference allocated on first use: "<<m_sourceW<<"x"<<m_sourceH<<" with "<<ReferenceUploads<<" uploads.");
+    return true;
+}
+
 bool D3D12Renderer::UploadReferenceFrame(const uint8_t*bgra,size_t bytes){
-    if(m_gpuUnusable||!m_reference)return false;
+    if(m_gpuUnusable)return false;
     const size_t row=size_t(m_sourceW)*4u;
     if(!bgra||bytes<row*m_sourceH)return false;
+    if(!CreateReferenceResources())return false;
     // The next submission (RenderFrame/PresentCurrent/capture) reuses this same slot
-    // and records the texture copy, so its fence also guards this upload buffer.
+    // and records the texture copy, so its fence guards this upload buffer. The
+    // buffer is shared with the slot ReferenceUploads away, whose last submission
+    // may have copied from it too, so that one is waited for as well.
     const uint32_t slot=m_frameSlot%FrameCount;
-    if(!WaitForFrameSlot(slot))return false;
-    CopyMappedRows(m_referenceMapped[slot],m_uploadFootprint,bgra,row,m_sourceH);
+    if(!WaitForFrameSlot(slot)||!WaitForFrameSlot((slot+ReferenceUploads)%FrameCount))return false;
+    CopyMappedRows(m_referenceMapped[slot%ReferenceUploads],m_uploadFootprint,bgra,row,m_sourceH);
     m_referenceUploadSlot=slot;m_referencePending=true;m_presentStale=true;
     return true;
 }
@@ -1149,7 +1165,7 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
     if(!m_referencePending||m_referenceUploadSlot!=slot)return;
     if(!m_referenceInCopyDest)Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=m_reference.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_referenceUpload[slot].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_uploadFootprint;
+    D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_referenceUpload[slot%ReferenceUploads].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_uploadFootprint;
     cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
     Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_referenceInCopyDest=false;m_referencePending=false;m_hasReference=true;

@@ -823,6 +823,78 @@ struct PlayerAppTestAccess {
         CheckLoadingFeedback(app);
     }
 
+    // Every presented pair used to be copied twice - into m_next when it was
+    // read, and into m_lastPlaybackFrame when it was rendered - about 11 MB per
+    // pair at 1440p, including the pairs the cadence skips. Both now share the
+    // pair. A decoded frame is taken by swap, handing its old buffer back to the
+    // decoder, and only a frame owned by nobody else is copied.
+    static void playback_frames_are_shared_not_copied_test()
+    {
+        PlayerApp& app = fixture->app;
+        const bool loaded = app.m_loaded, cached = app.m_cachedPlayback, requested = app.m_neuralRequested, seeking = app.m_seeking;
+        NumberedFrameSource original(0);
+        app.m_synchronizedPlayback = SynchronizedPlayback(original, [] {
+            return std::unique_ptr<ISynchronizedFrameSource>(std::make_unique<NumberedFrameSource>(0));
+        });
+        auto segments = std::make_shared<NeuralSegmentIndex>();
+        NeuralSegment part{}; part.path = L"segment.mkv"; part.runId = 1;
+        part.frameCount = 6000; part.end100ns = int64_t(part.frameCount) * 333333;
+        segments->Append(part);
+        CHECK(app.m_synchronizedPlayback.OpenLive(L"original.mkv", segments, SynchronizedRange{}, {},
+                                                  VideoDecoder::KnownMedia{1, 1, 30.0, 3600.0, {}}));
+        app.m_loaded = true; app.m_seeking = false; app.m_seekPending = false; app.m_sourceKind = MediaSourceKind::LocalFile;
+        app.m_liveSession = true; app.m_liveAttached = true; app.m_liveBuffering = false; app.m_liveResumePlaying = false;
+        app.m_liveSegments = segments; app.m_liveDirectory.clear(); app.m_liveRange = NeuralRenderRange{0, part.end100ns};
+        app.m_cachedPlayback = true; app.m_neuralRequested = true; app.m_haveNext = false; app.m_playing = true;
+        app.m_pairStall = {}; app.m_pairStallRead = {};
+
+        CHECK(app.ReadNextCachedFrame());
+        CHECK(app.m_haveNext);
+        CHECK(app.m_nextPairFrame != nullptr);
+        CHECK(&app.NextFrame() == app.m_synchronizedPlayback.VisibleFrame());
+        CHECK(app.m_next.bgra.empty());
+        app.RememberPlaybackFrame(app.NextFrame());
+        CHECK(app.m_lastPlaybackFrame.get() == app.m_nextPairFrame.get());
+        // The remembered frame outlives the next read, which replaces the pair.
+        const uint64_t kept = app.m_lastPlaybackFrame->frameNumber;
+        app.m_haveNext = false; app.m_nextPairFrame.reset();
+        CHECK(app.ReadNextCachedFrame());
+        CHECK_EQ(kept, app.m_lastPlaybackFrame->frameNumber);
+        CHECK(app.NextFrame().frameNumber != kept);
+
+        // A decoded frame is taken, not copied...
+        app.m_next = VideoFrame{}; app.m_next.bgra.assign(64, 7); app.m_next.frameNumber = 42;
+        const uint8_t* first = app.m_next.bgra.data();
+        app.RememberPlaybackFrame(app.m_next);
+        CHECK(app.m_lastPlaybackFrame->bgra.data() == first);
+        CHECK_EQ(uint64_t{42}, app.m_lastPlaybackFrame->frameNumber);
+        // ...and the one after it hands that buffer back to be decoded into.
+        app.m_next = VideoFrame{}; app.m_next.bgra.assign(64, 9); app.m_next.frameNumber = 43;
+        const uint8_t* second = app.m_next.bgra.data();
+        app.RememberPlaybackFrame(app.m_next);
+        CHECK(app.m_lastPlaybackFrame->bgra.data() == second);
+        CHECK_EQ(uint64_t{43}, app.m_lastPlaybackFrame->frameNumber);
+        CHECK(app.m_next.bgra.data() == first);
+        // Anything else is copied, since nothing says its owner is done with it.
+        VideoFrame other; other.bgra.assign(64, 3); other.frameNumber = 99;
+        app.RememberPlaybackFrame(other);
+        CHECK(app.m_lastPlaybackFrame->bgra == other.bgra);
+        CHECK(app.m_lastPlaybackFrame->bgra.data() != other.bgra.data());
+        // Re-rendering the remembered frame keeps it.
+        const VideoFrame* remembered = app.m_lastPlaybackFrame.get();
+        app.RememberPlaybackFrame(*remembered);
+        CHECK(app.m_lastPlaybackFrame.get() == remembered);
+
+        app.m_synchronizedPlayback = SynchronizedPlayback{};
+        app.m_next = VideoFrame{}; app.m_nextPairFrame.reset(); app.m_haveNext = false;
+        app.m_lastPlaybackFrame.reset(); app.m_ownedPlaybackFrame.reset();
+        app.m_liveSession = false; app.m_liveAttached = false; app.m_playing = false; app.m_seekPending = false;
+        app.m_neuralNotice.clear(); app.m_liveSegments.reset(); app.m_liveRange = {};
+        app.m_pairStall = {}; app.m_pairStallRead = {};
+        app.m_loaded = loaded; app.m_cachedPlayback = cached; app.m_neuralRequested = requested; app.m_seeking = seeking;
+        app.SyncFeatureMenuState();
+    }
+
     // A live retarget stops the running job and returns: the worker is retired
     // by its own completion message rather than joined on the UI thread, and
     // nothing else starts until it has gone.
@@ -1160,6 +1232,7 @@ struct PlayerAppTestAccess {
         UI_CASE(loading_feedback_test),
         UI_CASE(modal_loops_keep_ticking_test),
         UI_CASE(retarget_retires_the_worker_test),
+        UI_CASE(playback_frames_are_shared_not_copied_test),
         UI_CASE(paused_frame_presents_on_invalidation_test),
         UI_CASE(window_and_menu_teardown_test),
         UI_CASE(fullscreen_lifecycle_test),
