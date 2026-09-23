@@ -40,7 +40,8 @@ network stream.
 Press `D` or use **Neural Rendering** to switch views at the same timestamp.
 Pause with `Space` and press `.` to step a cached frame. Dragging the timeline
 shows the frame under the cursor while you drag and keeps playing afterwards if
-it was playing; mouse-wheel volume works anywhere in the window. An incomplete
+it was playing; mouse-wheel volume works anywhere in the window (`Ctrl`+wheel over
+the picture zooms instead). An incomplete
 render is never reused.
 
 ### Preview first: markers, timecodes and ranges
@@ -187,9 +188,30 @@ also under **Video > Compare**:
   original in place of any mode; release to go back. Moving the pointer while
   holding turns the hold into the drag it would have been.
 
-`Z` zooms 2x around the mouse position in the image. Pause and step with `.` to
-judge a single frame; `D` still switches the whole view between original and
-neural. The mode, Mix, split position and swap are remembered in `[Comparison]`.
+To look closely:
+
+- **Zoom** steps through Fit, **1:1**, **2x**, **4x** and **8x**, measured in
+  screen pixels per rendered pixel (a step that would not magnify in the
+  current window is skipped). `Z` zooms in at the mouse and wraps back to Fit
+  after 8x, `Shift+Z` zooms out, `Ctrl`+wheel over the picture zooms at the
+  pointer, and the bar's `-` and `+` zoom at the centre. **Video > Compare >
+  Zoom to fit** returns to Fit. Zoom works in every view, not only while
+  comparing.
+- **Pan** a zoomed picture by dragging it with the left button, or with the
+  middle button in any mode (in Split and Wipe the left drag moves the divider).
+- **Loupe** (`L`, or the bar) shows two magnified circles beside the pointer:
+  the original on the left and DLSS 5 on the right, both at the same spot, at
+  4x the rendered pixels (twice the view's own zoom when that is higher) and
+  without smoothing, so single pixels are visible. With Swap on, the sides
+  swap.
+- **Video > 1:1 pixels** sizes the picture to exactly the render's resolution,
+  so one rendered pixel is one screen pixel with no scaling at all; a render
+  larger than the window is cropped around the centre. `A` and the toolbar's
+  Fit/Fill button go back to Fit or Fill.
+
+Pause and step with `.` to judge a single frame; `D` still switches the whole
+view between original and neural. The mode, Mix, split position, swap and zoom
+step are remembered in `[Comparison]`.
 
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the

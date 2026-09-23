@@ -66,7 +66,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
-| [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
 | [P2.17](#p217) | A difference view | S-M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
@@ -343,20 +342,6 @@ RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
 amplifies banding; P2.11's metrics are the tool.
 
 ## Player UX
-
-<a id="p216"></a>
-### P2.16 · Zoom, pan and a synced magnifier
-
-`M` · **Player**
-
-Today there is a single 2× toggle, anchored where it was pressed, with no pan
-(`main.cpp:3058-3065`). Add 1:1, 2×, 4× and 8× zoom, wheel zoom at the cursor,
-drag to pan, and a loupe that shows the same spot on both sides. Pixel-peeping
-faces is the core use; see [video-compare](https://github.com/pixop/video-compare)
-and [Improve-ImgSLI](https://github.com/Loganavter/improve-imgsli). It depends
-on P0.10 for a true 1:1.
-
----
 
 <a id="p217"></a>
 ### P2.17 · A difference view

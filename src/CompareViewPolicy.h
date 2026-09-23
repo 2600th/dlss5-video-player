@@ -159,6 +159,143 @@ inline float StepMix(float mix, float delta)
 
 } // namespace compare_settings
 
+namespace compare_zoom {
+
+// The zoom ladder, in screen pixels per OUTPUT pixel: Fit, then 1:1, 2x, 4x and 8x,
+// which is what pixel-peeping asks for - "show me the render's own pixels, bigger"
+// - rather than multiples of however large the window happens to be. The shader's
+// zoom is relative to the fitted picture (uv = (s - c)/z + c over the view), so a
+// step becomes a scale through the output's width and the view's: z = k*outputW/viewW.
+// A step whose scale would not magnify - 1:1 of a 1080p render in a 4K window - is
+// skipped. With no output size known yet the ladder falls back to multiples of Fit.
+inline constexpr std::array<int, 5> kPixelsPerTexel{0, 1, 2, 4, 8};
+inline constexpr int kSteps = int(kPixelsPerTexel.size());
+
+inline float ScaleForStep(int step, uint32_t outputW, int viewW)
+{
+    if (step <= 0) return 1.0f;
+    const float perTexel = float(kPixelsPerTexel[size_t(std::min(step, kSteps - 1))]);
+    if (!outputW || viewW <= 0) return std::max(1.0f, perTexel);
+    return std::max(1.0f, perTexel * float(outputW) / float(viewW));
+}
+
+inline bool Reachable(int step, uint32_t outputW, int viewW)
+{
+    return step == 0 || ScaleForStep(step, outputW, viewW) > 1.0001f;
+}
+
+// The next step in `direction` (+1 in, -1 out) that changes the picture. Zooming in
+// past 8x stays at 8x unless `wrap`, which is what Z does - one key walks the whole
+// ladder and comes back to Fit. Zooming out from the lowest step that magnifies is Fit.
+inline int Step(int step, int direction, uint32_t outputW, int viewW, bool wrap)
+{
+    for (int next = step + direction; next >= 0 && next < kSteps; next += direction)
+        if (Reachable(next, outputW, viewW)) return next;
+    if (direction < 0) return 0;
+    return wrap ? 0 : step;
+}
+
+struct Centre {
+    float x = 0.5f;
+    float y = 0.5f;
+};
+
+// The image point shown at view position `view` (both in [0,1]) for a centre and
+// scale: the shader's uv = (s - c)/z + c.
+inline float ImageAt(float centre, float scale, float view)
+{
+    return (view - centre) / std::max(scale, 1.0f) + centre;
+}
+
+// The centre that keeps the image point under `anchor` where it is when the scale goes
+// from `from` to `to`: wheel zoom "at the cursor". Solving (a - c')/to + c' = u for c'
+// gives c' = (u - a/to)/(1 - 1/to), clamped so the view never leaves the picture.
+inline Centre ZoomAt(Centre centre, float from, float to, float anchorX, float anchorY)
+{
+    if (to <= 1.0f) return Centre{};
+    const auto axis = [&](float c, float anchor) {
+        const float image = ImageAt(c, from, anchor);
+        return std::clamp((image - anchor / to) / (1.0f - 1.0f / to), 0.0f, 1.0f);
+    };
+    return Centre{axis(centre.x, anchorX), axis(centre.y, anchorY)};
+}
+
+// The centre after the pointer dragged the picture by (dx, dy) of the view: the image
+// moves with the pointer, so the offset c*(1 - 1/z) moves by -d/z.
+inline Centre Pan(Centre centre, float scale, float dx, float dy)
+{
+    if (scale <= 1.0f) return centre;
+    const float span = 1.0f - 1.0f / scale;
+    const auto axis = [&](float c, float d) { return std::clamp((c * span - d / scale) / span, 0.0f, 1.0f); };
+    return Centre{axis(centre.x, dx), axis(centre.y, dy)};
+}
+
+} // namespace compare_zoom
+
+namespace compare_loupe {
+
+// The synced loupe: two circles side by side, the original on the left and DLSS 5 on
+// the right, both showing the image point under the pointer at the same magnification.
+// They sit above the pointer so it does not cover what they show, drop below it near
+// the top edge, and slide sideways to stay inside the view.
+struct Placement {
+    POINT left{};
+    POINT right{};
+};
+
+inline Placement Place(POINT pointer, int viewW, int viewH, int radius, int gap)
+{
+    const int span = 4 * radius + gap;
+    const int left = std::clamp(int(pointer.x) - span / 2, 0, std::max(0, viewW - span));
+    int y = int(pointer.y) - gap - radius;
+    if (y - radius < 0) y = int(pointer.y) + gap + radius;
+    if (y + radius > viewH) y = std::max(radius, viewH - radius);
+    return Placement{POINT{left + radius, y}, POINT{left + 3 * radius + gap, y}};
+}
+
+// Screen pixels per output texel inside the loupe: at least 4, and always twice what
+// the view itself is showing, so the loupe still magnifies a view zoomed to 4x.
+inline float Magnification(float viewPixelsPerTexel)
+{
+    return std::clamp(2.0f * viewPixelsPerTexel, 4.0f, 32.0f);
+}
+
+} // namespace compare_loupe
+
+namespace compare_view {
+
+enum class Fit { Fit, Fill, Pixels };
+
+// Where the render window goes in the video area. Fit and Fill keep the picture's
+// aspect inside or over the area; Pixels makes the window exactly the renderer's
+// output, so its backbuffer is the output's size and the present is 1:1 - which the
+// renderer already draws exactly - cropped by the area when it is larger. Without an
+// output size Pixels is Fit.
+inline RECT RenderRect(int areaW, int areaH, double aspect, Fit fit, uint32_t outputW, uint32_t outputH)
+{
+    areaW = std::max(1, areaW);
+    areaH = std::max(1, areaH);
+    const double ar = aspect > 0.0 ? aspect : 16.0 / 9.0;
+    const double areaAr = double(areaW) / double(areaH);
+    int rw = 0, rh = 0;
+    if (fit == Fit::Pixels && outputW && outputH) {
+        rw = int(outputW);
+        rh = int(outputH);
+    } else if (fit == Fit::Fill) {
+        if (areaAr > ar) { rw = areaW; rh = int(std::lround(areaW / ar)); }
+        else { rh = areaH; rw = int(std::lround(areaH * ar)); }
+    } else {
+        if (areaAr > ar) { rh = areaH; rw = int(std::lround(areaH * ar)); }
+        else { rw = areaW; rh = int(std::lround(areaW / ar)); }
+    }
+    rw = std::max(1, rw);
+    rh = std::max(1, rh);
+    const int left = (areaW - rw) / 2, top = (areaH - rh) / 2;
+    return RECT{left, top, left + rw, top + rh};
+}
+
+} // namespace compare_view
+
 namespace compare_labels {
 
 // The tags are drawn by GDI, which writes colour but no alpha, onto an opaque plate.

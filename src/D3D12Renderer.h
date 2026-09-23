@@ -162,15 +162,31 @@ struct ComparisonSettings {
     // "Original" / "DLSS 5" tags drawn on the picture wherever both members share it.
     // Drawn from the atlas SetLabelAtlas uploads; without one nothing is drawn.
     bool labels = true;
+    // The synced loupe: two circles, the original and DLSS 5 at the same image point,
+    // point-sampled so the texels show. Centres and radius in backbuffer pixels, the
+    // point in image UV, magnification in screen pixels per output texel.
+    bool loupe = false;
+    float loupeU = 0.5f, loupeV = 0.5f;
+    float loupeLeftX = 0.0f, loupeLeftY = 0.0f, loupeRightX = 0.0f, loupeRightY = 0.0f;
+    float loupeRadius = 0.0f;
+    float loupeMagnification = 4.0f;
 };
 
 // Whether a comparison needs the window compositor (PSPresentScaled) even when the
 // window is exactly the output's size, where the present would otherwise be PSPresent
 // at 1:1. PSPresent is the cache capture's program and is never changed, so anything
 // it cannot draw - the labels, the swap - lives in the compositor alone.
+// Whether the present reads the original at all. The pure neural view at a Mix of 100%
+// does not, and the player then skips uploading one (a source-size copy per frame).
+inline bool ComparisonReadsReference(const ComparisonSettings& comparison)
+{
+    return comparison.mode != ComparisonMode::Neural || comparison.strength != 1.0f || comparison.loupe;
+}
+
 inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
 {
-    return comparison.mode != ComparisonMode::Neural && comparison.mode != ComparisonMode::Blend;
+    return (comparison.mode != ComparisonMode::Neural && comparison.mode != ComparisonMode::Blend) ||
+           comparison.loupe;
 }
 
 class D3D12Renderer {
@@ -473,8 +489,9 @@ private:
     static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
-    // Pane, Label, LabelW, Target; see the Compose cbuffer in D3D12Renderer.cpp.
-    static constexpr uint32_t ComposeConstantCount = 16;
+    // Pane, Label, LabelW, Target, Loupe, LoupeAt; see the Compose cbuffer in
+    // D3D12Renderer.cpp.
+    static constexpr uint32_t ComposeConstantCount = 24;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;

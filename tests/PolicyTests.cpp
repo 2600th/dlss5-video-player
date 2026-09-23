@@ -1949,7 +1949,18 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     // Bare S stops playback, so the modifier is what tells them apart.
     CHECK(!app_menu::CommandForPlayerKey('S', false, false).has_value());
     CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
-    CHECK(has_menu_entry(entries, L"Zoom 2x\tZ", app_menu::IDM_COMPARE_ZOOM));
+    CHECK(has_menu_entry(entries, L"Zoom in (Fit, 1:1, 2x, 4x, 8x)\tZ", app_menu::IDM_COMPARE_ZOOM));
+    CHECK(has_menu_entry(entries, L"Zoom out\tShift+Z", app_menu::IDM_COMPARE_ZOOM_OUT));
+    CHECK(has_menu_entry(entries, L"Loupe\tL", app_menu::IDM_COMPARE_LOUPE));
+    CHECK(has_menu_entry(entries, L"1:1 pixels", app_menu::IDM_ASPECT_ONE_TO_ONE));
+    // Fit, Fill and 1:1 pixels are one radio group, by position.
+    CHECK(app_menu::CheckRadioCommand(menu, app_menu::IDM_ASPECT_FIT, app_menu::IDM_ASPECT_ONE_TO_ONE, app_menu::IDM_ASPECT_ONE_TO_ONE));
+    CHECK((GetMenuState(menu, app_menu::IDM_ASPECT_ONE_TO_ONE, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_ASPECT_FIT, MF_BYCOMMAND) & MF_CHECKED) == 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_FULLSCREEN, MF_BYCOMMAND) & MF_CHECKED) == 0);
+    CHECK(app_menu::CheckRadioCommand(menu, app_menu::IDM_ASPECT_FIT, app_menu::IDM_ASPECT_ONE_TO_ONE, app_menu::IDM_ASPECT_FILL));
+    CHECK((GetMenuState(menu, app_menu::IDM_ASPECT_FILL, MF_BYCOMMAND) & MF_CHECKED) != 0);
+    CHECK((GetMenuState(menu, app_menu::IDM_ASPECT_ONE_TO_ONE, MF_BYCOMMAND) & MF_CHECKED) == 0);
     // Depth is a persisted guide switch in the neural settings dialog now.
     CHECK(!has_menu_text(entries, L"Estimated / flat depth proxy\tG"));
     HMENU video = find_top_level_submenu(menu, L"Video");
@@ -1995,12 +2006,16 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(!grayed(app_menu::IDM_COMPARE_WIPE));
     CHECK(checked(app_menu::IDM_COMPARE_SPLIT));
     CHECK(!checked(app_menu::IDM_COMPARE_NEURAL));
-    CHECK(checked(app_menu::IDM_COMPARE_ZOOM));
+    CHECK(!grayed(app_menu::IDM_COMPARE_ZOOM_OUT)); // Zoomed: there is somewhere to zoom out to.
     CHECK(app_menu::UpdateComparisonMenu(menu, false, true, 999u, false));
     CHECK(grayed(app_menu::IDM_COMPARE_SPLIT));
     CHECK(!grayed(app_menu::IDM_COMPARE_ZOOM)); // Zoom is view-independent.
+    CHECK(grayed(app_menu::IDM_COMPARE_ZOOM_OUT) && grayed(app_menu::IDM_COMPARE_ZOOM_FIT));
+    CHECK(grayed(app_menu::IDM_COMPARE_LOUPE)); // The loupe shows the original: comparison only.
     CHECK(checked(app_menu::IDM_COMPARE_NEURAL)); // Unknown selection falls back to Neural.
     CHECK(!checked(app_menu::IDM_COMPARE_ZOOM));
+    CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_NEURAL, false, false, true));
+    CHECK(checked(app_menu::IDM_COMPARE_LOUPE));
     // The group is positional: Original sits between Neural and Split in the popup
     // with an id outside that range, and still takes the one radio mark.
     CHECK(app_menu::UpdateComparisonMenu(menu, true, true, app_menu::IDM_COMPARE_ORIGINAL, false, true));
@@ -2025,6 +2040,8 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey(VK_OEM_4, false, false) == app_menu::IDM_COMPARE_BLEND_LESS);
     CHECK(CommandForPlayerKey(VK_OEM_6, false, false) == app_menu::IDM_COMPARE_BLEND_MORE);
     CHECK(CommandForPlayerKey('X', false, false) == app_menu::IDM_COMPARE_SWAP);
+    CHECK(CommandForPlayerKey('Z', false, true) == app_menu::IDM_COMPARE_ZOOM_OUT);
+    CHECK(CommandForPlayerKey('L', false, false) == app_menu::IDM_COMPARE_LOUPE);
     CHECK(CommandForPlayerKey('C', false, false) == app_menu::IDM_COMPARE_NEXT_MODE);
     CHECK(CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
@@ -7650,6 +7667,94 @@ void compare_bar_lays_out_and_hit_tests_test()
     CHECK_EQ(LONG(2*kBarHeightDip),large.bar.bottom-large.bar.top);
 }
 
+// The zoom ladder is in screen pixels per output pixel, so the same step is a
+// different scale in a different window, and steps that would not magnify are skipped.
+void compare_zoom_ladder_zooms_at_the_pointer_and_pans_test()
+{
+    using namespace compare_zoom;
+    // A 4K render in a 1440-wide view: 1:1 is 2.67x the fitted picture.
+    CHECK_EQ(1.0f,ScaleForStep(0,3840,1440));
+    CHECK(std::abs(ScaleForStep(1,3840,1440)-3840.0f/1440.0f)<1e-4f);
+    CHECK(std::abs(ScaleForStep(4,3840,1440)-8.0f*3840.0f/1440.0f)<1e-3f);
+    CHECK_EQ(1,Step(0,+1,3840,1440,false));
+    // A 1080p render in a 1440p-wide view: 1:1 would shrink it, so Z goes straight to
+    // 2x; in a 4K-wide view 2x is exactly Fit and is skipped as well.
+    CHECK(!Reachable(1,1920,2560));
+    CHECK_EQ(2,Step(0,+1,1920,2560,false));
+    CHECK_EQ(0,Step(2,-1,1920,2560,false));
+    CHECK_EQ(3,Step(0,+1,1920,3840,false));
+    // Past 8x: Z wraps back to Fit, the wheel and the bar stop.
+    CHECK_EQ(0,Step(4,+1,3840,1440,true));
+    CHECK_EQ(4,Step(4,+1,3840,1440,false));
+    CHECK_EQ(0,Step(0,-1,3840,1440,false));
+    // No renderer yet: multiples of Fit, so the ladder still does something.
+    CHECK_EQ(2.0f,ScaleForStep(2,0,1440));
+    CHECK_EQ(2,Step(0,+1,0,0,false));
+    // Zooming keeps the image point under the anchor where it was...
+    const Centre fit{};
+    for(const float anchor:{0.1f,0.37f,0.5f,0.8f}){
+        const Centre zoomed=ZoomAt(fit,1.0f,2.0f,anchor,anchor);
+        CHECK(std::abs(ImageAt(zoomed.x,2.0f,anchor)-ImageAt(fit.x,1.0f,anchor))<1e-5f);
+        const Centre deeper=ZoomAt(zoomed,2.0f,8.0f,anchor*0.5f,anchor);
+        CHECK(std::abs(ImageAt(deeper.x,8.0f,anchor*0.5f)-ImageAt(zoomed.x,2.0f,anchor*0.5f))<1e-5f);
+    }
+    // ...back to the centre at Fit, and never off the picture.
+    const Centre back=ZoomAt(Centre{0.9f,0.1f},4.0f,1.0f,0.2f,0.2f);
+    CHECK_EQ(0.5f,back.x);CHECK_EQ(0.5f,back.y);
+    const Centre edge=ZoomAt(Centre{1.0f,1.0f},4.0f,8.0f,0.0f,0.0f);
+    CHECK(edge.x>=0.0f&&edge.x<=1.0f&&edge.y>=0.0f&&edge.y<=1.0f);
+    // A pan moves the picture with the pointer: what was under it stays under it.
+    const Centre start{0.5f,0.5f};
+    const Centre panned=Pan(start,4.0f,0.05f,-0.02f);
+    CHECK(std::abs(ImageAt(panned.x,4.0f,0.45f)-ImageAt(start.x,4.0f,0.40f))<1e-5f);
+    CHECK(std::abs(ImageAt(panned.y,4.0f,0.28f)-ImageAt(start.y,4.0f,0.30f))<1e-5f);
+    // It stops at the picture's edge, and does nothing at Fit.
+    const Centre wall=Pan(start,2.0f,-5.0f,5.0f);
+    CHECK_EQ(1.0f,wall.x);CHECK_EQ(0.0f,wall.y);
+    CHECK_EQ(0.5f,Pan(start,1.0f,0.3f,0.3f).x);
+}
+
+void compare_loupe_and_one_to_one_placement_test()
+{
+    // Two circles side by side above the pointer, inside the view.
+    auto placement=compare_loupe::Place(POINT{500,400},1000,600,80,8);
+    CHECK_EQ(placement.left.y,placement.right.y);
+    CHECK(placement.left.y<400);
+    CHECK_EQ(LONG(80*2+8),placement.right.x-placement.left.x);
+    CHECK(placement.left.x-80>=0&&placement.right.x+80<=1000);
+    // Near the top they drop below the pointer; near an edge they slide inward.
+    placement=compare_loupe::Place(POINT{990,30},1000,600,80,8);
+    CHECK(placement.left.y>30);
+    CHECK_EQ(LONG(1000-80),placement.right.x);
+    placement=compare_loupe::Place(POINT{5,590},1000,600,80,8);
+    CHECK_EQ(LONG(80),placement.left.x);CHECK(placement.left.y+80<=600);
+    // At least 4 screen pixels per texel, and always twice the view's own zoom.
+    CHECK_EQ(4.0f,compare_loupe::Magnification(0.4f));
+    CHECK_EQ(16.0f,compare_loupe::Magnification(8.0f));
+    CHECK_EQ(32.0f,compare_loupe::Magnification(50.0f));
+
+    // View > 1:1 pixels makes the render window the output's size, centred and
+    // cropped by the area; Fit and Fill keep what they always did.
+    using compare_view::Fit;
+    RECT r=compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,3840,2160);
+    CHECK_EQ(3840L,r.right-r.left);CHECK_EQ(2160L,r.bottom-r.top);CHECK_EQ(LONG((1600-3840)/2),r.left);
+    r=compare_view::RenderRect(1600,900,16.0/9.0,Fit::Pixels,1280,720);
+    CHECK_EQ(160L,r.left);CHECK_EQ(90L,r.top);CHECK_EQ(1280L,r.right-r.left);
+    r=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Fit,1280,720);
+    CHECK_EQ(1600L,r.right-r.left);CHECK_EQ(900L,r.bottom-r.top);CHECK_EQ(50L,r.top);
+    r=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Fill,1280,720);
+    CHECK_EQ(1000L,r.bottom-r.top);CHECK_EQ(1778L,r.right-r.left);
+    // No output yet: 1:1 is Fit.
+    const RECT fitted=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Fit,0,0);
+    r=compare_view::RenderRect(1600,1000,16.0/9.0,Fit::Pixels,0,0);
+    CHECK(EqualRect(&r,&fitted)!=FALSE);
+    // The loupe needs the original, so the neural view uploads one while it is up.
+    ComparisonSettings comparison;
+    CHECK(!ComparisonReadsReference(comparison));
+    comparison.loupe=true;
+    CHECK(ComparisonReadsReference(comparison));CHECK(ComparisonNeedsCompositor(comparison));
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11300,6 +11405,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
     TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
+    TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
+    TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

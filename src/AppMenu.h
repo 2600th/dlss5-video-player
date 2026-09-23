@@ -77,8 +77,11 @@ inline constexpr UINT IDM_FRAMEGEN_MAX = 344;
 // every command in the range it is given, and this one is a constraint on the
 // multiple rather than one of the choices of multiple.
 inline constexpr UINT IDM_FRAMEGEN_EVEN_ONLY = 345;
+// Fit, Fill and 1:1 pixels are one radio group by POSITION (see CheckRadioCommand):
+// 1:1 sits under Fill in the menu with an id past the two that were already taken.
 inline constexpr UINT IDM_ASPECT_FIT = 400;
 inline constexpr UINT IDM_ASPECT_FILL = 401;
+inline constexpr UINT IDM_ASPECT_ONE_TO_ONE = 404;
 inline constexpr UINT IDM_FULLSCREEN = 402;
 inline constexpr UINT IDM_VIDEO_ADJUSTMENTS = 403;
 inline constexpr UINT IDM_YOUTUBE_QUALITY_AUTO = 410;
@@ -101,6 +104,9 @@ inline constexpr UINT IDM_COMPARE_ORIGINAL = 427;
 inline constexpr UINT IDM_COMPARE_SWAP = 428;
 inline constexpr UINT IDM_COMPARE_NEXT_MODE = 429;
 inline constexpr UINT IDM_COMPARE_PREVIOUS_MODE = 430;
+inline constexpr UINT IDM_COMPARE_ZOOM_OUT = 431;
+inline constexpr UINT IDM_COMPARE_ZOOM_FIT = 432;
+inline constexpr UINT IDM_COMPARE_LOUPE = 433;
 inline constexpr UINT kLastComparisonModeCommand = IDM_COMPARE_WIPE;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
@@ -174,11 +180,17 @@ bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool r
 // Video > Compare: the mode radio group is enabled only while modesAvailable;
 // selectedMode is one of the mode commands (IDM_COMPARE_NEURAL, _ORIGINAL, _SPLIT,
 // _WIPE); anything else checks IDM_COMPARE_NEURAL.
+// zoomed enables Zoom out and Fit; the zoom steps themselves carry no check.
 bool UpdateComparisonMenu(HMENU menuBar, bool modesAvailable, bool zoomAvailable,
-                          UINT selectedMode, bool zoomed, bool swapped = false);
+                          UINT selectedMode, bool zoomed, bool swapped = false, bool loupe = false);
+// CheckMenuRadioItem over the popup that holds `first`, by the POSITIONS of `first`
+// and `last`: with MF_BYCOMMAND Windows wants the checked id numerically between
+// them, which a group that grew an item past its original ids cannot promise.
+bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
 // Menu command for a plain-key accelerator of the range, preview, neural
 // settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
-// Ctrl+N, Z, [ and ], X, C and Shift+C); nullopt when the key is not one of them.
+// Ctrl+N, Z, Shift+Z, [ and ], X, C, Shift+C and L); nullopt when the key is not
+// one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"

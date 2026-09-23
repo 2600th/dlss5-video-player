@@ -168,7 +168,7 @@ struct PlayerAppTestAccess {
         app.m_youtubeSourceQuality = YouTubeSourceQuality::P1440;
         app.m_renderGuides = GuideControls{false, true};
         app.m_neuralSettings.intensity = 1.5f; app.m_neuralSettings.preset = 2; app.m_neuralSettings.autoMask = false;
-        app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.swap = true; app.m_comparison.splitX = 0.8f; app.m_comparison.zoomScale = 2.0f;
+        app.m_comparison.mode = ComparisonMode::Wipe; app.m_comparison.swap = true; app.m_comparison.splitX = 0.8f; app.m_zoomStep = 3;
         app.m_comparison.strength = 0.4f;
         const auto savedCacheRoot=app.SettingsPath().parent_path()/L"shared-cache-location";
         app.m_cacheRoot=savedCacheRoot;
@@ -188,7 +188,11 @@ struct PlayerAppTestAccess {
         CHECK(app.m_neuralSettings.intensity == 1.5f && app.m_neuralSettings.preset == 2 && !app.m_neuralSettings.autoMask);
         CHECK(app.m_comparison.mode == ComparisonMode::Wipe);
         CHECK(app.m_comparison.swap && std::abs(app.m_comparison.splitX - 0.8f) < 0.001f);
-        CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
+        CHECK_EQ(app.m_zoomStep, 3);
+        // Every later reload in this case would bring the zoom back; the rest of the
+        // suite expects Fit.
+        app.m_zoomStep = 0;
+        WritePrivateProfileStringW(L"Comparison", L"ZoomStep", nullptr, app.SettingsPath().c_str());
         // The presentation-only strength dial rides the same save/load as the image
         // adjustments it sits with, clamps to the 0..2 the shader composites over, and
         // reads back as 1 (the neural frame untouched) when the key is absent.
@@ -1947,7 +1951,8 @@ struct PlayerAppTestAccess {
     static void CheckCompareBarAndPeek(PlayerApp& app)
     {
         const ComparisonSettings entry = app.m_comparison;
-        app.m_comparison.zoomScale = 1.0f;
+        const int entryZoom = app.m_zoomStep;
+        app.m_zoomStep = 0;
         // Blend has no row of its own; a stray command gets the neural view it became.
         app.m_comparison.mode = ComparisonMode::Wipe;
         app.HandleCommand(IDM_COMPARE_BLEND);
@@ -2003,7 +2008,51 @@ struct PlayerAppTestAccess {
         CHECK(app.m_peekOriginal);
         app.RenderCaptureLost();
         CHECK(!app.m_peekOriginal);
+
+        // The loupe follows the pointer over the picture and needs the original.
+        app.m_comparison.mode = ComparisonMode::Neural; app.m_comparison.strength = 1.0f;
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        CHECK(app.m_loupe);
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(200, 150));
+        ComparisonSettings shown = app.EffectiveComparison();
+        CHECK(shown.loupe);
+        CHECK(std::abs(shown.loupeU - 200.5f / 400.0f) < 1e-4f);
+        CHECK(shown.loupeRadius > 0.0f && shown.loupeLeftY < 150.0f);
+        CHECK(ComparisonReadsReference(shown));
+        CHECK(app.m_renderer->GetComparison().loupe);
+        app.RenderMouseLeft();
+        CHECK(!app.EffectiveComparison().loupe);
+        app.HandleCommand(IDM_COMPARE_LOUPE);
+        CHECK(!app.m_loupe);
+        // Ctrl+wheel over the picture zooms at the pointer, and the point under it stays.
+        // Straight into WndProc: this fixture's window class does not route to it.
+        RECT screen{}; GetWindowRect(app.m_renderWnd, &screen);
+        const int volumeBefore = int(app.m_volume * 100.0f);
+        app.WndProc(app.m_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WHEEL_DELTA), MAKELPARAM(screen.left + 100, screen.top + 50));
+        CHECK(app.m_zoomStep > 0);
+        CHECK_EQ(volumeBefore, int(app.m_volume * 100.0f));
+        const ComparisonSettings zoomed = app.EffectiveComparison();
+        CHECK(std::abs(compare_zoom::ImageAt(zoomed.zoomCenterX, zoomed.zoomScale, 100.0f / 400.0f) - 0.25f) < 1e-4f);
+        // Middle-drag pans the zoomed picture with the pointer.
+        const float centreBefore = app.m_comparison.zoomCenterX;
+        app.RenderMiddleDown(app.m_renderWnd, MAKELPARAM(100, 50));
+        app.RenderMouseMove(app.m_renderWnd, MAKELPARAM(140, 50));
+        app.RenderMiddleUp(app.m_renderWnd);
+        CHECK(app.m_comparison.zoomCenterX < centreBefore);
+        app.WndProc(app.m_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WORD(-WHEEL_DELTA)), MAKELPARAM(screen.left + 100, screen.top + 50));
+        app.WndProc(app.m_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(MK_CONTROL, WORD(-WHEEL_DELTA)), MAKELPARAM(screen.left + 100, screen.top + 50));
+        CHECK_EQ(0, app.m_zoomStep);
         DestroyWindow(app.m_renderWnd); app.m_renderWnd = fixtureRender;
+
+        // View > 1:1 pixels is a third answer beside Fit and Fill, and A leaves it.
+        app.HandleCommand(IDM_ASPECT_ONE_TO_ONE);
+        CHECK(app.m_onePixel && !app.m_fill);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_ASPECT_ONE_TO_ONE, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_ASPECT_FIT, MF_BYCOMMAND) & MF_CHECKED) == 0);
+        CHECK(app.ButtonContent(ToolbarAction::Aspect).active);
+        app.HandleCommand(IDM_ASPECT_FIT);
+        CHECK(!app.m_onePixel && !app.m_fill);
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_ASPECT_FIT, MF_BYCOMMAND) & MF_CHECKED) != 0);
 
         // The bar: shown only where a neural member can exist, above the toolbar.
         const bool configured = app.m_opt.neuralAddonConfigured;
@@ -2042,7 +2091,7 @@ struct PlayerAppTestAccess {
             CHECK_EQ(0, int(alpha(atlas.width - 1, atlas.rowHeight + 1)));
         }
         app.m_opt.neuralAddonConfigured = configured;
-        app.m_comparison = entry; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
+        app.m_comparison = entry; app.m_zoomStep = entryZoom; app.m_comparison.strength = 1.0f; app.ApplyComparison(false);
     }
 
     static void CheckComparisonAvailability(PlayerApp& app)
@@ -2069,9 +2118,12 @@ struct PlayerAppTestAccess {
         CHECK_EQ(app.m_comparison.strength, 0.0f);
         app.m_comparison.strength = 1.0f;
         CheckCompareBarAndPeek(app);
+        // Z steps along the ladder; with no render window or output to measure it is
+        // multiples of Fit, where 1:1 does not magnify and is skipped.
         app.HandleCommand(IDM_COMPARE_ZOOM);
-        CHECK_EQ(app.m_comparison.zoomScale, 2.0f);
-        CHECK((GetMenuState(menu, IDM_COMPARE_ZOOM, MF_BYCOMMAND) & MF_CHECKED) != 0);
+        CHECK_EQ(app.m_zoomStep, 2);
+        CHECK_EQ(app.EffectiveComparison().zoomScale, 2.0f);
+        CHECK(!grayed(IDM_COMPARE_ZOOM_OUT));
         // The original view has no pair member to compare against: items gray
         // out and presentation is forced to Neural while the choice is kept.
         app.m_neuralRequested = false; app.m_comparisonView = ComparisonView::Original;
@@ -2083,8 +2135,9 @@ struct PlayerAppTestAccess {
         CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
         app.HandleCommand(IDM_COMPARE_WIPE);
         CHECK(app.m_comparison.mode == ComparisonMode::SplitVertical);
-        app.HandleCommand(IDM_COMPARE_ZOOM);
-        CHECK_EQ(app.m_comparison.zoomScale, 1.0f);
+        app.HandleCommand(IDM_COMPARE_ZOOM_FIT);
+        CHECK_EQ(app.m_zoomStep, 0);
+        CHECK_EQ(app.EffectiveComparison().zoomScale, 1.0f);
         app.m_neuralRequested = true; app.m_comparisonView = ComparisonView::Neural;
         app.m_cachedPlayback = false;
         app.SyncFeatureMenuState();

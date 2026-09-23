@@ -3704,7 +3704,9 @@ private:
         m_comparison.mode=static_cast<ComparisonMode>(loaded.mode);
         m_comparison.strength=loaded.mix;
         m_comparison.splitX=std::clamp(ReadIniFloat(L"Comparison",L"SplitX",0.5f),0.0f,1.0f);
-        m_comparison.zoomScale=ReadIniFloat(L"Comparison",L"ZoomScale",1.0f)>=kZoomScale?kZoomScale:1.0f;
+        // The zoom is a step on compare_zoom's ladder now; the old 2x-of-the-window
+        // ZoomScale has no step that means the same, so it is left behind.
+        m_zoomStep=std::clamp(int(GetPrivateProfileIntW(L"Comparison",L"ZoomStep",0,SettingsPath().c_str())),0,compare_zoom::kSteps-1);
         m_comparison.swap=GetPrivateProfileIntW(L"Comparison",L"Swap",0,SettingsPath().c_str())!=0;
         LoadRenderPace();
     }
@@ -3856,7 +3858,7 @@ private:
         WriteIniFloat(L"Comparison",L"Mix",m_comparison.strength);
         WritePrivateProfileStringW(L"Comparison",L"Swap",m_comparison.swap?L"1":L"0",SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
-        WriteIniFloat(L"Comparison",L"ZoomScale",m_comparison.zoomScale);
+        WritePrivateProfileStringW(L"Comparison",L"ZoomStep",std::to_wstring(m_zoomStep).c_str(),SettingsPath().c_str());
     }
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
@@ -3876,9 +3878,43 @@ private:
     // without changing the mode; see compare_gesture.
     ComparisonSettings EffectiveComparison()const{
         ComparisonSettings effective=m_comparison;
+        const int viewW=ZoomViewWidth();const uint32_t outputW=ZoomOutputWidth();
+        effective.zoomScale=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW);
+        if(effective.zoomScale<=1.0f){effective.zoomCenterX=0.5f;effective.zoomCenterY=0.5f;}
+        effective.loupe=false;
         if(!ComparisonModesAvailable()){effective.mode=ComparisonMode::Neural;effective.strength=1.0f;return effective;}
         if(m_peekOriginal)effective.mode=ComparisonMode::Original;
+        // The loupe exists while the pointer is over the picture. Backbuffer pixels are
+        // the render window's client pixels, because the backbuffers follow it.
+        RECT client{};
+        if(m_loupe&&m_renderMouseKnown&&m_renderWnd&&GetClientRect(m_renderWnd,&client)&&client.right>0&&client.bottom>0&&
+           PtIn(client,m_renderMouse.x,m_renderMouse.y)){
+            const int radius=Dip(kLoupeRadiusDip);
+            const auto placement=compare_loupe::Place(m_renderMouse,client.right,client.bottom,radius,Dip(8));
+            effective.loupe=true;
+            effective.loupeU=compare_zoom::ImageAt(effective.zoomCenterX,effective.zoomScale,(float(m_renderMouse.x)+0.5f)/float(client.right));
+            effective.loupeV=compare_zoom::ImageAt(effective.zoomCenterY,effective.zoomScale,(float(m_renderMouse.y)+0.5f)/float(client.bottom));
+            effective.loupeLeftX=float(placement.left.x);effective.loupeLeftY=float(placement.left.y);
+            effective.loupeRightX=float(placement.right.x);effective.loupeRightY=float(placement.right.y);
+            effective.loupeRadius=float(radius);
+            const float viewPerTexel=outputW?effective.zoomScale*float(client.right)/float(outputW):effective.zoomScale;
+            effective.loupeMagnification=compare_loupe::Magnification(viewPerTexel);
+        }
         return effective;
+    }
+    static constexpr int kLoupeRadiusDip=90;
+    // What the zoom ladder measures against: the width the picture is drawn at, and the
+    // renderer's output width (0 until there is one, when the ladder falls back to
+    // multiples of Fit).
+    int ZoomViewWidth()const{RECT client{};return m_renderWnd&&GetClientRect(m_renderWnd,&client)?int(client.right):0;}
+    uint32_t ZoomOutputWidth()const{return m_renderer?m_renderer->OutputW():0u;}
+    std::optional<POINT> PointerOverPicture()const{
+        RECT client{};
+        if(m_renderMouseKnown&&m_renderWnd&&GetClientRect(m_renderWnd,&client)&&PtIn(client,m_renderMouse.x,m_renderMouse.y))return m_renderMouse;
+        return std::nullopt;
+    }
+    static std::wstring ZoomStepText(int step){
+        switch(step){case 1:return L"1:1";case 2:return L"2\u00d7";case 3:return L"4\u00d7";case 4:return L"8\u00d7";default:return L"";}
     }
     // The modes the compare bar offers, in its order, which is also the order C steps
     // through. Blend is not one of them: it was the Mix under another name.
@@ -3904,7 +3940,7 @@ private:
         // neural view needs no reference at all, so the conversion under it runs
         // only while someone is actually comparing - a paused inspection, where
         // a CPU pass over one frame costs nothing anyone can perceive.
-        if(effective.mode==ComparisonMode::Neural&&effective.strength==1.0f)return false;
+        if(!ComparisonReadsReference(effective))return false;
         EnsureLabelAtlas();
         if(original.layout==VideoPixelLayout::Nv12){
             Nv12ToBgraBt709Limited(original.bgra.data(),m_decoder.Width(),m_decoder.Height(),
@@ -3933,6 +3969,14 @@ private:
         }
         SyncFeatureMenuState();InvalidateCompareBar();
     }
+    // The view moved - a pan, the loupe following the pointer - and nothing the menu or
+    // the compare bar shows changed, so their refresh (a DrawMenuBar per mouse move)
+    // is skipped. A paused frame is presented again, as ApplyComparison does.
+    void ApplyComparisonView(){
+        if(!m_renderer)return;
+        m_renderer->SetComparison(EffectiveComparison());
+        if(!m_playing&&!m_seeking){UploadPausedComparisonReference();if(!m_renderer->PresentCurrent())RecoverUnusableRenderer();}
+    }
     // A refused mode used to be indistinguishable from one that did nothing: the
     // menu item greys out, but a command that arrives while no pair is resident
     // left no trace at all. Say which precondition was missing.
@@ -3942,7 +3986,7 @@ private:
             return;
         }
         m_comparison.mode=mode;ApplyComparison();
-        LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoom="<<m_comparison.zoomScale
+        LOG("Comparison mode="<<static_cast<int>(mode)<<" splitX="<<m_comparison.splitX<<" zoomStep="<<m_zoomStep
             <<" reference="<<m_havePresentedPair);
     }
     // The Mix is also the adjustments dialog's DLSS 5 mix slider; both drive this value.
@@ -3966,33 +4010,73 @@ private:
     void SetSplitFromRenderX(int x){
         RECT client{};if(!m_renderWnd||!GetClientRect(m_renderWnd,&client)||client.right<=0)return;
         const float screen=std::clamp(float(x)/float(client.right),0.0f,1.0f);
-        m_comparison.splitX=std::clamp((screen-m_comparison.zoomCenterX)/std::max(m_comparison.zoomScale,1.0f)+m_comparison.zoomCenterX,0.0f,1.0f);
+        const ComparisonSettings view=EffectiveComparison();
+        m_comparison.splitX=std::clamp(compare_zoom::ImageAt(view.zoomCenterX,view.zoomScale,screen),0.0f,1.0f);
         ApplyComparison();
     }
     bool SplitDragActive()const{const ComparisonMode mode=EffectiveComparison().mode;return mode==ComparisonMode::SplitVertical||mode==ComparisonMode::Wipe;}
-    void ToggleZoom(){
+    // One step along compare_zoom's ladder, keeping the image point under `anchor` (a
+    // point in the render window) where it is; the picture's centre without one.
+    void ZoomBy(int direction,bool wrap,std::optional<POINT> anchor){
         if(!m_loaded||!m_renderer)return;
-        const bool zoomed=m_comparison.zoomScale>1.0f;
-        m_comparison.zoomScale=zoomed?1.0f:kZoomScale;
-        RECT client{};
-        if(!zoomed&&m_renderMouseKnown&&GetClientRect(m_renderWnd,&client)&&client.right>0&&client.bottom>0&&PtIn(client,m_renderMouse.x,m_renderMouse.y)){
-            m_comparison.zoomCenterX=float(m_renderMouse.x)/float(client.right);m_comparison.zoomCenterY=float(m_renderMouse.y)/float(client.bottom);
-        }else{m_comparison.zoomCenterX=0.5f;m_comparison.zoomCenterY=0.5f;}
+        const int viewW=ZoomViewWidth();const uint32_t outputW=ZoomOutputWidth();
+        const int next=compare_zoom::Step(m_zoomStep,direction,outputW,viewW,wrap);
+        if(next==m_zoomStep)return;
+        const float from=compare_zoom::ScaleForStep(m_zoomStep,outputW,viewW),to=compare_zoom::ScaleForStep(next,outputW,viewW);
+        float anchorX=0.5f,anchorY=0.5f;RECT client{};
+        if(anchor&&m_renderWnd&&GetClientRect(m_renderWnd,&client)&&client.right>0&&client.bottom>0){
+            anchorX=std::clamp(float(anchor->x)/float(client.right),0.0f,1.0f);anchorY=std::clamp(float(anchor->y)/float(client.bottom),0.0f,1.0f);
+        }
+        const auto centre=compare_zoom::ZoomAt({m_comparison.zoomCenterX,m_comparison.zoomCenterY},from,to,anchorX,anchorY);
+        m_zoomStep=next;m_comparison.zoomCenterX=centre.x;m_comparison.zoomCenterY=centre.y;
         ApplyComparison();
     }
+    // Z: in one step at the pointer, and back to Fit after 8x.
+    void ToggleZoom(){ZoomBy(+1,true,PointerOverPicture());}
+    void ZoomToFit(){if(!m_zoomStep)return;m_zoomStep=0;m_comparison.zoomCenterX=0.5f;m_comparison.zoomCenterY=0.5f;ApplyComparison();}
+    bool Zoomed()const{return EffectiveComparison().zoomScale>1.0f;}
+    // Drags the zoomed picture with the pointer: (dx, dy) in render-window pixels.
+    void PanBy(int dx,int dy){
+        RECT client{};if(!m_renderWnd||!GetClientRect(m_renderWnd,&client)||client.right<=0||client.bottom<=0)return;
+        const float scale=EffectiveComparison().zoomScale;if(scale<=1.0f||(!dx&&!dy))return;
+        const auto centre=compare_zoom::Pan({m_comparison.zoomCenterX,m_comparison.zoomCenterY},scale,float(dx)/float(client.right),float(dy)/float(client.bottom));
+        m_comparison.zoomCenterX=centre.x;m_comparison.zoomCenterY=centre.y;
+        ApplyComparisonView();
+    }
+    void ToggleLoupe(){if(!ComparisonModesAvailable())return;m_loupe=!m_loupe;ApplyComparison();}
+    // View > Fit, Fill and 1:1 pixels; A and the toolbar pill flip between the first two.
+    void SetAspect(bool fill,bool onePixel){m_fill=fill;m_onePixel=onePixel;Layout();SyncFeatureMenuState();InvalidateControls();}
     // A press on the picture: the divider, a drag, or the press-and-hold A/B; see
     // compare_gesture for how the three are told apart.
     void RenderMouseDown(HWND source,LPARAM position){
         m_fullscreenKeyboardFocus=false;SetFocus(m_hwnd);
-        if(!ComparisonModesAvailable())return;
+        const bool compare=ComparisonModesAvailable(),zoomed=m_loaded&&Zoomed();
+        if(!compare&&!zoomed)return;
         const POINT point{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
-        ApplyGestureStep(compare_gesture::Press(m_gesture,point,SplitDragActive(),false),point);
-        m_dragSplit=SplitDragActive();SetCapture(source);
-        SetTimer(m_hwnd,kPeekTimerId,compare_gesture::kHoldMs,nullptr);
+        m_panLast=point;
+        ApplyGestureStep(compare_gesture::Press(m_gesture,point,compare&&SplitDragActive(),zoomed),point);
+        m_dragSplit=compare&&SplitDragActive();SetCapture(source);
+        if(compare)SetTimer(m_hwnd,kPeekTimerId,compare_gesture::kHoldMs,nullptr);
+    }
+    // The middle button pans a zoomed picture in every mode, split and wipe included,
+    // where the left button's drag belongs to the divider.
+    void RenderMiddleDown(HWND source,LPARAM position){
+        m_fullscreenKeyboardFocus=false;SetFocus(m_hwnd);
+        if(!m_loaded||!Zoomed())return;
+        m_middlePan=true;m_panLast={GET_X_LPARAM(position),GET_Y_LPARAM(position)};SetCapture(source);
+    }
+    void RenderMiddleUp(HWND source){if(!m_middlePan)return;m_middlePan=false;if(GetCapture()==source)ReleaseCapture();}
+    void RenderMouseLeft(){
+        m_renderTracking=false;m_renderMouseKnown=false;
+        if(m_loupe&&ComparisonModesAvailable())ApplyComparisonView();
     }
     void RenderMouseMove(HWND source,LPARAM position){
         FullscreenPointerMoved(source,position);
         m_renderMouse={GET_X_LPARAM(position),GET_Y_LPARAM(position)};m_renderMouseKnown=true;
+        // The loupe has to know when the pointer leaves the picture.
+        if(!m_renderTracking){TRACKMOUSEEVENT tracking{sizeof(tracking),TME_LEAVE,source,0};m_renderTracking=TrackMouseEvent(&tracking)!=FALSE;}
+        if(m_middlePan){PanBy(m_renderMouse.x-m_panLast.x,m_renderMouse.y-m_panLast.y);m_panLast=m_renderMouse;}
+        else if(m_loupe&&m_gesture.phase==compare_gesture::Phase::Idle&&ComparisonModesAvailable())ApplyComparisonView();
         // Not gated on holding the capture: losing it ends the press (RenderCaptureLost),
         // so a press still in progress is the only thing this needs to know.
         if(m_gesture.phase!=compare_gesture::Phase::Idle)
@@ -4006,14 +4090,16 @@ private:
     }
     // Capture taken away mid-press (a menu, a dialog, alt-tab) ends the press the way a
     // release would, so a peek can never outlive the button that started it.
-    void RenderCaptureLost(){KillTimer(m_hwnd,kPeekTimerId);m_dragSplit=false;ApplyGestureStep(compare_gesture::Release(m_gesture),m_renderMouse);}
+    void RenderCaptureLost(){KillTimer(m_hwnd,kPeekTimerId);m_dragSplit=false;m_middlePan=false;ApplyGestureStep(compare_gesture::Release(m_gesture),m_renderMouse);}
     void PeekHoldElapsed(){KillTimer(m_hwnd,kPeekTimerId);ApplyGestureStep(compare_gesture::HoldElapsed(m_gesture),m_renderMouse);}
     void ApplyGestureStep(const compare_gesture::Step& step,POINT point){
         // The peek ends before the divider moves, so the move that ends a hold already
         // drags the divider it lands on.
         if(step.endPeek&&m_peekOriginal){m_peekOriginal=false;ApplyComparison();}
         if(step.setDivider&&SplitDragActive())SetSplitFromRenderX(point.x);
-        if(step.startPeek&&!m_peekOriginal){m_peekOriginal=true;ApplyComparison();LOG("Press-and-hold: showing the original.");}
+        if(step.pan){PanBy(point.x-m_panLast.x,point.y-m_panLast.y);m_panLast=point;}
+        else if(m_loupe&&ComparisonModesAvailable()&&m_gesture.phase!=compare_gesture::Phase::Idle)ApplyComparisonView();
+        if(step.startPeek&&!m_peekOriginal&&ComparisonModesAvailable()){m_peekOriginal=true;ApplyComparison();LOG("Press-and-hold: showing the original.");}
     }
 
     void SyncFeatureMenuState(){
@@ -4077,9 +4163,9 @@ private:
                 EnableMenuItem(convert,IDM_EXPORT_STAGES,
                     MF_BYCOMMAND|((m_exportWorker.joinable()||(m_loaded&&!ActivityBusy()&&!m_frameGenWorker.joinable()))?MF_ENABLED:MF_GRAYED));
             }
-            CheckMenuRadioItem(menu,IDM_ASPECT_FIT,IDM_ASPECT_FILL,m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT,MF_BYCOMMAND);
+            app_menu::CheckRadioCommand(menu,IDM_ASPECT_FIT,IDM_ASPECT_ONE_TO_ONE,m_onePixel?IDM_ASPECT_ONE_TO_ONE:(m_fill?IDM_ASPECT_FILL:IDM_ASPECT_FIT));
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
-            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_comparison.zoomScale>1.0f,m_comparison.swap);
+            app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe);
             DrawMenuBar(m_hwnd);
         }
     }
@@ -4971,6 +5057,9 @@ private:
             if(m==WM_MOUSEMOVE){a->RenderMouseMove(h,l);return 0;}
             if(m==WM_LBUTTONDOWN){a->RenderMouseDown(h,l);return 0;}
             if(m==WM_LBUTTONUP){a->RenderMouseUp(h);return 0;}
+            if(m==WM_MBUTTONDOWN){a->RenderMiddleDown(h,l);return 0;}
+            if(m==WM_MBUTTONUP){a->RenderMiddleUp(h);return 0;}
+            if(m==WM_MOUSELEAVE){a->RenderMouseLeft();return 0;}
             if(m==WM_CAPTURECHANGED){a->RenderCaptureLost();return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
             if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN)return SendMessageW(a->m_hwnd,m,w,l);
@@ -5035,7 +5124,7 @@ private:
         // a settings preview still settling, or a neural toggle pressed during
         // a seek, would otherwise fire on the next file's first seek.
         CancelPausedSettingsPreview();m_previewShown=false;m_neuralToggleDeferred=false;m_livePaceConfirmedKey.clear();
-        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;
+        m_lastPlaybackFrame={};m_ownedPlaybackFrame.reset();m_upscalingError.clear();m_neuralNotice.clear();m_sourceNotice.clear();m_decodeNotice.clear();m_neuralPath.clear();m_cachedRange={};m_cachedReceiptPath.clear();m_cachedSettings={};m_cachedGuides={};m_markers={};m_dragSplit=false;m_renderMouseKnown=false;m_gesture={};m_peekOriginal=false;m_dragMix=false;m_middlePan=false;m_renderTracking=false;
         m_seekPending=false;m_seeking=false;Audio().Stop();m_networkAudio.reset();m_renderer.reset();m_decoder.Close();m_cachedPlayback=false;m_cachedSourceFile=false;m_cachedPresentedFrames=0;m_havePresentedPair=false;ForgetRenderedCachedPair();m_guides.Reset();m_haveNext=false;m_waitingForNetworkFrame=false;m_networkReadState.Reset();m_next=VideoFrame{};m_nextPairFrame.reset();m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();m_youtubeAudioUrl.clear();m_youtubePageUrl.clear();m_displayTitle.clear();m_sourceKind=MediaSourceKind::LocalFile;m_cachedStatus.clear();InvalidateFrameGenerationCopy();
         m_jobSourcePath.clear();m_jobSourceKey.clear();m_jobSourcePageUrl.clear();m_sourceCache.reset();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE);Layout();UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
@@ -5585,9 +5674,12 @@ private:
     void Layout(){
         if(!m_hwnd||!m_viewport||!m_renderWnd)return;RECT c{};GetClientRect(m_hwnd,&c);int W=static_cast<int>(std::max<LONG>(1,c.right-c.left)),H=static_cast<int>(std::max<LONG>(1,c.bottom-c.top));
         if(!m_loaded){MoveWindow(m_viewport,0,0,W,H,TRUE);ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateControls();return;}
-        int areaH=std::max(1,H-ControlHeight());MoveWindow(m_viewport,0,0,W,areaH,TRUE);double ar=m_dar>0?m_dar:16.0/9.0;double areaAr=double(W)/areaH;int rw=0,rh=0;
-        if(m_fill){if(areaAr>ar){rw=W;rh=int(std::lround(W/ar));}else{rh=areaH;rw=int(std::lround(areaH*ar));}}else{if(areaAr>ar){rh=areaH;rw=int(std::lround(areaH*ar));}else{rw=W;rh=int(std::lround(W/ar));}}
-        SetWindowPos(m_renderWnd,nullptr,(W-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOZORDER|SWP_NOACTIVATE);
+        int areaH=std::max(1,H-ControlHeight());MoveWindow(m_viewport,0,0,W,areaH,TRUE);
+        const compare_view::Fit fit=m_onePixel?compare_view::Fit::Pixels:(m_fill?compare_view::Fit::Fill:compare_view::Fit::Fit);
+        const RECT picture=compare_view::RenderRect(W,areaH,m_dar,fit,m_renderer?m_renderer->OutputW():0u,m_renderer?m_renderer->OutputH():0u);
+        SetWindowPos(m_renderWnd,nullptr,picture.left,picture.top,picture.right-picture.left,picture.bottom-picture.top,SWP_NOZORDER|SWP_NOACTIVATE);
+        // A zoom step is pixels per output pixel, so its scale follows the window.
+        if(m_renderer)m_renderer->SetComparison(EffectiveComparison());
         ReconcileFocusForCurrentLayout();RefreshHoverForCurrentLayout();InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
     }
 
@@ -6343,7 +6435,7 @@ private:
             }
             return{UiIcon::FrameGeneration,T(L"framegen.pill.generate"),enabled,false};
         }
-        case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill?L"Fit":L"Fill",enabled,m_fill};
+        case ToolbarAction::Aspect:return{UiIcon::Crop,m_fill||m_onePixel?L"Fit":L"Fill",enabled,m_fill||m_onePixel};
         case ToolbarAction::Adjustments:return{UiIcon::Adjustments,L"Color",enabled,m_adjustWnd!=nullptr};
         case ToolbarAction::DebugView:{const bool active=rendererReady&&m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final;return{UiIcon::Debug,L"Debug",enabled,active};}
         case ToolbarAction::Fullscreen:return{UiIcon::Maximize,L"Full",enabled,m_fullscreen};
@@ -6424,7 +6516,7 @@ private:
     compare_bar::Layout CompareBarLayout()const{
         RECT c{};GetClientRect(m_hwnd,&c);
         return compare_bar::LayoutBar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom)-ControlHeight(),
-                                      ActiveWindowDpi(m_hwnd),CompareBarModes().size(),false);
+                                      ActiveWindowDpi(m_hwnd),CompareBarModes().size(),true);
     }
     void InvalidateCompareBar(){
         if(!m_hwnd||!CompareBarVisible())return;
@@ -6455,9 +6547,10 @@ private:
         switch(item->part){
         case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
         case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));break;
-        case compare_bar::Part::ZoomOut:if(m_comparison.zoomScale>1.0f)ToggleZoom();break;
-        case compare_bar::Part::ZoomIn:if(m_comparison.zoomScale<=1.0f)ToggleZoom();break;
+        case compare_bar::Part::ZoomOut:ZoomBy(-1,false,std::nullopt);break;
+        case compare_bar::Part::ZoomIn:ZoomBy(+1,false,std::nullopt);break;
         case compare_bar::Part::Swap:ToggleSwap();break;
+        case compare_bar::Part::Loupe:ToggleLoupe();break;
         default:break;
         }
         return true;
@@ -6497,9 +6590,10 @@ private:
                 RECT k{x-knob,mid-knob,x+knob,mid+knob};
                 HBRUSH kb=CreateSolidBrush(!enabled?RGB(98,101,108):(m_dragMix||hovered(item)?kCompareMark:ui_palette::PrimaryText));FillRect(dc,&k,kb);DeleteObject(kb);
                 break;}
-            case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_comparison.zoomScale>1.0f,false,hovered(item));break;
-            case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&m_comparison.zoomScale<=1.0f,false,hovered(item));break;
+            case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_zoomStep>0,false,hovered(item));break;
+            case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&compare_zoom::Step(m_zoomStep,1,ZoomOutputWidth(),ZoomViewWidth(),false)!=m_zoomStep,false,hovered(item));break;
             case compare_bar::Part::Swap:DrawCompareSegment(dc,item.bounds,T(L"compare.swap"),enabled,m_comparison.swap,hovered(item));break;
+            case compare_bar::Part::Loupe:DrawCompareSegment(dc,item.bounds,T(L"compare.loupe"),enabled,m_loupe,hovered(item));break;
             default:break;
             }
         }
@@ -6508,7 +6602,7 @@ private:
         SetTextColor(dc,available?ui_palette::PrimaryText:RGB(98,101,108));
         RECT mixValue=layout.mixValue;DrawTextW(dc,PercentText(m_comparison.strength).c_str(),-1,&mixValue,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         SetTextColor(dc,m_loaded&&m_renderer?ui_palette::PrimaryText:RGB(98,101,108));
-        RECT zoomValue=layout.zoomValue;DrawTextW(dc,(m_comparison.zoomScale>1.0f?std::wstring(L"2\u00d7"):T(L"compare.zoom.fit")).c_str(),-1,&zoomValue,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        RECT zoomValue=layout.zoomValue;DrawTextW(dc,(m_zoomStep>0?ZoomStepText(m_zoomStep):T(L"compare.zoom.fit")).c_str(),-1,&zoomValue,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         if(layout.hint.right>layout.hint.left){
             SetTextColor(dc,ui_palette::SecondaryText);RECT hint=layout.hint;
             DrawTextW(dc,T(available?L"compare.hint.hold":L"compare.hint.unavailable").c_str(),-1,&hint,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
@@ -9165,7 +9259,7 @@ private:
         case ToolbarAction::ToggleFrameGeneration:
             if(m_frameGenWorker.joinable())CancelFrameGeneration();else StartFrameGeneration();
             break;
-        case ToolbarAction::Aspect:m_fill=!m_fill;Layout();break;
+        case ToolbarAction::Aspect:SetAspect(m_onePixel?false:!m_fill,false);break;
         case ToolbarAction::Adjustments:ShowAdjustments();break;
         case ToolbarAction::DebugView:ShowDebugMenu(anchor);break;
         case ToolbarAction::Fullscreen:ToggleFullscreen();break;
@@ -9446,7 +9540,16 @@ private:
                 UpdateCachedStatus();
             }
             return 0;}
-        case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
+        case WM_MOUSEWHEEL:{
+            // Ctrl+wheel over the picture zooms at the pointer; the plain wheel keeps
+            // its job, the volume, everywhere.
+            if(m_loaded&&(GET_KEYSTATE_WPARAM(w)&MK_CONTROL)&&m_renderWnd){
+                POINT pointer{GET_X_LPARAM(l),GET_Y_LPARAM(l)};RECT client{};
+                if(ScreenToClient(m_renderWnd,&pointer)&&GetClientRect(m_renderWnd,&client)&&PtIn(client,pointer.x,pointer.y)){
+                    ZoomBy(GET_WHEEL_DELTA_WPARAM(w)>0?1:-1,false,pointer);return 0;
+                }
+            }
+            if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;
         // ? is a character, not a key: it is Shift+/ on a US layout and
@@ -9461,7 +9564,7 @@ private:
             // live session, a neural job, a YouTube resolve - and a conversion
             // is the longest of them. It had no key at all.
             if(w==VK_ESCAPE&&m_frameGenWorker.joinable()&&!m_frameGenCancelling){CancelFrameGeneration();return 0;}
-            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){m_fill=!m_fill;Layout();return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w==VK_ESCAPE&&m_liveSession){StopLiveNeuralSession(true);return 0;}if(w==VK_ESCAPE&&NeuralJobActive()){CancelNeuralJob();return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
+            if(w==VK_TAB){FocusNextToolbarAction((GetKeyState(VK_SHIFT)&0x8000)!=0);return 0;}if(w==VK_RETURN&&m_focusedToolbarAction!=ToolbarAction::None){ActivateFocusedToolbarAction();return 0;}if(app_menu::RoutesToOpenYouTube(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0)){ActivateYouTube();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='O'){OpenFromDialog();return 0;}if((GetKeyState(VK_CONTROL)&0x8000)&&w=='E'){ShowAdjustments();return 0;}if(const auto command=app_menu::CommandForPlayerKey(static_cast<UINT>(w),(GetKeyState(VK_CONTROL)&0x8000)!=0,(GetKeyState(VK_SHIFT)&0x8000)!=0)){HandleCommand(*command);return 0;}if(w==VK_SPACE){TogglePause();return 0;}if(w==VK_OEM_PERIOD){StepCachedFrame();return 0;}if(w==VK_LEFT){RequestSeek(Position()-10);return 0;}if(w==VK_RIGHT){RequestSeek(Position()+10);return 0;}if(w==VK_F11){ToggleFullscreen();return 0;}if(app_menu::RoutesToRehook(app_menu::PlayerCommandRoute::KeyDown,static_cast<UINT>(w))){Rehook();return 0;}if(w=='S'){StopPlayback();return 0;}if(w=='A'){SetAspect(m_onePixel?false:!m_fill,false);return 0;}if(w=='D'){ToggleNeuralRendering();return 0;}if(w=='M'){ToggleMute();return 0;}if(w=='1'){SetDebug(D3D12Renderer::DebugView::Final);return 0;}if(w=='2'){SetDebug(D3D12Renderer::DebugView::Input);return 0;}if(w=='3'){SetDebug(D3D12Renderer::DebugView::MotionVectors);return 0;}if(w=='4'){SetDebug(D3D12Renderer::DebugView::Depth);return 0;}if(w==VK_ESCAPE&&m_liveSession){StopLiveNeuralSession(true);return 0;}if(w==VK_ESCAPE&&NeuralJobActive()){CancelNeuralJob();return 0;}if(w==VK_ESCAPE&&m_youtubeLifecycle.IsResolving()){CancelYouTubeResolution();return 0;}if(w==VK_ESCAPE&&m_fullscreen){ToggleFullscreen();return 0;}break;
         }
         return DefWindowProcW(h,m,w,l);
     }
@@ -9495,7 +9598,7 @@ private:
         case IDM_FRAMEGEN_MAX:SetFrameGenerationPreference(0);break;
         case IDM_FRAMEGEN_EVEN_ONLY:SetEvenCadenceOnly(!m_evenCadenceOnly);break;
         case IDM_EXPORT_CACHED_VIDEO:ExportCachedVideo();break;
-        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:m_fill=false;Layout();break;case IDM_ASPECT_FILL:m_fill=true;Layout();break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
+        case IDM_VIEW_FINAL:SetDebug(D3D12Renderer::DebugView::Final);break;case IDM_VIEW_INPUT:SetDebug(D3D12Renderer::DebugView::Input);break;case IDM_VIEW_MV:SetDebug(D3D12Renderer::DebugView::MotionVectors);break;case IDM_VIEW_DEPTH:SetDebug(D3D12Renderer::DebugView::Depth);break;case IDM_VIDEO_ADJUSTMENTS:ShowAdjustments();break;case IDM_ASPECT_FIT:SetAspect(false,false);break;case IDM_ASPECT_FILL:SetAspect(true,false);break;case IDM_FULLSCREEN:ToggleFullscreen();break;case IDM_ADVANCED_SAFE_MODE:RestartInSafeMode();break;case IDM_CLEAR_NEURAL_CACHE:ClearNeuralCache();break;
         case IDM_MARK_IN:SetMarker(true,Position100ns());break;case IDM_MARK_OUT:SetMarker(false,Position100ns());break;case IDM_CLEAR_MARKS:ClearMarkers();break;case IDM_GOTO_TIMECODE:ShowTimecodeDialog();break;
         case IDM_PAUSE_NEURAL_RENDER:if(NeuralJobActive())SetNeuralJobPaused(!NeuralJobPaused());break;
         case IDM_PREVIEW_FRAME:PreviewCurrentFrame();break;case IDM_PREVIEW_CLIP:PreviewClip();break;case IDM_RENDER_RANGE:RenderMarkedRange();break;case IDM_RENDER_WHOLE:RenderWholeSource();break;
@@ -9512,7 +9615,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
-        case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
+        case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;
+        case IDM_ASPECT_ONE_TO_ONE:SetAspect(false,true);break;case IDM_COMPARE_NEXT_MODE:CycleComparisonMode(false);break;case IDM_COMPARE_PREVIOUS_MODE:CycleComparisonMode(true);break;
         }
     }
 
@@ -9772,9 +9876,18 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;
-    // Presentation comparison of a synchronized pair (persisted in [Comparison]).
-    static constexpr float kZoomScale=2.0f;
+    // Presentation comparison of a synchronized pair (persisted in [Comparison]). Its
+    // zoomScale is resolved from m_zoomStep in EffectiveComparison, because a step is
+    // a number of screen pixels per output pixel and so depends on the window's size.
     ComparisonSettings m_comparison;
+    int m_zoomStep=0;
+    // The synced loupe follows the pointer over the picture while this is on.
+    bool m_loupe=false;
+    // View > 1:1 pixels: the render window is the output's size.
+    bool m_onePixel=false;
+    // A middle-button pan in progress, and where the last pan step left the pointer.
+    bool m_middlePan=false,m_renderTracking=false;
+    POINT m_panLast{};
     HWND m_neuralWnd=nullptr;
     HWND m_encoderWnd=nullptr;
     // Tooltip host per settings dialog, and the strings each host points at:

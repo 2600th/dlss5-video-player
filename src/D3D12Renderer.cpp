@@ -390,6 +390,8 @@ cbuffer Compose:register(b1){
     float4 Label;   // x = atlas row height px, y = inset from the picture's corner px, zw = atlas size px
     float4 LabelW;  // atlas row widths px: Original, DLSS 5, and two spare rows
     float4 Target;  // xy = backbuffer size px
+    float4 Loupe;   // xy = image UV under the pointer, z = circle radius px, w = px per output texel (0 = off)
+    float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
 }
 Texture2D Labels:register(t4);
 // One tag from the premultiplied atlas over an sRGB-encoded colour, with its top-left
@@ -398,9 +400,40 @@ Texture2D Labels:register(t4);
 float LabelWidth(int row){return row==0?LabelW.x:row==1?LabelW.y:row==2?LabelW.z:LabelW.w;}
 float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
     float2 rel=floor(px-anchor);
-    if(Label.x<1.0||rel.x<0.0||rel.y<0.0||rel.x>=LabelWidth(row)||rel.y>=Label.x)return c;
-    float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0));
-    return t.rgb+c*(1.0-t.a);
+    if(Label.x>=1.0&&rel.x>=0.0&&rel.y>=0.0&&rel.x<LabelWidth(row)&&rel.y<Label.x){
+        float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0));
+        c=t.rgb+c*(1.0-t.a);
+    }
+    return c;
+}
+// One loupe texel: point-sampled at the output's own grid, so a magnified texel is a
+// square and not a bilinear smear, which is the whole point of looking this close. The
+// original is point-sampled at ITS grid, the source's, which is what it really has; the
+// DLSS 5 side is dialled against the original at the same spot, like the main view.
+float3 LoupeColour(float2 uv,bool original){
+    uv=saturate(uv);
+    float w,h;T.GetDimensions(w,h);
+    float rw,rh;Ref.GetDimensions(rw,rh);
+    float3 c;
+    if(original)c=SRGBToLinear(Ref.Load(int3(min(int2(uv*float2(rw,rh)),int2(rw,rh)-1),0)).rgb);
+    else{
+        c=T.Load(int3(min(int2(uv*float2(w,h)),int2(w,h)-1),0)).rgb;
+        if(ColorB.z!=1.0)c=ApplyNeuralStrength(c,SRGBToLinear(Ref.SampleLevel(S,uv,0).rgb),ColorB.z,max(ColorB.w,1.0));
+    }
+    return LinearToSRGB(ApplyVideoAdjustments(c));
+}
+float3 LoupeOver(float3 o,float2 px,bool swap){
+    float radius=Loupe.z;
+    float w,h;T.GetDimensions(w,h);
+    [unroll]for(int side=0;side<2;++side){
+        float2 centre=side==0?LoupeAt.xy:LoupeAt.zw;
+        float d=length(px-centre);
+        // A white ring inside a dark one, for the reason the wipe divider has both.
+        if(d<radius)o=LoupeColour(Loupe.xy+(px-centre)/(Loupe.w*float2(w,h)),(side==0)!=swap);
+        else if(d<radius+2.0)o=1.0;
+        else if(d<radius+3.5)o=0.0;
+    }
+    return o;
 }
 float4 PSPresentScaled(V i):SV_Target{
     float zoom=max(Misc.y,0.01);
@@ -442,6 +475,7 @@ float4 PSPresentScaled(V i):SV_Target{
             else o=LabelOver(o,px,float2(Target.x-inset-LabelWidth(right),inset),right);
         }
     }
+    if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap);
     return float4(o,1);
 }
 // GPU colour conversion for the NV12 capture path. The picture is exactly what the
@@ -1358,12 +1392,16 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
     // b1. The tags need both a reference (they name its two members) and an atlas; the
     // row height is what the shader tests, so 0 draws none.
     const bool labels=useReference&&cmp.labels&&m_labelAtlas&&m_labelRowHeight;
+    // The loupe shows the original, so it needs the reference as much as a split does.
+    const bool loupe=useReference&&cmp.loupe&&cmp.loupeRadius>0.0f;
     const float inset=float(m_labelRowHeight/2u);
     const float compose[ComposeConstantCount]={
         0,useReference&&cmp.swap?1.0f:0.0f,0,labels?1.0f:0.0f,
         labels?float(m_labelRowHeight):0.0f,inset,float(m_labelAtlasW),float(m_labelAtlasH),
         float(m_labelWidths[0]),float(m_labelWidths[1]),float(m_labelWidths[2]),float(m_labelWidths[3]),
-        float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0};
+        float(targetWidth?targetWidth:m_outputW),float(targetHeight?targetHeight:m_outputH),0,0,
+        cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
+        cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
 }
