@@ -152,6 +152,7 @@ private:
     // position is read from more than the thread that starts and stops it.
     mutable std::mutex m_clockMutex;
     mutable audio_clock::StallState m_clock;
+    mutable audio_clock::Continuity m_continuity;
     mutable bool m_clockStalled = false;
     // The last position the clock actually answered with. A lost endpoint
     // stops answering, so this is where playback resumes from.

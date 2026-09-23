@@ -8842,6 +8842,115 @@ void audio_clock_stops_being_the_master_once_it_stops_advancing_test()
     CHECK(Usable(reused, 7.0, 500.0 + kStallSeconds, true));
 }
 
+// A stall used to hand the player -1, which fell back to its own steady
+// clock anchored at the last seek, and the audio clock was taken back with a
+// snap the moment audio moved again. After a 1 s YouTube underrun video ran
+// ahead and then stood still for a second. The clock now carries on from the
+// last position it handed out and slews back at no more than 5 %.
+void audio_clock_carries_through_a_stall_and_slews_back_instead_of_jumping_test()
+{
+    using namespace audio_clock;
+    StallState stall;
+    Continuity continuity;
+    const auto read = [&](double audio, double wall, bool playing = true) {
+        return Present(continuity, audio, Usable(stall, audio, wall, playing), wall, playing);
+    };
+
+    // Healthy: the audio position is handed through untouched, repeats and
+    // all, so nothing about ordinary playback changes.
+    for (int tick = 0; tick <= 100; ++tick) {
+        const double audio = 10.0 + std::floor(tick / 2) * 0.02;
+        CHECK_EQ(audio, read(audio, 100.0 + tick * 0.01));
+    }
+    CHECK(!continuity.bridging);
+
+    // An underrun: audio stands at 11.0 from wall 101.0. For the stall window
+    // it is still the clock, and video holds on it.
+    double last = read(11.0, 101.0);
+    CHECK_EQ(11.0, last);
+    double wall = 101.0;
+    for (; wall < 101.0 + kStallSeconds - 0.005; wall += 0.01) CHECK_EQ(11.0, read(11.0, wall));
+    // Declared stalled: carried on from where it was, at wall-clock rate,
+    // with no step at the moment it was declared.
+    last = 11.0;
+    for (; wall < 102.0; wall += 0.01) {
+        const double now = read(11.0, wall);
+        CHECK(now >= last);
+        CHECK(now - last <= 0.0101);
+        last = now;
+    }
+    CHECK(continuity.bridging);
+    CHECK(std::abs(last - (11.0 + (102.0 - 101.0 - kStallSeconds))) < 0.02);
+
+    // Audio resumes from where it stopped - behind the carried clock. The
+    // clock never runs backwards and never changes speed by more than 5 %,
+    // and it lands exactly on the audio once the gap is walked shut.
+    const double resumedAt = wall;
+    bool monotonic = true, gentle = true;
+    double audio = 11.0;
+    for (; wall < resumedAt + 20.0 && continuity.bridging; wall += 0.01) {
+        audio = 11.0 + (wall - resumedAt);
+        const double now = read(audio, wall);
+        if (now < last) monotonic = false;
+        const double rate = (now - last) / 0.01;
+        if (rate < 1.0 - kMaxSlewRate - 1e-6 || rate > 1.0 + kMaxSlewRate + 1e-6) gentle = false;
+        last = now;
+    }
+    CHECK(monotonic);
+    CHECK(gentle);
+    CHECK(!continuity.bridging);
+    CHECK_EQ(audio, last);
+    // About ten seconds to walk half a second shut at 5 %.
+    CHECK(wall - resumedAt > 8.0);
+    CHECK(wall - resumedAt < 12.0);
+    audio += 0.01; wall += 0.01;
+    CHECK_EQ(audio, read(audio, wall));
+
+    // A gap past kSnapSeconds is closed in one step: slewing three seconds
+    // would keep sound and picture apart for a minute.
+    StallState longStall;
+    Continuity longContinuity;
+    const auto readLong = [&](double position, double at) {
+        return Present(longContinuity, position, Usable(longStall, position, at, true), at, true);
+    };
+    CHECK_EQ(50.0, readLong(50.0, 0.0));
+    for (double at = 0.01; at < 3.5; at += 0.01) readLong(50.0, at);
+    CHECK(longContinuity.bridging);
+    CHECK_EQ(50.01, readLong(50.01, 3.5));
+    CHECK(!longContinuity.bridging);
+
+    // Audio that comes back AHEAD of the carried clock is chased up the same
+    // gentle way.
+    Continuity ahead;
+    CHECK_EQ(5.0, Present(ahead, 5.0, true, 0.0, true));
+    CHECK_EQ(5.1, Present(ahead, 5.0, false, 0.1, true));
+    const double chased = Present(ahead, 5.5, true, 0.2, true);
+    CHECK(std::abs(chased - (5.2 + kMaxSlewRate * 0.1)) < 1e-9);
+    CHECK(ahead.bridging);
+
+    // Paused, the carried clock stands still.
+    Continuity paused;
+    CHECK_EQ(7.0, Present(paused, 7.0, false, 0.0, true));
+    CHECK_EQ(7.0, Present(paused, 7.0, true, 30.0, false));
+
+    // The player does not read the clock while paused. Without PauseChanged
+    // the first read after a minute's pause - audio not yet moving again -
+    // counted the minute as a stall, and as a minute for the clock to carry.
+    StallState resumed;
+    Continuity resumedContinuity;
+    CHECK_EQ(20.0, Present(resumedContinuity, 20.0, Usable(resumed, 20.0, 0.0, true), 0.0, true));
+    PauseChanged(resumed, resumedContinuity, 0.01);
+    PauseChanged(resumed, resumedContinuity, 60.0);
+    CHECK(Usable(resumed, 20.0, 60.005, true));
+    CHECK_EQ(20.0, Present(resumedContinuity, 20.0, true, 60.005, true));
+    CHECK(!resumedContinuity.bridging);
+
+    // Reset is what Start and Stop use: the next reading is taken as it is.
+    Reset(continuity);
+    CHECK_EQ(3.0, Present(continuity, 3.0, true, 500.0, true));
+    CHECK(!continuity.bridging);
+}
+
 // A resident helper serves several jobs from one process. Whenever the next
 // job's geometry, fps, source layout, colour conversion or capture format
 // differs from the last, Initialize calls Release, which shuts the capture
@@ -9898,6 +10007,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(playback_cadence_reports_a_rate_no_cadence_can_follow_test),
     TEST_CASE(deferred_capture_serves_a_second_job_after_a_shutdown_test),
     TEST_CASE(audio_clock_stops_being_the_master_once_it_stops_advancing_test),
+    TEST_CASE(audio_clock_carries_through_a_stall_and_slews_back_instead_of_jumping_test),
     TEST_CASE(live_session_directory_is_per_process_and_never_relative_test),
     TEST_CASE(a_probe_that_could_not_run_does_not_condemn_a_cached_render_test),
     TEST_CASE(nv12_reference_conversion_is_bit_identical_to_the_scalar_original_test),

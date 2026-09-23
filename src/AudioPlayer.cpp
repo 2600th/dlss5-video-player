@@ -186,7 +186,7 @@ bool AudioPlayer::SelectAudioTrack(int audioIndex) {
 bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, AudioStartState state) {
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
-    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); m_clockStalled = false; }
+    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); audio_clock::Reset(m_continuity); m_clockStalled = false; }
     // Where this start begins is the newest position there is. The clock only
     // refreshes this while it is being read, which it is not while paused, so
     // a paused seek from 60 s to 10 s left 60 behind: a track change or a
@@ -458,26 +458,29 @@ double AudioPlayer::PositionSeconds() const {
     // device change - leaves the queued frames to drain and this
     // position frozen. Returning it anyway stopped video for the rest of the
     // file, because the presentation gate holds every frame until the clock
-    // reaches its due time. -1.0 is what the caller already handles: it falls
-    // back to the steady clock.
+    // reaches its due time. A stalled clock is carried forward at wall-clock
+    // rate instead, and slewed back to the audio when it moves again; see
+    // audio_clock::Present.
     const double now = std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-    m_lastKnownPosition.store(position);
     std::lock_guard<std::mutex> lock(m_clockMutex);
-    if (audio_clock::Usable(m_clock, position, now, !state->paused.load())) {
-        if (m_clockStalled) {
-            m_clockStalled = false;
-            LOG("Audio: clock advancing again at " << position << "s; master clock restored.");
-        }
-        return position;
-    }
-    if (!m_clockStalled) {
+    const bool playing = !state->paused.load();
+    const bool usable = audio_clock::Usable(m_clock, position, now, playing);
+    const double presented = audio_clock::Present(m_continuity, position, usable, now, playing);
+    // What a restart resumes from: where the viewer is, which during a stall
+    // is the carried clock rather than the frozen audio.
+    m_lastKnownPosition.store(presented);
+    if (usable && m_clockStalled) {
+        m_clockStalled = false;
+        LOG("Audio: clock advancing again at " << position << "s; slewing the master clock back from "
+            << presented << "s.");
+    } else if (!usable && !m_clockStalled) {
         m_clockStalled = true;
         LOG("Audio: clock frozen at " << position << "s for over " << audio_clock::kStallSeconds
-            << "s of playback; falling back to the steady clock. The helper has most likely "
-               "ended or the output device has gone away.");
+            << "s of playback; carrying it forward on the steady clock. The helper has most likely "
+               "ended, the stream has underrun, or the output device has gone away.");
     }
-    return -1.0;
+    return presented;
 }
 
 uint64_t AudioPlayer::SubmittedBuffers() const
@@ -491,6 +494,12 @@ bool AudioPlayer::Paused() const {const auto state=m_reader;return state&&state-
 
 void AudioPlayer::Pause(bool paused) {
     const auto state=m_reader;if(!state)return;
+    {
+        const double now = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        std::lock_guard<std::mutex> lock(m_clockMutex);
+        audio_clock::PauseChanged(m_clock, m_continuity, now);
+    }
     state->paused = paused;
     if (!state->renderer) return;
     // Pausing decays the last frame to silence and lets the queue play out
@@ -552,7 +561,7 @@ bool AudioPlayer::Seek(double seconds) {
 
 void AudioPlayer::Stop() {
     const auto state=m_reader;
-    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); m_clockStalled = false; }
+    { std::lock_guard<std::mutex> lock(m_clockMutex); audio_clock::Reset(m_clock); audio_clock::Reset(m_continuity); m_clockStalled = false; }
     if(!state){if(m_thread.joinable())m_thread.detach();return;}
     state->stop = true;
     state->hasAudioData = false;
