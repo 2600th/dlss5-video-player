@@ -429,7 +429,9 @@ helper job at all, which is correct and is not this measurement. See
 
 `NeuralCacheManager` stages source and render artifacts in `cache/v1` beside the
 executable, which is the default root; LocalAppData is the legacy fallback used
-only when the portable directory is not writable. Source, application version,
+only when the portable directory is not writable, or sits so deep that a staging
+path under it would pass the 260-character limit (the root is probed with the
+deepest path the cache writes; an explicit root that fails the probe is refused). Source, application version,
 GPU path, driver version, runtime digest, model-store digest, native
 dimensions, quality, upscaling state, the rendered range, the guide
 description, and a canonical neural-settings digest form the render identity -

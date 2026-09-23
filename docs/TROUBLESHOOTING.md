@@ -107,7 +107,10 @@ Use a writable player/data location and check free space. Cache data prefers
 Windows may redirect the fallback into the launching package's private LocalCache. The player
 resolves that physical location before creating source/render buckets and saves
 it as `[Storage] CacheDirectory` in the INI beside the EXE. Check that value or
-the startup log's `Neural cache directory:` line for the exact location.
+the startup log's `Neural cache directory:` line for the exact location. A cache
+folder whose path is longer than about 140 characters is refused, because the files
+the cache writes inside it would pass Windows' 260-character path limit; choose a
+shorter folder.
 Original YouTube downloads are in `sources/<key>/source.mkv`; processed videos
 are in `renders/<key>/neural.mkv`.
 

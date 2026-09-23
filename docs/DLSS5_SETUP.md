@@ -143,7 +143,8 @@ or redistribute runtime binaries from those repositories.
 
 The cache prefers `cache\v1` beside `DLSSVideoPlayer.exe` and falls back to
 `%LOCALAPPDATA%\DLSSVideoPlayer\NeuralCache\v1` when that folder cannot be
-written. **Advanced > Clear Neural
+written, or is nested so deep that the cache's own paths would pass Windows'
+260-character limit. **Advanced > Clear Neural
 Cache** reports its current size and requires confirmation. Clearing is blocked
 while acquisition, a neural job or export is active. Confirmed clearing closes
 playback first. Windows package virtualization may redirect the physical cache
