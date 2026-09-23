@@ -163,6 +163,30 @@ int RunTool(const fs::path& tool, const std::vector<std::wstring>& arguments)
     return int(_wspawnv(_P_WAIT, executable.c_str(), argv.data()));
 }
 
+// dlaa-smoke.mp4 lives under the gitignored `external/` tree and no script
+// fetches it, so on every checkout but one this registration skipped and
+// asked the converter nothing. When it is absent the harness makes a stand-in
+// with the same shape - 1280x720 at 30 fps, H.264 in MP4 with an AAC track,
+// statically framed so its pairs report themselves unmeasurable exactly as
+// the real clip's do (see kMinPairSeparationPx) - and runs on that. Temporal
+// noise gives the encoder and the runtime texture to work on rather than a
+// flat still. Two seconds: sixty source frames, enough for every assertion
+// below and short on a slow card.
+bool GenerateDefaultSource(const fs::path& ffmpeg, const fs::path& clip)
+{
+    std::error_code removeError;
+    fs::remove(clip, removeError);
+    const int exitCode = RunTool(ffmpeg, {
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
+        L"-f", L"lavfi", L"-i", L"smptehdbars=s=1280x720:r=30:d=2",
+        L"-f", L"lavfi", L"-i", L"sine=frequency=440:duration=2",
+        L"-map", L"0:v", L"-map", L"1:a", L"-vf", L"noise=alls=12:allf=t",
+        L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", L"-crf", L"18",
+        L"-c:a", L"aac", L"-shortest", clip.wstring()});
+    std::error_code existsError;
+    return exitCode == 0 && fs::is_regular_file(clip, existsError) && !existsError;
+}
+
 std::wstring SecondsText(double seconds)
 {
     wchar_t text[64]{};
@@ -410,7 +434,7 @@ int wmain(int argc, wchar_t** argv)
                       L"                Omitted means the streams come from <source> itself.\n";
         return 2;
     }
-    const fs::path source = argc > 1 ? fs::path(argv[1]) : fs::path(kDefaultSource);
+    fs::path source = argc > 1 ? fs::path(argv[1]) : fs::path(kDefaultSource);
     const uint32_t multiplier = argc > 2 ? uint32_t(std::max(0L, std::wcstol(argv[2], nullptr, 10)))
                                          : kDefaultMultiplier;
     // FFmpeg's directory. Empty searches beside this executable and then PATH,
@@ -431,20 +455,31 @@ int wmain(int argc, wchar_t** argv)
     fs::create_directories(output.parent_path(), directoryError);
 
     // A source that is not on this machine is not a broken player. The default
-    // clip lives under the gitignored `external/` tree, no script fetches it and
-    // no document says how to obtain it, so a fresh checkout fails this one
-    // registration while the three generated-clip registrations beside it pass.
-    // Report that as the skip it is, for the same reason and with the same exit
-    // code the no-adapter gate above uses.
+    // clip is made here when it is missing (GenerateDefaultSource); any other
+    // missing source is reported as the skip it is, for the same reason and
+    // with the same exit code the no-adapter gate above uses.
     //
     // Deliberately `exists` and nothing more: a file that IS here but cannot be
     // read, or has no listable streams, still returns 2 below. This hides a
     // missing FILE, never a broken one.
     std::error_code sourceError;
     if (!fs::exists(source, sourceError)) {
-        std::cout << "skipped: " << Narrow(source.wstring())
-                  << " is not on this machine; nothing was asked of the converter\n";
-        return gpu_test_gate::kSkipExitCode;
+        const fs::path generator = FfmpegTool(helpers, L"ffmpeg.exe");
+        if (source.filename() != fs::path(kDefaultSource).filename() || generator.empty()) {
+            std::cout << "skipped: " << Narrow(source.wstring())
+                      << " is not on this machine; nothing was asked of the converter\n";
+            return gpu_test_gate::kSkipExitCode;
+        }
+        const fs::path generated = output.parent_path() / L"dlaa-smoke-generated.mp4";
+        if (!GenerateDefaultSource(generator, generated)) {
+            std::cout << "source=" << Narrow(source.wstring())
+                      << "\nexperiment=unreachable reason=the stand-in for the missing default clip "
+                         "could not be generated\n";
+            return 2;
+        }
+        std::cout << "sourceGenerated=" << Narrow(generated.wstring()) << " (stand-in for "
+                  << Narrow(source.wstring()) << ")\n";
+        source = generated;
     }
 
     // The source the conversion is actually run on. Carrying the source's audio

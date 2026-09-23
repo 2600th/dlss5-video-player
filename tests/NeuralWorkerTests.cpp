@@ -814,20 +814,27 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     CHECK(!neural_worker_detail::ParseWorkerArguments(preflightWithSourceView).has_value());
 }
 
+// Timed from the stop request, not from the launch: starting a child copy of
+// this executable is what a loaded runner (or a virus scanner looking at a new
+// .exe) slows down, and it is not what this test is about. The bound is
+// generous because the failure it guards against is not slowness: a parent
+// that ignores the stop waits out the helper's 20 s hang.
 void cancellation_of_running_child_is_bounded_test()
 {
     std::stop_source stop;
+    std::chrono::steady_clock::time_point stopRequested{};
     std::jthread cancel([&] {
         std::this_thread::sleep_for(100ms);
+        stopRequested = std::chrono::steady_clock::now();
         stop.request_stop();
     });
-    const auto started = std::chrono::steady_clock::now();
     const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(), TestRequest(L"hang-source.mkv"),
         {}, stop.get_token());
-    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto returned = std::chrono::steady_clock::now();
+    cancel.join();
     CHECK(!result.ok);
     CHECK(result.cancelled);
-    CHECK(elapsed < 3s);
+    CHECK(returned - stopRequested < 10s);
 }
 
 // GetExitCodeProcess succeeds on a LIVE process and answers STILL_ACTIVE
@@ -968,19 +975,22 @@ void an_empty_metadata_pipe_is_not_a_spent_budget_test()
 void cancellation_is_bounded_even_when_the_helper_floods_the_pipe_test()
 {
     std::stop_source stop;
+    std::chrono::steady_clock::time_point stopRequested{};
     std::jthread cancel([&] {
         std::this_thread::sleep_for(300ms);
+        stopRequested = std::chrono::steady_clock::now();
         stop.request_stop();
     });
-    const auto started = std::chrono::steady_clock::now();
     const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(),
         TestRequest(L"flood-source.mkv"), {}, stop.get_token());
-    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto returned = std::chrono::steady_clock::now();
+    cancel.join();
     CHECK(!result.ok);
     CHECK(result.cancelled);
     // The helper writes for 30 s. Anything near that means the drain, not the
-    // cancellation, decided when this returned.
-    CHECK(elapsed < 8s);
+    // cancellation, decided when this returned. Timed from the stop request,
+    // with room for a loaded runner, for the reason given above.
+    CHECK(returned - stopRequested < 15s);
 }
 
 // P1.13: the parent used to poll its metadata pipe every 20 ms, so each

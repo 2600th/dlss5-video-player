@@ -104,11 +104,13 @@ whole session on its own. `ExportMatrixSmoke` renders all seven combinations of
 Super Resolution, neural rendering and frame generation through a 3.5 s 720p30
 clip and checks the geometry, the frame count and the bytes of each.
 
-Two of the twelve skip on hardware that is working correctly.
+One of the twelve skips on hardware that is working correctly.
 `DlssgEvaluateSmoke` needs three generated frames per source pair, and
 multi-frame generation is Blackwell-only, so every RTX 40 and earlier reports
-it skipped. `FrameGenerationSmoke` needs `external/test-media/dlaa-smoke.mp4`,
-which is fetched by no script; a checkout without it skips rather than failing.
+it skipped. `FrameGenerationSmoke` runs on `external/test-media/dlaa-smoke.mp4`
+when that file is there; it is fetched by no script, so otherwise the test
+generates a stand-in of the same shape (1280x720, 30 fps, H.264 with audio)
+with the staged FFmpeg and runs on that.
 `ctest -LE "gpu|audio"` is the portable run CI performs; `ctest -L "gpu|audio"`
 runs the hardware set. `AudioClockSmoke` is the `audio` one: it asserts the
 audio clock every video frame's due time is computed from, against a real

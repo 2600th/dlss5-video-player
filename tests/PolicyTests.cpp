@@ -2158,8 +2158,8 @@ void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin
 // The harness is the only thing standing between one bad case and the rest of
 // the suite, so it gets tested like anything else. CHECK(true) said nothing.
 //
-// These three probes are run through the real runner by the case below. They
-// are deliberately not in kCases: they fail on purpose.
+// These probes are run through the real runner by the case below. They are
+// deliberately not in kCases: all but the last fail on purpose.
 int g_harness_statements_after_require = 0;
 
 void harness_probe_require_stops_the_case()
@@ -2176,19 +2176,27 @@ void harness_probe_access_violation()
     *nowhere = 1;
 }
 
+// Returns without asserting anything, which is what a case whose body was
+// lost to an early return or a bad split looks like. The runner fails it.
+void harness_probe_asserts_nothing()
+{
+}
+
 void harness_probe_passes()
 {
     CHECK(true);
 }
 
-// Three properties, all of which the suite lacked: a hard failure stops its
-// own case rather than the run; the case after a crash still executes; and
-// each failure is attributed to the case that produced it by name.
+// Four properties, all of which the suite lacked: a hard failure stops its
+// own case rather than the run; the case after a crash still executes; each
+// failure is attributed to the case that produced it by name; and a case that
+// asserts nothing is a failure, not a pass.
 void harness_isolates_a_failing_case_from_the_ones_after_it_test()
 {
     static constexpr test_support::TestCase probes[] = {
         TEST_CASE(harness_probe_require_stops_the_case),
         TEST_CASE(harness_probe_access_violation),
+        TEST_CASE(harness_probe_asserts_nothing),
         TEST_CASE(harness_probe_passes),
     };
 
@@ -2204,8 +2212,8 @@ void harness_isolates_a_failing_case_from_the_ones_after_it_test()
     std::cerr.rdbuf(previous);
     test_support::failure_count = failuresBefore;
 
-    CHECK_EQ(size_t{3}, summary.ran);
-    CHECK_EQ(size_t{2}, summary.failed);
+    CHECK_EQ(size_t{4}, summary.ran);
+    CHECK_EQ(size_t{3}, summary.failed);
     // A failed REQUIRE abandons its case at the point of failure. A failed
     // CHECK would have carried on to the increment.
     CHECK_EQ(0, g_harness_statements_after_require);
@@ -2215,6 +2223,7 @@ void harness_isolates_a_failing_case_from_the_ones_after_it_test()
     CHECK(report.find("harness_probe_access_violation") != std::string::npos);
     // The access violation is reported as one, not as a silent abort.
     CHECK(report.find("c0000005") != std::string::npos);
+    CHECK(report.find("[harness_probe_asserts_nothing] made no assertions") != std::string::npos);
     // The case after the crash ran and did not fail.
     CHECK(report.find("harness_probe_passes") == std::string::npos);
 }
@@ -6187,7 +6196,10 @@ void video_decoder_close_returns_promptly_when_local_queue_thread_is_blocked_on_
     decoder->Close();
     const double elapsedMs=
         std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-closeStarted).count();
-    CHECK(elapsedMs<2000.0);
+    // The regression is a Close that never returns - the child sleeps forever
+    // and the join waits on it - so the bound only has to be finite. 2 s was
+    // a speed claim a loaded runner could fail; 10 s is not.
+    CHECK(elapsedMs<10000.0);
 }
 
 // NV12 needs even plane dimensions (the UV plane is half-resolution in both

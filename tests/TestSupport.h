@@ -1,9 +1,9 @@
 #pragma once
 
 // excpt.h rather than windows.h: the case runner below needs __except's
-// filter constant and GetExceptionCode, and nothing else Windows offers. Six
-// of the thirteen test targets compile without NOMINMAX, so pulling in
-// windows.h here would hand them the min/max macros.
+// filter constant and GetExceptionCode, and nothing else Windows offers. Every
+// target defines NOMINMAX now, but a header this far down should not decide
+// what an including test sees of windows.h.
 #include <excpt.h>
 
 #include <cstddef>
@@ -19,7 +19,8 @@ inline int failure_count = 0;
 // Every CHECK/CHECK_EQ/REQUIRE that was evaluated, passing or not. A suite
 // that silently stops asserting - a case that returns early, a split that
 // drops a block - keeps a failure count of zero, so the count of assertions
-// actually reached is what makes that visible.
+// actually reached is what makes that visible. run_cases fails a case that
+// reaches none; the count used to be kept and never read.
 inline int assertion_count = 0;
 // Name of the case a runner is executing, printed ahead of every failure it
 // produces; null outside a named case.
@@ -71,10 +72,11 @@ void check_equal(const Expected& expected, const Actual& actual,
 // optional and takes the process down.
 struct RequirementFailed {};
 
+// The REQUIRE macro counts itself when it is evaluated, pass or fail, so a
+// case that only REQUIREs is not mistaken for one that asserts nothing.
 [[noreturn]] inline void requirement_failed(std::string_view expression,
                                             std::string_view file, int line)
 {
-    ++assertion_count;
     failure(file, line) << "REQUIRE failed: " << expression << '\n';
     throw RequirementFailed{};
 }
@@ -123,7 +125,9 @@ inline void run_case_guarded(void (*run)(), CaseOutcome& outcome) noexcept
 
 // Runs every case whose name contains `only` (all of them when it is empty),
 // attributing each failed CHECK, failed REQUIRE, uncaught exception and
-// structured exception to the case it happened in.
+// structured exception to the case it happened in. A case that finishes
+// without evaluating a single assertion fails too: it proved nothing, and
+// green was the only thing it could ever report.
 inline RunSummary run_cases(const TestCase* cases, size_t count, std::string_view only)
 {
     RunSummary summary;
@@ -133,10 +137,15 @@ inline RunSummary run_cases(const TestCase* cases, size_t count, std::string_vie
         if (std::string_view(test.name).find(only) == std::string_view::npos) continue;
         ++summary.ran;
         const int before = failure_count;
+        const int assertionsBefore = assertion_count;
         current_case = test.name;
         CaseOutcome outcome;
         run_case_guarded(test.run, outcome);
         current_case = nullptr;
+        if (assertion_count == assertionsBefore && outcome.exception.empty() && outcome.exceptionCode == 0) {
+            ++failure_count;
+            std::cerr << '[' << test.name << "] made no assertions\n";
+        }
         if (!outcome.exception.empty()) {
             ++failure_count;
             std::cerr << '[' << test.name << "] uncaught exception: " << outcome.exception << '\n';
@@ -165,6 +174,7 @@ inline RunSummary run_cases(const TestCase* cases, size_t count, std::string_vie
 // it for a precondition the rest of the case would dereference.
 #define REQUIRE(expression)                                                   \
     do {                                                                      \
+        ++::test_support::assertion_count;                                    \
         if (!(expression))                                                    \
             ::test_support::requirement_failed(#expression, __FILE__, __LINE__); \
     } while (false)

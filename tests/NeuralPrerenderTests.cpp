@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -1853,11 +1854,24 @@ void encoder_blocked_write_is_interrupted_by_stop_test()
     // from the constant keeps this test honest if that buffer is ever retuned: it used to
     // rely on the pipe defaulting to a few kilobytes.
     CHECK(ExpectedFrameBytes(spec) > kChildStdinPipeBytes);
+    // The stop used to follow a 100 ms sleep, so on a slow start it could land
+    // before the write had blocked and test the cancel-before-block path
+    // instead. The fake child now says when the write is blocked: it signals
+    // this event once its stdin holds more than the pipe's whole buffer, which
+    // only a WriteFile still waiting for the reader can account for.
+    const std::wstring blockedName=L"Local\\DlssMediaTestWriteBlocked-"+std::to_wstring(GetCurrentProcessId());
+    HANDLE blocked=CreateEventW(nullptr,TRUE,FALSE,blockedName.c_str());
+    REQUIRE(blocked!=nullptr);
+    CHECK(SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_WRITE_BLOCKED_EVENT",blockedName.c_str())!=FALSE);
     CHECK_EQ(EncodeError::None,encoder.Start(spec,fixture.Path()/L"hang-output.mkv"));
+    SetEnvironmentVariableW(L"DLSS_MEDIA_TEST_WRITE_BLOCKED_EVENT",nullptr);
     std::vector<uint8_t> frame(ExpectedFrameBytes(spec));std::stop_source stop;
     auto write=std::async(std::launch::async,[&]{return encoder.WriteFrame(frame,stop.get_token());});
-    std::this_thread::sleep_for(100ms);stop.request_stop();
-    CHECK_EQ(std::future_status::ready,write.wait_for(3s));
+    CHECK_EQ(static_cast<DWORD>(WAIT_OBJECT_0),WaitForSingleObject(blocked,10000));
+    CloseHandle(blocked);
+    stop.request_stop();
+    // Generous: the failure this guards is a write that never returns.
+    CHECK_EQ(std::future_status::ready,write.wait_for(10s));
     if(write.wait_for(0s)==std::future_status::ready){
         // CHECK_EQ prints the expressions, not the values, and the future can only be
         // read once - so name the outcome here or a failure says nothing about which
@@ -3210,7 +3224,7 @@ public:
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop) override
     {
         if(stop.stop_requested())return VideoReadResult::Cancelled;
-        if(notReadyReads>0){--notReadyReads;return VideoReadResult::NotReady;}
+        if(notReadyReads>0){--notReadyReads;++notReadyServed;return VideoReadResult::NotReady;}
         if(index>=frames.size())return VideoReadResult::EndOfStream;
         frame=frames[index++];return VideoReadResult::FrameReady;
     }
@@ -3226,6 +3240,9 @@ public:
     double DurationSeconds() const override { return duration; }
     std::vector<VideoFrame> frames;size_t index{};uint32_t width{1},height{1};
     double fps{30.0},duration{};bool failOpen{},failNextSeek{};int opens{},knownOpens{},closes{},seeks{},notReadyReads{};
+    // Read from another thread by a test waiting for a reader to be inside its
+    // not-ready loop, so it is the one atomic here.
+    std::atomic<int> notReadyServed{};
 };
 
 void synchronized_seek_waits_for_decoder_startup_and_preserves_comparison_test()
@@ -3278,8 +3295,15 @@ void synchronized_seek_wait_can_be_cancelled_test()
     original.notReadyReads=100000;
     std::stop_source stop;
     auto seek=std::async(std::launch::async,[&]{return playback.SeekSeconds(0,stop.get_token());});
-    std::this_thread::sleep_for(25ms);stop.request_stop();
-    CHECK_EQ(std::future_status::ready,seek.wait_for(1s));CHECK(!seek.get());
+    // Stop only once the seek is waiting on a decoder that is not ready: a
+    // fixed 25 ms sleep could fire before the seek started, which tests a stop
+    // that was already there rather than one that interrupts the wait.
+    for(const auto deadline=std::chrono::steady_clock::now()+10s;
+        original.notReadyServed.load()==0&&std::chrono::steady_clock::now()<deadline;)
+        std::this_thread::sleep_for(1ms);
+    REQUIRE(original.notReadyServed.load()>0);
+    stop.request_stop();
+    CHECK_EQ(std::future_status::ready,seek.wait_for(10s));CHECK(!seek.get());
     CHECK(playback.VisibleFrame()==nullptr);
 }
 
@@ -4770,6 +4794,26 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
                value.find(L"hang-output") != std::wstring_view::npos;
     });
     if (hang) {
+        // encoder_blocked_write_is_interrupted_by_stop_test's latch. Bytes
+        // beyond the pipe's buffer can only be data of a write still pending
+        // on the parent side, so once they show up the parent is blocked.
+        std::array<wchar_t, 128> blockedName{};
+        if (GetEnvironmentVariableW(L"DLSS_MEDIA_TEST_WRITE_BLOCKED_EVENT", blockedName.data(),
+                                    static_cast<DWORD>(blockedName.size())) > 0) {
+            const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+            for (;;) {
+                DWORD available = 0;
+                if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) break;
+                if (available > kChildStdinPipeBytes) {
+                    if (HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, blockedName.data())) {
+                        SetEvent(event);
+                        CloseHandle(event);
+                    }
+                    break;
+                }
+                Sleep(1);
+            }
+        }
         Sleep(INFINITE);
         return 0;
     }

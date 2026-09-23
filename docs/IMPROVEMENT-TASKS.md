@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
-| [P1.22](#p122) | Test hygiene and coverage gaps | M | Release | 🔍 |
 | [P1.23](#p123) | Docs, screenshots and positioning drift | S | Docs, Site | ✅ |
 | **P2** | | | | |
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
@@ -149,29 +148,6 @@ These matter because the copies **disagree**, not because they are repeated.
 implementation.
 
 ## Release and CI
-
-<a id="p122"></a>
-### P1.22 · Test hygiene and coverage gaps
-
-`M` · **Release** · 🔍
-
-- **Wall-clock ceilings that can flake on a loaded runner**:
-  `PolicyTests.cpp:6020` (under 2,000 ms), `NeuralWorkerTests.cpp:786`,
-  `:939`.
-- **Sleep-then-stop at `NeuralPrerenderTests.cpp:1308`, `:2538`** can end up
-  testing cancel-before-block instead of the blocked path. Use a latch.
-- `assertion_count` (`tests/TestSupport.h:23`) is counted but never enforced,
-  and `harness_sanity_test` (`PolicyTests.cpp`) counts `CHECK(true)` as a
-  test.
-- **Never run by CI**: `DLSSGBackend`, `FrameGenerationPass`, `WasapiRenderer`,
-  `NeuralPreflightProbe` and `NeuralWorkerMain` run only under the `gpu`/`audio`
-  labels (see P1.17). `CrashDump.h` and `PrecisionSleeper.h` have no tests.
-  `stage_runtime.ps1` and the full-package path of `verify_package.ps1` never
-  run (see P0.1). The Debug configuration is never built.
-- **`FrameGenerationSmoke`'s clip cannot be obtained**, so the test skips
-  permanently. Generate the clip in the test, or fetch it with a pinned hash.
-- `tools/fetch_youtube_helpers.ps1` has four `# TEST-SEAM:` markers and no
-  harness uses them. Add a Pester test for the restore-failure path.
 
 ## Docs and site
 

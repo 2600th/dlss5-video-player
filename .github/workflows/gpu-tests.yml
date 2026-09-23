@@ -111,22 +111,23 @@ jobs:
           # A label filter with every test skipped still exits 0, which would
           # make a runner whose GPU fell out of the machine look green forever.
           # A skip used to mean exactly one thing - the runner lost its adapter
-          # or its audio endpoint - so refusing every skip was right. It no
-          # longer is: two of these skip on hardware that is working perfectly,
-          # and failing the run for that teaches everyone to ignore this job.
+          # or its audio endpoint - so refusing every skip was right. One test
+          # still skips on hardware that is working perfectly, and failing the
+          # run for that teaches everyone to ignore this job:
           #
           #   DlssgEvaluateSmoke    multi-frame generation is Blackwell-only, so
           #                         every RTX 40 and earlier admits exactly one
           #                         generated frame per pair and cannot be asked
           #                         for the three the phase table separates.
-          #   FrameGenerationSmoke  its default clip is not published, not in
-          #                         git and fetched by no script, so a checkout
-          #                         without it asks the converter nothing.
           #
-          # Any OTHER skip still means the runner is broken, which is the case
-          # this guard exists for - and both tests above still FAIL, rather than
-          # skip, when the hardware is there and the answer is wrong.
-          $allowedSkips = @('DlssgEvaluateSmoke', 'FrameGenerationSmoke')
+          # FrameGenerationSmoke used to be the second: its default clip is
+          # fetched by no script. It now generates a stand-in with the staged
+          # FFmpeg, so a skip there means FFmpeg is missing - a broken runner.
+          # Any skip but the one above still means the runner is broken, which
+          # is the case this guard exists for - and DlssgEvaluateSmoke still
+          # FAILS, rather than skips, when the hardware is there and the answer
+          # is wrong.
+          $allowedSkips = @('DlssgEvaluateSmoke')
           $skipped = @($cases | Where-Object { $_.SelectSingleNode('skipped') } | ForEach-Object { $_.name })
           $unexpected = @($skipped | Where-Object { $allowedSkips -notcontains $_ })
           if ($unexpected.Count -gt 0) {
