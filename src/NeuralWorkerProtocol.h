@@ -217,7 +217,8 @@ inline bool IsKnownFailure(uint32_t failure) noexcept
 inline bool IsKnownEncoder(uint8_t encoder) noexcept
 {
     return encoder == static_cast<uint8_t>(EncoderKind::HevcNvenc) ||
-           encoder == static_cast<uint8_t>(EncoderKind::H264Software);
+           encoder == static_cast<uint8_t>(EncoderKind::H264Software) ||
+           encoder == static_cast<uint8_t>(EncoderKind::Ffv1);
 }
 
 inline bool IsBooleanByte(uint8_t value) noexcept { return value == 0 || value == 1; }

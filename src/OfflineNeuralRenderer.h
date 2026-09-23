@@ -115,7 +115,15 @@ struct NeuralRenderRequest {
     // Ordered dither at the 8-bit capture store (DitherPolicy.h). Off by
     // default: it changes the captured bytes, which makes it a cache-key term
     // (CaptureQualityIdentityTerm), and it ships on only on a measurement.
+    // Only the Standard rung has an 8-bit store to dither; the 10-bit rungs
+    // ignore it.
     bool captureDither{false};
+    // The rung of the quality ladder the frames are written at (EncoderQuality in
+    // MediaPipeline.h). The 10-bit rungs capture P010 on the GPU whatever
+    // gpuColorConversion says, because an 8-bit capture would already have thrown
+    // away what they exist to keep; Lossless encodes FFV1 on the CPU and has no
+    // NVENC attempt to fall back from.
+    EncoderQuality quality{EncoderQuality::Standard};
 };
 
 struct NeuralRenderProgress {

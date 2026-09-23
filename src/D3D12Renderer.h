@@ -128,7 +128,32 @@ struct GuideFrame;
 //    by an interleaved half-resolution UV plane, BT.709 limited range. NVENC takes it
 //    unchanged, and it is 1.5 bytes per pixel instead of 4 across PCIe and the pipe.
 //    Requires even output dimensions.
-enum class CaptureFormat { Bgra, Nv12 };
+//  * P010 - the NV12 layout at 10 bits, the code in the top ten bits of each 16-bit
+//    sample, converted from the FP16 output by the same BT.709 limited-range algebra.
+//    The 10-bit rungs of the quality ladder (EncoderQuality) capture this, since an
+//    8-bit capture would already have thrown away what they exist to keep. Three
+//    bytes per pixel; requires even output dimensions.
+enum class CaptureFormat { Bgra, Nv12, P010 };
+
+namespace d3d12_renderer_detail {
+// Tightly packed bytes of one captured frame in `format`, which is what the capture
+// hands the encoder and what the encoder checks each frame against.
+constexpr uint64_t CaptureFrameBytes(CaptureFormat format, uint32_t width, uint32_t height)
+{
+    const uint64_t pixels = uint64_t{width} * height;
+    switch (format) {
+    case CaptureFormat::Nv12: return pixels + pixels / 2u;
+    case CaptureFormat::P010: return (pixels + pixels / 2u) * 2u;
+    case CaptureFormat::Bgra: break;
+    }
+    return pixels * 4u;
+}
+// Two planes, luma then interleaved half-size chroma, for NV12 and P010 alike.
+constexpr bool CaptureFormatIsPlanar(CaptureFormat format)
+{
+    return format == CaptureFormat::Nv12 || format == CaptureFormat::P010;
+}
+} // namespace d3d12_renderer_detail
 
 struct CapturedVideoFrame {
     // Tightly packed pixels in the renderer's active CaptureFormat, which the encoder
@@ -268,8 +293,8 @@ public:
         size_t bytes = 0;                // tightly packed size the copy produces
         uint32_t width = 0, height = 0;
         CaptureFormat format = CaptureFormat::Bgra;
-        // NV12 only: the interleaved UV plane, half resolution in both axes, sitting in
-        // the same readback buffer at its own aligned offset.
+        // NV12 and P010: the interleaved UV plane, half resolution in both axes, sitting
+        // in the same readback buffer at its own aligned offset.
         const uint8_t* chromaBase = nullptr;
         size_t chromaRowPitch = 0;
         // The frame this slot's capture was recorded for, stamped when the copy was

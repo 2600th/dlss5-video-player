@@ -55,7 +55,7 @@ std::string Iso8601Utc(std::chrono::system_clock::time_point at)
 
 std::string_view EncoderName(EncoderKind kind) noexcept
 {
-    return kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : "h264_software";
+    return kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : kind == EncoderKind::Ffv1 ? "ffv1" : "h264_software";
 }
 
 std::string_view TrimmedPreflight(std::string_view json) noexcept

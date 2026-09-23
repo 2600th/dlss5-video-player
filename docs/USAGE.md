@@ -503,6 +503,21 @@ key, so a default render keeps the cache entries it already has:
 - `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
   is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
   key.
+- `CacheQuality` (`standard`, `high` or `lossless`; default `standard`). The
+  quality ladder for what a render is written as, in the cache and in any export
+  made from it. Standard is HEVC 8-bit at CQ 16, what every earlier render used.
+  High captures 10 bits on the GPU (P010) and writes HEVC Main10 at CQ 14 without
+  NVENC's default bitrate ceiling; Lossless writes the same 10-bit capture as
+  FFV1, exactly. Measured on five 1080p clips against the Lossless render: VMAF
+  93.7 for Standard (81.7 on the most detailed clip, where that ceiling binds)
+  against 97.6 for High, at about 9 against 19 Mbit/s; Lossless is about 240
+  Mbit/s, 1.8 GB a minute at 1080p30. Render time did not change between rungs.
+  The key carries `high-main10-cq14-v1` or `lossless-ffv1-10bit-v1`, and a
+  10-bit rung ignores `GpuColorConversion` and `CaptureDither`, which have
+  nothing to act on there. Cached playback and **Save converted video** take
+  every rung: MKV copies the stream, MP4 carries High's HEVC as it is and turns
+  Lossless's FFV1 into lossless 10-bit H.264. The numbers are in
+  `docs/measurements/cache-quality-20260923/`.
 - `CaptureDither` (default off). Dithers each rendered frame against a static
   8x8 ordered map where it is cut to 8 bits for the cache, so a smooth dark
   gradient is written as a fine mix of two levels instead of flat bands.

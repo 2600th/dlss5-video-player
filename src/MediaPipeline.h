@@ -15,6 +15,9 @@
 enum class EncoderKind {
     HevcNvenc,
     H264Software,
+    // The Lossless rung's encoder (EncoderQuality::Lossless). CPU-only, so there is
+    // no NVENC attempt to fall back from and nothing to fall back to.
+    Ffv1,
 };
 
 enum class EncodeError {
@@ -77,15 +80,87 @@ inline constexpr size_t kChildStdinPipeBytes = 16u * 1024u * 1024u;
 // with limited range. It exists because BGRA leaves ffmpeg converting every frame on
 // the CPU, which measured as the export's slowest stage, and it also cuts the readback
 // and the pipe write from four bytes per pixel to one and a half.
-enum class EncoderPixelFormat { Bgra, Nv12 };
+//
+// P010 is NV12's layout at 16 bits a sample with the 10-bit code in the top bits, which
+// is what the 10-bit rungs capture: three bytes a pixel, and NVENC takes it as it stands.
+enum class EncoderPixelFormat { Bgra, Nv12, P010 };
 
-// Bytes one frame of `format` occupies at this size. NV12 needs even dimensions; the
-// caller is responsible for not selecting it otherwise.
+// Bytes one frame of `format` occupies at this size. NV12 and P010 need even
+// dimensions; the caller is responsible for not selecting them otherwise.
 constexpr uint64_t EncoderFrameBytes(EncoderPixelFormat format, uint32_t width, uint32_t height)
 {
     const uint64_t pixels = uint64_t{width} * height;
-    return format == EncoderPixelFormat::Nv12 ? pixels + (pixels / 2u) : pixels * 4u;
+    switch (format) {
+    case EncoderPixelFormat::Nv12: return pixels + (pixels / 2u);
+    case EncoderPixelFormat::P010: return (pixels + (pixels / 2u)) * 2u;
+    case EncoderPixelFormat::Bgra: break;
+    }
+    return pixels * 4u;
 }
+
+// The quality ladder for what a neural render is written as, in the cache and in an
+// export made from it. A named rung rather than free encoder options, so the choice is
+// one cache-key term (NeuralRenderPipelineIdentity) and one line in Encoder settings.
+//
+//  * Standard - HEVC 8-bit at CQ 16 through NVENC, libx264 CRF 16 when NVENC is
+//    unavailable. Every render before the ladder existed, and still the default.
+//  * High - HEVC Main10 through NVENC from a 10-bit P010 capture (libx264 High 10 when
+//    NVENC is unavailable), at kHighRungCq.
+//  * Lossless - FFV1 10-bit, every frame intra, from the same P010 capture: exact to the
+//    10-bit 4:2:0 capture, and the reference the other two rungs are scored against.
+//
+// The measured cost of each rung is recorded beside kHighRungCq.
+enum class EncoderQuality { Standard, High, Lossless };
+
+// The 10-bit rungs capture P010 on the GPU; Standard keeps the 8-bit capture.
+constexpr bool EncoderQualityIsTenBit(EncoderQuality quality)
+{
+    return quality != EncoderQuality::Standard;
+}
+
+// Stable lower-case names: the helper's --cache-quality value, the [Encoding]
+// CacheQuality key and the log. Parse accepts exactly these.
+constexpr std::string_view EncoderQualityName(EncoderQuality quality)
+{
+    switch (quality) {
+    case EncoderQuality::High: return "high";
+    case EncoderQuality::Lossless: return "lossless";
+    case EncoderQuality::Standard: break;
+    }
+    return "standard";
+}
+
+constexpr bool ParseEncoderQuality(std::string_view text, EncoderQuality& quality)
+{
+    for (const EncoderQuality candidate :
+         {EncoderQuality::Standard, EncoderQuality::High, EncoderQuality::Lossless}) {
+        if (text == EncoderQualityName(candidate)) { quality = candidate; return true; }
+    }
+    return false;
+}
+
+// Constant quality of the High rung, for hevc_nvenc (-cq, Main10) and for the libx264
+// fallback (-crf, High 10).
+//
+// Measured 2026-09-23 on an RTX 4080 SUPER, five 1080p30 benchmark clips, each rung's
+// encode scored with VMAF against the same clip's Lossless render (the neural frames are
+// bit-identical run to run, so the encode is the only difference):
+//
+//   rung                      VMAF mean (worst clip)   KiB/frame mean (max)   CAMBI mean
+//   Standard, 8-bit CQ 16     93.70 (81.72)             35.0 (46.0)            6.02
+//   High, Main10 CQ 16        97.19 (94.42)             61.5 (174.7)           0.91
+//   High, Main10 CQ 14        97.61 (94.93)             76.7 (219.0)           0.88
+//   Lossless, FFV1 10-bit     100                      983.9 (1813.4)         0.60
+//
+// The worst Standard clip is the fractal zoom, where NVENC's VBR ceiling - not the CQ -
+// decides the size (see BuildEncoderArguments); lifting it is most of what High buys
+// there, and 10 bits is most of what it buys on gradients, where Standard's 8-bit
+// encode leaves bands CAMBI scores at 10.6 against 0.9. CQ 14 over CQ 16 costs 25 %
+// more bytes for +0.5 to +1.3 VMAF on the two clips that move at all. Render time did
+// not change between rungs at 1080p (90-110 frames a second each): the neural pass is
+// the long pole, and NVENC took 3.4-5.3 ms a frame at either CQ.
+// docs/measurements/cache-quality-20260923/ has the per-clip numbers.
+inline constexpr uint32_t kHighRungCq = 14;
 
 struct EncoderSpec {
     uint32_t width{};
@@ -128,6 +203,10 @@ struct EncoderSpec {
     // takes the same trade. Anyone who wants p7 back has it in Encoder
     // settings, and the tooltip there quotes these numbers.
     uint32_t nvencPreset{5};
+    // Which rung of the ladder the frames are written at. The pixel format has to
+    // agree: a 10-bit rung is fed P010 wherever the size allows it (see
+    // BuildEncoderArguments for what an odd size gets instead).
+    EncoderQuality quality{EncoderQuality::Standard};
 };
 
 struct MaterializeResult {
@@ -157,19 +236,39 @@ struct ProbeResult {
     // Decoded video frame extent; independent of container/audio duration.
     // Zero for CachedMetadata, which does not inspect frames.
     int64_t videoDuration100ns{};
+    // ffprobe's codec_name and pix_fmt of the video stream, CachedMetadata only:
+    // what an export needs to carry a 10-bit or lossless render into MP4 without
+    // cutting it back to 8 bits. Empty when not asked for or not reported.
+    std::string codecName;
+    std::string pixelFormat;
 };
 
 std::vector<std::wstring> BuildMaterializeArguments(const MaterializeRequest& request);
 std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
                                                 const std::filesystem::path& output);
+// What an MP4 export does with the cached render's video, from its codec and pixel
+// format (ProbeResult::codecName/pixelFormat):
+//  * an 8-bit render is re-encoded to H.264 as it always was (CRF 18, 8-bit);
+//  * a 10-bit HEVC or H.264 render - the High rung, or its libx264 fallback - is
+//    stream-copied, since MP4 carries either and a re-encode could only lose what
+//    the rung paid for;
+//  * FFV1 - the Lossless rung - cannot go into MP4, so it is re-encoded to lossless
+//    H.264 (-qp 0) at the render's own 10-bit format.
+// MKV stream-copies every rung unchanged.
+enum class CachedVideoMp4Path { Reencode8Bit, CopyHevc, CopyH264, Lossless10Bit };
+CachedVideoMp4Path CachedVideoMp4PathFor(std::string_view codecName, std::string_view pixelFormat);
+
 // FFmpeg arguments for CachedVideoExporter. The container follows the
 // extension of request.output; the encoded file is written to `staging`.
 // Never a trim: the range fields are ignored, and a ranged export passes the
 // already cut streams as request.sourceMedia.
-// oddDimensions selects the 4:4:4 MP4 path; only MP4 exports inspect it.
+// oddDimensions selects the 4:4:4 MP4 path; only MP4 exports inspect it, and
+// so does `mp4Path` (CachedVideoMp4PathFor), whose default is the 8-bit path.
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,
-                                                     bool oddDimensions);
+                                                     bool oddDimensions,
+                                                     CachedVideoMp4Path mp4Path = CachedVideoMp4Path::Reencode8Bit,
+                                                     std::string_view tenBitPixelFormat = {});
 // Bytes RawVideoEncoder requires of one frame of `spec`, or 0 when the spec cannot be
 // encoded at all - which includes NV12 at an odd width or height, since that format has
 // no half-pixel chroma sample to describe it.

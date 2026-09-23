@@ -927,7 +927,12 @@ std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion, uint32_t nven
 std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
 {
     std::string term;
-    if (terms.captureDither != kDefaultCaptureDither) term += "|dither-bayer8-v1";
+    const bool tenBit = EncoderQualityIsTenBit(terms.quality);
+    if (terms.captureDither != kDefaultCaptureDither && !tenBit) term += "|dither-bayer8-v1";
+    if (terms.quality == EncoderQuality::High)
+        term += "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1";
+    else if (terms.quality == EncoderQuality::Lossless)
+        term += "|lossless-ffv1-10bit-v1";
     return term;
 }
 

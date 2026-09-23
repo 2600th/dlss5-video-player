@@ -208,7 +208,7 @@ void ReportStageTimings(EncoderKind kind, const StageTimers& stages,
     std::ostringstream line;
     line << std::fixed << std::setprecision(2)
          << "Neural export stage cost per frame ("
-         << (kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : "libx264") << ", "
+         << (kind == EncoderKind::HevcNvenc ? "hevc_nvenc" : kind == EncoderKind::Ffv1 ? "ffv1" : "libx264") << ", "
          << frames << " frames): total " << MillisPerFrame(accounted, frames)
          << " ms = source " << MillisPerFrame(stages.source, frames)
          << " + submit " << MillisPerFrame(stages.submit, frames)
@@ -1263,6 +1263,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         EncoderSpec spec{outputWidth, outputHeight, request.fps, kind,
                          evaluator.CapturePixelFormat()};
         spec.nvencPreset = request.nvencPreset;
+        spec.quality = request.quality;
         if (writer) {
             // Segment 0's encoder is armed here and starts while this attempt
             // prerolls, so the first captured frame never waits for a spawn.
@@ -1679,9 +1680,10 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
 
     // NVENC accepts odd dimensions but silently pads them to an even size,
     // which breaks exact source/neural pairing and cache validation. libx264's
-    // yuv444p path preserves odd image dimensions.
-    EncoderKind selected = (request.width % 2 || request.height % 2)
-        ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
+    // yuv444p path preserves odd image dimensions. The Lossless rung is FFV1 at
+    // any size, and ShouldRetryWithSoftware never retries it.
+    EncoderKind selected = request.quality == EncoderQuality::Lossless ? EncoderKind::Ffv1
+        : (request.width % 2 || request.height % 2) ? EncoderKind::H264Software : EncoderKind::HevcNvenc;
     AttemptResult attempt = runAttempt(selected);
     if (attempt.failure == NeuralRenderFailure::Cancelled)
         return cancelled(L"Neural render was cancelled.");
@@ -2037,6 +2039,9 @@ struct ProductionEvaluatorAdapter {
     // pipelines at bring-up, so a job that differs rebuilds the device.
     bool captureDither{false};
     bool builtCaptureDither{false};
+    // A 10-bit rung's P010 capture, requested and built, for the same reason.
+    bool tenBitCapture{false};
+    bool builtTenBitCapture{false};
     // Layout of the frames the source hands over, converted on the GPU when NV12.
     PixelLayout sourceLayout{PixelLayout::Bgra};
     // Which conversion the live renderer's source pass was COMPILED for, which is
@@ -2088,7 +2093,8 @@ struct ProductionEvaluatorAdapter {
                width==w&&height==h&&outputWidth==ow&&outputHeight==oh&&fps==rate&&
                sourceLayout==layout&&sourceConversion==conversion&&
                builtGpuColorConversion==gpuColorConversion&&
-               builtSuperResolutionCarrier==superResolutionCarrier&&builtCaptureDither==captureDither;
+               builtSuperResolutionCarrier==superResolutionCarrier&&builtCaptureDither==captureDither&&
+               builtTenBitCapture==tenBitCapture;
         // Answered, so spent: this job either re-arms the released feature or
         // rebuilds the device, and either way the next Initialize must judge
         // the feature on what it can see rather than on a stale promise.
@@ -2103,10 +2109,10 @@ struct ProductionEvaluatorAdapter {
         const auto [gridW,gridH]=TemporalGuideGenerator::AnalysisGrid(w,h,rate);
         renderer=MakeD3D12Renderer();
         if(!renderer)return false;
-        builtGpuColorConversion=gpuColorConversion;builtCaptureDither=captureDither;
+        builtGpuColorConversion=gpuColorConversion;builtCaptureDither=captureDither;builtTenBitCapture=tenBitCapture;
         builtSuperResolutionCarrier=superResolutionCarrier;
-        renderer->SetCaptureFormat(gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
-        renderer->SetCaptureDither(captureDither);
+        renderer->SetCaptureFormat(tenBitCapture?CaptureFormat::P010:gpuColorConversion?CaptureFormat::Nv12:CaptureFormat::Bgra);
+        renderer->SetCaptureDither(captureDither&&!tenBitCapture);
         renderer->SetSourceLayout(layout);
         renderer->SetSourceColor(color);
         // This swapchain is a hidden formality that exists so the neural add-on sees a
@@ -2353,8 +2359,13 @@ struct ProductionEvaluatorAdapter {
     // What Initialize settled on, which is BGRA unless the GPU conversion was both
     // asked for and possible at this size.
     EncoderPixelFormat CapturePixelFormat()const{
-        return renderer&&renderer->ActiveCaptureFormat()==CaptureFormat::Nv12
-            ?EncoderPixelFormat::Nv12:EncoderPixelFormat::Bgra;
+        if(!renderer)return EncoderPixelFormat::Bgra;
+        switch(renderer->ActiveCaptureFormat()){
+            case CaptureFormat::Nv12:return EncoderPixelFormat::Nv12;
+            case CaptureFormat::P010:return EncoderPixelFormat::P010;
+            case CaptureFormat::Bgra:break;
+        }
+        return EncoderPixelFormat::Bgra;
     }
     bool FeatureCreated()const{return renderer&&renderer->DLSSFeatureCreated();}
     uint64_t EvaluationCount()const{return successfulEvaluations;}
@@ -2899,7 +2910,9 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
             <<" dump="<<(files.dumpDirectory.empty()?std::string("none"):files.dumpDirectory.string())
             <<" zero-motion-test="<<(!files.zeroMotionTest?std::string("shipped"):*files.zeroMotionTest?std::string("on"):std::string("off")));
     }
-    state.evaluator.captureDither=request.captureDither;
+    // The dither has an 8-bit store only on the Standard rung.
+    state.evaluator.tenBitCapture=EncoderQualityIsTenBit(request.quality);
+    state.evaluator.captureDither=request.captureDither&&!state.evaluator.tenBitCapture;
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

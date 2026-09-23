@@ -1884,6 +1884,92 @@ void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
     // 1.5 bytes per pixel instead of 4, which is what the readback and the pipe carry.
     CHECK_EQ(uint64_t{1920 * 1080 * 3 / 2}, EncoderFrameBytes(EncoderPixelFormat::Nv12, 1920, 1080));
     CHECK_EQ(uint64_t{1920 * 1080 * 4}, EncoderFrameBytes(EncoderPixelFormat::Bgra, 1920, 1080));
+    // P010 is NV12's layout at two bytes a sample.
+    CHECK_EQ(uint64_t{1920 * 1080 * 3}, EncoderFrameBytes(EncoderPixelFormat::P010, 1920, 1080));
+}
+
+// The quality ladder. Standard is every render before the ladder, so its arguments
+// are the ones above, unchanged; the two 10-bit rungs are pinned here.
+void encoder_quality_ladder_arguments_test()
+{
+    const auto value = [](const std::vector<std::wstring>& list, const wchar_t* flag) {
+        std::vector<std::wstring> found;
+        for (size_t index = 0; index + 1 < list.size(); ++index)
+            if (list[index] == flag) found.push_back(list[index + 1]);
+        return found;
+    };
+    const auto has = [](const std::vector<std::wstring>& list, const wchar_t* item) {
+        return std::find(list.begin(), list.end(), std::wstring(item)) != list.end();
+    };
+    const std::filesystem::path output = LR"(C:\Cache Root\neural.partial.mkv)";
+    EncoderSpec standard{1920, 1080, 30.0, EncoderKind::HevcNvenc};
+    // The default rung is Standard, and asking for it explicitly changes nothing.
+    CHECK(standard.quality == EncoderQuality::Standard);
+    EncoderSpec explicitStandard = standard;
+    explicitStandard.quality = EncoderQuality::Standard;
+    CHECK(BuildEncoderArguments(standard, output) == BuildEncoderArguments(explicitStandard, output));
+    CHECK(!has(BuildEncoderArguments(standard, output), L"-maxrate"));
+
+    // High through NVENC: P010 in and out, Main10, the rung's CQ, the ceiling lifted,
+    // and only setparams - the capture shader already converted the colour.
+    EncoderSpec high{1920, 1080, 30.0, EncoderKind::HevcNvenc, EncoderPixelFormat::P010};
+    high.quality = EncoderQuality::High;
+    const auto highArguments = BuildEncoderArguments(high, output);
+    CHECK_EQ((std::vector<std::wstring>{L"p010le", L"p010le"}), value(highArguments, L"-pix_fmt"));
+    CHECK_EQ((std::vector<std::wstring>{L"main10"}), value(highArguments, L"-profile:v"));
+    CHECK_EQ((std::vector<std::wstring>{std::to_wstring(kHighRungCq)}), value(highArguments, L"-cq"));
+    CHECK_EQ((std::vector<std::wstring>{L"800M"}), value(highArguments, L"-maxrate"));
+    CHECK_EQ((std::vector<std::wstring>{L"setparams=color_primaries=bt709:color_trc=bt709:"
+                                        L"colorspace=bt709:range=tv"}), value(highArguments, L"-vf"));
+    // Its software fallback is x264 High 10 at the same number.
+    EncoderSpec highSoftware = high;
+    highSoftware.kind = EncoderKind::H264Software;
+    const auto highSoftwareArguments = BuildEncoderArguments(highSoftware, output);
+    CHECK_EQ((std::vector<std::wstring>{L"p010le", L"yuv420p10le"}), value(highSoftwareArguments, L"-pix_fmt"));
+    CHECK_EQ((std::vector<std::wstring>{std::to_wstring(kHighRungCq)}), value(highSoftwareArguments, L"-crf"));
+    // An odd size cannot be P010, so it arrives as BGRA, is converted with the matrix
+    // stated, and keeps every row and column at 4:4:4.
+    EncoderSpec highOdd{1919, 1079, 30.0, EncoderKind::H264Software};
+    highOdd.quality = EncoderQuality::High;
+    const auto highOddArguments = BuildEncoderArguments(highOdd, output);
+    CHECK_EQ((std::vector<std::wstring>{L"bgra", L"yuv444p10le"}), value(highOddArguments, L"-pix_fmt"));
+    CHECK(value(highOddArguments, L"-vf").front().starts_with(L"scale=out_color_matrix=bt709:out_range=tv,"));
+
+    // Lossless: FFV1, every frame intra, 10-bit, no rate control at all.
+    EncoderSpec lossless{1920, 1080, 30.0, EncoderKind::Ffv1, EncoderPixelFormat::P010};
+    lossless.quality = EncoderQuality::Lossless;
+    const auto losslessArguments = BuildEncoderArguments(lossless, output);
+    CHECK_EQ((std::vector<std::wstring>{L"ffv1"}), value(losslessArguments, L"-c:v"));
+    CHECK_EQ((std::vector<std::wstring>{L"p010le", L"yuv420p10le"}), value(losslessArguments, L"-pix_fmt"));
+    CHECK_EQ((std::vector<std::wstring>{L"1"}), value(losslessArguments, L"-g"));
+    CHECK(!has(losslessArguments, L"-cq") && !has(losslessArguments, L"-crf") && !has(losslessArguments, L"-preset"));
+    CHECK(!has(losslessArguments, L"-init_hw_device"));
+    EncoderSpec losslessOdd{1919, 1079, 30.0, EncoderKind::Ffv1};
+    losslessOdd.quality = EncoderQuality::Lossless;
+    CHECK_EQ((std::vector<std::wstring>{L"bgra", L"yuv444p10le"}),
+             value(BuildEncoderArguments(losslessOdd, output), L"-pix_fmt"));
+    // There is nothing to fall back to from FFV1.
+    CHECK(!ShouldRetryWithSoftware(EncoderKind::Ffv1, EncodeError::StartFailed));
+    CHECK(!ShouldRetryWithSoftware(EncoderKind::Ffv1, EncodeError::WriteFailed));
+    // P010 has no half-pixel chroma sample either.
+    EncoderSpec p010Odd = high;
+    p010Odd.width = 1919;
+    CHECK_EQ(size_t{0}, ExpectedFrameBytes(p010Odd));
+    CHECK_EQ(size_t{1920 * 1080 * 3}, ExpectedFrameBytes(high));
+
+    // The names are the wire and ini spelling, and nothing else parses.
+    for (const EncoderQuality quality : {EncoderQuality::Standard, EncoderQuality::High, EncoderQuality::Lossless}) {
+        EncoderQuality parsed{};
+        CHECK(ParseEncoderQuality(EncoderQualityName(quality), parsed));
+        CHECK(parsed == quality);
+    }
+    EncoderQuality untouched = EncoderQuality::High;
+    CHECK(!ParseEncoderQuality("Standard", untouched));
+    CHECK(!ParseEncoderQuality("best", untouched));
+    CHECK(!ParseEncoderQuality("", untouched));
+    CHECK(untouched == EncoderQuality::High);
+    CHECK(!EncoderQualityIsTenBit(EncoderQuality::Standard));
+    CHECK(EncoderQualityIsTenBit(EncoderQuality::High) && EncoderQualityIsTenBit(EncoderQuality::Lossless));
 }
 
 void encoder_frame_contract_and_fallback_policy_are_fail_closed_test()
@@ -5486,6 +5572,7 @@ int wmain(int argc, wchar_t* argv[])
     media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test();
     materialization_reports_download_progress_while_the_source_is_copied_test();
     encoder_frame_contract_and_fallback_policy_are_fail_closed_test();
+    encoder_quality_ladder_arguments_test();
     owned_media_pipeline_materializes_encodes_probes_and_cancels_test();
     encoder_child_inherits_only_its_stdin_pipe_test();
     cached_media_probe_reads_headers_without_redecoding_validated_video_test();

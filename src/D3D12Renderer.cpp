@@ -692,6 +692,27 @@ float2 PSCaptureChroma(V i):SV_Target{
 float4 PSCaptureDithered(V i):SV_Target{return float4(CaptureRGB(i.uv)+DitherOffsetBayer8(i.p.xy),1);}
 float PSCaptureLumaDithered(V i):SV_Target{return PSCaptureLuma(i)+DitherOffsetBayer8(i.p.xy);}
 float2 PSCaptureChromaDithered(V i):SV_Target{return PSCaptureChroma(i)+DitherOffsetBayer8(i.p.xy);}
+// The 10-bit rungs' capture, P010: the same picture and the same BT.709 limited-range
+// algebra as the NV12 pair, at 10 bits - Y 64..940, chroma 512 +- 448 - with the code in
+// the top ten bits of a 16-bit sample. The R16 store rounds f*65535 to nearest, so the
+// code is rounded here and handed over as exactly code*64: an encoder reads the top ten
+// bits of a P010 sample and would truncate, not round, whatever the low six held.
+float P010Store(float code){return round(code)*64.0/65535.0;}
+float2 CaptureChromaCodes10(float3 c){
+    return float2(512.0+896.0*dot(c,float3(-0.114572,-0.385428,0.5)),
+                  512.0+896.0*dot(c,float3(0.5,-0.454153,-0.045847)));
+}
+float PSCaptureLuma10(V i):SV_Target{return P010Store(64.0+876.0*Luma709(CaptureRGB(i.uv)));}
+// Converted per sample and averaged after, as PSCaptureChroma does, then rounded once.
+float2 PSCaptureChroma10(V i):SV_Target{
+    float2 o=Capture.xy*0.25;
+    float2 c=CaptureChromaCodes10(CaptureRGB(i.uv+float2(-o.x,-o.y)));
+    c+=CaptureChromaCodes10(CaptureRGB(i.uv+float2(o.x,-o.y)));
+    c+=CaptureChromaCodes10(CaptureRGB(i.uv+float2(-o.x,o.y)));
+    c+=CaptureChromaCodes10(CaptureRGB(i.uv+float2(o.x,o.y)));
+    c*=0.25;
+    return float2(P010Store(c.x),P010Store(c.y));
+}
 // The exact inverse of the capture conversion above, for a source that arrives as NV12
 // (Y at t0, interleaved UV at t1, sampled bilinearly at half size). It writes the same
 // 8-bit sRGB-encoded BGRA the decoder used to upload, so every pass after the decoded
@@ -789,6 +810,12 @@ bool D3D12Renderer::CreatePipelines(){
     // for its whole life, and the choice is part of the render's cache key.
     if(m_captureDither&&(!C("PSCaptureDithered","ps_5_1",captureDithered)||
        !C("PSCaptureLumaDithered","ps_5_1",captureLuma)||!C("PSCaptureChromaDithered","ps_5_1",captureChroma)))return false;
+    // A 10-bit capture takes the planar pair's slots with its own programs and 16-bit
+    // targets. Decided on the request, because the output size that could still
+    // downgrade it to BGRA is only known once DLSS has initialised; a downgraded
+    // renderer simply never binds these.
+    const bool p010=m_requestedCaptureFormat==CaptureFormat::P010;
+    if(p010&&(!C("PSCaptureLuma10","ps_5_1",captureLuma)||!C("PSCaptureChroma10","ps_5_1",captureChroma)))return false;
     // Only a renderer that presents to a window it follows ever scales the present.
     if(m_followWindow&&!C("PSPresentScaled","ps_5_1",presentScaled))return false;
     // The HDR backbuffer programs: the compositor and the two debug views with
@@ -867,9 +894,9 @@ bool D3D12Renderer::CreatePipelines(){
         if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoConvertPq)),"Create PQ source convert PSO"))return false;
     }
     p.PS={captureLuma->GetBufferPointer(),captureLuma->GetBufferSize()};
-    p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
+    p.RTVFormats[0]=p010?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create planar luma PSO"))return false;
     p.PS={captureChroma->GetBufferPointer(),captureChroma->GetBufferSize()};
-    p.RTVFormats[0]=DXGI_FORMAT_R8G8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureChroma)),"Create NV12 chroma PSO"))return false;
+    p.RTVFormats[0]=p010?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureChroma)),"Create planar chroma PSO"))return false;
     if(sourceNv12){
         p.PS={sourceNv12->GetBufferPointer(),sourceNv12->GetBufferSize()};
         p.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoSourceNv12)),"Create NV12 source PSO"))return false;
@@ -1103,28 +1130,31 @@ bool D3D12Renderer::CreateVideoResources(){
                                     &m_cacheRowSize,&m_cacheReadbackBytes);
     if(!m_cacheReadbackBytes||m_cacheRows!=m_outputH||m_cacheRowSize!=uint64_t{m_outputW}*4u)
         return false;
-    // GPU colour conversion writes two planes instead of one BGRA target. NV12 is 4:2:0,
-    // so an odd output keeps the BGRA capture rather than losing a row or a column.
-    m_captureFormat=(m_requestedCaptureFormat==CaptureFormat::Nv12&&!(m_outputW%2)&&!(m_outputH%2))
-        ?CaptureFormat::Nv12:CaptureFormat::Bgra;
-    if(m_requestedCaptureFormat==CaptureFormat::Nv12&&m_captureFormat==CaptureFormat::Bgra)
-        LOG("GPU colour conversion needs even output dimensions; capturing BGRA at "
+    // GPU colour conversion writes two planes instead of one BGRA target. NV12 and P010
+    // are 4:2:0, so an odd output keeps the BGRA capture rather than losing a row or a
+    // column.
+    const bool planarRequested=d3d12_renderer_detail::CaptureFormatIsPlanar(m_requestedCaptureFormat);
+    m_captureFormat=(planarRequested&&!(m_outputW%2)&&!(m_outputH%2))?m_requestedCaptureFormat:CaptureFormat::Bgra;
+    if(planarRequested&&m_captureFormat==CaptureFormat::Bgra)
+        LOG("GPU colour conversion needs even output dimensions; capturing 8-bit BGRA at "
             <<m_outputW<<"x"<<m_outputH<<".");
     m_captureLuma.Reset();m_captureChroma.Reset();
     m_lumaFootprint={};m_chromaFootprint={};
-    if(m_captureFormat==CaptureFormat::Nv12){
-        auto luma=Tex2D(DXGI_FORMAT_R8_UNORM,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    if(d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat)){
+        const bool p010=m_captureFormat==CaptureFormat::P010;
+        const uint64_t sampleBytes=p010?2u:1u;
+        auto luma=Tex2D(p010?DXGI_FORMAT_R16_UNORM:DXGI_FORMAT_R8_UNORM,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
         if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&luma,
             D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_captureLuma)),
-            "Create NV12 luma plane"))return false;
-        m_captureLuma->SetName(L"Neural_Capture_Luma_R8");
+            "Create planar luma plane"))return false;
+        m_captureLuma->SetName(p010?L"Neural_Capture_Luma_R16":L"Neural_Capture_Luma_R8");
         m_device->CreateRenderTargetView(m_captureLuma.Get(),nullptr,RTV(FrameCount+3));
-        auto chroma=Tex2D(DXGI_FORMAT_R8G8_UNORM,m_outputW/2u,m_outputH/2u,
+        auto chroma=Tex2D(p010?DXGI_FORMAT_R16G16_UNORM:DXGI_FORMAT_R8G8_UNORM,m_outputW/2u,m_outputH/2u,
                           D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
         if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&chroma,
             D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_captureChroma)),
-            "Create NV12 chroma plane"))return false;
-        m_captureChroma->SetName(L"Neural_Capture_Chroma_R8G8");
+            "Create planar chroma plane"))return false;
+        m_captureChroma->SetName(p010?L"Neural_Capture_Chroma_R16G16":L"Neural_Capture_Chroma_R8G8");
         m_device->CreateRenderTargetView(m_captureChroma.Get(),nullptr,RTV(FrameCount+4));
         // Both planes land in one readback buffer, the second at the offset D3D12
         // requires for a placed copy, so a capture is still a single fence and a single
@@ -1135,8 +1165,8 @@ bool D3D12Renderer::CreateVideoResources(){
         const uint64_t chromaOffset=(lumaTotal+alignment-1u)&~(alignment-1u);
         m_device->GetCopyableFootprints(&chroma,0,1,chromaOffset,&m_chromaFootprint,&chromaRows,
                                         &chromaRowSize,&chromaTotal);
-        if(lumaRows!=m_outputH||chromaRows!=m_outputH/2u||lumaRowSize!=uint64_t{m_outputW}||
-           chromaRowSize!=uint64_t{m_outputW})return false;
+        if(lumaRows!=m_outputH||chromaRows!=m_outputH/2u||lumaRowSize!=uint64_t{m_outputW}*sampleBytes||
+           chromaRowSize!=uint64_t{m_outputW}*sampleBytes)return false;
         m_cacheReadbackBytes=chromaOffset+
             uint64_t{m_chromaFootprint.Footprint.RowPitch}*chromaRows;
     }
@@ -1967,9 +1997,7 @@ bool D3D12Renderer::CaptureEvaluatedFrame(CapturedVideoFrame&capture){
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     // Whatever the active capture format produces, not four bytes per pixel: an NV12
     // capture is 1.5, and the size is the contract the caller checks the frame against.
-    const uint64_t pixels64=uint64_t{m_outputW}*m_outputH;
-    const uint64_t tightBytes64=m_captureFormat==CaptureFormat::Nv12
-        ?pixels64+pixels64/2u:pixels64*4u;
+    const uint64_t tightBytes64=d3d12_renderer_detail::CaptureFrameBytes(m_captureFormat,m_outputW,m_outputH);
     if(tightBytes64>std::numeric_limits<size_t>::max())return false;
     if(m_testHooks&&m_testHooks->cacheCapture){
         const size_t tightBytes=static_cast<size_t>(tightBytes64);
@@ -1992,10 +2020,10 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     if(!m_captureOutput)return false;
     if(!m_lastDLSSUsed||!m_outputW||!m_outputH)return false;
     if(m_capturePending>=CaptureSlots)return false;
-    const bool nv12=m_captureFormat==CaptureFormat::Nv12;
+    const bool planar=d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat);
     if(m_gpuUnusable||!m_cacheOutput||!m_dlssOutput||!m_queue||!m_rootSig||!m_psoCacheCapture)
         return false;
-    if(nv12&&(!m_captureLuma||!m_captureChroma||!m_psoCaptureLuma||!m_psoCaptureChroma))return false;
+    if(planar&&(!m_captureLuma||!m_captureChroma||!m_psoCaptureLuma||!m_psoCaptureChroma))return false;
     const uint32_t readbackSlot=m_captureWrite;
     if(!m_cacheReadback[readbackSlot])return false;
     const uint32_t slot=m_frameSlot%FrameCount;
@@ -2020,9 +2048,9 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
     uint32_t captured=1u;
     if(!RecordTemporalStability(cmd,captured))return false;
     cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&scissor);
-    auto target=RTV(nv12?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
+    auto target=RTV(planar?FrameCount+3:FrameCount+2);cmd->OMSetRenderTargets(1,&target,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());
-    cmd->SetPipelineState(nv12?m_psoCaptureLuma.Get():m_psoCacheCapture.Get());
+    cmd->SetPipelineState(planar?m_psoCaptureLuma.Get():m_psoCacheCapture.Get());
     cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(captured));
     // Cache frames are always the bare neural output: no comparison, no color/zoom.
@@ -2042,7 +2070,7 @@ bool D3D12Renderer::EnqueueEvaluatedFrameCapture(){
         cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
         Barrier(cmd,plane,D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
     };
-    if(nv12){
+    if(planar){
         // The chroma pass reads the same neural output at half resolution, averaging each
         // 2x2 block after conversion.
         D3D12_VIEWPORT chromaViewport{0,0,float(m_outputW/2u),float(m_outputH/2u),0,1};
@@ -2158,23 +2186,22 @@ bool D3D12Renderer::ReserveOldestCapture(CaptureReadbackView&view){
     if(!m_captureOutput)return false;
     if(!m_capturePending)return false;
     const uint32_t readbackSlot=m_captureRead;
-    const bool nv12=m_captureFormat==CaptureFormat::Nv12;
-    const uint64_t pixels64=uint64_t{m_outputW}*m_outputH;
-    const uint64_t tightBytes64=nv12?pixels64+pixels64/2u:pixels64*4u;
+    const bool planar=d3d12_renderer_detail::CaptureFormatIsPlanar(m_captureFormat);
+    const uint64_t tightBytes64=d3d12_renderer_detail::CaptureFrameBytes(m_captureFormat,m_outputW,m_outputH);
     if(!m_outputW||!m_outputH||tightBytes64>std::numeric_limits<size_t>::max()){
         EndResolveOldestCapture();return false;
     }
     const uint8_t*base=m_cacheReadbackMapped[readbackSlot];
     if(!base||!m_fence){EndResolveOldestCapture();return false;}
     view.fence=m_fence.Get();view.fenceValue=m_captureFence[readbackSlot];
-    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=nv12?m_lumaFootprint:m_cacheFootprint;
+    const D3D12_PLACED_SUBRESOURCE_FOOTPRINT&plane=planar?m_lumaFootprint:m_cacheFootprint;
     view.base=base+plane.Offset;
     view.rowPitch=size_t(plane.Footprint.RowPitch);
     view.bytes=static_cast<size_t>(tightBytes64);
     view.width=m_outputW;view.height=m_outputH;
     view.format=m_captureFormat;
     view.id=m_captureId[readbackSlot];
-    if(nv12){
+    if(planar){
         view.chromaBase=base+m_chromaFootprint.Offset;
         view.chromaRowPitch=size_t(m_chromaFootprint.Footprint.RowPitch);
     }
@@ -2244,11 +2271,11 @@ void D3D12Renderer::CopyCaptureView(const CaptureReadbackView&view,std::vector<u
     if(pixels.size()!=view.bytes)pixels.resize(view.bytes);
     uint8_t*out=pixels.data();
     auto&pool=CaptureCopyPool();
-    if(view.format==CaptureFormat::Nv12){
-        // Y rows, then the interleaved UV rows. Both planes are one byte per sample and
-        // the chroma plane is half as wide with two samples per texel, so the tight row
-        // is the frame width for each of them.
-        const size_t row=size_t(view.width);
+    if(d3d12_renderer_detail::CaptureFormatIsPlanar(view.format)){
+        // Y rows, then the interleaved UV rows. The chroma plane is half as wide with two
+        // samples per texel, so the tight row is the frame width in samples for each of
+        // them: one byte a sample for NV12, two for P010.
+        const size_t row=size_t(view.width)*(view.format==CaptureFormat::P010?2u:1u);
         const size_t lumaHeight=size_t(view.height);
         uint8_t*const chromaOut=out+row*lumaHeight;
         ParallelForRangesIn(pool,lumaHeight,kParallelRowGrain,[&](size_t begin,size_t end){

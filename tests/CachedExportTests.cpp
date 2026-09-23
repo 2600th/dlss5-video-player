@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <filesystem>
@@ -1040,6 +1041,147 @@ void PhotoAndAnimationTests(const std::filesystem::path& helpers)
     }
 }
 
+// The quality ladder's two 10-bit rungs, end to end through the real encoder, the real
+// decoders and the real exporter. P010 frames of known codes go through the exact
+// arguments the helper uses: Lossless (FFV1) must hand them back bit for bit, High's
+// software fallback (x264 High 10) must stay 10-bit, and the playback decoder - which
+// only ever emits 8-bit BGRA or NV12 - must play both. A Main10 HEVC file, the High
+// rung's NVENC output, is made with libx265 so this runs without a GPU; where one
+// exists the decoder takes its CUDA path, which converts P010 to NV12 on the GPU.
+// The MP4 export keeps each rung: FFV1 becomes lossless 10-bit H.264, bit for bit
+// again, and 10-bit HEVC is carried as it is.
+void QualityLadderRoundTripTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"tool.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    constexpr uint32_t width = 64, height = 48, frames = 6;
+    // Luma ramps across the frame and steps per frame; chroma carries a small tint.
+    // Every code is a 10-bit studio-swing value in the top ten bits, as P010 requires.
+    std::vector<std::vector<uint8_t>> input;
+    for (uint32_t f = 0; f < frames; ++f) {
+        std::vector<uint16_t> samples;
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                samples.push_back(static_cast<uint16_t>((64u + (x * 13u + y * 3u + f * 7u) % 877u) << 6));
+        for (uint32_t y = 0; y < height / 2; ++y)
+            for (uint32_t x = 0; x < width / 2; ++x) {
+                samples.push_back(static_cast<uint16_t>((480u + x + f) << 6));
+                samples.push_back(static_cast<uint16_t>((540u - y) << 6));
+            }
+        std::vector<uint8_t> bytes(samples.size() * 2);
+        std::memcpy(bytes.data(), samples.data(), bytes.size());
+        input.push_back(std::move(bytes));
+    }
+    const auto encode = [&](EncoderKind kind, EncoderQuality quality, const std::filesystem::path& output) {
+        RawVideoEncoder encoder(helpers);
+        EncoderSpec spec{width, height, 10.0, kind, EncoderPixelFormat::P010};
+        spec.quality = quality;
+        CHECK_EQ(EncodeError::None, encoder.Start(spec, output));
+        for (const auto& frame : input) CHECK_EQ(EncodeError::None, encoder.WriteFrame(frame));
+        CHECK_EQ(EncodeError::None, encoder.Finish());
+    };
+    const auto decodeP010 = [&](const std::filesystem::path& file) {
+        const auto raw = fixture.path / L"decoded.p010";
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", file.wstring(), L"-f", L"rawvideo",
+                               L"-pix_fmt", L"p010le", raw.wstring()}, log));
+        return Read(raw);
+    };
+    std::string expected;
+    for (const auto& frame : input) expected.append(reinterpret_cast<const char*>(frame.data()), frame.size());
+
+    const auto lossless = fixture.path / L"lossless.mkv";
+    encode(EncoderKind::Ffv1, EncoderQuality::Lossless, lossless);
+    CHECK(decodeP010(lossless) == expected);
+    {
+        const auto info = Probe(helpers, lossless, log, {L"-show_streams"});
+        CHECK(info.find("codec_name=ffv1") != std::string::npos);
+        CHECK(info.find("pix_fmt=yuv420p10le") != std::string::npos);
+        CHECK(info.find("color_range=tv") != std::string::npos);
+        CHECK(info.find("color_space=bt709") != std::string::npos);
+    }
+    const auto highSoftware = fixture.path / L"high-x264.mkv";
+    encode(EncoderKind::H264Software, EncoderQuality::High, highSoftware);
+    {
+        const auto info = Probe(helpers, highSoftware, log, {L"-show_streams"});
+        CHECK(info.find("pix_fmt=yuv420p10le") != std::string::npos);
+        CHECK(info.find("profile=High 10") != std::string::npos);
+    }
+    const auto main10 = fixture.path / L"main10.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", lossless.wstring(), L"-c:v", L"libx265",
+                           L"-x265-params", L"log-level=error", L"-pix_fmt", L"yuv420p10le",
+                           L"-profile:v", L"main10", main10.wstring()}, log));
+
+    // Playback: each 10-bit rung decodes through the player's decoder, in both of the
+    // layouts it hands out, to frames close to the codes that went in.
+    const auto expectedLuma8 = [&](uint32_t f, uint32_t x, uint32_t y) {
+        return double(64u + (x * 13u + y * 3u + f * 7u) % 877u) / 4.0;
+    };
+    for (const auto& file : {lossless, highSoftware, main10}) {
+        for (const bool nv12 : {true, false}) {
+            VideoDecoder decoder;
+            CHECK(decoder.OpenSequential(file.wstring(), MediaSourceKind::LocalFile, {}, nv12));
+            CHECK_EQ(width, decoder.Width());
+            CHECK_EQ(height, decoder.Height());
+            VideoFrame frame;
+            uint32_t count = 0;
+            double error = 0.0;
+            while (decoder.ReadNext(frame) && count < 20) {
+                if (nv12 && decoder.PixelLayout() == PixelLayout::Nv12) {
+                    CHECK_EQ(size_t{width * height * 3 / 2}, frame.bgra.size());
+                    if (frame.bgra.size() >= size_t{width} * height)
+                        for (uint32_t y = 0; y < height; ++y)
+                            for (uint32_t x = 0; x < width; ++x)
+                                error += std::abs(double(frame.bgra[y * width + x]) - expectedLuma8(count, x, y));
+                } else {
+                    CHECK_EQ(size_t{width * height * 4}, frame.bgra.size());
+                }
+                ++count;
+            }
+            CHECK_EQ(frames, count);
+            // Within about a code of the 8-bit value on average; the lossy rungs and the
+            // 10-to-8-bit cut both land here.
+            if (nv12 && decoder.PixelLayout() == PixelLayout::Nv12)
+                CHECK(error / double(width * height * frames) < 2.0);
+        }
+    }
+
+    // Export: the MP4 path keeps the rung. A source to take the audio from is needed.
+    const auto source = fixture.path / L"source.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-f", L"lavfi", L"-i", L"testsrc2=s=64x48:r=10:d=0.6",
+                           L"-c:v", L"ffv1", source.wstring()}, log));
+    CachedVideoExporter exporter(helpers);
+    const auto losslessMp4 = fixture.path / L"lossless.mp4";
+    const auto losslessResult = exporter.Run({lossless, source, losslessMp4}, {});
+    if (!losslessResult.ok) std::wcerr << losslessResult.detail << '\n';
+    CHECK(losslessResult.ok);
+    if (losslessResult.ok) {
+        const auto info = Probe(helpers, losslessMp4, log, {L"-show_streams"});
+        CHECK(info.find("codec_name=h264") != std::string::npos);
+        CHECK(info.find("pix_fmt=yuv420p10le") != std::string::npos);
+        CHECK(decodeP010(losslessMp4) == expected);
+    }
+    const auto main10Mp4 = fixture.path / L"main10.mp4";
+    const auto main10Result = exporter.Run({main10, source, main10Mp4}, {});
+    if (!main10Result.ok) std::wcerr << main10Result.detail << '\n';
+    CHECK(main10Result.ok);
+    if (main10Result.ok) {
+        const auto info = Probe(helpers, main10Mp4, log, {L"-show_streams"});
+        CHECK(info.find("codec_name=hevc") != std::string::npos);
+        CHECK(info.find("codec_tag_string=hvc1") != std::string::npos);
+        CHECK(info.find("pix_fmt=yuv420p10le") != std::string::npos);
+        // Carried, not re-encoded: the same decoded frames come out.
+        CHECK(decodeP010(main10Mp4) == decodeP010(main10));
+    }
+    // And the argument choice on its own.
+    CHECK(CachedVideoMp4PathFor("ffv1", "yuv420p10le") == CachedVideoMp4Path::Lossless10Bit);
+    CHECK(CachedVideoMp4PathFor("hevc", "yuv420p10le") == CachedVideoMp4Path::CopyHevc);
+    CHECK(CachedVideoMp4PathFor("h264", "yuv444p10le") == CachedVideoMp4Path::CopyH264);
+    CHECK(CachedVideoMp4PathFor("hevc", "yuv420p") == CachedVideoMp4Path::Reencode8Bit);
+    CHECK(CachedVideoMp4PathFor("h264", "yuv420p") == CachedVideoMp4Path::Reencode8Bit);
+    CHECK(CachedVideoMp4PathFor("", "") == CachedVideoMp4Path::Reencode8Bit);
+}
+
 // The publish gate compares the joined render's frame count and video span
 // against what the renderer reported. Both are read by demuxing rather than
 // decoding, which is 400x cheaper and used to hold the next hole's render back
@@ -1649,6 +1791,7 @@ int wmain(int argc, wchar_t** argv)
     SubtitlesDrawOnATransparentCanvasTest(helpers);
     BitmapSubtitlesAreScaledOntoTheCanvasTest(helpers);
     EmbeddedSubtitleTracksAreListedAndDrawnTest(helpers);
+    QualityLadderRoundTripTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

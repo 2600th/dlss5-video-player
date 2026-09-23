@@ -380,6 +380,7 @@ static constexpr int IDC_ES_NVENC_PRESET = 7403;
 static constexpr int IDC_ES_RESET = 7404;
 static constexpr int IDC_ES_CLOSE = 7405;
 static constexpr int IDC_ES_CAPTURE_DITHER = 7406;
+static constexpr int IDC_ES_CACHE_QUALITY = 7407;
 static constexpr int IDC_EX_UPSCALE = 7501;
 static constexpr int IDC_EX_NEURAL = 7502;
 static constexpr int IDC_EX_FRAMEGEN = 7503;
@@ -1556,6 +1557,17 @@ static UpscalingHistory ReadUpscalingHistory(const std::filesystem::path& settin
     return ParseUpscalingHistory(WideToUtf8(saved)).value_or(kRecommendedUpscalingHistory);
 }
 
+// The saved [Encoding] CacheQuality rung. A name this build does not know - a newer
+// player's rung - reads as Standard.
+static EncoderQuality ReadCacheQuality(const std::filesystem::path& settings){
+    wchar_t rung[32]{};
+    GetPrivateProfileStringW(L"Encoding",L"CacheQuality",L"standard",rung,static_cast<DWORD>(std::size(rung)),settings.c_str());
+    std::string narrow;for(const wchar_t* c=rung;*c;++c)narrow.push_back(*c<0x80?static_cast<char>(*c):'?');
+    EncoderQuality quality=EncoderQuality::Standard;
+    ParseEncoderQuality(narrow,quality);
+    return quality;
+}
+
 // Everything a neural render writes into the add-on's [RenoDX.DLSS5]: the
 // Neural settings, and the model's place against the carrier's upscale that
 // the processing scale needs (PreUpscaleOverride says when that is written).
@@ -1616,6 +1628,7 @@ struct StageExportJob {
     // The capture-quality switches of Encoder settings, so the export's neural pass
     // writes the same way the cache does.
     bool captureDither{false};
+    EncoderQuality quality{EncoderQuality::Standard};
 };
 
 // `passKey` null is the end of the passes, when the finished file is moved
@@ -1662,6 +1675,8 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         request.range=job.range;
         request.nvencPreset=job.nvencPreset;
         request.captureDither=job.captureDither;
+        // The stage export writes at the same rung the cache does.
+        request.quality=job.quality;
         request.requireNeural=plan.requireNeural;
         const bool upscales=plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight;
         if(upscales){
@@ -4191,6 +4206,7 @@ private:
         m_processingScale=ReadProcessingScale(SettingsPath());
         m_upscalingHistory=ReadUpscalingHistory(SettingsPath());
         m_captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",0,SettingsPath().c_str())!=0;
+        m_cacheQuality=ReadCacheQuality(SettingsPath());
         m_neuralSettings={};LoadNeuralSettings(SettingsPath(),m_neuralSettings);
         const int mode=static_cast<int>(GetPrivateProfileIntW(L"Comparison",L"Mode",0,SettingsPath().c_str()));
         m_comparison={};
@@ -4411,6 +4427,10 @@ private:
         WritePrivateProfileStringW(L"NeuralRender",L"ProcessingScale",std::to_wstring(m_processingScale).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Playback",L"UpscalingHistory",Utf8ToWide(std::string(UpscalingHistoryName(m_upscalingHistory))).c_str(),SettingsPath().c_str());
         WritePrivateProfileStringW(L"Encoding",L"CaptureDither",m_captureDither?L"1":L"0",SettingsPath().c_str());
+        {
+            const std::string_view rung=EncoderQualityName(m_cacheQuality);
+            WritePrivateProfileStringW(L"Encoding",L"CacheQuality",std::wstring(rung.begin(),rung.end()).c_str(),SettingsPath().c_str());
+        }
         SaveNeuralSettings(SettingsPath(),m_neuralSettings);
         WritePrivateProfileStringW(L"Comparison",L"Mode",std::to_wstring(static_cast<int>(m_comparison.mode)).c_str(),SettingsPath().c_str());
         WriteIniFloat(L"Comparison",L"Mix",m_comparison.strength);
@@ -5642,6 +5662,10 @@ private:
         check(IDC_ES_GPU_SOURCE,m_gpuSourceConversion);
         if(HWND combo=GetDlgItem(h,IDC_ES_NVENC_PRESET))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(int(m_nvencPreset)-1),0);
         check(IDC_ES_CAPTURE_DITHER,m_captureDither);
+        if(HWND combo=GetDlgItem(h,IDC_ES_CACHE_QUALITY))SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(m_cacheQuality),0);
+        // The dither has an 8-bit store to act on only on the Standard rung; greyed,
+        // not hidden, so the control still says the switch exists.
+        if(HWND box=GetDlgItem(h,IDC_ES_CAPTURE_DITHER))EnableWindow(box,!EncoderQualityIsTenBit(m_cacheQuality));
     }
 
     void ReadEncoderSettingControls(HWND h){
@@ -5652,6 +5676,8 @@ private:
         m_gpuSourceConversion=checked(IDC_ES_GPU_SOURCE);
         m_nvencPreset=uint32_t(sel(IDC_ES_NVENC_PRESET,int(m_nvencPreset)-1))+1;
         m_captureDither=checked(IDC_ES_CAPTURE_DITHER);
+        m_cacheQuality=static_cast<EncoderQuality>(std::clamp(sel(IDC_ES_CACHE_QUALITY,int(m_cacheQuality)),0,2));
+        if(HWND box=GetDlgItem(h,IDC_ES_CAPTURE_DITHER))EnableWindow(box,!EncoderQualityIsTenBit(m_cacheQuality));
         SaveVideoSettings();
     }
 
@@ -5659,15 +5685,19 @@ private:
         CreateNeuralCheck(h,IDC_ES_GPU_CONVERT,L"encoder.settings.gpu_convert",132,28,236,L"encoder.tip.gpu_convert");
         CreateNeuralCheck(h,IDC_ES_GPU_SOURCE,L"encoder.settings.gpu_source",132,52,236,L"encoder.tip.gpu_source");
         CreateNeuralCombo(h,IDC_ES_NVENC_PRESET,L"encoder.settings.nvenc_preset",84,{L"p1 (fastest)",L"p2",L"p3",L"p4",L"p5",L"p6",L"p7 (best quality)"},L"encoder.tip.nvenc_preset");
-        CreateNeuralCheck(h,IDC_ES_CAPTURE_DITHER,L"encoder.settings.capture_dither",132,112,300,L"encoder.tip.capture_dither");
-        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,146,418,38,0,DialogAnchor::StretchNote);
-        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,192,86,30);
-        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,192,86,30,true);
+        // The rung names say what each one writes; the tooltip carries the measured
+        // size and time beside each, the way the preset's does.
+        CreateNeuralCombo(h,IDC_ES_CACHE_QUALITY,L"encoder.settings.cache_quality",116,{T(L"encoder.quality.standard").c_str(),T(L"encoder.quality.high").c_str(),T(L"encoder.quality.lossless").c_str()},L"encoder.tip.cache_quality");
+        if(HWND combo=GetDlgItem(h,IDC_ES_CACHE_QUALITY))SetWindowPos(combo,nullptr,0,0,302,200,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        CreateNeuralCheck(h,IDC_ES_CAPTURE_DITHER,L"encoder.settings.capture_dither",132,144,300,L"encoder.tip.capture_dither");
+        DialogControl(h,L"STATIC",T(L"encoder.settings.note").c_str(),SS_LEFT,16,178,418,38,0,DialogAnchor::StretchNote);
+        DialogButton(h,L"encoder.settings.reset",IDC_ES_RESET,252,224,86,30);
+        DialogButton(h,L"encoder.settings.close",IDC_ES_CLOSE,348,224,86,30,true);
         SyncEncoderSettingControls(h);
         CaptureSettingsDesignLayout(h);
     }
 
-    static constexpr int kEncoderDesignW=466,kEncoderDesignH=258;
+    static constexpr int kEncoderDesignW=466,kEncoderDesignH=290;
 
     void ShowEncoderSettings(){
         if(m_encoderWnd&&IsWindow(m_encoderWnd)){ShowWindow(m_encoderWnd,SW_SHOWNORMAL);SetForegroundWindow(m_encoderWnd);return;}
@@ -5693,10 +5723,10 @@ private:
         case WM_SIZE:ResizeSettingsChildren(h,kEncoderDesignW,kEncoderDesignH);return 0;
         case WM_COMMAND:{
             const int id=LOWORD(w);const int code=HIWORD(w);
-            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=5;m_captureDither=false;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
+            if(id==IDC_ES_RESET){m_gpuColorConversion=false;m_gpuSourceConversion=false;m_nvencPreset=5;m_captureDither=false;m_cacheQuality=EncoderQuality::Standard;SyncEncoderSettingControls(h);SaveVideoSettings();return 0;}
             if(id==IDC_ES_CLOSE){DestroyWindow(h);return 0;}
             // Every control the dialog builds is named here; one left out is drawn and inert.
-            if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE||id==IDC_ES_CAPTURE_DITHER)&&code==BN_CLICKED)||(id==IDC_ES_NVENC_PRESET&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
+            if(((id==IDC_ES_GPU_CONVERT||id==IDC_ES_GPU_SOURCE||id==IDC_ES_CAPTURE_DITHER)&&code==BN_CLICKED)||((id==IDC_ES_NVENC_PRESET||id==IDC_ES_CACHE_QUALITY)&&code==CBN_SELCHANGE)){ReadEncoderSettingControls(h);return 0;}
             break;
         }
         case WM_CLOSE:DestroyWindow(h);return 0;
@@ -5898,7 +5928,7 @@ private:
         job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
         job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;job.processingScale=m_processingScale;
         job.upscalingHistory=m_upscalingHistory;
-        job.captureDither=m_captureDither;
+        job.captureDither=m_captureDither;job.quality=m_cacheQuality;
         job.holdDuplicates=m_frameGenHoldDuplicates;
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
@@ -9308,7 +9338,7 @@ private:
         const uint64_t generation=m_neuralLifecycle.Begin();m_neuralProgress={};m_neuralProgress.phase=NeuralRenderPhase::CheckingCache;m_pendingNeuralTitle=DisplayTitleForSource(sourceKind,displayTitle);m_neuralSourceWidth=0;m_neuralSourceHeight=0;if(m_neuralPauseEvent)ResetEvent(m_neuralPauseEvent);
         SyncSourceActionAvailability();InvalidateRect(m_hwnd,nullptr,FALSE);
         try{
-            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const TemporalSettings temporal=m_temporalSettings;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;const bool captureDither=m_captureDither;
+            HWND target=m_hwnd;const auto gpu=m_opt.detectedGpu.generation;const std::wstring driverVersion=m_opt.detectedGpu.driverVersion;const auto moduleDirectory=ExecutableDirectory();const auto cacheRoot=m_cacheRoot;const GuideControls guides=m_renderGuides;const TemporalSettings temporal=m_temporalSettings;const NeuralSettings settings=m_neuralSettings;const HANDLE pauseEvent=m_neuralPauseEvent;const bool gpuColorConversion=m_gpuColorConversion;const bool gpuSourceConversion=m_gpuSourceConversion;const uint32_t nvencPreset=m_nvencPreset;const uint32_t processingScale=m_processingScale;const bool captureDither=m_captureDither;const EncoderQuality cacheQuality=m_cacheQuality;
             // The background acquisition of this very source, when one is in
             // flight: the job waits for it rather than downloading again.
             const std::shared_ptr<SourcePrefetchState> prefetch=(sourceKind==MediaSourceKind::YouTube&&!pageUrl.empty()&&pageUrl==m_prefetchPageUrl)?m_prefetchState:nullptr;
@@ -9357,7 +9387,7 @@ private:
             // neural frame reaches the screen.
             m_coldStart=std::make_shared<NeuralColdStartRecord>();
             const std::shared_ptr<NeuralColdStartRecord> coldStart=m_coldStart;
-            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,temporal,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,captureDither,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
+            m_neuralWorker=std::jthread([target,generation,mediaUrl,audioUrl,displayTitle,pageUrl,sourceKind,sourceQuality,gpu,driverVersion,moduleDirectory,progressMessages,completions,reuseSourceKey,cacheRoot,expectedDurationSeconds,range,guides,temporal,settings,pauseEvent,prepareOnly,prefetch,liveIndex,liveDirectory,liveRunId,segmentFrames,firstSegmentFrames,driverNotice,cacheFailureText,preflightKey,preflightLatch,residentHelper,coldStart,gpuColorConversion,gpuSourceConversion,nvencPreset,processingScale,captureDither,cacheQuality,sourceDigestMemo=m_sourceDigestMemo](std::stop_token stop){
                 auto completion=std::make_unique<NeuralJobCompletion>();completion->generation=generation;completion->displayTitle=displayTitle;completion->pageUrl=pageUrl;completion->sourceKind=sourceKind;completion->sourceQuality=sourceQuality;
                 uint32_t progressWidth=0,progressHeight=0;
                 // Set the moment the job knows its local source; every progress
@@ -9478,7 +9508,7 @@ private:
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest
                         <<(NeuralModelStoreSettled(modelStore)?"":" (unsettled: the key may not match a later read)")
                         <<(modelStore.recentlyWrittenFiles?" recentlyWritten="+std::to_string(modelStore.recentlyWrittenFiles):std::string{}));
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+toneMapTerm+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({captureDither}),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,KeyedNvencPreset(nvencPreset,cacheQuality),KeyedGpuColorConversion(gpuColorConversion,cacheQuality))+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+toneMapTerm+TemporalPipelineTerm(temporal)+NeuralMotionIdentityTerm(kNeuralZeroMotionTest)+CaptureQualityIdentityTerm({captureDither,cacheQuality}),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and
@@ -9577,7 +9607,7 @@ private:
                     }
                     const auto staging=cache.BeginRenderStaging(renderKey);if(!staging){completion->result.detail=cacheFailureText.Describe(cache);goto finish;}
                     {std::ofstream settingsFile(*staging/L"neural-settings.ini",std::ios::binary|std::ios::trunc);settingsFile.write(settingsSnapshot->data(),static_cast<std::streamsize>(settingsSnapshot->size()));if(!settingsFile){cache.MarkInvalid(*staging);completion->result.detail=L"The neural settings snapshot could not be staged.";goto finish;}}
-                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.temporal=temporal;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;request.captureDither=captureDither;
+                    NeuralRenderRequest request{nullptr,sourcePath,liveIndex?liveDirectory/L"neural.mkv":*staging/L"neural.mkv",width,height,fps,duration};request.jobId=generation;request.range=range;request.prerollFrames=PrerollFramesFor(range,fps);request.guides=guides;request.temporal=temporal;request.pauseEvent=pauseEvent;request.segmentFrames=liveIndex?segmentFrames:0u;request.firstSegmentFrames=liveIndex?firstSegmentFrames:0u;request.gpuColorConversion=gpuColorConversion;request.nvencPreset=nvencPreset;request.gpuSourceConversion=gpuSourceConversion;request.processingScale=processingScale;request.captureDither=captureDither;request.quality=cacheQuality;
                     NeuralRenderReceiptInputs receipt{preflightJson,lockChecks,request,{},renderKey,*settingsDigest,*runtimeDigest,std::chrono::system_clock::now(),{}};
                     NeuralSegmentSink sink{};
                     if(liveIndex){
@@ -9676,7 +9706,7 @@ private:
                     const ProbeResult probe=ProbeMedia(moduleDirectory,*staging/L"neural.mkv",stop);
                     const double probeMs=msSince(probeStart);
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                    NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
+                    NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":completion->result.encoder==EncoderKind::Ffv1?"ffv1":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
                     manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
                     // The key's environment terms, so eviction can tell this entry from one a driver
                     // update, a model refresh or an upgrade of this installation has orphaned.
@@ -11088,6 +11118,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // Ordered dither at the 8-bit capture store. Off by default and a cache-key term;
     // the window present dithers (blue noise) regardless, since that costs the cache nothing.
     bool m_captureDither=false;
+    // The quality ladder's rung for the cache and the exports made through the helper
+    // (EncoderQuality). Standard is every render before the ladder existed.
+    EncoderQuality m_cacheQuality=EncoderQuality::Standard;
     NeuralSettings m_neuralSettings;
     // Frame-accurate in/out markers on the loaded source's timeline.
     RangeMarkers m_markers;
@@ -11432,6 +11465,7 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         job.processingScale=command.processingScale?*command.processingScale:ReadProcessingScale(settings);
         job.upscalingHistory=ReadUpscalingHistory(settings);
         job.captureDither=GetPrivateProfileIntW(L"Encoding",L"CaptureDither",0,settings.c_str())!=0;
+        job.quality=ReadCacheQuality(settings);
 
         wchar_t summary[256];
         swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,

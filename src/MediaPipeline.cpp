@@ -573,18 +573,34 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
         // session itself. The option fails only where hevc_nvenc would fail too.
         arguments.insert(arguments.end(), {L"-init_hw_device", L"cuda=cu:0"});
     }
+    const bool nv12 = spec.pixelFormat == EncoderPixelFormat::Nv12;
+    const bool p010 = spec.pixelFormat == EncoderPixelFormat::P010;
     arguments.insert(arguments.end(), {
         L"-f", L"rawvideo",
-        L"-pix_fmt", spec.pixelFormat == EncoderPixelFormat::Nv12 ? L"nv12" : L"bgra",
+        L"-pix_fmt", nv12 ? L"nv12" : p010 ? L"p010le" : L"bgra",
         L"-video_size", std::to_wstring(spec.width) + L"x" + std::to_wstring(spec.height),
         L"-framerate", FrameRateText(spec.fps), L"-i", L"pipe:0", L"-an",
     });
-    const bool nv12 = spec.pixelFormat == EncoderPixelFormat::Nv12;
-    if (spec.kind == EncoderKind::HevcNvenc) {
+    // The 10-bit rungs (EncoderQuality). Their frames arrive as P010 from the GPU
+    // capture; only an odd output size, which P010 cannot describe, still arrives as
+    // 8-bit BGRA, and is then written 4:4:4 so no row or column is lost to chroma
+    // subsampling - the same rule the 8-bit software path applies.
+    const bool tenBit = EncoderQualityIsTenBit(spec.quality);
+    const bool odd = spec.width % 2 || spec.height % 2;
+    const std::wstring highCq = std::to_wstring(kHighRungCq);
+    if (spec.kind == EncoderKind::Ffv1) {
+        // Level 3 with range coding, every frame a keyframe so a segment join or a
+        // seek never needs a neighbour, and per-slice CRCs so a damaged file says so.
+        // 16 slices keep a 4K frame's encode spread across the cores.
+        arguments.insert(arguments.end(), {
+            L"-c:v", L"ffv1", L"-level", L"3", L"-coder", L"1", L"-context", L"1", L"-g", L"1",
+            L"-slices", L"16", L"-slicecrc", L"1",
+            L"-pix_fmt", odd ? L"yuv444p10le" : L"yuv420p10le"});
+    } else if (spec.kind == EncoderKind::HevcNvenc) {
         arguments.insert(arguments.end(), {
             L"-c:v", L"hevc_nvenc", L"-preset",
             L"p" + std::to_wstring(std::clamp<uint32_t>(spec.nvencPreset, 1u, 7u)), L"-tune", L"hq",
-            L"-rc", L"vbr", L"-cq", L"16", L"-b:v", L"0",
+            L"-rc", L"vbr", L"-cq", tenBit ? highCq : std::wstring(L"16"), L"-b:v", L"0",
             // The export loop measured 3.7 ms/frame of encoder back pressure at
             // 2578x1080 once decode moved to NVDEC: one NVENC session at p7 caps near
             // 150 fps. Split-frame encoding stripes each frame across every NVENC
@@ -595,16 +611,26 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
             // the whole render on libx264, silently turning an HEVC export into H.264.
             // `auto` lets the encoder enable striping where it is supported and
             // costs only the preset/tune pairs NVENC declines to stripe.
-            L"-split_encode_mode", L"auto",
-            // NVENC takes NV12 as it stands, so an already-converted capture reaches the
-            // encoder without ffmpeg touching a single pixel.
-            L"-pix_fmt", nv12 ? L"nv12" : L"yuv420p"});
+            L"-split_encode_mode", L"auto"});
+        // The High rung lifts NVENC's own ceiling. With -b:v 0 and no -maxrate, VBR is
+        // not constant quality at all on detailed content: measured at 1080p it held
+        // every CQ from 10 to 20 at the same ~10.7 Mbit/s (43.7 KiB a frame) on the
+        // fractal clip, and ~32 Mbit/s at 4K, while the uncapped encode wanted 53.7 and
+        // 161. 800M is far above anything CQ 14 asked for and within what NVENC accepts
+        // (1000M with a 2000M buffer was refused as an invalid parameter). The Standard
+        // rung keeps the ceiling, because its bytes are every cached render's bytes.
+        if (tenBit) arguments.insert(arguments.end(), {L"-maxrate", L"800M", L"-bufsize", L"800M",
+                                                       L"-profile:v", L"main10", L"-pix_fmt", L"p010le"});
+        // NVENC takes NV12 and P010 as they stand, so an already-converted capture
+        // reaches the encoder without ffmpeg touching a single pixel.
+        else arguments.insert(arguments.end(), {L"-pix_fmt", nv12 ? L"nv12" : L"yuv420p"});
     } else {
         arguments.insert(arguments.end(), {
-            L"-c:v", L"libx264", L"-preset", L"slow", L"-crf", L"16",
+            L"-c:v", L"libx264", L"-preset", L"slow", L"-crf", tenBit ? highCq : std::wstring(L"16"),
             // x264 has no NV12 input, but deinterleaving one plane is far cheaper than
             // converting a whole BGRA frame.
-            L"-pix_fmt", (!nv12 && (spec.width % 2 || spec.height % 2)) ? L"yuv444p" : L"yuv420p"});
+            L"-pix_fmt", tenBit ? (odd ? L"yuv444p10le" : L"yuv420p10le")
+                                : ((!nv12 && odd) ? L"yuv444p" : L"yuv420p")});
     }
     // Colorimetry is stated on BOTH paths, and the BGRA path is additionally told which
     // matrix to convert with. Until 2026-09-15 only the GPU-converted path said
@@ -638,7 +664,9 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     // that path exists to avoid.
     constexpr const wchar_t* kSetColorParams =
         L"setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv";
-    if (nv12) {
+    // P010 is converted by the same capture shaders at 10 bits, so it is BT.709 limited
+    // range already and takes the NV12 treatment.
+    if (nv12 || p010) {
         arguments.insert(arguments.end(), {L"-vf", kSetColorParams});
     } else {
         arguments.insert(arguments.end(), {
@@ -651,9 +679,24 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
     return arguments;
 }
 
+CachedVideoMp4Path CachedVideoMp4PathFor(std::string_view codecName, std::string_view pixelFormat)
+{
+    // Every 10-bit format this player writes spells its depth in the name
+    // (p010le, yuv420p10le, yuv444p10le); an 8-bit one never does. Only a 10-bit
+    // file is one of the 10-bit rungs: an 8-bit FFV1 or HEVC is re-encoded exactly
+    // as every export before the ladder was.
+    const bool tenBit = pixelFormat.find("10") != std::string_view::npos;
+    if (tenBit && codecName == "ffv1") return CachedVideoMp4Path::Lossless10Bit;
+    if (tenBit && codecName == "hevc") return CachedVideoMp4Path::CopyHevc;
+    if (tenBit && codecName == "h264") return CachedVideoMp4Path::CopyH264;
+    return CachedVideoMp4Path::Reencode8Bit;
+}
+
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,
-                                                     bool oddDimensions)
+                                                     bool oddDimensions,
+                                                     CachedVideoMp4Path mp4Path,
+                                                     std::string_view tenBitPixelFormat)
 {
     const ExportFormat format = ExportFormatFor(request.output);
     std::vector<std::wstring> arguments{
@@ -674,12 +717,26 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
             L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
             L"-map_metadata", L"1", L"-map_chapters", L"1"});
         if (format.mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
-        else {
+        else if (mp4Path == CachedVideoMp4Path::CopyHevc) {
+            // The High rung's 10-bit HEVC as it was written. hvc1 is the sample entry
+            // players look for; ffmpeg's default for a copied stream, hev1, is not.
+            arguments.insert(arguments.end(), {L"-c:v", L"copy", L"-tag:v", L"hvc1"});
+        } else if (mp4Path == CachedVideoMp4Path::CopyH264) {
+            // The same rung from the libx264 fallback: High 10, carried as it is.
+            arguments.insert(arguments.end(), {L"-c:v", L"copy"});
+        } else if (mp4Path == CachedVideoMp4Path::Lossless10Bit) {
+            // Lossless H.264 keeps the Lossless rung lossless in a container that
+            // cannot hold FFV1, at the render's own depth and chroma layout.
+            const std::wstring pixelFormat(tenBitPixelFormat.begin(), tenBitPixelFormat.end());
+            arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-qp", L"0",
+                L"-pix_fmt", pixelFormat.empty() ? std::wstring(oddDimensions ? L"yuv444p10le" : L"yuv420p10le") : pixelFormat});
+        } else {
             arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-crf", L"18"});
             if (oddDimensions) arguments.insert(arguments.end(), {L"-pix_fmt", L"yuv444p"});
             else arguments.insert(arguments.end(), {L"-vf", L"pad=ceil(iw/2)*2:ceil(ih/2)*2", L"-pix_fmt", L"yuv420p"});
-            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
         }
+        if (format.mp4)
+            arguments.insert(arguments.end(), {L"-c:a", L"aac", L"-b:a", L"192k", L"-c:s", L"mov_text", L"-movflags", L"+faststart", L"-f", L"mp4"});
     } else if (format.gif) {
         arguments.insert(arguments.end(), {L"-filter_complex",
             // Two-centisecond frames avoid the short-delay clamping performed
@@ -703,7 +760,8 @@ size_t ExpectedFrameBytes(const EncoderSpec& spec)
     // The size the frames actually arrive at, which is 1.5 bytes per pixel once the
     // capture is converted on the GPU. Assuming BGRA here rejected every NV12 frame
     // the capture handed over as the wrong size.
-    if (spec.pixelFormat == EncoderPixelFormat::Nv12 && (spec.width % 2 || spec.height % 2))
+    if ((spec.pixelFormat == EncoderPixelFormat::Nv12 || spec.pixelFormat == EncoderPixelFormat::P010) &&
+        (spec.width % 2 || spec.height % 2))
         return 0;
     const uint64_t bytes = EncoderFrameBytes(spec.pixelFormat, spec.width, spec.height);
     if (bytes > std::numeric_limits<size_t>::max()) return 0;
@@ -914,6 +972,8 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     if (!neuralMetadata.ok)
         return {false, MaterializeError::ProcessFailed, L"The cached neural media could not be inspected."};
     const bool oddDimensions = neuralMetadata.width % 2 || neuralMetadata.height % 2;
+    // A 10-bit or lossless render keeps its rung in an MP4 export too.
+    const CachedVideoMp4Path mp4Path = CachedVideoMp4PathFor(neuralMetadata.codecName, neuralMetadata.pixelFormat);
 
     ExportStagingFile staging;
     staging.path = ReserveExportStaging(output.parent_path());
@@ -946,7 +1006,8 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         resolved.sourceStartSeconds = streamSourceStart;
         resolved.rangeStartSeconds = resolved.rangeDurationSeconds = 0.0;
     }
-    const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions);
+    const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions, mp4Path,
+                                                      neuralMetadata.pixelFormat);
     // Attachments (such as subtitle fonts) travel with the source subtitles.
     // Unsupported codecs fail the entire export; no subtitle is burned in.
     // A software encode of a 4K render runs at a small fraction of real time;
@@ -1186,7 +1247,7 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
     // one missing its tail segment 902 and 30.1 s against 43.3 s.
     std::vector<std::wstring> probeArguments{
         L"-v", L"error", L"-select_streams", L"v:0",
-        L"-show_entries", fullValidation?L"packet=pts_time,duration_time:stream=width,height,nb_read_packets:format=duration":L"stream=width,height:format=duration",
+        L"-show_entries", fullValidation?L"packet=pts_time,duration_time:stream=width,height,nb_read_packets:format=duration":L"stream=width,height,codec_name,pix_fmt:format=duration",
         L"-of", L"default=noprint_wrappers=1:nokey=0", L"-i", media.wstring()};
     if(fullValidation)probeArguments.insert(probeArguments.begin(),L"-count_packets");
     double durationSeconds = 0.0;
@@ -1203,6 +1264,8 @@ ProbeResult ProbeMedia(const std::filesystem::path& helperDirectory,
             if (key == "width" && ParseUnsigned(value, integer)) result.width = static_cast<uint32_t>(integer);
             else if (key == "height" && ParseUnsigned(value, integer)) result.height = static_cast<uint32_t>(integer);
             else if (key == "nb_read_packets" && ParseUnsigned(value, integer)) result.frameCount = integer;
+            else if (key == "codec_name" && value != "N/A") result.codecName = std::string(value);
+            else if (key == "pix_fmt" && value != "N/A") result.pixelFormat = std::string(value);
             else if (key == "duration") {
                 try { durationSeconds = std::stod(std::string(value)); } catch (...) { durationSeconds = 0.0; }
             }

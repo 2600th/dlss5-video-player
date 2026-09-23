@@ -1,0 +1,120 @@
+{
+  "q-standard": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "shipped state, Standard rung (HEVC 8-bit CQ16), no capture dither"
+  },
+  "q-dither": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "worker_flags": [
+      "--capture-dither",
+      "1"
+    ],
+    "description": "q-standard plus the blue-noise capture dither"
+  },
+  "q-high": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "shipped state, High rung (HEVC Main10 via P010 capture)",
+    "worker_flags": [
+      "--cache-quality",
+      "high"
+    ]
+  },
+  "q-lossless": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "shipped state, Lossless rung (FFV1 10-bit via P010 capture) - the reference",
+    "worker_flags": [
+      "--cache-quality",
+      "lossless"
+    ]
+  },
+  "q-nv12": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Standard rung through the GPU NV12 capture",
+    "worker_flags": [
+      "--gpu-color-conversion",
+      "1"
+    ]
+  },
+  "q-nv12-dither": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "q-nv12 plus the blue-noise capture dither",
+    "worker_flags": [
+      "--gpu-color-conversion",
+      "1",
+      "--capture-dither",
+      "1"
+    ]
+  }
+}

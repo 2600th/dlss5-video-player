@@ -380,6 +380,49 @@ void capture_dither_changes_the_render_key_and_names_its_map()
     CHECK(BuildNeuralCacheKey(identity) != shippedKey);
 }
 
+void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
+{
+    const std::string shipped =
+        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
+    const auto keyed = [&](bool source, uint32_t preset, bool colour, bool dither, EncoderQuality rung) {
+        return NeuralRenderPipelineIdentity(source, KeyedNvencPreset(preset, rung),
+                                            KeyedGpuColorConversion(colour, rung)) +
+               TemporalPipelineTerm(TemporalSettings{}) + CaptureQualityIdentityTerm({dither, rung});
+    };
+    // Standard is the key every field render was published under.
+    CHECK_EQ(shipped, keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::Standard));
+    const auto high = keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::High);
+    const auto lossless = keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::Lossless);
+    // The High term carries its CQ, so retuning the rung retires its renders; the
+    // rung's term comes after the dither's, and both after every other term.
+    CHECK_EQ(shipped + "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1", high);
+    CHECK_EQ(shipped + "|lossless-ffv1-10bit-v1", lossless);
+    CaptureQualityTerms both;
+    both.captureDither = true;
+    CHECK_EQ(std::string("|dither-bayer8-v1"), CaptureQualityIdentityTerm(both));
+    CHECK(high != lossless);
+    // A 10-bit rung captures P010 whatever the colour switch says, and has no 8-bit
+    // store to dither: neither switch may split its entries.
+    CHECK_EQ(high, keyed(false, kDefaultNvencPreset, true, true, EncoderQuality::High));
+    CHECK_EQ(lossless, keyed(false, kDefaultNvencPreset, true, true, EncoderQuality::Lossless));
+    // FFV1 has no NVENC preset, so neither does Lossless's key; High still does.
+    CHECK_EQ(lossless, keyed(false, 7, false, false, EncoderQuality::Lossless));
+    CHECK(high != keyed(false, 7, false, false, EncoderQuality::High));
+    // Standard keeps both switches.
+    CHECK(keyed(false, 7, true, true, EncoderQuality::Standard) != shipped);
+    // What the model is shown is not the encoder's business: the source term stays.
+    CHECK(lossless != keyed(true, kDefaultNvencPreset, false, false, EncoderQuality::Lossless));
+    NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
+                                 std::string(64, 'b'), shipped, false};
+    const auto shippedKey = BuildNeuralCacheKey(identity);
+    identity.quality = high;
+    const auto highKey = BuildNeuralCacheKey(identity);
+    identity.quality = lossless;
+    CHECK(highKey != shippedKey);
+    CHECK(BuildNeuralCacheKey(identity) != shippedKey);
+    CHECK(BuildNeuralCacheKey(identity) != highKey);
+}
+
 void schema_three_manifests_parse_with_defaults_and_stay_reusable()
 {
     // Byte-exact schema-3 manifest as written by the previous release.
@@ -843,6 +886,7 @@ int main()
     temporal_settings_change_the_render_key_only_off_their_defaults();
     encoder_settings_that_change_the_written_pixels_change_the_render_key();
     capture_dither_changes_the_render_key_and_names_its_map();
+    quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert();
     schema_three_manifests_parse_with_defaults_and_stay_reusable();
     current_schema_manifest_round_trips_with_receipt_digest();
     receipt_is_authenticated_on_promotion_and_lookup();

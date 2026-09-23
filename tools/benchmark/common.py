@@ -41,7 +41,7 @@ FAILURES = ["None", "Source", "Encoder", "Neural", "GpuStall", "DeviceRemoved", 
 # src/NeuralRenderTypes.h NeuralColdStartPhase, in wire bit order.
 COLD_START_PHASES = ["request", "preflight", "launch", "helperStart", "runtimeReady", "neuralInit",
                      "featureArm", "firstOutput", "attach"]
-ENCODERS = {0: "hevc_nvenc", 1: "h264_software"}  # src/MediaPipeline.h EncoderKind
+ENCODERS = {0: "hevc_nvenc", 1: "h264_software", 2: "ffv1"}  # src/MediaPipeline.h EncoderKind
 CONFIGURATION_CHANGED_EXIT = 75
 PROGRESS_STRUCT = struct.Struct("<IQQQqqII")  # 52 bytes
 RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQIIII")  # 152 bytes

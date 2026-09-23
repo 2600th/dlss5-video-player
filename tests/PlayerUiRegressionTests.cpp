@@ -3469,7 +3469,22 @@ struct PlayerAppTestAccess {
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CAPTURE_DITHER, BN_CLICKED), 0);
         CHECK(app.m_captureDither);
         CHECK_EQ(GetPrivateProfileIntW(L"Encoding", L"CaptureDither", 0, app.SettingsPath().c_str()), UINT{1});
+        // The quality ladder: the combo drives the rung and the ini spells it by name,
+        // and a 10-bit rung greys the dither out, since it has no 8-bit store to act on.
+        CHECK(GetDlgItem(dialog, IDC_ES_CACHE_QUALITY) != nullptr);
+        CHECK_EQ(int(SendMessageW(GetDlgItem(dialog, IDC_ES_CACHE_QUALITY), CB_GETCOUNT, 0, 0)), 3);
+        SendMessageW(GetDlgItem(dialog, IDC_ES_CACHE_QUALITY), CB_SETCURSEL, 2, 0);
+        app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_CACHE_QUALITY, CBN_SELCHANGE), 0);
+        CHECK(app.m_cacheQuality == EncoderQuality::Lossless);
+        {
+            wchar_t rung[32]{};
+            GetPrivateProfileStringW(L"Encoding", L"CacheQuality", L"", rung, 32, app.SettingsPath().c_str());
+            CHECK_EQ(std::wstring(L"lossless"), std::wstring(rung));
+        }
+        CHECK(!IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
         app.EncoderWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_ES_RESET, BN_CLICKED), 0);
+        CHECK(app.m_cacheQuality == EncoderQuality::Standard);
+        CHECK(IsWindowEnabled(GetDlgItem(dialog, IDC_ES_CAPTURE_DITHER)));
         CHECK(!app.m_captureDither);
         CHECK(!app.m_gpuColorConversion);
         CHECK(!app.m_gpuSourceConversion);

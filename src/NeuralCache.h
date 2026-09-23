@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CacheEvictionPolicy.h"
+#include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
 
 #include <cstdint>
@@ -187,11 +188,29 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 // (DitherPolicy.h): the same picture, different bytes in every frame. The term names
 // the map as well as the switch: a different map or amplitude is a different set of
 // bytes and gets a new version, never this term.
+//
+// `quality` is the rung of the ladder (EncoderQuality). A 10-bit rung captures P010
+// and has no 8-bit store, so the dither term is dropped there: flipping an inert
+// switch must not re-render anything. The High term carries its CQ.
 struct CaptureQualityTerms {
     bool captureDither{false};
+    EncoderQuality quality{EncoderQuality::Standard};
 };
 inline constexpr bool kDefaultCaptureDither = false;
+inline constexpr EncoderQuality kDefaultCacheQuality = EncoderQuality::Standard;
 std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms);
+
+// The encoder switches a rung makes inert, as the key should see them: a 10-bit rung
+// captures P010 whatever the colour conversion says, and Lossless (FFV1) has no NVENC
+// preset. Keyed at their defaults there, so flipping one re-renders nothing.
+constexpr bool KeyedGpuColorConversion(bool gpuColorConversion, EncoderQuality quality)
+{
+    return EncoderQualityIsTenBit(quality) ? kDefaultGpuColorConversion : gpuColorConversion;
+}
+constexpr uint32_t KeyedNvencPreset(uint32_t nvencPreset, EncoderQuality quality)
+{
+    return quality == EncoderQuality::Lossless ? kDefaultNvencPreset : nvencPreset;
+}
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,

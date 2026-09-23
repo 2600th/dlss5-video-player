@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P1** | | | | |
 | **P2** | | | | |
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
-| [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
@@ -115,26 +114,6 @@ Refs: [DLSS guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/Progr
 
 **Impact** — Pipeline: steadier tone across cuts and lighting changes.
 Player: less visible pumping.
-
----
-
-<a id="p23"></a>
-### P2.3 · A quality ladder for cache and export: CQ, 10-bit, lossless
-
-`M` · **Pipeline** · ✅ current state
-
-The cache is always HEVC 8-bit at `-cq 16` (`MediaPipeline.cpp:589`). Issue #13
-reports visible blocking on the official GTA VI trailer. Merserk now offers
-ProRes HQ and FFV1 10-bit; video2dlssnr defaults to HEVC 10-bit at CQ19.
-
-**Do** — P010 capture with HEVC Main10, a CQ ladder, and a lossless rung
-(FFV1 or NVENC lossless), all in the cache key. Score every rung with VMAF
-against a lossless intermediate (libvmaf_cuda), and print the cost beside
-each, as the NVENC preset tooltip already does. Main10 is also the first half
-of P3.1.
-
-**Impact** — Pipeline: fixes the one quality complaint users have filed
-about export.
 
 ---
 

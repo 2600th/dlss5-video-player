@@ -1254,6 +1254,12 @@ std::vector<std::wstring> neural_worker_detail::BuildWorkerArguments(
         arguments.emplace_back(L"--capture-dither");
         arguments.emplace_back(L"1");
     }
+    // Absent means Standard, the only rung every earlier helper could write.
+    if (request.quality != EncoderQuality::Standard) {
+        const std::string_view name = EncoderQualityName(request.quality);
+        arguments.emplace_back(L"--cache-quality");
+        arguments.emplace_back(name.begin(), name.end());
+    }
     if (pauseEvent) {
         arguments.emplace_back(L"--pause-event");
         arguments.emplace_back(HandleText(pauseEvent));
@@ -1312,7 +1318,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
                RetryLimit, Guides, SegmentFrames, PauseEvent, GpuColorConversion, NvencPreset,
                GpuSourceConversion, FirstSegmentFrames, Command, ParentProcess, IdleVram,
                OutputWidth, OutputHeight, RequireNeural, ProcessingScale, Temporal, UpscalingHistoryKey,
-               CaptureDither, KeyCount };
+               CaptureDither, CacheQuality, KeyCount };
     constexpr std::array<std::wstring_view, KeyCount> names{
         L"--metadata-handle", L"--source", L"--staging", L"--width", L"--height", L"--fps", L"--duration-100ns",
         L"--job-id", L"--range-start-100ns", L"--range-end-100ns", L"--preroll-frames", L"--frame-retry-limit",
@@ -1326,7 +1332,7 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         // Absent at the defaults, for the same reason.
         L"--temporal", L"--sr-history",
         // Capture-side quality switches: absent is what every earlier helper did.
-        L"--capture-dither"};
+        L"--capture-dither", L"--cache-quality"};
     std::array<std::optional<std::wstring_view>, KeyCount> values{};
     for (size_t index = 2; index < end; index += 2) {
         const auto found = std::find(names.begin(), names.end(), arguments[index]);
@@ -1478,6 +1484,21 @@ std::optional<neural_worker_detail::WorkerArguments> neural_worker_detail::Parse
         uint64_t enabled = 0;
         if (!ParseUnsigned(*values[CaptureDither], enabled) || enabled > 1) return std::nullopt;
         request.captureDither = enabled != 0;
+    }
+    // A rung this build cannot name is refused, never read as Standard: the
+    // parent keyed the render for the rung it asked for. "standard" itself is
+    // refused too, because the builder never sends it and a second spelling of
+    // the default is a second wire contract nobody tests.
+    if (values[CacheQuality]) {
+        const std::wstring_view text = *values[CacheQuality];
+        std::string narrow;
+        for (const wchar_t character : text) {
+            if (character > 0x7F) return std::nullopt;
+            narrow.push_back(static_cast<char>(character));
+        }
+        EncoderQuality quality{};
+        if (!ParseEncoderQuality(narrow, quality) || quality == EncoderQuality::Standard) return std::nullopt;
+        request.quality = quality;
     }
     // Absent means 7, stated here rather than left to the struct's own default.
     // The two are different numbers and different decisions: 7 is the VERSION

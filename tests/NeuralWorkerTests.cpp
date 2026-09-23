@@ -1066,6 +1066,31 @@ void helper_main_parser_accepts_normal_and_restarted_contracts_test()
     }
     const auto badDitherView = view(badDither);
     CHECK(!neural_worker_detail::ParseWorkerArguments(badDitherView).has_value());
+    // The quality rung travels by name, absent meaning Standard - the only rung an
+    // older parent can ask for - and a name this build does not know is refused
+    // rather than read as the default the parent did not key for.
+    for (const auto& argument : normal) CHECK(argument != L"--cache-quality");
+    if (parsedNormal) CHECK(parsedNormal->request.quality == EncoderQuality::Standard);
+    for (const EncoderQuality rung : {EncoderQuality::High, EncoderQuality::Lossless}) {
+        NeuralRenderRequest laddered = request;
+        laddered.quality = rung;
+        const auto ladderedArguments = neural_worker_detail::BuildWorkerArguments(laddered, metadata, pause, false);
+        const auto ladderedView = view(ladderedArguments);
+        const auto parsedLaddered = neural_worker_detail::ParseWorkerArguments(ladderedView);
+        CHECK(parsedLaddered.has_value());
+        if (parsedLaddered) CHECK(parsedLaddered->request.quality == rung);
+    }
+    NeuralRenderRequest high = request;
+    high.quality = EncoderQuality::High;
+    const auto highArguments = neural_worker_detail::BuildWorkerArguments(high, metadata, pause, false);
+    for (const wchar_t* refused : {L"standard", L"best", L"High", L""}) {
+        auto bad = highArguments;
+        for (size_t index = 0; index + 1 < bad.size(); ++index) {
+            if (bad[index] == L"--cache-quality") bad[index + 1] = refused;
+        }
+        const auto badView = view(bad);
+        CHECK(!neural_worker_detail::ParseWorkerArguments(badView).has_value());
+    }
     auto duplicated = normal;
     duplicated.emplace_back(L"--width");
     duplicated.emplace_back(L"1920");
