@@ -61,7 +61,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
-| [P1.1](#p11) | The decoder's buffer pool is never refilled | S | Player | ✅ |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
 | [P1.3](#p13) | Opening a cached render spawns redundant decoders | S | Player | 🔍 |
 | [P1.4](#p14) | Audio clock and endpoint edge cases | S | Player | 🔍 |
@@ -321,27 +320,6 @@ downscale). Keep a 1:1 pixel mode for P2.16.
 # P1 — Next
 
 ## Player: reliability and quality-neutral performance
-
-<a id="p11"></a>
-### P1.1 · The decoder's buffer pool is never refilled
-
-`S` · **Player** · ✅
-
-**Where** — `VideoDecoder.cpp:1498` (`out = std::move(...)`, with no recycle),
-`:1066-1068`, `SynchronizedPlayback.cpp:242`
-
-`ReadNextBlocking` moves each frame into the caller's buffer and frees the
-old one, and `SynchronizedPlayback` reads into a fresh `VideoFrame` every
-time. So `TakeRecycledBuffer` always misses, and every frame pays a `resize`
-zero-fill.
-
-**Impact** — Player: every frame allocates and zero-fills 5.5-31.6 MB, twice
-per neural pair. Pipeline: none; the export path does recycle.
-
-**Fix** — return `out`'s old buffer to the pool in `ReadNextBlocking`, and give
-the pairs' `shared_ptr`s a deleter that returns their buffers to the source.
-
----
 
 <a id="p12"></a>
 ### P1.2 · Remaining per-frame copies and allocations

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <mutex>
 #include <system_error>
 #include <optional>
 #include <thread>
@@ -36,6 +37,46 @@ public:
 private:
     VideoDecoder decoder_;
     bool preferNv12_{};
+};
+
+// Frame buffers handed back by pairs nobody holds any more, for the next read
+// to pass down to its decoder. Every pair used to be read into a fresh
+// VideoFrame, so the decoder's own pool never saw a buffer come back and each
+// member of each pair paid an allocation and a zero-fill of a whole frame:
+// 5.5 MB per member at 1440p NV12, 31.6 MB at 4K BGRA. Shared rather than
+// owned, because the last holder of a pair - PlayerApp's retained copy, say -
+// can let go of it after this playback has been closed, moved or destroyed.
+class FrameBufferPool {
+public:
+    FrameBufferPool(){buffers_.reserve(kCapacity);}
+    std::vector<uint8_t> Take()
+    {
+        std::scoped_lock lock(mutex_);
+        if(buffers_.empty())return {};
+        std::vector<uint8_t> buffer=std::move(buffers_.back());
+        buffers_.pop_back();
+        return buffer;
+    }
+    // A buffer of the wrong size is harmless: the decoder drops what it cannot
+    // use. Past the cap it is simply freed.
+    void Give(std::vector<uint8_t>&& buffer)noexcept
+    {
+        if(buffer.empty())return;
+        try{
+            std::scoped_lock lock(mutex_);
+            if(buffers_.size()<kCapacity)buffers_.push_back(std::move(buffer));
+        }catch(...){}
+    }
+    void Clear()
+    {
+        std::scoped_lock lock(mutex_);
+        buffers_.clear();
+    }
+private:
+    // Two pairs: the one just released and one discarded while resyncing.
+    static constexpr size_t kCapacity=4;
+    std::mutex mutex_;
+    std::vector<std::vector<uint8_t>> buffers_;
 };
 
 SynchronizedReadResult ConvertRead(VideoReadResult result)
@@ -83,7 +124,10 @@ struct SynchronizedPlayback::Impl {
     // it per presented frame was 11 MB of memcpy at 1440p against a 16.7 ms
     // budget. One small control-block allocation per pair buys both retentions
     // an alias. const so no holder can mutate a pair another holder is reading.
+    // Published through Publish(), whose deleter returns both frames' buffers
+    // to `buffers` once the last holder lets go.
     std::shared_ptr<const SynchronizedFramePair> current;
+    std::shared_ptr<FrameBufferPool> buffers{std::make_shared<FrameBufferPool>()};
     ComparisonView view{ComparisonView::Original};
     bool opened{};
     bool paused{};
@@ -134,6 +178,27 @@ struct SynchronizedPlayback::Impl {
     // What the caller asked the members to decode to. Every segment opened
     // later this session inherits it, so one answer covers the whole pair.
     bool preferNv12{};
+
+    std::shared_ptr<const SynchronizedFramePair> Publish(SynchronizedFramePair&& pair)
+    {
+        // The deleter owns a reference to the pool, never to this object: a
+        // pair can outlive the playback that produced it.
+        return std::shared_ptr<const SynchronizedFramePair>(
+            new SynchronizedFramePair(std::move(pair)),
+            [pool=buffers](SynchronizedFramePair* released)noexcept{
+                pool->Give(std::move(released->original.bgra));
+                pool->Give(std::move(released->neural.bgra));
+                delete released;
+            });
+    }
+
+    // Drops a pending member that pairing gave up on, keeping its buffer.
+    void Discard(std::optional<Pending>& pending)
+    {
+        if(!pending)return;
+        buffers->Give(std::move(pending->frame.bgra));
+        pending.reset();
+    }
 
     void ResetPublished()
     {
@@ -239,8 +304,11 @@ struct SynchronizedPlayback::Impl {
                                           uint64_t frameShift)
     {
         if(pending)return SynchronizedReadResult::PairReady;
-        VideoFrame frame;const VideoReadResult read=source.Read(frame,stop);
-        if(read!=VideoReadResult::FrameReady)return ConvertRead(read);
+        // The source recycles whatever buffer the frame arrives with, which is
+        // the only way one it handed out ever gets back to it.
+        VideoFrame frame;frame.bgra=buffers->Take();
+        const VideoReadResult read=source.Read(frame,stop);
+        if(read!=VideoReadResult::FrameReady){buffers->Give(std::move(frame.bgra));return ConvertRead(read);}
         Pending next{std::move(frame),false};
         next.numbered=next.frame.frameNumber!=0||next.frame.timestamp100ns==0;
         next.frame.timestamp100ns+=timestampShift100ns;
@@ -290,12 +358,12 @@ struct SynchronizedPlayback::Impl {
             // Cached playback keeps the hard refusal: there the two files are a
             // published pair, and a numbered disagreement is the identity failure
             // this check exists to catch.
-            if(originalNumber<neuralNumber)pendingOriginal.reset();else pendingNeural.reset();
+            if(originalNumber<neuralNumber)Discard(pendingOriginal);else Discard(pendingNeural);
             return live?Match::Skew:Match::Mismatch;
         }
         const int64_t difference=pendingOriginal->frame.timestamp100ns-pendingNeural->frame.timestamp100ns;
         if(std::llabs(difference)<=tolerance100ns)return Match::Pair;
-        if(difference<0)pendingOriginal.reset();else pendingNeural.reset();
+        if(difference<0)Discard(pendingOriginal);else Discard(pendingNeural);
         return Match::Skew;
     }
 
@@ -657,6 +725,9 @@ void SynchronizedPlayback::Close()
     if(impl_->original)impl_->original->Close();if(impl_->neural)impl_->neural->Close();
     impl_->CloseSegmentSources();impl_->segments.reset();impl_->live=false;impl_->segmentMedia={};
     impl_->opened=false;impl_->ResetPublished();
+    // The next open can be another geometry; buffers still out in retained
+    // pairs come back to a pool the decoder will size-check anyway.
+    impl_->buffers->Clear();
 }
 
 SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token stop)
@@ -665,7 +736,7 @@ SynchronizedReadResult SynchronizedPlayback::ReadNextAvailable(std::stop_token s
     if(impl_->paused&&!impl_->stepRequested)return SynchronizedReadResult::NotReady;
     SynchronizedFramePair pair;
     const auto result=impl_->live?impl_->BuildLivePair(pair,stop):impl_->BuildPair(pair,stop);
-    if(result==SynchronizedReadResult::PairReady)impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(pair));
+    if(result==SynchronizedReadResult::PairReady)impl_->current=impl_->Publish(std::move(pair));
     // WaitingForRender produced no frame, so a requested step is still pending.
     if(impl_->stepRequested&&result!=SynchronizedReadResult::NotReady&&
        result!=SynchronizedReadResult::WaitingForRender)impl_->stepRequested=false;
@@ -699,7 +770,7 @@ bool SynchronizedPlayback::SeekSeconds(double seconds,std::stop_token stop)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         if(result==SynchronizedReadResult::PairReady){
-            impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(candidate));impl_->stepRequested=false;return true;
+            impl_->current=impl_->Publish(std::move(candidate));impl_->stepRequested=false;return true;
         }
         // Container/audio duration may round past the last video PTS. At the
         // tail only, retry one frame earlier instead of unloading a valid pair.
@@ -751,7 +822,7 @@ bool SynchronizedPlayback::SeekLive(double seconds,std::stop_token stop)
     for(;;){
         const auto result=impl_->BuildLivePair(candidate,stop);
         if(result==SynchronizedReadResult::PairReady){
-            impl_->current=std::make_shared<const SynchronizedFramePair>(std::move(candidate));impl_->stepRequested=false;
+            impl_->current=impl_->Publish(std::move(candidate));impl_->stepRequested=false;
             impl_->fault=Impl::Fault{};
             return true;
         }

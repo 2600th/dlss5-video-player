@@ -6395,6 +6395,50 @@ void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_re
     CHECK_EQ(expectedTimestamp(600),afterLongSeek.timestamp100ns);
 }
 
+// ReadNextBlocking moved each queued frame over the caller's VideoFrame and
+// freed the buffer it held, so the read path never found one to reuse and
+// allocated and zero-filled a whole frame for every frame played - 5.5 to
+// 31.6 MB each on the player's main path. The caller's buffer now goes back to
+// the pool, and after the queue has filled no read allocates again.
+void video_decoder_blocking_reads_recycle_the_callers_buffer_test()
+{
+    MediaFixture fixture;
+    constexpr int kFrames=240;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"seekreuse_recycle",MediaSourceKind::LocalFile));
+    VideoFrame frame;
+    for(int index=0;index<kFrames;++index){
+        CHECK(decoder->ReadNextBlocking(frame)==VideoReadResult::FrameReady);
+        CHECK_EQ(static_cast<uint32_t>(index),stamped_frame_index(frame));
+    }
+    const uint64_t blockingFills=decoder->FrameBufferFills();
+    std::cout<<"  blocking reads: "<<kFrames<<" frames, "<<blockingFills<<" buffer fills\n";
+    // The queue (4), the frame being filled and the caller's own: what the
+    // ring needs before its first buffer comes back. Everything after is reuse.
+    CHECK(blockingFills<=8);
+
+    // The same through ReadNextAvailable, which SynchronizedPlayback uses, fed
+    // a buffer of the right size each time the way its pool does.
+    auto available=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(available->Open(L"seekreuse_recycle",MediaSourceKind::LocalFile));
+    VideoFrame spare;
+    for(int index=0;index<kFrames;){
+        VideoFrame next;next.bgra=std::move(spare.bgra);
+        const VideoReadResult result=available->ReadNextAvailable(next);
+        if(result==VideoReadResult::NotReady){
+            spare.bgra=std::move(next.bgra);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;
+        }
+        CHECK(result==VideoReadResult::FrameReady);
+        if(result!=VideoReadResult::FrameReady)break;
+        CHECK_EQ(static_cast<uint32_t>(index),stamped_frame_index(next));
+        spare.bgra=std::move(next.bgra);++index;
+    }
+    const uint64_t availableFills=available->FrameBufferFills();
+    std::cout<<"  available reads: "<<kFrames<<" frames, "<<availableFills<<" buffer fills\n";
+    CHECK(availableFills<=8);
+}
+
 void video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test()
 {
     struct Case {
@@ -9349,6 +9393,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
+    TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),
     TEST_CASE(youtube_audio_held_pipe_stop_destroy_and_failure_fallback_are_bounded_test),
     TEST_CASE(youtube_audio_failed_waits_and_query_retire_reader_without_termination_or_leaks_test),

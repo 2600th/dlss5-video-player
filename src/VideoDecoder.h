@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "PixelLayout.h"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -181,6 +182,11 @@ public:
     // twice because the pipe overwrites every byte of it immediately after.
     // Buffers of the wrong size, and any past the pool's cap, are simply dropped.
     void RecycleFrameBuffer(std::vector<uint8_t>&& buffer);
+    // Whole-frame buffers the read path had to allocate (and zero-fill) because
+    // the pool had none, since the frame queue last started. Once playback is
+    // under way this should stop growing; a count that grows with every frame
+    // is a caller that is not handing its buffers back.
+    uint64_t FrameBufferFills() const { return m_frameBufferFills.load(std::memory_order_relaxed); }
 
     // Where a seek's latency actually goes. Published per seek because the seek
     // path is the only place the player blocks on a decoder restart, and the
@@ -405,15 +411,20 @@ private:
     std::chrono::milliseconds m_networkStallTimeout{15000};
     std::chrono::milliseconds m_probeTimeout{15000};
     static constexpr size_t FrameQueueCapacity = 4;
-    // Only one read fills a buffer at a time, so a spare and the one in flight are
-    // all the pool can use; more would just hold 31.6 MiB each at 4K.
-    static constexpr size_t FrameBufferPoolCapacity = 2;
+    // One per queue slot. A consumer that catches up drains the whole queue in one
+    // burst - a late frame being dropped, a pair skipped by the cadence - and hands
+    // back that many buffers before the queue thread takes any. A pool of two
+    // dropped half of them and the refill allocated them again: measured 120 fills
+    // over 240 frames read in bursts of four, against 5 with this capacity. The
+    // buffers it keeps are ones the full queue was already holding.
+    static constexpr size_t FrameBufferPoolCapacity = FrameQueueCapacity;
     // Held by the queue thread and by whichever thread returns a spent buffer, so it
     // is deliberately not m_frameMutex: recycling never waits on the queue.
     std::mutex m_bufferPoolMutex;
     std::vector<std::vector<uint8_t>> m_bufferPool;
-    // Whole-frame allocations the pool did not cover; queue-thread only.
-    uint64_t m_frameBufferFills = 0;
+    // Whole-frame allocations the pool did not cover. Written by whichever
+    // thread reads the pipe, read by FrameBufferFills() from any other.
+    std::atomic<uint64_t> m_frameBufferFills{0};
     // Time spent inside the blocking ReadFile (LocalFile queue thread only), reset at
     // the top of each FrameQueueLoop run so the perFrameMs log line can separate the
     // in-kernel wait for the child from the rest of pipeRead.

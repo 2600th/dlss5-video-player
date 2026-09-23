@@ -3166,6 +3166,74 @@ void synchronized_playback_original_only_mode_remains_available_after_cancel_tes
     CHECK(!playback.SetView(ComparisonView::Neural));CHECK_EQ(ComparisonView::Original,playback.View());
 }
 
+// Behaves the way VideoDecoder does with the buffer a frame arrives holding:
+// one of the right size is written into, anything else means a new frame
+// buffer, allocated and zero-filled. Every frame is stamped with its index.
+class BufferCountingSource final : public ISynchronizedFrameSource {
+public:
+    static constexpr size_t kBytes=64;
+    bool Open(const std::filesystem::path&,std::stop_token)override{index=0;return true;}
+    void Close()override{}
+    VideoReadResult Read(VideoFrame& frame,std::stop_token)override
+    {
+        if(index>=kFrames)return VideoReadResult::EndOfStream;
+        if(frame.bgra.size()==kBytes)++reused;
+        else{frame.bgra.assign(kBytes,0);++fills;}
+        std::fill(frame.bgra.begin(),frame.bgra.end(),uint8_t(index&0xFFu));
+        frame.timestamp100ns=int64_t(index)*333333;frame.frameNumber=index;frame.discontinuity=index==0;
+        ++index;return VideoReadResult::FrameReady;
+    }
+    bool SeekSeconds(double)override{return true;}
+    uint32_t Width()const override{return 4;}
+    uint32_t Height()const override{return 4;}
+    double FrameRate()const override{return 30.0;}
+    double DurationSeconds()const override{return double(kFrames)/30.0;}
+    static constexpr uint64_t kFrames=400;
+    uint64_t index{},fills{},reused{};
+};
+
+// Every pair used to be read into a fresh VideoFrame, so a decoder never got a
+// buffer back and each member of each pair cost a whole-frame allocation. A
+// pair's buffers now go back to the sources when the last holder lets go -
+// and never while anyone still holds the pair.
+void synchronized_playback_returns_released_pair_buffers_to_its_sources_test()
+{
+    BufferCountingSource original,neural;
+    {
+        SynchronizedPlayback playback(original,neural);
+        CHECK(playback.Open(L"o",L"n",{}));
+        constexpr int kPairs=200;
+        for(int index=0;index<kPairs;++index)
+            CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        std::cout<<"  synchronized pairs: "<<kPairs<<" pairs, buffer fills original="<<original.fills
+                 <<" neural="<<neural.fills<<"\n";
+        // The pair being published and the one it replaces.
+        CHECK(original.fills<=2);CHECK(neural.fills<=2);
+        CHECK(original.reused>=uint64_t(kPairs-2));CHECK(neural.reused>=uint64_t(kPairs-2));
+
+        // A retained pair is never recycled from under its holder.
+        const auto held=playback.CurrentPairShared();
+        CHECK(held!=nullptr);
+        const uint8_t stamp=held?held->original.bgra.front():0;
+        for(int index=0;index<20;++index)
+            CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        CHECK(held&&held->original.bgra.size()==BufferCountingSource::kBytes);
+        CHECK(held&&std::all_of(held->original.bgra.begin(),held->original.bgra.end(),[&](uint8_t b){return b==stamp;}));
+        CHECK(held&&std::all_of(held->neural.bgra.begin(),held->neural.bgra.end(),[&](uint8_t b){return b==stamp;}));
+    }
+    // Outliving the playback is allowed: the pool a late release feeds is
+    // shared, not owned by the playback that was destroyed above.
+    std::shared_ptr<const SynchronizedFramePair> survivor;
+    {
+        SynchronizedPlayback playback(original,neural);
+        CHECK(playback.Open(L"o",L"n",{}));
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        survivor=playback.CurrentPairShared();
+    }
+    CHECK(survivor!=nullptr);
+    survivor.reset();
+}
+
 constexpr int64_t kLiveFrame100ns=333333;
 
 // One stream per path: 30 fps frames rebased to the file's own zero with
@@ -4613,6 +4681,7 @@ int wmain(int argc, wchar_t* argv[])
     synchronized_playback_rejects_incompatible_cached_stream_metadata_test();
     synchronized_playback_pause_step_and_eos_apply_to_both_streams_test();
     synchronized_playback_original_only_mode_remains_available_after_cancel_test();
+    synchronized_playback_returns_released_pair_buffers_to_its_sources_test();
     neural_segment_index_orders_appends_and_locates_by_timestamp_test();
     neural_segment_index_resumes_after_retained_coverage_test();
     neural_segment_index_covers_the_rounding_hole_but_not_a_real_gap_test();

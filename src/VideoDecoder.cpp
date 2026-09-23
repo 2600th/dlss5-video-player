@@ -1076,7 +1076,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if(stop.stop_requested())return VideoReadResult::Cancelled;
     if(m_pendingFrame.size()!=frameBytes){
         m_pendingFrame=TakeRecycledBuffer(frameBytes);
-        if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);++m_frameBufferFills;}
+        if(m_pendingFrame.size()!=frameBytes){m_pendingFrame.resize(frameBytes);m_frameBufferFills.fetch_add(1,std::memory_order_relaxed);}
         m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     }
 
@@ -1276,7 +1276,7 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
     Clock::duration readNanos{}, pollNanos{}, sleepNanos{}, spaceNanos{};
     uint64_t frames = 0, polls = 0, spaceWaits = 0;
     const auto loopStart = Clock::now();
-    m_frameBufferFills = 0;
+    m_frameBufferFills.store(0, std::memory_order_relaxed);
     m_frameBlockedNanos = Clock::duration{};
     m_frameReadCalls = 0;
     // Local files can wait in the kernel for the next pipe byte instead of polling for
@@ -1335,7 +1335,7 @@ void VideoDecoder::FrameQueueLoop(std::stop_token stop) {
             << " emptyPoll=" << ms(pollNanos) / double(frames) << " emptySleep=" << ms(sleepNanos) / double(frames)
             << " queueFullWait=" << ms(spaceNanos) / double(frames)
             << " other=" << (wall - ms(readNanos + pollNanos + sleepNanos + spaceNanos)) / double(frames)
-            << " reads=" << m_frameReadCalls << " polls=" << polls << " queueFullWaits=" << spaceWaits << " zeroFills=" << m_frameBufferFills);
+            << " reads=" << m_frameReadCalls << " polls=" << polls << " queueFullWaits=" << spaceWaits << " zeroFills=" << m_frameBufferFills.load(std::memory_order_relaxed));
     }
 }
 
@@ -1470,6 +1470,10 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         for (uint32_t y = 0; y < m_source.height; ++y) {
             const BYTE* src = stride >= 0 ? firstRow + absStride * y : firstRow - absStride * y;
             memcpy(out.bgra.data() + dstStride * y, src, std::min(dstStride, absStride));
+            // `out` can arrive holding a recycled frame, and resize() keeps its
+            // bytes: a row the sample does not fully cover is cleared rather
+            // than left showing the previous picture.
+            if (absStride < dstStride) memset(out.bgra.data() + dstStride * y + absStride, 0, dstStride - absStride);
         }
         buffer->Unlock();
 
@@ -1506,6 +1510,11 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
             for (;;) {
                 if (stop.stop_requested()) return VideoReadResult::Cancelled;
                 if (!m_frameQueue.empty()) {
+                    // The caller's previous frame is spent the moment it asks for the
+                    // next one. Letting the move below free it meant the queue thread
+                    // never found a buffer to reuse: every frame the player showed
+                    // paid an allocation and a zero-fill of the whole frame.
+                    RecycleFrameBuffer(std::move(out.bgra));
                     out = std::move(m_frameQueue.front());
                     m_frameQueue.pop_front();
                     m_frameCv.notify_all();
