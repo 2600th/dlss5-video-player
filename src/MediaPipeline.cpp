@@ -661,22 +661,15 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
         L"-i", request.neuralVideo.wstring()};
     if (format.mkv || format.mp4) {
-        // The neural video already covers only the rendered range, so the
-        // source is trimmed to line its audio, subtitles and chapters up with it.
-        // Input -ss seeks near the start and rebases the source to zero, but a
-        // stream copy keeps the pre-roll between the container seek point and
-        // the target as negative timestamps, which the muxer would then shift
-        // onto the video. Output -ss 0 discards that pre-roll exactly for both
-        // copied and re-encoded streams; the neural video begins at zero and
-        // loses nothing. Output -t bounds the source to the rendered duration.
-        const bool seek = request.rangeStartSeconds > 0.0;
-        if (seek) arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+        // No trim here, ever, and the range fields are not read: a ranged
+        // export cuts the source's streams to the range first
+        // (CachedVideoExporter::Run) and hands this command the cut. The
+        // output -ss 0 this used to trim with applied to the neural video as
+        // well, and a stream-copied render with B-frames lost every frame to
+        // it (BuildStageExportMuxArguments has the mechanism).
         arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(),
             L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
             L"-map_metadata", L"1", L"-map_chapters", L"1"});
-        if (seek) arguments.insert(arguments.end(), {L"-ss", L"0"});
-        if (request.rangeDurationSeconds > 0.0)
-            arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
         if (format.mkv) arguments.insert(arguments.end(), {L"-map", L"1:t?", L"-c", L"copy", L"-f", L"matroska"});
         else {
             arguments.insert(arguments.end(), {L"-c:v", L"libx264", L"-preset", L"medium", L"-crf", L"18"});
@@ -788,6 +781,60 @@ MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std:
     return {true, MaterializeError::None, {}};
 }
 
+namespace {
+
+// The first step of every ranged export - "Save converted video" and "Export
+// with DLSS stages" alike: the source's audio, subtitles, attachments and
+// chapters cut to the range on their own into `trimmed`, a Matroska staging
+// file beside the output, which the last step then reads in place of the
+// source. The rendered video is never part of it and the last step never
+// trims (BuildStageExportTrimArguments says why). `streams` is what the
+// source was listed to carry; on success it and `streamSource` describe what
+// the last step is to read instead - the cut, or the rendered video itself
+// when the source carries nothing to cut.
+MaterializeResult CutSourceStreamsToRange(const std::filesystem::path& helperDirectory,
+                                          const std::filesystem::path& ffmpeg,
+                                          const StageExportMuxRequest& request,
+                                          double videoSeconds,
+                                          ExportStagingFile& trimmed,
+                                          std::filesystem::path& streamSource,
+                                          std::vector<MediaStreamInfo>& streams,
+                                          std::stop_token stop)
+{
+    const auto cancelled = [] { return MaterializeResult{false, MaterializeError::Cancelled, L"The export was cancelled."}; };
+    const auto nothingToCut = [&] {
+        // Nothing beside the video to carry; the video's own (empty) metadata
+        // stands in for chapters that would describe the whole.
+        streamSource = request.video;
+        streams.clear();
+        return MaterializeResult{true, MaterializeError::None, {}};
+    };
+    if (streams.empty()) return nothingToCut();
+    trimmed.path = ReserveExportStaging(request.output.parent_path());
+    if (trimmed.path.empty())
+        return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
+    const auto arguments = BuildStageExportTrimArguments(request, trimmed.path, streams);
+    if (arguments.empty()) return nothingToCut();
+    const CaptureResult trim = RunCapture(ffmpeg, arguments, stop,
+        MediaDeadline(videoSeconds, std::chrono::hours{1}, 4.0), 64 * 1024);
+    if (trim.cancelled || stop.stop_requested()) return cancelled();
+    if (!trim.started || trim.timedOut || trim.exitCode != 0) {
+        std::wstring detail = L"The source's audio and subtitles could not be cut to the rendered range.";
+        if (const std::wstring diagnostic = utf8_text::ToWide(trim.output); !diagnostic.empty())
+            detail += L"\n" + diagnostic;
+        return {false, MaterializeError::ProcessFailed, std::move(detail)};
+    }
+    const auto trimmedStreams = ListMediaStreams(helperDirectory, trimmed.path, stop);
+    if (stop.stop_requested()) return cancelled();
+    if (!trimmedStreams)
+        return {false, MaterializeError::ProcessFailed, L"The streams to carry into the export could not be listed."};
+    streamSource = trimmed.path;
+    streams = *trimmedStreams;
+    return {true, MaterializeError::None, {}};
+}
+
+} // namespace
+
 CachedVideoExporter::CachedVideoExporter(std::filesystem::path helperDirectory)
     : helperDirectory_(std::move(helperDirectory)) {}
 
@@ -839,6 +886,27 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     CachedExportRequest resolved = request;
     resolved.neuralVideo = neuralVideo;
     resolved.sourceMedia = sourceMedia;
+    // A range is cut out of the source's own streams first, as the stage
+    // export's last step does, and the encode below reads that cut with no
+    // trim of its own. The output -ss 0 this used to trim with applied to the
+    // neural video too, and on a stream-copied render with B-frames - every
+    // NVENC render - it dropped every frame: a ranged MKV came out as audio
+    // over an empty video track.
+    ExportStagingFile trimmed;
+    if ((format.mkv || format.mp4) && (request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0)) {
+        auto streams = ListMediaStreams(helperDirectory_, sourceMedia, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!streams)
+            return {false, MaterializeError::ProcessFailed, L"The original source's streams could not be listed."};
+        std::filesystem::path streamSource;
+        const MaterializeResult cut = CutSourceStreamsToRange(helperDirectory_, ffmpeg,
+            {neuralVideo, sourceMedia, output, request.rangeStartSeconds, request.rangeDurationSeconds},
+            double(neuralMetadata.duration100ns) / 10000000.0, trimmed, streamSource, *streams, stop);
+        if (cut.error == MaterializeError::Cancelled) return cancelled();
+        if (!cut.ok) return cut;
+        resolved.sourceMedia = streamSource;
+        resolved.rangeStartSeconds = resolved.rangeDurationSeconds = 0.0;
+    }
     const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions);
     // Attachments (such as subtitle fonts) travel with the source subtitles.
     // Unsupported codecs fail the entire export; no subtitle is burned in.
@@ -1489,36 +1557,13 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
     // A range is cut out of the source's streams on their own first, so the
     // mux below never trims the video (BuildStageExportTrimArguments says why).
     ExportStagingFile trimmed;
-    const bool ranged = request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0;
-    if (ranged && !sourceStreams.empty()) {
-        trimmed.path = ReserveExportStaging(resolved.output.parent_path());
-        if (trimmed.path.empty())
-            return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
-        const auto trimArguments = BuildStageExportTrimArguments(resolved, trimmed.path, sourceStreams);
-        if (trimArguments.empty()) {
-            // Nothing beside the video to carry; the video's own (empty)
-            // metadata stands in for chapters that would describe the whole.
-            resolved.streamSource = resolved.video;
-            sourceStreams.clear();
-        } else {
-            const CaptureResult trim = RunCapture(ffmpeg, trimArguments, stop,
-                MediaDeadline(double(videoMetadata.duration100ns) / 10000000.0, std::chrono::hours{1}, 4.0), 64 * 1024);
-            if (trim.cancelled || stop.stop_requested()) return cancelled();
-            if (!trim.started || trim.timedOut || trim.exitCode != 0) {
-                std::wstring detail = L"The source's audio and subtitles could not be cut to the rendered range.";
-                if (const std::wstring diagnostic = utf8_text::ToWide(trim.output); !diagnostic.empty())
-                    detail += L"\n" + diagnostic;
-                return {false, MaterializeError::ProcessFailed, std::move(detail)};
-            }
-            const auto trimmedStreams = ListMediaStreams(helperDirectory, trimmed.path, stop);
-            if (stop.stop_requested()) return cancelled();
-            if (!trimmedStreams)
-                return {false, MaterializeError::ProcessFailed, L"The streams to carry into the export could not be listed."};
-            resolved.streamSource = trimmed.path;
-            sourceStreams = *trimmedStreams;
-        }
-    } else if (ranged) {
-        resolved.streamSource = resolved.video;
+    if (request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0) {
+        std::filesystem::path streamSource;
+        const MaterializeResult cut = CutSourceStreamsToRange(helperDirectory, ffmpeg, resolved,
+            double(videoMetadata.duration100ns) / 10000000.0, trimmed, streamSource, sourceStreams, stop);
+        if (cut.error == MaterializeError::Cancelled) return cancelled();
+        if (!cut.ok) return cut;
+        resolved.streamSource = streamSource;
     }
 
     ExportStagingFile staging;

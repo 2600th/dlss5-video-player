@@ -49,9 +49,11 @@ struct CachedExportRequest {
     std::filesystem::path sourceMedia;
     std::filesystem::path output;
     // Trim applied to the source's audio/subtitles/chapters so they match a
-    // range-rendered neural video: the source input is seeked to the start and
-    // the muxed output bounded to the duration. Start 0 and duration 0 keep
-    // the whole source; a positive start with duration 0 runs to its end.
+    // range-rendered neural video. CachedVideoExporter cuts them out of the
+    // source on their own first (BuildStageExportTrimArguments) and never
+    // trims the neural video; BuildCachedExportArguments does not read these.
+    // Start 0 and duration 0 keep the whole source; a positive start with
+    // duration 0 runs to its end.
     double rangeStartSeconds{};
     double rangeDurationSeconds{};
 };
@@ -158,6 +160,8 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
                                                 const std::filesystem::path& output);
 // FFmpeg arguments for CachedVideoExporter. The container follows the
 // extension of request.output; the encoded file is written to `staging`.
+// Never a trim: the range fields are ignored, and a ranged export passes the
+// already cut streams as request.sourceMedia.
 // oddDimensions selects the 4:4:4 MP4 path; only MP4 exports inspect it.
 std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& request,
                                                      const std::filesystem::path& staging,

@@ -124,51 +124,23 @@ size_t IndexOf(const std::vector<std::wstring>& arguments, std::wstring_view val
 
 void ExportArgumentTests()
 {
-    // The seek belongs to the source input: it must follow the neural video's
-    // -i and precede the source's, so the rendered range is never seeked. The
-    // zero start and duration are output options placed after every input.
+    // The encode never trims: an output -ss there applied to the neural video
+    // too and emptied a stream-copied render with B-frames. A ranged export
+    // cuts the source's streams first and hands this command the cut, so a
+    // range changes nothing here, in any of its shapes.
     const std::filesystem::path neural = L"C:/cache/neural.mkv", source = L"C:/media/source.mkv", staging = L"C:/out/.stage.tmp";
     for (const auto* extension : {L"clip.mkv", L"clip.mp4"}) {
         const auto whole = BuildCachedExportArguments({neural, source, extension}, staging, false);
         CHECK_EQ(whole.size(), IndexOf(whole, L"-ss"));
         CHECK_EQ(whole.size(), IndexOf(whole, L"-t"));
         CHECK_EQ(staging.wstring(), whole.back());
-
-        const auto ranged = BuildCachedExportArguments({neural, source, extension, 12.5, 3.25}, staging, false);
-        const size_t neuralInput = IndexOf(ranged, L"-i");
-        const size_t seek = IndexOf(ranged, L"-ss");
-        const size_t sourceInput = IndexOf(ranged, L"-i", neuralInput + 1);
-        const size_t outputStart = IndexOf(ranged, L"-ss", seek + 1);
-        const size_t duration = IndexOf(ranged, L"-t");
-        CHECK(neuralInput < ranged.size() && sourceInput < ranged.size());
-        CHECK(seek < ranged.size() && outputStart < ranged.size() && duration < ranged.size());
-        CHECK_EQ(neural.wstring(), ranged[neuralInput + 1]);
-        CHECK_EQ(source.wstring(), ranged[sourceInput + 1]);
-        CHECK(neuralInput < seek);
-        CHECK(seek < sourceInput);
-        CHECK(sourceInput < outputStart);
-        CHECK(outputStart < duration);
-        CHECK_EQ(std::wstring(L"12.5"), ranged[seek + 1]);
-        CHECK_EQ(std::wstring(L"0"), ranged[outputStart + 1]);
-        CHECK_EQ(std::wstring(L"3.25"), ranged[duration + 1]);
-        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-i", sourceInput + 1));
-        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-ss", outputStart + 1));
-        CHECK_EQ(ranged.size(), IndexOf(ranged, L"-t", duration + 1));
-        // Removing the trim yields exactly the untrimmed command.
-        auto stripped = ranged;
-        stripped.erase(stripped.begin() + static_cast<std::ptrdiff_t>(outputStart), stripped.begin() + static_cast<std::ptrdiff_t>(outputStart) + 4);
-        stripped.erase(stripped.begin() + static_cast<std::ptrdiff_t>(seek), stripped.begin() + static_cast<std::ptrdiff_t>(seek) + 2);
-        CHECK(stripped == whole);
-
-        // A start without a duration runs to the source end.
-        const auto openEnded = BuildCachedExportArguments({neural, source, extension, 2.0, 0.0}, staging, false);
-        CHECK(IndexOf(openEnded, L"-ss") < IndexOf(openEnded, L"-i", IndexOf(openEnded, L"-i") + 1));
-        CHECK_EQ(openEnded.size(), IndexOf(openEnded, L"-t"));
-        // A duration from the very start needs no seek.
-        const auto head = BuildCachedExportArguments({neural, source, extension, 0.0, 1.5}, staging, false);
-        CHECK_EQ(head.size(), IndexOf(head, L"-ss"));
-        CHECK(IndexOf(head, L"-i", IndexOf(head, L"-i") + 1) < IndexOf(head, L"-t"));
-        CHECK_EQ(std::wstring(L"1.5"), head[IndexOf(head, L"-t") + 1]);
+        const size_t neuralInput = IndexOf(whole, L"-i");
+        const size_t sourceInput = IndexOf(whole, L"-i", neuralInput + 1);
+        CHECK(sourceInput < whole.size());
+        CHECK_EQ(neural.wstring(), whole[neuralInput + 1]);
+        CHECK_EQ(source.wstring(), whole[sourceInput + 1]);
+        for (const auto [start, duration] : {std::pair{12.5, 3.25}, std::pair{2.0, 0.0}, std::pair{0.0, 1.5}})
+            CHECK(BuildCachedExportArguments({neural, source, extension, start, duration}, staging, false) == whole);
     }
     // GIF and still exports read the neural video only; nothing to trim.
     for (const auto* extension : {L"clip.gif", L"clip.png", L"clip.jpg"}) {
@@ -196,7 +168,14 @@ void RangeExportTests(const std::filesystem::path& helpers)
         L"-map", L"0:v", L"-map", L"1:a", L"-c:v", L"ffv1", L"-c:a", L"pcm_s16le", source.wstring()}, log));
     CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
         L"-i", L"color=blue:s=64x48:r=5:d=2", L"-c:v", L"ffv1", cached.wstring()}, log));
-    if (!std::filesystem::exists(source) || !std::filesystem::exists(cached)) return;
+    // The shape an NVENC render really has: B-frames and one keyframe. An
+    // all-keyframe ffv1 render hid that the old output -ss 0 trim dropped
+    // every frame of this one from a ranged MKV (W4-trim).
+    const auto bframes = fixture.path / L"cached-bframes.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc2=s=64x48:r=5:d=2", L"-c:v", L"libx264", L"-bf", L"3", L"-g", L"600",
+        L"-pix_fmt", L"yuv420p", bframes.wstring()}, log));
+    if (!std::filesystem::exists(source) || !std::filesystem::exists(cached) || !std::filesystem::exists(bframes)) return;
     CachedVideoExporter exporter(helpers);
     const auto peak = [](std::string_view pcm) {
         int maximum = 0;
@@ -204,9 +183,12 @@ void RangeExportTests(const std::filesystem::path& helpers)
             maximum = std::max(maximum, std::abs(static_cast<int16_t>(static_cast<uint8_t>(pcm[i]) | (static_cast<uint8_t>(pcm[i + 1]) << 8))));
         return maximum;
     };
-    for (const auto* name : {L"range.mkv", L"range.mp4"}) {
+    const std::vector<std::wstring> hashes{L"-select_streams", L"v:0", L"-show_packets",
+        L"-show_entries", L"packet=data_hash", L"-show_data_hash", L"sha256", L"-of", L"csv=p=0"};
+    for (const auto& [render, name] : {std::pair{cached, L"range.mkv"}, std::pair{cached, L"range.mp4"},
+                                       std::pair{bframes, L"range-bframes.mkv"}, std::pair{bframes, L"range-bframes.mp4"}}) {
         const auto output = fixture.path / name;
-        const auto result = exporter.Run({cached, source, output, 1.0, 2.0}, {});
+        const auto result = exporter.Run({render, source, output, 1.0, 2.0}, {});
         if (!result.ok) std::wcerr << result.detail << '\n';
         CHECK(result.ok);
         if (!result.ok) continue;
@@ -214,6 +196,12 @@ void RangeExportTests(const std::filesystem::path& helpers)
             L"-show_entries", L"stream=start_time,nb_read_frames", L"-of", L"default=noprint_wrappers=1"});
         CHECK(video.find("nb_read_frames=10") != std::string::npos);
         CHECK(video.find("start_time=0.000000") != std::string::npos);
+        // Matroska copies the render: every packet arrives, bit for bit.
+        if (output.extension() == L".mkv") {
+            const auto rendered = Probe(helpers, render, log, hashes);
+            CHECK_EQ(size_t{10}, Count(rendered, "SHA256:"));
+            CHECK_EQ(rendered, Probe(helpers, output, log, hashes));
+        }
         const auto pcm = fixture.path / L"exported.pcm";
         CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", output.wstring(), L"-map", L"0:a:0",
             L"-ac", L"1", L"-ar", L"44100", L"-f", L"s16le", pcm.wstring()}, log));
