@@ -4,6 +4,7 @@
 #include "KillOnCloseJob.h"
 #include "FrameRatePolicy.h"
 #include "VariableFrameRatePolicy.h"
+#include "HexText.h"
 #include "Log.h"
 #include <propvarutil.h>
 #include <algorithm>
@@ -1477,7 +1478,7 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
 
     HRESULT hr = MFCreateSourceReaderFromURL(path.c_str(), attrs.Get(), &m_reader);
     if (FAILED(hr)) {
-        LOG("MFCreateSourceReaderFromURL failed hr=0x" << std::hex << hr);
+        LOG("MFCreateSourceReaderFromURL failed hr=" << HexText(hr));
         return false;
     }
 
@@ -1498,7 +1499,7 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
         hr = m_reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, outType.Get());
     }
     if (FAILED(hr)) {
-        LOG("SetCurrentMediaType(RGB32/ARGB32) failed hr=0x" << std::hex << hr);
+        LOG("SetCurrentMediaType(RGB32/ARGB32) failed hr=" << HexText(hr));
         m_reader.Reset();
         return false;
     }
@@ -1552,7 +1553,7 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         HRESULT hr = m_reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0,
                                           &streamIndex, &flags, &timestamp, &sample);
         if (FAILED(hr)) {
-            LOG("ReadSample failed hr=0x" << std::hex << hr);
+            LOG("ReadSample failed hr=" << HexText(hr));
             return VideoReadResult::Error;
         }
         if (flags & MF_SOURCE_READERF_ERROR) {
@@ -1825,7 +1826,7 @@ bool VideoDecoder::SeekSeconds(double seconds) {
     HRESULT hr = m_reader->SetCurrentPosition(GUID_NULL, pos);
     PropVariantClear(&pos);
     if (FAILED(hr)) {
-        LOG("Media Foundation seek failed hr=0x" << std::hex << hr);
+        LOG("Media Foundation seek failed hr=" << HexText(hr));
         return false;
     }
     ++m_sourceGeneration;

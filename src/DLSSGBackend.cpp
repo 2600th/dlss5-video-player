@@ -1,5 +1,6 @@
 #include "DLSSGBackend.h"
 #include "PlatformPaths.h"
+#include "HexText.h"
 #include "Log.h"
 #include "NeuralPreflight.h"
 #include <windows.h>
@@ -116,7 +117,7 @@ bool DLSSGBackend::AcquireSession(ID3D12Device* device)
             return !NVSDK_NGX_FAILED(m_lastResult);
         });
     if (!sessionAcquired) {
-        LOG("NGX Init failed for the DLSS-G probe result=0x" << std::hex << m_lastResult);
+        LOG("NGX Init failed for the DLSS-G probe result=" << HexText(m_lastResult));
         m_sessionKey = nullptr;
         m_device = nullptr;
         return false;
@@ -125,7 +126,7 @@ bool DLSSGBackend::AcquireSession(ID3D12Device* device)
 
     m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&m_params);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_params) {
-        LOG("NGX GetCapabilityParameters failed for the DLSS-G probe result=0x" << std::hex << m_lastResult);
+        LOG("NGX GetCapabilityParameters failed for the DLSS-G probe result=" << HexText(m_lastResult));
         m_params = nullptr;
         return false;
     }
@@ -212,8 +213,8 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
     }
 
     LOG("NGX DLSS-G capability keys: FrameGeneration.Available=" << std::dec << advertised
-        << " (read=0x" << std::hex << advertisedRead << std::dec << ") FeatureInitResult=0x"
-        << std::hex << uint32_t(featureInitResult) << std::dec
+        << " (read=" << HexText(advertisedRead) << ") FeatureInitResult="
+        << HexText(uint32_t(featureInitResult))
         << " NeedsUpdatedDriver=" << needsUpdatedDriver
         << " MinDriverVersion=" << minDriverMajor << "." << minDriverMinor
         << " MultiFrameCountMax=" << capability.multiFrameCountMax
@@ -250,8 +251,8 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
                    L"the executable, the driver-store copy alone was measured not to serve this path");
         }
         if (!capability.hagsEnabled) Append(capability.detail, HardwareSchedulingSentence(hwSchMode));
-        LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) failed result=0x" << std::hex << m_lastResult
-            << std::dec << " at " << width << "x" << height << " format=" << int(backbufferFormat));
+        LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) failed result=" << HexText(m_lastResult)
+            << " at " << width << "x" << height << " format=" << int(backbufferFormat));
         return capability;
     }
 
@@ -266,7 +267,7 @@ DLSSGCapability DLSSGBackend::Probe(ID3D12Device* device, ID3D12GraphicsCommandL
         capability.createResult = releaseResult;
         Append(capability.detail, L"CreateFeature(FrameGeneration) succeeded but ReleaseFeature refused: " +
                                       HexResultTextWide(uint32_t(releaseResult)));
-        LOG("RAW NGX D3D12 ReleaseFeature(FrameGeneration) failed result=0x" << std::hex << releaseResult);
+        LOG("RAW NGX D3D12 ReleaseFeature(FrameGeneration) failed result=" << HexText(releaseResult));
         return capability;
     }
 
@@ -326,8 +327,8 @@ bool DLSSGBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* c
     m_lastResult = CreateFeature(cmd, width, height, backbufferFormat);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
         m_handle = nullptr;
-        LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) for evaluation failed result=0x" << std::hex
-            << m_lastResult << std::dec << " at " << width << "x" << height
+        LOG("RAW NGX D3D12 CreateFeature(FrameGeneration) for evaluation failed result=" << HexText(m_lastResult)
+            << " at " << width << "x" << height
             << " format=" << int(backbufferFormat)
             << "; DLSSGBackend::Probe reports why a create is refused");
         return false;
@@ -503,8 +504,8 @@ bool DLSSGBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
     // point the SR path uses.
     m_lastResult = NGX_D3D12_EVALUATE_DLSSG(cmd, m_handle, m_params, &evalParams, &constants);
     if (NVSDK_NGX_FAILED(m_lastResult)) {
-        LOG("RAW NGX D3D12 EvaluateFeature(FrameGeneration) failed result=0x" << std::hex << m_lastResult
-            << std::dec << " frame " << multiFrameIndex << "/" << multiFrameCount
+        LOG("RAW NGX D3D12 EvaluateFeature(FrameGeneration) failed result=" << HexText(m_lastResult)
+            << " frame " << multiFrameIndex << "/" << multiFrameCount
             << " reset=" << (reset ? 1 : 0));
         return false;
     }

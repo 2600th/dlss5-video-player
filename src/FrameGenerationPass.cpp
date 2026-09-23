@@ -3,6 +3,7 @@
 #include "SceneCut.h"
 
 #include "DLSSGBackend.h"
+#include "HexText.h"
 #include "Log.h"
 #include "MediaPipeline.h"
 #include "NeuralPreflight.h"
@@ -199,8 +200,8 @@ private:
                     << " s to retire; continuing.");
                 return true;
             case StalledSubmission::DeviceRemoved:
-                LOG("Frame generation: the device was removed under a submission (reason=0x" << std::hex
-                    << static_cast<uint32_t>(device->GetDeviceRemovedReason()) << std::dec
+                LOG("Frame generation: the device was removed under a submission (reason="
+                    << HexText(static_cast<uint32_t>(device->GetDeviceRemovedReason()))
                     << "); its resources are released.");
                 return false;
             case StalledSubmission::Stuck:

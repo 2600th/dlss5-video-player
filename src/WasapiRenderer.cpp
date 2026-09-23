@@ -1,6 +1,7 @@
 #include "WasapiRenderer.h"
 
 #include "AudioFadePolicy.h"
+#include "HexText.h"
 #include "Log.h"
 
 #include <audiopolicy.h>
@@ -158,8 +159,8 @@ void WasapiRenderer::OnEndpointStateChanged(const wchar_t* deviceId, DWORD newSt
     { std::lock_guard<std::mutex> lock(mutex_); ours = deviceId_; }
     if (!audio_endpoint::StateChangeAffectsUs(deviceId ? deviceId : L"", newState, ours)) return;
     if (!deviceLost_.exchange(true))
-        LOG("Audio: the endpoint being played to is no longer active (state=0x"
-            << std::hex << newState << std::dec << "); the owner will reopen.");
+        LOG("Audio: the endpoint being played to is no longer active (state="
+            << HexText(newState) << "); the owner will reopen.");
 }
 
 void WasapiRenderer::OnEndpointFormatChanged(const wchar_t* deviceId, bool isDeviceFormatKey)
@@ -195,21 +196,21 @@ bool WasapiRenderer::Open()
 
     HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(&enumerator_));
-    if (FAILED(result)) { LOG("Audio: MMDeviceEnumerator failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: MMDeviceEnumerator failed hr=" << HexText(result)); return false; }
 
     result = enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
     if (FAILED(result)) {
         noEndpoint_ = result == E_NOTFOUND;
-        LOG("Audio: no default render endpoint hr=0x" << std::hex << result);
+        LOG("Audio: no default render endpoint hr=" << HexText(result));
         return false;
     }
 
     result = device_->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &client_);
-    if (FAILED(result)) { LOG("Audio: IAudioClient activation failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: IAudioClient activation failed hr=" << HexText(result)); return false; }
 
     WAVEFORMATEX* mix = nullptr;
     result = client_->GetMixFormat(&mix);
-    if (FAILED(result) || !mix) { LOG("Audio: GetMixFormat failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result) || !mix) { LOG("Audio: GetMixFormat failed hr=" << HexText(result)); return false; }
     format_ = DescribeFormat(*mix);
 
     // The engine only ever mixes float in shared mode, so a non-float mix
@@ -225,15 +226,15 @@ bool WasapiRenderer::Open()
     result = client_->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                  kEnginePeriod, 0, mix, nullptr);
     CoTaskMemFree(mix);
-    if (FAILED(result)) { LOG("Audio: IAudioClient::Initialize failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: IAudioClient::Initialize failed hr=" << HexText(result)); return false; }
 
     ready_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!ready_) { LOG("Audio: render event creation failed winerr=" << GetLastError()); return false; }
     result = client_->SetEventHandle(ready_);
-    if (FAILED(result)) { LOG("Audio: SetEventHandle failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: SetEventHandle failed hr=" << HexText(result)); return false; }
 
     result = client_->GetBufferSize(&bufferFrames_);
-    if (FAILED(result)) { LOG("Audio: GetBufferSize failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: GetBufferSize failed hr=" << HexText(result)); return false; }
 
     // Identity first: every notification decision compares against it, and a
     // notification can arrive the instant the callback is registered.
@@ -253,13 +254,13 @@ bool WasapiRenderer::Open()
     refusingWrites_ = false;
 
     result = client_->GetService(IID_PPV_ARGS(&render_));
-    if (FAILED(result)) { LOG("Audio: IAudioRenderClient failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: IAudioRenderClient failed hr=" << HexText(result)); return false; }
 
     result = client_->GetService(IID_PPV_ARGS(&clock_));
-    if (FAILED(result)) { LOG("Audio: IAudioClock failed hr=0x" << std::hex << result); return false; }
+    if (FAILED(result)) { LOG("Audio: IAudioClock failed hr=" << HexText(result)); return false; }
     result = clock_->GetFrequency(&clockFrequency_);
     if (FAILED(result) || clockFrequency_ == 0) {
-        LOG("Audio: IAudioClock::GetFrequency failed hr=0x" << std::hex << result);
+        LOG("Audio: IAudioClock::GetFrequency failed hr=" << HexText(result));
         return false;
     }
 
@@ -629,14 +630,14 @@ bool RenderEndpointArrival::Watch(bool checkNow)
     HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(&enumerator_));
     if (FAILED(result)) {
-        LOG("Audio: cannot watch for a new endpoint (MMDeviceEnumerator hr=0x" << std::hex << result
-            << std::dec << "); sound will not come back on its own.");
+        LOG("Audio: cannot watch for a new endpoint (MMDeviceEnumerator hr=" << HexText(result)
+            << "); sound will not come back on its own.");
         return false;
     }
     client_ = new Client();
     result = enumerator_->RegisterEndpointNotificationCallback(client_);
     if (FAILED(result)) {
-        LOG("Audio: cannot watch for a new endpoint (register hr=0x" << std::hex << result << std::dec
+        LOG("Audio: cannot watch for a new endpoint (register hr=" << HexText(result)
             << "); sound will not come back on its own.");
         return false;
     }

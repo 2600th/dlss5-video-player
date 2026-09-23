@@ -1,5 +1,6 @@
 #include "DLSSBackend.h"
 #include "PlatformPaths.h"
+#include "HexText.h"
 #include "Log.h"
 #include "UpscalingPolicy.h"
 #include <windows.h>
@@ -102,7 +103,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
             return !NVSDK_NGX_FAILED(m_lastResult);
         });
     if (!sessionAcquired) {
-        LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
+        LOG("NGX Init failed result=" << HexText(m_lastResult));
         m_sessionKey = nullptr;
         return false;
     }
@@ -111,7 +112,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
 
     m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&m_params);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_params) {
-        LOG("NGX GetCapabilityParameters failed result=0x" << std::hex << m_lastResult);
+        LOG("NGX GetCapabilityParameters failed result=" << HexText(m_lastResult));
         return false;
     }
 
@@ -153,7 +154,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
                                    NVSDK_NGX_PerfQuality_Value_UltraPerformance}) {
                 m_lastResult=NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params,outputW,outputH,candidate,
                     &m_optimalW,&m_optimalH,&m_maxW,&m_maxH,&m_minW,&m_minH,&sharpness);
-                LOG("SR range query quality="<<candidate<<" result="<<std::hex<<m_lastResult<<std::dec
+                LOG("SR range query quality="<<candidate<<" result="<<HexText(m_lastResult)
                     <<" optimal="<<m_optimalW<<"x"<<m_optimalH<<" min="<<m_minW<<"x"<<m_minH<<" max="<<m_maxW<<"x"<<m_maxH);
                 if (NVSDK_NGX_FAILED(m_lastResult)) continue;
                 if (SourceFitsDLSSRange(sourceW,sourceH,outputW,outputH,m_minW,m_minH,m_maxW,m_maxH)) {
@@ -182,7 +183,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
     m_lastResult = NGX_DLSS_GET_OPTIMAL_SETTINGS(m_params, outputW, outputH, quality,
         &m_optimalW, &m_optimalH, &m_maxW, &m_maxH, &m_minW, &m_minH, &sharpness);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_optimalW || !m_optimalH) {
-        LOG("NGX optimal settings failed result=0x" << std::hex << m_lastResult
+        LOG("NGX optimal settings failed result=" << HexText(m_lastResult)
             << "; using 2/3 output dimensions fallback.");
         m_optimalW = std::max(1u, outputW * 2u / 3u);
         m_optimalH = std::max(1u, outputH * 2u / 3u);
@@ -266,7 +267,7 @@ bool DLSSBackend::CreateFeature(ID3D12GraphicsCommandList* cmd) {
     m_lastResult = NVSDK_NGX_D3D12_CreateFeature(
         cmd, NVSDK_NGX_Feature_SuperSampling, m_params, &m_handle);
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_handle) {
-        LOG("RAW NGX D3D12 CreateFeature failed result=0x" << std::hex << m_lastResult);
+        LOG("RAW NGX D3D12 CreateFeature failed result=" << HexText(m_lastResult));
         m_handle = nullptr;
         m_featureCreateGate.RecordFailure();
         return false;
@@ -313,8 +314,8 @@ bool DLSSBackend::ReleaseFeatureFreeingMemory() {
     if (m_params) {
         NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 0);
     }
-    LOG("NGX feature released for idle with FreeMemOnReleaseFeature result=0x"
-        << std::hex << m_lastResult << std::dec);
+    LOG("NGX feature released for idle with FreeMemOnReleaseFeature result="
+        << HexText(m_lastResult));
     return true;
 }
 
@@ -422,13 +423,13 @@ bool DLSSBackend::Evaluate(ID3D12GraphicsCommandList* cmd,
     const char* evalPath = "EvaluateFeature_C";
     if (NVSDK_NGX_FAILED(m_lastResult)) {
         const NVSDK_NGX_Result cResult = m_lastResult;
-        LOG("RAW NGX D3D12 EvaluateFeature_C failed result=0x" << std::hex << cResult
+        LOG("RAW NGX D3D12 EvaluateFeature_C failed result=" << HexText(cResult)
             << "; trying legacy EvaluateFeature fallback.");
         m_lastResult = NVSDK_NGX_D3D12_EvaluateFeature(cmd, m_handle, m_params, nullptr);
         evalPath = "EvaluateFeature";
     }
     if (NVSDK_NGX_FAILED(m_lastResult)) {
-        LOG("RAW NGX D3D12 " << evalPath << " failed result=0x" << std::hex << m_lastResult);
+        LOG("RAW NGX D3D12 " << evalPath << " failed result=" << HexText(m_lastResult));
         return false;
     }
 

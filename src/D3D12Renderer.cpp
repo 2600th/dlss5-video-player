@@ -1,6 +1,7 @@
 #include "D3D12Renderer.h"
 #include "D3D12FenceWait.h"
 #include "TemporalGuides.h"
+#include "HexText.h"
 #include "Log.h"
 #include "NvofResolveShader.h"
 #include "RuntimePolicy.h"
@@ -82,17 +83,17 @@ void LogDeviceAdapter(const DXGI_ADAPTER_DESC1& device)
         case AdapterMatch::Different: verdict="is NOT"; break;
         case AdapterMatch::Unknown: break;
     }
-    LOG("D3D12 device adapter \""<<WideToUtf8(device.Description)<<"\" luid=0x"<<std::hex<<deviceLuid<<std::dec
-        <<" vendor=0x"<<std::hex<<device.VendorId<<std::dec<<" vram="<<(device.DedicatedVideoMemory>>20)<<"MiB "
-        <<verdict<<" the high-performance adapter \""<<WideToUtf8(policy.description)<<"\" luid=0x"
-        <<std::hex<<policy.adapterLuid<<std::dec
+    LOG("D3D12 device adapter \""<<WideToUtf8(device.Description)<<"\" luid="<<HexText(deviceLuid)
+        <<" vendor="<<HexText(device.VendorId)<<" vram="<<(device.DedicatedVideoMemory>>20)<<"MiB "
+        <<verdict<<" the high-performance adapter \""<<WideToUtf8(policy.description)<<"\" luid="
+        <<HexText(policy.adapterLuid)
         <<" that the cache identity, the receipt GPU label and the pace prior describe");
 }
 
 } // namespace
 
 static bool HR(HRESULT hr, const char* what) {
-    if (FAILED(hr)) { LOG(what << " failed hr=0x" << std::hex << hr); return false; }
+    if (FAILED(hr)) { LOG(what << " failed hr=" << HexText(hr)); return false; }
     return true;
 }
 static D3D12_HEAP_PROPERTIES HeapProps(D3D12_HEAP_TYPE type) {
@@ -1229,7 +1230,7 @@ bool D3D12Renderer::ResizeSwapchain(uint32_t width,uint32_t height){
         if(FAILED(reason))return DeviceHR(hr,"ResizeBuffers");
         // Not a lost device: the swapchain is as it was, so take its buffers back and
         // go on presenting at the old size.
-        LOG("ResizeBuffers to "<<width<<"x"<<height<<" failed hr=0x"<<std::hex<<hr<<std::dec<<"; keeping "
+        LOG("ResizeBuffers to "<<width<<"x"<<height<<" failed hr="<<HexText(hr)<<"; keeping "
             <<m_backbufferW<<"x"<<m_backbufferH);
         width=desc.Width;height=desc.Height;
     }
@@ -1653,7 +1654,7 @@ bool D3D12Renderer::ReleaseDLSSFeatureForIdle(){
 void D3D12Renderer::Barrier(ID3D12GraphicsCommandList*cmd,ID3D12Resource*res,D3D12_RESOURCE_STATES a,D3D12_RESOURCE_STATES b){if(a==b)return;auto x=Transition(res,a,b);cmd->ResourceBarrier(1,&x);}
 bool D3D12Renderer::DeviceHR(HRESULT hr,const char*what){
     if(SUCCEEDED(hr))return true;
-    LOG(what<<" failed hr=0x"<<std::hex<<hr);
+    LOG(what<<" failed hr="<<HexText(hr));
     const HRESULT reason=DeviceRemovedReason();
     LatchGpuUnusable(d3d12_renderer_detail::ClassifyDeviceCallFailure(
         hr,d3d12_renderer_detail::FenceWaitResult::Completed,[=]{return reason;}),reason);
@@ -1668,7 +1669,7 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     const bool first=!m_gpuUnusable;
     m_gpuUnusable=true;m_lastFenceWaitResult=result;
     if(!first||result!=d3d12_renderer_detail::FenceWaitResult::DeviceRemoved)return;
-    LOG("D3D12 device removed: reason=0x"<<std::hex<<reason<<std::dec<<"; the renderer takes no further work.");
+    LOG("D3D12 device removed: reason="<<HexText(reason)<<"; the renderer takes no further work.");
     // Whatever DRED recorded - asked for by a test hook above, or turned on outside the
     // process by the system's own device-removal policy - is worth the one query here.
     // DXGI_ERROR_UNSUPPORTED means the settings were never on in this process. An
@@ -1681,7 +1682,7 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     if(!m_device||FAILED(m_device.As(&dred)))return;
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
     const HRESULT hr=dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
-    if(FAILED(hr))LOG("DRED breadcrumbs unavailable: hr=0x"<<std::hex<<hr<<std::dec<<"; the settings were not turned on in this process.");
+    if(FAILED(hr))LOG("DRED breadcrumbs unavailable: hr="<<HexText(hr)<<"; the settings were not turned on in this process.");
     else if(!breadcrumbs.pHeadAutoBreadcrumbNode)LOG("DRED enabled; no breadcrumbs outstanding - the GPU had no command list in flight when the device went (an explicit removal or an idle device, not a fault).");
     for(const D3D12_AUTO_BREADCRUMB_NODE*node=breadcrumbs.pHeadAutoBreadcrumbNode;node;node=node->pNext){
         const UINT completed=node->pLastBreadcrumbValue?*node->pLastBreadcrumbValue:0;
@@ -1693,7 +1694,7 @@ void D3D12Renderer::LatchGpuUnusable(d3d12_renderer_detail::FenceWaitResult resu
     }
     D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
     if(SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))&&fault.PageFaultVA){
-        LOG("DRED page fault: va=0x"<<std::hex<<fault.PageFaultVA<<std::dec);
+        LOG("DRED page fault: va="<<HexText(fault.PageFaultVA));
         for(const D3D12_DRED_ALLOCATION_NODE*node=fault.pHeadExistingAllocationNode;node;node=node->pNext)
             LOG("DRED page fault: live allocation \""<<(node->ObjectNameA?node->ObjectNameA:"")<<"\" type "<<int(node->AllocationType));
         for(const D3D12_DRED_ALLOCATION_NODE*node=fault.pHeadRecentFreedAllocationNode;node;node=node->pNext)

@@ -36,6 +36,7 @@
 #include "AppMenu.h"
 #include "UiLayout.h"
 #include "UiResources.h"
+#include "HexText.h"
 #include "Log.h"
 #include "HardErrorSuppression.h"
 #include "ReShadeConfig.h"
@@ -2369,7 +2370,7 @@ private:
             const HRESULT created=CoCreateInstance(CLSID_TaskbarList,nullptr,CLSCTX_INPROC_SERVER,
                                                    IID_PPV_ARGS(&m_taskbar));
             const HRESULT initialized=(SUCCEEDED(created)&&m_taskbar)?m_taskbar->HrInit():created;
-            LOG("Taskbar progress: CoCreateInstance=0x"<<std::hex<<created<<" HrInit=0x"<<initialized<<std::dec);
+            LOG("Taskbar progress: CoCreateInstance="<<HexText(created)<<" HrInit="<<HexText(initialized));
             if(FAILED(created)||!m_taskbar||FAILED(initialized)){m_taskbar.Reset();m_taskbarUnavailable=true;return;}
         }
         if(!m_taskbar)return;
@@ -2379,8 +2380,8 @@ private:
             static_cast<ULONGLONG>(std::clamp(*fraction,0.0,1.0)*1000.0),1000ull);
         if(!m_taskbarReported){
             m_taskbarReported=true;
-            LOG("Taskbar progress first update: SetProgressState=0x"<<std::hex<<state<<" SetProgressValue=0x"
-                <<value<<std::dec<<" fraction="<<*fraction);
+            LOG("Taskbar progress first update: SetProgressState="<<HexText(state)<<" SetProgressValue="
+                <<HexText(value)<<" fraction="<<*fraction);
         }
     }
 

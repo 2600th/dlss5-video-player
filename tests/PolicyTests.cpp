@@ -47,6 +47,7 @@
 #include "CachedRenderVerdict.h"
 #include "Nv12Convert.h"
 #include "NeuralPresets.h"
+#include "HexText.h"
 #ifdef small
 #undef small
 #endif
@@ -10041,6 +10042,24 @@ void audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test()
     CHECK(Dead(recovered, 2.2, false, true));
 }
 
+// P1.16: every hex value in a log line has the digits of its type, so an NGX
+// result or HRESULT reads the same there as in a receipt. std::hex wrote
+// "0x1" for NVSDK_NGX_Result_Success, which a search for the receipt's
+// "0x00000001" does not find.
+void hex_text_is_zero_padded_to_the_width_of_its_type_test()
+{
+    enum class Result : uint32_t { Success = 0x1, Fail = 0xBAD00000 };
+    CHECK_EQ(std::string("0x00000001"), HexText(Result::Success));
+    CHECK_EQ(std::string("0xbad00000"), HexText(Result::Fail));
+    CHECK_EQ(std::string("0x80070005"), HexText(HRESULT(0x80070005L)));
+    CHECK_EQ(std::string("0x00000001"), HexText(S_FALSE));
+    CHECK_EQ(std::string("0x000010de"), HexText(UINT{0x10de}));
+    CHECK_EQ(std::string("0x000000000001a2b3"), HexText(uint64_t{0x1a2b3}));
+    CHECK_EQ(std::string("0xff"), HexText(int8_t{-1}));
+    CHECK_EQ(HexResultText(0xbad00002u), HexText(uint32_t{0xbad00002u}));
+    CHECK(HexResultTextWide(0xbad00002u) == L"0xbad00002");
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -10329,6 +10348,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_endpoint_notifications_fire_only_for_the_stream_we_are_on_test),
     TEST_CASE(audio_endpoint_callbacks_never_reach_a_detached_renderer_test),
     TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
+    TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
 };
 
 

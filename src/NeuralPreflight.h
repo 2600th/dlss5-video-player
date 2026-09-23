@@ -13,6 +13,7 @@
 // back to the driver version, so that fallback is on the receipt rather than
 // silent.
 
+#include "HexText.h"
 #include "JsonEscape.h"
 #include "RuntimePolicy.h"
 
@@ -117,16 +118,6 @@ std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::
 // JsonEscape (JsonEscape.h) over the UTF-8 of `text`.
 std::string JsonEscapeWide(std::wstring_view text);
 std::string BuildPreflightFailureJson(std::wstring_view detail);
-
-// Lowercase 0x-prefixed eight-digit form of an NGX result code. Shared with the
-// probe, which reports the same codes in its receipt JSON.
-std::string HexResultText(uint32_t value);
-
-// The same digits as a wide string, for the diagnostics that are shown to a
-// user or carried in a std::wstring reason (the DLSS-G probe's capability
-// detail among them). Widening here keeps HexResultText the only place the
-// digits are produced.
-std::wstring HexResultTextWide(uint32_t value);
 
 // The thirteen runtime files whose hashes form the render identity: the twelve
 // vendor modules the embedded lock pins byte for byte, plus NeuralWorker.exe,

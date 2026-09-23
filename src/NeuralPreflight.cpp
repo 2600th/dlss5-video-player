@@ -654,18 +654,3 @@ std::string BuildPreflightFailureJson(std::wstring_view detail)
            escaped + "\"},\"error\":\"" + escaped + "\"}";
 }
 
-// NGX results are always written as eight lower-case hex digits ("0xbad00002")
-// so a receipt and a log line can be compared literally.
-std::string HexResultText(uint32_t value)
-{
-    std::string text = "0x";
-    for (int shift = 28; shift >= 0; shift -= 4) text.push_back("0123456789abcdef"[(value >> shift) & 0xFu]);
-    return text;
-}
-
-std::wstring HexResultTextWide(uint32_t value)
-{
-    const std::string text = HexResultText(value);
-    return std::wstring(text.begin(), text.end());
-}
-
