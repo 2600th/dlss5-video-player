@@ -976,6 +976,8 @@ bool D3D12Renderer::CreateVideoResources(){
     m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofFlowSRV));
     m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofBackFlowSRV));
     fsrv.Format=DXGI_FORMAT_R8_UINT;m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofCostSRV));
+    fsrv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+    for(uint32_t i=0;i<4;++i)m_device->CreateShaderResourceView(nullptr,&fsrv,SRVCPU(NvofInputSRV+i));
     const HardwareFlowPlan flowPlan=PlanHardwareFlow(m_sourceW,m_sourceH,m_renderW,m_renderH);
     m_nvofMotionScaleX=flowPlan.motionScaleX;m_nvofMotionScaleY=flowPlan.motionScaleY;
     if(flowPlan.attempt&&m_nvof.Initialize(m_device.Get(),flowPlan.width,flowPlan.height)){
@@ -991,6 +993,8 @@ bool D3D12Renderer::CreateVideoResources(){
             fsrv.Format=DXGI_FORMAT_R16G16_SINT;
             m_device->CreateShaderResourceView(m_nvof.BackwardFlow(),&fsrv,SRVCPU(NvofBackFlowSRV));
         }
+        fsrv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        for(uint32_t i=0;i<4;++i)m_device->CreateShaderResourceView(m_nvof.Input(i),&fsrv,SRVCPU(NvofInputSRV+i));
         m_nvofActive=true;
     }
     // One line per session, because a log that does not name the estimator cannot tell
@@ -1327,9 +1331,13 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         // is what leaves that gate out of the pass entirely on a device that gave no
         // backward field.
         const float cells=m_nvof.BackwardFlow()?1.0f/float(m_nvof.Grid()):0.0f;
-        const float resolve[7]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,
-                                m_nvofMotionScaleX,m_nvofMotionScaleY,cells};
-        cmd->SetGraphicsRoot32BitConstants(RootConstants,7,resolve,0);
+        // The eighth is the zero-motion test (see the shader), on for a Super Resolution
+        // session only: it is measured there, and every neural render at the source's
+        // size - each a cached render on disk - keeps the field it was made with.
+        const float resolve[8]={1.0f/32.0f,1.0f/32.0f,0.0f,0.0f,
+                                m_nvofMotionScaleX,m_nvofMotionScaleY,cells,m_preserveSource?1.0f:0.0f};
+        cmd->SetGraphicsRoot32BitConstants(RootConstants,8,resolve,0);
+        cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(NvofInputSRV+m_nvof.CurrentInput()));
         cmd->DrawInstanced(3,1,0,0);
         m_nvof.EndRead(cmd);
     }else{

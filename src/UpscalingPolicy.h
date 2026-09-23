@@ -150,9 +150,15 @@ inline ProcessingInput ProcessingSize(uint32_t width, uint32_t height, uint32_t 
 // The cache-key term a rung adds to the pipeline identity. Empty at 100, so a
 // default render keeps the exact key it was published under; a reduced rung
 // is a different picture and must never be served for another.
+//
+// v2: a reduced rung's carrier is Super Resolution, and Super Resolution's
+// motion now goes through the flow resolve's zero-motion test (w4-sr), which
+// zeroes the field the flow engine reports for content that did not move. The
+// model runs on that carrier's evaluation, so a v1 render is a different
+// picture from what this build makes.
 inline std::string ProcessingScaleIdentityTerm(uint32_t percent) {
     if (percent == kDefaultProcessingScale) return {};
-    return "|processing-scale-" + std::to_string(percent) + "-v1";
+    return "|processing-scale-" + std::to_string(percent) + "-v2";
 }
 
 // The add-on's NRPreUpscale a render at `percent` needs, given the value its

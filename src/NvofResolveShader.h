@@ -29,7 +29,13 @@ Texture2D<int2> Flow:register(t0); Texture2D<uint> Cost:register(t1); Texture2D<
 // before the gate existed. MotionScale is the last step and the only one that leaves
 // that unit: it converts a vector measured on the decoded frame into the DLSS input
 // pixels NGX reads, and is 1,1 whenever the two are the same size.
-cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; float2 MotionScale; float CellsPerPixel; };
+// ZeroMotionTest, when above zero, keeps a vector only where it explains the pair
+// better than no motion at all - see the test at the end of PSNvofMotion.
+cbuffer Params:register(b0){ float2 FlowScale; float2 Gate; float2 MotionScale; float CellsPerPixel; float ZeroMotionTest; };
+// The pair the engine compared: this frame and the one before it, as its own input
+// copies. Bound only for the zero-motion test; nothing reads them while it is off.
+Texture2D<float4> Current:register(t3); Texture2D<float4> Previous:register(t4); SamplerState S:register(s0);
+float Luma(float3 c){return dot(c,float3(0.2126,0.7152,0.0722));}
 static const float GateAlpha=)" NVOF_RESOLVE_TOKEN(FLOW_GATE_ALPHA) R"(;
 static const float GateBeta=)" NVOF_RESOLVE_TOKEN(FLOW_GATE_BETA_PX2) R"(;
 struct V{float4 p:SV_Position;float2 uv:TEXCOORD0;};
@@ -68,6 +74,29 @@ float2 PSNvofMotion(V i):SV_Target{
         float2 back=float2(BackFlow.Load(int3(dest,0)))*FlowScale;
         float2 residual=flow+back;
         if(dot(residual,residual)>GateAlpha*(dot(flow,flow)+dot(back,back))+GateBeta)motion=float2(0,0);
+    }
+    // The zero-motion test. The engine does not answer zero for a pair that did not
+    // move: fed the same frame twice it returned a fixed field of up to 0.35 px, 0.057 px
+    // on average, on 47% of the pixels of a 960x540 still (w4-sr, 2026-09-24). Handed
+    // to Super Resolution as motion, that re-sampled the whole history by a fraction of
+    // a pixel every frame, and a held frame lost 17 VMAF in 60 frames. So a vector is
+    // kept only where it matches this frame to the previous one better than standing
+    // still does, over a 3x3 neighbourhood of engine pixels, which is the same null
+    // hypothesis the CPU estimator puts every cell to (TemporalGuides.cpp). Identical
+    // frames therefore carry exactly zero, and real motion - which the moved samples
+    // match and the unmoved ones do not - is untouched. A tie goes to zero: where both
+    // explain the pair equally, as on flat colour, no motion is the answer that cannot
+    // drift.
+    if(ZeroMotionTest>0){
+        float2 size; Current.GetDimensions(size.x,size.y);
+        float still=0,moved=0;
+        [unroll]for(int y=-1;y<=1;++y)[unroll]for(int x=-1;x<=1;++x){
+            float2 at=(i.uv*size+float2(x,y))/size;
+            float here=Luma(Current.SampleLevel(S,at,0).rgb);
+            still+=abs(here-Luma(Previous.SampleLevel(S,at,0).rgb));
+            moved+=abs(here-Luma(Previous.SampleLevel(S,at+flow/size,0).rgb));
+        }
+        if(still<=moved)motion=float2(0,0);
     }
     return motion*MotionScale;
 }

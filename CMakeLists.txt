@@ -470,6 +470,11 @@ if(BUILD_TESTING)
     # suite is `ctest -LE gpu` and the opt-in run on such a machine is `ctest -L gpu`.
     add_test(NAME UpscalingGpuSmoke COMMAND UpscalingGpuSmoke
         "${CMAKE_SOURCE_DIR}/docs/media/neural-comparison-demo.mp4" 1440)
+    # The Super Resolution quality gate (W4-SR): a generated clip upscaled and scored
+    # with VMAF, failing when a held frame decays - which the flow engine's field on
+    # identical frames used to do. See RunSrQualityProbe.
+    add_test(NAME UpscalingSrQualitySmoke COMMAND UpscalingGpuSmoke
+        "${FFMPEG_STAGED_DIR}" sr-quality "${CMAKE_BINARY_DIR}/sr-quality")
     add_test(NAME MediaGpuSmoke COMMAND MediaGpuSmoke
         "${FFMPEG_STAGED_DIR}" "$<TARGET_FILE:NeuralWorker>" "${CMAKE_BINARY_DIR}/gpu-smoke")
     add_test(NAME NeuralRangeRenderSmoke COMMAND NeuralRangeRenderSmoke
@@ -625,7 +630,7 @@ if(BUILD_TESTING)
     # "skipped" would hide the regressions a GPU runner exists to catch. Each
     # smoke opens with gpu_test_gate::SkipWithoutGpu(), so `ctest -L gpu` on a
     # machine with no adapter skips rather than reporting five hard failures.
-    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
+    set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke MediaGpuSmoke DlssgProbeSmoke DlssgEvaluateSmoke
         FrameGenerationSmoke FrameGenerationSmokeTextured FrameGenerationSmokeSceneCut
         FrameGenerationSmokeStreamSource NeuralRangeRenderSmoke
         PROPERTIES LABELS gpu SKIP_RETURN_CODE 125)
@@ -733,7 +738,7 @@ if(BUILD_TESTING)
     set_tests_properties(ExportMatrixSmoke PROPERTIES LABELS gpu SKIP_RETURN_CODE 125 TIMEOUT 900)
     # FrameGenerationSmoke decodes, generates and encodes a whole clip, so it
     # belongs with the two smokes that render rather than with the 300 s probes.
-    set_tests_properties(UpscalingGpuSmoke MediaGpuSmoke FrameGenerationSmoke PROPERTIES TIMEOUT 900)
+    set_tests_properties(UpscalingGpuSmoke UpscalingSrQualitySmoke MediaGpuSmoke FrameGenerationSmoke PROPERTIES TIMEOUT 900)
 
     # A test seam (PLAYER_APP_TESTING, YOUTUBE_RESOLVER_TESTING, ...) opens a
     # private route that only a test may take; none may be compiled into a

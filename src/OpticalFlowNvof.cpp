@@ -553,11 +553,12 @@ bool OpticalFlowNvof::Submit(ID3D12CommandQueue* queue)
 void OpticalFlowNvof::BeginRead(ID3D12GraphicsCommandList* cmd)
 {
     if (!m_ready || !cmd) return;
-    D3D12_RESOURCE_BARRIER barriers[3]{};
+    D3D12_RESOURCE_BARRIER barriers[5]{};
     uint32_t count = 0;
     // The backward cost is deliberately not in this list: the engine writes it, and
     // nothing reads it until the cost gate has thresholds that were measured.
-    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get()}) {
+    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get(),
+                                     m_input[0].Get(), m_input[1].Get()}) {
         if (!resource) continue;
         barriers[count].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[count].Transition.pResource = resource;
@@ -572,9 +573,10 @@ void OpticalFlowNvof::BeginRead(ID3D12GraphicsCommandList* cmd)
 void OpticalFlowNvof::EndRead(ID3D12GraphicsCommandList* cmd)
 {
     if (!m_ready || !cmd) return;
-    D3D12_RESOURCE_BARRIER barriers[3]{};
+    D3D12_RESOURCE_BARRIER barriers[5]{};
     uint32_t count = 0;
-    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get()}) {
+    for (ID3D12Resource* resource : {m_flow.Get(), m_cost.Get(), m_backFlow.Get(),
+                                     m_input[0].Get(), m_input[1].Get()}) {
         if (!resource) continue;
         barriers[count].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barriers[count].Transition.pResource = resource;

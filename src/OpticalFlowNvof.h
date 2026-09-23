@@ -52,6 +52,12 @@ public:
     // Execute also writes the reverse field, on the reference frame's grid. That is what
     // the resolve pass's round-trip gate reads; without it the gate stays off.
     ID3D12Resource* BackwardFlow() const { return m_backFlow.Get(); }
+    // The two frames the engine compared, as the copies it read them from: slot
+    // CurrentInput() holds the frame the field was estimated for and the other one
+    // the frame before it. Read by the resolve pass's zero-motion test, which has to
+    // judge a vector on exactly the pair that produced it.
+    ID3D12Resource* Input(uint32_t slot) const { return m_input[slot & 1u].Get(); }
+    uint32_t CurrentInput() const { return m_current; }
 
     // The engine's own estimate of the dominant motion of a pair, in input pixels.
     // Invalid while global flow is off, before the first pair, and after a Reset() until
@@ -82,7 +88,8 @@ public:
     bool Submit(ID3D12CommandQueue* queue);
 
     // The flow surface is handed to the engine in COMMON and read by the resolve pass as
-    // a shader resource; these bracket that read.
+    // a shader resource; these bracket that read. The two input copies are bracketed
+    // with it, because the zero-motion test reads them in the same pass.
     void BeginRead(ID3D12GraphicsCommandList* cmd);
     void EndRead(ID3D12GraphicsCommandList* cmd);
 

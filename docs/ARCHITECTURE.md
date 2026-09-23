@@ -226,6 +226,16 @@ a frame or two behind the field and never stalling; nothing consumes it yet. The
 cost surface is still ungated: its scale is unpublished, and the round-trip mask
 is what it will be calibrated against.
 
+In a Super Resolution session the pass also applies a zero-motion test: a vector
+is kept only where it matches the engine's current input to its previous one
+(3x3 luma SAD, both copies bound at t3/t4) better than no motion does. The engine
+does not answer zero for identical frames. On a held 960x540 frame it returned a
+fixed field on 47 % of pixels (up to 0.35 px), and SR, which re-samples its history
+by that field every frame, lost 17 VMAF in 60 frames
+(`docs/measurements/sr-quality-20260924/REPORT.md`). Neural renders at source size
+leave the test off, so their cached field is unchanged. The reduced
+processing-scale rungs run on an SR carrier, so their cache term went to `-v2`.
+
 `TemporalGuideGenerator` still runs. It owns the depth proxy and the scene-cut
 decision, and it owns motion too on any machine without the engine - block
 matching on a compact grid, gated on how much the winning displacement beats

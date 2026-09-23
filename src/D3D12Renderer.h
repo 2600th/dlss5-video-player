@@ -607,7 +607,11 @@ private:
     // An HDR source frame (SetNextSourcePq), R10G10B10A2, for the one draw that
     // converts it into the linear colour texture.
     static constexpr uint32_t PqSourceSRV = TemporalOutputSRV + 2;
-    static constexpr uint32_t SRVCount = PqSourceSRV + 1;
+    // The flow engine's two input copies, for the resolve pass's zero-motion test, as
+    // [0,1,0,1]: the pass binds a three-wide table at CurrentInput(), so t3 is always
+    // the frame the field belongs to and t4 the one before it.
+    static constexpr uint32_t NvofInputSRV = PqSourceSRV + 1;
+    static constexpr uint32_t SRVCount = NvofInputSRV + 4;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two

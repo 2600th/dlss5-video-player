@@ -15,6 +15,10 @@
 #include "GuideControls.h"
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
+#include <iomanip>
+#include <string>
+#include <vector>
 
 // With five arguments it becomes a guide A/B probe instead: it renders the first
 // N frames through the real DLSS-SR path with the named guides and writes every
@@ -37,8 +41,26 @@ int RunDeviceLossProbe(const wchar_t* source,uint32_t targetHeight);
 // installed, every step must leave no error. Source: an HDR10 clip.
 int RunHdrOutputProbe(const wchar_t* source);
 
+// `sr-quality` as the second argument, after FFmpeg's folder and before a scratch
+// folder, is the Super Resolution quality gate (W4-SR). The flow engine reports a
+// fixed sub-pixel field for a pair of IDENTICAL frames - up to 0.35 px, on half the
+// pixels - and Super Resolution, handed that as motion, re-sampled its history by it
+// every frame: a held frame lost 17 VMAF in 60 frames, and moving clips lost about 11.
+// The resolve pass now zeroes any vector that explains the pair no better than no
+// motion. This renders a generated clip at 960x540 up to 1920x1080, scores it against
+// its 1080p original, and fails when a held frame decays. It also prints bicubic's
+// score beside SR's, through the same BGRA path, without asserting an order between
+// them: on band-limited video DLSS SR measured below bicubic on every clip tried,
+// frame 0 included, where no history or motion vector is involved at all - see
+// docs/measurements/sr-quality-20260924/REPORT.md.
+int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirectory);
+// The generated original, an FFmpeg lavfi source at 1080p30: a Mandelbrot zoom,
+// because it has detail at every scale for the engine to be wrong about.
+inline constexpr wchar_t kSrQualitySource[]=L"mandelbrot=s=1920x1080:r=30";
+
 int wmain(int argc,wchar_t** argv) {
     if (const int skip = gpu_test_gate::SkipWithoutGpu()) return skip;
+    if(argc==4&&std::wstring_view(argv[2])==L"sr-quality")return RunSrQualityProbe(argv[1],argv[3]);
     if(argc==6){
         const std::wstring wide(argv[4]);
         std::string text;for(const wchar_t c:wide){if(c>0x7F)return 2;text.push_back(char(c));}
@@ -432,6 +454,147 @@ int RunHdrOutputProbe(const wchar_t* source)
                  hdrOff&&sdrAgain&&afterHdr.errors==0&&afterSdr.errors==0?0:6;
         }
         renderer.reset();DestroyWindow(window);
+    }
+    MFShutdown();CoUninitialize();return code;
+}
+
+namespace {
+
+// Runs one FFmpeg child in `directory` and waits for it. The libvmaf log is
+// named relative to that folder because a drive colon inside a filter argument
+// needs an escape the filter parser and the command line disagree about.
+bool RunFfmpeg(const std::filesystem::path& ffmpegDirectory,const std::filesystem::path& directory,const std::wstring& arguments)
+{
+    const std::filesystem::path exe=ffmpegDirectory/L"ffmpeg.exe";
+    std::wstring command=L"\""+exe.wstring()+L"\" -hide_banner -nostdin -loglevel error -y "+arguments;
+    STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
+    if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,
+                       directory.c_str(),&startup,&process))return false;
+    CloseHandle(process.hThread);
+    const bool finished=WaitForSingleObject(process.hProcess,15u*60u*1000u)==WAIT_OBJECT_0;
+    DWORD code=1;
+    if(finished)GetExitCodeProcess(process.hProcess,&code);else TerminateProcess(process.hProcess,1);
+    CloseHandle(process.hProcess);
+    if(!finished||code!=0)std::wcout<<L"ffmpeg failed: "<<arguments<<L"\n";
+    return finished&&code==0;
+}
+
+// Every per-frame score in a libvmaf JSON log: each frame's metrics hold
+// `"vmaf": <number>`, and the pooled block writes `"vmaf": {` instead.
+std::vector<double> ReadVmafFrames(const std::filesystem::path& log)
+{
+    std::ifstream file(log,std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>(file),{}};
+    std::vector<double> frames;
+    for(size_t at=text.find("\"vmaf\": ");at!=std::string::npos;at=text.find("\"vmaf\": ",at+1)){
+        const char* begin=text.c_str()+at+8;
+        if(*begin=='{')continue;
+        char* end=nullptr;const double value=std::strtod(begin,&end);
+        if(end!=begin)frames.push_back(value);
+    }
+    return frames;
+}
+
+double MeanOf(const std::vector<double>& values,size_t from,size_t to)
+{
+    to=std::min(to,values.size());
+    if(from>=to)return 0.0;
+    double sum=0.0;for(size_t i=from;i<to;++i)sum+=values[i];
+    return sum/double(to-from);
+}
+
+// The clip through the real Super Resolution path exactly as an export's SR
+// stage runs it - preserve-source, the capture ring, guides from the frames -
+// written raw for scoring. False when any frame did not come through DLSS.
+bool RenderSuperResolution(const std::filesystem::path& source,const std::filesystem::path& raw,uint32_t& frames)
+{
+    frames=0;
+    VideoDecoder decoder;
+    if(!decoder.Open(source.c_str(),MediaSourceKind::LocalFile))return false;
+    const auto target=UpscalingTarget(decoder.Width(),decoder.Height(),1080);
+    if(!target.grows)return false;
+    HWND window=CreateWindowExW(0,L"STATIC",L"sr quality",WS_POPUP,0,0,100,100,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+    bool ok=false;
+    {
+        auto renderer=MakeD3D12Renderer();
+        const auto [gw,gh]=TemporalGuideGenerator::AnalysisGrid(decoder.Width(),decoder.Height(),decoder.FrameRate());
+        if(renderer->Initialize(window,decoder.Width(),decoder.Height(),target.width,target.height,gw,gh,
+               NVSDK_NGX_PerfQuality_Value_MaxQuality,true,true)&&renderer->DLSSAvailable()&&
+           renderer->OutputW()==target.width&&renderer->OutputH()==target.height){
+            TemporalGuideGenerator guides;VideoFrame frame;ok=true;
+            std::ofstream out(raw,std::ios::binary|std::ios::trunc);
+            const float frameMs=float(1000.0/decoder.FrameRate());
+            while(ok&&decoder.ReadNext(frame)){
+                GuideFrame guide;CapturedVideoFrame captured;
+                const FrameIdentity id=IdentityOf(frame,guides.HistoryGeneration(),0,frames==0?HistoryReset::FirstFrame:HistoryReset::None);
+                ok=guides.Generate(frame.bgra.data(),frame.bgra.size(),decoder.Width(),decoder.Height(),decoder.Width(),decoder.Height(),
+                                   decoder.FrameRate(),id,guide,frame.layout)&&
+                   renderer->RenderFrameForCache(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs,captured)&&
+                   captured.pixels.size()==size_t(target.width)*target.height*4u;
+                if(ok){out.write(reinterpret_cast<const char*>(captured.pixels.data()),std::streamsize(captured.pixels.size()));++frames;}
+            }
+            ok=ok&&frames>0&&renderer->DLSSEvaluations()==frames;
+        }else std::cout<<"SR initialization rejected; see DLSSVideoPlayer.log\n";
+    }
+    DestroyWindow(window);
+    return ok;
+}
+
+} // namespace
+
+int RunSrQualityProbe(const wchar_t* ffmpegDirectory,const wchar_t* workDirectory)
+{
+    const std::filesystem::path ffmpeg(ffmpegDirectory),work(workDirectory);
+    std::error_code error;std::filesystem::create_directories(work,error);
+    CoInitializeEx(nullptr,COINIT_MULTITHREADED);MFStartup(MF_VERSION);
+    const std::wstring tagged=L" -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -c:v ffv1 ";
+    const std::wstring bt709=L"setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv";
+    // A moving clip and its first frame held for two seconds, each area-reduced to
+    // 960x540, which is what SR and bicubic are both handed.
+    const std::wstring generated=kSrQualitySource;
+    struct Clip{const wchar_t* name;std::wstring source;};
+    const Clip clips[]={
+        {L"moving",L"-f lavfi -i "+generated+L" -frames:v 90 -vf "+bt709},
+        {L"still",L"-f lavfi -i "+generated+L" -vf select=eq(n\\,0),loop=loop=59:size=1:start=0,setpts=N/30/TB,"+bt709+L" -frames:v 60"},
+    };
+    bool ok=true;
+    struct Result{std::vector<double> sr,bicubic;};
+    std::vector<Result> results;
+    // Both upscales are scored from BGRA, the way the capture hands SR's over: the
+    // BGRA round trip alone costs about 3 VMAF on dark footage, and bicubic scored
+    // straight from YUV would be given that for free.
+    const std::wstring score=L"[d];[1:v]format=yuv420p,setpts=N/30/TB[r];[d][r]libvmaf=n_threads=8:log_fmt=json:log_path=";
+    const std::wstring fromBgra=L" -lavfi [0:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setpts=N/30/TB";
+    for(const Clip& clip:clips){
+        const std::wstring name(clip.name);
+        const std::wstring ref=name+L"-ref.mkv",reduced=name+L"-540.mkv",bicubic=name+L"-bicubic.raw",raw=name+L"-sr.raw";
+        ok=ok&&RunFfmpeg(ffmpeg,work,clip.source+tagged+ref)&&
+           RunFfmpeg(ffmpeg,work,L"-i "+ref+L" -vf scale=960:540:flags=area,"+bt709+tagged+reduced)&&
+           RunFfmpeg(ffmpeg,work,L"-i "+reduced+L" -vf scale=in_color_matrix=bt709:in_range=tv,format=bgra,"
+                                 L"scale=1920:1080:flags=bicubic -f rawvideo "+bicubic);
+        uint32_t frames=0;
+        ok=ok&&RenderSuperResolution(work/reduced,work/raw,frames);
+        for(const auto& [input,log]:{std::pair{raw,name+L"-sr.json"},std::pair{bicubic,name+L"-bicubic.json"}})
+            ok=ok&&RunFfmpeg(ffmpeg,work,L"-f rawvideo -pix_fmt bgra -s 1920x1080 -r 30 -i "+input+L" -i "+ref+
+                                           fromBgra+score+log+L" -f null -");
+        Result result{ReadVmafFrames(work/(name+L"-sr.json")),ReadVmafFrames(work/(name+L"-bicubic.json"))};
+        ok=ok&&result.sr.size()==frames&&result.bicubic.size()==frames&&frames>=20;
+        std::filesystem::remove(work/raw,error);std::filesystem::remove(work/bicubic,error);
+        results.push_back(std::move(result));
+        if(!ok)break;
+    }
+    int code=8;
+    if(ok&&results.size()==2){
+        const Result& moving=results[0];const Result& still=results[1];
+        const double movingSr=MeanOf(moving.sr,0,moving.sr.size()),movingBicubic=MeanOf(moving.bicubic,0,moving.bicubic.size());
+        const double stillFirst=MeanOf(still.sr,0,10),stillLast=MeanOf(still.sr,still.sr.size()-10,still.sr.size());
+        const double stillBicubic=MeanOf(still.bicubic,0,still.bicubic.size());
+        std::cout<<std::fixed<<std::setprecision(2)<<"sr-quality: moving SR="<<movingSr<<" bicubic="<<movingBicubic
+            <<" | still SR first10="<<stillFirst<<" last10="<<stillLast<<" bicubic="<<stillBicubic<<"\n";
+        // A held frame must hold its score. With nothing moving there is nothing new
+        // to accumulate, so the last ten frames may only match or beat the first ten;
+        // the engine's field on identical frames took them down by more than ten VMAF.
+        code=stillLast>=stillFirst-1.0?0:9;
     }
     MFShutdown();CoUninitialize();return code;
 }

@@ -5068,7 +5068,7 @@ void processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test()
     CHECK(!SuperResolutionCarrier(0, 0, 1920, 1080));
 
     CHECK(ProcessingScaleIdentityTerm(100).empty());
-    CHECK(ProcessingScaleIdentityTerm(75) == "|processing-scale-75-v1");
+    CHECK(ProcessingScaleIdentityTerm(75) == "|processing-scale-75-v2");
     CHECK(ProcessingScaleIdentityTerm(50) != ProcessingScaleIdentityTerm(75));
 
     // The add-on order: the model ahead of the upscale below 100; at 100 the

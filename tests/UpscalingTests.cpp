@@ -5,6 +5,7 @@
 #include "TestSupport.h"
 
 #include <d3dcompiler.h>
+#include <d3d12shader.h>
 
 int main() {
     const auto hd = UpscalingTarget(1920,1080,1440);
@@ -101,5 +102,37 @@ int main() {
     };
     CHECK(compiles("VS","vs_5_1"));
     CHECK(compiles("PSNvofMotion","ps_5_1"));
+
+    // The zero-motion test's contract with the renderer (w4-sr): eight root constants,
+    // the eighth switching the test on, and the engine's two input frames at t3/t4
+    // through the table the renderer binds at RootOverlay. A constant the shader
+    // dropped or a register it moved would leave the test silently off - the flow
+    // engine's fixed field on a still frame then decays Super Resolution again.
+    {
+        ID3DBlob* code = nullptr;
+        ID3DBlob* errors = nullptr;
+        const HRESULT hr = D3DCompile(kNvofResolveHlsl, sizeof(kNvofResolveHlsl) - 1, "nvof",
+                                      nullptr, nullptr, "PSNvofMotion", "ps_5_1",
+                                      D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+        if (errors) errors->Release();
+        ID3D12ShaderReflection* reflection = nullptr;
+        CHECK(SUCCEEDED(hr) && code &&
+              SUCCEEDED(D3DReflect(code->GetBufferPointer(), code->GetBufferSize(), IID_PPV_ARGS(&reflection))));
+        if (reflection) {
+            D3D12_SHADER_BUFFER_DESC params{};
+            CHECK(SUCCEEDED(reflection->GetConstantBufferByName("Params")->GetDesc(&params)));
+            D3D12_SHADER_VARIABLE_DESC zero{};
+            CHECK(SUCCEEDED(reflection->GetConstantBufferByName("Params")->GetVariableByName("ZeroMotionTest")->GetDesc(&zero)));
+            CHECK_EQ(28u, zero.StartOffset);
+            CHECK((zero.uFlags & D3D_SVF_USED) != 0);
+            D3D12_SHADER_INPUT_BIND_DESC current{}, previous{};
+            CHECK(SUCCEEDED(reflection->GetResourceBindingDescByName("Current", &current)));
+            CHECK(SUCCEEDED(reflection->GetResourceBindingDescByName("Previous", &previous)));
+            CHECK_EQ(3u, current.BindPoint);
+            CHECK_EQ(4u, previous.BindPoint);
+            reflection->Release();
+        }
+        if (code) code->Release();
+    }
     return test_support::failure_count==0?0:1;
 }
