@@ -160,6 +160,8 @@ static UINT ActiveWindowDpi(HWND window)
     return dpi > 0 ? static_cast<UINT>(dpi) : USER_DEFAULT_SCREEN_DPI;
 }
 
+// The shipped exe declares per-monitor v2 in its manifest (DLSSVideoPlayer.manifest),
+// and then this call is refused as already set; it matters for a binary without one.
 static void EnablePerMonitorDpiAwareness()
 {
     using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -496,11 +498,11 @@ static void ApplyDarkTitleBar(HWND window)
 static HBRUSH DarkDialogBrush(){static const HBRUSH brush=CreateSolidBrush(dark_mode::DialogBackground);return brush;}
 static HBRUSH DarkFieldBrush(){static const HBRUSH brush=CreateSolidBrush(dark_mode::FieldBackground);return brush;}
 
-// WM_CTLCOLOR* for a dark dialog. The app runs on comctl32 v5 - there is no
-// v6 manifest - so SetWindowTheme(L"DarkMode_Explorer") has nothing to act
-// on; these messages are the classic controls' own way to be recoloured.
-// Statics, check boxes and trackbars sit on the dialog; edits and lists on
-// the field surface. Returns null for a message it does not own.
+// WM_CTLCOLOR* for a dark dialog: the background every control sits on, and
+// the text colour of the ones that honour it (statics, edits, lists; a themed
+// check box draws its own). Statics, check boxes and trackbars sit on the
+// dialog; edits and lists on the field surface. Returns null for a message it
+// does not own.
 static HBRUSH DarkControlColor(UINT message, WPARAM wParam, COLORREF text)
 {
     const HDC dc=reinterpret_cast<HDC>(wParam);
@@ -514,6 +516,36 @@ static HBRUSH DarkControlColor(UINT message, WPARAM wParam, COLORREF text)
         SetTextColor(dc,dark_mode::Text);SetBkColor(dc,dark_mode::FieldBackground);return DarkFieldBrush();
     default:return nullptr;
     }
+}
+
+// The dark visual style for one dialog control, now that the manifest brings
+// Common Controls 6 (DLSSVideoPlayer.manifest): combo boxes and edits take
+// Windows' dark "CFD" style, the common file dialog's, with light text on a
+// dark field; check boxes, radios, trackbars, scroll bars, lists and tooltips
+// take DarkMode_Explorer, whose check box draws a light caption beside a dark
+// box. uxtheme is loaded by name, so a Windows without the styles keeps the
+// themed light look and the WM_CTLCOLOR* backgrounds below.
+static void ApplyDarkControlTheme(HWND control)
+{
+    if(!control)return;
+    using SetWindowThemeFn=HRESULT(WINAPI*)(HWND,LPCWSTR,LPCWSTR);
+    static const auto setTheme=[]{
+        const HMODULE uxtheme=LoadLibraryExW(L"uxtheme.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        return uxtheme?reinterpret_cast<SetWindowThemeFn>(GetProcAddress(uxtheme,"SetWindowTheme")):nullptr;
+    }();
+    if(!setTheme)return;
+    wchar_t name[64]{};GetClassNameW(control,name,int(std::size(name)));
+    const std::wstring_view kind(name);
+    if(kind==L"ComboBox"||kind==L"Edit"){setTheme(control,L"DarkMode_CFD",nullptr);return;}
+    if(kind==L"Button"){
+        const LONG_PTR type=GetWindowLongPtrW(control,GWL_STYLE)&BS_TYPEMASK;
+        const bool check=type==BS_CHECKBOX||type==BS_AUTOCHECKBOX||type==BS_3STATE||type==BS_AUTO3STATE||
+                         type==BS_RADIOBUTTON||type==BS_AUTORADIOBUTTON;
+        if(check)setTheme(control,L"DarkMode_Explorer",nullptr);
+        return;
+    }
+    if(kind==L"msctls_trackbar32"||kind==L"ScrollBar"||kind==L"tooltips_class32"||kind==L"ListBox")
+        setTheme(control,L"DarkMode_Explorer",nullptr);
 }
 
 // Push buttons are owner-drawn, because a classic push button is painted in
@@ -637,6 +669,7 @@ static LRESULT CALLBACK YouTubeUrlDialogProc(HWND window, UINT message, WPARAM w
             pad, pad + labelHeight, client.right - 3 * pad - buttonWidth, editHeight,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_YOUTUBE_URL)), nullptr, nullptr);
         SendMessageW(state->edit, EM_SETLIMITTEXT, 2048, 0);
+        ApplyDarkControlTheme(state->edit);
         HWND paste = CreateWindowExW(0, L"BUTTON", state->localizer->Get(L"youtube.dialog.paste").c_str(),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             client.right - pad - buttonWidth, pad + labelHeight, buttonWidth, editHeight,
@@ -841,6 +874,7 @@ static LRESULT CALLBACK TimecodeDialogProc(HWND window, UINT message, WPARAM wPa
             pad, pad + labelHeight, client.right - 2 * pad, editHeight,
             window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TIMECODE_EDIT)), nullptr, nullptr);
         SendMessageW(state->edit, EM_SETLIMITTEXT, 64, 0);
+        ApplyDarkControlTheme(state->edit);
         state->error = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
             pad, pad + labelHeight + editHeight + gap, client.right - 2 * pad, DialogDip(window, 38), window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TIMECODE_ERROR)), nullptr, nullptr);
@@ -4613,6 +4647,7 @@ private:
         HWND host=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
             CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,dialog,nullptr,GetModuleHandleW(nullptr),nullptr);
         if(host){
+            ApplyDarkControlTheme(host);
             SendMessageW(host,TTM_SETMAXTIPWIDTH,0,Sd(dialog,420));
             SendMessageW(host,TTM_SETDELAYTIME,TTDT_AUTOPOP,MAKELPARAM(30000,0));
             m_tipHosts[dialog]=host;
@@ -4700,8 +4735,8 @@ private:
         HWND host=EnsureTipHost(dialog);if(!host)return;
         auto& text=m_tipText[dialog];
         text.push_back(std::make_unique<std::wstring>(T(tipKey)));
-        // The app runs on comctl32 v5 (no v6 manifest), which rejects the v6
-        // struct size, so ask for the version the classic control understands.
+        // V2 is the size both comctl32 v5 and v6 accept; the v6 size would be
+        // refused by a binary that runs without the manifest.
         TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_IDISHWND|TTF_SUBCLASS;info.hwnd=dialog;
         info.uId=reinterpret_cast<UINT_PTR>(control);info.lpszText=text.back()->data();
         SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
@@ -4728,6 +4763,7 @@ private:
         HWND control=CreateWindowExW(0,className,text,WS_CHILD|WS_VISIBLE|style,Sd(h,x),Sd(h,y),Sd(h,width),Sd(h,height),h,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),nullptr,nullptr);
         if(!control)return nullptr;
+        ApplyDarkControlTheme(control);
         SendMessageW(control,WM_SETFONT,reinterpret_cast<WPARAM>(DialogFont(h)),TRUE);
         if(anchor!=DialogAnchor::Fixed)SetPropW(control,kDialogAnchorProperty,reinterpret_cast<HANDLE>(static_cast<INT_PTR>(anchor)));
         return control;

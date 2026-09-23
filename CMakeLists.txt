@@ -275,6 +275,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
     src/resources.h
     src/resources.rc
+    # Common Controls 6 and per-monitor v2 DPI, merged into the linker's manifest.
+    src/DLSSVideoPlayer.manifest
     src/VersionData.h.in
     src/RuntimeLockData.h.in
     src/FrameRatePolicy.h
@@ -680,7 +682,9 @@ if(BUILD_TESTING)
     # The test includes main.cpp itself, so it takes the player's other own
     # sources (not main.cpp) beside the object libraries.
     get_target_property(player_ui_sources DLSSVideoPlayer SOURCES)
-    list(REMOVE_ITEM player_ui_sources src/main.cpp)
+    # Nor the manifest: its per-monitor DPI awareness would run the fixture at the
+    # desktop's scale, and the layouts these tests pin are measured at 96 dpi.
+    list(REMOVE_ITEM player_ui_sources src/main.cpp src/DLSSVideoPlayer.manifest)
     dlss_video_player_test(PlayerUiRegressionTests tests/PlayerUiRegressionTests.cpp ${player_ui_sources})
     target_compile_definitions(PlayerUiRegressionTests PRIVATE PLAYER_APP_TESTING)
     # The player persists settings beside its executable; isolate test settings.
