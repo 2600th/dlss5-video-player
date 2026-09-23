@@ -855,6 +855,22 @@ struct PlayerAppTestAccess {
         CHECK(!app.NeuralWorkerRetiring());
         CHECK(!app.NeuralJobActive());
 
+        // A worker whose completion was drained by the cancel that retired it
+        // is still reaped, once it has exited, by the next Tick.
+        release = false;
+        app.m_neuralLifecycle.Begin();
+        startWorker();
+        app.CancelNeuralJob(false, true);
+        CHECK(app.NeuralWorkerRetiring());
+        app.ReapRetiringNeuralWorker();
+        CHECK(app.NeuralWorkerRetiring());
+        release = true;
+        for (int attempt = 0; attempt < 200 && app.NeuralWorkerRetiring(); ++attempt) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            app.ReapRetiringNeuralWorker();
+        }
+        CHECK(!app.NeuralWorkerRetiring());
+
         // A cancel that waits joins a retiring worker first, whatever is active.
         release = false;
         app.m_neuralLifecycle.Begin();

@@ -1369,6 +1369,7 @@ public:
     }
     void TickOnce() {
         ReapSourcePrefetch();
+        ReapRetiringNeuralWorker();
         // Headphones unplugged, a default-device change, a driver restart: the
         // endpoint reports itself invalidated and audio restarts on the new
         // one. waveOut had no equivalent - the write failed, the reader thread
@@ -6875,6 +6876,16 @@ private:
     void JoinRetiringNeuralWorker(){
         if(!m_retiringNeuralWorker.joinable())return;
         m_retiringNeuralWorker.join();m_retiringNeuralWorker=std::jthread{};m_retiringNeuralGeneration=0;
+    }
+    // The completion message is not a guarantee: a worker that posted it before the
+    // cancel had its message drained by that cancel. A thread that has already
+    // exited is joined here without waiting, so the next render is never held back
+    // by a retirement nobody will announce.
+    void ReapRetiringNeuralWorker(){
+        if(!m_retiringNeuralWorker.joinable())return;
+        if(WaitForSingleObject(static_cast<HANDLE>(m_retiringNeuralWorker.native_handle()),0)!=WAIT_OBJECT_0)return;
+        JoinRetiringNeuralWorker();
+        LOG("Retired neural worker reaped after it exited.");
     }
     void CompleteNeuralJob(uint64_t token){
         auto completion=m_neuralCompletions.Take(token);

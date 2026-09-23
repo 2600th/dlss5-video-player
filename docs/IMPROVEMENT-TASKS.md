@@ -58,7 +58,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
-| [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
@@ -240,21 +239,6 @@ downscale). Keep a 1:1 pixel mode for P2.16.
 
 **Impact** — Player: headroom at 119.88 fps and 4K, and less VRAM and host
 memory. The pixels do not change.
-
----
-
-<a id="p15"></a>
-### P1.5 · Waits on the UI thread
-
-`S` · **Player** · 🔍
-
-| Wait | Where | Fix |
-| --- | --- | --- |
-| `CancelNeuralJob` joins the worker during a live retarget | `main.cpp:6227`, called from `:5938`, `:6021` | Request the stop, and retire the worker from its completion message, as frame generation does |
-| `AdoptSegment` waits on `future.wait()` with no limit (two 15 s probes behind it) | `SynchronizedPlayback.cpp:384-385` | `wait_for` with a deadline; return `NotReady` |
-| Closing the window joins the update check, whose WinHTTP stages each wait 8 s | `main.cpp:7430`, `:2357`; `UpdateCheck.cpp:306` | Close the WinHTTP handle from a `std::stop_callback` |
-| Dragging the split while paused converts and re-uploads the whole original on every mouse move | `main.cpp:3051-3055`, `:3019-3023` | Re-upload only when the pair changes |
-| Paused playback re-presents at 60 Hz | `main.cpp:1322-1327` | Present only when something invalidates the frame |
 
 ---
 
