@@ -183,6 +183,35 @@ void PumpMessagesUntil(HANDLE completed)
     }
 }
 
+// Empty when every module beside the helper is one the runtime lock names. The
+// lock check hashes only the files it knows, and ReShade loads every add-on in
+// this directory (packaging/ReShade.ini: AddonPath=.), so a stray *.addon64
+// ran inside feature 18's process while the digest, the cache key and the
+// receipt all still named the locked runtime. The proxy loads add-ons when a
+// device is created, which is after this runs; the check is a refusal rather
+// than a digest term because the digest is a cache-key input, and folding the
+// listing into it would retire every cache entry to catch a file that should
+// never be there at all.
+std::wstring UnlockedRuntimeModules(const std::filesystem::path& moduleDirectory)
+{
+    const auto unlocked = FindUnlockedRuntimeModules(moduleDirectory, EmbeddedRuntimeLock());
+    if (!unlocked) {
+        LOG("Neural helper refused: its runtime directory could not be listed for unlocked modules.");
+        return L"The helper could not list its runtime directory to check it for modules the runtime lock "
+               L"does not name.";
+    }
+    if (unlocked->empty()) return {};
+    std::wstring names;
+    for (const std::wstring& name : *unlocked) {
+        if (!names.empty()) names += L", ";
+        names += name;
+    }
+    LOG("Neural helper refused: the runtime directory holds modules the runtime lock does not name: "
+        << narrow_text::LossyAscii(names));
+    return L"The neural runtime directory holds modules the runtime lock does not name, which the helper "
+           L"would load: " + names + L". Remove them and try again.";
+}
+
 NeuralRenderResult FailedResult(std::wstring detail, uint64_t jobId)
 {
     NeuralRenderResult failed;
@@ -485,7 +514,9 @@ private:
             return L"The staged neural runtime changed under a resident helper, which has the "
                    L"previous files mapped.";
         }
-        return {};
+        // A module dropped in after launch is not loaded yet, but a device the
+        // renderer recreates would load it; the next process refuses it anyway.
+        return UnlockedRuntimeModules(moduleDirectory_);
     }
 
     MetadataWriter& metadata_;
@@ -535,6 +566,8 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     };
     const std::filesystem::path moduleDirectory = ModuleDirectory();
+    if (std::wstring unlocked = UnlockedRuntimeModules(moduleDirectory); !unlocked.empty())
+        return fail(std::move(unlocked));
     const ConfigUpdate config = ConfigureNeuralAddon(moduleDirectory / L"ReShade.ini", true);
     if (!config.ok || !config.addonEnabled) {
         return fail(config.error.empty() ? L"The helper-local neural add-on configuration was not enabled." :

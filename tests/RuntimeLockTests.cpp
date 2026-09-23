@@ -244,6 +244,45 @@ void verify_reports_each_drift_kind_and_names_only_failing_files_test()
     std::filesystem::remove_all(directory);
 }
 
+// P1.11: a stray add-on or DLL beside the helper is loaded by the proxy or
+// the loader, so it is named and refused even though every locked file
+// verifies. The files the build and the package legitimately put there are
+// not modules and stay allowed.
+void unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test()
+{
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / (L"RuntimeLockModules-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory / L"ngx_logs");
+    RuntimeLock lock;
+    lock.schemaVersion = 1;
+    lock.entries = {RuntimeLockEntry{L"dxgi.dll", 1, Hex("x"), L""},
+                    RuntimeLockEntry{L"renodx-dlss5.addon64", 1, Hex("x"), L""}};
+    for (const wchar_t* name : {L"DXGI.dll", L"renodx-dlss5.addon64", L"NeuralWorker.exe", L"NeuralWorker.log",
+                                L"ReShade.ini", L"ReShadePreset.ini", L"ReShade.log", L"ReShade.log1",
+                                L"ReShade.ini.renodx-dlss5-pre-v4-migration-20260922-120343.bak",
+                                L"dxgi.dll.bak"}) {
+        WriteFile(directory / name, "x");
+    }
+    WriteFile(directory / L"ngx_logs" / L"nested.dll", "x"); // not on any load path
+    const auto clean = FindUnlockedRuntimeModules(directory, lock);
+    CHECK(clean.has_value() && clean->empty());
+
+    WriteFile(directory / L"zzz-extra.addon64", "x");
+    WriteFile(directory / L"Stray.DLL", "x");
+    WriteFile(directory / L"other.addon32", "x");
+    WriteFile(directory / L"plain.addon", "x");
+    std::filesystem::create_directories(directory / L"folder.dll"); // a directory is not a module
+    const auto stray = FindUnlockedRuntimeModules(directory, lock);
+    CHECK(stray.has_value());
+    CHECK_EQ((std::vector<std::wstring>{L"Stray.DLL", L"other.addon32", L"plain.addon", L"zzz-extra.addon64"}),
+             stray.value_or(std::vector<std::wstring>{}));
+
+    // A directory that cannot be listed is a refusal, not a pass.
+    CHECK(!FindUnlockedRuntimeModules(directory / L"does-not-exist", lock).has_value());
+    std::filesystem::remove_all(directory);
+}
+
 constexpr std::string_view kSamplePreflight =
     "{\"schema\":2,\"ok\":true,\"workerVersion\":\"1.2.3\",\"elapsedMilliseconds\":812,"
     "\"gpu\":{\"description\":\"NVIDIA GeForce RTX 4090\",\"vendorId\":4318,\"deviceId\":9988,"
@@ -610,6 +649,7 @@ int wmain()
     parse_rejects_missing_fields_and_wrong_schema_test();
     embedded_lock_parses_and_names_the_locked_runtime_files_test();
     verify_reports_each_drift_kind_and_names_only_failing_files_test();
+    unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test();
     receipt_json_records_failure_lock_status_and_preflight_verbatim_test();
     receipt_log_summary_extracts_runtime_identity_and_lock_state_test();
     receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test();

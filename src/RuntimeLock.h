@@ -68,3 +68,15 @@ bool RuntimeLockSatisfied(std::span<const RuntimeLockCheck> checks);
 // missing; sl.dlss.dll: size 1 != 421504, hash mismatch"). Empty when the
 // lock is satisfied.
 std::wstring DescribeRuntimeLockDrift(std::span<const RuntimeLockCheck> checks);
+
+// Every loadable module in the top level of `runtimeDirectory` that the lock
+// does not name: a *.dll the loader would find beside the helper, or a
+// *.addon / *.addon32 / *.addon64 the ReShade proxy loads from `AddonPath=.`.
+// VerifyRuntimeLock only looks at the files it knows, so a stray add-on was
+// loaded into feature 18's process while the digest, the cache key and the
+// receipt still named the locked runtime. Names are compared case-insensitively
+// and returned sorted; anything else (NeuralWorker.exe, the INIs, logs, *.bak
+// backups, ngx_logs/) is not a module and is ignored. nullopt when the
+// directory cannot be listed, which the caller must treat as a refusal.
+std::optional<std::vector<std::wstring>> FindUnlockedRuntimeModules(const std::filesystem::path& runtimeDirectory,
+                                                                    const RuntimeLock& lock);

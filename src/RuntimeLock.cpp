@@ -454,3 +454,36 @@ std::wstring DescribeRuntimeLockDrift(std::span<const RuntimeLockCheck> checks)
     }
     return description;
 }
+
+std::optional<std::vector<std::wstring>> FindUnlockedRuntimeModules(const std::filesystem::path& runtimeDirectory,
+                                                                    const RuntimeLock& lock)
+{
+    const auto lower = [](std::wstring text) {
+        for (wchar_t& c : text) {
+            if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+        }
+        return text;
+    };
+    std::vector<std::wstring> locked;
+    locked.reserve(lock.entries.size());
+    for (const RuntimeLockEntry& entry : lock.entries) locked.push_back(lower(entry.destination));
+
+    std::vector<std::wstring> unlocked;
+    std::error_code error;
+    std::filesystem::directory_iterator it(runtimeDirectory, error);
+    if (error) return std::nullopt;
+    for (const std::filesystem::directory_iterator end{}; it != end; it.increment(error)) {
+        if (error) return std::nullopt;
+        std::error_code typeError;
+        // Follows links: a symlinked DLL is loaded exactly like a copied one.
+        if (!it->is_regular_file(typeError) || typeError) continue;
+        const std::wstring name = it->path().filename().wstring();
+        const std::wstring extension = lower(it->path().extension().wstring());
+        if (extension != L".dll" && extension != L".addon" && extension != L".addon32" && extension != L".addon64")
+            continue;
+        if (std::find(locked.begin(), locked.end(), lower(name)) == locked.end()) unlocked.push_back(name);
+    }
+    if (error) return std::nullopt;
+    std::sort(unlocked.begin(), unlocked.end());
+    return unlocked;
+}
