@@ -443,6 +443,12 @@ public:
     bool SetMask(const uint8_t* gray, uint32_t width, uint32_t height);
     void ClearMask();
     bool HasMask() const { return m_mask != nullptr; }
+    // The picture on screen, drawn again into an offscreen target of the present's own
+    // size with the present's own constants and program - so a saved comparison is what
+    // the window shows, tags and loupe included - and read back as tightly packed RGBA.
+    // Synchronous: it drains the queue before and after. Call PresentCurrent first so
+    // a reference uploaded since the last present is in it.
+    bool CaptureComposedView(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height);
     // Something the present pass reads - colours, comparison, debug view, the
     // reference - changed since the last present was attempted. A paused player
     // presents only then, instead of re-presenting the same image at 60 Hz.
@@ -521,8 +527,9 @@ private:
     static constexpr uint32_t OverlaySRV = 12, LabelSRV = 13;
     static constexpr uint32_t SRVCount = 14;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
-    // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source).
-    static constexpr uint32_t DecodedRTV = FrameCount + 5, RTVCount = FrameCount + 6;
+    // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
+    // [+6] the composed-view capture (CaptureComposedView).
+    static constexpr uint32_t DecodedRTV = FrameCount + 5, ComposedRTV = FrameCount + 6, RTVCount = FrameCount + 7;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -599,6 +606,9 @@ private:
     bool UploadStaticTexture(Microsoft::WRL::ComPtr<ID3D12Resource>& texture, DXGI_FORMAT format,
                              const uint8_t* pixels, uint32_t width, uint32_t height,
                              uint32_t bytesPerPixel, uint32_t srvIndex, const wchar_t* name);
+    // PresentCurrent's draw into `rtv`: viewport, constants, program, the view it reads.
+    void RecordViewDraw(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                        const present_scale::Target& target);
     // What the backbuffer pass draws into: the window-sized backbuffer through the
     // scaled present, or - when the sizes agree, or the renderer does not follow its
     // window - the output's size through PSPresent, exactly as before.

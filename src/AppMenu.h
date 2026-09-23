@@ -26,6 +26,8 @@ inline constexpr UINT IDM_EXPORT_CACHED_VIDEO = 140;
 // Export with any combination of the three neural stages, as against
 // IDM_EXPORT_CACHED_VIDEO, which writes out the render already in the cache.
 inline constexpr UINT IDM_EXPORT_STAGES = 142;
+// The composed comparison as shown, with a provenance footer, as a PNG.
+inline constexpr UINT IDM_SAVE_COMPARISON_IMAGE = 143;
 inline constexpr UINT IDM_PLAY = 200;
 inline constexpr UINT IDM_STOP = 201;
 inline constexpr UINT IDM_BACK10 = 202;
@@ -204,8 +206,8 @@ bool UpdateMaskMenu(HMENU menuBar, bool loadAvailable, bool maskLoaded, bool inv
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
 // Menu command for a plain-key accelerator of the range, preview, neural
 // settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
-// Ctrl+N, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C, Shift+C and L); nullopt
-// when the key is not one of them.
+// Ctrl+N, Ctrl+Shift+S, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C, Shift+C
+// and L); nullopt when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"

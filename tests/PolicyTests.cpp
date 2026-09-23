@@ -1951,6 +1951,7 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     // Bare S stops playback, so the modifier is what tells them apart.
     CHECK(!app_menu::CommandForPlayerKey('S', false, false).has_value());
     CHECK(has_menu_entry(entries, L"Open render receipt", app_menu::IDM_OPEN_RENDER_RECEIPT));
+    CHECK(has_menu_entry(entries, L"Save comparison image\u2026\tCtrl+Shift+S", app_menu::IDM_SAVE_COMPARISON_IMAGE));
     CHECK(has_menu_entry(entries, L"Zoom in (Fit, 1:1, 2x, 4x, 8x)\tZ", app_menu::IDM_COMPARE_ZOOM));
     CHECK(has_menu_entry(entries, L"Zoom out\tShift+Z", app_menu::IDM_COMPARE_ZOOM_OUT));
     CHECK(has_menu_entry(entries, L"Loupe\tL", app_menu::IDM_COMPARE_LOUPE));
@@ -2073,6 +2074,7 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     for (const UINT key : {'O', 'E', 'L', 'I', 'F', 'Z'})
         CHECK(!CommandForPlayerKey(key, true, false).has_value());
     CHECK(!CommandForPlayerKey('G', true, true).has_value());
+    CHECK(!CommandForPlayerKey('S', false, true).has_value());
     if (menu) DestroyMenu(menu);
 }
 
@@ -7873,6 +7875,52 @@ void compare_mask_shrinks_feathers_and_is_remembered_per_source_test()
     CHECK(ComparisonReadsReference(comparison));CHECK(ComparisonNeedsCompositor(comparison));
 }
 
+// A saved comparison carries its provenance in a footer, and is written as a PNG
+// through WIC without ever leaving half a file under the chosen name.
+void compare_saved_image_carries_its_provenance_test()
+{
+    compare_provenance::Facts facts;
+    facts.application=L"DLSS 5 Video Player 9.9.9";facts.source=L"Trailer";facts.timecode=L"00:01:02:03";facts.frame=1863;
+    facts.view=L"Split 50%";facts.settings=L"sha256:0123456789abcdef";facts.runtime=L"6.5.3";facts.saved=L"2026-09-23 12:00:00";
+    const auto lines=compare_provenance::FooterLines(facts);
+    CHECK_EQ(size_t{3},lines.size());
+    if(lines.size()==3){
+        CHECK(lines[0].find(L"9.9.9")!=std::wstring::npos&&lines[0].find(L"Trailer")!=std::wstring::npos);
+        CHECK(lines[1].find(L"00:01:02:03")!=std::wstring::npos&&lines[1].find(L"frame 1863")!=std::wstring::npos&&lines[1].find(L"Split 50%")!=std::wstring::npos);
+        CHECK(lines[2].find(L"sha256:0123456789abcdef")!=std::wstring::npos&&lines[2].find(L"Runtime 6.5.3")!=std::wstring::npos&&lines[2].find(L"2026-09-23")!=std::wstring::npos);
+    }
+    CHECK(compare_provenance::SuggestedName(L"A: \"b\"/c?",L"00:01:02:03")==L"A- -b--c- 00-01-02-03 comparison.png");
+    CHECK(compare_provenance::SuggestedName(L"",L"x")==L"comparison x comparison.png");
+    CHECK(compare_provenance::SuggestedName(std::wstring(300,L'a'),L"t").size()==124);
+
+    const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    const auto png=std::filesystem::temp_directory_path()/L"compare-save-test.png";
+    std::error_code ignored;std::filesystem::remove(png,ignored);
+    // 5x2 BGR, rows padded to 16 bytes: the left pixel black, the right one white.
+    constexpr UINT width=5,height=2,stride=16;
+    std::vector<uint8_t> bgr(size_t(stride)*height,0);
+    for(UINT y=0;y<height;++y)for(int channel=0;channel<3;++channel)bgr[size_t(y)*stride+4*3+size_t(channel)]=255;
+    CHECK(SUCCEEDED(compare_image::SavePngBgr(png,bgr.data(),width,height,stride)));
+    CHECK(std::filesystem::exists(png));
+    // Published through atomic_file: nothing but the PNG is left beside it.
+    size_t beside=0;
+    for(const auto& entry:std::filesystem::directory_iterator(png.parent_path()))
+        if(entry.path().filename().wstring().rfind(png.filename().wstring(),0)==0)++beside;
+    CHECK_EQ(size_t{1},beside);
+    compare_mask::Gray back;
+    CHECK(SUCCEEDED(compare_image::LoadGray(png,back)));
+    CHECK_EQ(width,back.width);CHECK_EQ(height,back.height);
+    if(back.pixels.size()==10){CHECK_EQ(0,int(back.pixels[0]));CHECK_EQ(255,int(back.pixels[4]));CHECK_EQ(255,int(back.pixels[9]));}
+    // Refused before anything is written; a directory that is not there leaves nothing.
+    CHECK(FAILED(compare_image::SavePngBgr(png,bgr.data(),width,height,width*3u-1u)));
+    const auto nowhere=png.parent_path()/L"no-such-directory"/L"x.png";
+    CHECK(FAILED(compare_image::SavePngBgr(nowhere,bgr.data(),width,height,stride)));
+    CHECK(!std::filesystem::exists(nowhere.parent_path()));
+    std::filesystem::remove(png,ignored);
+    if(SUCCEEDED(com))CoUninitialize();
+    CHECK(app_menu::CommandForPlayerKey('S',true,true)==app_menu::IDM_SAVE_COMPARISON_IMAGE);
+}
+
 void video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test()
 {
     MediaFixture fixture;
@@ -11526,6 +11574,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),
+    TEST_CASE(compare_saved_image_carries_its_provenance_test),
     TEST_CASE(video_decoder_forward_seek_reuses_child_and_delivers_the_same_frame_as_a_restart_test),
     TEST_CASE(video_decoder_blocking_reads_recycle_the_callers_buffer_test),
     TEST_CASE(video_decoder_resume_failures_are_bounded_and_leak_free_for_local_and_network_startup_test),

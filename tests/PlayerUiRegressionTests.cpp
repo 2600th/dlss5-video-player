@@ -2187,6 +2187,40 @@ struct PlayerAppTestAccess {
         if (SUCCEEDED(com)) CoUninitialize();
     }
 
+    // Save comparison image: the footer under the picture, and what it says. The GPU
+    // read-back itself (CaptureComposedView) needs a device and is left to a visual pass.
+    static void CheckSavedComparisonComposition(PlayerApp& app)
+    {
+        CHECK((GetMenuState(GetMenu(app.m_hwnd), IDM_SAVE_COMPARISON_IMAGE, MF_BYCOMMAND) & (MF_GRAYED | MF_DISABLED)) == 0);
+        const ComparisonSettings entry = app.m_comparison;
+        app.m_comparison.mode = ComparisonMode::SplitVertical; app.m_comparison.splitX = 0.5f; app.m_comparison.swap = true;
+        const auto facts = app.ComparisonProvenance();
+        CHECK(facts.application.find(L"DLSS 5 Video Player") == 0);
+        CHECK(facts.view.find(L"Split 50% swapped") != std::wstring::npos);
+        CHECK(facts.view.find(L"Mix 100%") != std::wstring::npos);
+        CHECK(facts.settings.rfind(L"sha256:", 0) == 0 && facts.settings.size() == 7 + 16);
+        CHECK(!facts.runtime.empty() && facts.saved.size() == 19);
+        app.m_comparison = entry;
+        // 40x20 of one colour in, the same picture out as BGR, with the footer below it:
+        // the ground, and the flag rule at its left edge.
+        constexpr uint32_t width = 40, height = 20;
+        std::vector<uint8_t> rgba(size_t(width) * height * 4);
+        for (size_t at = 0; at < size_t(width) * height; ++at) { rgba[at * 4] = 200; rgba[at * 4 + 1] = 100; rgba[at * 4 + 2] = 50; rgba[at * 4 + 3] = 255; }
+        uint32_t total = 0, stride = 0;
+        const auto bgr = app.ComposeComparisonImage(rgba, width, height, compare_provenance::FooterLines(facts), total, stride);
+        CHECK(!bgr.empty());
+        CHECK(total > height);
+        CHECK_EQ(size_t(stride) * total, bgr.size());
+        if (!bgr.empty() && total > height + 2) {
+            CHECK_EQ(50, int(bgr[0])); CHECK_EQ(100, int(bgr[1])); CHECK_EQ(200, int(bgr[2]));
+            const size_t rule = size_t(height + 2) * stride;
+            CHECK_EQ(26, int(bgr[rule])); CHECK_EQ(255, int(bgr[rule + 2]));
+            const size_t ground = size_t(total - 1) * stride + size_t(width - 1) * 3;
+            CHECK_EQ(5, int(bgr[ground + 2]));
+        }
+        CHECK(app.ComposeComparisonImage({}, width, height, {}, total, stride).empty());
+    }
+
     static void CheckComparisonAvailability(PlayerApp& app)
     {
         const HMENU menu = GetMenu(app.m_hwnd);
@@ -2212,6 +2246,7 @@ struct PlayerAppTestAccess {
         app.m_comparison.strength = 1.0f;
         CheckCompareBarAndPeek(app);
         CheckComparisonMask(app);
+        CheckSavedComparisonComposition(app);
         // Z steps along the ladder; with no render window or output to measure it is
         // multiples of Fit, where 1:1 does not magnify and is skipped.
         app.HandleCommand(IDM_COMPARE_ZOOM);

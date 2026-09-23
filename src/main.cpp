@@ -1238,6 +1238,17 @@ static std::wstring PickVideoFile(HWND owner, const Localizer& loc) {
     return PickVideoFileFallback(owner,loc);
 }
 
+// Where a saved comparison goes (P2.21).
+static std::filesystem::path PickComparisonImage(HWND owner, const Localizer& loc, const std::wstring& suggested) {
+    wchar_t path[32768]{};wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
+    const wchar_t filter[]=L"PNG image (*.png)\0*.png\0\0";
+    const std::wstring title=loc.Get(L"compare.save.dialog");
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
+    dialog.lpstrFilter=filter;dialog.nFilterIndex=1;dialog.lpstrDefExt=L"png";dialog.lpstrTitle=title.c_str();
+    dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT;
+    return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
+}
+
 // A mask for the Mix (P2.6): any still image WIC reads, used as grey.
 static std::filesystem::path PickMaskImage(HWND owner, const Localizer& loc) {
     wchar_t path[32768]{};
@@ -4078,6 +4089,98 @@ private:
     }
     void ToggleLoupe(){if(!ComparisonModesAvailable())return;m_loupe=!m_loupe;ApplyComparison();}
 
+    // --- Save comparison image (P2.21) ---------------------------------------------
+    // What the saved image says about itself; see compare_provenance::FooterLines.
+    compare_provenance::Facts ComparisonProvenance()const{
+        compare_provenance::Facts facts;
+        const std::string version=DLSS_VIDEO_PLAYER_VERSION;
+        facts.application=L"DLSS 5 Video Player "+std::wstring(version.begin(),version.end());
+        facts.source=m_displayTitle.empty()?std::filesystem::path(m_path).filename().wstring():m_displayTitle;
+        const double fps=std::max(1.0,m_decoder.FrameRate());
+        facts.timecode=FormatTimecode(Position100ns(),fps,true);
+        facts.frame=uint64_t(std::llround(std::max(0.0,Position())*fps));
+        const ComparisonSettings shown=EffectiveComparison();
+        std::wstring view=T(CompareModeLabelKey(shown.mode));
+        if(shown.mode==ComparisonMode::SplitVertical||shown.mode==ComparisonMode::Wipe)view+=L" "+PercentText(shown.splitX)+(shown.swap?L" swapped":L"");
+        if(shown.mode==ComparisonMode::Difference){wchar_t gain[16]{};swprintf_s(gain,L"%g",double(shown.differenceGain));view+=std::wstring(L" \u00d7")+gain+(shown.differenceLuma?L" luma":L" color");}
+        view+=L" \u00b7 Mix "+PercentText(shown.strength)+L" \u00b7 Zoom "+(m_zoomStep>0?ZoomStepText(m_zoomStep):T(L"compare.zoom.fit"));
+        if(shown.mask)view+=L" \u00b7 Mask "+m_maskPath.filename().wstring()+(shown.maskInvert?L" inverted":L"");
+        facts.view=view;
+        // The render's settings as the player recorded them for the cache entry being
+        // played: the canonical neural settings and guide switches, hashed.
+        if(m_cachedPlayback){
+            const auto digest=Sha256Bytes(CanonicalNeuralSettings(m_cachedSettings)+"|"+CanonicalGuideControls(m_cachedGuides));
+            facts.settings=digest?L"sha256:"+std::wstring(digest->begin(),digest->begin()+std::min<size_t>(16,digest->size())):std::wstring(L"unavailable");
+        }else facts.settings=T(L"compare.save.no_render");
+        const std::string& runtime=EmbeddedRuntimeLock().runtimeVersion;
+        facts.runtime=runtime.empty()?std::wstring(L"unknown"):std::wstring(runtime.begin(),runtime.end());
+        SYSTEMTIME now{};GetLocalTime(&now);wchar_t stamp[32]{};
+        swprintf_s(stamp,L"%04u-%02u-%02u %02u:%02u:%02u",now.wYear,now.wMonth,now.wDay,now.wHour,now.wMinute,now.wSecond);
+        facts.saved=stamp;
+        return facts;
+    }
+    // The composed picture above a footer, as 24-bit BGR rows. The footer is set in a
+    // monospaced face - the facts in it are measured values - on the near-black ground
+    // with the flag rule down its left edge, like the tags on the picture.
+    std::vector<uint8_t> ComposeComparisonImage(const std::vector<uint8_t>& rgba,uint32_t width,uint32_t height,
+                                                const std::vector<std::wstring>& lines,uint32_t& outHeight,uint32_t& stride)const{
+        std::vector<uint8_t> bgr;outHeight=0;stride=0;
+        if(!width||!height||rgba.size()<size_t(width)*height*4u)return bgr;
+        const int fontPx=std::clamp(int(width)/100,12,28),lineHeight=fontPx*3/2,pad=fontPx;
+        const int footer=pad*2+lineHeight*int(lines.size());
+        const int total=int(height)+footer;
+        HDC screen=GetDC(nullptr);HDC dc=CreateCompatibleDC(screen);ReleaseDC(nullptr,screen);
+        if(!dc)return bgr;
+        BITMAPINFO info{};info.bmiHeader.biSize=sizeof(info.bmiHeader);info.bmiHeader.biWidth=int(width);info.bmiHeader.biHeight=-total;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+        void* bits=nullptr;HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        if(!bitmap||!bits){if(bitmap)DeleteObject(bitmap);DeleteDC(dc);return bgr;}
+        const HGDIOBJ oldBitmap=SelectObject(dc,bitmap);
+        auto* pixels=static_cast<uint8_t*>(bits);
+        for(size_t at=0;at<size_t(width)*height;++at){pixels[at*4]=rgba[at*4+2];pixels[at*4+1]=rgba[at*4+1];pixels[at*4+2]=rgba[at*4];pixels[at*4+3]=255;}
+        RECT band{0,int(height),int(width),total};HBRUSH ground=CreateSolidBrush(RGB(5,5,6));FillRect(dc,&band,ground);DeleteObject(ground);
+        RECT rule{0,int(height),std::max(2,fontPx/6),total};HBRUSH flag=CreateSolidBrush(kCompareMark);FillRect(dc,&rule,flag);DeleteObject(flag);
+        HFONT font=CreateFontW(-fontPx,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,FIXED_PITCH|FF_MODERN,L"Cascadia Mono");
+        const HGDIOBJ oldFont=SelectObject(dc,font?font:GetStockObject(ANSI_FIXED_FONT));
+        SetBkMode(dc,TRANSPARENT);
+        for(size_t index=0;index<lines.size();++index){
+            // The first line names the picture, so it takes the brighter step.
+            SetTextColor(dc,index==0?RGB(236,235,232):RGB(164,160,153));
+            RECT line{pad*2,int(height)+pad+int(index)*lineHeight,int(width)-pad,int(height)+pad+int(index+1)*lineHeight};
+            DrawTextW(dc,lines[index].c_str(),-1,&line,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        GdiFlush();
+        stride=(width*3u+3u)&~3u;outHeight=uint32_t(total);
+        bgr.assign(size_t(stride)*outHeight,0);
+        for(int y=0;y<total;++y)for(uint32_t x=0;x<width;++x){
+            const uint8_t* from=pixels+(size_t(y)*width+x)*4;uint8_t* to=bgr.data()+size_t(y)*stride+size_t(x)*3;
+            to[0]=from[0];to[1]=from[1];to[2]=from[2];
+        }
+        SelectObject(dc,oldFont);if(font)DeleteObject(font);SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);
+        return bgr;
+    }
+    bool SaveComparisonImageTo(const std::filesystem::path& path){
+        if(!m_loaded||!m_renderer)return false;
+        // The present first, so an original uploaded since the last one is in the capture.
+        if(!m_renderer->PresentCurrent()){RecoverUnusableRenderer();return false;}
+        std::vector<uint8_t> rgba;uint32_t width=0,height=0;
+        if(!m_renderer->CaptureComposedView(rgba,width,height)){LOG("Save comparison image: the composed view could not be read back.");return false;}
+        const auto lines=compare_provenance::FooterLines(ComparisonProvenance());
+        uint32_t total=0,stride=0;
+        const auto bgr=ComposeComparisonImage(rgba,width,height,lines,total,stride);
+        if(bgr.empty())return false;
+        const HRESULT hr=compare_image::SavePngBgr(path,bgr.data(),width,total,stride);
+        if(FAILED(hr)){LOG("Save comparison image failed hr="<<HexText(hr)<<" path="<<WideToUtf8(path.wstring()));return false;}
+        LOG("Comparison image saved: "<<width<<"x"<<height<<" plus a "<<(total-height)<<" px footer -> "<<WideToUtf8(path.wstring()));
+        return true;
+    }
+    void SaveComparisonImage(){
+        if(!m_loaded||!m_renderer)return;
+        const auto path=PickComparisonImage(m_hwnd,m_loc,compare_provenance::SuggestedName(m_displayTitle,FormatTimecode(Position100ns(),std::max(1.0,m_decoder.FrameRate()),true)));
+        if(path.empty())return;
+        m_sourceNotice=SaveComparisonImageTo(path)?T(L"compare.save.saved")+path.filename().wstring():T(L"compare.save.failed");
+        UpdateCachedStatus();
+    }
+
     // --- The spatial mask on the Mix (P2.6) -------------------------------------
     // Which source the mask state belongs to. Compared by the two strings that
     // identify it before anything is built, because this runs per presented pair.
@@ -4307,6 +4410,7 @@ private:
             app_menu::UpdateRenderActionAvailability(menu,m_loaded,RangeRenderAvailable(),NeuralJobActive(),NeuralJobPaused(),!m_cachedReceiptPath.empty());
             app_menu::UpdateComparisonMenu(menu,ComparisonModesAvailable(),m_loaded&&m_renderer!=nullptr,CommandForComparisonMode(m_comparison.mode),m_zoomStep>0,m_comparison.swap,m_loupe,m_comparison.differenceLuma);
             app_menu::UpdateMaskMenu(menu,m_loaded,!m_maskSource.pixels.empty(),m_maskInvert,MaskFeatherIndex());
+            EnableMenuItem(menu,IDM_SAVE_COMPARISON_IMAGE,MF_BYCOMMAND|(m_loaded&&m_renderer?MF_ENABLED:MF_GRAYED));
             DrawMenuBar(m_hwnd);
         }
     }
@@ -9766,6 +9870,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         // the view Blend became, the neural frame at the Mix.
         case IDM_COMPARE_NEURAL:case IDM_COMPARE_BLEND:SetComparisonMode(ComparisonMode::Neural);break;case IDM_COMPARE_ORIGINAL:SetComparisonMode(ComparisonMode::Original);break;case IDM_COMPARE_SPLIT:SetComparisonMode(ComparisonMode::SplitVertical);break;case IDM_COMPARE_WIPE:SetComparisonMode(ComparisonMode::Wipe);break;
         case IDM_COMPARE_BLEND_LESS:AdjustMix(-0.1f);break;case IDM_COMPARE_BLEND_MORE:AdjustMix(0.1f);break;case IDM_COMPARE_ZOOM:ToggleZoom();break;
+        case IDM_SAVE_COMPARISON_IMAGE:SaveComparisonImage();break;
         case IDM_COMPARE_MASK_LOAD:LoadMaskFromDialog();break;case IDM_COMPARE_MASK_INVERT:ToggleMaskInvert();break;case IDM_COMPARE_MASK_CLEAR:ClearMaskForSource();break;
         case IDM_COMPARE_SWAP:ToggleSwap();break;case IDM_COMPARE_DIFFERENCE:SetComparisonMode(ComparisonMode::Difference);break;
         case IDM_COMPARE_DIFFERENCE_LESS:StepDifferenceGain(-1);break;case IDM_COMPARE_DIFFERENCE_MORE:StepDifferenceGain(+1);break;case IDM_COMPARE_DIFFERENCE_LUMA:ToggleDifferenceLuma();break;case IDM_COMPARE_ZOOM_OUT:ZoomBy(-1,false,PointerOverPicture());break;case IDM_COMPARE_ZOOM_FIT:ZoomToFit();break;case IDM_COMPARE_LOUPE:ToggleLoupe();break;

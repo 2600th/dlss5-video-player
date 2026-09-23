@@ -65,7 +65,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
-| [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
@@ -323,18 +322,6 @@ RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
 amplifies banding; P2.11's metrics are the tool.
 
 ## Player UX
-
-<a id="p221"></a>
-### P2.21 · Export the comparison itself
-
-`S` PNG · `M` clip · **Player**
-
-Save the composed split exactly as shown, with labels and a provenance footer
-(frame, settings digest, runtime), and later a short wipe clip. The demo video
-is assembled by hand today (`docs/media/README.md`). This turns every user
-into a source of verifiable evidence.
-
----
 
 <a id="p225"></a>
 ### P2.25 · Synced multi-pane comparison

@@ -1746,11 +1746,20 @@ bool D3D12Renderer::PresentCurrent(){
 
     uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    const present_scale::Target target=CurrentPresentTarget();
+    RecordViewDraw(cmd,RTV(bi),CurrentPresentTarget());
+    Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
+    if(!DeviceHR(cmd->Close(),"Close static-present command list"))return false;
+    ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
+    // Published whether or not the Present took the frame; see RenderFrameInternal.
+    const bool presented=PresentSwapchain("Static Present");
+    return SignalFrameSlot(slot)&&presented;
+}
+
+void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target){
     D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
     D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};
     cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);
-    auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);
+    cmd->OMSetRenderTargets(1,&rtv,FALSE,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     const bool finalView=(m_debugView==DebugView::Final);
@@ -1772,12 +1781,51 @@ bool D3D12Renderer::PresentCurrent(){
     if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
-    Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
-    if(!DeviceHR(cmd->Close(),"Close static-present command list"))return false;
-    ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    // Published whether or not the Present took the frame; see RenderFrameInternal.
-    const bool presented=PresentSwapchain("Static Present");
-    return SignalFrameSlot(slot)&&presented;
+}
+
+bool D3D12Renderer::CaptureComposedView(std::vector<uint8_t>&rgba,uint32_t&width,uint32_t&height){
+    rgba.clear();width=0;height=0;
+    if(m_gpuUnusable||!m_device||!m_queue||!m_swapchain||!m_rootSig||!m_rtvHeap)return false;
+    FollowWindowSize();
+    const present_scale::Target target=CurrentPresentTarget();
+    if(!target.width||!target.height)return false;
+    // Nothing in flight, so any slot's upload list is free and the capture sees the
+    // state the last present left.
+    if(!WaitGPUForContinuedUse())return false;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,target.width,target.height,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+    ComPtr<ID3D12Resource> composed;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&composed)),"Create composed-view capture"))return false;
+    composed->SetName(L"Composed_View_Capture");
+    m_device->CreateRenderTargetView(composed.Get(),nullptr,RTV(ComposedRTV));
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};uint32_t rows=0;uint64_t rowBytes=0,total=0;
+    m_device->GetCopyableFootprints(&desc,0,1,0,&fp,&rows,&rowBytes,&total);
+    D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=total;buffer.Height=1;buffer.DepthOrArraySize=1;buffer.MipLevels=1;buffer.SampleDesc={1,0};buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    auto readbackHeap=HeapProps(D3D12_HEAP_TYPE_READBACK);
+    ComPtr<ID3D12Resource> readback;
+    if(!HR(m_device->CreateCommittedResource(&readbackHeap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"Create composed-view readback"))return false;
+    const uint32_t slot=m_frameSlot%FrameCount;
+    if(!DeviceHR(m_uploadAllocators[slot]->Reset(),"Reset composed-view allocator"))return false;
+    auto*cmd=m_uploadCmds[slot].Get();
+    if(!DeviceHR(cmd->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset composed-view list"))return false;
+    ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
+    RecordViewDraw(cmd,RTV(ComposedRTV),target);
+    Barrier(cmd,composed.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=composed.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=readback.Get();destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;destination.PlacedFootprint=fp;
+    cmd->CopyTextureRegion(&destination,0,0,0,&source,nullptr);
+    if(!DeviceHR(cmd->Close(),"Close composed-view list"))return false;
+    ID3D12CommandList*lists[]={cmd};m_queue->ExecuteCommandLists(1,lists);
+    if(!WaitGPUForContinuedUse())return false;
+    const D3D12_RANGE readRange{0,static_cast<SIZE_T>(total)};void*mapped=nullptr;
+    if(!HR(readback->Map(0,&readRange,&mapped),"Map composed-view readback"))return false;
+    const size_t tight=size_t(target.width)*4u;
+    rgba.resize(tight*target.height);
+    for(uint32_t y=0;y<target.height;++y)
+        memcpy(rgba.data()+tight*y,static_cast<const uint8_t*>(mapped)+fp.Offset+size_t(fp.Footprint.RowPitch)*y,tight);
+    const D3D12_RANGE written{0,0};readback->Unmap(0,&written);
+    width=target.width;height=target.height;
+    return true;
 }
 
 // Reads back every slot whose DLSS timestamps were resolved by a fence value the

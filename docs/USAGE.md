@@ -226,6 +226,13 @@ To look closely:
   larger than the window is cropped around the centre. `A` and the toolbar's
   Fit/Fill button go back to Fit or Fill.
 
+**File > Save comparison image...** (`Ctrl+Shift+S`) saves exactly what the
+picture shows - the mode, Mix, zoom, tags, mask and loupe - as a PNG at the
+window's resolution, with a footer that records the player version, the video,
+the timecode and frame number, the view settings, a digest of the render's
+neural settings, the neural runtime's version and when it was saved. It is
+meant as evidence you can share: the footer travels with the pixels.
+
 Pause and step with `.` to judge a single frame; `D` still switches the whole
 view between original and neural. The mode, Mix, split position, swap, zoom step and difference settings
 are remembered in `[Comparison]`.

@@ -63,6 +63,10 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(examples), L"Game trailers");
     AppendMenuW(recent, MF_STRING | MF_GRAYED, IDM_RECENT_VIDEO_FIRST, L"No recent videos");
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent videos");
+    // A picture of what is on screen: the one thing File writes rather than opens, kept
+    // in the file group because a group of one breaks the menu's own rule (only Exit
+    // may stand alone).
+    AppendMenuW(file, MF_STRING | MF_GRAYED, IDM_SAVE_COMPARISON_IMAGE, localizer.Get(L"menu.save_comparison").c_str());
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr); add(file, IDM_EXIT, L"menu.exit");
     // Transport, and the audio track is part of it: which track is playing is a
     // property of playback, and alone behind its own separator it was a group of
@@ -647,7 +651,8 @@ std::vector<ShortcutRow> CollectShortcuts(HMENU menuBar, const Localizer& locali
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown)
 {
     if (controlDown) {
-        if (shiftDown) return std::nullopt;
+        // Ctrl+Shift+S beside Ctrl+S: both write a file of what is loaded.
+        if (shiftDown) return key == 'S' ? std::optional<UINT>(IDM_SAVE_COMPARISON_IMAGE) : std::nullopt;
         switch (key) {
         case 'G': return IDM_GOTO_TIMECODE;
         case 'R': return IDM_RENDER_RANGE;
