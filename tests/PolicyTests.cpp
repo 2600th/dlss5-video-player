@@ -1014,6 +1014,11 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     CHECK(has(L"File", L"Open file", L"Ctrl+O"));
     CHECK(has(L"Playback", L"Stop", L"S"));
     CHECK(has(L"Playback", L"Mark In", L"I"));
+    // The subtitle keys live in Playback > Subtitles, greyed until a source is
+    // loaded, and are listed all the same.
+    CHECK(has(L"Playback", L"Next subtitles", L"V"));
+    CHECK(has(L"Playback", L"Subtitles earlier (−0.1 s)", L"H"));
+    CHECK(has(L"Playback", L"Subtitles later (+0.1 s)", L"J"));
     // Runs of spaces in a menu's accelerator column close up on the sheet.
     CHECK(has(L"Playback", L"Play / Pause", L"Space (Overlay: Ctrl+Alt+Space)"));
     // A submenu's commands are found, under the top-level menu they live in.
@@ -2112,6 +2117,12 @@ void range_preview_and_comparison_menus_route_keys_and_gate_availability_test()
     CHECK(CommandForPlayerKey(VK_OEM_6, false, true) == app_menu::IDM_COMPARE_DIFFERENCE_MORE);
     CHECK(CommandForPlayerKey('C', false, false) == app_menu::IDM_COMPARE_NEXT_MODE);
     CHECK(CommandForPlayerKey('C', false, true) == app_menu::IDM_COMPARE_PREVIOUS_MODE);
+    // Subtitles: V steps through them, H and J move them earlier and later.
+    CHECK(CommandForPlayerKey('V', false, false) == app_menu::IDM_SUBTITLE_NEXT);
+    CHECK(CommandForPlayerKey('H', false, false) == app_menu::IDM_SUBTITLE_EARLIER);
+    CHECK(CommandForPlayerKey('J', false, false) == app_menu::IDM_SUBTITLE_LATER);
+    CHECK(!CommandForPlayerKey('V', false, true).has_value());
+    CHECK(!CommandForPlayerKey('V', true, false).has_value());
     // Ctrl+Alt+C is the overlay hotkey for the adjustments; Ctrl+C stays unclaimed.
     CHECK(!CommandForPlayerKey('C', true, false).has_value());
     // Existing single-letter and Ctrl accelerators keep their owners.
@@ -11319,6 +11330,49 @@ void audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test()
     DestroyMenu(menu);
 }
 
+// Playback > Subtitles: Off, one row per stream and the loaded file are one
+// radio group at the top of the popup, rebuilt in place above the commands.
+void subtitle_menu_lists_off_the_streams_and_the_file_test()
+{
+    Localizer localizer;
+    const HMENU menu = app_menu::CreateMenuBar(localizer, true);
+    CHECK(menu != nullptr);
+    if (!menu) return;
+    std::vector<MenuEntry> entries;
+    collect_menu_entries(menu, entries);
+    // Nothing loaded: Off alone, greyed, and the commands below it.
+    CHECK(has_menu_entry(entries, L"Off", app_menu::IDM_SUBTITLE_OFF));
+    CHECK(GetMenuState(menu, app_menu::IDM_SUBTITLE_OFF, MF_BYCOMMAND) & MF_GRAYED);
+    CHECK(has_menu_entry(entries, L"Next subtitles\tV", app_menu::IDM_SUBTITLE_NEXT));
+    CHECK(has_menu_entry(entries, L"Load subtitle file…", app_menu::IDM_SUBTITLE_LOAD));
+
+    const std::wstring labels[] = {L"1. English - SRT", L"2. French - Styled & Co - ASS"};
+    app_menu::UpdateSubtitles(menu, L"Off", labels, L"File: Film.srt", app_menu::IDM_SUBTITLE_TRACK_FIRST + 1, true);
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    CHECK(has_menu_entry(entries, L"Off", app_menu::IDM_SUBTITLE_OFF));
+    CHECK(has_menu_entry(entries, labels[0], app_menu::IDM_SUBTITLE_TRACK_FIRST));
+    CHECK(has_menu_entry(entries, L"2. French - Styled && Co - ASS", app_menu::IDM_SUBTITLE_TRACK_FIRST + 1));
+    CHECK(has_menu_entry(entries, L"File: Film.srt", app_menu::IDM_SUBTITLE_FILE));
+    CHECK(GetMenuState(menu, app_menu::IDM_SUBTITLE_TRACK_FIRST + 1, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK_EQ(UINT{0}, GetMenuState(menu, app_menu::IDM_SUBTITLE_OFF, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK_EQ(UINT{0}, GetMenuState(menu, app_menu::IDM_SUBTITLE_FILE, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK_EQ(UINT{0}, GetMenuState(menu, app_menu::IDM_SUBTITLE_LOAD, MF_BYCOMMAND) & MF_GRAYED);
+
+    // Rebuilt for a source with no streams: the old rows go, the commands stay.
+    app_menu::UpdateSubtitles(menu, L"Off", {}, L"", app_menu::IDM_SUBTITLE_OFF, true);
+    entries.clear();
+    collect_menu_entries(menu, entries);
+    CHECK(!has_menu_entry(entries, labels[0], app_menu::IDM_SUBTITLE_TRACK_FIRST));
+    CHECK(!has_menu_entry(entries, L"File: Film.srt", app_menu::IDM_SUBTITLE_FILE));
+    CHECK(GetMenuState(menu, app_menu::IDM_SUBTITLE_OFF, MF_BYCOMMAND) & MF_CHECKED);
+    CHECK(has_menu_entry(entries, L"Next subtitles\tV", app_menu::IDM_SUBTITLE_NEXT));
+    const HMENU popup = app_menu::FindMenuContainingCommand(menu, app_menu::IDM_SUBTITLE_OFF);
+    CHECK(popup != nullptr);
+    if (popup) CHECK_EQ(8, GetMenuItemCount(popup));
+    DestroyMenu(menu);
+}
+
 // Subtitles are off unless the file asks for them: a track marked default is
 // what its author wants shown, and failing that a forced one, which carries
 // only the lines nobody could follow otherwise. A stream the player cannot draw
@@ -12430,6 +12484,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_helper_stderr_keeps_a_bounded_tail_and_reports_only_bad_exits_test),
     TEST_CASE(audio_child_stderr_is_drained_and_logged_when_it_fails_test),
     TEST_CASE(audio_track_menu_lists_the_tracks_and_marks_the_one_playing_test),
+    TEST_CASE(subtitle_menu_lists_off_the_streams_and_the_file_test),
     TEST_CASE(subtitle_track_choice_follows_the_container_test),
     TEST_CASE(subtitle_sidecar_is_the_video_name_with_a_subtitle_extension_test),
     TEST_CASE(subtitle_text_encoding_is_detected_test),

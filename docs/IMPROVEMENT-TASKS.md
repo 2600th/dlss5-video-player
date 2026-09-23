@@ -63,7 +63,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
 | [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
-| [P3.2](#p32) | Subtitles via libass, composited after the network | M-L | Player | |
 | [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
 | [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
 | [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
@@ -254,30 +253,6 @@ amplifies banding; P2.11's metrics are the tool.
 - **Never toggle the OS HDR setting.**
 
 P2.3's Main10 export is the first half of this task.
-
----
-
-<a id="p32"></a>
-### P3.2 · Subtitles via libass, composited after the network
-
-`M-L` · **Player** · _old 3.7_
-
-A player that cannot show subtitles pushes people to export and watch
-elsewhere, which undercuts the whole idea of watching while it renders.
-
-**Composite after the network.** Subtitles are HUD, and the model warps and
-shimmers static text.
-
-**Details that are routinely got wrong:**
-- `ass_set_storage_size` is mandatory;
-- use `ASS_FONTPROVIDER_DIRECTWRITE`, plus `ass_add_font` for fonts embedded
-  in MKV attachments;
-- render at output resolution, not video resolution.
-
-**Formats:** SRT, ASS/SSA, PGS, VobSub, WebVTT and `mov_text`.
-
-**Baseline UX:** delay adjustment, switching track mid-play, loading external
-files automatically, and detecting the text encoding.
 
 ---
 

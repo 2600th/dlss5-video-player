@@ -38,6 +38,7 @@
 #include "TemporalSettings.h"
 #include "StrictJson.h"
 #include "AudioPlayer.h"
+#include "SubtitleOverlay.h"
 #include "Localization.h"
 #include "AppMenu.h"
 #include "UiLayout.h"
@@ -1342,6 +1343,19 @@ static std::filesystem::path PickMaskImage(HWND owner, const Localizer& loc) {
     return GetOpenFileNameW(&o)?std::filesystem::path(path):std::filesystem::path{};
 }
 
+// A subtitle file for the loaded source (P3.2): anything FFmpeg reads subtitles from.
+static std::filesystem::path PickSubtitleFile(HWND owner, const Localizer& loc) {
+    wchar_t path[32768]{};
+    std::wstring filter=loc.Get(L"subtitles.filter");filter.push_back(L'\0');
+    filter+=L"*.srt;*.ass;*.ssa;*.vtt;*.sup;*.idx;*.mks;*.mkv";filter.push_back(L'\0');
+    filter+=loc.Get(L"dialog.all");filter.push_back(L'\0');filter+=L"*.*";filter.push_back(L'\0');filter.push_back(L'\0');
+    const std::wstring title=loc.Get(L"subtitles.dialog");
+    OPENFILENAMEW o{};o.lStructSize=sizeof(o);o.hwndOwner=owner;o.lpstrFile=path;o.nMaxFile=static_cast<DWORD>(std::size(path));
+    o.lpstrFilter=filter.c_str();o.nFilterIndex=1;o.lpstrTitle=title.c_str();
+    o.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_EXPLORER|OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&o)?std::filesystem::path(path):std::filesystem::path{};
+}
+
 static std::wstring TimeText(double sec) {
     if(!std::isfinite(sec)||sec<0) sec=0; int s=int(sec+0.5),h=s/3600; s%=3600; int m=s/60; s%=60; wchar_t b[64];
     if(h) swprintf_s(b,L"%d:%02d:%02d",h,m,s); else swprintf_s(b,L"%02d:%02d",m,s); return b;
@@ -2231,6 +2245,9 @@ public:
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
         }
+        // Ahead of both presents below, so a subtitle that changed is in the
+        // frame or the paused re-present this tick makes.
+        ServiceSubtitles();
         // A paused frame is presented when something invalidated it - a window
         // resize or repaint, or a renderer setting the present pass reads - and
         // not otherwise. It used to be re-presented at 60 Hz whether or not
@@ -2432,6 +2449,237 @@ private:
             subject=codec.empty()?T(L"audio.passthrough.unknown_track"):std::wstring(codec.begin(),codec.end());
         }
         return Format(T(key),subject.c_str());
+    }
+
+    // ---- Subtitles (P3.2) ----------------------------------------------------
+    //
+    // Drawn by an ffmpeg child (SubtitleOverlay) at the size the picture has on
+    // screen, and composited by the renderer's window compositor after everything
+    // else, so no subtitle can reach the cache, the model's input or an export.
+    // What is chosen lives here and is served every tick from ServiceSubtitles;
+    // the decisions are SubtitlePolicy.h's, and nothing below waits on a child.
+    std::wstring SubtitleSourceKey()const{
+        const std::wstring identity=MaskIdentity();
+        return identity.empty()?std::wstring{}:compare_mask::SourceKey(identity);
+    }
+    std::optional<subtitle::Choice> RememberedSubtitleChoice()const{
+        const std::wstring key=SubtitleSourceKey();
+        if(key.empty())return std::nullopt;
+        wchar_t saved[4096]{};
+        GetPrivateProfileStringW(L"Subtitles",key.c_str(),L"",saved,static_cast<DWORD>(std::size(saved)),SettingsPath().c_str());
+        return subtitle::ParseChoice(saved);
+    }
+    // Only a choice the viewer made is kept - a track, a file, off, a delay - and
+    // it comes back with the source, like its mask.
+    void RememberSubtitleChoice(){
+        const std::wstring key=SubtitleSourceKey();
+        if(key.empty())return;
+        const auto path=SettingsPath();
+        std::vector<wchar_t> section(65536,L'\0');
+        const DWORD length=GetPrivateProfileSectionW(L"Subtitles",section.data(),static_cast<DWORD>(section.size()),path.c_str());
+        std::map<std::wstring,subtitle::Choice> choices;uint64_t newest=0;
+        for(size_t at=0;at<length&&section[at];){
+            const std::wstring line(section.data()+at);at+=line.size()+1;
+            const size_t equals=line.find(L'=');if(equals==std::wstring::npos)continue;
+            if(const auto choice=subtitle::ParseChoice(std::wstring_view(line).substr(equals+1))){
+                choices[line.substr(0,equals)]=*choice;newest=std::max(newest,choice->sequence);
+            }
+        }
+        subtitle::Choice choice=m_subtitleChoice;choice.delayMs=m_subtitleDelayMs;choice.sequence=newest+1;
+        if(choice.mode==subtitle::Choice::Mode::File)choice.file=m_subtitleFile;
+        choices[key]=choice;
+        WritePrivateProfileStringW(L"Subtitles",key.c_str(),subtitle::FormatChoice(choice).c_str(),path.c_str());
+        for(const std::wstring& stale:subtitle::Evict(choices))WritePrivateProfileStringW(L"Subtitles",stale.c_str(),nullptr,path.c_str());
+    }
+    // A new source starts with nothing: its streams are listed on the worker and
+    // the choice is made when the list arrives (TakeSubtitleDiscoveries).
+    void SyncSubtitlesToSource(){
+        const std::wstring source=m_loaded?m_path:std::wstring{};
+        if(source==m_subtitlesForPath)return;
+        m_subtitlesForPath=source;
+        m_subtitleTracks.clear();m_subtitleSidecar.clear();m_subtitleOrigin=0.0;
+        m_subtitleFile.clear();m_subtitleFileCodec.clear();m_subtitleFileCharenc.clear();m_subtitleProbeFile.clear();
+        m_subtitleChoice={};m_subtitleDelayMs=0;m_subtitleWanted.reset();m_subtitleClock=-1.0;m_subtitleDiscovering=false;
+        m_subtitles.Hide();
+        if(m_renderer)m_renderer->SetSubtitleOverlay(nullptr,0,0);
+        m_subtitleFrame.reset();
+        if(!source.empty()){
+            // A stream has no folder to look in and no container this can read
+            // cheaply; only a file the viewer loaded for it before comes back.
+            const bool local=_wcsnicmp(source.c_str(),L"http://",7)!=0&&_wcsnicmp(source.c_str(),L"https://",8)!=0;
+            if(local){m_subtitles.Discover(source,true);m_subtitleDiscovering=true;}
+            else ChooseInitialSubtitles();
+        }
+        UpdateSubtitleMenu();
+    }
+    // What a source opens with: what the viewer chose for it before, else the file
+    // beside it, else the stream its container marks (subtitle::SelectDefault).
+    void ChooseInitialSubtitles(){
+        using Mode=subtitle::Choice::Mode;
+        const auto remembered=RememberedSubtitleChoice();
+        m_subtitleDelayMs=remembered?remembered->delayMs:0;
+        const Mode mode=remembered?remembered->mode:Mode::Auto;
+        if(mode==Mode::Off){SelectSubtitlesOff(false);return;}
+        if(mode==Mode::Track&&remembered->track<int(m_subtitleTracks.size())){SelectSubtitleTrack(remembered->track,false);return;}
+        std::error_code error;
+        if(mode==Mode::File&&std::filesystem::is_regular_file(remembered->file,error)){LoadSubtitleFile(remembered->file,false);return;}
+        if(!m_subtitleSidecar.empty()){LoadSubtitleFile(m_subtitleSidecar,false);return;}
+        ChooseContainerSubtitles();
+    }
+    void ChooseContainerSubtitles(){
+        const size_t chosen=subtitle::SelectDefault(m_subtitleTracks);
+        if(chosen!=subtitle::kNoTrack)SelectSubtitleTrack(int(chosen),false);else SelectSubtitlesOff(false);
+    }
+    void TakeSubtitleDiscoveries(){
+        while(auto found=m_subtitles.TakeDiscovery()){
+            if(m_subtitleDiscovering&&found->media==m_subtitlesForPath){
+                m_subtitleDiscovering=false;
+                m_subtitleTracks=std::move(found->tracks);m_subtitleSidecar=found->sidecar;m_subtitleOrigin=found->origin;
+                ChooseInitialSubtitles();
+                UpdateSubtitleMenu();
+            }else if(!m_subtitleProbeFile.empty()&&found->media==m_subtitleProbeFile){
+                const bool chosenNow=m_subtitleProbeRemember;
+                m_subtitleProbeFile.clear();
+                if(!found->probed||found->tracks.empty()||found->tracks.front().Drawn()==subtitle::Kind::Unsupported){
+                    LOG("Subtitles: the file has no subtitles this player can draw.");
+                    // Picked just now: say so. Loaded by itself: the container's
+                    // own choice stands instead.
+                    if(chosenNow){m_sourceNotice=T(L"subtitles.failed");UpdateCachedStatus();}
+                    else ChooseContainerSubtitles();
+                    UpdateSubtitleMenu();
+                    continue;
+                }
+                m_subtitleFile=found->media;m_subtitleFileCodec=found->tracks.front().codec;m_subtitleFileCharenc=found->charenc;
+                SelectSubtitleFile(chosenNow);
+            }
+        }
+    }
+    void SelectSubtitlesOff(bool remember){
+        if(!m_loaded)return;
+        m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Off;m_subtitleWanted.reset();
+        if(remember)RememberSubtitleChoice();
+        UpdateSubtitleMenu();
+    }
+    void SelectSubtitleTrack(int index,bool remember){
+        if(!m_loaded||index<0||size_t(index)>=m_subtitleTracks.size())return;
+        const subtitle::Track& track=m_subtitleTracks[size_t(index)];
+        if(track.Drawn()==subtitle::Kind::Unsupported){LOG("Subtitles: "<<subtitle::Describe(track)<<" cannot be drawn.");return;}
+        m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::Track;m_subtitleChoice.track=index;
+        SubtitleOverlay::Source source;
+        source.path=m_path;source.stream=index;source.codec=track.codec;source.origin=m_subtitleOrigin;
+        m_subtitleWanted=source;
+        LOG("Subtitles: showing "<<subtitle::Describe(track)<<'.');
+        if(remember)RememberSubtitleChoice();
+        UpdateSubtitleMenu();
+    }
+    // A file is probed on the worker first - for what it holds and how its text
+    // is encoded - and shown when the answer arrives.
+    void LoadSubtitleFile(const std::wstring& path,bool chosenNow){
+        if(!m_loaded||path.empty())return;
+        m_subtitleProbeFile=path;m_subtitleProbeRemember=chosenNow;
+        m_subtitles.Discover(path,false);
+    }
+    void SelectSubtitleFile(bool remember){
+        if(!m_loaded||m_subtitleFile.empty())return;
+        m_subtitleChoice={};m_subtitleChoice.mode=subtitle::Choice::Mode::File;m_subtitleChoice.file=m_subtitleFile;
+        SubtitleOverlay::Source source;
+        source.path=m_subtitleFile;source.external=true;source.codec=m_subtitleFileCodec;source.charenc=m_subtitleFileCharenc;
+        m_subtitleWanted=source;
+        LOG("Subtitles: showing a subtitle file ("<<m_subtitleFileCodec<<").");
+        if(remember)RememberSubtitleChoice();
+        UpdateSubtitleMenu();
+    }
+    void LoadSubtitleFromDialog(){
+        if(!m_loaded)return;
+        const auto path=PickSubtitleFile(m_hwnd,m_loc);
+        if(!path.empty())LoadSubtitleFile(path.wstring(),true);
+    }
+    // V: off, each stream the player can draw, the loaded file, and round again.
+    void NextSubtitles(){
+        if(!m_loaded)return;
+        using Mode=subtitle::Choice::Mode;
+        std::vector<int> order{-1};
+        for(size_t index=0;index<m_subtitleTracks.size();++index)
+            if(m_subtitleTracks[index].Drawn()!=subtitle::Kind::Unsupported)order.push_back(int(index));
+        if(!m_subtitleFile.empty())order.push_back(-2);
+        const int current=m_subtitleChoice.mode==Mode::Track?m_subtitleChoice.track:m_subtitleChoice.mode==Mode::File?-2:-1;
+        const auto at=std::find(order.begin(),order.end(),current);
+        const int next=order[at==order.end()?0:size_t(std::distance(order.begin(),at)+1)%order.size()];
+        std::wstring label;
+        if(next==-1){SelectSubtitlesOff(true);label=T(L"menu.subtitles_off");}
+        else if(next==-2){SelectSubtitleFile(true);label=std::filesystem::path(m_subtitleFile).filename().wstring();}
+        else{SelectSubtitleTrack(next,true);label=Utf8ToWide(subtitle::Describe(m_subtitleTracks[size_t(next)]));}
+        m_sourceNotice=T(L"menu.subtitles")+L": "+label;UpdateCachedStatus();
+    }
+    std::wstring SubtitleDelayText()const{
+        wchar_t text[32]{};swprintf_s(text,L"%+.1f s",double(m_subtitleDelayMs)/1000.0);return text;
+    }
+    // H and J: 0.1 s at a time, direction 0 back to none. The clock the overlay
+    // is asked about moves with it, which is all a delay is (SubtitleClock).
+    void StepSubtitleDelay(int direction){
+        if(!m_loaded)return;
+        m_subtitleDelayMs=direction?subtitle::StepDelay(m_subtitleDelayMs,direction):0;
+        RememberSubtitleChoice();
+        m_sourceNotice=T(L"subtitles.delay")+SubtitleDelayText();UpdateCachedStatus();
+        UpdateSubtitleMenu();
+    }
+    void UpdateSubtitleMenu(){
+        if(!m_hwnd)return;
+        const HMENU menu=GetMenu(m_hwnd);
+        if(!menu)return;
+        std::vector<std::wstring> labels;
+        for(const auto& track:m_subtitleTracks)labels.push_back(Utf8ToWide(subtitle::Describe(track)));
+        const std::wstring file=m_subtitleFile.empty()?std::wstring{}:
+            T(L"menu.subtitles_file")+std::filesystem::path(m_subtitleFile).filename().wstring();
+        UINT chosen=IDM_SUBTITLE_OFF;
+        if(m_subtitleChoice.mode==subtitle::Choice::Mode::Track)chosen=IDM_SUBTITLE_TRACK_FIRST+UINT(m_subtitleChoice.track);
+        else if(m_subtitleChoice.mode==subtitle::Choice::Mode::File)chosen=IDM_SUBTITLE_FILE;
+        app_menu::UpdateSubtitles(menu,T(L"menu.subtitles_off"),labels,file,chosen,m_loaded);
+        std::wstring reset=T(L"menu.subtitles_delay_reset");
+        if(m_subtitleDelayMs)reset+=L" ("+SubtitleDelayText()+L")";
+        if(const HMENU owner=app_menu::FindMenuContainingCommand(menu,IDM_SUBTITLE_DELAY_RESET))
+            app_menu::SetMenuCommandText(owner,IDM_SUBTITLE_DELAY_RESET,reset);
+        DrawMenuBar(m_hwnd);
+    }
+    // Every tick: keeps the child drawing what is chosen at the size the picture
+    // has, tells it when the clock jumped, and hands the renderer a new picture
+    // when there is one. Paused, a new picture marks the present stale, and the
+    // tick's paused present shows it.
+    void ServiceSubtitles(){
+        SyncSubtitlesToSource();
+        TakeSubtitleDiscoveries();
+        if(!m_loaded||!m_renderer)return;
+        // A rebuilt renderer holds no picture of its own.
+        if(m_subtitleRenderer!=m_renderer.get()){m_subtitleRenderer=m_renderer.get();m_subtitleFrame.reset();}
+        if(!m_subtitleWanted){
+            if(m_subtitles.Showing())m_subtitles.Hide();
+            if(m_subtitleFrame||m_renderer->SubtitleOverlayShown()){m_renderer->SetSubtitleOverlay(nullptr,0,0);m_subtitleFrame.reset();}
+            return;
+        }
+        const double clock=subtitle::SubtitleClock(Position(),m_subtitleDelayMs);
+        SubtitleOverlay::Canvas canvas;
+        canvas.width=m_renderer->BackbufferW();canvas.height=m_renderer->BackbufferH();
+        canvas.videoWidth=m_decoder.Width();canvas.videoHeight=m_decoder.Height();
+        canvas.rate=subtitle::CanvasRate(m_decoder.FrameRate());canvas.duration=m_decoder.DurationSeconds();
+        const SubtitleOverlay::Source* shown=m_subtitles.CurrentSource();
+        bool start=!shown||!(*shown==*m_subtitleWanted);
+        if(!start&&!(m_subtitles.CurrentCanvas()==canvas)){
+            // A window being dragged to a new size passes through dozens; the
+            // picture already up is stretched until one of them holds.
+            const ULONGLONG now=GetTickCount64();
+            if(canvas.width!=m_subtitleResizeW||canvas.height!=m_subtitleResizeH){
+                m_subtitleResizeW=canvas.width;m_subtitleResizeH=canvas.height;m_subtitleResizeAt=now;
+            }else if(now-m_subtitleResizeAt>=250)start=true;
+        }
+        if(start&&subtitle::CanvasUsable(canvas.width,canvas.height))m_subtitles.Show(*m_subtitleWanted,canvas,clock);
+        else if(m_subtitleClock>=0.0&&subtitle::ClockJumped(m_subtitleClock,clock))m_subtitles.Seek(clock);
+        m_subtitleClock=clock;
+        const auto frame=m_subtitles.FrameAt(clock);
+        if(frame==m_subtitleFrame)return;
+        m_subtitleFrame=frame;
+        if(!frame||frame->Empty()){m_renderer->SetSubtitleOverlay(nullptr,0,0);return;}
+        if(!m_renderer->SetSubtitleOverlay(frame->bgra.data(),frame->width,frame->height))
+            LOG("Subtitles: the renderer did not take a "<<frame->width<<"x"<<frame->height<<" picture.");
     }
     void RecordRecent(const NeuralJobCompletion& completion,bool preserveCache=false){
         if(!m_recent)return;
@@ -10230,6 +10478,8 @@ private:
         if(const auto quality=app_menu::YouTubeQualityForCommand(id)){SetYouTubeSourceQuality(*quality);return;}
         if(id>=IDM_AUDIO_TRACK_FIRST&&id<IDM_AUDIO_TRACK_FIRST+IDM_AUDIO_TRACK_COUNT){
             ChooseAudioTrack(int(id-IDM_AUDIO_TRACK_FIRST));return;}
+        if(id>=IDM_SUBTITLE_TRACK_FIRST&&id<IDM_SUBTITLE_TRACK_FIRST+IDM_SUBTITLE_TRACK_COUNT){
+            SelectSubtitleTrack(int(id-IDM_SUBTITLE_TRACK_FIRST),true);return;}
         switch(id){
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_NEURAL_RENDERING:ToggleNeuralRendering();break;
         case IDM_DLSS_UPSCALING:ToggleUpscaling();break;
@@ -10262,6 +10512,10 @@ private:
 case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;case IDM_RENDER_REPORT:ShowRenderReport();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
+        case IDM_SUBTITLE_OFF:SelectSubtitlesOff(true);break;case IDM_SUBTITLE_FILE:SelectSubtitleFile(true);break;
+        case IDM_SUBTITLE_LOAD:LoadSubtitleFromDialog();break;case IDM_SUBTITLE_NEXT:NextSubtitles();break;
+        case IDM_SUBTITLE_EARLIER:StepSubtitleDelay(-1);break;case IDM_SUBTITLE_LATER:StepSubtitleDelay(+1);break;
+        case IDM_SUBTITLE_DELAY_RESET:StepSubtitleDelay(0);break;
         case IDM_COMPARE_TOGGLE:ToggleSideBySide();break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         // IDM_COMPARE_BLEND has no menu row any more; anything that still sends it gets
@@ -10564,6 +10818,28 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     uint64_t m_maskRevision=0,m_maskUploadedRevision=0,m_maskRefusedRevision=0;
     const D3D12Renderer* m_maskRefusedBy=nullptr;
     std::wstring m_maskForPath,m_maskForPage,m_maskSourceKey;
+    // Subtitles (P3.2): the worker that probes and draws them, what the loaded
+    // source offers (its streams, the file beside it, where its clock starts),
+    // a file loaded for it, the viewer's choice and delay, what the overlay is
+    // asked to draw, and the picture the renderer holds.
+    SubtitleOverlay m_subtitles;
+    std::wstring m_subtitlesForPath;
+    bool m_subtitleDiscovering=false;
+    std::vector<subtitle::Track> m_subtitleTracks;
+    std::wstring m_subtitleSidecar;
+    double m_subtitleOrigin=0.0;
+    std::wstring m_subtitleFile,m_subtitleFileCharenc;
+    std::string m_subtitleFileCodec;
+    std::wstring m_subtitleProbeFile;
+    bool m_subtitleProbeRemember=false;
+    subtitle::Choice m_subtitleChoice;
+    int m_subtitleDelayMs=0;
+    std::optional<SubtitleOverlay::Source> m_subtitleWanted;
+    std::shared_ptr<const subtitle::Frame> m_subtitleFrame;
+    const D3D12Renderer* m_subtitleRenderer=nullptr;
+    double m_subtitleClock=-1.0;
+    uint32_t m_subtitleResizeW=0,m_subtitleResizeH=0;
+    ULONGLONG m_subtitleResizeAt=0;
     // A middle-button pan in progress, and where the last pan step left the pointer.
     bool m_middlePan=false,m_renderTracking=false;
     POINT m_panLast{};

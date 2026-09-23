@@ -84,6 +84,25 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     add(audioTracks, IDM_AUDIO_PASSTHROUGH, L"menu.audio_passthrough");
     AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(audioTracks),
                 localizer.Get(L"menu.audio").c_str());
+    // Subtitles beside Audio, for the same reason: which ones are up
+    // is a property of playback. The choices first (UpdateSubtitles fills them),
+    // then loading a file, then the timing.
+    // Greyed until something is loaded; UpdateSubtitles enables them.
+    HMENU subtitles = CreatePopupMenu();
+    const auto addGrayed = [&](UINT command, const wchar_t* key) {
+        AppendMenuW(subtitles, MF_STRING | MF_GRAYED, command, localizer.Get(key).c_str());
+    };
+    addGrayed(IDM_SUBTITLE_OFF, L"menu.subtitles_off");
+    AppendMenuW(subtitles, MF_SEPARATOR, 0, nullptr);
+    addGrayed(IDM_SUBTITLE_NEXT, L"menu.subtitles_next");
+    addGrayed(IDM_SUBTITLE_LOAD, L"menu.subtitles_load");
+    AppendMenuW(subtitles, MF_SEPARATOR, 0, nullptr);
+    addGrayed(IDM_SUBTITLE_EARLIER, L"menu.subtitles_earlier");
+    addGrayed(IDM_SUBTITLE_LATER, L"menu.subtitles_later");
+    addGrayed(IDM_SUBTITLE_DELAY_RESET, L"menu.subtitles_delay_reset");
+    CheckMenuRadioItem(subtitles, 0, 0, 0, MF_BYPOSITION);
+    AppendMenuW(play, MF_POPUP, reinterpret_cast<UINT_PTR>(subtitles),
+                localizer.Get(L"menu.subtitles").c_str());
     AppendMenuW(play, MF_SEPARATOR, 0, nullptr);
     // The range tools. IDM_PAUSE_NEURAL_RENDER used to sit alone below these:
     // it is a control over the neural RENDER, not over playback, and it now
@@ -377,6 +396,44 @@ void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int 
         static_cast<UINT>(selected>=0&&size_t(selected)<shown?size_t(selected):0);
     CheckMenuRadioItem(tracks,IDM_AUDIO_TRACK_FIRST,
                        IDM_AUDIO_TRACK_FIRST+static_cast<UINT>(shown)-1,chosen,MF_BYCOMMAND);
+}
+
+void UpdateSubtitles(HMENU menuBar, const std::wstring& offLabel, std::span<const std::wstring> trackLabels,
+                     const std::wstring& fileLabel, UINT chosen, bool loaded)
+{
+    HMENU menu=find_menu_containing_command(menuBar,IDM_SUBTITLE_OFF);
+    if(!menu)return;
+    // The group is everything above the first separator.
+    while(GetMenuItemCount(menu)>0){
+        const UINT id=GetMenuItemID(menu,0);
+        if(id!=IDM_SUBTITLE_OFF&&id!=IDM_SUBTITLE_FILE&&
+           (id<IDM_SUBTITLE_TRACK_FIRST||id>=IDM_SUBTITLE_TRACK_FIRST+IDM_SUBTITLE_TRACK_COUNT))break;
+        DeleteMenu(menu,0,MF_BYPOSITION);
+    }
+    const auto escaped=[](std::wstring_view text){
+        // Free text from whoever made the file: an ampersand is a character,
+        // and a control character may not break the row.
+        std::wstring label;
+        for(wchar_t character:text.substr(0,160)){
+            if(character==L'&')label+=L'&';
+            label+=(character<L' '?L' ':character);
+        }
+        return label;
+    };
+    const UINT enabled=loaded?MF_ENABLED:MF_GRAYED;
+    UINT position=0;
+    InsertMenuW(menu,position++,MF_BYPOSITION|MF_STRING|enabled,IDM_SUBTITLE_OFF,offLabel.c_str());
+    const size_t shown=std::min<size_t>(trackLabels.size(),IDM_SUBTITLE_TRACK_COUNT);
+    for(size_t index=0;index<shown;++index)
+        InsertMenuW(menu,position++,MF_BYPOSITION|MF_STRING|enabled,IDM_SUBTITLE_TRACK_FIRST+static_cast<UINT>(index),
+                    escaped(trackLabels[index]).c_str());
+    if(!fileLabel.empty())
+        InsertMenuW(menu,position++,MF_BYPOSITION|MF_STRING|enabled,IDM_SUBTITLE_FILE,escaped(fileLabel).c_str());
+    const UINT last=!fileLabel.empty()?IDM_SUBTITLE_FILE:
+                    shown?IDM_SUBTITLE_TRACK_FIRST+static_cast<UINT>(shown)-1:IDM_SUBTITLE_OFF;
+    CheckRadioCommand(menuBar,IDM_SUBTITLE_OFF,last,chosen);
+    for(const UINT command:{IDM_SUBTITLE_NEXT,IDM_SUBTITLE_LOAD,IDM_SUBTITLE_EARLIER,IDM_SUBTITLE_LATER,IDM_SUBTITLE_DELAY_RESET})
+        EnableMenuItem(menu,command,MF_BYCOMMAND|enabled);
 }
 
 bool RoutesToRehook(PlayerCommandRoute route, UINT value)
@@ -711,6 +768,11 @@ std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDo
     case 'L': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_LOUPE);
     case 'X': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_COMPARE_SWAP);
     case 'C': return shiftDown ? IDM_COMPARE_PREVIOUS_MODE : IDM_COMPARE_NEXT_MODE;
+    // V steps through the subtitles as it does in VLC and mpv; H and J sit
+    // side by side for earlier and later, since G belongs to Ctrl+G's go-to.
+    case 'V': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_NEXT);
+    case 'H': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_EARLIER);
+    case 'J': return shiftDown ? std::nullopt : std::optional<UINT>(IDM_SUBTITLE_LATER);
     case VK_OEM_4: return shiftDown ? IDM_COMPARE_DIFFERENCE_LESS : IDM_COMPARE_BLEND_LESS;
     case VK_OEM_6: return shiftDown ? IDM_COMPARE_DIFFERENCE_MORE : IDM_COMPARE_BLEND_MORE;
     default: return std::nullopt;

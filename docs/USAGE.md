@@ -568,6 +568,40 @@ silent because passthrough was refused. Each seek restarts the bitstream, and
 most receivers take a moment to lock onto it again, so the first fraction of a
 second after a seek can be quiet on the receiver.
 
+## Subtitles
+
+**Playback > Subtitles** lists the source's subtitle streams under **Off**,
+and a subtitle file once one is loaded. Text subtitles (SRT, ASS/SSA, WebVTT,
+MP4 timed text) are drawn by libass with their own styling and positioning,
+using the fonts an MKV carries as attachments; picture subtitles (PGS from a
+Blu-ray, VobSub from a DVD) are scaled with the picture.
+
+- **What opens with the video.** A subtitle file beside the video with the same
+  name (`Film.srt`, or `Film.en.srt` when there is no plain one; `.ass`, `.ssa`,
+  `.srt`, `.vtt`, `.sup`, `.idx`) is loaded by itself. Otherwise a stream the
+  container marks as default, or failing that one marked forced, is shown;
+  otherwise subtitles start off.
+- **Load subtitle file…** takes a file from anywhere. A text file that is not
+  UTF-8 is handled: UTF-16 (with or without a byte-order mark) is recognised,
+  and anything else that is not valid UTF-8 is read in the system's ANSI code
+  page (Windows-1252 on a Western European install). A file saved in some other
+  legacy code page shows the wrong accents - convert it to UTF-8.
+- `V` steps through Off, each stream and the loaded file. `H` shows subtitles
+  0.1 s earlier and `J` 0.1 s later; **Reset subtitle delay** shows the current
+  delay and puts it back to zero.
+- Your choice for a source - the stream or file, Off, and the delay - is
+  remembered with it, like its mask (the 200 most recent sources).
+
+Subtitles are drawn over the picture after the neural render, at the size the
+picture has on screen, so text is never warped by the model, never enters the
+render cache and is never in an export (MKV export still carries the source's
+subtitle streams as separate tracks, see below). They follow the playback
+clock through pause, seeks and frame steps; after a seek the line on screen
+appears once the subtitle helper has caught up, usually within a fraction of a
+second. A stream inside a large file is read out of it once, in the background,
+the first time it is shown. Subtitles are not shown in the Motion vectors and
+Depth views.
+
 ## Generate frames for a higher frame rate
 
 **DLSS > Generate frames (higher frame rate)** converts what you are watching to
@@ -731,8 +765,8 @@ GIFs and photos have no audio or subtitle tracks.
 
 MKV stream-copies the cached neural video and available source audio tracks,
 compatible subtitle tracks, font attachments, metadata and chapters. Subtitles
-remain separate; they are not enhanced or burned into the image. Export does not
-add subtitle display or track selection to the player itself.
+remain separate; they are not enhanced or burned into the image, and the
+subtitles the player shows (see "Subtitles") never reach an export.
 
 The output uses the cached video, even when the original view is selected.
 Playback image adjustments and runtime upscaling are not baked in. The current

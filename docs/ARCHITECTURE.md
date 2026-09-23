@@ -347,6 +347,33 @@ upload. Neither reaches the capture: the export draws `PSPresent` with default
 comparison constants, which is also why there is no "export with mask" - the
 export path cannot apply the Mix at all.
 
+Subtitles are the compositor's last layer (t5, `Compose.Subs`): a
+premultiplied BGRA texture at the backbuffer's size, blended over whatever the
+compositor drew, in the sRGB-encoded values subtitles are authored in. Like the
+tags they need the compositor even at 1:1, and fxc strips them from
+`PSPresent`, so they cannot reach the capture, the neural input or an export.
+The texture is updated the way the comparison reference is - copied into one
+of three upload buffers and onto the GPU by the next frame or present - and only
+a new canvas size drains the queue. The pixels come from
+`SubtitleOverlay`: one worker thread that probes files with ffprobe and runs an
+ffmpeg child drawing the chosen stream at the picture's size. Text goes
+through FFmpeg's libass `subtitles` filter (DirectWrite fonts, the MKV's font
+attachments, `original_size` as libass's storage size) onto a transparent
+canvas stamped with the subtitle clock; each canvas frame is first drawn onto
+an opaque odd-coloured canvas and compared with the last one kept
+(`mpdecimate` at zero thresholds), and only a changed frame is drawn again
+with `alpha=1`, which leaves premultiplied colour and coverage - about 1.3 ms
+per unchanged 1920x1080 canvas frame. Picture subtitles (PGS, VobSub) are the
+stream's own frames, premultiplied and scaled. Frames arrive only on change,
+each paired with its time from a `-stats_mux_pre` line on stderr; the worker
+keeps two changes ahead of the clock, so the child blocks on its pipe rather
+than drawing the film into memory. A seek the frames already read cannot answer
+restarts the child at the target (a picture-subtitle child starts 30 s early so
+a picture already up is found); a text stream inside a video is copied out
+once into a small MKS first, because the `subtitles` filter reads its whole
+input at every start. The decisions - track choice, sidecars, text encoding,
+filtergraph escaping, timing and delay - are `SubtitlePolicy.h`.
+
 During neural pre-render, `RenderFrameForCache` copies the evaluated output to a
 dedicated readback resource and emits tightly packed BGRA frames to a bounded
 FFmpeg encoder process. The same persistent NGX/feature-18 session is retained

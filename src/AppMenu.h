@@ -47,6 +47,18 @@ inline constexpr UINT IDM_AUDIO_TRACK_COUNT = 16;
 // Playback > Audio > Passthrough to receiver (AC-3/E-AC-3/DTS), a checkbox
 // below the track list, just past its block.
 inline constexpr UINT IDM_AUDIO_PASSTHROUGH = 226;
+// Playback > Subtitles. Off, the source's streams and a loaded file are one
+// radio group by position at the top of the popup; the rest are commands.
+// 230-252, past the audio tracks' 210-225 and clear of IDM_NEURAL_RENDERING.
+inline constexpr UINT IDM_SUBTITLE_OFF = 230;
+inline constexpr UINT IDM_SUBTITLE_TRACK_FIRST = 231;
+inline constexpr UINT IDM_SUBTITLE_TRACK_COUNT = 16;
+inline constexpr UINT IDM_SUBTITLE_FILE = 247;
+inline constexpr UINT IDM_SUBTITLE_LOAD = 248;
+inline constexpr UINT IDM_SUBTITLE_NEXT = 249;
+inline constexpr UINT IDM_SUBTITLE_EARLIER = 250;
+inline constexpr UINT IDM_SUBTITLE_LATER = 251;
+inline constexpr UINT IDM_SUBTITLE_DELAY_RESET = 252;
 inline constexpr UINT IDM_NEURAL_RENDERING = 300;
 inline constexpr UINT IDM_REHOOK = 301;
 inline constexpr UINT IDM_VIEW_FINAL = 302;
@@ -170,6 +182,11 @@ void UpdateRecentVideos(HMENU menuBar, std::span<const std::wstring> titles, boo
 // than an empty popup; `selected` is the index of the track playing and
 // carries the only radio mark.
 void UpdateAudioTracks(HMENU menuBar, std::span<const std::wstring> labels, int selected);
+// Playback > Subtitles: rebuilds the radio group at the top of the popup - Off,
+// one row per subtitle stream, and `fileLabel`'s row when a file is loaded -
+// checks `chosen` (one of those commands), and enables the rest for `loaded`.
+void UpdateSubtitles(HMENU menuBar, const std::wstring& offLabel, std::span<const std::wstring> trackLabels,
+                     const std::wstring& fileLabel, UINT chosen, bool loaded);
 HMENU CreateDebugViewMenu(UINT selectedCommand);
 bool RoutesToRehook(PlayerCommandRoute route, UINT value);
 // Shows, relabels or removes the right-justified update item in the menu bar.
@@ -223,9 +240,9 @@ bool UpdateSecondMixMenu(HMENU menuBar, bool available, UINT index);
 // them, which a group that grew an item past its original ids cannot promise.
 bool CheckRadioCommand(HMENU menuBar, UINT first, UINT last, UINT chosen);
 // Menu command for a plain-key accelerator of the range, preview, neural
-// settings and comparison items (I, O, Shift+I/O, Ctrl+G, F, Shift+F, Ctrl+R,
-// Ctrl+N, Ctrl+Shift+S, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C, Shift+C
-// and L); nullopt when the key is not one of them.
+// settings, comparison and subtitle items (I, O, Shift+I/O, Ctrl+G, F, Shift+F,
+// Ctrl+R, Ctrl+N, Ctrl+Shift+S, Z, Shift+Z, [ and ], Shift+[ and Shift+], X, C,
+// Shift+C, L, V, H and J); nullopt when the key is not one of them.
 std::optional<UINT> CommandForPlayerKey(UINT key, bool controlDown, bool shiftDown);
 
 // One row of the keyboard cheat sheet: the menu it lives in (or "Keyboard"
