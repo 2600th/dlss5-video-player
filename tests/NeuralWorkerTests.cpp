@@ -361,6 +361,26 @@ int RunFakeWorker(int argc, wchar_t** argv)
             static_cast<uint16_t>(WireKind::Result), sizeof(WireResult)};
         return WriteAll(handle, &truncated, sizeof(truncated)) ? 0 : 12;
     }
+    if (source == L"relaunch-staging-source.mkv") {
+        // Dies under the first launch's staging name and succeeds under any
+        // other, reporting the name it was given.
+        const std::wstring staging = parsed->request.stagingVideoPath.filename().wstring();
+        if (staging == L"staging-output.mkv") return 0xC0000005u & 0xFF;
+        NeuralRenderResult named;
+        named.ok = true;
+        named.encoder = EncoderKind::H264Software;
+        named.feature18ArmedBeforeCapture = true;
+        named.evidence = {true, true, true, true, false, 75};
+        named.frameCount = 60;
+        named.duration100ns = 10'000'000;
+        named.nativeEvaluations = 60;
+        named.verifiedNeuralFrames = 60;
+        named.jobId = parsed->request.jobId;
+        named.timing = {60, 1.5, 2.5, 4.0, 0.7, 0.3, 2048};
+        named.detail = staging;
+        const auto bytes = EncodeResult(named);
+        return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
+    }
     if (source == L"crash-source.mkv") {
         // Report progress, then die without a result: the parent must treat
         // this as a crash and relaunch from zero at most once.
@@ -1050,6 +1070,28 @@ void request_fields_reach_the_helper_intact_test()
     CHECK(result.ok);
     if (!result.ok) std::wcerr << L"detail: " << result.detail << L" failure=" << static_cast<int>(result.failure) << L'\n';
     CHECK(result.detail == L"guides=mv=0,depth=1 preroll=7 retry=2 segments=90 range=30000000-50000000 pause=1");
+}
+
+// A relaunched helper numbers its segments from 0 again. Under the first
+// helper's names it truncated files the player's decoder still held open, so
+// each relaunch of a segmented job writes under a stem of its own. A
+// single-file job's staging path is its output, so it is left alone.
+void relaunched_helper_writes_its_segments_under_a_name_of_its_own_test()
+{
+    NeuralRenderRequest segmented = TestRequest(L"relaunch-staging-source.mkv");
+    segmented.segmentFrames = 24;
+    size_t restarts = 0;
+    NeuralSegmentSink sink;
+    sink.onRestart = [&] { ++restarts; };
+    const NeuralRenderResult relaunched = RunNeuralWorker(CurrentExecutable(), segmented, {}, {}, sink);
+    CHECK(relaunched.ok);
+    CHECK(relaunched.detail == L"staging-output-l1.mkv");
+    CHECK(restarts == 1);
+
+    const NeuralRenderResult single = RunNeuralWorker(CurrentExecutable(),
+                                                      TestRequest(L"relaunch-staging-source.mkv"));
+    CHECK(!single.ok);
+    CHECK(single.failure == NeuralRenderFailure::RetryExhausted);
 }
 
 void crashed_helper_is_relaunched_at_most_once_test()
@@ -2381,6 +2423,7 @@ int wmain(int argc, wchar_t** argv)
     valid_result_preserves_all_verification_fields_test();
     request_fields_reach_the_helper_intact_test();
     crashed_helper_is_relaunched_at_most_once_test();
+    relaunched_helper_writes_its_segments_under_a_name_of_its_own_test();
     preflight_receipt_round_trips_and_restarts_once_test();
     preflight_failure_detail_comes_from_the_receipt_diagnosis_test();
     identity_encoding_keeps_different_names_different_test();

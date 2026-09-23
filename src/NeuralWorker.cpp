@@ -986,6 +986,8 @@ NeuralRenderResult RunNeuralWorkerAttempt(const std::filesystem::path& executabl
 // relaunch is worth making: a helper that died took its verdict with it, and
 // after a device removal the driver has restarted underneath this process. It
 // returns a result to fail closed with, or nothing to let the relaunch happen.
+//
+// `attempt` is handed the launch number, 0 for the first helper; see ForLaunch.
 template <class Attempt, class Recover>
 NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallback& progress,
                                      const NeuralSegmentSink& segments, uint32_t crashRelaunchLimit,
@@ -993,10 +995,9 @@ NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallba
 {
     for (uint32_t tries = 0;; ++tries) {
         // A relaunch renders the range again from frame zero, so every segment
-        // the previous helper published names a file that is about to be
-        // rewritten.
+        // the previous helper published is superseded.
         if (tries && segments.onRestart) segments.onRestart();
-        NeuralRenderResult result = attempt();
+        NeuralRenderResult result = attempt(tries);
         const bool relaunchable = !result.ok && !result.cancelled &&
             (result.failure == NeuralRenderFailure::WorkerCrashed ||
              result.failure == NeuralRenderFailure::DeviceRemoved ||
@@ -1019,6 +1020,24 @@ NeuralRenderResult RunWithRelaunches(const OfflineNeuralRenderer::ProgressCallba
         // under a phase the user can already see rather than in silence.
         if (auto refused = recover(result)) return *refused;
     }
+}
+
+// The request a given launch of the helper is sent. A relaunched helper numbers
+// its segments from 0 again, and named from the same staging stem they are the
+// previous helper's file names: the player's decoder may still hold one of
+// those open without delete sharing, so the new helper's delete failed quietly
+// and its encoder truncated a file that was being decoded. Each launch after
+// the first writes under its own stem instead (neural-l1-00000.mkv). A
+// single-file job is left alone: its staging path is the output the caller
+// promotes, and nothing reads it while the helper writes.
+NeuralRenderRequest ForLaunch(const NeuralRenderRequest& request, uint32_t launch)
+{
+    if (!launch || !request.segmentFrames) return request;
+    NeuralRenderRequest relaunched = request;
+    const std::filesystem::path& staging = request.stagingVideoPath;
+    relaunched.stagingVideoPath = staging.parent_path() /
+        (staging.stem().wstring() + L"-l" + std::to_wstring(launch) + staging.extension().wstring());
+    return relaunched;
 }
 
 // The one controlled recovery between a helper that died and the relaunch that
@@ -1421,9 +1440,9 @@ NeuralRenderResult RunNeuralWorker(const std::filesystem::path& executable,
     // Refusals every caller shares: a job the launcher cannot describe never
     // reaches a helper, resident or not.
     if (auto refusal = RefuseUnrunnableJob(executable, request)) return *refusal;
-    return RunWithRelaunches(progress, segments, crashRelaunchLimit, [&] {
-        return RunNeuralWorkerAttempt(executable, request, progress, segments, stop, false,
-                                      processCreated, helperTimeline);
+    return RunWithRelaunches(progress, segments, crashRelaunchLimit, [&](uint32_t launch) {
+        return RunNeuralWorkerAttempt(executable, ForLaunch(request, launch), progress, segments, stop,
+                                      false, processCreated, helperTimeline);
     }, [&](const NeuralRenderResult& failed) {
         return ProbeBeforeRelaunch(executable, stop, failed);
     });
@@ -1589,7 +1608,9 @@ NeuralRenderResult ResidentNeuralHelper::RunJob(const std::filesystem::path& exe
         firstAcceptance = false;
     };
     return RunWithRelaunches(hooks.progress, hooks.segments, hooks.crashRelaunchLimit,
-        [&] { return RunAttempt(executable, key, request, hooks, stop, accepted); },
+        [&](uint32_t launch) {
+            return RunAttempt(executable, key, ForLaunch(request, launch), hooks, stop, accepted);
+        },
         [&](const NeuralRenderResult& failed) {
             // The dead helper's session is already dropped by the attempt that
             // judged it, so the probe gets the runtime directory to itself.

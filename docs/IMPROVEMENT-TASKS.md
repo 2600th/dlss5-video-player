@@ -54,7 +54,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | **P1** | | | | |
-| [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
@@ -140,26 +139,6 @@ from an extracted zip with no repository around it. Correct the README command.
 ## Player: reliability and quality-neutral performance
 
 ## Pipeline: helper, cache, runtime
-
-<a id="p18"></a>
-### P1.8 · Segment names are reused across retries
-
-`XS` · **Pipeline, Player** · 🔍
-
-**Where** — `OfflineNeuralRenderer.cpp:305-311`, `:349-365`, `:717-721`;
-`NeuralWorker.cpp:806`
-
-Segment names come from the index alone. A retry or a helper relaunch deletes
-the old file and ignores the error. The player's ffmpeg holds the file open
-without delete sharing, so the delete fails and the new encoder truncates a
-file that is still being decoded.
-
-**Impact** — Player: corrupt frames or a decode error in place of a clean
-switch.
-
-**Fix** — include the attempt or launch number in the segment name.
-
----
 
 <a id="p110"></a>
 ### P1.10 · The first-frame receipt gate: cost and reproducibility

@@ -2870,12 +2870,15 @@ std::function<std::unique_ptr<IFrameEncoder>()> SegmentEncoderFactory(SegmentEnc
 }
 
 // OfflineRequest's staging file is neural.partial.mkv, so its segments are
-// neural.partial-00000.mkv and so on.
-std::filesystem::path OfflineSegmentPath(const std::filesystem::path& directory, uint64_t index)
+// neural.partial-00000.mkv and so on; a software retry's are
+// neural.partial-r1-00000.mkv.
+std::filesystem::path OfflineSegmentPath(const std::filesystem::path& directory, uint64_t index,
+                                         uint32_t attempt = 0)
 {
     std::wstring digits = std::to_wstring(index);
     if (digits.size() < 5) digits.insert(0, 5 - digits.size(), L'0');
-    return directory / (L"neural.partial-" + digits + L".mkv");
+    const std::wstring retry = attempt ? L"r" + std::to_wstring(attempt) + L"-" : L"";
+    return directory / (L"neural.partial-" + retry + digits + L".mkv");
 }
 
 // The sink runs on the job's finalize thread; Run() joins it before returning,
@@ -3013,14 +3016,20 @@ void segmented_offline_job_software_retry_deletes_the_failed_attempts_files_test
     for(size_t index=0;index<3;++index){
         const auto& segment=announced[announced.size()-3+index];
         CHECK_EQ(uint64_t(index),segment.index);
+        // The retry never reuses a name the failed attempt published: the
+        // player may still be decoding that file, and a delete it blocks would
+        // have left the retry's encoder truncating it.
+        CHECK(segment.fileName==OfflineSegmentPath(fixture.Path(),index,1).filename().wstring());
     }
     // Renumbering from zero only means anything if nothing of the abandoned
     // attempt is left: no NVENC-written file, no armed file, no live encoder.
     CHECK_EQ(size_t{0},farm.Live());
     for(uint64_t index=0;index<3;++index){
         CHECK_EQ(std::string(index==2?"s":"ss"),
-                 ReadBytes(OfflineSegmentPath(fixture.Path(),index)));
+                 ReadBytes(OfflineSegmentPath(fixture.Path(),index,1)));
+        CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),index)));
     }
+    CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3,1)));
     CHECK(!std::filesystem::exists(OfflineSegmentPath(fixture.Path(),3)));
 }
 

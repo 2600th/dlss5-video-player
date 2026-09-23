@@ -301,13 +301,19 @@ const wchar_t* AttemptFailureDetail(NeuralRenderFailure failure)
 }
 
 // Segment files sit beside the staging video and are named from its stem:
-// <staging>/neural-00000.mkv, neural-00001.mkv, ...
-std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoPath, uint64_t index)
+// <staging>/neural-00000.mkv, neural-00001.mkv, ... A software-encoder retry
+// renumbers from 0 under a name of its own, neural-r1-00000.mkv, rather than
+// reusing the failed attempt's: the player's decoder holds a published file
+// open without delete sharing, so deleting it fails silently and the retry's
+// encoder then truncated a file that was still being decoded.
+std::filesystem::path SegmentFilePath(const std::filesystem::path& stagingVideoPath, uint32_t attempt,
+                                      uint64_t index)
 {
     std::wstring digits = std::to_wstring(index);
     if (digits.size() < 5) digits.insert(0, 5 - digits.size(), L'0');
-    return stagingVideoPath.parent_path() /
-           (stagingVideoPath.stem().wstring() + L"-" + digits + stagingVideoPath.extension().wstring());
+    std::wstring stem = stagingVideoPath.stem().wstring();
+    if (attempt) stem += L"-r" + std::to_wstring(attempt);
+    return stagingVideoPath.parent_path() / (stem + L"-" + digits + stagingVideoPath.extension().wstring());
 }
 
 // Captured frames queued for the writer thread. Deep enough to cover a freshly
@@ -344,13 +350,17 @@ public:
     SegmentWriter& operator=(const SegmentWriter&) = delete;
 
     // Starts a fresh sequence at index 0. A software-encoder retry deletes every
-    // file the previous attempt wrote and reuses its names, so a consumer that
-    // sees index 0 again knows the earlier segments are gone.
+    // file the previous attempt wrote, best effort, and writes under new names
+    // (see SegmentFilePath), so a consumer that sees index 0 again knows the
+    // earlier segments are gone and none of them is overwritten under it.
     void BeginAttempt(const EncoderSpec& spec)
     {
         Cancel();
         const uint64_t previous = started_;
         for (uint64_t index = 0; index < previous; ++index) Remove(index);
+        // Both threads are joined, so nothing reads the attempt number while it moves.
+        if (begun_) ++attempt_;
+        begun_ = true;
         started_ = 0;written_ = 0;spec_ = spec;
         {
             std::lock_guard lock(mutex_);
@@ -528,7 +538,7 @@ private:
             next = factory_ ? factory_() : nullptr;
             if (!next) return EncodeError::InvalidSpecification;
             NoteStarted(index);
-            const EncodeError startError = next->Start(spec_, SegmentFilePath(staging_, index));
+            const EncodeError startError = next->Start(spec_, Path(index));
             if (startError != EncodeError::None) {
                 next->Cancel();
                 Remove(index);
@@ -618,7 +628,7 @@ private:
         segment.firstTimestamp100ns = currentFirstTimestamp_;
         segment.end100ns = currentLast_ + frameDuration_;
         segment.frameCount = currentFrames_;
-        segment.fileName = SegmentFilePath(staging_, currentIndex_).filename().wstring();
+        segment.fileName = Path(currentIndex_).filename().wstring();
         {
             std::lock_guard lock(mutex_);
             queue_.push_back(Pending{std::move(current_), std::move(segment)});
@@ -681,7 +691,7 @@ private:
             if (startWarm) {
                 std::unique_ptr<Encoder> warm = factory_();
                 const EncodeError error = warm
-                    ? warm->Start(spec_, SegmentFilePath(staging_, warmIndex))
+                    ? warm->Start(spec_, Path(warmIndex))
                     : EncodeError::InvalidSpecification;
                 if (error != EncodeError::None) {
                     if (warm) warm->Cancel();
@@ -714,10 +724,12 @@ private:
         }
     }
 
+    std::filesystem::path Path(uint64_t index) const { return SegmentFilePath(staging_, attempt_, index); }
+
     void Remove(uint64_t index) const
     {
         std::error_code error;
-        std::filesystem::remove(SegmentFilePath(staging_, index), error);
+        std::filesystem::remove(Path(index), error);
     }
 
     std::function<std::unique_ptr<Encoder>()> factory_;
@@ -732,6 +744,9 @@ private:
     uint64_t currentIndex_{},currentFrames_{},currentFirstFrameNumber_{};
     int64_t currentFirstTimestamp_{},currentLast_{};
     uint64_t written_{};
+    // Which attempt's names the files are written under; 0 until a retry.
+    uint32_t attempt_{};
+    bool begun_{};
     std::mutex mutex_;
     std::condition_variable work_;
     std::condition_variable ready_;
