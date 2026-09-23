@@ -37,6 +37,7 @@
 #include "UiLayout.h"
 #include "UiResources.h"
 #include "HexText.h"
+#include "Utf8Text.h"
 #include "Log.h"
 #include "HardErrorSuppression.h"
 #include "ReShadeConfig.h"
@@ -895,23 +896,9 @@ static AppOptions ParseArgs() {
 
 enum class StartupResult { Continue, ExitSuccess, ExitFailure };
 
-static std::string WideToUtf8(std::wstring_view value) {
-    if(value.empty()) return {};
-    const int size=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
-    if(size<=0) return "<wide-string conversion failed>";
-    std::string result(static_cast<size_t>(size),'\0');
-    if(WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),size,nullptr,nullptr)!=size) return "<wide-string conversion failed>";
-    return result;
-}
+static std::string WideToUtf8(std::wstring_view value) { return utf8_text::FromWide(value); }
 
-static std::wstring Utf8ToWide(std::string_view value) {
-    if(value.empty()) return {};
-    const int size=MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0);
-    if(size<=0) return {};
-    std::wstring result(static_cast<size_t>(size),L'\0');
-    if(MultiByteToWideChar(CP_UTF8,0,value.data(),static_cast<int>(value.size()),result.data(),size)!=size) return {};
-    return result;
-}
+static std::wstring Utf8ToWide(std::string_view value) { return utf8_text::ToWide(value); }
 
 // Substitutes into a localized format string. swprintf_s calls the invalid
 // parameter handler instead of truncating, and one substitution here is a

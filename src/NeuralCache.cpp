@@ -4,6 +4,7 @@
 #include "PlatformPaths.h"
 #include "GuideControls.h"
 #include "JsonEscape.h"
+#include "Utf8Text.h"
 #include "LiveSessionPolicy.h"
 #include "Log.h"
 
@@ -327,24 +328,13 @@ std::filesystem::path CanonicalOrAbsolute(const std::filesystem::path& path,
 
 std::atomic<uint64_t> g_stagingNonce{0};
 
-std::string Utf8(std::wstring_view text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(),
-        static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string utf8(static_cast<size_t>(std::max(length, 0)), '\0');
-    if (length > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
-        utf8.data(), length, nullptr, nullptr);
-    return utf8;
-}
-
 // One line per refusal. The only field report of an uncreatable cache carried
 // the player's status string and nothing else, so the path, the cause, the
 // filesystem error and the ownership verdict all belong on it.
 void LogCacheFailure(std::string_view what, const NeuralCacheFailure& failure)
 {
     LOG(what << ": cause=" << NeuralCacheFailureCauseName(failure.cause)
-             << " path=" << Utf8(failure.path.native())
+             << " path=" << utf8_text::FromWide(failure.path.native())
              << " error=" << failure.error.value() << " ownershipRejected="
              << (failure.cause == NeuralCacheFailure::Cause::OutsideRoot ? 1 : 0));
 }
@@ -674,7 +664,7 @@ void NoteQuarantine(const std::filesystem::path& directory, std::wstring_view re
     std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02uT%02u:%02u:%02uZ", now.wYear, now.wMonth,
                   now.wDay, now.wHour, now.wMinute, now.wSecond);
     std::ofstream note(directory / L"quarantine.txt", std::ios::binary | std::ios::trunc);
-    note << "reason=" << Utf8(reason) << "\npid=" << GetCurrentProcessId() << "\ntime=" << stamp
+    note << "reason=" << utf8_text::FromWide(reason) << "\npid=" << GetCurrentProcessId() << "\ntime=" << stamp
          << "\n";
 }
 
@@ -978,7 +968,7 @@ std::wstring NeuralCacheRootLockName(const std::filesystem::path& root)
     std::wstring canonical = root.lexically_normal().generic_wstring();
     std::ranges::transform(canonical, canonical.begin(), towlower);
     while (canonical.size() > 1 && canonical.back() == L'/') canonical.pop_back();
-    const std::string digest = HashBytes(Utf8(canonical)).value_or(std::string(64, '0'));
+    const std::string digest = HashBytes(utf8_text::FromWide(canonical)).value_or(std::string(64, '0'));
     return L"Local\\DLSSVideoPlayer.Cache." + std::wstring(digest.begin(), digest.begin() + 16);
 }
 
@@ -989,7 +979,7 @@ std::string NeuralCacheInstallation()
     std::wstring normalized = directory->lexically_normal().generic_wstring();
     std::ranges::transform(normalized, normalized.begin(), towlower);
     while (normalized.size() > 1 && normalized.back() == L'/') normalized.pop_back();
-    return Utf8(normalized);
+    return utf8_text::FromWide(normalized);
 }
 
 NeuralCacheEnvironment NeuralCacheEnvironmentFor(const NeuralCacheIdentity& identity)
@@ -1026,15 +1016,9 @@ std::optional<std::string> BuildRuntimeDigest(
         if (stop.stop_requested()) return std::nullopt;
         const auto digest = Sha256FileCached(moduleDirectory / relative, stop);
         if (!digest) return std::nullopt;
-        const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, relative.data(),
-                                                 static_cast<int>(relative.size()), nullptr, 0,
-                                                 nullptr, nullptr);
-        if (required <= 0) return std::nullopt;
-        std::string utf8(static_cast<size_t>(required), '\0');
-        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, relative.data(),
-                                static_cast<int>(relative.size()), utf8.data(), required,
-                                nullptr, nullptr) != required) return std::nullopt;
-        canonical += utf8;
+        const auto utf8 = utf8_text::FromWideStrict(relative);
+        if (!utf8 || utf8->empty()) return std::nullopt;
+        canonical += *utf8;
         canonical.push_back('\0');
         canonical += *digest;
         canonical.push_back('\n');

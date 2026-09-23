@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | **P1** | | | | |
-| [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
 | [P1.23](#p123) | Screenshots and the last product-name drift | S | Docs, Release | 🔍 |
 | **P2** | | | | |
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
@@ -103,30 +102,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 ## Player: reliability and quality-neutral performance
 
 ## Pipeline: helper, cache, runtime
-
-<a id="p116"></a>
-### P1.16 · Duplicated helpers that behave differently
-
-`M` · **Pipeline** · 🔍 · _open parts of old 2.21_
-
-These matter because the copies **disagree**, not because they are repeated.
-
-- **Wide/narrow conversion**: the parent and child of the same IPC channel
-  handle non-ASCII differently. `NeuralWorker.cpp:109` rejects it;
-  `NeuralWorkerMain.cpp:149` substitutes `?`.
-- **`JsonEscape`**: `NeuralCache.cpp:120-139` returns an empty string for a
-  control character, while `NeuralPreflight.cpp:469-492` escapes it.
-- **Hex and NGX error formatting**: 24 ad-hoc `std::hex` sites drop leading
-  zeros, so their log lines cannot be grepped against receipts.
-- **`CreateKillOnCloseJob`**: identical copies at `MediaPipeline.cpp:114` and
-  `NeuralWorker.cpp:79`.
-- **Atomic file writes**: five copies, and only two of them flush.
-- **`AudioPlayer.cpp:34`'s ffmpeg lookup** lacks the `neural-runtime` guard the
-  other two lookups have, and falls back to `SearchPathW`, so it can pick up
-  an arbitrary ffmpeg from PATH.
-
-**Fix** — one shared header per helper, following `Sha256File`'s single
-implementation.
 
 ## Release and CI
 

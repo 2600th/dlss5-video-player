@@ -1,6 +1,7 @@
 #include "NeuralPreflight.h"
 
 #include "NeuralCache.h"
+#include "Utf8Text.h"
 
 #include <windows.h>
 #include <knownfolders.h>
@@ -89,15 +90,6 @@ int HexNibble(char character) noexcept
     if (character >= '0' && character <= '9') return character - '0';
     if (character >= 'a' && character <= 'f') return character - 'a' + 10;
     return -1;
-}
-
-std::string Utf8(std::wstring_view text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    std::string utf8(static_cast<size_t>(std::max(length, 0)), '\0');
-    if (length > 0) WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), length, nullptr, nullptr);
-    return utf8;
 }
 
 std::wstring FileVersionText(const std::filesystem::path& path)
@@ -356,7 +348,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
     for (const NeuralModelRoot& root : roots) {
         const std::wstring spelling = LowerWide(root.directory.generic_wstring());
         const auto files = CollectModelRoot(root, stop);
-        canonical += "root=" + Utf8(spelling);
+        canonical += "root=" + utf8_text::FromWide(spelling);
         if (!files) {
             // An unreadable root still belongs in the digest: a machine that
             // grows one later must not answer with the key it used without it.
@@ -378,7 +370,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             // write times on the reference machine are the time of its last
             // check - and each rewrite moved every render key. Size and write
             // time identify only the blobs too large to hash.
-            canonical += Utf8(file.relative);
+            canonical += utf8_text::FromWide(file.relative);
             canonical.push_back('\0');
             if (!file.digest.empty()) {
                 canonical += file.digest;
@@ -400,7 +392,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
         // The cheap fallback, and the only one available: with no root to read,
         // the driver version is all that still moves when the weights do.
         store.source = NeuralModelStoreSource::DriverVersion;
-        canonical = "model-store=1\ndriver=" + Utf8(driverVersion) + "\n";
+        canonical = "model-store=1\ndriver=" + utf8_text::FromWide(driverVersion) + "\n";
         if (store.fallbackDetail.empty())
             store.fallbackDetail = L"No NGX model root is registered on this machine.";
     } else {
@@ -594,7 +586,7 @@ std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::
 
 std::string JsonEscapeWide(std::wstring_view text)
 {
-    return JsonEscape(Utf8(text));
+    return JsonEscape(utf8_text::FromWide(text));
 }
 
 std::string ReportedFeature18ObservationsJson(std::span<const Feature18Observation> observations)

@@ -3,6 +3,7 @@
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
 #include "NarrowText.h"
+#include "Utf8Text.h"
 #include "Log.h"
 
 #include <winhttp.h>
@@ -553,22 +554,6 @@ bool has_forbidden_input_character(std::wstring_view value)
     });
 }
 
-std::wstring utf8_to_wide(std::string_view value)
-{
-    if (value.empty() || value.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-        return {};
-    }
-    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
-                                           static_cast<int>(value.size()), nullptr, 0);
-    if (count <= 0) return {};
-    std::wstring converted(static_cast<size_t>(count), L'\0');
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
-                            static_cast<int>(value.size()), converted.data(), count) != count) {
-        return {};
-    }
-    return converted;
-}
-
 ResolveResult invalid_output()
 {
     ResolveResult result;
@@ -803,8 +788,8 @@ ResolveResult ParseResolverOutput(std::string_view stdoutBytes, DWORD exitCode)
         return invalid_output();
     }
 
-    std::wstring mediaUrl = utf8_to_wide(videoBytes);
-    std::wstring audioUrl = utf8_to_wide(audioBytes);
+    std::wstring mediaUrl = utf8_text::ToWideStrict(videoBytes).value_or(std::wstring{});
+    std::wstring audioUrl = utf8_text::ToWideStrict(audioBytes).value_or(std::wstring{});
     const auto trustedStreamUrl = [](const std::wstring& value) {
         if (value.empty() || has_forbidden_input_character(value)) return false;
         CrackedUrl url;

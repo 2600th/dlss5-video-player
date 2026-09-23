@@ -4,6 +4,7 @@
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
 #include "AtomicFile.h"
+#include "Utf8Text.h"
 #include "KillOnCloseJob.h"
 #include "StrictJson.h"
 
@@ -1110,13 +1111,7 @@ std::wstring UnescapeJsonToWide(std::string_view escaped)
             default: text.push_back(escaped[index]); break;
         }
     }
-    if (text.empty()) return {};
-    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
-    std::wstring wide(static_cast<size_t>(std::max(length, 0)), L'\0');
-    if (length > 0) {
-        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), wide.data(), length);
-    }
-    return wide;
+    return utf8_text::ToWide(text);
 }
 
 ReceiptDiagnosis ScanReceiptDiagnosis(std::string_view json)

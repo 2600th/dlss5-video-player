@@ -14,6 +14,7 @@
 
 #include "DLSSGBackend.h"
 #include "NeuralPreflight.h"
+#include "Utf8Text.h"
 
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -31,15 +32,7 @@ constexpr uint32_t kProbeWidth = 1920;
 constexpr uint32_t kProbeHeight = 1080;
 constexpr DXGI_FORMAT kProbeFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 
-std::string Narrow(std::wstring_view text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0, nullptr, nullptr);
-    if (length <= 0) return {};
-    std::string narrow(size_t(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), narrow.data(), length, nullptr, nullptr);
-    return narrow;
-}
+std::string Narrow(std::wstring_view text) { return utf8_text::FromWide(text); }
 
 // Which nvngx_dlssg.dll the runtime ended up loading, which is the measured
 // difference between a refusal and an admission on this machine: with none

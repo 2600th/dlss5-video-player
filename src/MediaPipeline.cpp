@@ -3,6 +3,7 @@
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
 #include "MediaTools.h"
+#include "Utf8Text.h"
 
 #include <windows.h>
 
@@ -368,13 +369,8 @@ bool ParseUnsigned(std::string_view value, uint64_t& output)
 
 std::wstring MaterializeDiagnostic(std::string_view output, const MaterializeRequest& request)
 {
-    if (output.empty()) return {};
-    const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, output.data(),
-                                       static_cast<int>(output.size()), nullptr, 0);
-    if (size <= 0) return {};
-    std::wstring text(static_cast<size_t>(size), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, output.data(),
-                        static_cast<int>(output.size()), text.data(), size);
+    std::wstring text = utf8_text::ToWide(output);
+    if (text.empty()) return {};
     // Remove exact inputs first (including any whitespace), then URLs emitted
     // after redirects. Redact before shortening so signed query strings cannot
     // survive a truncated URL match.
@@ -844,14 +840,8 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
     const auto bytes = std::filesystem::file_size(staging.path, error);
     if (capture.exitCode != 0 || error || bytes == 0) {
         std::wstring detail = L"FFmpeg could not export this media in the selected format.";
-        const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, capture.output.data(),
-                                               static_cast<int>(capture.output.size()), nullptr, 0);
-        if (length > 0) {
-            std::wstring diagnostic(static_cast<size_t>(length), L'\0');
-            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, capture.output.data(),
-                               static_cast<int>(capture.output.size()), diagnostic.data(), length);
+        if (const std::wstring diagnostic = utf8_text::ToWide(capture.output); !diagnostic.empty())
             detail += L"\n" + diagnostic;
-        }
         return {false, MaterializeError::ProcessFailed, std::move(detail)};
     }
     if (stop.stop_requested()) return cancelled();
@@ -952,18 +942,6 @@ void RawVideoEncoder::Cancel()
 
 namespace {
 
-std::string NarrowUtf8(std::wstring_view value)
-{
-    if (value.empty()) return {};
-    const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
-                                         nullptr, 0, nullptr, nullptr);
-    if (size <= 0) return {};
-    std::string text(static_cast<size_t>(size), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), text.data(),
-                        size, nullptr, nullptr);
-    return text;
-}
-
 // One `file` directive per part. FFmpeg reads the list as UTF-8 and treats the
 // quoted value literally, so only the quote itself needs escaping; forward
 // slashes avoid any backslash-escape ambiguity.
@@ -975,7 +953,7 @@ std::string ConcatListText(std::span<const std::filesystem::path> parts)
         std::wstring absolute = std::filesystem::absolute(part, error).wstring();
         if (error || absolute.empty()) return {};
         for (wchar_t& character : absolute) if (character == L'\\') character = L'/';
-        const std::string narrow = NarrowUtf8(absolute);
+        const std::string narrow = utf8_text::FromWide(absolute);
         if (narrow.empty()) return {};
         text += "file '";
         for (const char character : narrow) {

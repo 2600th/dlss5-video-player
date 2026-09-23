@@ -2,6 +2,7 @@
 #include "D3D12FenceWait.h"
 #include "TemporalGuides.h"
 #include "HexText.h"
+#include "Utf8Text.h"
 #include "Log.h"
 #include "NvofResolveShader.h"
 #include "RuntimePolicy.h"
@@ -48,21 +49,6 @@ parallel_detail::WorkerPool& CaptureCopyPool()
     return pool;
 }
 
-// Local because every converter in this tree is private to the file that
-// needs one, and a single log line does not justify a shared header the
-// render loop would then have to carry.
-std::string WideToUtf8(std::wstring_view text)
-{
-    if(text.empty())return {};
-    const int length=static_cast<int>(text.size());
-    const int size=WideCharToMultiByte(CP_UTF8,0,text.data(),length,nullptr,0,nullptr,nullptr);
-    if(size<=0)return "<wide-string conversion failed>";
-    std::string result(static_cast<size_t>(size),'\0');
-    if(WideCharToMultiByte(CP_UTF8,0,text.data(),length,result.data(),size,nullptr,nullptr)!=size)
-        return "<wide-string conversion failed>";
-    return result;
-}
-
 // The adapter the device was actually created on, against the one the
 // high-performance policy classified. A hybrid laptop can place this process
 // on either GPU, and until this line existed nothing in the log told the two
@@ -83,9 +69,9 @@ void LogDeviceAdapter(const DXGI_ADAPTER_DESC1& device)
         case AdapterMatch::Different: verdict="is NOT"; break;
         case AdapterMatch::Unknown: break;
     }
-    LOG("D3D12 device adapter \""<<WideToUtf8(device.Description)<<"\" luid="<<HexText(deviceLuid)
+    LOG("D3D12 device adapter \""<<utf8_text::FromWide(device.Description)<<"\" luid="<<HexText(deviceLuid)
         <<" vendor="<<HexText(device.VendorId)<<" vram="<<(device.DedicatedVideoMemory>>20)<<"MiB "
-        <<verdict<<" the high-performance adapter \""<<WideToUtf8(policy.description)<<"\" luid="
+        <<verdict<<" the high-performance adapter \""<<utf8_text::FromWide(policy.description)<<"\" luid="
         <<HexText(policy.adapterLuid)
         <<" that the cache identity, the receipt GPU label and the pace prior describe");
 }

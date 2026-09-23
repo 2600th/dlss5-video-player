@@ -50,6 +50,7 @@
 #include "HexText.h"
 #include "AtomicFile.h"
 #include "MediaTools.h"
+#include "Utf8Text.h"
 #ifdef small
 #undef small
 #endif
@@ -10172,6 +10173,27 @@ void media_tools_are_found_the_same_way_by_every_caller_test()
     fs::remove_all(root, error);
 }
 
+// P1.16: one pair of UTF-8 converters, named for what they do with text that
+// is not well formed. The lossy pair keeps the rest of a message; the strict
+// pair refuses what it could not store faithfully.
+void utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test()
+{
+    CHECK_EQ(std::string("caf\xc3\xa9"), utf8_text::FromWide(L"caf\u00e9"));
+    CHECK(utf8_text::FromWideStrict(L"caf\u00e9") == std::optional<std::string>("caf\xc3\xa9"));
+    CHECK(utf8_text::ToWide("caf\xc3\xa9") == L"caf\u00e9");
+    CHECK(utf8_text::ToWideStrict("caf\xc3\xa9") == std::optional<std::wstring>(L"caf\u00e9"));
+
+    const std::wstring unpaired{L'a', wchar_t(0xD800), L'b'};
+    CHECK_EQ(std::string("a\xef\xbf\xbd" "b"), utf8_text::FromWide(unpaired));
+    CHECK(!utf8_text::FromWideStrict(unpaired).has_value());
+    CHECK(utf8_text::ToWide("Caf\xe9 del Mar") == L"Caf\uFFFD del Mar");
+    CHECK(!utf8_text::ToWideStrict("Caf\xe9 del Mar").has_value());
+
+    CHECK(utf8_text::FromWide(L"").empty());
+    CHECK(utf8_text::FromWideStrict(L"") == std::optional<std::string>(""));
+    CHECK(utf8_text::ToWideStrict("") == std::optional<std::wstring>(L""));
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -10463,6 +10485,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
     TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
     TEST_CASE(media_tools_are_found_the_same_way_by_every_caller_test),
+    TEST_CASE(utf8_text_lossy_keeps_the_message_and_strict_refuses_it_test),
 };
 
 

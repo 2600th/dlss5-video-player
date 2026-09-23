@@ -1,6 +1,7 @@
 #include "NeuralReceipt.h"
 
 #include "NeuralPreflight.h"
+#include "Utf8Text.h"
 
 #include <windows.h>
 
@@ -14,18 +15,6 @@
 #include <string_view>
 
 namespace {
-
-std::string Utf8(std::wstring_view text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()),
-                                           nullptr, 0, nullptr, nullptr);
-    if (length <= 0) return {};
-    std::string utf8(static_cast<size_t>(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), utf8.data(), length,
-                        nullptr, nullptr);
-    return utf8;
-}
 
 std::string_view Bool(bool value) noexcept
 {
@@ -307,7 +296,7 @@ std::string SummarizeNeuralReceiptForLog(const NeuralRenderReceiptInputs& inputs
             if (check.Ok()) continue;
             if (!first) line += ',';
             first = false;
-            line += Utf8(check.name);
+            line += utf8_text::FromWide(check.name);
         }
         line += ')';
     }

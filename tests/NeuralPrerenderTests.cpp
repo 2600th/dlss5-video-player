@@ -1818,6 +1818,21 @@ void materialization_failure_reports_diagnostics_without_signed_urls_test()
     CHECK(result.detail.size() < 2200);
 }
 
+// P1.16: the diagnostic was decoded strictly, so one byte that was not UTF-8
+// - a Latin-1 tag, which ffmpeg prints raw - dropped the whole message.
+void materialization_diagnostic_survives_output_that_is_not_utf8_test()
+{
+    TempDirectory fixture;
+    std::filesystem::copy_file(CurrentExecutable(), fixture.Path() / L"ffmpeg.exe");
+    const auto result = MediaMaterializer(fixture.Path()).Run({
+        L"https://media.invalid/diagnostic-latin1?token=secret-value", {}, fixture.Path() / L"output.mkv"}, {});
+    CHECK(!result.ok);
+    CHECK_EQ(MaterializeError::ProcessFailed, result.error);
+    CHECK(result.detail.find(L"Connection reset") != std::wstring::npos);
+    CHECK(result.detail.find(L"Caf\uFFFD del Mar") != std::wstring::npos);
+    CHECK(result.detail.find(L"secret-value") == std::wstring::npos);
+}
+
 void materialization_discards_oversized_diagnostic_url_fragments_test()
 {
     TempDirectory fixture;
@@ -5108,6 +5123,14 @@ int RunFakeMediaPipelineChild(int argc, wchar_t* argv[])
         return 7;
     }
     if (std::ranges::any_of(arguments, [](std::wstring_view value) {
+            return value.find(L"/diagnostic-latin1") != std::wstring_view::npos;
+        })) {
+        // FFmpeg prints container tags byte for byte, and a Latin-1 tag is not UTF-8.
+        std::cerr << "  title           : Caf\xe9 del Mar\n"
+                     "Connection reset while reading https://media.invalid/diagnostic-latin1?token=secret-value\n";
+        return 7;
+    }
+    if (std::ranges::any_of(arguments, [](std::wstring_view value) {
             return value.find(L"/diagnostic-error") != std::wstring_view::npos;
         })) {
         std::cerr << "Connection reset while reading https://media.invalid/diagnostic-error?token=secret-value\n";
@@ -5220,6 +5243,7 @@ int wmain(int argc, wchar_t* argv[])
     staging_sweep_resumes_a_directory_it_could_not_finish_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
+    materialization_diagnostic_survives_output_that_is_not_utf8_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();
     media_progress_reader_buffers_split_keys_and_limits_its_report_rate_test();
     materialization_reports_download_progress_while_the_source_is_copied_test();

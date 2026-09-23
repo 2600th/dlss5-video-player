@@ -69,6 +69,7 @@
 
 #include "FrameGenerationPass.h"
 #include "MediaPipeline.h"
+#include "Utf8Text.h"
 
 #include <mfapi.h>
 
@@ -99,15 +100,7 @@ namespace fs = std::filesystem;
 constexpr const wchar_t* kDefaultSource = L"external/test-media/dlaa-smoke.mp4";
 constexpr uint32_t kDefaultMultiplier = 4;
 
-std::string Narrow(std::wstring_view text)
-{
-    if (text.empty()) return {};
-    const int length = WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0, nullptr, nullptr);
-    if (length <= 0) return {};
-    std::string narrow(size_t(length), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text.data(), int(text.size()), narrow.data(), length, nullptr, nullptr);
-    return narrow;
-}
+std::string Narrow(std::wstring_view text) { return utf8_text::FromWide(text); }
 
 const char* ErrorName(FrameGenerationError error)
 {

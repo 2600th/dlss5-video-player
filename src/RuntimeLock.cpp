@@ -3,6 +3,7 @@
 #include "NeuralCache.h"
 #include "RuntimeLockData.h"
 #include "StrictJson.h"
+#include "Utf8Text.h"
 
 #include <windows.h>
 
@@ -36,18 +37,6 @@ bool ReadString(const JsonValue* value, std::string& out)
     if (!value || value->kind != JsonValue::Kind::String) return false;
     out = value->text;
     return true;
-}
-
-std::wstring Widen(std::string_view utf8)
-{
-    if (utf8.empty()) return {};
-    const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
-                                           static_cast<int>(utf8.size()), nullptr, 0);
-    if (length <= 0) return {};
-    std::wstring wide(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), static_cast<int>(utf8.size()),
-                        wide.data(), length);
-    return wide;
 }
 
 bool LowercaseHex64(std::string& hex)
@@ -131,8 +120,8 @@ std::optional<RuntimeLock> ParseRuntimeLock(std::string_view json)
         if (!ReadUnsigned(item.Member("size"), entry.size)) return std::nullopt;
         if (!ReadString(item.Member("sha256"), entry.sha256) || !LowercaseHex64(entry.sha256)) return std::nullopt;
         if (!ReadString(item.Member("fileVersion"), fileVersion)) return std::nullopt;
-        entry.destination = Widen(destination);
-        entry.fileVersion = Widen(fileVersion);
+        entry.destination = utf8_text::ToWideStrict(destination).value_or(std::wstring{});
+        entry.fileVersion = utf8_text::ToWideStrict(fileVersion).value_or(std::wstring{});
         if (entry.destination.empty()) return std::nullopt;
         lock.entries.push_back(std::move(entry));
     }

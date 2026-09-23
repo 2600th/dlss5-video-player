@@ -1,6 +1,7 @@
 #include "RecentMedia.h"
 
 #include "AtomicFile.h"
+#include "Utf8Text.h"
 
 #include <windows.h>
 
@@ -23,25 +24,15 @@ std::optional<std::string> Utf8(std::wstring_view text)
 {
     if (text.empty()) return std::string{};
     if (text.size() > kMaximumTextLength || text.find(L'\0') != text.npos) return {};
-    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
-        static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
-    if (count <= 0) return {};
-    std::string result(static_cast<size_t>(count), '\0');
-    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
-            static_cast<int>(text.size()), result.data(), count, nullptr, nullptr) != count) return {};
-    return result;
+    return utf8_text::FromWideStrict(text);
 }
 
 std::optional<std::wstring> Wide(std::string_view text)
 {
     if (text.empty()) return std::wstring{};
     if (text.size() > kMaximumTextLength * 4 || text.find('\0') != text.npos) return {};
-    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-        static_cast<int>(text.size()), nullptr, 0);
-    if (count <= 0 || static_cast<size_t>(count) > kMaximumTextLength) return {};
-    std::wstring result(static_cast<size_t>(count), L'\0');
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-            static_cast<int>(text.size()), result.data(), count) != count) return {};
+    auto result = utf8_text::ToWideStrict(text);
+    if (!result || result->size() > kMaximumTextLength) return {};
     return result;
 }
 
