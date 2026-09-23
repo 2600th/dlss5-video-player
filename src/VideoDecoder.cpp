@@ -117,6 +117,22 @@ static bool ParseDurationTag(std::string_view text, double& out) {
     return true;
 }
 
+// Ceilings on the geometry a header may declare. The pixel count is the
+// largest picture H.264, HEVC and AV1 allow at any level (MaxLumaPs and
+// MaxPicSize are all 35,651,584 - 8192x4352), and a side past 16384 is past
+// the largest texture D3D12 creates, so nothing that exceeds either decodes
+// here anyway. The point is where it fails: a crafted file declaring
+// 20000x20000 asked for ~11 GB of frame buffers before anything noticed. A
+// still is one frame and phone cameras exceed the video ceiling, so it is held
+// to the texture limit only.
+static constexpr uint32_t kMaxVideoSide = 16384;
+static constexpr uint64_t kMaxVideoPixels = 35651584;
+
+static bool PlausibleGeometry(uint32_t width, uint32_t height, bool stillImage) {
+    if (!width || !height || width > kMaxVideoSide || height > kMaxVideoSide) return false;
+    return stillImage || uint64_t(width) * height <= kMaxVideoPixels;
+}
+
 VideoDecoder::~VideoDecoder() { Close(); }
 
 void VideoDecoder::Swap(VideoDecoder& other) noexcept {
@@ -512,6 +528,12 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_source.gif = format == "gif";
     m_source.stillImage = format == "image2" || format == "png_pipe" || format == "jpeg_pipe" ||
         format == "bmp_pipe" || format == "tiff_pipe" || format == "webp_pipe";
+    if (!PlausibleGeometry(width, height, m_source.stillImage)) {
+        LOG("ffprobe declared " << width << "x" << height << ", past what any decodable "
+            << (m_source.stillImage ? "image" : "video") << " can be; refusing the file.");
+        m_source.width = m_source.height = m_source.nativeWidth = m_source.nativeHeight = 0;
+        return false;
+    }
     // A photo has one frame, with a finite carrier duration for the existing
     // neural cache. GIF delays are centiseconds: a 100 Hz carrier preserves
     // every delay instead of retiming variable-delay animation to its average.
@@ -923,14 +945,19 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         // A file this process produced beside one already probed: same encoder,
         // same geometry, same frame rate. Probing it again would spend a child
         // process on an answer already in hand.
+        if (!PlausibleGeometry(known->width, known->height, false)) {
+            LOG("Known media declared " << known->width << "x" << known->height << "; refusing it.");
+            return false;
+        }
         m_source.width = m_source.nativeWidth = known->width;
         m_source.height = m_source.nativeHeight = known->height;
-        m_source.fps = known->fps;
+        // The same bound a probed rate gets: FrameRate() promises 1..240.
+        m_source.fps = std::clamp(known->fps, 1.0, 240.0);
         // The sibling was encoded by StartFFmpeg with -fps_mode cfr -r fps, so
         // this rate is both the source's own and genuinely constant; without it
         // a no-probe open would report an unknown rate for a file whose rate
         // this process chose.
-        m_source.avgFrameRate = m_source.nominalFrameRate = known->fps;
+        m_source.avgFrameRate = m_source.nominalFrameRate = m_source.fps;
         m_source.durationSec = known->durationSec;
         m_source.hardwareProfile = known->hardwareProfile;
         // Declared by the caller off a file it probed, not assumed here. Empty
@@ -1405,11 +1432,17 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
     ComPtr<IMFMediaType> current;
     if (FAILED(m_reader->GetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), &current))) return false;
     MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &m_source.width, &m_source.height);
+    if (!PlausibleGeometry(m_source.width, m_source.height, false)) {
+        LOG("Media Foundation declared " << m_source.width << "x" << m_source.height << "; refusing it.");
+        m_source.width = m_source.height = 0;
+        m_reader.Reset();
+        return false;
+    }
     m_source.nativeWidth=m_source.width; m_source.nativeHeight=m_source.height;
     m_source.displayAspect = m_source.height ? double(m_source.width)/double(m_source.height) : 16.0/9.0;
     UINT32 frN = 0, frD = 0;
     if (SUCCEEDED(MFGetAttributeRatio(current.Get(), MF_MT_FRAME_RATE, &frN, &frD)) && frD) {
-        m_source.fps = double(frN) / double(frD);
+        m_source.fps = std::clamp(double(frN) / double(frD), 1.0, 240.0);
         // A rate the reader stated, so FrameRateKnown() is true here rather than
         // reporting the 30.0 default as the source's own. MF exposes one nominal
         // rate and no frames-over-duration average, so there is no second rate to

@@ -54,6 +54,7 @@
 #include "CrashDump.h"
 #include "Nv12Convert.h"
 #include "FrameRatePolicy.h"
+#include "DroppedFilesPolicy.h"
 #include "FrameGenerationPass.h"
 #include "NeuralCache.h"
 #include "SourceDigestMemo.h"
@@ -7503,7 +7504,26 @@ private:
         case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;EndScrub();InvalidateControls();}if(m_dragVolume)m_dragVolume=false;if(m_pressedToolbarAction!=ToolbarAction::None){m_pressedToolbarAction=ToolbarAction::None;InvalidateControls();}return 0;
         case WM_SETFOCUS:InvalidateControls();return 0;
         case WM_KILLFOCUS:InvalidateControls();return 0;
-        case WM_DROPFILES:{HDROP d=reinterpret_cast<HDROP>(w);wchar_t p[32768]{};UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);if(count>0&&DragQueryFileW(d,0,p,static_cast<UINT>(std::size(p))))Load(p);DragFinish(d);return 0;}
+        case WM_DROPFILES:{
+            // Each name sized by its own query, on the heap: this used to be a 64 KB
+            // array in WndProc's frame, and every file after the first was dropped
+            // without a word.
+            HDROP d=reinterpret_cast<HDROP>(w);std::vector<std::wstring> dropped;
+            const UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);
+            for(UINT i=0;i<count;++i){
+                const UINT length=DragQueryFileW(d,i,nullptr,0);std::wstring path(length,L'\0');
+                if(!length||DragQueryFileW(d,i,path.data(),length+1)!=length)path.clear();
+                dropped.push_back(std::move(path));
+            }
+            DragFinish(d);
+            const auto choice=dropped_files::Choose(dropped,kVideoPatterns,[](const std::wstring& path){std::error_code ec;return std::filesystem::is_directory(path,ec);});
+            if(!choice.open){LOG("Dropped "<<count<<" item(s), none of them a file; nothing opened.");return 0;}
+            if(choice.ignored)LOG("Dropped "<<count<<" items; opening item "<<(*choice.open+1)<<" and ignoring "<<choice.ignored<<".");
+            if(Load(dropped[*choice.open])&&choice.ignored){
+                m_sourceNotice=L"Opened one dropped file; "+std::to_wstring(choice.ignored)+(choice.ignored==1?L" other was":L" others were")+L" ignored";
+                UpdateCachedStatus();
+            }
+            return 0;}
         case WM_MOUSEWHEEL:{if(m_loaded){const float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;const float volume=std::clamp(m_volume+step,0.0f,1.0f);const bool changed=m_muted||volume!=m_volume;if(changed){m_muted=false;m_volume=volume;Audio().SetVolume(m_volume);InvalidateToolbarAction(ToolbarAction::Mute);InvalidateVolumeControls();}}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
         case WM_HOTKEY:HandleHotkey(int(w));return 0;

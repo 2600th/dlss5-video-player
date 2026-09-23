@@ -1,5 +1,6 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
+#include "DroppedFilesPolicy.h"
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
 #include "SourceDigestMemo.h"
@@ -6220,6 +6221,76 @@ void video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_t
     CHECK(plain->PixelLayout()==VideoPixelLayout::Bgra);
 }
 
+// A drop of several files opened whatever Explorer listed first - a folder, a
+// subtitle - and silently discarded the rest.
+void dropped_files_open_the_first_supported_file_and_count_the_rest_test()
+{
+    using namespace dropped_files;
+    constexpr std::wstring_view patterns=L"*.mp4;*.mkv;*.webm";
+    CHECK(MatchesPatterns(L"C:\\clips\\Film.MKV",patterns));
+    CHECK(!MatchesPatterns(L"C:\\clips\\film.srt",patterns));
+    CHECK(!MatchesPatterns(L"C:\\clips.mp4\\readme",patterns));
+    CHECK(!MatchesPatterns(L"C:\\clips\\mp4",patterns));
+    CHECK(!MatchesPatterns(L"C:\\clips\\film.mp",patterns));
+
+    const auto folders=[](const std::wstring& path){return path.ends_with(L"\\folder");};
+    const std::vector<std::wstring> mixed{L"C:\\a\\folder",L"C:\\a\\film.srt",L"C:\\a\\film.mkv",L"C:\\a\\other.mp4"};
+    const Choice picked=Choose(mixed,patterns,folders);
+    CHECK(picked.open.has_value());
+    CHECK_EQ(size_t{2},picked.open.value_or(99));
+    CHECK_EQ(size_t{3},picked.ignored);
+
+    // Nothing listed: the first file of any kind, since FFmpeg opens more
+    // than the dialog lists.
+    const std::vector<std::wstring> unlisted{L"C:\\a\\folder",L"C:\\a\\capture.xyz",L"C:\\a\\notes.txt"};
+    const Choice fallback=Choose(unlisted,patterns,folders);
+    CHECK_EQ(size_t{1},fallback.open.value_or(99));
+    CHECK_EQ(size_t{2},fallback.ignored);
+
+    // One file is the ordinary drop: nothing ignored, nothing to say.
+    const Choice single=Choose(std::vector<std::wstring>{L"C:\\a\\film.webm"},patterns,folders);
+    CHECK_EQ(size_t{0},single.open.value_or(99));
+    CHECK_EQ(size_t{0},single.ignored);
+
+    // Only folders, or names the shell could not return: nothing opens.
+    const Choice none=Choose(std::vector<std::wstring>{L"C:\\a\\folder",L""},patterns,folders);
+    CHECK(!none.open.has_value());
+    CHECK_EQ(size_t{2},none.ignored);
+}
+
+// A header's width, height and rate are untrusted. A crafted 20000x20000 file
+// asked for ~11 GB of frame buffers, and a known open took any rate at all
+// although FrameRate() promises 1..240.
+void video_decoder_bounds_declared_geometry_and_known_rates_test()
+{
+    MediaFixture fixture;
+    const auto describes=[&](const wchar_t* scenario){
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        return decoder->OpenMetadata(scenario,MediaSourceKind::LocalFile);
+    };
+    CHECK(!describes(L"geomcap_huge"));
+    // 142 Mpx: within the texture limit, past any codec level.
+    CHECK(!describes(L"geomcap_pixels"));
+    // 8K DCI is the largest real video there is, and still opens.
+    CHECK(describes(L"geomcap_8k"));
+    // A 200 MP phone photo is one frame and is held to the texture limit only.
+    CHECK(describes(L"geomcap_photo"));
+
+    VideoDecoder::KnownMedia media{};
+    media.width=2;media.height=2;media.durationSec=30.0;
+    media.fps=1000.0;
+    auto fast=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(fast->OpenKnown(L"knownrate",media,MediaSourceKind::LocalFile));
+    CHECK_EQ(240.0,fast->FrameRate());
+    media.fps=0.25;
+    auto slow=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(slow->OpenKnown(L"knownrate",media,MediaSourceKind::LocalFile));
+    CHECK_EQ(1.0,slow->FrameRate());
+    media.fps=30.0;media.width=20000;media.height=20000;
+    auto huge=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(!huge->OpenKnown(L"knownrate",media,MediaSourceKind::LocalFile));
+}
+
 // The GPU source conversion is a matrix plus a range mapping. A source that
 // declares neither, or declares a matrix the conversion has no coefficients for,
 // cannot be converted correctly - so it is never handed over as NV12, however
@@ -7266,6 +7337,15 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         }
         if(all.find(L"largeburst")!=std::wstring::npos){
             std::cout<<geometry(1024,1024,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
+        }
+        // Declared geometry at and past the ceilings a header is held to.
+        if(all.find(L"geomcap_")!=std::wstring::npos){
+            if(all.find(L"geomcap_huge")!=std::wstring::npos)std::cout<<geometry(20000,20000,"1:1");
+            else if(all.find(L"geomcap_pixels")!=std::wstring::npos)std::cout<<geometry(16384,8704,"32:17");
+            else if(all.find(L"geomcap_8k")!=std::wstring::npos)std::cout<<geometry(8192,4320,"256:135");
+            else if(all.find(L"geomcap_photo")!=std::wstring::npos)
+                std::cout<<"width=16320\nheight=12240\nformat_name=image2\ndisplay_aspect_ratio=4:3\n";
+            std::cout<<std::flush;return 0;
         }
         if(all.find(L"drainexit")!=std::wstring::npos){
             std::cout<<geometry(1920,1080,"16:9","0.034")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
@@ -9415,6 +9495,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_sequential_can_keep_bgra_for_even_geometry_test),
     TEST_CASE(video_decoder_open_sequential_stays_bgra_for_odd_geometry_test),
     TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
+    TEST_CASE(video_decoder_bounds_declared_geometry_and_known_rates_test),
+    TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),

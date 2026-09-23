@@ -65,7 +65,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.4](#p14) | Audio clock and endpoint edge cases | S | Player | 🔍 |
 | [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
 | [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
-| [P1.7](#p17) | Bounds on untrusted media values | XS | Player, Pipeline | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
@@ -407,20 +406,6 @@ memory. The pixels do not change.
   timeline when the duration is unknown.
 
 ---
-
-<a id="p17"></a>
-### P1.7 · Bounds on untrusted media values
-
-`XS` · **Player, Pipeline** · 🔍 · _open parts of old 2.23_
-
-- `width`/`height` have no ceiling (`VideoDecoder.cpp:487-496`); a crafted
-  file declaring 20000×20000 asks for about 11 GB. Bound them the way the
-  Matroska path bounds duration.
-- `OpenKnown` assigns `fps` without the `[1, 240]` clamp its header documents
-  (`VideoDecoder.cpp:913`).
-- `WM_DROPFILES` discards every file after the first without a word, and keeps
-  a 64 KB buffer on the stack in `WndProc` (`main.cpp:7463`). Open the first
-  file and say that the rest were ignored.
 
 ## Pipeline: helper, cache, runtime
 
