@@ -13,6 +13,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -23,8 +24,10 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -119,6 +122,178 @@ std::wstring HandleText(HANDLE handle)
     return std::to_wstring(reinterpret_cast<uintptr_t>(handle));
 }
 
+// The parent's end of the metadata pipe, read by a thread of its own.
+//
+// The pump used to peek the pipe and, finding it empty, wait 20 ms on the
+// helper process before looking again, so every Progress, Segment and Result
+// sat in the pipe for up to a poll interval - measured 15-16 ms median, the
+// timer tick rounding the 20 ms wait. A Segment is what makes a finished
+// segment playable, so that delay came straight out of the live buffer. This
+// thread is blocked in ReadFile instead, queues what it reads, and sets
+// `ready`, which the pump waits on beside the helper process and its stop
+// token.
+//
+// The queue is bounded, so a helper that writes faster than the parent reads
+// is still held back by the pipe, as it always was: the thread stops reading
+// at kMetadataReadAheadBytes until the pump takes some. State lives in a
+// shared block so a reader that cannot be cancelled can be let go without
+// anything it uses being freed under it.
+struct MetadataPipeState {
+    HANDLE pipe{};
+    HANDLE ready{};   // auto-reset: set whenever the queue grows or the read ends
+    std::mutex mutex;
+    std::condition_variable room;
+    std::vector<std::byte> queue;
+    bool ended{};     // no more bytes will arrive
+    bool failed{};    // ...because a read failed, not because the helper closed its end
+    bool stopping{};
+
+    MetadataPipeState() = default;
+    MetadataPipeState(const MetadataPipeState&) = delete;
+    MetadataPipeState& operator=(const MetadataPipeState&) = delete;
+    ~MetadataPipeState()
+    {
+        if (pipe) CloseHandle(pipe);
+        if (ready) CloseHandle(ready);
+    }
+};
+
+// The pipe's own size (StartHelper), so one read takes whatever one burst of
+// the helper's left in it.
+constexpr DWORD kMetadataPipeBytes = 64 * 1024;
+// How far the reader may run ahead of the pump: one drain budget, which is far
+// more than a well-behaved helper writes between two passes.
+constexpr size_t kMetadataReadAheadBytes = neural_worker_detail::kMetadataDrainByteBudget;
+
+void ReadMetadataPipe(const std::shared_ptr<MetadataPipeState>& state)
+{
+    // Allocated once for the pipe's life. The drain this replaces zero-filled
+    // a 4 KiB array on every pass of its loop.
+    std::vector<std::byte> chunk(kMetadataPipeBytes);
+    for (;;) {
+        {
+            std::unique_lock lock(state->mutex);
+            state->room.wait(lock, [&] {
+                return state->stopping || state->queue.size() < kMetadataReadAheadBytes;
+            });
+            if (state->stopping) {
+                state->ended = true;
+                break;
+            }
+        }
+        DWORD read = 0;
+        if (!ReadFile(state->pipe, chunk.data(), static_cast<DWORD>(chunk.size()), &read, nullptr)) {
+            const DWORD error = GetLastError();
+            std::lock_guard lock(state->mutex);
+            state->ended = true;
+            // The helper closing its end is how every stream finishes, and a
+            // cancelled read is this parent finishing it.
+            state->failed = error != ERROR_BROKEN_PIPE && !state->stopping;
+            break;
+        }
+        if (!read) continue;
+        std::lock_guard lock(state->mutex);
+        state->queue.insert(state->queue.end(), chunk.begin(), chunk.begin() + read);
+        SetEvent(state->ready);
+    }
+    SetEvent(state->ready);
+}
+
+class MetadataPipe {
+public:
+    // Takes ownership of `pipe`, the parent's read end.
+    explicit MetadataPipe(HANDLE pipe) : state_(std::make_shared<MetadataPipeState>())
+    {
+        state_->pipe = pipe;
+        state_->ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!state_->ready) return;
+        try {
+            reader_ = std::thread([state = state_] { ReadMetadataPipe(state); });
+        } catch (...) {
+        }
+    }
+
+    ~MetadataPipe()
+    {
+        {
+            std::lock_guard lock(state_->mutex);
+            state_->stopping = true;
+        }
+        state_->room.notify_all();
+        if (!reader_.joinable()) return;
+        // Normally the read has ended already: a pipe is dropped after its
+        // helper is gone, and the helper's write end went with it. A write end
+        // something else still holds leaves the thread in ReadFile, which is
+        // what the cancel is for; one that will not cancel is let go with the
+        // state it owns rather than hanging the caller, as the shutdown write
+        // is (SendShutdownAndCloseBounded).
+        const HANDLE thread = reader_.native_handle();
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            if (WaitForSingleObject(thread, attempt ? 50 : 0) == WAIT_OBJECT_0) {
+                reader_.join();
+                return;
+            }
+            CancelSynchronousIo(thread);
+        }
+        reader_.detach();
+    }
+
+    MetadataPipe(const MetadataPipe&) = delete;
+    MetadataPipe& operator=(const MetadataPipe&) = delete;
+
+    bool Valid() const { return reader_.joinable(); }
+    HANDLE Ready() const { return state_->ready; }
+    HANDLE Pipe() const { return state_->pipe; }
+
+    size_t Buffered() const
+    {
+        std::lock_guard lock(state_->mutex);
+        return state_->queue.size();
+    }
+
+    struct Taken {
+        size_t bytes{};
+        bool failed{};   // the read failed and nothing it delivered is left
+    };
+
+    // Moves at most `budget` queued bytes into `out`, oldest first.
+    Taken Take(std::vector<std::byte>& out, size_t budget)
+    {
+        Taken taken;
+        {
+            std::lock_guard lock(state_->mutex);
+            taken.bytes = std::min(budget, state_->queue.size());
+            const auto end = state_->queue.begin() + static_cast<std::ptrdiff_t>(taken.bytes);
+            out.assign(state_->queue.begin(), end);
+            state_->queue.erase(state_->queue.begin(), end);
+            taken.failed = state_->failed && state_->queue.empty();
+        }
+        if (taken.bytes) state_->room.notify_all();
+        return taken;
+    }
+
+    // Until the reader has everything the helper wrote, or `budget` runs out.
+    // Asked once the helper process is gone: its last bytes may still be on
+    // their way from the pipe into the queue.
+    void WaitForEnd(DWORD budget)
+    {
+        const ULONGLONG started = GetTickCount64();
+        for (;;) {
+            {
+                std::lock_guard lock(state_->mutex);
+                if (state_->ended) return;
+            }
+            const ULONGLONG elapsed = GetTickCount64() - started;
+            if (elapsed >= budget) return;
+            WaitForSingleObject(state_->ready, static_cast<DWORD>(budget - elapsed));
+        }
+    }
+
+private:
+    std::shared_ptr<MetadataPipeState> state_;
+    std::thread reader_;
+};
+
 class MetadataReader {
 public:
     MetadataReader(OfflineNeuralRenderer::ProgressCallback progress, NeuralSegmentSink segments,
@@ -132,39 +307,23 @@ public:
     // make the render uncancellable - the user pressed stop and nothing
     // happened until the helper chose to go quiet. `budgetSpent` tells the
     // pump the pipe still has work, so it checks its stop token and returns.
-    bool ReadAvailable(HANDLE pipe, bool* budgetSpent = nullptr, size_t* bytesRead = nullptr)
+    bool ReadAvailable(MetadataPipe& pipe, bool* budgetSpent = nullptr, size_t* bytesRead = nullptr)
     {
-        size_t drained = 0;
-        if (budgetSpent) *budgetSpent = false;
-        for (;;) {
-            if (drained >= neural_worker_detail::kMetadataDrainByteBudget) {
-                if (budgetSpent) *budgetSpent = true;
-                break;
-            }
-            DWORD available = 0;
-            if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
-                const DWORD error = GetLastError();
-                if (error == ERROR_BROKEN_PIPE) break;
-                malformed_ = true;
-                if (bytesRead) *bytesRead = drained;
-                return false;
-            }
-            if (!available) break;
-            std::array<std::byte, 4096> chunk{};
-            const DWORD wanted = std::min<DWORD>(available, static_cast<DWORD>(chunk.size()));
-            DWORD read = 0;
-            if (!ReadFile(pipe, chunk.data(), wanted, &read, nullptr) || read == 0) {
-                malformed_ = true;
-                if (bytesRead) *bytesRead = drained;
-                return false;
-            }
-            drained += read;
-            if (!Push(std::span<const std::byte>(chunk.data(), read))) {
-                if (bytesRead) *bytesRead = drained;
-                return false;
-            }
+        const MetadataPipe::Taken taken = pipe.Take(taken_, neural_worker_detail::kMetadataDrainByteBudget);
+        if (budgetSpent) *budgetSpent = taken.bytes >= neural_worker_detail::kMetadataDrainByteBudget;
+        if (bytesRead) *bytesRead = taken.bytes;
+        // Fed in the 4 KiB pieces the pipe drain always used: Push bounds what
+        // it holds undecoded, and a whole budget at once would trip that bound
+        // on a stream of perfectly good messages.
+        constexpr size_t kPiece = 4096;
+        for (size_t offset = 0; offset < taken.bytes; offset += kPiece) {
+            const size_t piece = std::min(kPiece, taken.bytes - offset);
+            if (!Push(std::span<const std::byte>(taken_.data() + offset, piece))) return false;
         }
-        if (bytesRead) *bytesRead = drained;
+        if (taken.failed) {
+            malformed_ = true;
+            return false;
+        }
         return true;
     }
 
@@ -310,6 +469,7 @@ private:
     NeuralColdStartCallback timeline_reported_;
     std::optional<uint64_t> lastSegmentIndex_;
     std::vector<std::byte> bytes_;
+    std::vector<std::byte> taken_;   // one drain's bytes, kept for its capacity
     NeuralColdStartTimeline timeline_;
     std::optional<NeuralRenderResult> result_;
     std::optional<PreflightPayload> preflight_;
@@ -379,7 +539,7 @@ private:
 struct HelperProcess {
     HANDLE process{};
     HANDLE job{};
-    HANDLE metadata{};
+    std::unique_ptr<MetadataPipe> metadata;
     HANDLE command{};
 
     bool Valid() const noexcept { return process != nullptr; }
@@ -416,7 +576,9 @@ void EndHelper(HelperProcess& helper, DWORD grace)
         TerminateProcess(helper.process, ERROR_PROCESS_ABORTED);
         WaitForSingleObject(helper.process, 2000);
     }
-    if (helper.metadata) CloseHandle(helper.metadata);
+    // After the kill, so the reader finds the pipe broken rather than having
+    // to be cancelled out of a read.
+    helper.metadata.reset();
     if (helper.process) CloseHandle(helper.process);
     if (helper.job) CloseHandle(helper.job);
     helper = {};
@@ -449,7 +611,10 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
     RemoveStaleRuntimeLogs(executable.parent_path());
     SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
     ScopedHandle metadataRead, metadataWrite;
-    if (!CreatePipe(metadataRead.Address(), metadataWrite.Address(), &security, 0) ||
+    // 64 KiB rather than the 4 KiB default: the helper writes 60 progress
+    // messages a second plus segments, and a small buffer made it block on
+    // every burst the parent had not yet read.
+    if (!CreatePipe(metadataRead.Address(), metadataWrite.Address(), &security, kMetadataPipeBytes) ||
         !SetHandleInformation(metadataRead.Get(), HANDLE_FLAG_INHERIT, 0)) {
         outcome.detail = ErrorDetail(L"Creating the neural helper metadata pipe failed");
         return outcome;
@@ -534,7 +699,14 @@ StartOutcome StartHelper(const std::filesystem::path& executable,
         EndHelper(doomed, 0);
         return outcome;
     }
-    outcome.helper = {process.hProcess, job.Release(), metadataRead.Release(), commandWrite.Release()};
+    auto metadata = std::make_unique<MetadataPipe>(metadataRead.Release());
+    if (!metadata->Valid()) {
+        outcome.detail = ErrorDetail(L"Starting the neural helper metadata reader failed");
+        HelperProcess doomed{process.hProcess, job.Release(), std::move(metadata), nullptr};
+        EndHelper(doomed, 0);
+        return outcome;
+    }
+    outcome.helper = {process.hProcess, job.Release(), std::move(metadata), commandWrite.Release()};
     outcome.helperMetadata = metadataWrite.Get();
     outcome.helperPause = inheritedPause.Get();
     return outcome;
@@ -560,27 +732,19 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
 {
     PumpOutcome outcome;
     std::optional<std::chrono::steady_clock::time_point> cancelDeadline;
+    // The stop token as something the wait below can wake on. Without the
+    // event the pump still works, falling back to the 20 ms look it used to
+    // take at everything.
+    ScopedHandle stopped(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    const HANDLE stoppedEvent = stopped.Get();
+    const std::stop_callback onStop(stop, [stoppedEvent] { if (stoppedEvent) SetEvent(stoppedEvent); });
     for (;;) {
         bool budgetSpent = false;
-        if (!reader.ReadAvailable(helper.metadata, &budgetSpent)) { outcome.malformed = true; break; }
-        // Judged from the reader rather than from this break, because a helper
+        if (!reader.ReadAvailable(*helper.metadata, &budgetSpent)) { outcome.malformed = true; break; }
+        // Judged from the reader rather than from the process, because a helper
         // that writes its result and exits in the same breath is judged below
         // on what it said, not on the fact that it went.
         if (resident && (reader.Complete() || reader.PreflightComplete())) break;
-        // The pipe still has work. Fall through to the stop check rather than
-        // reading on, then come straight back without the 20 ms wait - which
-        // is for an idle helper, not a busy one.
-        if (budgetSpent) {
-            if (stop.stop_requested() && !outcome.cancelled) {
-                outcome.cancelled = true;
-                if (!resident || !WriteCommand(helper.command, CommandKind::Cancel, nullptr, 0)) break;
-                cancelDeadline = std::chrono::steady_clock::now() + kResidentCancelGrace;
-            }
-            if (cancelDeadline && std::chrono::steady_clock::now() >= *cancelDeadline) break;
-            continue;
-        }
-        const DWORD wait = WaitForSingleObject(helper.process, 20);
-        if (wait != WAIT_TIMEOUT) { outcome.exited = true; break; }
         if (stop.stop_requested() && !outcome.cancelled) {
             outcome.cancelled = true;
             // A single-shot helper is killed by the caller. A resident one is
@@ -589,9 +753,29 @@ PumpOutcome Pump(const HelperProcess& helper, MetadataReader& reader, std::stop_
             if (!resident || !WriteCommand(helper.command, CommandKind::Cancel, nullptr, 0)) break;
             cancelDeadline = std::chrono::steady_clock::now() + kResidentCancelGrace;
         }
-        if (cancelDeadline && std::chrono::steady_clock::now() >= *cancelDeadline) break;
+        DWORD timeout = INFINITE;
+        if (cancelDeadline) {
+            const auto left = *cancelDeadline - std::chrono::steady_clock::now();
+            if (left <= std::chrono::steady_clock::duration::zero()) break;
+            timeout = static_cast<DWORD>(
+                std::chrono::ceil<std::chrono::milliseconds>(left).count());
+        }
+        // The queue still has work: take it before sleeping, having checked
+        // the stop token on the way, which is what the budget is for.
+        if (budgetSpent) continue;
+        if (!stoppedEvent) timeout = std::min<DWORD>(timeout, 20);
+        // Data first, so a helper that wrote and exited is read before it is
+        // judged gone. The stop event stays set once stop is requested, so it
+        // leaves the set once the cancel has been acted on.
+        const HANDLE handles[] = {helper.metadata->Ready(), helper.process, stoppedEvent};
+        const DWORD count = outcome.cancelled || !stoppedEvent ? 2 : 3;
+        const DWORD wait = WaitForMultipleObjects(count, handles, FALSE, timeout);
+        if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_FAILED) { outcome.exited = !helper.Alive(); break; }
     }
-    reader.ReadAvailable(helper.metadata);
+    // A helper that has gone may still have its last bytes on their way from
+    // the pipe into the queue.
+    if (outcome.exited) helper.metadata->WaitForEnd(1000);
+    reader.ReadAvailable(*helper.metadata);
     outcome.completed = reader.Complete() || reader.PreflightComplete();
     return outcome;
 }
@@ -1295,7 +1479,7 @@ struct ResidentNeuralHelper::Session {
             }, pauseEvent, true, processCreated);
         launchPause = pauseEvent;
         if (!started.helper.Valid()) return std::move(started.detail);
-        helper = started.helper;
+        helper = std::move(started.helper);
         helperMetadata = started.helperMetadata;
         helperPause = started.helperPause;
         // Answered with Ready whenever the helper gets to it. The first job
@@ -1608,8 +1792,29 @@ bool neural_worker_detail::SendShutdownAndCloseBounded(HANDLE command,
 neural_worker_detail::MetadataDrainPass neural_worker_detail::DrainMetadataPipeOnce(HANDLE pipe)
 {
     MetadataDrainPass pass;
+    // The caller keeps its handle; the reader owns a duplicate of it.
+    HANDLE duplicate = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), pipe, GetCurrentProcess(), &duplicate, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+        pass.malformed = true;
+        return pass;
+    }
+    MetadataPipe metadata(duplicate);
+    if (!metadata.Valid()) {
+        pass.malformed = true;
+        return pass;
+    }
+    // Let the reader catch up with what is already in the pipe - until its
+    // read-ahead is full or the pipe has nothing left for it - so the pass
+    // below sees what a pump that had been waiting would see.
+    const ULONGLONG started = GetTickCount64();
+    while (GetTickCount64() - started < 5000 && metadata.Buffered() < kMetadataReadAheadBytes) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr) || !available) break;
+        Sleep(1);
+    }
     MetadataReader reader({}, {});
-    const bool ok = reader.ReadAvailable(pipe, &pass.budgetSpent, &pass.bytesRead);
+    const bool ok = reader.ReadAvailable(metadata, &pass.budgetSpent, &pass.bytesRead);
     pass.malformed = !ok || reader.Malformed();
     return pass;
 }

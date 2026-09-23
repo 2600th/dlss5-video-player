@@ -117,6 +117,9 @@ void AppendMessage(std::vector<std::byte>& stream, WireKind kind, std::span<cons
     AppendMessage(stream, kProtocolVersion, kind, payload);
 }
 
+// How many stamped progress messages latency-source.mkv writes.
+constexpr uint64_t kLatencyMessages = 20;
+
 NeuralRenderResult ValidFakeResult(uint64_t jobId)
 {
     NeuralRenderResult result;
@@ -333,6 +336,25 @@ int RunFakeWorker(int argc, wchar_t** argv)
             if (!WriteMessage(handle, WireKind::Progress, &wire, sizeof(wire))) break;
         }
         return 0;
+    }
+    if (source == L"latency-source.mkv") {
+        // Messages spaced wider than any poll interval, each stamped with the
+        // moment it was written, so the parent can measure how long each one
+        // sat in the pipe. steady_clock is QueryPerformanceCounter, one clock
+        // for every process on the machine.
+        NeuralRenderProgress progress;
+        progress.phase = NeuralRenderPhase::NeuralRendering;
+        progress.totalFrames = kLatencyMessages;
+        for (uint64_t index = 0; index < kLatencyMessages; ++index) {
+            std::this_thread::sleep_for(25ms);
+            progress.completedFrames = index;
+            progress.bytes = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            const WireProgress wire = EncodeProgress(progress);
+            if (!WriteMessage(handle, WireKind::Progress, &wire, sizeof(wire))) return 13;
+        }
+        const auto bytes = EncodeResult(ValidFakeResult(parsed->request.jobId));
+        return WriteMessage(handle, WireKind::Result, bytes.data(), static_cast<uint32_t>(bytes.size())) ? 0 : 14;
     }
     if (source == L"truncated-source.mkv") {
         const WireHeader truncated{kProtocolMagic, kProtocolVersion,
@@ -939,6 +961,30 @@ void cancellation_is_bounded_even_when_the_helper_floods_the_pipe_test()
     // The helper writes for 30 s. Anything near that means the drain, not the
     // cancellation, decided when this returned.
     CHECK(elapsed < 8s);
+}
+
+// P1.13: the parent used to poll its metadata pipe every 20 ms, so each
+// message - including the Segment that makes a finished segment playable -
+// reached it up to a poll interval (and a timer tick) late. A reader blocked
+// in ReadFile wakes the pump as the bytes land.
+void helper_messages_reach_the_parent_without_a_poll_interval_test()
+{
+    std::vector<int64_t> latencies;
+    const NeuralRenderResult result = RunNeuralWorker(CurrentExecutable(), TestRequest(L"latency-source.mkv"),
+        [&](const NeuralRenderProgress& progress) {
+            if (progress.totalFrames != kLatencyMessages) return;
+            const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            latencies.push_back(now - static_cast<int64_t>(progress.bytes));
+        });
+    CHECK(result.ok);
+    CHECK_EQ(size_t{kLatencyMessages}, latencies.size());
+    if (latencies.empty()) return;
+    std::sort(latencies.begin(), latencies.end());
+    const int64_t median = latencies[latencies.size() / 2];
+    // Polling put the median near half the interval - 10 ms and up - on every
+    // run. Woken by the read, it is a context switch.
+    CHECK(median < 3000);
 }
 
 void malformed_or_truncated_results_are_rejected_test()
@@ -2330,6 +2376,7 @@ int wmain(int argc, wchar_t** argv)
     one_metadata_drain_pass_stops_on_its_budget_test();
     an_empty_metadata_pipe_is_not_a_spent_budget_test();
     cancellation_is_bounded_even_when_the_helper_floods_the_pipe_test();
+    helper_messages_reach_the_parent_without_a_poll_interval_test();
     malformed_or_truncated_results_are_rejected_test();
     valid_result_preserves_all_verification_fields_test();
     request_fields_reach_the_helper_intact_test();

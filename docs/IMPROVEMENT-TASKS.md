@@ -72,7 +72,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
 | [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
-| [P1.13](#p113) | Parent-side IPC polls at 20 ms | M | Pipeline, Player | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
@@ -546,26 +545,6 @@ runtime.
 
 **Fix** — allowlist the directory's contents (refuse unknown `.addon64` and
 `.dll` files) and fold the directory listing into the runtime digest.
-
----
-
-<a id="p113"></a>
-### P1.13 · Parent-side IPC polls at 20 ms
-
-`M` · **Pipeline, Player** · 🔍 · _old 2.8, not started_
-
-**Where** — `NeuralWorker.cpp:580` (`WaitForSingleObject(helper.process, 20)`),
-`:450`, `:151`; `NeuralWorkerProtocol.h:222-240`
-
-Every `Progress`, `Segment` and `Result` message reaches the parent 0-20 ms
-late. A `Segment` message is what makes a finished segment playable, so the
-delay comes straight out of the live buffer. The helper side already uses a
-reader thread blocked on an event.
-
-**Fix** — use a parent-side reader thread blocked in `ReadFile`, as the helper
-does. Coalesce header and payload into one `WriteFile` (and merge the two
-identical write functions). Give the 60 Hz metadata pipe 64 KiB rather than
-the default 4 KiB. Move the 4 KiB zero-filled chunk out of the drain loop.
 
 ---
 

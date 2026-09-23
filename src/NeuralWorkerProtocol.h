@@ -10,6 +10,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -219,11 +220,30 @@ inline bool WriteAll(HANDLE handle, const void* data, size_t bytes)
     return true;
 }
 
+// Payloads up to this size travel in the same WriteFile as their header: every
+// message but a preflight receipt or a job vector, including a result carrying
+// the longest detail it may. Each WriteFile on a pipe is a kernel transition
+// and, with a reader blocked on the other end, a wake-up for half a message.
+inline constexpr uint32_t kCoalescedPayloadBytes = static_cast<uint32_t>(sizeof(WireResult)) + kMaximumDetailBytes;
+
+// One frame in either direction. The bytes are exactly the header followed by
+// the payload whichever way they are written; only the number of writes
+// differs, so the wire format does not.
+inline bool WriteFrame(HANDLE handle, uint16_t kind, const void* payload, uint32_t payloadBytes)
+{
+    const WireHeader header{kMagic, kVersion, kind, payloadBytes};
+    if (payloadBytes <= kCoalescedPayloadBytes) {
+        std::array<std::byte, sizeof(WireHeader) + kCoalescedPayloadBytes> frame;
+        std::memcpy(frame.data(), &header, sizeof(header));
+        if (payloadBytes) std::memcpy(frame.data() + sizeof(header), payload, payloadBytes);
+        return WriteAll(handle, frame.data(), sizeof(header) + payloadBytes);
+    }
+    return WriteAll(handle, &header, sizeof(header)) && WriteAll(handle, payload, payloadBytes);
+}
+
 inline bool WriteMessage(HANDLE handle, WireKind kind, const void* payload, uint32_t payloadBytes)
 {
-    const WireHeader header{kMagic, kVersion, static_cast<uint16_t>(kind), payloadBytes};
-    return WriteAll(handle, &header, sizeof(header)) &&
-           (!payloadBytes || WriteAll(handle, payload, payloadBytes));
+    return WriteFrame(handle, static_cast<uint16_t>(kind), payload, payloadBytes);
 }
 
 inline bool IsKnownCommand(uint16_t kind) noexcept
@@ -234,9 +254,7 @@ inline bool IsKnownCommand(uint16_t kind) noexcept
 
 inline bool WriteCommand(HANDLE handle, CommandKind kind, const void* payload, uint32_t payloadBytes)
 {
-    const WireHeader header{kMagic, kVersion, static_cast<uint16_t>(kind), payloadBytes};
-    return WriteAll(handle, &header, sizeof(header)) &&
-           (!payloadBytes || WriteAll(handle, payload, payloadBytes));
+    return WriteFrame(handle, static_cast<uint16_t>(kind), payload, payloadBytes);
 }
 
 // `count`, then `count` pairs of byte length and UTF-16LE text. Lengths are
