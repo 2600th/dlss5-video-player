@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
@@ -269,6 +270,54 @@ MediaStreamSummary SummarizeMediaStreams(const std::filesystem::path& helperDire
                                          const std::filesystem::path& media,
                                          std::stop_token stop,
                                          MediaStreamMode mode = MediaStreamMode::Counts);
+
+// One stream of a file as ffprobe names it: its absolute index, its type
+// ("video", "audio", "subtitle", "attachment", "data") and its codec.
+struct MediaStreamInfo {
+    uint32_t index{};
+    std::string type;
+    std::string codec;
+};
+
+// Every stream of `media`, in file order, or nothing when ffprobe could not
+// list them. A header read.
+std::optional<std::vector<MediaStreamInfo>> ListMediaStreams(const std::filesystem::path& helperDirectory,
+                                                             const std::filesystem::path& media,
+                                                             std::stop_token stop);
+
+// The last step of "Export with DLSS stages": the video the passes wrote, kept
+// bit for bit, in the container the output's extension names, with the
+// streams of `streamSource` beside it. GIF, PNG and JPEG are encoded from the
+// video alone. The container is not the carrier's: every pass writes
+// Matroska, and this is what turns that into the file the user named
+// (ExportContainerFor in ExportPipeline.h).
+struct StageExportMuxRequest {
+    std::filesystem::path video;
+    std::filesystem::path streamSource;
+    std::filesystem::path output;
+    // The same trim CachedExportRequest applies, for a video that covers only
+    // a range of `streamSource`: 0 and 0 keep the whole source.
+    double rangeStartSeconds{};
+    double rangeDurationSeconds{};
+};
+
+// The FFmpeg arguments for MuxStageExport, from what the two inputs were
+// probed to carry. `staging` is the file FFmpeg writes. Empty when the
+// output's extension names no container this export writes.
+std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxRequest& request,
+                                                       const std::filesystem::path& staging,
+                                                       std::string_view videoCodec,
+                                                       const std::vector<MediaStreamInfo>& sourceStreams);
+
+// Writes the finished export. Unlike CachedVideoExporter this REPLACES an
+// existing output: the user confirmed the overwrite in the Save dialog, or
+// named the file with --out, whose documented contract is to replace it. The
+// replacement is atomic - FFmpeg writes a staging file in the output's folder
+// that is moved over the output only once it is complete - so a failed or
+// cancelled mux leaves whatever was there before untouched.
+MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
+                                 const StageExportMuxRequest& request,
+                                 std::stop_token stop);
 
 enum class MediaProbeMode { FullValidation, CachedMetadata };
 

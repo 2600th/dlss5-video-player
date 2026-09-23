@@ -1,3 +1,4 @@
+#include "ExportPipeline.h"
 #include "MediaPipeline.h"
 #include "NeuralSegmentIndex.h"
 #include "RuntimePolicy.h"
@@ -458,6 +459,145 @@ void ExportTests(const std::filesystem::path& helpers)
     CHECK_EQ(expectedFiles, Files(fixture.path));
     CHECK_EQ(sourceBefore, Read(source));
     CHECK_EQ(cachedBefore, Read(cached));
+}
+
+// "Export with DLSS stages" renamed its last pass's Matroska carrier onto the
+// chosen name, so clip.mp4 probed as format_name=matroska,webm. Every offered
+// extension has to come out as the container it names, with the video's
+// packets untouched where the container keeps them.
+void StageExportContainerTests(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto log = fixture.path / L"tool.log";
+    // The two carriers the passes write: HEVC from NVENC, H.264 when NVENC
+    // refused and the software encoder finished the job.
+    const auto hevc = fixture.path / L"carrier-hevc.mkv";
+    const auto h264 = fixture.path / L"carrier-h264.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc2=s=64x48:r=5:d=1", L"-c:v", L"libx265", L"-x265-params", L"log-level=error",
+        L"-pix_fmt", L"yuv420p", hevc.wstring()}, log));
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc2=s=64x48:r=5:d=1", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", h264.wstring()}, log));
+    const auto photo = fixture.path / L"photo.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc2=s=64x48:r=5:d=0.2", L"-frames:v", L"1", L"-c:v", L"libx264",
+        L"-pix_fmt", L"yuv420p", photo.wstring()}, log));
+    if (!std::filesystem::exists(hevc) || !std::filesystem::exists(h264) || !std::filesystem::exists(photo)) return;
+
+    // One value, without the line ending ffprobe puts after it.
+    const auto value = [&](const std::filesystem::path& file, const wchar_t* entry) {
+        auto text = Probe(helpers, file, log, {L"-select_streams", L"v:0", L"-show_entries", entry,
+                                               L"-of", L"default=noprint_wrappers=1:nokey=1"});
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+        return text;
+    };
+    const auto formatName = [&](const std::filesystem::path& file) { return value(file, L"format=format_name"); };
+    const std::vector<std::wstring> hashes{L"-select_streams", L"v:0", L"-show_packets",
+        L"-show_entries", L"packet=data_hash", L"-show_data_hash", L"sha256", L"-of", L"csv=p=0"};
+    for (const auto& carrier : {hevc, h264}) {
+        const bool isHevc = carrier == hevc;
+        for (const auto& [name, expected] : {std::pair{L"out.mkv", "matroska,webm"},
+                                             std::pair{L"out.MP4", "mov,mp4,m4a,3gp,3g2,mj2"},
+                                             std::pair{L"out.gif", "gif"}}) {
+            const auto output = fixture.path / (std::wstring(isHevc ? L"hevc-" : L"h264-") + name);
+            const auto result = MuxStageExport(helpers, {carrier, carrier, output}, {});
+            if (!result.ok) std::wcerr << result.detail << '\n';
+            CHECK(result.ok);
+            if (!result.ok) continue;
+            CHECK_EQ(std::string(expected), formatName(output));
+            if (ExportContainerFor(output.extension().wstring()) == ExportContainer::Gif) continue;
+            // MKV and MP4 carry the passes' video bit for bit.
+            CHECK_EQ(Probe(helpers, carrier, log, hashes), Probe(helpers, output, log, hashes));
+            if (ExportContainerFor(output.extension().wstring()) == ExportContainer::Mp4)
+                CHECK_EQ(std::string(isHevc ? "hvc1" : "avc1"), value(output, L"stream=codec_tag_string"));
+        }
+    }
+    // A picture is judged by its codec as well: ffprobe names the demuxer of a
+    // .jpeg "image2" and of a .jpg "jpeg_pipe", for the same bytes.
+    for (const auto& [name, expected] : {std::pair{L"photo.png", "png"}, std::pair{L"photo.jpg", "mjpeg"},
+                                         std::pair{L"photo.jpeg", "mjpeg"}}) {
+        const auto output = fixture.path / name;
+        const auto result = MuxStageExport(helpers, {photo, photo, output}, {});
+        CHECK(result.ok);
+        if (!result.ok) continue;
+        CHECK_EQ(std::string(expected), value(output, L"stream=codec_name"));
+        CHECK(formatName(output) == (std::string(expected) == "png" ? "png_pipe" : "jpeg_pipe") ||
+              formatName(output) == "image2");
+    }
+
+    // The user confirmed replacing an existing file; it is replaced whole.
+    const auto existing = fixture.path / L"existing.mp4";
+    Write(existing, "an older export");
+    CHECK(MuxStageExport(helpers, {h264, h264, existing}, {}).ok);
+    CHECK_EQ(std::string("mov,mp4,m4a,3gp,3g2,mj2"), formatName(existing));
+    // A failed mux leaves it as it was, and leaves no staging file behind.
+    const auto invalid = fixture.path / L"invalid.mkv";
+    Write(invalid, "not media");
+    Write(existing, "an older export");
+    const auto before = Files(fixture.path);
+    const auto failed = MuxStageExport(helpers, {invalid, invalid, existing}, {});
+    CHECK(!failed.ok);
+    CHECK_EQ(std::string("an older export"), Read(existing));
+    CHECK_EQ(before, Files(fixture.path));
+    // Refused before anything runs: no container this export writes, and an
+    // output that is one of the inputs.
+    for (const auto& output : {fixture.path / L"out.avi", fixture.path / L"noextension", h264}) {
+        const auto refused = MuxStageExport(helpers, {h264, h264, output}, {});
+        CHECK(!refused.ok);
+        CHECK_EQ(MaterializeError::InvalidRequest, refused.error);
+    }
+    CHECK_EQ(before, Files(fixture.path));
+    std::stop_source stopped;
+    stopped.request_stop();
+    CHECK_EQ(MaterializeError::Cancelled,
+             MuxStageExport(helpers, {h264, h264, fixture.path / L"cancelled.mkv"}, stopped.get_token()).error);
+    CHECK_EQ(before, Files(fixture.path));
+}
+
+// The argument list for the stage export's last step, without FFmpeg: each
+// source stream is mapped by its own index, and codec options address output
+// indices, which shift whenever a stream is left out.
+void StageExportArgumentTests()
+{
+    const std::vector<MediaStreamInfo> streams{
+        {0, "video", "h264"}, {1, "audio", "pcm_s16le"}, {2, "subtitle", "hdmv_pgs_subtitle"},
+        {3, "audio", "aac"}, {4, "subtitle", "subrip"}, {5, "attachment", "ttf"}, {6, "data", "bin_data"}};
+    const std::filesystem::path video = L"C:/scratch/stage2.mkv", source = L"C:/media/source.mkv",
+                                staging = L"C:/out/.stage.tmp";
+    const auto at = [](const std::vector<std::wstring>& arguments, std::wstring_view option) {
+        const size_t index = IndexOf(arguments, option);
+        return index + 1 < arguments.size() ? arguments[index + 1] : std::wstring{};
+    };
+    const auto mp4 = BuildStageExportMuxArguments({video, source, L"C:/out/clip.mp4"}, staging, "hevc", streams);
+    CHECK_EQ(staging.wstring(), mp4.back());
+    CHECK_EQ(std::wstring(L"hvc1"), at(mp4, L"-tag:v"));
+    CHECK_EQ(std::wstring(L"copy"), at(mp4, L"-c:v"));
+    // Kept: audio 1 (encoded), audio 3 (copied), subtitle 4 (to mov_text), in that order.
+    CHECK(IndexOf(mp4, L"1:1") < IndexOf(mp4, L"1:3"));
+    CHECK(IndexOf(mp4, L"1:3") < IndexOf(mp4, L"1:4"));
+    for (const auto* left : {L"1:0", L"1:2", L"1:5", L"1:6"}) CHECK_EQ(mp4.size(), IndexOf(mp4, left));
+    CHECK_EQ(std::wstring(L"aac"), at(mp4, L"-c:1"));
+    CHECK_EQ(std::wstring(L"192k"), at(mp4, L"-b:1"));
+    CHECK_EQ(std::wstring(L"copy"), at(mp4, L"-c:2"));
+    CHECK_EQ(std::wstring(L"mov_text"), at(mp4, L"-c:3"));
+    CHECK_EQ(mp4.size(), IndexOf(mp4, L"-c:4"));
+    CHECK_EQ(std::wstring(L"+faststart"), at(mp4, L"-movflags"));
+    CHECK_EQ(std::wstring(L"mp4"), at(mp4, L"-f"));
+
+    const auto mkv = BuildStageExportMuxArguments({video, source, L"C:/out/clip.mkv"}, staging, "hevc", streams);
+    CHECK_EQ(mkv.size(), IndexOf(mkv, L"-tag:v"));
+    for (const auto* kept : {L"1:1", L"1:2", L"1:3", L"1:4", L"1:5"}) CHECK(IndexOf(mkv, kept) < mkv.size());
+    for (const auto* specifier : {L"-c:1", L"-c:2", L"-c:3", L"-c:4", L"-c:5"})
+        CHECK_EQ(std::wstring(L"copy"), at(mkv, specifier));
+    CHECK_EQ(std::wstring(L"matroska"), at(mkv, L"-f"));
+
+    // Pictures are the cached export's own encode, from the video alone.
+    for (const auto* name : {L"C:/out/clip.gif", L"C:/out/clip.png", L"C:/out/clip.jpg"}) {
+        const auto picture = BuildStageExportMuxArguments({video, source, name}, staging, "hevc", streams);
+        CHECK(picture == BuildCachedExportArguments({video, source, name}, staging, false));
+    }
+    CHECK(BuildStageExportMuxArguments({video, source, L"C:/out/clip.avi"}, staging, "hevc", streams).empty());
 }
 
 void PhotoAndAnimationTests(const std::filesystem::path& helpers)
@@ -1218,7 +1358,9 @@ int wmain(int argc, wchar_t** argv)
     MaterializationPreservesFullVideoTest(helpers);
     MaterializationRejectsShortVideoWithLongAudioTest(helpers);
     ExportArgumentTests();
+    StageExportArgumentTests();
     ExportTests(helpers);
+    StageExportContainerTests(helpers);
     RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
     JoinedFrameCountMatchesDecodedCountTest(helpers);

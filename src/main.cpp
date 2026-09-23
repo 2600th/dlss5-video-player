@@ -1300,6 +1300,38 @@ static std::filesystem::path PickExportFile(HWND owner, std::wstring_view title,
     return GetSaveFileNameW(&dialog)?std::filesystem::path(path):std::filesystem::path{};
 }
 
+// Where "Export with DLSS stages" writes. Only the containers the export can
+// actually write for this source are offered (ExportContainerChoices), the
+// returned name always ends in one of them, and replacing a file is asked
+// about here because the export replaces it.
+static std::filesystem::path PickStageExportFile(HWND owner, std::wstring_view title, bool photo, bool animation) {
+    wchar_t path[32768]{};
+    std::wstring suggested(title.empty()?L"neural-video":std::wstring(title));
+    for(wchar_t& c:suggested)if(c==L'<'||c==L'>'||c==L':'||c==L'"'||c==L'/'||c==L'\\'||c==L'|'||c==L'?'||c==L'*')c=L'_';
+    suggested+=L"-dlss";wcsncpy_s(path,suggested.c_str(),_TRUNCATE);
+    const auto choices=ExportContainerChoices(photo,animation);
+    std::wstring filter;
+    for(const ExportContainer container:choices){
+        const auto [name,pattern]=ExportContainerFilter(container);
+        filter+=name;filter.push_back(L'\0');filter+=pattern;filter.push_back(L'\0');
+    }
+    filter.push_back(L'\0');
+    const std::wstring defaultExtension=ExportContainerExtension(choices.front())+1;
+    OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;dialog.lpstrFile=path;dialog.nMaxFile=static_cast<DWORD>(std::size(path));
+    dialog.lpstrFilter=filter.c_str();dialog.nFilterIndex=1;dialog.lpstrDefExt=defaultExtension.c_str();dialog.lpstrTitle=L"Export with DLSS stages to a file";
+    dialog.Flags=OFN_EXPLORER|OFN_NOCHANGEDIR|OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT;
+    if(!GetSaveFileNameW(&dialog))return {};
+    const std::filesystem::path chosen(ExportFileName(path,dialog.nFilterIndex?dialog.nFilterIndex-1u:0u,photo,animation));
+    // The dialog asked about the name it returned; an extension appended here
+    // names a different file, which has to be asked about again.
+    std::error_code existsError;
+    if(chosen!=std::filesystem::path(path)&&std::filesystem::exists(chosen,existsError)){
+        const std::wstring question=chosen.filename().wstring()+L" already exists.\nDo you want to replace it?";
+        if(MessageBoxW(owner,question.c_str(),L"Export with DLSS stages",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return {};
+    }
+    return chosen;
+}
+
 static std::wstring PickVideoFile(HWND owner, const Localizer& loc) {
     ComPtr<IFileOpenDialog> dlg;
     HRESULT hr=CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dlg));
@@ -1594,6 +1626,11 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         if(stageOne!=produced)std::filesystem::remove(stageOne,ec);
         if(stageTwo!=produced)std::filesystem::remove(stageTwo,ec);};
     const auto report=[&](StageExportUpdate update){if(progress)progress(update);};
+    // Asked before the passes rather than by the last step after them: the
+    // file is replaced, and a source replaced by its own export is gone.
+    {std::error_code sameError;
+        if(std::filesystem::equivalent(job.source,job.destination,sameError)&&!sameError)
+            return {StageExportStatus::Refused,L"The export cannot replace its own source. Choose a new filename."};}
     const uint32_t passes=ExportStageCount(plan);
     if(plan.workerStage){
         NeuralRenderRequest request{};
@@ -1660,18 +1697,18 @@ static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_tok
         }
         produced=stageTwo;
     }
-    std::error_code moveError;
-    std::filesystem::remove(job.destination,moveError);
-    std::filesystem::rename(produced,job.destination,moveError);
-    if(moveError){
-        // A rename across volumes fails; a copy is the fallback the user's
-        // chosen folder may require.
-        moveError.clear();
-        std::filesystem::copy_file(produced,job.destination,std::filesystem::copy_options::overwrite_existing,moveError);
-    }
+    // Every pass writes Matroska. This used to be renamed onto the chosen name
+    // whatever it was, so "clip.mp4" was a Matroska file under an MP4 name;
+    // the last step now writes the container the name asks for, keeping the
+    // video bitstream as the passes encoded it.
     report({});
+    const MaterializeResult finished=MuxStageExport(job.helpers,{produced,produced,job.destination},stop);
     sweep();
-    if(moveError)return {StageExportStatus::Failed,L"The finished export could not be written to the chosen file."};
+    if(!finished.ok){
+        if(finished.error==MaterializeError::Cancelled)return {StageExportStatus::Cancelled,{}};
+        LOG("Stage export could not write "<<WideToUtf8(job.destination.wstring())<<": "<<WideToUtf8(finished.detail));
+        return {StageExportStatus::Failed,finished.detail};
+    }
     return {StageExportStatus::Done,{}};
 }
 
@@ -5718,7 +5755,7 @@ private:
         const std::filesystem::path scratch=cache.Root()/L"export-stages";
         std::error_code directoryError;std::filesystem::create_directories(scratch,directoryError);
         if(directoryError){MessageBoxW(m_hwnd,T(L"framegen.cache_failed").c_str(),title.c_str(),MB_OK|MB_ICONERROR);return;}
-        const std::filesystem::path destination=PickExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());
+        const std::filesystem::path destination=PickStageExportFile(m_hwnd,m_displayTitle,m_decoder.IsStillImage(),m_decoder.IsAnimation());
         if(destination.empty())return;
 
         LOG("Stage export starting: upscale="<<m_exportSelection.upscale
@@ -11174,10 +11211,10 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         console.Err(L"error: the input is not a file: "+command.input);return kExitBadArguments;
     }
     const bool defaultOutput=command.output.empty();
-    const std::filesystem::path output=defaultOutput?DefaultOutput(input):std::filesystem::absolute(command.output,fileError);
+    // The default's extension follows the source (a photo exports to PNG), so
+    // it is settled, and checked for an existing file, once the source is read.
+    std::filesystem::path output=defaultOutput?DefaultOutput(input):std::filesystem::absolute(command.output,fileError);
     if(fileError){console.Err(L"error: the output path is not usable: "+command.output);return kExitBadArguments;}
-    if(defaultOutput&&std::filesystem::exists(output,fileError))
-        return refuse(output.wstring()+L" already exists. Name the file to write with --out, which replaces it.");
     if(output.has_parent_path()&&!std::filesystem::is_directory(output.parent_path(),fileError))
         return refuse(L"the output folder does not exist: "+output.parent_path().wstring());
     if(command.safeMode&&command.selection.neural)
@@ -11196,7 +11233,19 @@ static int RunRenderCommand(const render_command::Parsed& parsed,const std::vect
         const uint32_t width=decoder.Width(),height=decoder.Height();
         const double fps=decoder.FrameRate(),duration=decoder.DurationSeconds();
         const bool still=decoder.IsStillImage();
+        const bool animation=decoder.IsAnimation();
         decoder.Close();
+        // The container follows the extension, as it does in the dialog, and
+        // only the containers the dialog would offer this source are written.
+        if(defaultOutput)output.replace_extension(ExportContainerExtension(ExportContainerChoices(still,animation).front()));
+        else if(const auto container=ExportContainerFor(output.extension().wstring());!container||!ExportContainerOffered(*container,still,animation)){
+            console.Err(still?L"error: --out must name a .png or .jpg file for a photo."
+                        :animation?L"error: --out must name a .gif, .mp4 or .mkv file for an animation."
+                        :L"error: --out must name a .mkv or .mp4 file for a video.");
+            return kExitBadArguments;
+        }
+        if(defaultOutput&&std::filesystem::exists(output,fileError))
+            return refuse(output.wstring()+L" already exists. Name the file to write with --out, which replaces it.");
 
         // The dialog's own order: measured only when frame generation was asked
         // for, because the probe brings up a device of its own.

@@ -1,4 +1,5 @@
 #include "MediaPipeline.h"
+#include "ExportPipeline.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
 #include "KillOnCloseJob.h"
@@ -55,6 +56,37 @@ std::chrono::milliseconds MediaDeadline(double mediaSeconds, std::chrono::minute
         ? std::min(mediaSeconds, 7.0 * 86400.0) : 0.0;
     return floor + std::chrono::milliseconds(std::llround(bounded * slowdown * 1000.0));
 }
+
+// An exclusively created, empty file in `folder` for an export to be written
+// into and then renamed onto its final name, or an empty path when none could
+// be created. Beside the output rather than in a temporary folder, so the
+// final rename never crosses a volume.
+std::filesystem::path ReserveExportStaging(const std::filesystem::path& folder)
+{
+    static std::atomic_uint64_t sequence{};
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        const auto candidate = folder / (L".dlss-export-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
+            L"-" + std::to_wstring(sequence.fetch_add(1)) + L".tmp");
+        HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            return candidate;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) break;
+    }
+    return {};
+}
+
+// Removes the staging file on every way out that did not publish it.
+struct ExportStagingFile {
+    std::filesystem::path path;
+    ExportStagingFile() = default;
+    ExportStagingFile(const ExportStagingFile&) = delete;
+    ExportStagingFile& operator=(const ExportStagingFile&) = delete;
+    ~ExportStagingFile() { if (!path.empty()) { std::error_code ignored; std::filesystem::remove(path, ignored); } }
+};
 
 std::filesystem::path FindHelper(const std::filesystem::path& directory,
                                  std::wstring_view name)
@@ -799,24 +831,8 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         return {false, MaterializeError::ProcessFailed, L"The cached neural media could not be inspected."};
     const bool oddDimensions = neuralMetadata.width % 2 || neuralMetadata.height % 2;
 
-    struct StagingFile {
-        std::filesystem::path path;
-        ~StagingFile() { if (!path.empty()) { std::error_code ignored; std::filesystem::remove(path, ignored); } }
-    } staging;
-    static std::atomic_uint64_t sequence{};
-    for (unsigned attempt = 0; attempt < 100; ++attempt) {
-        const auto candidate = output.parent_path() / (L".dlss-export-" +
-            std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) +
-            L"-" + std::to_wstring(sequence.fetch_add(1)) + L".tmp");
-        HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, 0, nullptr,
-                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file != INVALID_HANDLE_VALUE) {
-            CloseHandle(file);
-            staging.path = candidate;
-            break;
-        }
-        if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) break;
-    }
+    ExportStagingFile staging;
+    staging.path = ReserveExportStaging(output.parent_path());
     if (staging.path.empty())
         return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
     if (stop.stop_requested()) return cancelled();
@@ -1289,4 +1305,182 @@ MediaStreamSummary SummarizeMediaStreams(const std::filesystem::path& helperDire
     summary.audioEnd100ns = std::llround(end * 10000000.0);
     summary.ok = true;
     return summary;
+}
+
+std::optional<std::vector<MediaStreamInfo>> ListMediaStreams(const std::filesystem::path& helperDirectory,
+                                                             const std::filesystem::path& media,
+                                                             std::stop_token stop)
+{
+    if (media.empty()) return std::nullopt;
+    const auto ffprobe = FindHelper(helperDirectory, L"ffprobe.exe");
+    if (ffprobe.empty()) return std::nullopt;
+    std::vector<MediaStreamInfo> streams;
+    std::string pending;
+    bool oversized = false;
+    // ffprobe writes each stream's keys together and `index` first, so a new
+    // index opens the record the following keys belong to.
+    const auto streamLine = [&streams](std::string_view line) {
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        const size_t equals = line.find('=');
+        if (equals == std::string_view::npos) return;
+        const auto key = line.substr(0, equals);
+        const auto value = line.substr(equals + 1);
+        if (key == "index") {
+            uint32_t index = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), index);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size())
+                streams.push_back({index, {}, {}});
+        } else if (!streams.empty() && key == "codec_type") {
+            streams.back().type = std::string(value);
+        } else if (!streams.empty() && key == "codec_name") {
+            streams.back().codec = std::string(value);
+        }
+    };
+    // A header read, as SummarizeMediaStreams' stream list is.
+    const CaptureResult capture = RunCapture(ffprobe,
+        {L"-v", L"error", L"-show_entries", L"stream=index,codec_type,codec_name",
+         L"-of", L"default=noprint_wrappers=1:nokey=0", L"-i", media.wstring()},
+        stop, std::chrono::minutes{1}, 64 * 1024,
+        [&](std::string_view chunk) { ConsumeProbeLines(pending, oversized, chunk, streamLine); });
+    if (!pending.empty() && !oversized) streamLine(pending);
+    if (!capture.started || capture.cancelled || capture.timedOut || capture.exitCode != 0)
+        return std::nullopt;
+    return streams;
+}
+
+std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxRequest& request,
+                                                       const std::filesystem::path& staging,
+                                                       std::string_view videoCodec,
+                                                       const std::vector<MediaStreamInfo>& sourceStreams)
+{
+    const auto container = ExportContainerFor(request.output.extension().wstring());
+    if (!container) return {};
+    // A picture is encoded from the video alone, exactly as "Save converted
+    // video" encodes one, so the two cannot drift apart.
+    if (*container != ExportContainer::Matroska && *container != ExportContainer::Mp4)
+        return BuildCachedExportArguments({request.video, request.streamSource, request.output}, staging, false);
+
+    std::vector<std::wstring> arguments{
+        // -y applies only to the exclusively reserved staging file.
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
+        L"-i", request.video.wstring()};
+    // The trim CachedExportRequest documents: an input seek on the stream
+    // source only, then an output -ss 0 that discards the pre-roll a stream
+    // copy would otherwise keep as negative timestamps.
+    const bool seek = request.rangeStartSeconds > 0.0;
+    if (seek) arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+    arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring(), L"-map", L"0:v:0"});
+    // Codec options address OUTPUT stream indices, which are known only once
+    // each source stream has been kept or left out; the video is output 0.
+    std::vector<std::wstring> codecs{L"-c:v", L"copy"};
+    if (const std::wstring tag = ExportVideoTag(*container, videoCodec); !tag.empty())
+        codecs.insert(codecs.end(), {L"-tag:v", tag});
+    uint32_t outputIndex = 1;
+    for (const MediaStreamInfo& stream : sourceStreams) {
+        const ExportStreamAction action = ExportStreamActionFor(*container, stream.type, stream.codec);
+        if (action == ExportStreamAction::Drop) continue;
+        arguments.insert(arguments.end(), {L"-map", L"1:" + std::to_wstring(stream.index)});
+        const std::wstring specifier = std::to_wstring(outputIndex++);
+        switch (action) {
+        case ExportStreamAction::EncodeAac:
+            // The rate "Save converted video" gives MP4 audio.
+            codecs.insert(codecs.end(), {L"-c:" + specifier, L"aac", L"-b:" + specifier, L"192k"});
+            break;
+        case ExportStreamAction::ToMovText: codecs.insert(codecs.end(), {L"-c:" + specifier, L"mov_text"}); break;
+        case ExportStreamAction::ToSubrip: codecs.insert(codecs.end(), {L"-c:" + specifier, L"srt"}); break;
+        default: codecs.insert(codecs.end(), {L"-c:" + specifier, L"copy"}); break;
+        }
+    }
+    arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
+    if (seek) arguments.insert(arguments.end(), {L"-ss", L"0"});
+    if (request.rangeDurationSeconds > 0.0)
+        arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
+    arguments.insert(arguments.end(), codecs.begin(), codecs.end());
+    if (*container == ExportContainer::Mp4)
+        arguments.insert(arguments.end(), {L"-movflags", L"+faststart", L"-f", L"mp4"});
+    else
+        arguments.insert(arguments.end(), {L"-f", L"matroska"});
+    arguments.push_back(staging.wstring());
+    return arguments;
+}
+
+MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
+                                 const StageExportMuxRequest& request,
+                                 std::stop_token stop)
+{
+    const auto cancelled = [] {
+        return MaterializeResult{false, MaterializeError::Cancelled, L"The export was cancelled."};
+    };
+    if (stop.stop_requested()) return cancelled();
+    const auto container = ExportContainerFor(request.output.extension().wstring());
+    if (request.video.empty() || request.streamSource.empty() || request.output.empty() || !container)
+        return {false, MaterializeError::InvalidRequest, L"Choose an MKV, MP4, GIF, PNG or JPEG file."};
+    if (!ValidRangeSeconds(request.rangeStartSeconds) || !ValidRangeSeconds(request.rangeDurationSeconds))
+        return {false, MaterializeError::InvalidRequest, L"The export range is invalid."};
+    std::error_code error;
+    StageExportMuxRequest resolved = request;
+    resolved.video = std::filesystem::absolute(request.video, error);
+    if (!error) resolved.streamSource = std::filesystem::absolute(request.streamSource, error);
+    if (!error) resolved.output = std::filesystem::absolute(request.output, error);
+    if (error) return {false, MaterializeError::InvalidRequest, L"An export path is unavailable."};
+    for (const auto& input : {resolved.video, resolved.streamSource}) {
+        if (!std::filesystem::is_regular_file(input, error) || error)
+            return {false, MaterializeError::InvalidRequest, L"The rendered video or the original source is unavailable."};
+        // Replacing an input would destroy it, and the stream source is the
+        // user's original.
+        if (std::filesystem::equivalent(input, resolved.output, error) && !error)
+            return {false, MaterializeError::InvalidRequest, L"The export cannot replace its own source. Choose a new filename."};
+        error.clear();
+    }
+    if (!std::filesystem::is_directory(resolved.output.parent_path(), error) || error)
+        return {false, MaterializeError::InvalidRequest, L"The export folder is unavailable."};
+    const auto ffmpeg = FindHelper(helperDirectory, L"ffmpeg.exe");
+    if (ffmpeg.empty()) return {false, MaterializeError::HelperMissing, L"FFmpeg is unavailable."};
+    // The video's length sizes the deadline, as it does for the cached export.
+    const ProbeResult videoMetadata = ProbeMedia(helperDirectory, resolved.video, stop, MediaProbeMode::CachedMetadata);
+    if (stop.stop_requested()) return cancelled();
+    if (!videoMetadata.ok)
+        return {false, MaterializeError::ProcessFailed, L"The rendered video could not be inspected."};
+    std::string videoCodec;
+    std::vector<MediaStreamInfo> sourceStreams;
+    if (*container == ExportContainer::Matroska || *container == ExportContainer::Mp4) {
+        const auto videoStreams = ListMediaStreams(helperDirectory, resolved.video, stop);
+        const auto listed = ListMediaStreams(helperDirectory, resolved.streamSource, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!videoStreams || !listed)
+            return {false, MaterializeError::ProcessFailed, L"The streams to carry into the export could not be listed."};
+        for (const MediaStreamInfo& stream : *videoStreams)
+            if (stream.type == "video") { videoCodec = stream.codec; break; }
+        sourceStreams = *listed;
+    }
+
+    ExportStagingFile staging;
+    staging.path = ReserveExportStaging(resolved.output.parent_path());
+    if (staging.path.empty())
+        return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
+    if (stop.stop_requested()) return cancelled();
+    // A stream copy is seconds; a GIF of a long 4K render is the slow case,
+    // bounded like the cached export's software encode.
+    const CaptureResult capture = RunCapture(ffmpeg,
+        BuildStageExportMuxArguments(resolved, staging.path, videoCodec, sourceStreams), stop,
+        MediaDeadline(double(videoMetadata.duration100ns) / 10000000.0, std::chrono::hours{1}, 60.0),
+        64 * 1024);
+    if (capture.cancelled || stop.stop_requested()) return cancelled();
+    if (capture.timedOut)
+        return {false, MaterializeError::ProcessFailed, L"FFmpeg did not finish the export in time."};
+    if (!capture.started)
+        return {false, MaterializeError::StartFailed, L"FFmpeg could not be started."};
+    const auto bytes = std::filesystem::file_size(staging.path, error);
+    if (capture.exitCode != 0 || error || bytes == 0) {
+        std::wstring detail = L"FFmpeg could not write the export in the chosen format.";
+        if (const std::wstring diagnostic = utf8_text::ToWide(capture.output); !diagnostic.empty())
+            detail += L"\n" + diagnostic;
+        return {false, MaterializeError::ProcessFailed, std::move(detail)};
+    }
+    if (stop.stop_requested()) return cancelled();
+    if (!MoveFileExW(staging.path.c_str(), resolved.output.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return {false, MaterializeError::ProcessFailed,
+            L"The finished export could not be written to the chosen file. Check that it is not open in another program."};
+    staging.path.clear();
+    return {true, MaterializeError::None, {}};
 }

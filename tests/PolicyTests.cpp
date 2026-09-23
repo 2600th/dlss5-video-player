@@ -4806,6 +4806,85 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     CHECK(quad.valid); CHECK_EQ(uint32_t{4}, quad.multiplier); CHECK_EQ(120.0, quad.outputFps);
 }
 
+// The stage export used to rename its Matroska carrier onto whatever name the
+// Save dialog returned, so "clip.mp4" was Matroska. The container now follows
+// the extension, and only the containers the output can be are offered.
+void export_container_follows_the_chosen_extension_test()
+{
+    CHECK(ExportContainerFor(L".mkv") == ExportContainer::Matroska);
+    CHECK(ExportContainerFor(L"MP4") == ExportContainer::Mp4);
+    CHECK(ExportContainerFor(L".Gif") == ExportContainer::Gif);
+    CHECK(ExportContainerFor(L".png") == ExportContainer::Png);
+    CHECK(ExportContainerFor(L".jpg") == ExportContainer::Jpeg);
+    CHECK(ExportContainerFor(L".JPEG") == ExportContainer::Jpeg);
+    CHECK(!ExportContainerFor(L".avi")); CHECK(!ExportContainerFor(L"")); CHECK(!ExportContainerFor(L".mkv2"));
+
+    // Video: MKV first (the default), MP4; no pictures, no GIF.
+    const auto video = ExportContainerChoices(false, false);
+    CHECK_EQ(size_t{2}, video.size());
+    CHECK(video.front() == ExportContainer::Matroska);
+    CHECK(ExportContainerOffered(ExportContainer::Mp4, false, false));
+    for (const auto refused : {ExportContainer::Gif, ExportContainer::Png, ExportContainer::Jpeg})
+        CHECK(!ExportContainerOffered(refused, false, false));
+    // Animation: GIF first, and the two video containers.
+    CHECK(ExportContainerChoices(false, true).front() == ExportContainer::Gif);
+    CHECK(ExportContainerOffered(ExportContainer::Matroska, false, true));
+    CHECK(!ExportContainerOffered(ExportContainer::Png, false, true));
+    // Photo: one frame, so pictures only.
+    CHECK(ExportContainerChoices(true, false).front() == ExportContainer::Png);
+    CHECK(ExportContainerOffered(ExportContainer::Jpeg, true, false));
+    CHECK(!ExportContainerOffered(ExportContainer::Matroska, true, false));
+    // Every offered container's extension names that container again.
+    for (const bool still : {false, true})
+        for (const bool animation : {false, true})
+            for (const ExportContainer container : ExportContainerChoices(still, animation))
+                CHECK(ExportContainerFor(ExportContainerExtension(container)) == container);
+
+    // The name written is always one whose extension says what it is.
+    CHECK(ExportFileName(L"C:/out/clip.mp4", 0, false, false) == L"C:/out/clip.mp4");
+    CHECK(ExportFileName(L"C:/out/clip.MKV", 1, false, false) == L"C:/out/clip.MKV");
+    CHECK(ExportFileName(L"C:/out/clip", 1, false, false) == L"C:/out/clip.mp4");
+    CHECK(ExportFileName(L"C:/out/clip.avi", 0, false, false) == L"C:/out/clip.avi.mkv");
+    // A container this source is not offered is not honoured either.
+    CHECK(ExportFileName(L"C:/out/clip.png", 0, false, false) == L"C:/out/clip.png.mkv");
+    CHECK(ExportFileName(L"C:/out/photo.jpeg", 0, true, false) == L"C:/out/photo.jpeg");
+    // A dot in a folder name is not an extension; a filter out of range is the default.
+    CHECK(ExportFileName(L"C:/out.v2/clip", 7, false, true) == L"C:/out.v2/clip.gif");
+
+    // What travels beside the video. MKV copies nearly everything, converting
+    // only the MP4 timed text it cannot hold.
+    using A = ExportStreamAction;
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "audio", "pcm_s16le") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "audio", "vorbis") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "subtitle", "subrip") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "subtitle", "hdmv_pgs_subtitle") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "subtitle", "mov_text") == A::ToSubrip);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "subtitle", "eia_608") == A::Drop);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "attachment", "ttf") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "data", "bin_data") == A::Drop);
+    CHECK(ExportStreamActionFor(ExportContainer::Matroska, "video", "mjpeg") == A::Drop);
+    // MP4 encodes the audio it cannot hold rather than dropping it, and has
+    // no place for picture subtitles or fonts.
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "audio", "aac") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "audio", "opus") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "audio", "pcm_s16le") == A::EncodeAac);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "audio", "vorbis") == A::EncodeAac);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "audio", "") == A::Drop);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "subtitle", "subrip") == A::ToMovText);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "subtitle", "ass") == A::ToMovText);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "subtitle", "mov_text") == A::Copy);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "subtitle", "hdmv_pgs_subtitle") == A::Drop);
+    CHECK(ExportStreamActionFor(ExportContainer::Mp4, "attachment", "ttf") == A::Drop);
+    // Pictures carry nothing.
+    CHECK(ExportStreamActionFor(ExportContainer::Gif, "audio", "aac") == A::Drop);
+    CHECK(ExportStreamActionFor(ExportContainer::Png, "subtitle", "subrip") == A::Drop);
+
+    // HEVC in MP4 is tagged hvc1, which Apple's players require.
+    CHECK(std::wstring(ExportVideoTag(ExportContainer::Mp4, "hevc")) == L"hvc1");
+    CHECK(std::wstring(ExportVideoTag(ExportContainer::Mp4, "h264")).empty());
+    CHECK(std::wstring(ExportVideoTag(ExportContainer::Matroska, "hevc")).empty());
+}
+
 // `--render` is parsed before anything else runs, so the one thing it must
 // never do is claim a launch that was meant for the player - a bare file path
 // (dragged onto the exe), --output, --safe-mode - and the one thing it must
@@ -4851,6 +4930,10 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
     CHECK(full.command.hasRange);
     CHECK(full.command.rangeStart == L"0:10"); CHECK(full.command.rangeEnd == L"0:25.5");
     CHECK(full.command.output == L"D:/out/film.MKV");
+    // Every container the export writes is accepted here; which of them the
+    // source may be written as is decided once it is read.
+    for (const wchar_t* name : {L"film.mp4", L"film.gif", L"photo.png", L"photo.JPG", L"photo.jpeg"})
+        CHECK(parse({L"--render", L"a.mp4", L"--out", name}).command.output == name);
     CHECK(full.command.input == L"in put.mp4");
     // What it asks for goes through the dialog's own planner unchanged.
     const ExportPlan plan = PlanExport(full.command.selection, 1280, 720, 30.0, 4, false);
@@ -4882,7 +4965,8 @@ void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_t
              {L"--render", L"a.mp4", L"--range", L"-10"},
              {L"--render", L"a.mp4", L"--range", L"1-2-3"},
              {L"--render", L"a.mp4", L"--stages", L"fg", L"--range", L"0:01-0:02"},  // fg alone
-             {L"--render", L"a.mp4", L"--out", L"a.mp4"},                // not Matroska
+             {L"--render", L"a.mp4", L"--out", L"a.avi"},                // no container it writes
+             {L"--render", L"a.mp4", L"--out", L"a"},
              {L"--render", L"a.mp4", L"--out"},                          // no value
              {L"--render", L"a.mp4", L"--quiet", L"--quiet"},
     };
@@ -12658,6 +12742,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(feature_pills_are_visually_distinguishable_test),
     TEST_CASE(menus_group_two_to_seven_related_items_per_block_test),
     TEST_CASE(export_plan_runs_super_resolution_and_neural_as_one_pass_test),
+    TEST_CASE(export_container_follows_the_chosen_extension_test),
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),

@@ -1061,6 +1061,15 @@ neural after the upscale - so the model then runs on the upscaled frame with no
 further plumbing. The second pass is frame generation over the file the first
 one wrote. `ExportStageCount` is what the progress panel divides by.
 
+Every pass writes Matroska, so the last step is not a rename: `MuxStageExport`
+writes the container the chosen name's extension asks for
+(`ExportContainerFor`), stream-copying the video into MKV or MP4 (`hvc1` for
+HEVC in MP4, `+faststart`) and encoding GIF, PNG or JPEG exactly as "Save
+converted video" does. It stages beside the output and replaces it only once
+the file is complete. `ExportContainerChoices` is what the dialog and `--render`
+offer for a video, an animation and a photo; the rename it replaced wrote
+Matroska under an `.mp4` name.
+
 The order is fixed and the dialog exposes no way to change it. It is NVIDIA's:
 DLSS 5 neural rendering runs on the fully upscaled frame, and Streamline hands
 DLSS-G the final post-processed buffer. The community Neural Upstream mod moves

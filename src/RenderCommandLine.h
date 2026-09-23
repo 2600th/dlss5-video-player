@@ -45,7 +45,8 @@ enum class Mode {
 
 struct Command {
     std::wstring input;
-    // Empty means "<input stem>-dlss.mkv beside the input" (DefaultOutput).
+    // Empty means "<input stem>-dlss.mkv beside the input" (DefaultOutput),
+    // with the source's default container's extension once it is read.
     std::wstring output;
     // Timecodes as typed, in ParseTimecode's grammar. Resolved once the source
     // frame rate is known, which this parser does not have.
@@ -206,11 +207,11 @@ inline Parsed Parse(std::span<const std::wstring> userArguments)
             command.selection.multiplier = *multiplier;
         } else {
             if (!once(seenOut)) return bad(L"--out was given twice.");
-            // The passes write Matroska and the finished file is moved into
-            // place as it is, so another extension would name a container the
-            // file is not.
-            if (!EqualsIgnoringCase(std::filesystem::path(value).extension().wstring(), L".mkv"))
-                return bad(L"--out must name a .mkv file: the export writes Matroska.");
+            // The container follows the extension (ExportContainerFor). Which
+            // of them this source may be written as is settled once it is
+            // read: a photo is a .png or .jpg, a video a .mkv or .mp4.
+            if (!ExportContainerFor(std::filesystem::path(value).extension().wstring()))
+                return bad(L"--out must name a .mkv, .mp4, .gif, .png or .jpg file.");
             command.output = value;
         }
     }
@@ -290,8 +291,11 @@ inline std::wstring Usage()
         L"                     saved setting, 100 unless changed.\n"
         L"  --range START-END  Render only this part, e.g. 0:10-0:25 or f0-f300. Needs sr\n"
         L"                     or nr. Default: the whole source.\n"
-        L"  --out FILE         The .mkv to write. An existing file is replaced. Default:\n"
-        L"                     <input>-dlss.mkv beside the input, never replaced.\n"
+        L"  --out FILE         The file to write, in the container its extension names:\n"
+        L"                     .mkv or .mp4 for a video, also .gif for an animation,\n"
+        L"                     .png or .jpg for a photo. An existing file is replaced.\n"
+        L"                     Default: <input>-dlss.mkv (.gif, .png) beside the input,\n"
+        L"                     never replaced.\n"
         L"  --quiet            Print only the final line.\n"
         L"  --help             Print this and exit.\n"
         L"\n"

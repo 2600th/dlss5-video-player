@@ -712,6 +712,15 @@ disabled, so the file is DLSS Super Resolution alone. The render is refused
 rather than written if the add-on turns out to have run anyway. With Neural
 rendering ticked, the pass uses the look set in **Neural settings**.
 
+The file is written in the container its name asks for. The Save dialog
+offers MKV (the default) and MP4 for a video, GIF (the default), MP4 and MKV
+for an animated GIF, and PNG (the default) or JPEG for a photo; a name typed
+with any other extension gets the selected type's extension added. MKV and MP4
+keep the video exactly as the passes encoded it - only the container changes -
+and an MP4 of HEVC is tagged `hvc1`, which Apple's players need. The dialog
+asks before replacing an existing file, and the replacement happens only once
+the new file is complete.
+
 While it runs, the panel over the video names the pass, the percentage, frames
 done of total, elapsed time and an ETA once enough frames have gone through for
 one to mean anything. Two passes are reported as two rather than one bar that
@@ -730,7 +739,7 @@ The same export runs without opening the player:
 ```
 DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|2160]
                     [--multiplier 2-5] [--preset NAME] [--processing-scale 100|75|50]
-                    [--range START-END] [--out FILE.mkv] [--quiet]
+                    [--range START-END] [--out FILE] [--quiet]
 ```
 
 - `--stages` picks the stages as the dialog's ticks do: `sr` (Super
@@ -748,9 +757,12 @@ DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|216
   `nr`: frame generation then converts that pass's result rather than the whole
   film, and the file has no audio, as an export without frame generation never
   does.
-- `--out` names the `.mkv` to write and replaces an existing file. Without it
-  the file is `<input>-dlss.mkv` beside the input, and an existing one is
-  refused rather than overwritten.
+- `--out` names the file to write and replaces an existing one. Its extension
+  picks the container, from the ones the dialog offers that source: `.mkv` or
+  `.mp4` for a video, also `.gif` for an animated GIF, `.png` or `.jpg` for a
+  photo; any other is refused as a bad argument. Without it the file is
+  `<input>-dlss.mkv` beside the input (`.gif` for an animation, `.png` for a
+  photo), and an existing one is refused rather than overwritten.
 - `--quiet` prints only the last line; `--help` prints the options.
 
 It prints the plan, a progress line per pass at most once a second, and a final
