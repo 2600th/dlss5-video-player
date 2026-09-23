@@ -53,10 +53,10 @@ or muxed away from the panel ignores them entirely.
 for the helper, carry one line per device creation naming the adapter that
 actually rendered:
 
-`D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1600b vendor=0x10de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x1600b that the cache identity, the receipt GPU label and the pace prior describe`
+`D3D12 device adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x000000000001600b vendor=0x000010de vram=16047MiB is the high-performance adapter "NVIDIA GeForce RTX 4080 SUPER" luid=0x000000000001600b that the cache identity, the receipt GPU label and the pace prior describe`
 
-Read the vendor first: `vendor=0x10de` is NVIDIA and anything else cannot run
-DLSS at all, so `vendor=0x8086` with a small `vram` on a laptop that has an RTX
+Read the vendor first: `vendor=0x000010de` is NVIDIA and anything else cannot run
+DLSS at all, so `vendor=0x00008086` with a small `vram` on a laptop that has an RTX
 card is placement having landed on the integrated GPU. Then compare the two
 LUIDs, which identify physical parts rather than models - two identical cards
 share a description. `is` means the adapter the device was created on and the
