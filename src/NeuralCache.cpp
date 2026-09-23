@@ -3,6 +3,7 @@
 #include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "GuideControls.h"
+#include "LiveSessionPolicy.h"
 #include "Log.h"
 
 #include <windows.h>
@@ -272,6 +273,19 @@ bool RangeFieldsValid(int64_t start100ns, int64_t end100ns)
     return start100ns >= 0 && end100ns >= 0 && (end100ns == 0 || end100ns > start100ns);
 }
 
+// A recorded environment is all or nothing, and only a render has one: a
+// source key carries none of these terms. The installation may be empty - a
+// publisher that could not read its own module path still records the rest,
+// and eviction then never treats the entry as this installation's.
+bool EnvironmentValid(const NeuralCacheManifest& manifest)
+{
+    const NeuralCacheEnvironment& environment = manifest.environment;
+    if (!environment.Recorded()) return true;
+    return manifest.schema == kSchema && manifest.kind == NeuralCacheEntryKind::Render &&
+           !environment.application.empty() && !environment.driver.empty() &&
+           IsHexDigest(environment.modelStore);
+}
+
 bool CommonManifestFieldsValid(const NeuralCacheManifest& manifest)
 {
     if (manifest.schema != kSchema && manifest.schema != kLegacySchema) return false;
@@ -279,6 +293,7 @@ bool CommonManifestFieldsValid(const NeuralCacheManifest& manifest)
         (manifest.rangeStart100ns != 0 || manifest.rangeEnd100ns != 0 ||
          !manifest.guides.empty() || manifest.jobId != 0 || manifest.historyResets != 0 ||
          !manifest.receiptDigest.empty())) return false;
+    if (!EnvironmentValid(manifest)) return false;
     return manifest.width >= kMinDimension && manifest.width <= kMaxWidth &&
            manifest.height >= kMinDimension && manifest.height <= kMaxHeight &&
            manifest.frameCount > 0 && manifest.duration100ns > 0 &&
@@ -426,19 +441,121 @@ bool RenameDirectory(const std::filesystem::path& from, const std::filesystem::p
     return false;
 }
 
+// `patient` retries the sharing errors a scanner causes. Eviction and Clear
+// pass false: an entry something has open is one they must leave whole, and a
+// single refused rename is exactly how they find that out.
 bool MoveToInvalidDirectory(const std::filesystem::path& root,
                             const std::filesystem::path& source,
-                            std::wstring_view prefix)
+                            std::wstring_view prefix,
+                            std::filesystem::path* moved = nullptr,
+                            bool patient = true)
 {
     for(size_t attempt=0;attempt<128;++attempt){
         const auto destination=root/L"staging"/
             (std::wstring(prefix)+L"-"+std::to_wstring(GetCurrentProcessId())+L"-"+
              std::to_wstring(++g_stagingNonce));
         DWORD error=ERROR_SUCCESS;
-        if(RenameDirectory(source,destination,&error))return true;
+        const bool renamed=patient?RenameDirectory(source,destination,&error)
+                                  :MoveFileExW(source.c_str(),destination.c_str(),MOVEFILE_WRITE_THROUGH)!=FALSE;
+        if(!patient&&!renamed)error=GetLastError();
+        if(renamed){if(moved)*moved=destination;return true;}
         if(error!=ERROR_ALREADY_EXISTS&&error!=ERROR_FILE_EXISTS)return false;
     }
     return false;
+}
+
+// Removes a published entry without ever leaving half of one. remove_all
+// deletes file by file, so an entry whose payload another process was playing
+// lost its manifest and receipt, kept the payload it could not delete, and
+// was left as a directory lookup refuses and nothing ever cleans up. A rename
+// is all or nothing: while anything inside is open the directory cannot move,
+// and the entry stays whole for whoever has it open. Once moved it is
+// unreachable, and what cannot be deleted now is an invalid-* staging
+// directory the next sweep reaps.
+bool RetireEntryDirectory(const std::filesystem::path& root,
+                          const std::filesystem::path& directory,
+                          std::wstring_view prefix)
+{
+    std::filesystem::path moved;
+    if (!MoveToInvalidDirectory(root, directory, prefix, &moved, false)) return false;
+    std::error_code error;
+    std::filesystem::remove_all(moved, error);
+    return true;
+}
+
+// Serializes the operations that restructure a cache root - Evict, Clear,
+// Promote - across every player instance that shares it, and the last-use mark
+// a lookup leaves. The cache is per root, not per process: a second instance
+// running Clear() deleted the first one's live segments, and one instance's
+// eviction could remove the entry another was opening.
+//
+// Named after the root rather than stored in it, so there is nothing on disk
+// to go stale when a process dies: Windows abandons the mutex, and the next
+// waiter owns it (WAIT_ABANDONED) with nothing to recover - every operation
+// under it leaves the root consistent at each step. `Local\` scopes it to the
+// logon session, which is what shares a LocalAppData root.
+//
+// Every wait is bounded. The UI thread asks for this (Clear, and the source
+// lookups the toolbar makes), and it must never hang on another instance; a
+// caller that does not get the lock in time skips or degrades, and says so.
+class CacheRootLock {
+public:
+    CacheRootLock(const std::filesystem::path& root, DWORD waitMs)
+    {
+        mutex_ = CreateMutexW(nullptr, FALSE, NeuralCacheRootLockName(root).c_str());
+        if (!mutex_) return;
+        const DWORD wait = WaitForSingleObject(mutex_, waitMs);
+        held_ = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    }
+    ~CacheRootLock()
+    {
+        if (held_) ReleaseMutex(mutex_);
+        if (mutex_) CloseHandle(mutex_);
+    }
+    CacheRootLock(const CacheRootLock&) = delete;
+    CacheRootLock& operator=(const CacheRootLock&) = delete;
+    bool Held() const { return held_; }
+
+private:
+    HANDLE mutex_{};
+    bool held_{};
+};
+
+// The waits. A lookup holds the lock only for the mark it leaves, and Clear
+// runs on the UI thread, so both are short enough not to be felt. Eviction is
+// on its own thread and waits per entry. Promotion is on a render's worker at
+// the end of minutes of GPU time, so it waits long - and then publishes
+// anyway: the only holder that could take that long is a Clear, which the
+// user asked for, and throwing a finished render away is the worse outcome.
+constexpr DWORD kLookupLockWaitMs = 100;
+constexpr DWORD kClearLockWaitMs = 250;
+constexpr DWORD kEvictLockWaitMs = 2000;
+constexpr DWORD kPromoteLockWaitMs = 30000;
+
+// Last use is the entry directory's own write time. Nothing recorded a use, so
+// "least recently used" was really "oldest written": a film watched every day
+// was evicted before one rendered last week and never opened. Stamping the
+// directory costs one handle and writes no file into the entry. Never allowed
+// to fail a lookup: a mark that cannot be written leaves the entry as old as
+// it was.
+void MarkEntryUsed(const std::filesystem::path& directory)
+{
+    const HANDLE handle = CreateFileW(directory.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    SetFileTime(handle, nullptr, nullptr, &now);
+    CloseHandle(handle);
+}
+
+std::optional<int64_t> DirectoryWriteTime(const std::filesystem::path& directory)
+{
+    std::error_code error;
+    const auto written = std::filesystem::last_write_time(directory, error);
+    if (error) return std::nullopt;
+    return written.time_since_epoch().count();
 }
 
 // The owner of a staging directory, from the "<prefix>-<pid>-<nonce>" name
@@ -641,6 +758,36 @@ std::string BuildNeuralCacheKey(const NeuralCacheIdentity& identity)
     return Sha256Bytes(canonical).value_or(std::string{});
 }
 
+std::wstring NeuralCacheRootLockName(const std::filesystem::path& root)
+{
+    std::wstring canonical = root.lexically_normal().generic_wstring();
+    std::ranges::transform(canonical, canonical.begin(), towlower);
+    while (canonical.size() > 1 && canonical.back() == L'/') canonical.pop_back();
+    const std::string digest = HashBytes(Utf8(canonical)).value_or(std::string(64, '0'));
+    return L"Local\\DLSSVideoPlayer.Cache." + std::wstring(digest.begin(), digest.begin() + 16);
+}
+
+std::string NeuralCacheInstallation()
+{
+    const auto directory = platform_paths::ModuleDirectory();
+    if (!directory) return {};
+    std::wstring normalized = directory->lexically_normal().generic_wstring();
+    std::ranges::transform(normalized, normalized.begin(), towlower);
+    while (normalized.size() > 1 && normalized.back() == L'/') normalized.pop_back();
+    return Utf8(normalized);
+}
+
+NeuralCacheEnvironment NeuralCacheEnvironmentFor(const NeuralCacheIdentity& identity)
+{
+    // Incomplete terms record nothing rather than something the manifest gate
+    // would refuse: an undetected driver must not turn a finished render into
+    // an unpublishable one. Such an entry is kept like any legacy entry.
+    if (identity.applicationVersion.empty() || identity.driverVersion.empty() ||
+        !IsHexDigest(identity.modelStoreDigest)) return {};
+    return {identity.applicationVersion, NeuralCacheInstallation(), identity.driverVersion,
+            identity.modelStoreDigest};
+}
+
 std::optional<std::string> BuildRuntimeDigest(
     const std::filesystem::path& moduleDirectory,
     std::span<const std::wstring_view> relativeFiles,
@@ -713,8 +860,15 @@ std::string SerializeNeuralCacheManifest(const NeuralCacheManifest& manifest)
         ",\"guides\":\"" + JsonEscape(manifest.guides) +
         "\",\"jobId\":" + std::to_string(manifest.jobId) +
         ",\"historyResets\":" + std::to_string(manifest.historyResets) +
-        ",\"receiptDigest\":\"" + JsonEscape(manifest.receiptDigest) + "\"}\n";
-    return json;
+        ",\"receiptDigest\":\"" + JsonEscape(manifest.receiptDigest) + "\"";
+    // Absent rather than empty when nothing was recorded, so a manifest without
+    // it is byte-for-byte what every earlier schema-5 writer produced.
+    if (const NeuralCacheEnvironment& environment = manifest.environment; environment.Recorded())
+        json += ",\"environment\":{\"application\":\"" + JsonEscape(environment.application) +
+            "\",\"installation\":\"" + JsonEscape(environment.installation) +
+            "\",\"driver\":\"" + JsonEscape(environment.driver) +
+            "\",\"models\":\"" + JsonEscape(environment.modelStore) + "\"}";
+    return json + "}\n";
 }
 
 std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view bytes)
@@ -759,6 +913,19 @@ std::optional<NeuralCacheManifest> ParseNeuralCacheManifest(std::string_view byt
             !ReadIntegerField(cursor, "historyResets", manifest.historyResets) ||
             !ReadStringField(cursor, "receiptDigest", manifest.receiptDigest, false))
             return std::nullopt;
+        // The one optional extension: the key environment, fixed and ordered
+        // like everything before it. An empty object is not something this
+        // code writes, so it is refused rather than read as "not recorded".
+        if (cursor.Expect(',')) {
+            NeuralCacheEnvironment& environment = manifest.environment;
+            if (!cursor.Key("environment") || !cursor.Expect('{') ||
+                !ReadStringField(cursor, "application", environment.application) ||
+                !ReadStringField(cursor, "installation", environment.installation) ||
+                !ReadStringField(cursor, "driver", environment.driver) ||
+                !ReadStringField(cursor, "models", environment.modelStore, false) ||
+                !cursor.Expect('}') || !environment.Recorded())
+                return std::nullopt;
+        }
     } else {
         // Schema 4 included, whose field list schema 5 keeps: those entries are
         // refused for their schema rather than for a field they are missing,
@@ -983,6 +1150,17 @@ std::optional<NeuralCacheEntry> NeuralCacheManager::Lookup(
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
     if (!OwnsPath(directory)) return std::nullopt;
+    {
+        // Marked before it is read, and under the root's lock: an eviction
+        // that planned to remove this entry re-reads the mark under the same
+        // lock and leaves it, so an entry being opened - the startup file's,
+        // whose key nobody knows until its source is hashed - is never deleted
+        // from under the lookup. Without the lock in time the mark is still
+        // written; the hash below then refuses anything removed mid-read.
+        const CacheRootLock lock(root_, kLookupLockWaitMs);
+        if (!lock.Held()) LOG("Neural cache lookup did not get the cache lock in time; reading unlocked.");
+        MarkEntryUsed(directory);
+    }
     const auto manifestPath = directory / L"manifest.json";
     std::ifstream input(manifestPath, std::ios::binary);
     if (!input.is_open()) return std::nullopt;
@@ -1057,6 +1235,7 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
         manifest.jobId = 0;
         manifest.historyResets = 0;
         manifest.receiptDigest.clear();
+        manifest.environment = {};
     } else {
         manifest.neuralDigest = *digest;
     }
@@ -1088,6 +1267,13 @@ bool NeuralCacheManager::Promote(NeuralCacheEntryKind kind, std::string_view key
     const auto destination = root_ /
         (kind == NeuralCacheEntryKind::Source ? L"sources" : L"renders") /
         std::wstring(key.begin(), key.end());
+    // From the existing-entry check to the rename, nothing else may restructure
+    // the root: another instance's eviction or Clear, or a second promotion of
+    // the same key setting this one's entry aside as "existing".
+    const CacheRootLock lock(root_, kPromoteLockWaitMs);
+    if (!lock.Held())
+        LOG("Neural cache promotion waited " << kPromoteLockWaitMs
+            << " ms for another instance's cache operation; publishing without the lock.");
     if (auto existing = Lookup(kind, key)) {
         std::error_code cleanupError;
         std::filesystem::remove_all(staging, cleanupError);
@@ -1214,7 +1400,8 @@ uintmax_t NeuralCacheManager::SizeBytes() const
 }
 
 NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
-    std::span<const std::string> activeKeys, uintmax_t freeFloorBytes)
+    std::span<const std::string> activeKeys, uintmax_t freeFloorBytes,
+    const cache_eviction::Identity* current)
 {
     EvictionReport report;
     if (!valid_) return report;
@@ -1223,6 +1410,8 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
     if (!std::filesystem::is_directory(renders, error)) return report;
 
     std::vector<cache_eviction::Entry> entries;
+    std::vector<std::string> retired;
+    std::vector<std::pair<std::string, std::optional<int64_t>>> marks;
     for (const auto& child : std::filesystem::directory_iterator(
              renders, std::filesystem::directory_options::skip_permission_denied, error)) {
         std::error_code entryError;
@@ -1245,11 +1434,29 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
                                  std::istreambuf_iterator<char>());
         const auto manifest = ParseNeuralCacheManifest(manifestBytes);
         entry.reusable = manifest && IsReusableNeuralCacheManifest(*manifest);
+        // A well-formed entry whose recorded key environment nothing sharing
+        // this root can rebuild is as unreachable as a retired schema. One that
+        // recorded nothing - everything published before the field existed -
+        // is never judged here and waits for the pressure pass instead.
+        if (entry.reusable && current && manifest->environment.Recorded()) {
+            const NeuralCacheEnvironment& environment = manifest->environment;
+            const cache_eviction::Identity recorded{environment.application,
+                environment.installation, manifest->runtimeDigest, environment.driver,
+                environment.modelStore};
+            if (cache_eviction::IdentityRetired(recorded, *current)) {
+                entry.reusable = false;
+                retired.push_back(*key);
+            }
+        }
 
-        // Last use is the newest timestamp in the entry, so serving a render
-        // keeps it alive only if something touches it. Nothing does today, so
-        // in practice this orders by when the entry was written - which is
-        // still a far better answer than an arbitrary one.
+        // Last use is the newest of the entry's own mark - which every lookup
+        // stamps (MarkEntryUsed) - and its files' write times, which stand in
+        // for an entry nothing has looked up since it was written. The mark is
+        // also remembered as planned: an entry whose mark moves before its turn
+        // comes was looked up in the meantime, and is left.
+        const auto mark = DirectoryWriteTime(child.path());
+        if (mark) entry.lastUsed = *mark;
+        marks.emplace_back(*key, mark);
         for (std::filesystem::recursive_directory_iterator file(
                  child.path(), std::filesystem::directory_options::skip_permission_denied,
                  entryError), end;
@@ -1277,16 +1484,38 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
     for (const std::string& key : plan.evict) {
         const auto matched = std::ranges::find(entries, key, &cache_eviction::Entry::key);
         const bool unreachable = matched != entries.end() && !matched->reusable;
-        if (!RemoveRender(key)) { ++report.failures; continue; }
+        const auto directory = renders / std::wstring(key.begin(), key.end());
+        // One entry at a time under the root's lock, so a lookup in any
+        // instance is either before this - and has moved the mark - or after
+        // it, and finds nothing. The lock is never held across the walk above.
+        const CacheRootLock lock(root_, kEvictLockWaitMs);
+        if (!lock.Held()) { ++report.deferred; continue; }
+        const auto planned = std::ranges::find(marks, key, &decltype(marks)::value_type::first);
+        if (planned == marks.end() || DirectoryWriteTime(directory) != planned->second) {
+            ++report.deferred;
+            continue;
+        }
+        const DWORD attributes = GetFileAttributesW(directory.c_str());
+        if (!OwnsPath(directory) || attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            !RetireEntryDirectory(root_, directory, L"invalid-evicted")) {
+            ++report.failures;
+            continue;
+        }
         if (matched != entries.end()) report.freedBytes += matched->bytes;
-        if (unreachable) ++report.unreachableRemoved;
+        if (std::ranges::find(retired, key) != retired.end()) ++report.retiredRemoved;
+        else if (unreachable) ++report.unreachableRemoved;
         else ++report.leastRecentlyUsedRemoved;
     }
     if (!plan.evict.empty() || report.failures)
         LOG("Cache eviction: removed " << report.unreachableRemoved
-            << " unreachable and " << report.leastRecentlyUsedRemoved
+            << " unreachable, " << report.retiredRemoved
+            << " retired by a changed driver, model store, version or runtime, and "
+            << report.leastRecentlyUsedRemoved
             << " least-recently-used render(s), freeing " << report.freedBytes
-            << " bytes; " << report.failures << " could not be removed."
+            << " bytes; " << report.failures << " could not be removed (in use or refused), "
+            << report.deferred << " were left because they were looked up since, or another"
+               " instance held the cache."
             << (plan.floorMet ? "" : " The free-space floor was still not met."));
     return report;
 }
@@ -1294,6 +1523,13 @@ NeuralCacheManager::EvictionReport NeuralCacheManager::Evict(
 bool NeuralCacheManager::Clear()
 {
     if (!valid_) return false;
+    // Another instance evicting, promoting or clearing: skip rather than
+    // block the UI thread that asked, and say so.
+    const CacheRootLock lock(root_, kClearLockWaitMs);
+    if (!lock.Held()) {
+        LOG("Neural cache clear skipped: another player instance is using the cache.");
+        return false;
+    }
     // frame-generation holds the player's converted videos. Leaving it out made
     // the Clear prompt lie: SizeBytes recurses the whole root, so the dialog
     // offered to free bytes it then kept, and generated files accumulated with
@@ -1303,14 +1539,77 @@ bool NeuralCacheManager::Clear()
     // round. It holds each session's published segments; SizeBytes counts them
     // and Clear did not remove them, so the dialog over-promised again by
     // however much live rendering the user had done.
+    //
+    // Emptied child by child rather than removed whole. remove_all over live/
+    // and staging/ deleted what another RUNNING instance was writing - its
+    // session's segments and its unfinished renders - which is the
+    // cross-instance deletion SessionDirectory was introduced to stop. Those
+    // stay, by the same owner check the staging sweep uses; everything of this
+    // process's and of processes that are gone goes. A published entry is
+    // retired by rename, so one another instance is playing is left whole and
+    // reported rather than half deleted.
+    bool complete = true;
+    const DWORD self = GetCurrentProcessId();
     for (const auto name : {L"sources", L"renders", L"staging", L"frame-generation", L"live"}) {
+        const std::wstring bucket = name;
         const auto target = root_ / name;
         if (!OwnsPath(target)) return false;
         std::error_code error;
-        std::filesystem::remove_all(target, error);
-        if (error) return false;
         std::filesystem::create_directories(target, error);
         if (error) return false;
+        std::vector<std::filesystem::path> children;
+        for (std::filesystem::directory_iterator iterator(target, error), end;
+             !error && iterator != end; iterator.increment(error))
+            children.push_back(iterator->path());
+        if (error) return false;
+        for (const auto& child : children) {
+            const std::wstring childName = child.filename().wstring();
+            DWORD owner = 0;
+            if (bucket == L"staging" && ParseStagingOwner(childName, owner) && owner != self &&
+                ProcessAlive(owner)) continue;
+            uint32_t session = 0;
+            if (bucket == L"live" && live_session::ParseSessionOwner(childName, session) &&
+                session != self && ProcessAlive(session)) continue;
+            if (bucket == L"sources" || bucket == L"renders") {
+                if (!RetireEntryDirectory(root_, child, L"invalid-cleared")) complete = false;
+                continue;
+            }
+            std::error_code removeError;
+            std::filesystem::remove_all(child, removeError);
+            if (removeError) complete = false;
+        }
     }
-    return true;
+    if (!complete) LOG("Neural cache clear left entries another process still has open.");
+    return complete;
+}
+
+size_t NeuralCacheManager::SweepLiveSessions()
+{
+    if (!valid_) return 0;
+    // A crash during a live session left its live/pid<N> behind - gigabytes of
+    // segments - and only a directory named after the CURRENT process was ever
+    // removed, so each crash added another one for good. Windows does not
+    // reuse a pid while its process lives, so a directory whose owner is gone
+    // belongs to nobody. An owner that is alive, or that this process may not
+    // query, keeps its directory.
+    size_t removed = 0;
+    std::error_code error;
+    std::vector<std::filesystem::path> dead;
+    for (std::filesystem::directory_iterator iterator(root_ / L"live", error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        uint32_t owner = 0;
+        if (!live_session::ParseSessionOwner(iterator->path().filename().wstring(), owner)) continue;
+        if (ProcessAlive(owner)) continue;
+        dead.push_back(iterator->path());
+    }
+    for (const auto& directory : dead) {
+        if (!OwnsPath(directory)) continue;
+        std::error_code removeError;
+        std::filesystem::remove_all(directory, removeError);
+        if (!removeError) ++removed;
+    }
+    if (removed || !dead.empty())
+        LOG("Live session directories swept: removed=" << removed << " of " << dead.size()
+            << " left by processes that are gone.");
+    return removed;
 }

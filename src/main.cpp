@@ -1278,10 +1278,24 @@ public:
     // Reclaims render entries that can never be served again, and - only when
     // the volume is genuinely short of space - the least recently used ones.
     //
-    // At startup, once, on its own thread. The cache had no eviction at all:
-    // its key retires entries wholesale, so a single driver update makes every
-    // render unreachable and the only remedy on offer was Clear(), which
-    // destroys the new ones too. Nothing is loaded yet, so no entry is active.
+    // At startup, once, on its own thread. A single driver update makes every
+    // render unreachable, and "never served again" used to mean only "the
+    // manifest is malformed": nothing recorded which driver, model store,
+    // version or runtime an entry was keyed under, so the orphans passed the
+    // gate and stayed until the disk ran short. Entries now record those terms,
+    // and this process's own are resolved here - the same runtime digest and
+    // model-store digest a render would key on, both memoised or cheap, off the
+    // UI thread - so the orphans go at the next start. When either cannot be
+    // resolved cleanly (no runtime staged, a model root that did not read
+    // whole) nothing is judged by identity at all: a wrong "current" would
+    // delete every render that still works.
+    //
+    // The file opened at startup is looked up while this runs. It is not passed
+    // as active because its key is not known until its source is hashed;
+    // instead a lookup marks the entry used under the cache root's lock before
+    // it reads it, and eviction re-checks that mark under the same lock before
+    // it removes anything, so an entry being opened is skipped rather than
+    // deleted from under the lookup.
     //
     // Detached rather than joined: it walks directories, which on a large
     // cache on a cold disk is seconds, and none of it needs to happen before
@@ -1289,10 +1303,22 @@ public:
     // nothing is shared with the UI.
     void StartCacheEviction(){
         if(m_cacheRoot.empty())return;
-        std::thread([root=m_cacheRoot]{
+        std::thread([root=m_cacheRoot,driverVersion=m_opt.detectedGpu.driverVersion,moduleDirectory=ExecutableDirectory()]{
             NeuralCacheManager cache(root);
             if(!cache.Valid())return;
-            cache.Evict({},cache_eviction::kDefaultFreeFloorBytes);
+            // A crashed session's live/pid<N> - gigabytes of segments - had no
+            // owner left to remove it; this process only ever removes its own.
+            cache.SweepLiveSessions();
+            std::optional<cache_eviction::Identity> current;
+            if(!driverVersion.empty()){
+                const auto runtime=BuildRuntimeDigest(moduleDirectory/L"neural-runtime",LockedRuntimeFileNames());
+                const NeuralModelStore models=ResolveNeuralModelStore(driverVersion);
+                if(runtime&&NeuralModelStoreSettled(models))
+                    current=cache_eviction::Identity{DLSS_VIDEO_PLAYER_VERSION,NeuralCacheInstallation(),*runtime,WideToUtf8(driverVersion),models.digest};
+                else LOG("Cache eviction is not judging entries by identity: runtime="<<(runtime?"resolved":"unavailable")
+                         <<" modelStore="<<(NeuralModelStoreSettled(models)?"settled":"unsettled")<<".");
+            }
+            cache.Evict({},cache_eviction::kDefaultFreeFloorBytes,current?&*current:nullptr);
         }).detach();
     }
 
@@ -6600,6 +6626,9 @@ private:
                     if(stop.stop_requested()){cache.MarkInvalid(*staging);completion->result.cancelled=true;completion->result.ok=false;completion->result.detail=L"Neural render was cancelled.";goto finish;}
                     NeuralCacheManifest manifest{};manifest.sourceDigest=*sourceDigest;manifest.runtimeDigest=*runtimeDigest;manifest.encoder=completion->result.encoder==EncoderKind::HevcNvenc?"hevc_nvenc":"h264_software";manifest.width=width;manifest.height=height;manifest.frameCount=completion->result.frameCount;manifest.duration100ns=completion->result.duration100ns;manifest.nativeEvaluations=completion->result.nativeEvaluations;manifest.verifiedNeuralFrames=completion->result.verifiedNeuralFrames;manifest.observedFeature18Evaluations=completion->result.evidence.highestObservedEvaluation;manifest.feature18Created=completion->result.evidence.feature18Created;manifest.feature18ArmedBeforeCapture=completion->result.feature18ArmedBeforeCapture;manifest.upscaling=false;
                     manifest.settingsDigest=*settingsDigest;manifest.rangeStart100ns=range.start100ns;manifest.rangeEnd100ns=range.end100ns;manifest.guides=identity.guides;manifest.jobId=generation;manifest.historyResets=completion->result.historyResets;manifest.receiptDigest=*receiptDigest;
+                    // The key's environment terms, so eviction can tell this entry from one a driver
+                    // update, a model refresh or an upgrade of this installation has orphaned.
+                    manifest.environment=NeuralCacheEnvironmentFor(identity);
                     const int64_t joinedDurationTolerance=JoinedMediaDurationTolerance100ns(fps,joinedParts);
                     const bool probeMatches=probe.ok&&probe.width==width&&probe.height==height&&probe.frameCount==completion->result.frameCount&&NeuralPublishDurationsMatch(probe.duration100ns,completion->result.duration100ns,expectedDuration100ns,joinedDurationTolerance);
                     NeuralCacheManifest publishCandidate=manifest;publishCandidate.kind=NeuralCacheEntryKind::Render;publishCandidate.state=NeuralCacheState::Complete;publishCandidate.neuralDigest=std::string(64,'0');

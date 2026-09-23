@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include "NeuralCoverage.h"
 
@@ -333,8 +334,9 @@ inline double RealtimeRatio(double coveredSec, double elapsedSec, double settleS
 // Naming the directory after the process fixes both: an instance only ever
 // removes its own, and an empty root yields no directory at all rather than a
 // relative one. Windows does not reuse a pid while its process is alive, so a
-// `live/pid<N>` found at startup belongs to a dead run and is ours to clear -
-// the same reasoning NeuralCacheManager's staging sweep already uses.
+// `live/pid<N>` whose process is gone belongs to a dead run and is ours to
+// clear - the same reasoning NeuralCacheManager's staging sweep already uses,
+// and what NeuralCacheManager::SweepLiveSessions does at startup.
 //
 // Returns an empty path when there is no root, which the caller must treat as
 // "no live session is possible" rather than as a path.
@@ -343,6 +345,25 @@ inline std::filesystem::path SessionDirectory(const std::filesystem::path& cache
 {
     if (cacheRoot.empty()) return {};
     return cacheRoot / L"live" / (L"pid" + std::to_wstring(processId));
+}
+
+// The owner of a live/ directory, when its name is exactly what
+// SessionDirectory writes - "pid" and the decimal pid, no sign, no leading
+// zero. Anything else under live/ was not put there by a session and is never
+// read as one, so a sweep for dead owners cannot mistake it for theirs.
+inline bool ParseSessionOwner(std::wstring_view name, uint32_t& processId)
+{
+    if (name.size() < 4 || name.size() > 13 || !name.starts_with(L"pid")) return false;
+    const std::wstring_view digits = name.substr(3);
+    if (digits.front() == L'0' && digits.size() > 1) return false;
+    uint64_t value = 0;
+    for (const wchar_t digit : digits) {
+        if (digit < L'0' || digit > L'9') return false;
+        value = value * 10 + static_cast<uint64_t>(digit - L'0');
+    }
+    if (value > 0xFFFFFFFFull) return false;
+    processId = static_cast<uint32_t>(value);
+    return true;
 }
 
 } // namespace live_session

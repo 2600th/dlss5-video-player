@@ -2307,6 +2307,77 @@ void a_zero_floor_evicts_only_the_dead_test()
     if (plan.evict.size() == 1) CHECK_EQ(std::string("dead"), plan.evict.front());
 }
 
+// The manifest recorded none of the key's environment, so an entry a driver
+// update had orphaned passed the reuse gate and stayed until the disk ran
+// short. Retirement is the certain case only: a false positive deletes a
+// render someone can still play.
+void identity_retirement_needs_certainty_and_respects_other_installations_test()
+{
+    using cache_eviction::Identity;
+    using cache_eviction::IdentityRetired;
+    const Identity current{"0.21.2", "c:/player", std::string(64, 'b'), "32.0.16.1047",
+                           std::string(64, 'd')};
+    CHECK(!IdentityRetired(current, current));
+
+    // Machine-wide terms retire an entry whoever made it.
+    auto changed = current;
+    changed.driver = "32.0.15.9999";
+    CHECK(IdentityRetired(changed, current));
+    changed = current;
+    changed.models = std::string(64, 'e');
+    CHECK(IdentityRetired(changed, current));
+    changed.installation = "d:/elsewhere";
+    CHECK(IdentityRetired(changed, current));
+
+    // Installation terms retire only this installation's own entries.
+    changed = current;
+    changed.application = "0.21.1";
+    CHECK(IdentityRetired(changed, current));
+    changed.installation = "d:/elsewhere";
+    CHECK(!IdentityRetired(changed, current));
+    changed.installation.clear();
+    CHECK(!IdentityRetired(changed, current));
+    changed = current;
+    changed.runtime = std::string(64, 'f');
+    CHECK(IdentityRetired(changed, current));
+    changed.installation = "d:/elsewhere";
+    CHECK(!IdentityRetired(changed, current));
+
+    // Nothing recorded, or nothing known about now: never retired.
+    changed = current;
+    changed.driver = "32.0.15.9999";
+    CHECK(!IdentityRetired(Identity{}, current));
+    auto unknown = current;
+    unknown.models.clear();
+    CHECK(!IdentityRetired(changed, unknown));
+    unknown = current;
+    unknown.runtime.clear();
+    CHECK(!IdentityRetired(changed, unknown));
+    auto partial = changed;
+    partial.application.clear();
+    CHECK(!IdentityRetired(partial, current));
+}
+
+// A dead session's live/pid<N> is swept at startup, so what counts as one has
+// to be exactly what SessionDirectory writes and nothing that merely looks
+// like it.
+void live_session_owner_is_read_only_from_names_session_directory_writes_test()
+{
+    uint32_t pid = 0;
+    CHECK(live_session::ParseSessionOwner(L"pid4242", pid));
+    CHECK_EQ(uint32_t{4242}, pid);
+    CHECK(live_session::ParseSessionOwner(L"pid0", pid));
+    CHECK_EQ(uint32_t{0}, pid);
+    CHECK(live_session::ParseSessionOwner(L"pid4294967295", pid));
+    CHECK_EQ(uint32_t{4294967295u}, pid);
+    const std::filesystem::path written = live_session::SessionDirectory(L"D:\\cache", 9001);
+    CHECK(live_session::ParseSessionOwner(written.filename().wstring(), pid));
+    CHECK_EQ(uint32_t{9001}, pid);
+    for (const wchar_t* name : {L"pid", L"pid04242", L"pid-1", L"pid42a", L"Pid42", L"notes",
+                                L"pid4294967296", L"pid99999999999", L"job1"})
+        CHECK(!live_session::ParseSessionOwner(name, pid));
+}
+
 // DLSSBackend.cpp and DLSSGBackend.cpp were byte-identical and both wrong:
 //
 //     wchar_t exePath[MAX_PATH]{};
@@ -9094,6 +9165,8 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(eviction_never_touches_an_active_entry_test),
     TEST_CASE(eviction_frees_what_it_can_when_the_floor_is_unreachable_test),
     TEST_CASE(a_zero_floor_evicts_only_the_dead_test),
+    TEST_CASE(identity_retirement_needs_certainty_and_respects_other_installations_test),
+    TEST_CASE(live_session_owner_is_read_only_from_names_session_directory_writes_test),
     TEST_CASE(module_path_grows_past_max_path_test),
     TEST_CASE(module_path_never_accepts_a_filled_buffer_test),
     TEST_CASE(module_path_reports_a_failed_query_test),

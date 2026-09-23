@@ -58,7 +58,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
-| [P0.7](#p07) | Cache housekeeping keeps dead entries and hits live ones | M | Pipeline | ✅ |
 | [P0.8](#p08) | VFR detection never decides on B-frame video | XS | Pipeline, Player | ✅ |
 | [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
@@ -277,45 +276,6 @@ flag at `:1978` guards against, shuffled frames are published as verified.
 **Fix** — record the identity in the readback slot when the copy is queued,
 return it when the slot resolves, and compare it with the frame queued in
 that position.
-
----
-
-<a id="p07"></a>
-### P0.7 · Cache housekeeping keeps dead entries and hits live ones
-
-`M` · **Pipeline** · ✅ items 1-2 · 🔍 items 3-5
-
-1. **Entries a driver update orphaned are never reclaimed.** `Evict` treats any
-   complete manifest as reusable (`NeuralCache.cpp:1247`, `:782`), and
-   `PlanEviction` skips reusable entries (`CacheEvictionPolicy.h:72-76`). The
-   manifest records none of the key's identity terms: driver, model store,
-   runtime, app version. After a driver update the whole old cache survives
-   until free space falls below the 20 GiB floor. The comment at
-   `main.cpp:1282` claims the opposite.
-2. **Startup eviction ignores the file being opened.** `StartCacheEviction()`
-   (`main.cpp:1273`) runs on a detached thread with no active keys, and the
-   next line loads the startup file. The comment "Nothing is loaded yet" is
-   wrong. Under space pressure the render being opened can be deleted while
-   it is being looked up.
-3. **Last use is never recorded** (`NeuralCache.cpp:1249-1252`), so eviction
-   by least recent use is really eviction by age.
-4. **`Clear()` removes all of `live/` and `staging/`** (`:1306-1314`),
-   including directories another running instance is using. That brings back
-   the cross-instance deletion the old 1.9 fixed.
-5. **Dead `live/pid<N>` directories are never swept.** `LiveSessionPolicy.h:333`
-   says they are "ours to clear", but only the current process's own is
-   removed (`main.cpp:5609`). A crash during a live session leaves gigabytes
-   behind.
-
-**Impact** — Pipeline: the cache grows without bound on disk, and renders are
-lost under space pressure or when a second instance runs.
-
-**Fix** — write the key's identity terms into the manifest and evict any
-entry whose terms differ from the current ones. Pass the startup file's key
-as active, or start eviction after the first load. Touch last-use when an
-entry is served. Put a named mutex per cache root around eviction, Clear and
-promotion. At startup, sweep `live/pid*` directories whose process is gone,
-using the existing `ProcessAlive`.
 
 ---
 

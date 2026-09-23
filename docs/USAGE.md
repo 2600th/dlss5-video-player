@@ -228,7 +228,11 @@ evicts a render on the list's behalf. A sixth video pushes the first out of the
 menu and leaves its render on disk, so reopening that video attaches to it
 again instead of rendering the same seconds a second time; replacing a tracked
 render with new settings leaves the old one there too, since it is keyed by
-those settings and a later session may ask for them again. **Advanced > Clear
+those settings and a later session may ask for them again. At startup the
+player removes published renders it can prove nothing will ask for again - ones
+made under a different NVIDIA driver or model store, or by an older version of
+this same installation - and, only when the disk has less than 20 GiB free,
+the least recently watched renders until it does. Otherwise **Advanced > Clear
 Neural Cache** is the only thing that removes a published entry. Local
 originals and exported files are never deleted by any of this. Work that was
 abandoned or refused -
@@ -257,7 +261,9 @@ at their original paths.
 
 **Advanced > Clear Neural Cache** shows its size and asks for confirmation. It
 closes current playback and removes owned cache data, keeping recent titles and
-original-source references. Clearing is blocked during acquisition, rendering or
+original-source references. Work belonging to another player that is still
+running - its live session and its unfinished renders - is kept, and so is any
+entry that player has open. Clearing is blocked during acquisition, rendering or
 export. Retention is unbounded and manual: not a count, not a byte quota, and
 not a backup.
 

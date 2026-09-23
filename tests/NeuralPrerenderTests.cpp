@@ -332,15 +332,20 @@ void eviction_leaves_an_active_entry_alone_test()
     CHECK(std::filesystem::exists(directory));
 }
 
+DWORD DeadProcessId();
+
 // Clear() offered to free bytes it then kept: SizeBytes recurses the whole
-// root, live/ included, and Clear did not remove live/.
+// root, live/ included, and Clear did not remove live/. The session is a dead
+// process's: a running instance's is kept (see
+// clear_keeps_what_another_running_instance_owns_test).
 void clearing_the_cache_frees_everything_size_bytes_counted_test()
 {
     TempDirectory fixture;
     NeuralCacheManager manager(fixture.Path() / L"cache");
     REQUIRE(manager.Valid());
 
-    const auto liveSegment = manager.Root() / L"live" / L"pid1234" / L"segment-000.mkv";
+    const auto liveSegment = manager.Root() / L"live" /
+        (L"pid" + std::to_wstring(DeadProcessId())) / L"segment-000.mkv";
     std::filesystem::create_directories(liveSegment.parent_path());
     WriteBytes(liveSegment, std::string(4096, 'x'));
 
@@ -945,6 +950,359 @@ void staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test()
     size_t entries = 0;
     for (const auto& entry : std::filesystem::directory_iterator(staging)) { (void)entry; ++entries; }
     CHECK_EQ(size_t{3}, entries);
+}
+
+// A process that is certainly alive and certainly not this one: a suspended
+// copy of the test executable, terminated by the destructor. The owner checks
+// under test treat any pid the kernel still knows as alive, so this is the
+// "another running player instance" case without a second player.
+class LiveChildProcess {
+public:
+    LiveChildProcess()
+    {
+        const auto executable = CurrentExecutable();
+        std::wstring arguments = L"\"" + executable.wstring() + L"\" --suspended-child";
+        STARTUPINFOW startup{sizeof(startup)};
+        if (CreateProcessW(executable.c_str(), arguments.data(), nullptr, nullptr, FALSE,
+                           CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                           &process_)) CloseHandle(process_.hThread);
+    }
+    ~LiveChildProcess()
+    {
+        if (!process_.hProcess) return;
+        TerminateProcess(process_.hProcess, 0);
+        WaitForSingleObject(process_.hProcess, 10000);
+        CloseHandle(process_.hProcess);
+    }
+    LiveChildProcess(const LiveChildProcess&) = delete;
+    LiveChildProcess& operator=(const LiveChildProcess&) = delete;
+    DWORD Pid() const { return process_.dwProcessId; }
+
+private:
+    PROCESS_INFORMATION process_{};
+};
+
+// Publishes a render under `key` with `environment` recorded (or none), and
+// the runtime digest `runtime`.
+bool PublishRender(NeuralCacheManager& manager, const std::string& key,
+                   const NeuralCacheEnvironment& environment, char runtime = 'b')
+{
+    const auto staging = manager.BeginRenderStaging(key);
+    if (!staging) return false;
+    WriteBytes(*staging / L"neural.mkv", "neural-frames-" + key.substr(0, 4));
+    StageRenderReceipt(*staging);
+    auto manifest = CompleteRenderManifest();
+    manifest.runtimeDigest = std::string(64, runtime);
+    manifest.environment = environment;
+    return manager.PromoteRender(key, *staging, manifest);
+}
+
+std::filesystem::path RenderDirectory(const NeuralCacheManager& manager, const std::string& key)
+{
+    return manager.Root() / L"renders" / std::wstring(key.begin(), key.end());
+}
+
+// The manifest recorded none of the key's environment, so eviction could not
+// tell an entry a driver update had orphaned from one that still worked. The
+// field is additive: a manifest without it is byte-for-byte what earlier
+// writers produced and still parses, and one with it is exact and all or
+// nothing.
+void manifest_environment_is_optional_additive_and_all_or_nothing_test()
+{
+    auto manifest = CompleteRenderManifest();
+    manifest.state = NeuralCacheState::Complete;
+    manifest.neuralDigest = std::string(64, 'c');
+    const std::string legacyBytes = SerializeNeuralCacheManifest(manifest);
+    CHECK(legacyBytes.find("environment") == std::string::npos);
+    CHECK(legacyBytes.ends_with("\"}\n"));
+    const auto legacy = ParseNeuralCacheManifest(legacyBytes);
+    CHECK(legacy.has_value());
+    if (legacy) {
+        CHECK(!legacy->environment.Recorded());
+        CHECK(IsReusableNeuralCacheManifest(*legacy));
+    }
+
+    manifest.environment = {"0.21.2", "c:/players/dlss", "32.0.16.1047", std::string(64, 'd')};
+    const std::string recordedBytes = SerializeNeuralCacheManifest(manifest);
+    CHECK(recordedBytes.find(",\"environment\":{\"application\":\"0.21.2\"") != std::string::npos);
+    // Everything before the extension is the legacy manifest unchanged.
+    CHECK(recordedBytes.starts_with(legacyBytes.substr(0, legacyBytes.size() - 2)));
+    const auto recorded = ParseNeuralCacheManifest(recordedBytes);
+    CHECK(recorded.has_value());
+    if (recorded) {
+        CHECK_EQ(manifest, *recorded);
+        CHECK(IsReusableNeuralCacheManifest(*recorded));
+    }
+
+    // All or nothing, and renders only.
+    auto partial = manifest;
+    partial.environment.application.clear();
+    CHECK(!IsReusableNeuralCacheManifest(partial));
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(partial)).has_value());
+    auto badModels = manifest;
+    badModels.environment.modelStore = "not-a-digest";
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(badModels)).has_value());
+    auto source = manifest;
+    source.kind = NeuralCacheEntryKind::Source;
+    CHECK(!ParseNeuralCacheManifest(SerializeNeuralCacheManifest(source)).has_value());
+    // An empty object is not something any writer produces.
+    std::string empty = legacyBytes;
+    empty.insert(empty.size() - 2, ",\"environment\":{\"application\":\"\",\"installation\":\"\","
+                                   "\"driver\":\"\",\"models\":\"\"}");
+    CHECK(!ParseNeuralCacheManifest(empty).has_value());
+
+    // The recorder records nothing rather than something the gate refuses: an
+    // undetected driver must not make a finished render unpublishable.
+    NeuralCacheIdentity identity;
+    identity.applicationVersion = "0.21.2";
+    identity.modelStoreDigest = std::string(64, 'd');
+    CHECK(!NeuralCacheEnvironmentFor(identity).Recorded());
+    identity.driverVersion = "32.0.16.1047";
+    const auto environment = NeuralCacheEnvironmentFor(identity);
+    CHECK(environment.Recorded());
+    CHECK_EQ(NeuralCacheInstallation(), environment.installation);
+    CHECK(!environment.installation.empty());
+    CHECK(environment.installation.find('\\') == std::string::npos);
+}
+
+// Entries a driver update, a model refresh or an upgrade of this installation
+// orphaned were kept until the disk ran short. Now they go at the next start -
+// and only they: an entry that recorded nothing, one that still matches, and
+// one another installation sharing the root can still serve all stay.
+void eviction_retires_entries_whose_recorded_environment_nothing_can_rebuild_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+
+    const NeuralCacheEnvironment here{"0.21.2", NeuralCacheInstallation(), "32.0.16.1047",
+                                      std::string(64, 'd')};
+    const cache_eviction::Identity current{here.application, here.installation,
+                                           std::string(64, 'b'), here.driver, here.modelStore};
+    auto elsewhere = here;
+    elsewhere.installation = "d:/another/player";
+    auto oldDriver = here;
+    oldDriver.driver = "32.0.15.9999";
+    auto oldModels = here;
+    oldModels.modelStore = std::string(64, 'e');
+    auto oldVersion = here;
+    oldVersion.application = "0.21.1";
+    auto otherInstallOldVersion = elsewhere;
+    otherInstallOldVersion.application = "0.21.1";
+
+    const std::string legacy(64, '1'), match(64, '2'), driver(64, '3'), models(64, '4'),
+        version(64, '5'), runtime(64, '6'), otherInstall(64, '7');
+    REQUIRE(PublishRender(manager, legacy, {}));
+    REQUIRE(PublishRender(manager, match, here));
+    REQUIRE(PublishRender(manager, driver, oldDriver));
+    REQUIRE(PublishRender(manager, models, oldModels));
+    REQUIRE(PublishRender(manager, version, oldVersion));
+    REQUIRE(PublishRender(manager, runtime, here, 'f'));
+    REQUIRE(PublishRender(manager, otherInstall, otherInstallOldVersion));
+
+    // Without the current identity nothing is judged by it.
+    const auto blind = manager.Evict({}, 0);
+    CHECK_EQ(size_t{0}, blind.retiredRemoved + blind.unreachableRemoved);
+    // An identity that is not fully known decides nothing either.
+    auto unsettled = current;
+    unsettled.models.clear();
+    const auto unsure = manager.Evict({}, 0, &unsettled);
+    CHECK_EQ(size_t{0}, unsure.retiredRemoved);
+
+    // A floor of zero: this is the always-on pass, not the pressure pass.
+    const std::string activeKeys[] = {std::string(64, '9')};
+    const auto report = manager.Evict(activeKeys, 0, &current);
+    CHECK_EQ(size_t{4}, report.retiredRemoved);
+    CHECK_EQ(size_t{0}, report.unreachableRemoved);
+    CHECK_EQ(size_t{0}, report.leastRecentlyUsedRemoved);
+    CHECK_EQ(size_t{0}, report.failures);
+    for (const auto& gone : {driver, models, version, runtime})
+        CHECK(!std::filesystem::exists(RenderDirectory(manager, gone)));
+    for (const auto& kept : {legacy, match, otherInstall})
+        CHECK(manager.LookupRender(kept).has_value());
+
+    // An active key is never touched, retired or not.
+    REQUIRE(PublishRender(manager, driver, oldDriver));
+    const std::string active[] = {driver};
+    CHECK_EQ(size_t{0}, manager.Evict(active, 0, &current).retiredRemoved);
+    CHECK(std::filesystem::exists(RenderDirectory(manager, driver)));
+}
+
+// remove_all deleted file by file, so an entry whose payload another process
+// had open lost its manifest and receipt and kept a payload nothing could
+// serve. A rename is all or nothing: the entry stays whole until it is free.
+void eviction_leaves_an_open_entry_whole_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string key(64, 'c');
+    const auto directory = RenderDirectory(manager, key);
+    std::filesystem::create_directories(directory);
+    WriteBytes(directory / L"neural.mkv", "frames-being-played");
+    WriteBytes(directory / L"manifest.json", "{\"schema\":4}");   // unreachable
+
+    const HANDLE player = CreateFileW((directory / L"neural.mkv").c_str(), GENERIC_READ,
+                                      FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(player != INVALID_HANDLE_VALUE);
+    const auto held = manager.Evict({}, 0);
+    CHECK_EQ(size_t{1}, held.failures);
+    CHECK_EQ(size_t{0}, held.unreachableRemoved);
+    CHECK(std::filesystem::is_regular_file(directory / L"manifest.json"));
+    CHECK(std::filesystem::is_regular_file(directory / L"neural.mkv"));
+    CloseHandle(player);
+
+    const auto freed = manager.Evict({}, 0);
+    CHECK_EQ(size_t{1}, freed.unreachableRemoved);
+    CHECK(!std::filesystem::exists(directory));
+}
+
+// Nothing recorded a use, so eviction by least recent use was eviction by age.
+// A lookup now stamps the entry, and never fails for want of stamping it.
+void lookup_marks_the_entry_used_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string key(64, 'e');
+    REQUIRE(PublishRender(manager, key, {}));
+    const auto directory = RenderDirectory(manager, key);
+
+    // Back-date the entry to 2020, the way an entry written long ago looks.
+    const HANDLE handle = CreateFileW(directory.c_str(), FILE_WRITE_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    REQUIRE(handle != INVALID_HANDLE_VALUE);
+    SYSTEMTIME old{2020, 1, 3, 1, 0, 0, 0, 0};
+    FILETIME oldTime{};
+    SystemTimeToFileTime(&old, &oldTime);
+    CHECK(SetFileTime(handle, nullptr, nullptr, &oldTime));
+    CloseHandle(handle);
+    const auto before = std::filesystem::last_write_time(directory);
+
+    CHECK(manager.LookupRender(key).has_value());
+    const auto after = std::filesystem::last_write_time(directory);
+    CHECK(after > before);
+    CHECK(after > std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
+}
+
+// Every instance sharing a root takes one named mutex around the operations
+// that restructure it. Clear runs on the UI thread, so it gives up quickly and
+// says so; eviction defers the entry; neither removes anything meanwhile.
+void cache_operations_yield_to_another_holder_of_the_root_lock_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const std::string good(64, 'a');
+    REQUIRE(PublishRender(manager, good, {}));
+    const std::string dead(64, 'b');
+    const auto deadDirectory = RenderDirectory(manager, dead);
+    std::filesystem::create_directories(deadDirectory);
+    WriteBytes(deadDirectory / L"manifest.json", "{\"schema\":4}");
+
+    const std::wstring name = NeuralCacheRootLockName(manager.Root());
+    CHECK(name.starts_with(L"Local\\DLSSVideoPlayer.Cache."));
+    CHECK_EQ(size_t{28 + 16}, name.size());
+    // The same root spelled with a trailing separator and upper case is the
+    // same lock.
+    std::wstring shouted = manager.Root().wstring() + L"\\";
+    std::ranges::transform(shouted, shouted.begin(), towupper);
+    CHECK(name == NeuralCacheRootLockName(shouted));
+
+    std::promise<void> taken;
+    std::promise<void> release;
+    std::thread holder([&] {
+        const HANDLE mutex = CreateMutexW(nullptr, FALSE, name.c_str());
+        WaitForSingleObject(mutex, INFINITE);
+        taken.set_value();
+        release.get_future().wait();
+        ReleaseMutex(mutex);
+        CloseHandle(mutex);
+    });
+    taken.get_future().wait();
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(!manager.Clear());
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(2));
+    CHECK(std::filesystem::exists(RenderDirectory(manager, good)));
+    const auto report = manager.Evict({}, 0);
+    CHECK_EQ(size_t{1}, report.deferred);
+    CHECK_EQ(size_t{0}, report.unreachableRemoved);
+    CHECK(std::filesystem::exists(deadDirectory));
+    // A lookup does not wait long for it and still answers.
+    CHECK(manager.LookupRender(good).has_value());
+
+    release.set_value();
+    holder.join();
+    CHECK_EQ(size_t{1}, manager.Evict({}, 0).unreachableRemoved);
+    CHECK(manager.Clear());
+    CHECK(!manager.LookupRender(good).has_value());
+}
+
+// Clear() ran remove_all over live/ and staging/ and deleted what another
+// running instance was writing: its session's segments, its unfinished
+// renders. Those stay now; this process's and dead processes' go.
+void clear_keeps_what_another_running_instance_owns_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const LiveChildProcess other;
+    REQUIRE(other.Pid() != 0);
+    const DWORD deadPid = DeadProcessId();
+    REQUIRE(deadPid != 0);
+    const std::wstring key(64, L'4');
+    const auto live = manager.Root() / L"live";
+    const auto staging = manager.Root() / L"staging";
+    const auto otherSession = live / (L"pid" + std::to_wstring(other.Pid()));
+    const auto deadSession = live / (L"pid" + std::to_wstring(deadPid));
+    const auto ownSession = live / (L"pid" + std::to_wstring(GetCurrentProcessId()));
+    const auto otherRender = staging / (L"render-" + key + L"-" + std::to_wstring(other.Pid()) + L"-1");
+    const auto deadRender = staging / (L"render-" + key + L"-" + std::to_wstring(deadPid) + L"-2");
+    for (const auto& directory : {otherSession, deadSession, ownSession, otherRender, deadRender}) {
+        std::filesystem::create_directories(directory);
+        WriteBytes(directory / L"neural-00000.mkv", "segment");
+    }
+    REQUIRE(PublishRender(manager, std::string(64, 'a'), {}));
+
+    CHECK(manager.Clear());
+    for (const auto& kept : {otherSession, otherRender})
+        CHECK(std::filesystem::is_regular_file(kept / L"neural-00000.mkv"));
+    for (const auto& gone : {deadSession, ownSession, deadRender})
+        CHECK(!std::filesystem::exists(gone));
+    CHECK(!manager.LookupRender(std::string(64, 'a')).has_value());
+    for (const auto bucket : {L"sources", L"renders", L"staging", L"frame-generation", L"live"})
+        CHECK(std::filesystem::is_directory(manager.Root() / bucket));
+}
+
+// A crash during a live session left its live/pid<N> - gigabytes of segments -
+// and only the current process's own directory was ever removed.
+void startup_sweep_removes_live_sessions_whose_process_is_gone_test()
+{
+    TempDirectory fixture;
+    NeuralCacheManager manager(fixture.Path() / L"cache");
+    REQUIRE(manager.Valid());
+    const LiveChildProcess other;
+    REQUIRE(other.Pid() != 0);
+    const DWORD deadPid = DeadProcessId();
+    REQUIRE(deadPid != 0);
+    const auto live = manager.Root() / L"live";
+    const auto dead = live / (L"pid" + std::to_wstring(deadPid));
+    const auto alive = live / (L"pid" + std::to_wstring(other.Pid()));
+    const auto own = live / (L"pid" + std::to_wstring(GetCurrentProcessId()));
+    const auto padded = live / (L"pid0" + std::to_wstring(deadPid));
+    const auto foreign = live / L"notes";
+    for (const auto& directory : {dead, alive, own, padded, foreign}) {
+        std::filesystem::create_directories(directory / L"job1");
+        WriteBytes(directory / L"job1" / L"neural-00000.mkv", "segment");
+    }
+    CHECK_EQ(size_t{1}, manager.SweepLiveSessions());
+    CHECK(!std::filesystem::exists(dead));
+    for (const auto& kept : {alive, own, padded, foreign})
+        CHECK(std::filesystem::is_directory(kept));
+    CHECK_EQ(size_t{0}, manager.SweepLiveSessions());
 }
 
 void media_pipeline_arguments_are_exact_and_never_use_a_shell_test()
@@ -3965,6 +4323,8 @@ int wmain(int argc, wchar_t* argv[])
 {
     if (argc == 3 && std::wstring_view(argv[1]) == L"--cache-root-probe")
         return RunCacheRootProbe(argv[2]);
+    // Never resumed: LiveChildProcess only needs a pid that stays alive.
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--suspended-child") return EXIT_SUCCESS;
     const std::wstring executableName = CurrentExecutable().filename().wstring();
     if (_wcsicmp(executableName.c_str(), L"ffmpeg.exe") == 0 ||
         _wcsicmp(executableName.c_str(), L"ffprobe.exe") == 0)
@@ -3988,6 +4348,13 @@ int wmain(int argc, wchar_t* argv[])
     promotion_waits_out_a_transient_lock_and_names_the_failing_step_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();
     staging_sweep_reaps_invalid_and_orphaned_entries_but_not_live_ones_test();
+    manifest_environment_is_optional_additive_and_all_or_nothing_test();
+    eviction_retires_entries_whose_recorded_environment_nothing_can_rebuild_test();
+    eviction_leaves_an_open_entry_whole_test();
+    lookup_marks_the_entry_used_test();
+    cache_operations_yield_to_another_holder_of_the_root_lock_test();
+    clear_keeps_what_another_running_instance_owns_test();
+    startup_sweep_removes_live_sessions_whose_process_is_gone_test();
     media_pipeline_arguments_are_exact_and_never_use_a_shell_test();
     materialization_failure_reports_diagnostics_without_signed_urls_test();
     materialization_discards_oversized_diagnostic_url_fragments_test();

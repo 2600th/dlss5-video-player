@@ -168,7 +168,21 @@ struct NeuralModelStore {
     // version stood in for every one of them. Empty only when each registered
     // root was enumerated whole.
     std::wstring fallbackDetail;
+    // What made this digest depend on the moment it was taken rather than on
+    // the store: a registered root that could not be enumerated whole (a stop
+    // included), and files the listing could not size or, within the content
+    // bound, could not hash. Either one yields a digest no render was keyed
+    // under, which is harmless for a lookup - it misses - and fatal for
+    // eviction, which would read every entry as retired by it.
+    uint32_t unavailableRoots{};
+    uint32_t unreadableFiles{};
 };
+
+// True when `store` describes the store rather than a failed read of it, so
+// eviction may compare recorded digests against it. A machine with no NGX
+// root registered at all is settled: its driver-version fallback is
+// deterministic.
+bool NeuralModelStoreSettled(const NeuralModelStore& store);
 
 // Digests the given roots: every file's relative name, size and write time,
 // plus the content hash of each file small enough to afford one. Files a root

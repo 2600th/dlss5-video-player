@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CacheEvictionPolicy.h"
 #include "NeuralRenderTypes.h"
 
 #include <cstdint>
@@ -52,6 +53,40 @@ struct NeuralCacheIdentity {
     std::string modelStoreDigest;
 };
 
+// The environment terms of the key a render was published under, recorded
+// beside it so eviction can tell an entry nothing will ask for again from one
+// that is merely old (cache_eviction::IdentityRetired). The key is a one-way
+// hash, so without these a driver update left every orphan indistinguishable
+// from a live render. `runtimeDigest` is already a manifest field and is not
+// repeated here. Empty on sources, on legacy schema-3 entries, and on every
+// render published before the field existed - all of which stay reusable.
+struct NeuralCacheEnvironment {
+    std::string application;   // NeuralCacheIdentity::applicationVersion
+    std::string installation;  // NeuralCacheInstallation() of the publisher
+    std::string driver;        // NeuralCacheIdentity::driverVersion
+    std::string modelStore;    // NeuralCacheIdentity::modelStoreDigest
+
+    bool Recorded() const
+    {
+        return !application.empty() || !installation.empty() || !driver.empty() ||
+               !modelStore.empty();
+    }
+    friend bool operator==(const NeuralCacheEnvironment&, const NeuralCacheEnvironment&) = default;
+};
+
+// The named mutex every player instance takes around the operations that
+// restructure one cache root (Evict, Clear, Promote, and a lookup's last-use
+// mark): Local\DLSSVideoPlayer.Cache.<first 16 hex of SHA-256 of the root,
+// lower case, forward slashes>. Pass the manager's Root(), already canonical.
+std::wstring NeuralCacheRootLockName(const std::filesystem::path& root);
+
+// This installation, as the environment records it: the module directory in
+// lower case with forward slashes, so two spellings of one directory compare
+// equal. Empty when the module path cannot be read.
+std::string NeuralCacheInstallation();
+// The environment terms of `identity`, plus this installation.
+NeuralCacheEnvironment NeuralCacheEnvironmentFor(const NeuralCacheIdentity& identity);
+
 struct NeuralCacheManifest {
     // Schema 5 carries schema 4's field list. The bump retires every schema-4
     // entry, because those were written under a render identity that named
@@ -88,6 +123,10 @@ struct NeuralCacheManifest {
     // Required on current-schema renders, which authenticate receipt.json
     // beside the payload; empty on sources and on legacy schema-3 entries.
     std::string receiptDigest;
+    // Optional, schema 5, renders only: written after receiptDigest when
+    // recorded and absent otherwise, so every manifest written before it
+    // still parses - and those entries stay reusable.
+    NeuralCacheEnvironment environment;
 
     friend bool operator==(const NeuralCacheManifest&, const NeuralCacheManifest&) = default;
 };
@@ -229,15 +268,22 @@ public:
     // the log.
     struct EvictionReport {
         size_t unreachableRemoved{};   // manifests this build can never serve
+        size_t retiredRemoved{};       // recorded key environment nothing can rebuild
         size_t leastRecentlyUsedRemoved{};
         uintmax_t freedBytes{};
         bool freeSpaceFloorMet{};
-        size_t failures{};             // entries the filesystem refused
+        size_t failures{};             // entries the filesystem refused, or in use
+        // Planned but left: looked up since the plan was made, or another
+        // instance held the cache root past the wait.
+        size_t deferred{};
     };
 
     // Removes render entries that can never be served again, and - only when
     // the volume has less than `freeFloorBytes` free - the least recently used
     // reusable entries until it does. `activeKeys` are never touched.
+    // `current` is this process's key environment; when given, an entry whose
+    // recorded one is retired by it (cache_eviction::IdentityRetired) counts as
+    // unreachable. Without it only manifests the reuse gate refuses are.
     //
     // The cache had no eviction at all, and its key deliberately retires
     // entries wholesale: one driver update changes every key, so 40 GB of
@@ -245,9 +291,18 @@ public:
     // Clear(), which destroys the new renders too. See CacheEvictionPolicy.h
     // for why the trigger is free space rather than a size cap.
     EvictionReport Evict(std::span<const std::string> activeKeys = {},
-                         uintmax_t freeFloorBytes = 0);
+                         uintmax_t freeFloorBytes = 0,
+                         const cache_eviction::Identity* current = nullptr);
     uintmax_t SizeBytes() const;
+    // Empties the cache except what another RUNNING instance owns: its
+    // live/pid<N> session and its staging entries. Published entries go by
+    // rename, so one that another process has open is left whole. False when
+    // anything was left, or when another instance held the cache root past a
+    // short wait - the UI thread calls this and must not hang on it.
     bool Clear();
+    // Removes live/pid<N> session directories whose process is gone. Returns
+    // the number removed.
+    size_t SweepLiveSessions();
     // Reaps staging/ entries nothing will ever finish: directories set aside
     // as invalid, and partial payloads whose owning process is gone. Bounded
     // per call and run by the constructor, so a litter of them is worked off

@@ -493,10 +493,25 @@ Reclamation happens at startup, on its own thread, in two steps
 (`NeuralCacheManager::Evict`, rules in `CacheEvictionPolicy.h`). Render entries
 whose manifest this build can never serve again — a retired schema, an
 unparsable manifest — are removed unconditionally: the lookup gate already
-refuses them, so keeping them costs space and buys nothing. Everything else is
-removed only when the volume has less than `kDefaultFreeFloorBytes` (20 GiB)
-free, least recently used first, and only until the floor is met. An entry an
-active job owns is never a target.
+refuses them, so keeping them costs space and buys nothing. So are entries
+whose recorded key environment (the manifest's optional `environment` object:
+application version, installation, driver, model-store digest, beside the
+existing `runtimeDigest`) no process sharing the root can rebuild: a different
+driver or model store, or an older version or runtime of this same
+installation. Entries that recorded nothing, and every case where this
+process's own terms cannot be resolved cleanly, are left alone. Everything else
+is removed only when the volume has less than `kDefaultFreeFloorBytes` (20 GiB)
+free, least recently used first, and only until the floor is met. Last use is
+the entry directory's write time, which every lookup stamps. An entry an
+active job owns is never a target, and an entry is removed by rename, so one
+another process has open stays whole.
+
+Evict, Clear, promotion and a lookup's last-use stamp take a named mutex per
+cache root (`NeuralCacheRootLockName`), shared by every player instance, with
+bounded waits. Eviction re-reads an entry's stamp under the lock before it
+removes it, so an entry being looked up is skipped. Clear keeps another
+running instance's `live/pid<N>` and staging entries, and startup removes
+`live/pid<N>` directories whose process is gone.
 
 The trigger is free space rather than a size cap because the key retires
 entries wholesale — `applicationVersion`, `driverVersion`, `modelStoreDigest`,

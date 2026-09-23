@@ -150,6 +150,7 @@ struct ModelStoreFile {
     uintmax_t size{};
     int64_t writeTime{};
     std::string digest;  // empty above kModelContentHashLimit or when unreadable
+    bool unreadable{};   // size, write time or (within the bound) content missing
 };
 
 // One root's listing, or nothing when the root cannot be walked whole: a
@@ -171,9 +172,11 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
         const uintmax_t size = entry.file_size(local);
         const bool sized = !local;
         if (sized) file.size = size;
+        else file.unreadable = true;
         local.clear();
         const auto written = entry.last_write_time(local);
         if (!local) file.writeTime = written.time_since_epoch().count();
+        else file.unreadable = true;
         if (sized && size <= kModelContentHashLimit) {
             // Uncached on purpose. Sha256FileCached keys on (path, size, write
             // time), and Windows write times move in ~15 ms ticks, so a small
@@ -184,6 +187,7 @@ std::optional<std::vector<ModelStoreFile>> CollectModelRoot(const NeuralModelRoo
             // built against weights that are no longer the ones on disk. Only
             // files at or below the bound reach this, so the re-read is small.
             if (const auto digest = Sha256File(entry.path(), stop)) file.digest = *digest;
+            else file.unreadable = true;
         }
         files.push_back(std::move(file));
     };
@@ -255,6 +259,11 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             // An unreadable root still belongs in the digest: a machine that
             // grows one later must not answer with the key it used without it.
             canonical += "|unavailable\n";
+            // A root that is not there reads the same way every time; one that
+            // is there and could not be walked may read whole next time.
+            std::error_code existsError;
+            if (std::filesystem::exists(root.directory, existsError) || existsError)
+                ++store.unavailableRoots;
             if (!store.fallbackDetail.empty()) store.fallbackDetail += L"; ";
             store.fallbackDetail += spelling + L" could not be enumerated";
             continue;
@@ -272,6 +281,7 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
             canonical.push_back('\n');
             ++store.files;
             if (!file.digest.empty()) ++store.contentHashedFiles;
+            if (file.unreadable) ++store.unreadableFiles;
             store.bytes += file.size;
         }
     }
@@ -287,6 +297,11 @@ NeuralModelStore DigestNeuralModelStore(std::span<const NeuralModelRoot> roots,
     }
     store.digest = Sha256Bytes(canonical).value_or(std::string{});
     return store;
+}
+
+bool NeuralModelStoreSettled(const NeuralModelStore& store)
+{
+    return store.digest.size() == 64 && store.unavailableRoots == 0 && store.unreadableFiles == 0;
 }
 
 NeuralModelStore ResolveNeuralModelStore(std::wstring_view driverVersion, std::stop_token stop)
