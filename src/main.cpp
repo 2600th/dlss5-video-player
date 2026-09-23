@@ -9236,7 +9236,11 @@ private:
                     // An undeclared HD source now reaches the model as BT.709
                     // rather than ffmpeg's BT.601 (UntaggedColorPolicy.h), so its
                     // renders carry a term that retires the ones made before.
-                    const bool untaggedBt709=metadata.DecodesUntaggedAsBt709();metadata.Close();
+                    const bool untaggedBt709=metadata.DecodesUntaggedAsBt709();
+                    // An HDR source reaches the model tone mapped to SDR now
+                    // (HdrPolicy.h), for a peak read from its metadata; its
+                    // renders carry both, and every SDR key stays as it was.
+                    const std::string toneMapTerm=metadata.ToneMapIdentityTerm();metadata.Close();
                     if(!width||!height||!std::isfinite(fps)||fps<=0.0||!std::isfinite(duration)||duration<=0.0){completion->result.detail=L"The source metadata is incomplete.";goto finish;}progressWidth=width;progressHeight=height;
                     NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;postProgress(checking);
                     const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration*10000000.0));
@@ -9273,7 +9277,7 @@ private:
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+TemporalPipelineTerm(temporal),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709)+toneMapTerm+TemporalPipelineTerm(temporal),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;completion->temporal=temporal;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and
@@ -10050,6 +10054,7 @@ private:
             std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
                 T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+
                 L" \u00b7 "+BuildPlayerStatusText(status);
+            if(const std::wstring hdr=HdrStatusText();!hdr.empty())text+=L" \u00b7 "+hdr;
             if(!CachedRangeCoversSource())text+=L" \u00b7 Range "+FormatTimecode(m_cachedRange.start100ns,m_decoder.FrameRate(),true)+L"\u2013"+FormatTimecode(m_cachedRange.end100ns,m_decoder.FrameRate(),true);
             if(const std::wstring markers=MarkerStatusText();!markers.empty())text+=L" \u00b7 "+markers;
             text+=L" \u00b7 "+NeuralSettingsSummary(m_cachedSettings,m_cachedGuides);
@@ -10066,6 +10071,9 @@ private:
         // window should lose the counters before it loses why the receiver is
         // getting PCM.
         if(const std::wstring passthrough=AudioPassthroughNote();!passthrough.empty())text=passthrough+L" \u00b7 "+text;
+        // Ahead of the runtime detail: it says why the picture is not the HDR
+        // one the file carries, and what the model will be shown.
+        if(const std::wstring hdr=HdrStatusText();!hdr.empty())text=hdr+L" \u00b7 "+text;
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
         if(const std::wstring markers=MarkerStatusText();!markers.empty())text=markers+L" \u00b7 "+text;
@@ -10087,6 +10095,13 @@ private:
         // worth reading while its cache cannot be written to.
         if(!m_cacheNotice.empty())text=m_cacheNotice+L" \u00b7 "+text;
         return text;
+    }
+    // An HDR source is decoded tone mapped to SDR (HdrPolicy.h), because the
+    // neural pass is SDR; the line says so, or the flatter picture reads as a
+    // fault in the player.
+    std::wstring HdrStatusText()const{
+        if(!m_loaded||m_decoder.SourceHdrSignal()==hdr_policy::HdrSignal::Sdr)return{};
+        return T(L"status.hdr_tonemapped");
     }
     // Short canonical of the settings a cache entry was rendered with; the
     // full record is its receipt.json.

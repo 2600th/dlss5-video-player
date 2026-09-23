@@ -9,6 +9,7 @@
 #include <vector>
 #include "PixelLayout.h"
 #include "UntaggedColorPolicy.h"
+#include "HdrPolicy.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -160,13 +161,17 @@ public:
         // copies it off a file it probed, and SourceNv12ConversionFor still
         // refuses any description the GPU conversion does not implement.
         SourceColorDescription color;
+        // The tone-map peak the sibling was probed for (HdrPolicy.h), so a known
+        // open of an HDR source converts it exactly as the probed one did. Zero
+        // for SDR and for a caller that never probed.
+        double hdrPeakNits{};
         bool Valid() const { return width != 0 && height != 0 && fps > 0.0; }
     };
     bool OpenKnown(const std::wstring& path, const KnownMedia& media,
                    MediaSourceKind sourceKind = MediaSourceKind::LocalFile,
                    std::stop_token stop = {}, bool preferNv12 = false);
     // What a sibling file of the one this decoder has open can be opened with.
-    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color}; }
+    KnownMedia Media() const { return {m_source.width, m_source.height, m_source.fps, m_source.durationSec, m_source.hardwareProfile, m_source.color, m_source.hdrPeakNits}; }
     // Geometry, frame rate and duration only: runs the probe and starts no
     // decoder. The caller that just needs to describe a file was paying for a
     // full ffmpeg child it closed two lines later. preferNv12 settles
@@ -265,6 +270,17 @@ public:
     // Whether this source is converted as an undeclared HD video (BT.709).
     // Known after any open, OpenMetadata included, which is what a caller that
     // keys a render on the decoded pixels asks.
+    // PQ or HLG, as the probe (or a KnownMedia) declared it. Such a source is
+    // tone mapped to SDR BT.709 on decode (HdrPolicy.h): the neural pass is
+    // SDR, and every consumer reads the frames it was shown.
+    hdr_policy::HdrSignal SourceHdrSignal() const { return hdr_policy::SignalOf(m_source.color); }
+    // The peak the tone map maps to SDR white, fixed per source. 0 for SDR.
+    double HdrPeakNits() const { return m_source.hdrPeakNits; }
+    // What a render keyed on the decoded pixels adds for this source; empty
+    // for SDR. Known after any open, OpenMetadata included.
+    std::string ToneMapIdentityTerm() const {
+        return hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(), m_source.hdrPeakNits);
+    }
     bool DecodesUntaggedAsBt709() const {
         return UntaggedSourceDecodesAsBt709(m_source.color,
             m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
@@ -308,6 +324,9 @@ private:
         // is per codec, so the memo of dead paths is keyed by this, never global.
         std::string hardwareProfile;
         SourceColorDescription color{};
+        // Tone-map peak for a PQ/HLG source (HdrPolicy.h), from the probe's
+        // one read of its static metadata; 0 for SDR.
+        double hdrPeakNits = 0.0;
         // An HD video that declared no matrix, decoded as BT.709 rather than
         // ffmpeg's BT.601 default (UntaggedColorPolicy.h). Set with the layout.
         bool untaggedBt709{};
@@ -360,6 +379,10 @@ private:
     void DecideSourceLayout();
     void ProbePacketSpacing(const std::wstring& path, const std::wstring& inputOptions,
                             std::stop_token stop);
+    // MaxCLL and the mastering peak of a PQ/HLG source, read once from its first
+    // frame; sets m_source.hdrPeakNits. A failed read keeps the default peak.
+    void ProbeHdrPeak(const std::wstring& path, const std::wstring& inputOptions,
+                      std::stop_token stop);
     // Restarts (seeks, resizes, recovery) default to the path that last produced
     // frames instead of re-running a hardware chain that already failed.
     bool StartFFmpeg(double seekSeconds,

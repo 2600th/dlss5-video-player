@@ -388,6 +388,7 @@ private:
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking\u2026"},
             {L"status.render_hint", L"Mark I/O, then Ctrl+R renders the marked range"},
             {L"status.preparing_source", L"Downloading this source for rendering\u2026"},
+            {L"status.hdr_tonemapped", L"HDR source tone-mapped to SDR: DLSS 5 renders in SDR"},
             {L"recent.missing", L"This local video has moved or is no longer available."},
             // Keyboard discoverability (P2.23). The cheat sheet lists every
             // menu command that names a key by reading the menus themselves;

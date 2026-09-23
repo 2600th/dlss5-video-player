@@ -45,6 +45,7 @@
 #include "RenderCommandLine.h"
 #include "FrameResample.h"
 #include "UntaggedColorPolicy.h"
+#include "HdrPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
@@ -5028,6 +5029,43 @@ void untagged_hd_video_decodes_as_bt709_and_only_it_test()
     CHECK(std::string_view(UntaggedColorIdentityTerm(true)) == "|untagged-hd-bt709-v1");
 }
 
+// An HDR source is tone mapped to SDR for a peak fixed per source from its static
+// metadata, never measured per frame, and that peak is part of the render's key.
+void hdr_sources_tone_map_for_a_static_peak_test()
+{
+    using namespace hdr_policy;
+    SourceColorDescription color{};
+    CHECK(SignalOf(color)==HdrSignal::Sdr);
+    color.transfer=ColorTransfer::Bt709;CHECK(SignalOf(color)==HdrSignal::Sdr);
+    color.transfer=ColorTransfer::Other;CHECK(SignalOf(color)==HdrSignal::Sdr);
+    color.transfer=ColorTransfer::Pq;CHECK(SignalOf(color)==HdrSignal::Pq);
+    color.transfer=ColorTransfer::Hlg;CHECK(SignalOf(color)==HdrSignal::Hlg);
+    // MaxCLL is the content's own peak and wins; the mastering peak only bounds it.
+    CHECK_EQ(1000.0,ToneMapPeakNits(HdrSignal::Pq,1000.0,4000.0));
+    CHECK_EQ(4000.0,ToneMapPeakNits(HdrSignal::Pq,0.0,4000.0));
+    // Nothing usable: 1000 nits, not ffmpeg's 10000 that plays a typical grade dark.
+    CHECK_EQ(1000.0,ToneMapPeakNits(HdrSignal::Pq,0.0,0.0));
+    CHECK_EQ(1000.0,ToneMapPeakNits(HdrSignal::Pq,50.0,20000.0));
+    CHECK_EQ(1000.0,ToneMapPeakNits(HdrSignal::Pq,std::nan(""),std::numeric_limits<double>::infinity()));
+    // Whole nits, so a key cannot move on a float's last digit.
+    CHECK_EQ(1234.0,ToneMapPeakNits(HdrSignal::Pq,1233.6,0.0));
+    // HLG is relative and ignores whatever it carries.
+    CHECK_EQ(1000.0,ToneMapPeakNits(HdrSignal::Hlg,4000.0,4000.0));
+    const std::wstring pq=SdrToneMapFilter(HdrSignal::Pq,4000.0,true);
+    CHECK(pq.find(L"zscale=tin=smpte2084:pin=bt2020:t=linear:npl=100")==0);
+    CHECK(pq.find(L"tonemap=tonemap=hable:desat=0:peak=40.000000")!=std::wstring::npos);
+    CHECK(pq.find(L"zscale=p=bt709")!=std::wstring::npos);
+    CHECK(pq.find(L"zscale=t=bt709")!=std::wstring::npos);
+    CHECK(pq.find(L"min=")==std::wstring::npos);
+    // An undeclared matrix is named, because zimg cannot convert YUV without one.
+    CHECK(SdrToneMapFilter(HdrSignal::Pq,1000.0,false).find(L":min=bt2020nc")!=std::wstring::npos);
+    CHECK(SdrToneMapFilter(HdrSignal::Hlg,1000.0,true).find(L"tin=arib-std-b67")==7);
+    CHECK(ToneMapIdentityTerm(HdrSignal::Sdr,1000.0).empty());
+    CHECK_EQ(std::string("|hdr-sdr-hable-v1-pq-peak4000"),ToneMapIdentityTerm(HdrSignal::Pq,4000.0));
+    CHECK_EQ(std::string("|hdr-sdr-hable-v1-hlg-peak1000"),ToneMapIdentityTerm(HdrSignal::Hlg,1000.0));
+    CHECK(ToneMapIdentityTerm(HdrSignal::Pq,1000.0)!=ToneMapIdentityTerm(HdrSignal::Pq,4000.0));
+}
+
 void one_step_of_the_frame_grid_is_always_work_test()
 {
     for (const double fps : {60000.0 / 1001.0, 59.9401, 30000.0 / 1001.0, 29.97,
@@ -7420,6 +7458,102 @@ void video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test
     }
 }
 
+// What the decoder asks ffmpeg for, per source. The marker collects one line per
+// child the decoder started; only the first (the CUDA attempt, which the fake
+// accepts) is looked at.
+static std::string first_decode_command(const std::filesystem::path& marker)
+{
+    const std::string all=read_binary_file(marker);
+    return all.substr(0,all.find('\n'));
+}
+
+// An HDR source reaches every consumer tone mapped to SDR BT.709, for the peak its
+// metadata states, and keeps the ten bits until the curve has run. An SDR source's
+// command is untouched.
+void video_decoder_tone_maps_hdr_sources_to_sdr_test()
+{
+    MediaFixture fixture;
+    const auto decode=[&](const wchar_t* scenario,std::string& command)->std::unique_ptr<VideoDecoder>{
+        const auto marker=fixture.directory/(std::wstring(scenario)+L"-args.txt");
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(scenario,MediaSourceKind::LocalFile));
+        const VideoFrame frame=read_one_frame(*decoder);
+        CHECK(frame.layout==VideoPixelLayout::Bgra);
+        CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,4,2),frame.bgra.size());
+        command=first_decode_command(marker);
+        return decoder;
+    };
+    std::string command;
+    {
+        // MaxCLL 1000 beats the 4000-nit mastering display.
+        auto decoder=decode(L"hdrsrc_pqmeta",command);
+        CHECK(decoder->SourceHdrSignal()==hdr_policy::HdrSignal::Pq);
+        CHECK_EQ(1000.0,decoder->HdrPeakNits());
+        CHECK_EQ(std::string("|hdr-sdr-hable-v1-pq-peak1000"),decoder->ToneMapIdentityTerm());
+        // NV12 was asked for and refused: the curve runs on the CPU.
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(command.find("-hwaccel cuda")!=std::string::npos);
+        CHECK(command.find("scale_cuda=4:2:format=p010:")!=std::string::npos);
+        CHECK(command.find("hwdownload,format=p010le,zscale=tin=smpte2084:pin=bt2020:t=linear:npl=100")!=std::string::npos);
+        CHECK(command.find("tonemap=tonemap=hable:desat=0:peak=10.000000")!=std::string::npos);
+        CHECK(command.find(",format=bgra -pix_fmt bgra")!=std::string::npos);
+        // A known open of the same source converts it identically, without a probe.
+        const VideoDecoder::KnownMedia media=decoder->Media();
+        CHECK_EQ(1000.0,media.hdrPeakNits);
+        const auto marker=fixture.directory/L"known-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto known=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(known->OpenKnown(L"hdrsrc_pqmeta",media,MediaSourceKind::LocalFile));
+        CHECK_EQ(std::string("|hdr-sdr-hable-v1-pq-peak1000"),known->ToneMapIdentityTerm());
+        read_one_frame(*known);
+        CHECK(first_decode_command(marker).find("peak=10.000000")!=std::string::npos);
+    }
+    {
+        auto decoder=decode(L"hdrsrc_pqmastering",command);
+        CHECK_EQ(4000.0,decoder->HdrPeakNits());
+        CHECK(command.find("peak=40.000000")!=std::string::npos);
+    }
+    {
+        // No static metadata at all: the default peak, not ffmpeg's 10000.
+        auto decoder=decode(L"hdrsrc_pqnometa",command);
+        CHECK_EQ(1000.0,decoder->HdrPeakNits());
+        CHECK(command.find("peak=10.000000")!=std::string::npos);
+    }
+    {
+        auto decoder=decode(L"hdrsrc_pqnomatrix",command);
+        CHECK(command.find("zscale=tin=smpte2084:min=bt2020nc:pin=bt2020")!=std::string::npos);
+    }
+    {
+        // A PQ stream that declares a BT.709 matrix would otherwise be handed to
+        // the GPU NV12 conversion, which knows nothing of PQ.
+        auto decoder=decode(L"hdrsrc_pq709",command);
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+        CHECK(command.find("tonemap=tonemap=hable")!=std::string::npos);
+    }
+    {
+        auto decoder=decode(L"hdrsrc_hlg",command);
+        CHECK(decoder->SourceHdrSignal()==hdr_policy::HdrSignal::Hlg);
+        CHECK_EQ(std::string("|hdr-sdr-hable-v1-hlg-peak1000"),decoder->ToneMapIdentityTerm());
+        CHECK(command.find("zscale=tin=arib-std-b67:pin=bt2020")!=std::string::npos);
+    }
+    {
+        // SDR: no tone map, no key term, the NV12 path it always had.
+        const auto marker=fixture.directory/L"sdr-args.txt";
+        ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->OpenSequential(L"nv12geom",MediaSourceKind::LocalFile));
+        CHECK(decoder->PixelLayout()==VideoPixelLayout::Nv12);
+        read_one_frame(*decoder);
+        CHECK(decoder->ToneMapIdentityTerm().empty());
+        CHECK_EQ(0.0,decoder->HdrPeakNits());
+        const std::string sdr=first_decode_command(marker);
+        CHECK(!sdr.empty());
+        CHECK(sdr.find("zscale")==std::string::npos);
+        CHECK(sdr.find("format=nv12:interp_algo")!=std::string::npos);
+    }
+}
+
 // A source that does declare a description the conversion implements keeps the
 // NV12 path, and the description travels far enough out of the decoder for the
 // renderer to specialise the shader from it rather than assume BT.709.
@@ -9158,6 +9292,19 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(all.find(L"colortag_bt2020")!=std::wstring::npos){
             std::cout<<color("bt2020nc","tv","bt2020","smpte2084")<<geometry(4,2,"2:1")<<std::flush;return 0;
         }
+        // HDR sources for the tone map. The side-data probe is a second ffprobe
+        // call; each scenario answers it with the static metadata it names.
+        if(all.find(L"hdrsrc_")!=std::wstring::npos){
+            if(all.find(L"frame_side_data")!=std::wstring::npos){
+                if(all.find(L"hdrsrc_pqmeta")!=std::wstring::npos)std::cout<<"max_luminance=40000000/10000\nmax_content=1000\n";
+                else if(all.find(L"hdrsrc_pqmastering")!=std::wstring::npos)std::cout<<"max_luminance=40000000/10000\nmax_content=0\n";
+                std::cout<<std::flush;return 0;
+            }
+            const char* transfer=all.find(L"hdrsrc_hlg")!=std::wstring::npos?"arib-std-b67":"smpte2084";
+            const char* matrix=all.find(L"hdrsrc_pq709")!=std::wstring::npos?"bt709":
+                               all.find(L"hdrsrc_pqnomatrix")!=std::wstring::npos?"unknown":"bt2020nc";
+            std::cout<<color(matrix,"tv","bt2020",transfer)<<geometry(4,2,"2:1")<<std::flush;return 0;
+        }
         if(all.find(L"colortag_hlg")!=std::wstring::npos){
             std::cout<<color("bt2020nc","tv","bt2020","arib-std-b67")<<geometry(4,2,"2:1")<<std::flush;return 0;
         }
@@ -9171,6 +9318,12 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=30\n"<<std::flush;return 0;
     }
     if(_wcsicmp(name.c_str(),L"ffmpeg.exe")!=0)return 94;
+    // The decode command line, for a test that asserts what the decoder asked
+    // ffmpeg to do rather than what this fake produced.
+    if(const std::wstring argsMarker=read_environment_variable(L"DLSS_VIDEO_TEST_ARGS_MARKER");!argsMarker.empty()){
+        std::string narrow;for(const wchar_t character:all)narrow.push_back(character<0x80?static_cast<char>(character):'?');
+        std::ofstream out(argsMarker,std::ios::binary|std::ios::app);out<<narrow<<"\n";
+    }
     // The audio child failing after flooding stderr: 256 KiB, four times the
     // pipe, so a parent that did not drain as it went would leave this child
     // blocked in WriteFile for good. The last line names the input, which is
@@ -9194,6 +9347,10 @@ int run_fake_media_child(int argc,wchar_t* argv[])
     };
     if(all.find(L"nv12geom")!=std::wstring::npos){
         const std::vector<char> frame(rawFrameBytes(4,2),'n');
+        std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
+    }
+    if(all.find(L"hdrsrc_")!=std::wstring::npos){
+        const std::vector<char> frame(rawFrameBytes(4,2),'h');
         std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));std::cout.flush();return 0;
     }
     // Every colortag_ scenario shares nv12geom's 4x2 geometry; only the declared
@@ -12279,6 +12436,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
+    TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
@@ -12377,6 +12535,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
     TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),
+    TEST_CASE(hdr_sources_tone_map_for_a_static_peak_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
     TEST_CASE(every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test),
     TEST_CASE(render_start_snaps_into_the_frame_it_lands_in_not_past_it_test),

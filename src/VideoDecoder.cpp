@@ -555,10 +555,53 @@ bool VideoDecoder::ProbeFFmpeg(const std::wstring& path, std::stop_token stop) {
     m_source.fps = std::clamp(m_source.fps, 1.0, 240.0);
 
     ProbePacketSpacing(path, inputOptions, stop);
+    ProbeHdrPeak(path, inputOptions, stop);
 
     LOG("ffprobe: " << m_source.width << "x" << m_source.height << " DAR=" << m_source.displayAspect << " @ " << m_source.fps
         << " fps, duration=" << m_source.durationSec << ", " << m_source.colorTags);
     return true;
+}
+
+// One ffprobe of the first frame's side data, for PQ sources only. The
+// container's copy (mp4 `clli`/`mdcv`, Matroska colour elements) and the
+// bitstream's SEI are both asked for, because a file carries one or the other.
+// The answer is fixed for the session: see ToneMapPeakNits for why the peak is
+// never taken from each frame as it arrives. HLG is relative and has no peak
+// to read.
+void VideoDecoder::ProbeHdrPeak(const std::wstring& path, const std::wstring& inputOptions,
+                                std::stop_token stop) {
+    m_source.hdrPeakNits = 0.0;
+    const hdr_policy::HdrSignal signal = hdr_policy::SignalOf(m_source.color);
+    if (signal == hdr_policy::HdrSignal::Sdr) return;
+    double maxContent = 0.0, masteringPeak = 0.0;
+    if (signal == hdr_policy::HdrSignal::Pq) {
+        std::string text;
+        DWORD code = 0;
+        if (RunCapture(m_ffprobeExe, L"-v error -select_streams v:0 -read_intervals \"%+#1\" "
+                L"-show_entries stream_side_data=max_content,max_luminance:frame_side_data=max_content,max_luminance "
+                L"-of default=noprint_wrappers=1 " + inputOptions + L"-i " + Quote(path),
+                text, &code, stop, m_probeTimeout)) {
+            std::istringstream in(text);
+            std::string line;
+            while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const size_t eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+                double parsed = 0.0;
+                if (!ParseRate(value, parsed)) continue;
+                // Stream and frame both print the pair; the first of each wins.
+                if (key == "max_content" && maxContent <= 0.0) maxContent = parsed;
+                else if (key == "max_luminance" && masteringPeak <= 0.0) masteringPeak = parsed;
+            }
+        } else {
+            LOG("HDR metadata probe failed, exitCode=" << code << "; tone mapping for the default peak.");
+        }
+    }
+    m_source.hdrPeakNits = hdr_policy::ToneMapPeakNits(signal, maxContent, masteringPeak);
+    LOG("HDR source (" << m_source.colorTags << "): MaxCLL=" << maxContent << " mastering peak="
+        << masteringPeak << " nits; tone mapping to SDR BT.709 for a " << m_source.hdrPeakNits
+        << "-nit peak. The neural pass sees the tone-mapped frames.");
 }
 
 // Samples the first packets' presentation timestamps and asks whether they are
@@ -846,7 +889,27 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // layout is only chosen for a declared matrix.
     const bool bt709Untagged = !nv12 && m_source.untaggedBt709;
     const wchar_t* bgraConversion = bt709Untagged ? L",scale=in_color_matrix=bt709,format=bgra" : L",format=bgra";
-    if (acceleration == FFmpegAcceleration::Cuda) {
+    // A PQ or HLG source is tone mapped to SDR BT.709 before the BGRA conversion
+    // (HdrPolicy.h). Its frames leave the hardware as P010 rather than NV12: the
+    // curve needs the ten bits, and an 8-bit PQ signal bands in the shadows the
+    // curve lifts. Never NV12 (DecideSourceLayout), and never the untagged rule,
+    // which is about a missing matrix on an SDR video.
+    const hdr_policy::HdrSignal hdr = hdr_policy::SignalOf(m_source.color);
+    if (hdr != hdr_policy::HdrSignal::Sdr) {
+        const std::wstring toneMap = hdr_policy::SdrToneMapFilter(
+            hdr, m_source.hdrPeakNits > 0.0 ? m_source.hdrPeakNits : hdr_policy::ToneMapPeakNits(hdr, 0.0, 0.0),
+            m_source.color.matrix != ColorMatrix::Unspecified) + L",format=bgra";
+        if (acceleration == FFmpegAcceleration::Cuda)
+            args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
+                 << L":format=p010:interp_algo=bicubic:passthrough=0,hwdownload,format=p010le," << toneMap << L" ";
+        else if (acceleration == FFmpegAcceleration::D3D11Va)
+            args << L"-vf hwdownload,format=p010le,scale=" << m_source.width << L":" << m_source.height
+                 << L":flags=bicubic," << toneMap << L" ";
+        else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight))
+            args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic," << toneMap << L" ";
+        else
+            args << L"-vf " << toneMap << L" ";
+    } else if (acceleration == FFmpegAcceleration::Cuda) {
         args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
              << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
         if (!nv12) args << bgraConversion;
@@ -973,6 +1036,12 @@ bool VideoDecoder::OpenFFmpeg(const std::wstring& path, std::stop_token stop,
         // stays empty, which lands on the same refusal as any other undeclared
         // stream.
         m_source.color = known->color;
+        // Carried like the colour, and for the same reason: a known open of an
+        // HDR source must tone map it exactly as the probed sibling did. A
+        // caller that carried the transfer but no peak gets the default one.
+        m_source.hdrPeakNits = hdr_policy::SignalOf(m_source.color) == hdr_policy::HdrSignal::Sdr ? 0.0 :
+            known->hdrPeakNits > 0.0 ? known->hdrPeakNits :
+            hdr_policy::ToneMapPeakNits(hdr_policy::SignalOf(m_source.color), 0.0, 0.0);
         // A known open runs no probe, so it has no verbatim ffprobe strings to
         // quote. Render the mapped description instead: the accept/refuse line
         // below is the only place either decision is visible, and a blank one
@@ -1025,7 +1094,11 @@ void VideoDecoder::DecideSourceLayout() {
         !m_source.playbackNv12Requested ||
         SourceNv12ConversionFor(m_source.color) == SourceNv12Conversion::Bt709Limited;
     const bool evenGeometry = m_source.width % 2 == 0 && m_source.height % 2 == 0;
-    const bool convertible = SourceNv12ConversionFor(m_source.color) != SourceNv12Conversion::Unsupported;
+    // An HDR source is tone mapped on the CPU (StartFFmpeg), so it never takes the
+    // GPU conversion, whatever matrix it declares: that pass would hand the model
+    // PQ code values as SDR, which is the bug the tone map exists to fix.
+    const bool convertible = SourceNv12ConversionFor(m_source.color) != SourceNv12Conversion::Unsupported &&
+                             hdr_policy::SignalOf(m_source.color) == hdr_policy::HdrSignal::Sdr;
     // Accepted and refused are deliberately one grep away from each other - same
     // "GPU source conversion" prefix, same four tags named either way - so a reader
     // of one render's log gets either the path it took or the reason it did not.
