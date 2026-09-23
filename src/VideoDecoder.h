@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include "PixelLayout.h"
+#include "UntaggedColorPolicy.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -261,6 +262,15 @@ public:
     // RGB32/ARGB32 output, so it hands out BGRA and is never the backend behind
     // an NV12 layout. Unspecified is the refusal, never an assumed BT.709.
     const SourceColorDescription& ColorDescription() const { return m_source.color; }
+    // Whether this source is converted as an undeclared HD video (BT.709).
+    // Known after any open, OpenMetadata included, which is what a caller that
+    // keys a render on the decoded pixels asks.
+    bool DecodesUntaggedAsBt709() const {
+        return UntaggedSourceDecodesAsBt709(m_source.color,
+            m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
+            m_source.nativeHeight ? m_source.nativeHeight : m_source.height,
+            m_source.stillImage || m_source.gif);
+    }
 
 private:
     // Everything the open source is known by - what ffprobe, a KnownMedia or
@@ -298,6 +308,9 @@ private:
         // is per codec, so the memo of dead paths is keyed by this, never global.
         std::string hardwareProfile;
         SourceColorDescription color{};
+        // An HD video that declared no matrix, decoded as BT.709 rather than
+        // ffmpeg's BT.601 default (UntaggedColorPolicy.h). Set with the layout.
+        bool untaggedBt709{};
         // The four colour entries exactly as ffprobe printed them, for the log line
         // that refuses the GPU conversion. The mapped description is what the code
         // gates on, but "other" is a diagnosis nobody can act on and "bt2020nc" is.

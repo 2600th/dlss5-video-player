@@ -835,18 +835,31 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // trailing `format=bgra` conversion and asking for `-pix_fmt nv12` below -
     // 11.1 MB BGRA -> 4.2 MB NV12 per 2578x1080 frame over the pipe.
     const bool nv12 = m_source.layout == VideoPixelLayout::Nv12;
+    // An undeclared HD video is converted to BGRA as BT.709, which is how
+    // players read one and how every export is converted back; ffmpeg would
+    // pick BT.601 (UntaggedColorPolicy.h). The conversion is pinned to a scale
+    // filter of its own, followed by format=bgra, so it is THAT filter that
+    // converts and the matrix it was given is the one used. Never on NV12: that
+    // layout is only chosen for a declared matrix.
+    const bool bt709Untagged = !nv12 && m_source.untaggedBt709;
+    const wchar_t* bgraConversion = bt709Untagged ? L",scale=in_color_matrix=bt709,format=bgra" : L",format=bgra";
     if (acceleration == FFmpegAcceleration::Cuda) {
         args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
              << L":format=nv12:interp_algo=bicubic:passthrough=0,hwdownload,format=nv12";
-        if (!nv12) args << L",format=bgra";
+        if (!nv12) args << bgraConversion;
         args << L" ";
     } else if (acceleration == FFmpegAcceleration::D3D11Va) {
         args << L"-vf hwdownload,format=nv12,scale=" << m_source.width << L":" << m_source.height
              << L":flags=bicubic";
-        if (!nv12) args << L",format=bgra";
+        if (!nv12) args << bgraConversion;
         args << L" ";
-    } else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight))
-        args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic ";
+    } else if (m_source.nativeWidth && m_source.nativeHeight && (m_source.width != m_source.nativeWidth || m_source.height != m_source.nativeHeight)) {
+        args << L"-vf scale=" << m_source.width << L":" << m_source.height << L":flags=bicubic";
+        if (bt709Untagged) args << bgraConversion;
+        args << L" ";
+    } else if (bt709Untagged) {
+        args << L"-vf " << (bgraConversion + 1) << L" ";
+    }
     if (m_source.stillImage) args << L"-frames:v 1 ";
     if (m_source.gif && m_source.durationSec > seekSeconds)
         args << L"-t " << std::fixed << std::setprecision(6) << (m_source.durationSec - seekSeconds) << L" ";
@@ -985,9 +998,10 @@ void VideoDecoder::DecideSourceLayout() {
     // conversion implements. That conversion is a matrix plus a range mapping,
     // and an undeclared stream states neither: handing one over as NV12 is what
     // used to decode a BT.601 or full-range source under BT.709 limited-range
-    // coefficients with nothing in the log to say so. Undeclared is not BT.709 -
-    // it is BGRA, ffmpeg converts it on the CPU from the tags it can see, and
-    // that costs pipe bandwidth rather than colour. A `known` open skips the
+    // coefficients with nothing in the log to say so. Undeclared is BGRA,
+    // converted on the CPU, which costs pipe bandwidth rather than colour - with
+    // the matrix players assume for it (BT.709 for HD, UntaggedColorPolicy.h),
+    // named in StartFFmpeg's filter rather than left to ffmpeg's BT.601. A `known` open skips the
     // probe entirely and so declares nothing, which lands on the same refusal.
     //
     // This is also what makes the renderer's matching refusal unreachable: the
@@ -1023,6 +1037,13 @@ void VideoDecoder::DecideSourceLayout() {
     }
     m_source.layout = (wantNv12 && evenGeometry && convertible && playbackConvertible)
         ? VideoPixelLayout::Nv12 : VideoPixelLayout::Bgra;
+    m_source.untaggedBt709 = UntaggedSourceDecodesAsBt709(
+        m_source.color, m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
+        m_source.nativeHeight ? m_source.nativeHeight : m_source.height,
+        m_source.stillImage || m_source.gif);
+    if (m_source.untaggedBt709 && m_source.layout == VideoPixelLayout::Bgra)
+        LOG("Source declares no colour matrix (" << m_source.colorTags
+            << "); decoding it as BT.709, the reading for an HD video that states none.");
 }
 
 // Position on the current timeline of the next frame the child will emit. The

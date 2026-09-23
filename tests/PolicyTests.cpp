@@ -42,6 +42,7 @@
 #include "ExportPipeline.h"
 #include "RenderCommandLine.h"
 #include "FrameResample.h"
+#include "UntaggedColorPolicy.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
@@ -4878,6 +4879,34 @@ void area_downscale_is_the_exact_coverage_mean_and_deterministic_test()
     CHECK(!frame_resample::DownscaleBgraArea(row, 3, 1, 4, 1, untouched));   // an enlargement
     CHECK(!frame_resample::DownscaleBgraArea(row, 4, 1, 2, 1, untouched));   // not a whole frame
     CHECK(untouched == std::vector<uint8_t>({1, 2, 3}));
+}
+
+// The matrix an undeclared video is decoded with: BT.709 from HD up, BT.601
+// below it (ffmpeg's own default, so nothing moves there), never for a stream
+// that declared one, and never for a photo or a GIF.
+void untagged_hd_video_decodes_as_bt709_and_only_it_test()
+{
+    const SourceColorDescription none{};
+    SourceColorDescription declared601{};
+    declared601.matrix = ColorMatrix::Bt601; declared601.range = ColorRange::Limited;
+    SourceColorDescription declared709{};
+    declared709.matrix = ColorMatrix::Bt709;
+    SourceColorDescription rangeOnly{};
+    rangeOnly.range = ColorRange::Limited;
+    CHECK(UntaggedSourceDecodesAsBt709(none, 1280, 720, false));
+    CHECK(UntaggedSourceDecodesAsBt709(none, 1920, 1080, false));
+    CHECK(UntaggedSourceDecodesAsBt709(none, 3840, 2160, false));
+    CHECK(UntaggedSourceDecodesAsBt709(none, 1280, 544, false));    // scope 720p
+    CHECK(UntaggedSourceDecodesAsBt709(none, 960, 720, false));     // 4:3 720p
+    CHECK(UntaggedSourceDecodesAsBt709(rangeOnly, 1920, 1080, false));
+    CHECK(!UntaggedSourceDecodesAsBt709(none, 720, 576, false));    // PAL SD
+    CHECK(!UntaggedSourceDecodesAsBt709(none, 720, 480, false));    // NTSC SD
+    CHECK(!UntaggedSourceDecodesAsBt709(none, 640, 360, false));
+    CHECK(!UntaggedSourceDecodesAsBt709(declared601, 1920, 1080, false));
+    CHECK(!UntaggedSourceDecodesAsBt709(declared709, 1920, 1080, false));   // declared, not inferred
+    CHECK(!UntaggedSourceDecodesAsBt709(none, 1920, 1080, true));   // photo or GIF
+    CHECK(std::string_view(UntaggedColorIdentityTerm(false)).empty());
+    CHECK(std::string_view(UntaggedColorIdentityTerm(true)) == "|untagged-hd-bt709-v1");
 }
 
 void one_step_of_the_frame_grid_is_always_work_test()
@@ -11132,6 +11161,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
     TEST_CASE(processing_scale_ladder_defaults_to_the_source_and_keys_every_rung_test),
     TEST_CASE(area_downscale_is_the_exact_coverage_mean_and_deterministic_test),
+    TEST_CASE(untagged_hd_video_decodes_as_bt709_and_only_it_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
     TEST_CASE(every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test),
     TEST_CASE(render_start_snaps_into_the_frame_it_lands_in_not_past_it_test),

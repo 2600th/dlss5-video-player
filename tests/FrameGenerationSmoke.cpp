@@ -293,10 +293,18 @@ CentroidSeries DecodeCentroids(const fs::path& ffmpeg, const fs::path& media, ui
     fs::remove(scratch, ignored);
     // -frames:v bounds the decode to the prefix, so a two-hour clip costs what
     // a two-second one costs.
+    //
+    // extractplanes=y hands over the stored luma bytes as they are. A plain
+    // `-pix_fmt gray` converts, and the conversion follows each file's colour
+    // tags: an untagged source and the BT.709-tagged output with the SAME Y
+    // bytes (154 on the magenta bar, measured) came back as gray 161 and 134,
+    // and the harness reported an 11 px passthrough shift for frames the pass
+    // had copied exactly. The probe is about position, and position is in the
+    // stored samples, not in how a converter reads their tags.
     const std::vector<std::wstring> arguments{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
         L"-i", media.wstring(), L"-frames:v", std::to_wstring(frames),
-        L"-f", L"rawvideo", L"-pix_fmt", L"gray", scratch.wstring()};
+        L"-vf", L"extractplanes=y", L"-f", L"rawvideo", L"-pix_fmt", L"gray", scratch.wstring()};
     // Wrapped so the scratch file is removed on EVERY path out, the failures
     // included: a 20-frame gray prefix of 720p is 18 MB, nothing downstream
     // reads it, and a failing run is the one most likely to be repeated.

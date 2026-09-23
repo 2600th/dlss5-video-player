@@ -8010,7 +8010,11 @@ private:
                     // Metadata only: this decoder was opened and closed two lines
                     // later, and a full open paid for an ffmpeg child for nothing.
                     VideoDecoder metadata;if(!metadata.OpenMetadata(sourcePath.wstring(),MediaSourceKind::LocalFile,stop)){completion->result.detail=L"The source could not be decoded for neural rendering.";goto finish;}
-                    const uint32_t width=metadata.NativeWidth(),height=metadata.NativeHeight();const double fps=metadata.FrameRate(),duration=metadata.DurationSeconds();metadata.Close();
+                    const uint32_t width=metadata.NativeWidth(),height=metadata.NativeHeight();const double fps=metadata.FrameRate(),duration=metadata.DurationSeconds();
+                    // An undeclared HD source now reaches the model as BT.709
+                    // rather than ffmpeg's BT.601 (UntaggedColorPolicy.h), so its
+                    // renders carry a term that retires the ones made before.
+                    const bool untaggedBt709=metadata.DecodesUntaggedAsBt709();metadata.Close();
                     if(!width||!height||!std::isfinite(fps)||fps<=0.0||!std::isfinite(duration)||duration<=0.0){completion->result.detail=L"The source metadata is incomplete.";goto finish;}progressWidth=width;progressHeight=height;
                     NeuralRenderProgress checking{};checking.phase=NeuralRenderPhase::CheckingCache;postProgress(checking);
                     const int64_t sourceDuration100ns=static_cast<int64_t>(std::llround(duration*10000000.0));
@@ -8047,7 +8051,7 @@ private:
                     // model is shown rather than how the result is encoded.
                     const auto modelStore=ResolveNeuralModelStore(driverVersion,stop);
                     LOG("Neural model store "<<NeuralModelStoreSourceName(modelStore.source)<<" files="<<modelStore.files<<" hashed="<<modelStore.contentHashedFiles<<" digest="<<modelStore.digest);
-                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
+                    NeuralCacheIdentity identity{*sourceDigest,width,height,DLSS_VIDEO_PLAYER_VERSION,GpuPathName(gpu),*runtimeDigest,NeuralRenderPipelineIdentity(gpuSourceConversion,nvencPreset,gpuColorConversion)+ProcessingScaleIdentityTerm(processingScale)+UntaggedColorIdentityTerm(untaggedBt709),false,*settingsDigest,range,guides.IsDefault()?std::string{}:CanonicalGuideControls(guides),WideToUtf8(driverVersion),modelStore.digest};const std::string renderKey=BuildNeuralCacheKey(identity);completion->renderKey=renderKey;completion->range=range;completion->settings=settings;completion->guides=guides;
                     LOG("Checking neural cache key="<<renderKey<<" range=["<<range.start100ns<<","<<range.end100ns<<") guides="<<CanonicalGuideControls(guides)<<" settings="<<CanonicalNeuralSettings(settings));
                     if(const auto cached=cache.LookupRender(renderKey,stop)){
                         // LookupRender already verifies the full payload hash and

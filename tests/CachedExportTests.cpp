@@ -694,6 +694,62 @@ void JoinedFrameCountMatchesDecodedCountTest(const std::filesystem::path& helper
     CHECK(!CanPublishNeuralCompletion(true, probeMatches(shortMeasured), true));
 }
 
+// One Y'CbCr colour, decoded to BGRA, under the three descriptions that
+// decide its matrix: an HD video that declares nothing is BT.709 (the reading
+// players use, and the matrix every export converts back with), an SD video
+// that declares nothing is BT.601, and a declared matrix is honoured whatever
+// the size. The colour is Y=100 Cb=90 Cr=180, written losslessly at 4:4:4, so
+// the two matrices land ten levels apart on red: BT.709 limited predicts
+// B,G,R = 17.5, 78.2, 191.0 and BT.601 limited 21.2, 70.4, 180.8.
+//
+// The HD case is the one that used to break: ffmpeg picks BT.601 for every
+// undeclared stream, the export encodes with BT.709, and an untagged 1280x720
+// source came out of frame generation with its cyan bar's Y moved 133 -> 155.
+void UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto log = fixture.path / L"colour.log";
+    struct Case {
+        const wchar_t* name;
+        uint32_t width, height;
+        const wchar_t* colorspace;   // what the file declares
+        bool expectBt709;
+    };
+    for (const Case& clip : {Case{L"hd-untagged", 1280, 720, L"unknown", true},
+                             Case{L"sd-untagged", 640, 480, L"unknown", false},
+                             Case{L"hd-bt601", 1280, 720, L"bt470bg", false},
+                             Case{L"sd-bt709", 640, 480, L"bt709", true}}) {
+        const auto path = fixture.path / (std::wstring(clip.name) + L".mkv");
+        const std::wstring size = std::to_wstring(clip.width) + L"x" + std::to_wstring(clip.height);
+        const std::wstring declared = std::wstring(L"setparams=colorspace=") + clip.colorspace +
+            L":color_primaries=unknown:color_trc=unknown:range=" +
+            (std::wstring_view(clip.colorspace) == L"unknown" ? L"unknown" : L"tv");
+        CHECK(RunTool(helpers / L"ffmpeg.exe", {L"-v", L"error", L"-nostdin", L"-y", L"-f", L"lavfi", L"-i",
+            L"color=c=black:s=" + size + L":r=10:d=0.5,format=yuv444p,geq=lum=100:cb=90:cr=180," + declared,
+            L"-c:v", L"libx264", L"-qp", L"0", L"-pix_fmt", L"yuv444p", path.wstring()}, log));
+        VideoDecoder decoder;
+        CHECK(decoder.OpenSequential(path.wstring(), MediaSourceKind::LocalFile, {}, false));
+        CHECK(decoder.DecodesUntaggedAsBt709() ==
+              (clip.expectBt709 && std::wstring_view(clip.colorspace) == L"unknown"));
+        VideoFrame frame;
+        CHECK(decoder.ReadNext(frame));
+        CHECK_EQ(frame.bgra.size(), size_t(clip.width) * clip.height * 4u);
+        if (frame.bgra.size() != size_t(clip.width) * clip.height * 4u) continue;
+        const uint8_t* centre = frame.bgra.data() + (size_t(clip.height / 2) * clip.width + clip.width / 2) * 4u;
+        const double b = centre[0], g = centre[1], r = centre[2];
+        const double expectB = clip.expectBt709 ? 17.5 : 21.2;
+        const double expectG = clip.expectBt709 ? 78.2 : 70.4;
+        const double expectR = clip.expectBt709 ? 191.0 : 180.8;
+        const bool matches = std::abs(b - expectB) <= 3.0 && std::abs(g - expectG) <= 3.0 &&
+                             std::abs(r - expectR) <= 3.0;
+        if (!matches) {
+            std::wcerr << L"  " << clip.name << L" decoded to B,G,R " << b << L',' << g << L',' << r
+                       << L", expected about " << expectB << L',' << expectG << L',' << expectR << L'\n';
+        }
+        CHECK(matches);
+    }
+}
+
 // Cached playback builds its own decoders: nothing injects the two sources,
 // so this is the one place the decoder-backed frame source pairs real files.
 // A red original and a blue render, lossless, so a pair is checked by its
@@ -920,6 +976,7 @@ int wmain(int argc, wchar_t** argv)
     JoinedFrameCountMatchesDecodedCountTest(helpers);
     SynchronizedPlaybackPairsRealMediaTest(helpers);
     LivePlaybackSwitchesOntoTheJoinedRunTest(helpers);
+    UntaggedVideoDecodesWithTheMatrixItsSizeImpliesTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

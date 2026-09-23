@@ -386,12 +386,16 @@ key, so a default render keeps the cache entries it already has:
   the key they were published under, and a render made with it on gets an entry of
   its own instead of being served for a request that wanted the other input.
 
-  One assumption this does not change, on either path: ffmpeg's own conversion
-  resolves an *unspecified* matrix to BT.601 whatever the resolution, so an untagged
-  HD source decodes as BT.601 on the CPU fallback exactly as it did before. Refusing
-  the GPU path keeps that behaviour identical rather than improving it - "unspecified
-  plus HD implies BT.709" would be a product decision for both paths, and nobody has
-  made it.
+  A source that declares no matrix is decoded the way players decode one: BT.709
+  when it is HD (wider than 1279 or taller than 576 pixels), BT.601 below that.
+  ffmpeg's own conversion would pick BT.601 at every size, and every export is
+  converted back with BT.709, so an untagged HD source used to come out of an export
+  with its colours moved - the cyan bar of an untagged 720p test pattern went from
+  Y 133 to 155 through frame generation alone. Such a source still refuses the GPU
+  path and decodes on the CPU, now with BT.709; its renders carry
+  `untagged-hd-bt709-v1` in the key, so none made under the old reading is served.
+  A declared matrix is always used as declared, and photos and GIFs are left as
+  they are.
 
 Each new neural render has a canonical `neural-settings.ini` snapshot and its
 SHA-256 in the manifest. The cache key covers that snapshot, source content,
