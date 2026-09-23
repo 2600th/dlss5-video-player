@@ -48,6 +48,9 @@ private:
             // The compare bar over the control strip, and the tags drawn on the picture.
             {L"compare.mode.neural", L"DLSS 5"}, {L"compare.mode.original", L"Original"}, {L"compare.mode.split", L"Split"}, {L"compare.mode.wipe", L"Wipe"}, {L"compare.mode.difference", L"Difference"}, {L"compare.mode.side_by_side", L"Side by side"}, {L"compare.mode.quad", L"2 \u00d7 2"},
             {L"compare.mix", L"Mix"}, {L"compare.swap", L"Swap"}, {L"compare.zoom.fit", L"Fit"}, {L"compare.loupe", L"Loupe"},
+            // What a narrow window shows instead: the bar steps down to these before it folds the modes into a menu.
+            {L"compare.mode.neural.short", L"DLSS 5"}, {L"compare.mode.original.short", L"Orig."}, {L"compare.mode.split.short", L"Split"}, {L"compare.mode.wipe.short", L"Wipe"}, {L"compare.mode.difference.short", L"Diff."}, {L"compare.mode.side_by_side.short", L"Side"}, {L"compare.mode.quad.short", L"2 × 2"},
+            {L"compare.tip.mode", L"Compare mode (C)"}, {L"compare.tip.swap", L"Swap sides (X)"}, {L"compare.tip.loupe", L"Loupe (L)"}, {L"compare.tip.zoom_in", L"Zoom in (Z)"}, {L"compare.tip.zoom_out", L"Zoom out (Shift+Z)"},
             {L"compare.hint.hold", L"Hold on the picture to see the original"},
             {L"compare.hint.unavailable", L"Turn on Neural Rendering (D) to compare"},
             {L"compare.tag.original", L"ORIGINAL"}, {L"compare.tag.dlss", L"DLSS 5"},

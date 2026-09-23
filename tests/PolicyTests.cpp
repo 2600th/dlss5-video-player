@@ -7679,9 +7679,9 @@ void compare_label_premultiply_matches_the_gdi_composite_test()
 void compare_bar_lays_out_and_hit_tests_test()
 {
     using namespace compare_bar;
-    const auto layout=LayoutBar(1440,700,96,4,false);
+    const auto layout=LayoutBar(1440,700,96,EstimatedMetrics(4,96),false);
     CHECK_EQ(700L,layout.bar.top);CHECK_EQ(700L+kBarHeightDip,layout.bar.bottom);
-    CHECK(!layout.compact);
+    CHECK(!layout.compact);CHECK(layout.tier==Tier::Full);CHECK(layout.fits);
     size_t modes=0;
     for(const Item& item:layout.items)if(item.part==Part::Mode)++modes;
     CHECK_EQ(size_t{4},modes);
@@ -7707,11 +7707,93 @@ void compare_bar_lays_out_and_hit_tests_test()
     CHECK(std::abs(MixFromX(track,150)-0.5f)<1e-6f);
     CHECK_EQ(200L,LONG(XFromMix(track,1.0f)));CHECK_EQ(100L,LONG(XFromMix(track,-1.0f)));
     // A narrow window gets the compact widths, and a narrower one drops the hint.
-    const auto narrow=LayoutBar(700,0,96,4,true);
-    CHECK(narrow.compact);CHECK(narrow.hint.right<=narrow.hint.left);
+    const auto narrow=LayoutBar(700,0,96,EstimatedMetrics(4,96),true);
+    CHECK(narrow.compact);CHECK(narrow.hint.right<=narrow.hint.left);CHECK(narrow.fits);
     // Scaled with the DPI.
-    const auto large=LayoutBar(2880,0,192,4,false);
+    const auto large=LayoutBar(2880,0,192,EstimatedMetrics(4,192),false);
     CHECK_EQ(LONG(2*kBarHeightDip),large.bar.bottom-large.bar.top);
+}
+
+// The bar with the seven modes the player offers, its labels measured in the font it
+// paints with, at every width from the player's minimum up and at five DPIs. The
+// first version clipped "Difference" and "Side by side" and pushed Swap off the right
+// edge at the default window (1440 px at 175%); nothing may be clipped or dropped at
+// any width the window can have.
+void compare_bar_fits_every_width_and_dpi_test()
+{
+    using namespace compare_bar;
+    const std::array<const wchar_t*,7> full{L"DLSS 5",L"Original",L"Split",L"Wipe",L"Difference",L"Side by side",L"2 \u00d7 2"};
+    const std::array<const wchar_t*,7> brief{L"DLSS 5",L"Orig.",L"Split",L"Wipe",L"Diff.",L"Side",L"2 \u00d7 2"};
+    HDC dc=CreateCompatibleDC(nullptr);
+    CHECK(dc!=nullptr);if(!dc)return;
+    for(const UINT dpi:{96u,120u,144u,168u,192u}){
+        HFONT font=CreateFontW(-Scale(14,dpi),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        const HGDIOBJ old=SelectObject(dc,font);
+        const auto measure=[&](const wchar_t* text){SIZE size{};GetTextExtentPoint32W(dc,text,int(wcslen(text)),&size);return int(size.cx);};
+        Metrics metrics;
+        for(size_t index=0;index<full.size();++index){metrics.modeLabels.push_back(measure(full[index]));metrics.modeShortLabels.push_back(measure(brief[index]));}
+        metrics.swapLabel=measure(L"Swap");metrics.loupeLabel=measure(L"Loupe");metrics.mixLabel=measure(L"Mix");
+        metrics.icon=Scale(17,dpi);   // a Tabler glyph is one em of the 17 dip icon font
+        SelectObject(dc,old);DeleteObject(font);
+        const int gutter=Scale(kGutterDip,dpi),inset=Scale(kLabelInsetDip,dpi);
+        const int minimum=MinimumToolbarClientWidth(dpi);
+        Tier widest=Tier::Tight;
+        for(int width=minimum;width<=Scale(1600,dpi);width+=std::max(1,Scale(3,dpi))){
+            const Layout bar=LayoutBar(width,0,dpi,metrics,true);
+            CHECK(bar.fits);
+            // Wider never steps down.
+            CHECK(int(bar.tier)<=int(widest));widest=bar.tier;
+            LONG previous=gutter;
+            bool swap=false,loupe=false,zoom=false,menu=false;size_t modes=0;
+            for(const Item& item:bar.items){
+                CHECK(item.bounds.left>=previous);CHECK(item.bounds.right<=width-gutter);
+                previous=item.bounds.right;
+                const auto shown=[&](int text){return item.bounds.right-item.bounds.left>=text+2*inset;};
+                switch(item.part){
+                case Part::Mode:
+                    ++modes;
+                    CHECK(shown(item.face==Face::ShortLabel?metrics.modeShortLabels[size_t(item.index)]:metrics.modeLabels[size_t(item.index)]));
+                    break;
+                case Part::ModeMenu:{
+                    menu=true;
+                    int longest=0;for(size_t index=0;index<full.size();++index)longest=std::max(longest,item.face==Face::ShortLabel?metrics.modeShortLabels[index]:metrics.modeLabels[index]);
+                    CHECK(shown(longest+Scale(kChevronDip,dpi)));
+                    break;}
+                case Part::Swap:swap=true;CHECK(item.face==Face::Icon||shown(metrics.swapLabel));break;
+                case Part::Loupe:loupe=true;CHECK(item.face==Face::Icon||shown(metrics.loupeLabel));break;
+                case Part::ZoomIn:zoom=true;break;
+                default:break;
+                }
+            }
+            // Every control is there at every width: seven segments or the menu.
+            CHECK(swap&&loupe&&zoom);CHECK(menu?modes==0:modes==full.size());
+            CHECK(bar.mixValue.right>bar.mixValue.left&&bar.zoomValue.right>bar.zoomValue.left);
+            CHECK((bar.tier==Tier::Tight)==(bar.mixLabel.right<=bar.mixLabel.left));
+        }
+        // The widest window gets the full labels at every DPI here.
+        CHECK(LayoutBar(Scale(1600,dpi),0,dpi,metrics,true).tier==Tier::Full);
+    }
+    DeleteDC(dc);
+    // The default window on the machine the bug was seen on: short labels, all of them.
+    const Metrics estimate=EstimatedMetrics(7,168);
+    const Layout seen=LayoutBar(1440,0,168,estimate,true);
+    CHECK(seen.fits);CHECK(seen.tier!=Tier::Full);
+    // Below the short labels the modes fold into one button, which answers a click like
+    // any other part. The player's own minimum is wider than this today; the menu is for
+    // translations with longer names, and for the tight tier's sake nothing is dropped.
+    const Layout folded=LayoutBar(700,0,96,EstimatedMetrics(7,96),true);
+    CHECK(folded.tier==Tier::Menu);CHECK(folded.fits);
+    const Layout tight=LayoutBar(520,0,96,EstimatedMetrics(7,96),true);
+    CHECK(tight.tier==Tier::Tight);CHECK(tight.fits);
+    const Item& button=folded.items.front();
+    CHECK(button.part==Part::ModeMenu);
+    const Item* hit=HitTest(folded,POINT{(button.bounds.left+button.bounds.right)/2,(button.bounds.top+button.bounds.bottom)/2});
+    CHECK(hit!=nullptr&&hit->part==Part::ModeMenu);
+    // Without the icon font the toggles keep their words, even when tight.
+    Metrics wordy=EstimatedMetrics(7,96);wordy.icon=0;
+    const Layout plain=LayoutBar(MinimumToolbarClientWidth(96),0,96,wordy,true);
+    for(const Item& item:plain.items)if(item.part==Part::Swap||item.part==Part::Loupe)CHECK(item.face==Face::Label);
 }
 
 // The zoom ladder is in screen pixels per output pixel, so the same step is a
@@ -11889,6 +11971,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),
     TEST_CASE(compare_bar_lays_out_and_hit_tests_test),
+    TEST_CASE(compare_bar_fits_every_width_and_dpi_test),
     TEST_CASE(compare_zoom_ladder_zooms_at_the_pointer_and_pans_test),
     TEST_CASE(compare_loupe_and_one_to_one_placement_test),
     TEST_CASE(compare_mask_shrinks_feathers_and_is_remembered_per_source_test),

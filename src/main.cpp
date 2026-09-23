@@ -4032,6 +4032,7 @@ private:
     static const wchar_t* CompareModeLabelKey(ComparisonMode mode){
         switch(mode){case ComparisonMode::Original:return L"compare.mode.original";case ComparisonMode::SplitVertical:return L"compare.mode.split";case ComparisonMode::Wipe:return L"compare.mode.wipe";case ComparisonMode::Difference:return L"compare.mode.difference";case ComparisonMode::SideBySide:return L"compare.mode.side_by_side";case ComparisonMode::Quad:return L"compare.mode.quad";default:return L"compare.mode.neural";}
     }
+    std::wstring CompareModeLabel(ComparisonMode mode,bool brief)const{return T((std::wstring(CompareModeLabelKey(mode))+(brief?L".short":L"")).c_str());}
     static UINT CommandForComparisonMode(ComparisonMode mode){switch(mode){case ComparisonMode::Original:return IDM_COMPARE_ORIGINAL;case ComparisonMode::SplitVertical:return IDM_COMPARE_SPLIT;case ComparisonMode::Wipe:return IDM_COMPARE_WIPE;case ComparisonMode::Difference:return IDM_COMPARE_DIFFERENCE;case ComparisonMode::SideBySide:return IDM_COMPARE_SIDE_BY_SIDE;case ComparisonMode::Quad:return IDM_COMPARE_QUAD;default:return IDM_COMPARE_NEURAL;}}
     // The pane layout a mode draws; zoom, pan and the loupe work in pane coordinates.
     static compare_view::Layout PaneLayout(ComparisonMode mode){
@@ -4627,6 +4628,8 @@ private:
     // the bar drops items, so they are re-registered from the same layout the
     // painter uses - a tip pinned to a stale rect is worse than no tip, because
     // it describes whatever control has moved into that space.
+    // Tool ids past every ToolbarAction value, so the compare bar's tips never replace a toolbar one.
+    static constexpr UINT_PTR kCompareTipIdBase=0x1000;
     void RefreshToolbarTips(){
         if(!m_hwnd||!IsWindow(m_hwnd))return;
         const auto items=ToolbarItems();
@@ -4650,6 +4653,24 @@ private:
             text.push_back(std::make_unique<std::wstring>(T(key)));
             info.lpszText=text.back()->data();
             info.rect=item.bounds;
+            SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
+        }
+        // The compare bar's parts that can lose their words, named on hover. A part the
+        // bar does not show keeps its tool with an empty rectangle, which never fires.
+        const auto bar=CompareBarVisible()?CompareBarLayout():compare_bar::Layout{};
+        static constexpr std::array<std::pair<compare_bar::Part,const wchar_t*>,5> kCompareTips{{
+            {compare_bar::Part::ModeMenu,L"compare.tip.mode"},{compare_bar::Part::ZoomOut,L"compare.tip.zoom_out"},{compare_bar::Part::ZoomIn,L"compare.tip.zoom_in"},
+            {compare_bar::Part::Swap,L"compare.tip.swap"},{compare_bar::Part::Loupe,L"compare.tip.loupe"}}};
+        for(const auto& [part,key]:kCompareTips){
+            RECT bounds{};
+            for(const auto& item:bar.items)if(item.part==part)bounds=item.bounds;
+            TTTOOLINFOW info{};info.cbSize=TTTOOLINFOW_V2_SIZE;info.uFlags=TTF_SUBCLASS;
+            info.hwnd=m_hwnd;info.uId=kCompareTipIdBase+static_cast<UINT_PTR>(part);
+            if(SendMessageW(host,TTM_GETTOOLINFOW,0,reinterpret_cast<LPARAM>(&info))){
+                info.rect=bounds;SendMessageW(host,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&info));continue;
+            }
+            text.push_back(std::make_unique<std::wstring>(T(key)));
+            info.lpszText=text.back()->data();info.rect=bounds;
             SendMessageW(host,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&info));
         }
         // Multi-line tips need a width or comctl draws one long line.
@@ -6889,12 +6910,32 @@ private:
     // pill but a 2 px rule in the flag orange under its label, the one ink the site
     // uses for the comparison seam. Everything else is the strip's own greys.
     static constexpr COLORREF kCompareMark=RGB(255,106,26);
+    // Tabler glyphs for the parts that drop their words when the bar narrows.
+    static constexpr wchar_t kCompareSwapGlyph=L'\xeb31';    // switch-horizontal
+    static constexpr wchar_t kCompareLoupeGlyph=L'\xfcb0';   // zoom-scan
+    static constexpr wchar_t kCompareChevronGlyph=L'\xea5f'; // chevron-down
     struct CompareHover{compare_bar::Part part=compare_bar::Part::None;int index=0;
         friend bool operator==(const CompareHover&,const CompareHover&)=default;};
+    // The bar's text measured in the fonts it is painted with, so the layout steps down
+    // on what the labels really take rather than on a guess about them.
+    compare_bar::Metrics CompareBarMetrics()const{
+        const UINT dpi=ActiveWindowDpi(m_hwnd);
+        const HFONT font=m_fontSmall?m_fontSmall:m_font;
+        HDC dc=m_hwnd?GetDC(m_hwnd):nullptr;
+        if(!dc||!font){if(dc)ReleaseDC(m_hwnd,dc);return compare_bar::EstimatedMetrics(CompareBarModes().size(),dpi);}
+        const HGDIOBJ old=SelectObject(dc,font);
+        const auto measure=[&](const std::wstring& text){SIZE size{};GetTextExtentPoint32W(dc,text.c_str(),int(text.size()),&size);return int(size.cx);};
+        compare_bar::Metrics metrics;
+        for(const ComparisonMode mode:CompareBarModes()){metrics.modeLabels.push_back(measure(CompareModeLabel(mode,false)));metrics.modeShortLabels.push_back(measure(CompareModeLabel(mode,true)));}
+        metrics.swapLabel=measure(T(L"compare.swap"));metrics.loupeLabel=measure(T(L"compare.loupe"));metrics.mixLabel=measure(T(L"compare.mix"));
+        if(m_iconFont){SelectObject(dc,m_iconFont);const wchar_t glyph=kCompareSwapGlyph;SIZE size{};GetTextExtentPoint32W(dc,&glyph,1,&size);metrics.icon=std::max(1,int(size.cx));}
+        SelectObject(dc,old);ReleaseDC(m_hwnd,dc);
+        return metrics;
+    }
     compare_bar::Layout CompareBarLayout()const{
         RECT c{};GetClientRect(m_hwnd,&c);
         return compare_bar::LayoutBar(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom)-ControlHeight(),
-                                      ActiveWindowDpi(m_hwnd),CompareBarModes().size(),true);
+                                      ActiveWindowDpi(m_hwnd),CompareBarMetrics(),true);
     }
     void InvalidateCompareBar(){
         if(!m_hwnd||!CompareBarVisible())return;
@@ -6924,6 +6965,7 @@ private:
         if(!item||!CompareBarPartEnabled(item->part))return true;
         switch(item->part){
         case compare_bar::Part::Mode:SetComparisonMode(CompareBarModes()[size_t(item->index)]);break;
+        case compare_bar::Part::ModeMenu:ShowCompareModeMenu(item->bounds);break;
         case compare_bar::Part::MixTrack:m_dragMix=true;SetCapture(m_hwnd);SetMix(compare_bar::MixFromX(layout.mixTrack,x));break;
         case compare_bar::Part::ZoomOut:ZoomBy(-1,false,std::nullopt);break;
         case compare_bar::Part::ZoomIn:ZoomBy(+1,false,std::nullopt);break;
@@ -6933,13 +6975,41 @@ private:
         }
         return true;
     }
-    void DrawCompareSegment(HDC dc,RECT r,const std::wstring& label,bool enabled,bool selected,bool hover){
+    // The narrow bar's mode button: a menu of every mode, the current one checked. It
+    // opens upward from the button, since the bar sits at the bottom of the window.
+    void ShowCompareModeMenu(RECT button){
+        HMENU menu=CreatePopupMenu();if(!menu)return;
+        const auto modes=CompareBarModes();
+        for(size_t index=0;index<modes.size();++index)
+            AppendMenuW(menu,MF_STRING|(modes[index]==m_comparison.mode?MF_CHECKED:0u),UINT_PTR(index+1),CompareModeLabel(modes[index],false).c_str());
+        POINT anchor{button.left,button.top};ClientToScreen(m_hwnd,&anchor);
+        const UINT chosen=UINT(TrackPopupMenuEx(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_LEFTALIGN|TPM_BOTTOMALIGN|TPM_RIGHTBUTTON,anchor.x,anchor.y,m_hwnd,nullptr));
+        DestroyMenu(menu);
+        if(chosen>=1&&chosen<=modes.size())SetComparisonMode(modes[chosen-1]);
+    }
+    // `glyph` is drawn in the icon font ahead of the label, or alone when the label is
+    // empty; a chevron after the label marks a button that opens a menu.
+    void DrawCompareSegment(HDC dc,RECT r,const std::wstring& label,bool enabled,bool selected,bool hover,wchar_t glyph=0,bool chevron=false){
         // One pixel of the strip between neighbours, so a run of segments reads as a
         // segmented control without a border around each.
         r.right-=1;
         HBRUSH fill=CreateSolidBrush(hover&&enabled?ui_palette::Hover:ui_palette::Inactive);FillRect(dc,&r,fill);DeleteObject(fill);
         SetTextColor(dc,!enabled?RGB(98,101,108):(selected?ui_palette::PrimaryText:ui_palette::SecondaryText));
-        RECT text=r;DrawTextW(dc,label.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        if(!m_iconFont){glyph=0;chevron=false;}
+        if(!glyph&&!chevron){RECT text=r;DrawTextW(dc,label.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);}
+        else{
+            // Icon, label and chevron centred as one run.
+            const HGDIOBJ textFont=GetCurrentObject(dc,OBJ_FONT);
+            const wchar_t mark=kCompareChevronGlyph;SIZE glyphSize{},labelSize{},chevronSize{};
+            SelectObject(dc,m_iconFont);if(glyph)GetTextExtentPoint32W(dc,&glyph,1,&glyphSize);if(chevron)GetTextExtentPoint32W(dc,&mark,1,&chevronSize);SelectObject(dc,textFont);
+            if(!label.empty())GetTextExtentPoint32W(dc,label.c_str(),int(label.size()),&labelSize);
+            const int gap=Dip(compare_bar::kIconLabelGapDip);
+            const int content=glyphSize.cx+(glyph&&!label.empty()?gap:0)+labelSize.cx+(chevron?gap+chevronSize.cx:0);
+            int x=r.left+std::max(0,int(r.right-r.left-content)/2);
+            if(glyph){SelectObject(dc,m_iconFont);RECT box{x,r.top,x+glyphSize.cx,r.bottom};DrawTextW(dc,&glyph,1,&box,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,textFont);x+=glyphSize.cx+(label.empty()?0:gap);}
+            if(!label.empty()){RECT text{x,r.top,std::min<LONG>(r.right,x+labelSize.cx),r.bottom};DrawTextW(dc,label.c_str(),-1,&text,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);x+=labelSize.cx;}
+            if(chevron){SelectObject(dc,m_iconFont);RECT box{x+gap,r.top,x+gap+chevronSize.cx,r.bottom};DrawTextW(dc,&mark,1,&box,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,textFont);}
+        }
         if(selected){RECT mark{r.left,r.bottom-std::max(1,Dip(2)),r.right,r.bottom};HBRUSH ink=CreateSolidBrush(enabled?kCompareMark:RGB(98,101,108));FillRect(dc,&mark,ink);DeleteObject(ink);}
     }
     static std::wstring PercentText(float value){return std::to_wstring(int(std::lround(value*100.0f)))+L"%";}
@@ -6956,7 +7026,9 @@ private:
             switch(item.part){
             case compare_bar::Part::Mode:{
                 const ComparisonMode mode=CompareBarModes()[size_t(item.index)];
-                DrawCompareSegment(dc,item.bounds,T(CompareModeLabelKey(mode)),enabled,mode==m_comparison.mode,hovered(item));break;}
+                DrawCompareSegment(dc,item.bounds,CompareModeLabel(mode,item.face==compare_bar::Face::ShortLabel),enabled,mode==m_comparison.mode,hovered(item));break;}
+            // Folded into one button, the mode is always the selected one: the mark says so.
+            case compare_bar::Part::ModeMenu:DrawCompareSegment(dc,item.bounds,CompareModeLabel(m_comparison.mode,item.face==compare_bar::Face::ShortLabel),enabled,true,hovered(item),0,true);break;
             case compare_bar::Part::MixTrack:{
                 const RECT& t=item.bounds;const int mid=(t.top+t.bottom)/2,thick=std::max(1,Dip(2));
                 RECT line{t.left,mid-thick/2,t.right,mid-thick/2+thick};
@@ -6970,13 +7042,16 @@ private:
                 break;}
             case compare_bar::Part::ZoomOut:DrawCompareSegment(dc,item.bounds,L"\u2212",enabled&&m_zoomStep>0,false,hovered(item));break;
             case compare_bar::Part::ZoomIn:DrawCompareSegment(dc,item.bounds,L"+",enabled&&compare_zoom::Step(m_zoomStep,1,ZoomOutputWidth(),ZoomViewWidth(),false)!=m_zoomStep,false,hovered(item));break;
-            case compare_bar::Part::Swap:DrawCompareSegment(dc,item.bounds,T(L"compare.swap"),enabled,m_comparison.swap,hovered(item));break;
-            case compare_bar::Part::Loupe:DrawCompareSegment(dc,item.bounds,T(L"compare.loupe"),enabled,m_loupe,hovered(item));break;
+            case compare_bar::Part::Swap:case compare_bar::Part::Loupe:{
+                const bool swap=item.part==compare_bar::Part::Swap;
+                const bool icon=item.face==compare_bar::Face::Icon||item.face==compare_bar::Face::IconLabel;
+                DrawCompareSegment(dc,item.bounds,item.face==compare_bar::Face::Icon?std::wstring{}:T(swap?L"compare.swap":L"compare.loupe"),enabled,swap?m_comparison.swap:m_loupe,hovered(item),
+                                   icon?(swap?kCompareSwapGlyph:kCompareLoupeGlyph):wchar_t(0));break;}
             default:break;
             }
         }
         SetTextColor(dc,available?ui_palette::SecondaryText:RGB(98,101,108));
-        RECT mixLabel=layout.mixLabel;DrawTextW(dc,T(L"compare.mix").c_str(),-1,&mixLabel,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
+        if(layout.mixLabel.right>layout.mixLabel.left){RECT mixLabel=layout.mixLabel;DrawTextW(dc,T(L"compare.mix").c_str(),-1,&mixLabel,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);}
         SetTextColor(dc,available?ui_palette::PrimaryText:RGB(98,101,108));
         RECT mixValue=layout.mixValue;DrawTextW(dc,PercentText(m_comparison.strength).c_str(),-1,&mixValue,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);
         SetTextColor(dc,m_loaded&&m_renderer?ui_palette::PrimaryText:RGB(98,101,108));
