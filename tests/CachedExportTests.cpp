@@ -665,6 +665,104 @@ void StageExportCarriesSourceStreamsTest(const std::filesystem::path& helpers)
     CHECK_EQ(uint32_t{0}, SummarizeMediaStreams(helpers, silent, {}).audioStreams);
 }
 
+// W4-chap. A ranged export - either exporter - must put everything on the
+// render's timeline: a chapter at source 3.0 s of a range starting at 1.0 s
+// begins at exactly 2.0 s, the tone that starts at source 1.5 s is heard at
+// 0.5 s, and a cue that began before the range but is still showing inside
+// it is kept, from 0 and shortened by what the range cut off. Both used to be
+// wrong: every cut stream was rebased again by the cut's own start time (its
+// first AAC packet's, 24 ms at 48 kHz), and the output -ss 0 that removed the
+// pre-roll removed that cue with it.
+void RangedExportKeepsTheRenderTimelineTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    const auto log = fixture.path / L"tool.log";
+    const auto subtitle = fixture.path / L"captions.srt";
+    const auto metadata = fixture.path / L"chapters.txt";
+    Write(subtitle, "1\n00:00:00,200 --> 00:00:00,400\nGone\n\n2\n00:00:00,500 --> 00:00:01,500\nStraddle\n\n"
+                    "3\n00:00:02,000 --> 00:00:03,500\nInside\n");
+    Write(metadata, ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=3000\ntitle=Opening\n"
+                    "[CHAPTER]\nTIMEBASE=1/1000\nSTART=3000\nEND=6000\ntitle=Second\n");
+    const auto source = fixture.path / L"source.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n",
+        L"-f", L"lavfi", L"-i", L"testsrc2=s=64x48:r=30:d=6",
+        L"-f", L"lavfi", L"-i", L"aevalsrc=0.5*sin(440*2*PI*t)*gte(t\\,1.5):s=48000:d=6",
+        L"-i", subtitle.wstring(), L"-f", L"ffmetadata", L"-i", metadata.wstring(),
+        L"-map", L"0:v", L"-map", L"1:a", L"-map", L"2:s", L"-map_metadata", L"3", L"-map_chapters", L"3",
+        L"-c:v", L"libx264", L"-g", L"300", L"-pix_fmt", L"yuv420p", L"-c:a", L"aac", L"-c:s", L"srt",
+        source.wstring()}, log));
+    // The render of [1 s, 4 s), shaped as NVENC writes it.
+    const auto render = fixture.path / L"render.mkv";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc2=s=64x48:r=30:d=3", L"-c:v", L"libx264", L"-bf", L"3", L"-g", L"600",
+        L"-pix_fmt", L"yuv420p", render.wstring()}, log));
+    if (!std::filesystem::exists(source) || !std::filesystem::exists(render)) return;
+
+    const auto lines = [](const std::string& text) {
+        std::vector<std::string> out;
+        size_t begin = 0;
+        while (begin < text.size()) {
+            size_t end = text.find('\n', begin);
+            if (end == std::string::npos) end = text.size();
+            std::string line = text.substr(begin, end - begin);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) out.push_back(line);
+            begin = end + 1;
+        }
+        return out;
+    };
+    const auto check = [&](const std::filesystem::path& output) {
+        std::wcerr << L"  " << output.filename().wstring() << L'\n';
+        const auto chapters = lines(Probe(helpers, output, log, {L"-show_entries", L"chapter=start_time",
+            L"-of", L"csv=p=0"}));
+        CHECK_EQ(size_t{2}, chapters.size());
+        if (chapters.size() == 2) {
+            CHECK_EQ(std::string("0.000000"), chapters[0]);
+            CHECK_EQ(std::string("2.000000"), chapters[1]);
+        }
+        const auto cues = lines(Probe(helpers, output, log, {L"-select_streams", L"s:0",
+            L"-show_entries", L"packet=pts_time,duration_time", L"-of", L"csv=p=0"}));
+        CHECK(std::find(cues.begin(), cues.end(), "0.000000,0.500000") != cues.end());
+        CHECK(std::find(cues.begin(), cues.end(), "1.000000,1.500000") != cues.end());
+        // MP4 timed text fills the gaps between cues with empty samples, so
+        // only Matroska can say that nothing else was kept.
+        if (output.extension() == L".mkv") CHECK_EQ(size_t{2}, cues.size());
+        const auto pcm = fixture.path / L"onset.pcm";
+        // Decoded on the file's own timeline and padded back to zero: FFmpeg
+        // would otherwise rebase the audio to its first sample, which is the
+        // very shift this measures.
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-copyts", L"-i", output.wstring(), L"-map", L"0:a:0",
+            L"-af", L"aresample=async=1:first_pts=0",
+            L"-ac", L"1", L"-ar", L"48000", L"-f", L"s16le", pcm.wstring()}, log));
+        const auto samples = Read(pcm);
+        std::filesystem::remove(pcm);
+        size_t onset = samples.size() / 2;
+        for (size_t i = 0; i + 1 < samples.size(); i += 2) {
+            const int16_t value = static_cast<int16_t>(static_cast<uint8_t>(samples[i]) | (static_cast<uint8_t>(samples[i + 1]) << 8));
+            if (std::abs(int{value}) > 8000) { onset = i / 2; break; }
+        }
+        // 0.5 s, within a few ms of codec smear; the rebase put it at 0.476.
+        CHECK(onset > 48000 * 495 / 1000 && onset < 48000 * 505 / 1000);
+        if (!(onset > 48000 * 495 / 1000 && onset < 48000 * 505 / 1000))
+            std::cerr << "tone onset at sample " << onset << " (" << double(onset) / 48000.0 << " s)\n";
+    };
+    for (const auto* name : {L"stage.mkv", L"stage.mp4"}) {
+        const auto output = fixture.path / name;
+        const auto result = MuxStageExport(helpers, {render, source, output, 1.0, 3.0}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (result.ok) check(output);
+    }
+    for (const auto* name : {L"saved.mkv", L"saved.mp4"}) {
+        const auto output = fixture.path / name;
+        const auto result = CachedVideoExporter(helpers).Run({render, source, output, 1.0, 3.0}, {});
+        if (!result.ok) std::wcerr << result.detail << '\n';
+        CHECK(result.ok);
+        if (result.ok) check(output);
+    }
+}
+
 // The argument list for the stage export's last step, without FFmpeg: each
 // source stream is mapped by its own index, and codec options address output
 // indices, which shift whenever a stream is left out.
@@ -716,24 +814,66 @@ void StageExportArgumentTests()
     CHECK_EQ(rangedMux.size(), IndexOf(rangedMux, L"-ss"));
     CHECK_EQ(rangedMux.size(), IndexOf(rangedMux, L"-t"));
     const auto trim = BuildStageExportTrimArguments(rangedRequest, staging, streams);
-    CHECK_EQ(std::ptrdiff_t{1}, std::count(trim.begin(), trim.end(), L"-i"));
-    CHECK_EQ(source.wstring(), at(trim, L"-i"));
-    CHECK(IndexOf(trim, L"-ss") < IndexOf(trim, L"-i"));
+    // Two inputs of the source: seeked to the range for everything but the
+    // cues, and read from the top, moved back by the range start, for the
+    // cues - a cue that began before the seek's keyframe is not demuxed from
+    // the seeked one at all.
+    CHECK_EQ(std::ptrdiff_t{2}, std::count(trim.begin(), trim.end(), L"-i"));
+    const size_t seeked = IndexOf(trim, L"-i"), unseeked = IndexOf(trim, L"-i", seeked + 1);
+    CHECK_EQ(source.wstring(), trim[seeked + 1]);
+    CHECK(unseeked < trim.size() && source.wstring() == trim[unseeked + 1]);
+    CHECK(IndexOf(trim, L"-ss") < seeked);
     CHECK_EQ(std::wstring(L"12.5"), at(trim, L"-ss"));
-    CHECK_EQ(std::wstring(L"0"), trim[IndexOf(trim, L"-ss", IndexOf(trim, L"-i")) + 1]);
+    CHECK(seeked < IndexOf(trim, L"-itsoffset") && IndexOf(trim, L"-itsoffset") < unseeked);
+    CHECK_EQ(std::wstring(L"-12.5"), at(trim, L"-itsoffset"));
+    // No output -ss: it dropped every cue already showing at the range start.
+    // The pre-roll goes per stream instead.
+    CHECK_EQ(trim.size(), IndexOf(trim, L"-ss", seeked));
     CHECK_EQ(std::wstring(L"3.25"), at(trim, L"-t"));
-    // No video; everything Matroska holds, in source order, output indices from 0.
+    // No video; everything Matroska holds, in source order, output indices
+    // from 0; cues from the second input, the rest from the first.
     CHECK_EQ(trim.size(), IndexOf(trim, L"0:0"));
-    for (const auto* kept : {L"0:1", L"0:2", L"0:3", L"0:4", L"0:5"}) CHECK(IndexOf(trim, kept) < trim.size());
-    CHECK_EQ(trim.size(), IndexOf(trim, L"0:6"));
+    for (const auto* kept : {L"0:1", L"1:2", L"0:3", L"1:4", L"0:5"}) CHECK(IndexOf(trim, kept) < trim.size());
+    for (const auto* left : {L"0:2", L"0:4", L"0:6", L"1:6"}) CHECK_EQ(trim.size(), IndexOf(trim, left));
     CHECK_EQ(std::wstring(L"copy"), at(trim, L"-c:0"));
     CHECK_EQ(trim.size(), IndexOf(trim, L"-c:5"));
+    const std::wstring audioPreroll = L"noise=drop=lt(pts\\,0)";
+    const std::wstring cuePreroll = L"noise=drop=lt(pts\\,0)*lte(pts+duration\\,0),"
+                                    L"setts=pts=max(PTS\\,0):dts=max(DTS\\,0):duration=DURATION+min(PTS\\,0)";
+    CHECK_EQ(audioPreroll, at(trim, L"-bsf:0"));
+    CHECK_EQ(cuePreroll, at(trim, L"-bsf:1"));
+    CHECK_EQ(audioPreroll, at(trim, L"-bsf:2"));
+    CHECK_EQ(cuePreroll, at(trim, L"-bsf:3"));
+    CHECK_EQ(trim.size(), IndexOf(trim, L"-bsf:4"));   // the attachment has no packets
+    CHECK_EQ(std::wstring(L"0"), at(trim, L"-map_chapters"));
     CHECK_EQ(std::wstring(L"matroska"), at(trim, L"-f"));
     CHECK_EQ(staging.wstring(), trim.back());
+    // A range from the very start, or a source with no cues, reads the source once.
+    const auto head = BuildStageExportTrimArguments({video, source, L"C:/out/clip.mp4", 0.0, 3.25}, staging, streams);
+    CHECK_EQ(std::ptrdiff_t{1}, std::count(head.begin(), head.end(), L"-i"));
+    CHECK_EQ(head.size(), IndexOf(head, L"-ss"));
+    CHECK_EQ(head.size(), IndexOf(head, L"-itsoffset"));
+    const auto quiet = BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}, {1, "audio", "aac"}});
+    CHECK_EQ(std::ptrdiff_t{1}, std::count(quiet.begin(), quiet.end(), L"-i"));
+    CHECK_EQ(quiet.size(), IndexOf(quiet, L"-itsoffset"));
     // Timed text is converted on the way in, and a source with nothing to cut
     // needs no step at all.
     const auto timedTrim = BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}, {1, "subtitle", "mov_text"}});
     CHECK_EQ(std::wstring(L"srt"), at(timedTrim, L"-c:0"));
+    CHECK(IndexOf(timedTrim, L"1:1") < timedTrim.size());
+    // A cut keeps its own timeline in the mux.
+    StageExportMuxRequest cut{video, staging, L"C:/out/clip.mkv"};
+    cut.streamSourceStartSeconds = 0.024;
+    const auto cutMux = BuildStageExportMuxArguments(cut, L"C:/out/.mux.tmp", "hevc", streams);
+    CHECK_EQ(std::wstring(L"0.024"), at(cutMux, L"-itsoffset"));
+    CHECK(IndexOf(cutMux, L"-itsoffset") < IndexOf(cutMux, staging.wstring()));
+    CHECK(IndexOf(cutMux, L"-i") < IndexOf(cutMux, L"-itsoffset"));
+    CHECK_EQ(mkv.size(), IndexOf(mkv, L"-itsoffset"));
+    CachedExportRequest saved{video, staging, L"C:/out/clip.mp4"};
+    saved.sourceStartSeconds = 0.024;
+    const auto savedMux = BuildCachedExportArguments(saved, L"C:/out/.mux.tmp", false);
+    CHECK_EQ(std::wstring(L"0.024"), at(savedMux, L"-itsoffset"));
+    CHECK(IndexOf(savedMux, L"-itsoffset") < IndexOf(savedMux, staging.wstring()));
     CHECK(BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}}).empty());
 }
 
@@ -1499,6 +1639,7 @@ int wmain(int argc, wchar_t** argv)
     ExportTests(helpers);
     StageExportContainerTests(helpers);
     StageExportCarriesSourceStreamsTest(helpers);
+    RangedExportKeepsTheRenderTimelineTest(helpers);
     RangeExportTests(helpers);
     PhotoAndAnimationTests(helpers);
     JoinedFrameCountMatchesDecodedCountTest(helpers);

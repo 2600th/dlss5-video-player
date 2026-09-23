@@ -667,6 +667,9 @@ std::vector<std::wstring> BuildCachedExportArguments(const CachedExportRequest& 
         // output -ss 0 this used to trim with applied to the neural video as
         // well, and a stream-copied render with B-frames lost every frame to
         // it (BuildStageExportMuxArguments has the mechanism).
+        // A cut keeps its own timeline (CachedExportRequest::sourceStartSeconds).
+        if (request.sourceStartSeconds > 0.0)
+            arguments.insert(arguments.end(), {L"-itsoffset", FrameRateText(request.sourceStartSeconds)});
         arguments.insert(arguments.end(), {L"-i", request.sourceMedia.wstring(),
             L"-map", L"0:v:0", L"-map", L"1:a?", L"-map", L"1:s?",
             L"-map_metadata", L"1", L"-map_chapters", L"1"});
@@ -783,6 +786,29 @@ MaterializeResult MediaMaterializer::Run(const MaterializeRequest& request, std:
 
 namespace {
 
+// Where a file's own timeline begins: the start time FFmpeg rebases the file
+// by when it is an input, read off the file rather than assumed. 0 for a file
+// with no timed packets ("N/A"); nothing when it could not be read.
+std::optional<double> MediaStartSeconds(const std::filesystem::path& helperDirectory,
+                                        const std::filesystem::path& media, std::stop_token stop)
+{
+    const auto ffprobe = FindHelper(helperDirectory, L"ffprobe.exe");
+    if (ffprobe.empty()) return std::nullopt;
+    // A header read.
+    const CaptureResult capture = RunCapture(ffprobe,
+        {L"-v", L"error", L"-show_entries", L"format=start_time",
+         L"-of", L"default=noprint_wrappers=1:nokey=1", L"-i", media.wstring()},
+        stop, std::chrono::minutes{1}, 4 * 1024);
+    if (!capture.started || capture.cancelled || capture.timedOut || capture.exitCode != 0) return std::nullopt;
+    std::string_view text = capture.output;
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == ' ')) text.remove_suffix(1);
+    if (text == "N/A") return 0.0;
+    double seconds = 0.0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), seconds);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || !std::isfinite(seconds)) return std::nullopt;
+    return seconds;
+}
+
 // The first step of every ranged export - "Save converted video" and "Export
 // with DLSS stages" alike: the source's audio, subtitles, attachments and
 // chapters cut to the range on their own into `trimmed`, a Matroska staging
@@ -791,16 +817,20 @@ namespace {
 // trims (BuildStageExportTrimArguments says why). `streams` is what the
 // source was listed to carry; on success it and `streamSource` describe what
 // the last step is to read instead - the cut, or the rendered video itself
-// when the source carries nothing to cut.
+// when the source carries nothing to cut - and `streamSourceStart` where the
+// cut's own timeline begins, which the last step must keep rather than
+// rebase (StageExportMuxRequest::streamSourceStartSeconds).
 MaterializeResult CutSourceStreamsToRange(const std::filesystem::path& helperDirectory,
                                           const std::filesystem::path& ffmpeg,
                                           const StageExportMuxRequest& request,
                                           double videoSeconds,
                                           ExportStagingFile& trimmed,
                                           std::filesystem::path& streamSource,
+                                          double& streamSourceStart,
                                           std::vector<MediaStreamInfo>& streams,
                                           std::stop_token stop)
 {
+    streamSourceStart = 0.0;
     const auto cancelled = [] { return MaterializeResult{false, MaterializeError::Cancelled, L"The export was cancelled."}; };
     const auto nothingToCut = [&] {
         // Nothing beside the video to carry; the video's own (empty) metadata
@@ -828,7 +858,14 @@ MaterializeResult CutSourceStreamsToRange(const std::filesystem::path& helperDir
     if (stop.stop_requested()) return cancelled();
     if (!trimmedStreams)
         return {false, MaterializeError::ProcessFailed, L"The streams to carry into the export could not be listed."};
+    // The cut starts where its first packet landed after the seek - an audio
+    // packet boundary, 24 ms in on 48 kHz AAC - and not at zero.
+    const auto start = MediaStartSeconds(helperDirectory, trimmed.path, stop);
+    if (stop.stop_requested()) return cancelled();
+    if (!start || *start < 0.0)
+        return {false, MaterializeError::ProcessFailed, L"The cut of the source's audio and subtitles could not be inspected."};
     streamSource = trimmed.path;
+    streamSourceStart = *start;
     streams = *trimmedStreams;
     return {true, MaterializeError::None, {}};
 }
@@ -899,12 +936,14 @@ MaterializeResult CachedVideoExporter::Run(const CachedExportRequest& request, s
         if (!streams)
             return {false, MaterializeError::ProcessFailed, L"The original source's streams could not be listed."};
         std::filesystem::path streamSource;
+        double streamSourceStart = 0.0;
         const MaterializeResult cut = CutSourceStreamsToRange(helperDirectory_, ffmpeg,
             {neuralVideo, sourceMedia, output, request.rangeStartSeconds, request.rangeDurationSeconds},
-            double(neuralMetadata.duration100ns) / 10000000.0, trimmed, streamSource, *streams, stop);
+            double(neuralMetadata.duration100ns) / 10000000.0, trimmed, streamSource, streamSourceStart, *streams, stop);
         if (cut.error == MaterializeError::Cancelled) return cancelled();
         if (!cut.ok) return cut;
         resolved.sourceMedia = streamSource;
+        resolved.sourceStartSeconds = streamSourceStart;
         resolved.rangeStartSeconds = resolved.rangeDurationSeconds = 0.0;
     }
     const auto arguments = BuildCachedExportArguments(resolved, staging.path, oddDimensions);
@@ -1439,6 +1478,9 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
     // so the cut discards it and then every frame up to the next keyframe - on
     // an NVENC carrier with one keyframe per job, the whole video. A ranged
     // export came out with audio and no picture.
+    // A cut keeps its own timeline (StageExportMuxRequest::streamSourceStartSeconds).
+    if (request.streamSourceStartSeconds > 0.0)
+        arguments.insert(arguments.end(), {L"-itsoffset", FrameRateText(request.streamSourceStartSeconds)});
     arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring(), L"-map", L"0:v:0"});
     // Codec options address OUTPUT stream indices, which are known only once
     // each source stream has been kept or left out; the video is output 0.
@@ -1475,28 +1517,60 @@ std::vector<std::wstring> BuildStageExportTrimArguments(const StageExportMuxRequ
                                                         const std::filesystem::path& staging,
                                                         const std::vector<MediaStreamInfo>& sourceStreams)
 {
-    // The trim CachedExportRequest documents - an input seek, then an output
-    // -ss 0 that discards the pre-roll a stream copy keeps as negative
-    // timestamps - applied to the source's own streams and nothing else, so
-    // no video is ever cut by it. Matroska holds what the source carries;
-    // MP4 timed text becomes SubRip, which the last step can still turn back.
+    // An input seek to the range start, which rebases the source exactly as
+    // the decoder's own seek rebased the frames the render began with, so
+    // chapters and packets land on the render's timeline. What the seek
+    // leaves before zero - the pre-roll a stream copy keeps as negative
+    // timestamps - is removed per stream by bitstream filters, not by an
+    // output -ss 0: that option dropped every subtitle already showing when
+    // the range began, since a cue's start is its only timestamp. Matroska
+    // holds what the source carries; MP4 timed text becomes SubRip, which the
+    // last step can still turn back.
+    const bool seek = request.rangeStartSeconds > 0.0;
+    const std::wstring start = FrameRateText(request.rangeStartSeconds);
     std::vector<std::wstring> arguments{
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y"};
-    if (request.rangeStartSeconds > 0.0)
-        arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+    if (seek) arguments.insert(arguments.end(), {L"-ss", start});
     arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring()});
+    // Subtitles are read from a second, unseeked copy of the source moved
+    // back by the range start (-itsoffset), which is the same timeline: the
+    // seek lands on the video keyframe at or before the range start, and a cue
+    // that began before that keyframe is never demuxed from the seeked input
+    // at all. This one is read from the top, which costs a demux of the file
+    // up to the range; the cues are the only thing kept from it.
+    const bool subtitlesUnseeked = seek && std::any_of(sourceStreams.begin(), sourceStreams.end(),
+        [](const MediaStreamInfo& stream) {
+            return stream.type == "subtitle" &&
+                   ExportStreamActionFor(ExportContainer::Matroska, stream.type, stream.codec) != ExportStreamAction::Drop;
+        });
+    if (subtitlesUnseeked)
+        arguments.insert(arguments.end(), {L"-itsoffset", L"-" + start, L"-i", request.streamSource.wstring()});
     std::vector<std::wstring> codecs;
     uint32_t outputIndex = 0;
     for (const MediaStreamInfo& stream : sourceStreams) {
         const ExportStreamAction action = ExportStreamActionFor(ExportContainer::Matroska, stream.type, stream.codec);
         if (action == ExportStreamAction::Drop) continue;
-        arguments.insert(arguments.end(), {L"-map", L"0:" + std::to_wstring(stream.index)});
-        codecs.insert(codecs.end(), {L"-c:" + std::to_wstring(outputIndex++),
-                                     action == ExportStreamAction::ToSubrip ? L"srt" : L"copy"});
+        const bool subtitle = stream.type == "subtitle";
+        arguments.insert(arguments.end(), {L"-map",
+            std::wstring(subtitle && subtitlesUnseeked ? L"1:" : L"0:") + std::to_wstring(stream.index)});
+        const std::wstring specifier = std::to_wstring(outputIndex++);
+        codecs.insert(codecs.end(), {L"-c:" + specifier, action == ExportStreamAction::ToSubrip ? L"srt" : L"copy"});
+        // The pre-roll: audio before zero is dropped, as -ss 0 dropped it. A
+        // cue before zero is dropped only if it has also ended by then;
+        // otherwise it starts at zero, shortened by what the range cut off. A
+        // bitmap cue carries no duration, so it is dropped as before - its
+        // clear is a packet of its own.
+        if (subtitle)
+            codecs.insert(codecs.end(), {L"-bsf:" + specifier,
+                L"noise=drop=lt(pts\\,0)*lte(pts+duration\\,0),"
+                L"setts=pts=max(PTS\\,0):dts=max(DTS\\,0):duration=DURATION+min(PTS\\,0)"});
+        else if (stream.type == "audio")
+            codecs.insert(codecs.end(), {L"-bsf:" + specifier, L"noise=drop=lt(pts\\,0)"});
     }
     if (!outputIndex) return {};
+    // Chapters and metadata from the seeked input: its rebase is the range
+    // start, so a chapter moves by exactly that.
     arguments.insert(arguments.end(), {L"-map_metadata", L"0", L"-map_chapters", L"0"});
-    if (request.rangeStartSeconds > 0.0) arguments.insert(arguments.end(), {L"-ss", L"0"});
     if (request.rangeDurationSeconds > 0.0)
         arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
     arguments.insert(arguments.end(), codecs.begin(), codecs.end());
@@ -1559,11 +1633,13 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
     ExportStagingFile trimmed;
     if (request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0) {
         std::filesystem::path streamSource;
+        double streamSourceStart = 0.0;
         const MaterializeResult cut = CutSourceStreamsToRange(helperDirectory, ffmpeg, resolved,
-            double(videoMetadata.duration100ns) / 10000000.0, trimmed, streamSource, sourceStreams, stop);
+            double(videoMetadata.duration100ns) / 10000000.0, trimmed, streamSource, streamSourceStart, sourceStreams, stop);
         if (cut.error == MaterializeError::Cancelled) return cancelled();
         if (!cut.ok) return cut;
         resolved.streamSource = streamSource;
+        resolved.streamSourceStartSeconds = streamSourceStart;
     }
 
     ExportStagingFile staging;

@@ -726,7 +726,9 @@ keep the video exactly as the passes encoded it - only the container changes -
 and an MP4 of HEVC is tagged `hvc1`, which Apple's players need.
 
 Whatever the stages, the file carries the source's audio, subtitles and
-chapters (only the part a range covers). MKV copies them as they are, turning
+chapters (only the part a range covers, on the range's own clock: a subtitle
+already showing when the range starts is kept for the rest of its time, and
+"Save converted video" cuts a range the same way). MKV copies them as they are, turning
 MP4 timed text into SubRip. MP4 copies the audio it can hold and encodes the
 rest to AAC, turns text subtitles into MP4 timed text, and leaves out picture
 subtitles and font attachments, which it has no place for. An export whose

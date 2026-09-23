@@ -56,6 +56,10 @@ struct CachedExportRequest {
     // duration 0 runs to its end.
     double rangeStartSeconds{};
     double rangeDurationSeconds{};
+    // Where sourceMedia's own timeline begins when it is such a cut, which
+    // the encode keeps instead of rebasing it to zero (see
+    // StageExportMuxRequest::streamSourceStartSeconds). 0 for a source.
+    double sourceStartSeconds{};
 };
 
 // Capacity requested for a child process's stdin pipe. Large enough that the encoder
@@ -303,6 +307,14 @@ struct StageExportMuxRequest {
     // a range of `streamSource`: 0 and 0 keep the whole source.
     double rangeStartSeconds{};
     double rangeDurationSeconds{};
+    // Where `streamSource`'s own timeline begins when it is a range already
+    // cut to the rendered video: the start time FFmpeg reads off the cut,
+    // which is where its first audio packet landed, not 0. The mux keeps
+    // those timestamps (-itsoffset) instead of rebasing the input to zero,
+    // which FFmpeg does by default and which moved a ranged export's
+    // chapters, audio and subtitles early by that much - 24 ms with 48 kHz
+    // AAC. 0 for a source that is not a cut.
+    double streamSourceStartSeconds{};
 };
 
 // The FFmpeg arguments for MuxStageExport, from what the two inputs were
@@ -319,6 +331,9 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
 // which the mux above then reads in place of the source. Empty when the
 // source carries nothing to cut. The video is never in it: an output -ss on a
 // stream-copied video with B-frames drops every frame up to its next keyframe.
+// A subtitle that starts before the range and is still showing inside it is
+// kept, starting at 0 and shortened by what the range cut off; one that ended
+// before the range is dropped. Chapters are shifted by exactly the range start.
 std::vector<std::wstring> BuildStageExportTrimArguments(const StageExportMuxRequest& request,
                                                         const std::filesystem::path& staging,
                                                         const std::vector<MediaStreamInfo>& sourceStreams);
