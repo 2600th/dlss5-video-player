@@ -632,12 +632,15 @@ void CollectMenuShortcuts(HMENU menu, const std::wstring& group, std::vector<Sho
     for (int index = 0; index < count; ++index) {
         wchar_t text[256]{};
         MENUITEMINFOW item{sizeof(item)};
-        item.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING;
+        item.fMask = MIIM_FTYPE | MIIM_SUBMENU | MIIM_STRING | MIIM_ID;
         item.dwTypeData = text;
         item.cch = static_cast<UINT>(std::size(text));
         if (!GetMenuItemInfoW(menu, static_cast<UINT>(index), TRUE, &item)) continue;
         if (item.fType & MFT_SEPARATOR) continue;
         if (item.hSubMenu) { CollectMenuShortcuts(item.hSubMenu, group, rows); continue; }
+        // The processing-scale rungs use the accelerator column for what each one
+        // measured ("14.8 fps"), not for a key, and the sheet listed them as keys.
+        if (item.wID >= IDM_PROCESSING_SCALE_FIRST && item.wID <= IDM_PROCESSING_SCALE_LAST) continue;
         const std::wstring_view label(text);
         const size_t tab = label.find(L'\t');
         if (tab == std::wstring_view::npos) continue;

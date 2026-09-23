@@ -1021,6 +1021,11 @@ void keyboard_cheat_sheet_is_read_from_the_menus_test()
     CHECK(has(L"DLSS", L"Convert marked clip to neural video", L"Ctrl+R"));
     CHECK(has(L"Advanced", L"Recreate NGX / re-hook DLSS 5", L"F6"));
     CHECK(has(L"Help", L"Keyboard shortcuts", L"? / F1"));
+    // A processing-scale rung's measured cost sits in the accelerator column; it
+    // is not a key and is not listed as one.
+    CHECK(std::none_of(rows.begin(), rows.end(), [](const app_menu::ShortcutRow& row) {
+        return row.keys.find(L"fps") != std::wstring::npos;
+    }));
     CHECK(has(localizer.Get(L"shortcuts.group.keyboard"), localizer.Get(L"shortcuts.step"), L"."));
     // Groups come in menu-bar order, each one contiguous, and nothing without
     // a key is listed.
