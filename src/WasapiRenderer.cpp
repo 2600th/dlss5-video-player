@@ -386,15 +386,15 @@ bool WasapiRenderer::WaitForSpace(DWORD timeoutMilliseconds, uint32_t& framesWan
     return true;
 }
 
-bool WasapiRenderer::Write(const void* frames, uint32_t framesToWrite)
+WasapiRenderer::WriteResult WasapiRenderer::Write(const void* frames, uint32_t framesToWrite)
 {
-    if (!framesToWrite) return true;
+    if (!framesToWrite) return WriteResult::Written;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!render_) return false;
+    if (!render_) return WriteResult::Failed;
     // A tail has been queued and the stream is on its way down. Accepting more
     // would put a step back in after the ramp that removed it.
-    if (refusingWrites_) return true;
-    return WriteLocked(frames, framesToWrite, true);
+    if (refusingWrites_) return WriteResult::Refused;
+    return WriteLocked(frames, framesToWrite, true) ? WriteResult::Written : WriteResult::Failed;
 }
 
 // The caller holds mutex_. `fadeIn` is false for the fade-out tail, which is

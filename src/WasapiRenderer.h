@@ -67,9 +67,20 @@ public:
     // DeviceLost.
     bool WaitForSpace(DWORD timeoutMilliseconds, uint32_t& framesWanted);
 
+    enum class WriteResult {
+        Written,
+        // A fade-out tail is queued and the stream is on its way down, so
+        // nothing was taken. The caller keeps the frames for the resume:
+        // this used to report success, and the reader threw away a buffer's
+        // worth of the film whenever a pause landed mid-write.
+        Refused,
+        // The device went away - check DeviceLost.
+        Failed,
+    };
+
     // `frames` must hold framesToWrite * BytesPerFrame bytes in the current
-    // format. False means the device went away.
-    bool Write(const void* frames, uint32_t framesToWrite);
+    // format, and framesToWrite must not exceed what WaitForSpace reported.
+    WriteResult Write(const void* frames, uint32_t framesToWrite);
 
     bool Start();
     bool Stop();

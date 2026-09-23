@@ -337,6 +337,31 @@ int wmain(int argc, wchar_t** argv)
         Check(!quiet.Arrived(), "and reports nothing until something arrives");
     }
 
+    // ---- a write refused by a pause is not reported as written -------------
+    // A pause that lands between the reader's paused check and its write used
+    // to be answered "written", and the reader discarded the chunk: a
+    // buffer's worth of the film gone on every such pause.
+    {
+        WasapiRenderer renderer;
+        const bool opened = renderer.Open();
+        Check(opened, "a bare renderer opens");
+        if (opened) {
+            const auto format = renderer.CurrentFormat();
+            std::vector<std::byte> silence(size_t(format.BytesPerFrame()) * 16);
+            Check(renderer.Start(), "the bare renderer starts");
+            Check(renderer.FadeOutAndStop(), "the bare renderer ramps down");
+            Check(renderer.Write(silence.data(), 16) == WasapiRenderer::WriteResult::Refused,
+                  "a write after the ramp-down is refused, not reported as written");
+            Check(renderer.Start(), "the bare renderer starts again");
+            uint32_t wanted = 0;
+            Check(renderer.WaitForSpace(500, wanted), "the restarted renderer asks for data");
+            if (wanted)
+                Check(renderer.Write(silence.data(), std::min<uint32_t>(wanted, 16)) ==
+                          WasapiRenderer::WriteResult::Written,
+                      "after the resume the same frames are taken");
+        }
+    }
+
     // ---- end of stream -----------------------------------------------------
     // The clock must never run backwards as the queue drains. Resetting the
     // device at EOF would snap the played-sample count to zero and make the

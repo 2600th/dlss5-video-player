@@ -411,22 +411,33 @@ void AudioPlayer::ThreadMain(const std::shared_ptr<ReaderState>& state) {
             continue;
         }
 
-        const uint32_t wholeFrames = static_cast<uint32_t>(chunk.size() / bytesPerFrame);
-        const size_t wholeBytes = size_t(wholeFrames) * bytesPerFrame;
+        // Never more than the endpoint asked for: frames kept back from a
+        // refused write can outnumber the space the next wait reports.
+        const uint32_t wholeFrames = std::min(static_cast<uint32_t>(chunk.size() / bytesPerFrame), framesWanted);
+        size_t consumedBytes = 0;
         if (wholeFrames) {
-            if (!renderer->Write(chunk.data(), wholeFrames)) {
+            const auto written = renderer->Write(chunk.data(), wholeFrames);
+            if (written == WasapiRenderer::WriteResult::Failed) {
                 if (renderer->DeviceLost()) { state->deviceLost = true; break; }
                 LOG("Audio: writing to the endpoint failed; there will be no sound from here.");
                 break;
             }
-            if (!state->paused) ++state->submittedBuffers;
+            // Refused: a pause landed between the paused check above and the
+            // write. The frames are kept for the resume rather than dropped.
+            if (written == WasapiRenderer::WriteResult::Written) {
+                consumedBytes = size_t(wholeFrames) * bytesPerFrame;
+                if (!state->paused) ++state->submittedBuffers;
+            }
         }
-        // The tail of a partial frame waits for the rest rather than being
-        // rendered as a fraction of a sample.
-        pending.assign(chunk.begin() + static_cast<ptrdiff_t>(wholeBytes), chunk.end());
+        // What was not taken - the tail of a partial frame, or frames the
+        // endpoint refused or had no room for - waits for the next round
+        // rather than being rendered as a fraction of a sample or lost.
+        pending.assign(chunk.begin() + static_cast<ptrdiff_t>(consumedBytes), chunk.end());
 
-        if (ended && pending.empty() && !wholeFrames) break;
-        if (!wholeFrames) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        // Nothing whole left to write after the end. A trailing partial frame
+        // can never be completed, so it must not keep the loop alive.
+        if (ended && pending.size() < bytesPerFrame) break;
+        if (!consumedBytes) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     // On natural EOF the queued frames are left to play out rather than reset.
