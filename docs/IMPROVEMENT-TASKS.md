@@ -60,7 +60,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
-| [P1.4](#p14) | Audio clock and endpoint edge cases | S | Player | 🔍 |
 | [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
 | [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
@@ -288,33 +287,6 @@ downscale). Keep a 1:1 pixel mode for P2.16.
 
 **Impact** — Player: headroom at 119.88 fps and 4K, and less VRAM and host
 memory. The pixels do not change.
-
----
-
-<a id="p14"></a>
-### P1.4 · Audio clock and endpoint edge cases
-
-`S` · **Player** · 🔍
-
-- **The clock jumps back after an underrun** — `main.cpp:4475`,
-  `AudioClockPolicy.h:41-45`. A stall over 0.5 s falls back to wall time, and
-  when audio resumes the clock snaps back to the audio position. After a 1 s
-  YouTube underrun, video runs ahead, then holds for a second. Anchor the
-  fallback at the last audio position and slew back instead of jumping.
-- **Frame-stepping restarts audio on every step** — `main.cpp:4616-4619` calls
-  `Stop()` then `Start()`, which spawns ffmpeg and reopens the endpoint each
-  step. Mark audio dirty and restart it once in `SetPaused(false)`.
-- **Audio never comes back after the last device disappears** —
-  `AudioPlayer.cpp:207`, `:513`. With `m_reader` null, `ServiceDeviceChanges`
-  returns early and nothing watches for a new device. Keep an enumerator
-  watching while there is no reader.
-- **A pause racing a write drops samples** — `WasapiRenderer.cpp:367` returns
-  true without writing, and `AudioPlayer.cpp:411-420` discards the chunk.
-  Return "not written" so the reader keeps it.
-- **WASAPI objects are created on a thread without COM** —
-  `PrepareYouTubeMedia` calls `audio->Start` on a worker (`main.cpp:6781`),
-  which reaches `CoCreateInstance` (`WasapiRenderer.cpp:187`). Call
-  `CoInitializeEx(COINIT_MULTITHREADED)` on that thread.
 
 ---
 

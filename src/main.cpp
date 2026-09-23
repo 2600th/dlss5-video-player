@@ -6807,6 +6807,13 @@ private:
         else if(!noticeShown){std::wstring detail=completion->result.detail.empty()?L"Neural pre-render failed before playback could start.":completion->result.detail;if(const wchar_t* kind=NeuralFailureTextKey(completion->result.failure))detail=T(kind)+L"\n\n"+detail;MessageBoxW(m_hwnd,detail.c_str(),T(L"app.title").c_str(),MB_OK|MB_ICONERROR);InvalidateRect(m_hwnd,nullptr,FALSE);}
         else InvalidateRect(m_hwnd,nullptr,FALSE);
     }
+    // PrepareYouTubeMedia starts the network audio on the resolution worker,
+    // and WASAPI is COM: CoCreateInstance on a thread that never joined an
+    // apartment works only while some other thread happens to hold the
+    // process's MTA open. Joining it explicitly stops that depending on luck.
+    // Declared first in each worker, so it outlives the completion - and the
+    // audio inside it - when that is destroyed on the worker undelivered.
+    struct WorkerComApartment{HRESULT result=CoInitializeEx(nullptr,COINIT_MULTITHREADED);WorkerComApartment()=default;WorkerComApartment(const WorkerComApartment&)=delete;WorkerComApartment& operator=(const WorkerComApartment&)=delete;~WorkerComApartment(){if(SUCCEEDED(result))CoUninitialize();}};
     static void PrepareYouTubeMedia(YouTubeCompletion& completion,std::stop_token stop,[[maybe_unused]] uint32_t maxW,[[maybe_unused]] uint32_t maxH,[[maybe_unused]] bool qualityExplicit,[[maybe_unused]] NVSDK_NGX_PerfQuality_Value explicitQuality){
         if(!completion.result.ok||stop.stop_requested())return;
         completion.decoder=std::make_unique<VideoDecoder>();
@@ -6865,6 +6872,7 @@ private:
             const uint32_t maxW=m_opt.maxW,maxH=m_opt.maxH;const bool qualityExplicit=m_opt.qualityExplicit;const auto explicitQuality=m_opt.quality;
             CompletionRegistry<YouTubeCompletion>* completions=&m_youtubeCompletions;
             m_youtubeWorker=std::jthread([target,resolver,completions,generation,url,title,sourceQuality,seekSeconds,resumeAfter,commitKind,maxW,maxH,qualityExplicit,explicitQuality](std::stop_token stop){
+                const WorkerComApartment com;
                 auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->displayTitle=title;completion->pageUrl=url;completion->sourceQuality=sourceQuality;completion->seekSeconds=seekSeconds;completion->resumeAfterSeek=resumeAfter;completion->commitKind=commitKind;
                 completion->requestedQualityExplicit=qualityExplicit;completion->requestedQuality=explicitQuality;
                 completion->result=resolver->Resolve(url,sourceQuality,stop);
@@ -6884,6 +6892,7 @@ private:
         try{
             HWND target=m_hwnd;CompletionRegistry<YouTubeCompletion>* completions=&m_youtubeCompletions;
             m_youtubeWorker=std::jthread([target,completions,generation,source,audioSource,pageUrl,title,sourceQuality,seconds,resumeAfter,commitKind,maxW,maxH,qualityExplicit,explicitQuality,activeConfiguration](std::stop_token stop){
+                const WorkerComApartment com;
                 auto completion=std::make_unique<YouTubeCompletion>();completion->generation=generation;completion->displayTitle=title;completion->pageUrl=pageUrl;completion->sourceQuality=sourceQuality;completion->commitKind=commitKind;completion->requestedQualityExplicit=qualityExplicit;completion->requestedQuality=explicitQuality;completion->resumeAfterSeek=resumeAfter;completion->seekSeconds=seconds;completion->result.ok=true;completion->result.error=ResolveError::None;completion->result.mediaUrl=source;completion->result.audioUrl=audioSource;
                 PrepareYouTubeMedia(*completion,stop,maxW,maxH,qualityExplicit,explicitQuality);
                 if(commitKind==NetworkCommitKind::Seek&&NetworkConfigurationMatchesExceptInput(activeConfiguration,completion->configuration)){completion->configuration.inputWidth=activeConfiguration.inputWidth;completion->configuration.inputHeight=activeConfiguration.inputHeight;}
