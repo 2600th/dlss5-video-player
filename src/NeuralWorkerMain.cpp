@@ -9,6 +9,7 @@
 #include "ReShadeConfig.h"
 #include "ResidentWorkerLoop.h"
 #include "RuntimeLock.h"
+#include "RuntimeModulePolicy.h"
 #include "RuntimePolicy.h"
 
 #include <windows.h>
@@ -208,8 +209,9 @@ std::wstring UnlockedRuntimeModules(const std::filesystem::path& moduleDirectory
     }
     LOG("Neural helper refused: the runtime directory holds modules the runtime lock does not name: "
         << narrow_text::LossyAscii(names));
-    return L"The neural runtime directory holds modules the runtime lock does not name, which the helper "
-           L"would load: " + names + L". Remove them and try again.";
+    // The player refuses the same directory before launching this helper, in
+    // the same words (runtime_modules::UnlockedModulesRefusal).
+    return runtime_modules::UnlockedModulesRefusal(*unlocked);
 }
 
 NeuralRenderResult FailedResult(std::wstring detail, uint64_t jobId)

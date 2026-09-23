@@ -97,6 +97,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "PrecisionSleeper.h"
 #include "RangeSelection.h"
 #include "RuntimeLock.h"
+#include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "ExportPipeline.h"
 #include "UpdateCheck.h"
@@ -6680,10 +6681,28 @@ private:
                     // A driver below the floor cannot create feature 18 at all,
                     // so do not pay five seconds for a probe to learn that.
                     if(!driverNotice.empty()){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=driverNotice;LOG("Neural render refused before the probe: "<<WideToUtf8(driverNotice));goto finish;}
+                    // A stray module beside the helper is refused by the helper at
+                    // startup - after a process start and, on a first run, a
+                    // five-second preflight. It is named here instead, in the
+                    // helper's own words, and never latched: the directory is
+                    // listed again on every attempt, so removing the file is all
+                    // it takes. A directory that cannot be listed is left to the
+                    // helper, which refuses it with its own reason.
+                    if(const auto unlocked=FindUnlockedRuntimeModules(runtimeDirectory,EmbeddedRuntimeLock());unlocked&&!unlocked->empty()){
+                        completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=runtime_modules::UnlockedModulesRefusal(*unlocked);
+                        LOG("Neural render refused before the helper: "<<WideToUtf8(completion->result.detail));
+                        goto finish;
+                    }
                     // The same runtime on the same driver fails the same way:
                     // probe once per configuration, not once per play and seek.
+                    // A failure is remembered against the module listing too: the
+                    // digest hashes only the locked files, so a refusal caused by
+                    // anything else the loader picks up from that directory stood
+                    // until restart even after the user removed the cause.
                     const NeuralPreflightKey runtimeKey{preflightKey.gpu,preflightKey.driver,*runtimeDigest};
-                    if(const std::wstring latched=preflightLatch->LatchedFailureDetail(runtimeKey);!latched.empty()){
+                    const NeuralPreflightKey failureKey{preflightKey.gpu,preflightKey.driver,
+                        *runtimeDigest+"|"+WideToUtf8(runtime_modules::ModuleListingIdentity(runtimeDirectory))};
+                    if(const std::wstring latched=preflightLatch->LatchedFailureDetail(failureKey);!latched.empty()){
                         completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=latched;
                         LOG("Neural preflight skipped; this runtime and driver already failed: "<<WideToUtf8(latched));
                         goto finish;
@@ -6713,7 +6732,7 @@ private:
                         // or was cancelled still cost what it cost.
                         coldStart->Mark(NeuralColdStartPhase::Preflight);
                         if(preflight.cancelled||stop.stop_requested()){completion->result.cancelled=true;completion->result.detail=L"Neural render was cancelled.";goto finish;}
-                        if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(runtimeKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
+                        if(!preflight.ok){completion->result.failure=NeuralRenderFailure::Preflight;completion->result.detail=preflight.detail.empty()?L"The neural runtime preflight failed.":preflight.detail;preflightLatch->RecordFailure(failureKey,completion->result.detail);LOG("Neural preflight failed: cause="<<NeuralPreflightCauseName(preflight.cause)<<" "<<WideToUtf8(completion->result.detail)<<(preflight.json.empty()?"":" receipt=")<<preflight.json);goto finish;}
                         preflightLatch->RecordSuccess(runtimeKey,preflight.json);
                         StoreNeuralPreflightReceipt(cacheRoot,runtimeKey,preflight.json);
                         preflightJson=preflight.json;

@@ -4,6 +4,7 @@
 #include "NeuralPreflight.h"
 #include "NeuralReceipt.h"
 #include "RuntimeLock.h"
+#include "RuntimeModulePolicy.h"
 
 #include <windows.h>
 
@@ -286,6 +287,52 @@ void unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test()
     CHECK(Contains(BuildPreflightFailureJson(L"holds modules the runtime lock does not name: Stray.DLL"),
                    "\"ok\":false,\"diagnosis\":{\"cause\":\"probeFailed\",\"detail\":\"holds modules the "
                    "runtime lock does not name: Stray.DLL\"}"));
+    std::filesystem::remove_all(directory);
+}
+
+// F3: the player names a stray module itself, in the helper's words, before it
+// launches the helper; and a refused preflight is remembered against the
+// module listing, so removing the stray file ends the refusal without a
+// restart. The listing must not move with the files every job rewrites.
+void player_names_unlocked_modules_and_the_refusal_key_follows_the_module_listing_test()
+{
+    CHECK(runtime_modules::UnlockedModulesRefusal({}).empty());
+    CHECK(runtime_modules::UnlockedModulesRefusal({L"Stray.DLL", L"plain.addon"}) ==
+          L"The neural runtime directory holds modules the runtime lock does not name, which the helper "
+          L"would load: Stray.DLL, plain.addon. Remove them and try again.");
+
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / (L"RuntimeModuleListing-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    RuntimeLock lock;
+    lock.schemaVersion = 1;
+    lock.entries = {RuntimeLockEntry{L"dxgi.dll", 1, Hex("x"), L""}};
+    for (const wchar_t* name : {L"dxgi.dll", L"ReShade.ini", L"ReShade.log", L"NeuralWorker.exe"})
+        WriteFile(directory / name, "x");
+    const std::wstring clean = runtime_modules::ModuleListingIdentity(directory);
+    CHECK(!clean.empty());
+    // Every job rewrites the INI and every run the log: neither is a module.
+    WriteFile(directory / L"ReShade.ini", "rewritten for the next job");
+    WriteFile(directory / L"ReShade.log", "a new run");
+    CHECK(clean == runtime_modules::ModuleListingIdentity(directory));
+
+    WriteFile(directory / L"Stray.addon64", "x");
+    const auto unlocked = FindUnlockedRuntimeModules(directory, lock);
+    CHECK(unlocked.has_value());
+    CHECK(runtime_modules::UnlockedModulesRefusal(unlocked.value_or(std::vector<std::wstring>{}))
+              .find(L"would load: Stray.addon64.") != std::wstring::npos);
+    const std::wstring stray = runtime_modules::ModuleListingIdentity(directory);
+    CHECK(stray != clean);
+    // The user removes it: the key is the clean one again, so a refusal
+    // latched while it was there no longer applies.
+    std::filesystem::remove(directory / L"Stray.addon64");
+    CHECK(clean == runtime_modules::ModuleListingIdentity(directory));
+    // A replaced module is a different directory too, locked name or not.
+    WriteFile(directory / L"dxgi.dll", "a different, larger build");
+    CHECK(clean != runtime_modules::ModuleListingIdentity(directory));
+
+    CHECK(runtime_modules::ModuleListingIdentity(directory / L"does-not-exist").empty());
     std::filesystem::remove_all(directory);
 }
 
@@ -691,6 +738,7 @@ int wmain()
     embedded_lock_parses_and_names_the_locked_runtime_files_test();
     verify_reports_each_drift_kind_and_names_only_failing_files_test();
     unlocked_runtime_modules_are_named_and_packaged_files_are_allowed_test();
+    player_names_unlocked_modules_and_the_refusal_key_follows_the_module_listing_test();
     receipt_json_records_failure_lock_status_and_preflight_verbatim_test();
     receipt_log_summary_extracts_runtime_identity_and_lock_state_test();
     receipt_carries_the_cold_start_and_keeps_absent_phases_absent_test();
