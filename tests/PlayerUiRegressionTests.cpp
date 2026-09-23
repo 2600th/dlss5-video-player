@@ -3569,6 +3569,17 @@ struct PlayerAppTestAccess {
         SendMessageW(app.m_hwnd,WM_KEYDOWN,VK_F11,0);
         CHECK(app.m_fullscreen);
         CHECK(GetMenu(app.m_hwnd)==nullptr);
+        // Entering fullscreen samples the REAL cursor (GetCursorPos), and every
+        // pointer move below is measured from that sample. Where the desk's
+        // cursor happened to be decided the outcome: with no readable cursor (a
+        // locked or disconnected session, a runner without an input desktop) the
+        // sample stayed unknown, so the synthesized "stationary" move read as
+        // movement and revealed the controls. Pin it inside the picture instead.
+        {
+            RECT picture{};GetWindowRect(app.m_renderWnd,&picture);
+            app.m_fullscreenPointer=POINT{(picture.left+picture.right)/2,(picture.top+picture.bottom)/2};
+            app.m_fullscreenPointerKnown=true;
+        }
         RECT client{},viewport{};
         GetClientRect(app.m_hwnd,&client);GetClientRect(app.m_viewport,&viewport);
         CHECK(EqualRect(&client,&viewport));
