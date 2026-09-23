@@ -123,6 +123,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "CompareMaskPolicy.h"
 #include "CompareImageIO.h"
 #include "resources.h"
+#include "HdrPolicy.h"
 
 using Clock = std::chrono::steady_clock;
 
@@ -2241,6 +2242,7 @@ public:
             m_shownPassthrough=std::move(passthrough);UpdateCachedStatus();}
         UpdateLiveSession();
         WatchNeuralJobProgress();
+        SyncHdrPresentation();
         if(m_seekPending) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
@@ -4117,6 +4119,7 @@ private:
         m_comparison.differenceGain=compare_settings::LoadDifferenceGain(ReadIniFloat(L"Comparison",L"DifferenceGain",compare_settings::kDefaultDifferenceGain));
         m_comparison.differenceLuma=GetPrivateProfileIntW(L"Comparison",L"DifferenceLuma",1,SettingsPath().c_str())!=0;
         m_comparison.secondMix=compare_settings::LoadSecondMix(ReadIniFloat(L"Comparison",L"SecondMix",compare_settings::kDefaultSecondMix));
+        m_compareHdrAtSdr=GetPrivateProfileIntW(L"Comparison",L"HdrAtSdr",0,SettingsPath().c_str())!=0;
         ++m_labelTextRevision;
         LoadRenderPace();
     }
@@ -4276,6 +4279,7 @@ private:
         WriteIniFloat(L"Comparison",L"SecondMix",m_comparison.secondMix);
         WriteIniFloat(L"Comparison",L"SplitX",m_comparison.splitX);
         WritePrivateProfileStringW(L"Comparison",L"ZoomStep",std::to_wstring(m_zoomStep).c_str(),SettingsPath().c_str());
+        WritePrivateProfileStringW(L"Comparison",L"HdrAtSdr",m_compareHdrAtSdr?L"1":L"0",SettingsPath().c_str());
     }
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
@@ -4388,7 +4392,7 @@ private:
             if(m_referenceBgra.empty())return false;
             return m_renderer->UploadReferenceFrame(m_referenceBgra.data(),m_referenceBgra.size());
         }
-        return m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size());
+        return m_renderer->UploadReferenceFrame(original.bgra.data(),original.bgra.size(),original.pq);
     }
     // The paused path's reference, uploaded only when the pair changed. Dragging
     // the split while paused ran ApplyComparison per mouse move, and each one
@@ -4800,6 +4804,12 @@ private:
                                MF_BYCOMMAND);
             CheckMenuRadioItem(menu,IDM_PROCESSING_SCALE_FIRST,IDM_PROCESSING_SCALE_LAST,
                                app_menu::CommandForProcessingScale(m_processingScale),MF_BYCOMMAND);
+            // Live only while an HDR source is on an HDR display: anywhere else there
+            // is no HDR original to compare at SDR.
+            const bool hdrCompare=m_loaded&&m_renderer&&m_renderer->HdrOutputActive()&&
+                                  m_decoder.SourceHdrSignal()!=hdr_policy::HdrSignal::Sdr;
+            EnableMenuItem(menu,IDM_COMPARE_HDR_AT_SDR,MF_BYCOMMAND|(hdrCompare?MF_ENABLED:MF_GRAYED));
+            CheckMenuItem(menu,IDM_COMPARE_HDR_AT_SDR,MF_BYCOMMAND|(m_compareHdrAtSdr?MF_CHECKED:MF_UNCHECKED));
             // 2x..5x then "as many as the display allows", in the order the
             // submenu appends them, so the radio always shows what the next
             // conversion will plan against.
@@ -5978,6 +5988,7 @@ private:
                     m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
                     IdentityOf(last,m_historyGeneration,0,HistoryReset::FirstFrame),guide,
                     last.layout)){
+                    candidate->renderer->SetNextSourcePq(last.pq);
                     ready=candidate->renderer->RenderFrame(last.bgra.data(),last.bgra.size(),
                         guide.guideGridRGBA32F.data(),guide.guideGridRGBA32F.size()*sizeof(float),guide.gridW,guide.gridH,
                         true,guide.motionVectors,float(1000.0/std::max(1.0,m_decoder.FrameRate())))&&candidate->renderer->LastFrameUsedDLSS();
@@ -6049,8 +6060,10 @@ private:
         if(!renderer)return;
         renderer->SetSourceLayout(m_decoder.PixelLayout());
         renderer->SetSourceColor(m_decoder.ColorDescription());
-        // Every renderer the player shows presents at its window's size.
+        // Every renderer the player shows presents at its window's size, and may
+        // present HDR when the display under it is in HDR mode (SyncHdrPresentation).
         renderer->SetPresentFollowsWindow(true);
+        renderer->SetHdrOutputAllowed(true);
     }
     void ConfigureRendererSource(){ConfigureRendererSource(m_renderer.get());}
     bool RendererTookSourceLayout(D3D12Renderer* renderer){
@@ -6118,6 +6131,8 @@ private:
         // Read before RememberPlaybackFrame, which may take `f`'s storage.
         const int64_t renderedTs=f.timestamp100ns;
         const auto renderStart=Clock::now();
+        // An HDR original decoded for an HDR display is PQ, and says so per frame.
+        m_renderer->SetNextSourcePq(f.pq);
         bool ok=m_renderer->RenderFrame(f.bgra.data(),f.bgra.size(),g.guideGridRGBA32F.data(),g.guideGridRGBA32F.size()*sizeof(float),g.gridW,g.gridH,r,g.motionVectors,ms);
         m_renderMsTotal+=std::chrono::duration<double,std::milli>(Clock::now()-renderStart).count();
         ++m_renderMsFrames;
@@ -9795,6 +9810,7 @@ private:
         candidate->renderer->SetSourceLayout(completion.decoder->PixelLayout());
         candidate->renderer->SetSourceColor(completion.decoder->ColorDescription());
         candidate->renderer->SetPresentFollowsWindow(true);
+        candidate->renderer->SetHdrOutputAllowed(true);
         if(!candidate->renderer->Initialize(candidate->window,completion.configuration.decodeWidth,completion.configuration.decodeHeight,completion.configuration.outputWidth,completion.configuration.outputHeight,completion.configuration.guideWidth,completion.configuration.guideHeight,quality))return{};
         if(candidate->renderer->ActiveSourceLayout()!=completion.decoder->PixelLayout()){
             LOG("Prepared renderer refused the decoder's "
@@ -10101,7 +10117,66 @@ private:
     // fault in the player.
     std::wstring HdrStatusText()const{
         if(!m_loaded||m_decoder.SourceHdrSignal()==hdr_policy::HdrSignal::Sdr)return{};
+        // On an HDR display the original is either HDR on screen or deliberately
+        // compared at SDR, and which is the thing worth reading.
+        if(m_renderer&&m_renderer->HdrOutputActive())
+            return T(OriginalDecodedAsPq()?L"status.hdr_original":L"status.hdr_at_sdr");
         return T(L"status.hdr_tonemapped");
+    }
+    bool OriginalDecodedAsPq()const{
+        return m_cachedPlayback?m_lastPair&&m_lastPair->original.pq
+                               :m_lastPlaybackFrame&&m_lastPlaybackFrame->pq;
+    }
+    // HDR output and the original's decode (P3.1). The display is asked only when
+    // something says it may have changed - a new renderer, a display change, the
+    // end of a move - and the decode is re-decided every tick from state that is
+    // free to read, so every path that changes a view, the upscaler or the file
+    // is covered without each having to remember to ask.
+    void SyncHdrPresentation(){
+        if(!m_renderer)return;
+        if(m_renderer->Instance()!=m_hdrRenderer||m_hdrRecheck){
+            m_hdrRenderer=m_renderer->Instance();m_hdrRecheck=false;
+            const D3D12Renderer::DisplayHdrState display=m_renderer->QueryDisplayHdr();
+            if(display.known!=m_hdrDisplay.known||display.hdr!=m_hdrDisplay.hdr||display.device!=m_hdrDisplay.device||
+               display.sdrWhiteNits!=m_hdrDisplay.sdrWhiteNits)
+                LOG("Display under the player: "<<(display.known?WideToUtf8(display.device):std::string("none found"))
+                    <<(display.hdr?" in HDR mode":" in SDR mode")<<", SDR white "<<display.sdrWhiteNits
+                    <<" nits, peak "<<display.maxLuminanceNits<<" nits.");
+            m_hdrDisplay=display;
+            // Never the other way round: the player follows the display's mode and
+            // never asks Windows to change it.
+            if(!m_renderer->SetHdrOutput(display.hdr,display.sdrWhiteNits)&&display.hdr)
+                LOG("HDR output could not be enabled on this display; presenting SDR.");
+            UpdateCachedStatus();SyncFeatureMenuState();
+        }
+        SyncHdrOriginal();
+    }
+    void SyncHdrOriginal(){
+        if(!m_loaded||!m_renderer||m_seeking)return;
+        hdr_policy::OriginalPresentation state{};
+        state.hdrSwapchain=m_renderer->HdrOutputActive();
+        state.sourceHdr=m_decoder.SourceHdrSignal()!=hdr_policy::HdrSignal::Sdr;
+        state.compareAtSdr=m_compareHdrAtSdr;
+        state.sourceFeedsSdrConsumer=m_renderer->GuidesRequired();
+        // The settled view, not a hold on the picture: a peek at the original from
+        // Difference must not cost a decoder restart on the way in and out.
+        ComparisonSettings settled=EffectiveComparison();
+        if(m_peekOriginal&&ComparisonModesAvailable())settled.mode=m_comparison.mode;
+        state.viewCombinesPixels=m_cachedPlayback&&ComparisonCombinesPixels(settled);
+        const bool pq=hdr_policy::DecodeOriginalAsPq(state);
+        bool changed=false;
+        if(m_cachedPlayback)changed=m_synchronizedPlayback.SetOriginalHdrPresentation(pq);
+        else if(m_decoder.HdrPresentation()!=pq){m_decoder.SetHdrPresentation(pq);changed=true;}
+        // An SDR source decodes the same either way, and a stream's seek is a new
+        // resolution, so a network source takes the new decode at its next seek.
+        if(!changed||!state.sourceHdr||NetworkPlayback())return;
+        LOG("HDR original "<<(pq?"decoded as PQ for the HDR display":"tone mapped to SDR")<<"; decoding again at "<<Position()<<" s.");
+        RequestSeek(Position());
+    }
+    void ToggleCompareHdrAtSdr(){
+        m_compareHdrAtSdr=!m_compareHdrAtSdr;
+        LOG("Compare HDR at SDR "<<(m_compareHdrAtSdr?"on":"off")<<".");
+        SyncHdrOriginal();UpdateCachedStatus();SyncFeatureMenuState();
     }
     // Short canonical of the settings a cache entry was rendered with; the
     // full record is its receipt.json.
@@ -10384,8 +10459,10 @@ private:
         case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}if(w==kPeekTimerId){PeekHoldElapsed();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
-        case WM_ENTERSIZEMOVE:StartModalTick();break;
-        case WM_EXITSIZEMOVE:StopModalTick();break;
+        case WM_ENTERSIZEMOVE:m_inSizeMove=true;StartModalTick();break;
+        // The window may have been dragged onto another display: HDR or not, and
+        // its own SDR white level.
+        case WM_EXITSIZEMOVE:m_inSizeMove=false;m_hdrRecheck=true;StopModalTick();break;
         case WM_SYSKEYDOWN:if(w==VK_MENU)RevealFullscreenControls();break;
         case WM_SYSCOMMAND:if((w&0xfff0)==SC_KEYMENU)RevealFullscreenControls();break;
         case WM_NCDESTROY:
@@ -10416,9 +10493,10 @@ private:
         // HMONITOR, so the handle comparison cannot see it and the cached mode
         // has to be dropped here. Switching a 4K panel to 1080p is exactly this
         // case, and it moves the Auto rung.
-        case WM_DISPLAYCHANGE:Audio().NoteDisplayModeChanged();InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
+        // Also what Windows sends when its HDR switch is turned on or off.
+        case WM_DISPLAYCHANGE:m_hdrRecheck=true;Audio().NoteDisplayModeChanged();InvalidateMonitorMode();ReportUpscaleRungDrift();Layout();InvalidateRect(h,nullptr,FALSE);return 0;
         case WM_SIZE:Layout();SyncActivityFeedback();RefreshToolbarTips();if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();return 0;
-        case WM_MOVE:if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();break;
+        case WM_MOVE:if(!m_inSizeMove)m_hdrRecheck=true;if(m_shortcutSheetOpen)ShowShortcutSheet();ClearTimelineHover();break;
         case WM_PAINT:Paint();return 0;
         case WM_NCMOUSEMOVE:{
             POINT point{GET_X_LPARAM(l),GET_Y_LPARAM(l)};
@@ -10532,6 +10610,7 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
         case IDM_SUBTITLE_EARLIER:StepSubtitleDelay(-1);break;case IDM_SUBTITLE_LATER:StepSubtitleDelay(+1);break;
         case IDM_SUBTITLE_DELAY_RESET:StepSubtitleDelay(0);break;
         case IDM_COMPARE_TOGGLE:ToggleSideBySide();break;
+        case IDM_COMPARE_HDR_AT_SDR:ToggleCompareHdrAtSdr();break;
         case IDM_UPDATE_AVAILABLE:ActivateUpdateBadge();break;
         // IDM_COMPARE_BLEND has no menu row any more; anything that still sends it gets
         // the view Blend became, the neural frame at the Mix.
@@ -10652,6 +10731,11 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // first enabled one, so without this the Open button wore a ring from launch on.
     bool m_keyboardCues=false;
     HMENU m_fullscreenMenu=nullptr;
+    // HDR output (SyncHdrPresentation): the renderer the display state was last
+    // applied to, whether the display must be asked again, what it said, and the
+    // viewer's choice to compare an HDR original as the model saw it.
+    uint64_t m_hdrRenderer=0;bool m_hdrRecheck=true;bool m_inSizeMove=false;
+    D3D12Renderer::DisplayHdrState m_hdrDisplay{};bool m_compareHdrAtSdr=false;
     UINT_PTR m_fullscreenTimer=0;
     bool m_fullscreenControlsHidden=false,m_fullscreenMenuLoop=false,m_fullscreenKeyboardFocus=false,m_fullscreenPointerKnown=false;
     POINT m_fullscreenPointer{};

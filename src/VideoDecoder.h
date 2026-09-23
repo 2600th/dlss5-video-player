@@ -58,6 +58,11 @@ struct VideoFrame {
     // Trailing (not after bgra) so existing positional-brace VideoFrame{...}
     // initializers that predate NV12 support keep compiling unchanged.
     VideoPixelLayout layout = VideoPixelLayout::Bgra;
+    // A Bgra-sized frame whose four bytes a pixel are x2bgr10le - R10G10B10A2
+    // holding PQ BT.2020 - rather than 8-bit sRGB BGRA: an HDR original decoded
+    // for an HDR display (VideoDecoder::SetHdrPresentation). Only the presentation
+    // reads such a frame; nothing that feeds the model ever asks for one.
+    bool pq = false;
 };
 
 inline FrameIdentity IdentityOf(const VideoFrame& frame, uint32_t historyGeneration,
@@ -281,6 +286,18 @@ public:
     std::string ToneMapIdentityTerm() const {
         return hdr_policy::ToneMapIdentityTerm(SourceHdrSignal(), m_source.hdrPeakNits);
     }
+    // Asks for an HDR source to be decoded as PQ BT.2020 in ten bits (VideoFrame::pq)
+    // instead of tone mapped, for an HDR display to show the original as graded.
+    // A presentation request and nothing else: an SDR source ignores it, and the
+    // offline render, the live segments and every metadata open never make it, so
+    // the model is always shown the tone-mapped frames. Kept across opens, like a
+    // preference. A running child keeps what it was started with; the next seek
+    // restarts it with the new answer (a kept-child seek is refused while they
+    // differ).
+    void SetHdrPresentation(bool pq) { m_hdrPresentation = pq; }
+    bool HdrPresentation() const { return m_hdrPresentation; }
+    // Whether the running child emits PQ frames.
+    bool DecodingPq() const { return m_ffmpegPq; }
     bool DecodesUntaggedAsBt709() const {
         return UntaggedSourceDecodesAsBt709(m_source.color,
             m_source.nativeWidth ? m_source.nativeWidth : m_source.width,
@@ -462,6 +479,9 @@ private:
     bool m_seekReusedBuffered = false;
     mutable std::mutex m_seekTimingMutex;
     FFmpegAcceleration m_ffmpegAcceleration = FFmpegAcceleration::Software;
+    // SetHdrPresentation's request, and what the running child was started with.
+    bool m_hdrPresentation = false;
+    bool m_ffmpegPq = false;
     uint32_t m_sourceGeneration = 0;
     bool m_restartDiscontinuity = false;
     MediaSourceKind m_sourceKind = MediaSourceKind::LocalFile;

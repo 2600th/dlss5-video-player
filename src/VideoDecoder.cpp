@@ -157,6 +157,7 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
         swap(m_lastErrorOutput,other.m_lastErrorOutput);
     }
     swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
+    swap(m_hdrPresentation,other.m_hdrPresentation);swap(m_ffmpegPq,other.m_ffmpegPq);
     swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
     swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
     swap(m_seekTiming,other.m_seekTiming);swap(m_seekStart,other.m_seekStart);swap(m_seekTargetSeconds,other.m_seekTargetSeconds);swap(m_seekTimingPending,other.m_seekTimingPending);
@@ -895,10 +896,14 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // curve lifts. Never NV12 (DecideSourceLayout), and never the untagged rule,
     // which is about a missing matrix on an SDR video.
     const hdr_policy::HdrSignal hdr = hdr_policy::SignalOf(m_source.color);
+    // Or kept HDR, as PQ in ten bits, when the presentation asked for it.
+    const bool pq = hdr != hdr_policy::HdrSignal::Sdr && m_hdrPresentation && !nv12;
     if (hdr != hdr_policy::HdrSignal::Sdr) {
-        const std::wstring toneMap = hdr_policy::SdrToneMapFilter(
-            hdr, m_source.hdrPeakNits > 0.0 ? m_source.hdrPeakNits : hdr_policy::ToneMapPeakNits(hdr, 0.0, 0.0),
-            m_source.color.matrix != ColorMatrix::Unspecified) + L",format=bgra";
+        const bool matrixDeclared = m_source.color.matrix != ColorMatrix::Unspecified;
+        const std::wstring toneMap = pq ? hdr_policy::PqPresentationFilter(hdr, matrixDeclared) :
+            hdr_policy::SdrToneMapFilter(
+                hdr, m_source.hdrPeakNits > 0.0 ? m_source.hdrPeakNits : hdr_policy::ToneMapPeakNits(hdr, 0.0, 0.0),
+                matrixDeclared) + L",format=bgra";
         if (acceleration == FFmpegAcceleration::Cuda)
             args << L"-vf scale_cuda=" << m_source.width << L":" << m_source.height
                  << L":format=p010:interp_algo=bicubic:passthrough=0,hwdownload,format=p010le," << toneMap << L" ";
@@ -929,7 +934,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     if (m_source.stillImage) args << L"-frames:v 1 ";
     if (m_source.gif && m_source.durationSec > seekSeconds)
         args << L"-t " << std::fixed << std::setprecision(6) << (m_source.durationSec - seekSeconds) << L" ";
-    args << L"-pix_fmt " << (nv12 ? L"nv12" : L"bgra") << L" -fps_mode cfr -r "
+    args << L"-pix_fmt " << (nv12 ? L"nv12" : pq ? L"x2bgr10le" : L"bgra") << L" -fps_mode cfr -r "
          << std::fixed << std::setprecision(6) << m_source.fps
          << L" -f rawvideo pipe:1";
 
@@ -982,6 +987,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
     m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_source.fps);
     m_ffmpegAcceleration = acceleration;
+    m_ffmpegPq = pq;
     m_pendingFrame.clear();m_pendingFrameBytes=0;m_lastFrameByte=std::chrono::steady_clock::now();
     m_restartDiscontinuity = false;
     if(m_seekTimingPending){
@@ -990,7 +996,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     }
     const char* accelerationName = acceleration == FFmpegAcceleration::Cuda ? "CUDA decode + GPU scale" :
         acceleration == FFmpegAcceleration::D3D11Va ? "D3D11VA decode" : "software decode";
-    LOG("FFmpeg raw " << (nv12 ? "NV12" : "BGRA") << " process started with " << accelerationName << ".");
+    LOG("FFmpeg raw " << (nv12 ? "NV12" : pq ? "PQ R10G10B10A2" : "BGRA") << " process started with " << accelerationName << ".");
     return true;
 }
 
@@ -1359,6 +1365,7 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
 
     out.bgra.swap(m_pendingFrame);
     out.layout = m_source.layout;
+    out.pq = m_ffmpegPq;
     RecycleFrameBuffer(std::move(m_pendingFrame));
     m_pendingFrame.clear();
     const int64_t timelineFrame=sourceFrame-m_ffmpegFirstSourceFrame;
@@ -1670,6 +1677,7 @@ VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_source.fps * 1e-7));
         out.sourceGeneration = m_sourceGeneration;
         out.layout = VideoPixelLayout::Bgra; // Media Foundation's reader only ever hands out BGRA.
+        out.pq = false;
         return VideoReadResult::FrameReady;
     }
 }
@@ -1787,6 +1795,10 @@ void VideoDecoder::PublishSeekTiming(bool frameDelivered) {
 VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
 {
     if(!m_ffmpegProcess||!m_ffmpegStdout||m_source.stillImage||m_source.gif)return SeekReuse::Restart;
+    // The presentation asked for HDR or SDR frames since this child started, and
+    // only a new child can give it the other kind.
+    if(m_ffmpegPq!=(m_hdrPresentation&&hdr_policy::SignalOf(m_source.color)!=hdr_policy::HdrSignal::Sdr&&
+                    m_source.layout!=VideoPixelLayout::Nv12))return SeekReuse::Restart;
     size_t buffered=0;
     {
         std::lock_guard lock(m_frameMutex);

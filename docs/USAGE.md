@@ -255,6 +255,32 @@ Pause and step with `.` to judge a single frame; `D` still switches the whole
 view between original and neural. The mode, Mix, split position, swap, zoom step, difference settings and
 the fourth pane's Mix are remembered in `[Comparison]`.
 
+### HDR sources
+
+The neural model renders in SDR, so an HDR10 (PQ) or HLG video is tone mapped
+to SDR BT.709 as it is decoded, for playback, for rendering and for export
+alike. The curve is Hable, mapped to the brightest the file says it gets: its
+MaxCLL, else its mastering display's peak, else 1000 nits. That peak is read
+once per video, never measured frame by frame, which would make the picture
+pump. The status line says **HDR source tone-mapped to SDR** while one is
+loaded. Renders of HDR sources made before this saw the untone-mapped picture,
+flat and grey, and are not served again: the tone map and its peak are part of
+the render's identity.
+
+On a display Windows has in HDR mode (**Settings > Display > Use HDR**), the
+player presents in HDR. DLSS 5, SDR videos, subtitles and the tags and loupe on
+the picture sit at Windows' **SDR content brightness**, like every other SDR
+window on that display, and the original of an HDR video is shown in HDR, as it
+was graded: in the original view, in Split, Wipe, Side by side and the loupe, and while
+you hold the picture. The player follows the display it is on - drag it to an
+SDR monitor and it presents SDR again - and never turns Windows HDR on or off
+itself. **Video > Compare > Compare HDR at SDR** shows the original tone mapped
+instead, exactly as the model saw it, for a like-for-like comparison. A Mix
+other than 100%, a mask, Difference and 2 × 2 always compare at SDR:
+they compute with both pictures, and mixing HDR light with SDR light would
+measure the tone map rather than the model. **Save comparison image**, exports
+and the cache stay SDR.
+
 **DLSS > Neural settings** (`Ctrl+N`) exposes the neural model's intensity,
 local structure, local tone, skin structure, style and automatic mask, the
 number of neural passes and whether temporal history carries between them, the

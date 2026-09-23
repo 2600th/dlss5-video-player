@@ -67,6 +67,9 @@ public:
     // GPU conversion does not implement still decodes to BGRA, and Layout()
     // reports what actually happened.
     virtual void PreferNv12(bool) {}
+    // Asked of the original member only: decode an HDR source as PQ for an HDR
+    // display (VideoDecoder::SetHdrPresentation). Takes effect at the next seek.
+    virtual void PreferHdrPresentation(bool) {}
     // What the next sibling of the open file can be opened with.
     virtual VideoDecoder::KnownMedia Media() const
     {
@@ -115,6 +118,10 @@ public:
     SynchronizedReadResult ReadNextAvailable(std::stop_token stop = {});
     bool SeekSeconds(double seconds, std::stop_token stop = {});
     bool SetView(ComparisonView view);
+    // The original member's HDR presentation request (VideoDecoder::SetHdrPresentation),
+    // kept across opens. True when it changed, which the caller answers with a seek
+    // to where it is: a running decode keeps what it was started with.
+    bool SetOriginalHdrPresentation(bool pq);
     ComparisonView View() const;
     const VideoFrame* VisibleFrame() const;
     const SynchronizedFramePair* CurrentPair() const;

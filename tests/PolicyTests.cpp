@@ -223,9 +223,9 @@ struct D3D12RendererTestAccess {
     {
         return D3D12Renderer::CompileSourceNv12(conversion,blob);
     }
-    static bool CompilePresentProgram(const char* entry,Microsoft::WRL::ComPtr<ID3DBlob>& blob)
+    static bool CompilePresentProgram(const char* entry,Microsoft::WRL::ComPtr<ID3DBlob>& blob,bool hdrOutput=false)
     {
-        return D3D12Renderer::CompilePresentProgram(entry,"ps_5_1",blob);
+        return D3D12Renderer::CompilePresentProgram(entry,"ps_5_1",blob,hdrOutput);
     }
 
     static void ConfigureWait(D3D12Renderer& renderer,
@@ -7554,6 +7554,46 @@ void video_decoder_tone_maps_hdr_sources_to_sdr_test()
     }
 }
 
+// An HDR display asks for the original as PQ. Only the presentation ever asks,
+// only an HDR source answers, and a running child keeps what it was started with
+// until a seek, which then cannot be served by that child.
+void video_decoder_decodes_hdr_originals_as_pq_on_request_test()
+{
+    MediaFixture fixture;
+    const auto marker=fixture.directory/L"pq-args.txt";
+    ScopedEnvironmentVariable markerVariable(L"DLSS_VIDEO_TEST_ARGS_MARKER",marker.wstring());
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    decoder->SetHdrPresentation(true);
+    CHECK(decoder->Open(L"hdrsrc_pqmeta",MediaSourceKind::LocalFile,{},true));
+    CHECK(decoder->PixelLayout()==VideoPixelLayout::Bgra);
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK(frame.pq);
+    CHECK(decoder->DecodingPq());
+    // Four bytes a pixel, like BGRA: R10G10B10A2.
+    CHECK_EQ(FrameBytes(VideoPixelLayout::Bgra,4,2),frame.bgra.size());
+    const std::string command=first_decode_command(marker);
+    CHECK(command.find("hwdownload,format=p010le,zscale=tin=smpte2084:pin=bt2020:t=smpte2084:p=bt2020:npl=100,format=gbrp10le")!=std::string::npos);
+    CHECK(command.find("-pix_fmt x2bgr10le")!=std::string::npos);
+    CHECK(command.find("tonemap")==std::string::npos);
+    // The cache key is about what the model is shown, which a presentation request
+    // never changes.
+    CHECK_EQ(std::string("|hdr-sdr-hable-v1-pq-peak1000"),decoder->ToneMapIdentityTerm());
+    // Back to SDR: the next seek restarts rather than walking the PQ child forward.
+    decoder->SetHdrPresentation(false);
+    CHECK(decoder->SeekSeconds(0.1));
+    CHECK(!decoder->LastSeekTiming().reusedChild);
+    const VideoFrame after=read_one_frame(*decoder);
+    CHECK(!after.pq);
+    const std::string all=read_binary_file(marker);
+    CHECK(all.substr(all.find('\n')+1).find("tonemap=tonemap=hable")!=std::string::npos);
+    // An SDR source ignores the request.
+    auto sdr=VideoDecoderTestAccess::Create(fixture.directory);
+    sdr->SetHdrPresentation(true);
+    CHECK(sdr->OpenSequential(L"colortag_bt601full",MediaSourceKind::LocalFile,{},false));
+    CHECK(!read_one_frame(*sdr).pq);
+    CHECK(!sdr->DecodingPq());
+}
+
 // A source that does declare a description the conversion implements keeps the
 // NV12 path, and the description travels far enough out of the decoder for the
 // renderer to specialise the shader from it rather than assume BT.709.
@@ -7756,6 +7796,86 @@ void compare_compositor_stays_out_of_the_capture_program_test()
     for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::Difference}){
         comparison.mode=mode;CHECK(ComparisonNeedsCompositor(comparison));
     }
+}
+
+static std::string program_bytes(const char* entry,bool hdrOutput)
+{
+    Microsoft::WRL::ComPtr<ID3DBlob> blob;
+    if(!D3D12RendererTestAccess::CompilePresentProgram(entry,blob,hdrOutput)||!blob)return {};
+    return std::string(static_cast<const char*>(blob->GetBufferPointer()),blob->GetBufferSize());
+}
+
+// HDR output is the backbuffer's business alone. HDR_OUTPUT changes the compositor
+// and the debug views and nothing the cache capture or the model's input runs:
+// those compile to the same bytes with it defined as without, which is the whole
+// of the proof that a render made on an HDR display is the render made on any
+// other. (Their bytes against the pre-HDR build were compared with fxc when the
+// HDR text went in: PSPresent, PSConvert, both NV12 capture passes and the BT.709
+// NV12 source conversion are unchanged.)
+void hdr_output_leaves_the_capture_programs_alone_test()
+{
+    for(const char* entry:{"PSPresent","PSConvert","PSCaptureLuma","PSCaptureChroma"}){
+        const std::string sdr=program_bytes(entry,false);
+        CHECK(!sdr.empty());
+        CHECK(sdr==program_bytes(entry,true));
+    }
+    CHECK((present_program_bindings("PSPresent")==std::vector<std::string>{"Params@0","Ref@1","S@0","T@0"}));
+    // The HDR compositor is a different program from the SDR one, and both compile.
+    const std::string scaled=program_bytes("PSPresentScaled",false),scaledHdr=program_bytes("PSPresentScaled",true);
+    CHECK(!scaled.empty());CHECK(!scaledHdr.empty());CHECK(scaled!=scaledHdr);
+    for(const char* entry:{"PSMotion","PSDepth"}){
+        const std::string sdr=program_bytes(entry,false),hdr=program_bytes(entry,true);
+        CHECK(!sdr.empty());CHECK(!hdr.empty());CHECK(sdr!=hdr);
+    }
+    // The PQ source conversion reads its SDR white from the compositor's constants.
+    const auto convert=present_program_bindings("PSConvertPq");
+    CHECK(std::find(convert.begin(),convert.end(),"Compose@1")!=convert.end());
+    CHECK(std::find(convert.begin(),convert.end(),"T@0")!=convert.end());
+}
+
+// Which output the window is on, what SDR white Windows asks for, and when an HDR
+// original is shown as HDR rather than as the model saw it.
+void hdr_output_follows_the_display_under_the_window_test()
+{
+    using namespace hdr_policy;
+    // Windows' SDR content brightness: thousandths of 80 nits; 0 is unanswered.
+    CHECK_EQ(80.0f,SdrWhiteNits(1000));
+    CHECK_EQ(200.0f,SdrWhiteNits(2500));
+    CHECK_EQ(203.0f,SdrWhiteNits(0));
+    CHECK_EQ(480.0f,SdrWhiteNits(100000));
+    CHECK_EQ(80.0f,SdrWhiteNits(1));
+    const DesktopRect outputs[]={{0,0,1920,1080},{1920,0,4480,1440},{-1280,0,0,1024}};
+    // Mostly on the second display, straddling the first.
+    CHECK_EQ(1,OutputUnderWindow({1500,100,3000,900},outputs,3));
+    CHECK_EQ(0,OutputUnderWindow({100,100,1000,900},outputs,3));
+    CHECK_EQ(2,OutputUnderWindow({-1000,10,100,900},outputs,3));
+    // Minimised windows live at -32000, on no display at all.
+    CHECK_EQ(-1,OutputUnderWindow({-32000,-32000,-31840,-31972},outputs,3));
+    CHECK_EQ(-1,OutputUnderWindow({0,0,100,100},outputs,0));
+    OriginalPresentation state{true,true,false,false,false};
+    CHECK(DecodeOriginalAsPq(state));
+    state.hdrSwapchain=false;CHECK(!DecodeOriginalAsPq(state));state.hdrSwapchain=true;
+    state.sourceHdr=false;CHECK(!DecodeOriginalAsPq(state));state.sourceHdr=true;
+    state.compareAtSdr=true;CHECK(!DecodeOriginalAsPq(state));state.compareAtSdr=false;
+    state.sourceFeedsSdrConsumer=true;CHECK(!DecodeOriginalAsPq(state));state.sourceFeedsSdrConsumer=false;
+    state.viewCombinesPixels=true;CHECK(!DecodeOriginalAsPq(state));
+    // The views that compute with the original's values, and those that only place it.
+    ComparisonSettings comparison;
+    CHECK(!ComparisonCombinesPixels(comparison));
+    for(const ComparisonMode mode:{ComparisonMode::Original,ComparisonMode::SplitVertical,ComparisonMode::Wipe,ComparisonMode::SideBySide}){
+        comparison.mode=mode;CHECK(!ComparisonCombinesPixels(comparison));
+    }
+    for(const ComparisonMode mode:{ComparisonMode::Blend,ComparisonMode::Difference,ComparisonMode::Quad}){
+        comparison.mode=mode;CHECK(ComparisonCombinesPixels(comparison));
+    }
+    comparison.mode=ComparisonMode::SplitVertical;comparison.strength=0.5f;CHECK(ComparisonCombinesPixels(comparison));
+    comparison.strength=1.0f;comparison.mask=true;CHECK(ComparisonCombinesPixels(comparison));
+    // The presentation decode stays HDR end to end, in R10G10B10A2's four bytes.
+    const std::wstring pq=PqPresentationFilter(HdrSignal::Pq,true);
+    CHECK(pq.find(L"t=smpte2084:p=bt2020")!=std::wstring::npos);
+    CHECK(pq.find(L"tonemap")==std::wstring::npos);
+    CHECK(pq.find(L"format=gbrp10le")!=std::wstring::npos);
+    CHECK(PqPresentationFilter(HdrSignal::Hlg,false).find(L"tin=arib-std-b67:min=bt2020nc")!=std::wstring::npos);
 }
 
 // Press, drag and hold on the picture are three gestures that share one button.
@@ -8255,6 +8375,10 @@ void compare_panes_locate_the_point_under_the_pointer_test()
         std::sort(ids.begin(),ids.end());
         CHECK(!ids.empty());
         CHECK(std::adjacent_find(ids.begin(),ids.end())==ids.end());
+        // Compare HDR at SDR is built with the menu, not appended by the player.
+        CHECK(std::binary_search(ids.begin(),ids.end(),app_menu::IDM_COMPARE_HDR_AT_SDR));
+        CHECK(app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_HDR_AT_SDR)==
+              app_menu::FindMenuContainingCommand(bar,app_menu::IDM_COMPARE_LOUPE));
         for(UINT index=0;index<app_menu::IDM_COMPARE_SECOND_MIX_COUNT;++index)
             for(const UINT other:{app_menu::IDM_ADVANCED_SAFE_MODE,app_menu::IDM_CLEAR_NEURAL_CACHE,app_menu::IDM_OPEN_RENDER_RECEIPT,app_menu::IDM_CHECK_FOR_UPDATES})
                 CHECK(app_menu::IDM_COMPARE_SECOND_MIX_FIRST+index!=other);
@@ -12437,11 +12561,14 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
     TEST_CASE(video_decoder_tone_maps_hdr_sources_to_sdr_test),
+    TEST_CASE(video_decoder_decodes_hdr_originals_as_pq_on_request_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),
     TEST_CASE(source_nv12_conversion_constants_are_the_shipped_coefficients_test),
     TEST_CASE(source_nv12_conversion_compiles_a_distinct_program_per_arm_test),
     TEST_CASE(present_scale_follows_the_window_only_where_it_should_test),
     TEST_CASE(compare_compositor_stays_out_of_the_capture_program_test),
+    TEST_CASE(hdr_output_leaves_the_capture_programs_alone_test),
+    TEST_CASE(hdr_output_follows_the_display_under_the_window_test),
     TEST_CASE(compare_gesture_tells_press_drag_and_hold_apart_test),
     TEST_CASE(compare_settings_migrate_strength_and_blend_to_the_mix_test),
     TEST_CASE(compare_label_premultiply_matches_the_gdi_composite_test),

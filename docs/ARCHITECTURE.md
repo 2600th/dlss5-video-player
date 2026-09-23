@@ -1219,8 +1219,9 @@ recovery, range preview, comparison controls and confidence-aware optical flow
 are implemented; the measured guide ablation lives in [Benchmark](BENCHMARK.md).
 Buffered viewing shipped as the active session, and protection masks were
 measured and abandoned because the NGX mask inputs are inert on both features.
-What remains is source-color/HDR preservation, RTX Video modes and the rest of
-GPU-resident processing; the changelog's `Unreleased` section carries anything
+HDR sources are tone mapped to SDR on decode and an HDR display shows their
+original in HDR (`HdrPolicy.h`); what remains is an HDR cache and export, RTX
+Video modes and the rest of GPU-resident processing; the changelog's `Unreleased` section carries anything
 in flight.
 
 The harness under `tools/benchmark/` is deliberately not a second implementation

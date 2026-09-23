@@ -170,6 +170,10 @@ inline constexpr UINT IDM_KEYBOARD_SHORTCUTS = 490;
 // Not on any menu: the taskbar thumbnail's side-by-side switch, which flips
 // between the Compare menu's Neural and Split rather than naming a mode.
 inline constexpr UINT IDM_COMPARE_TOGGLE = 491;
+// Video > Compare > Compare HDR at SDR (P3.1): an HDR original shown tone mapped,
+// as the model saw it, instead of in HDR. Live only while an HDR source is on an
+// HDR display (main.cpp SyncFeatureMenuState).
+inline constexpr UINT IDM_COMPARE_HDR_AT_SDR = 493;
 
 enum class PlayerCommandRoute {
     KeyDown,

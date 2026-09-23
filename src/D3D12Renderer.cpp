@@ -8,6 +8,7 @@
 #include "TemporalStabilityShader.h"
 #include "RuntimePolicy.h"
 #include "GpuPreference.h"
+#include "HdrPolicy.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <atomic>
@@ -401,16 +402,73 @@ cbuffer Compose:register(b1){
     float4 LoupeAt; // xy = centre of the left circle, zw = of the right one, px
     float4 Diff;    // x = difference gain, y = 1 for grey luma, 0 per channel, z = mask on, w = mask inverted
     float4 Subs;    // x = the subtitle overlay is on
+    float4 Hdr;     // x = SDR white in nits, y = 1 when Ref holds PQ BT.2020 (R10G10B10A2)
 }
 Texture2D Mask:register(t3); Texture2D Labels:register(t4); Texture2D Subtitles:register(t5);
+// HDR (P3.1). The compositor works in linear light with SDR white at 1.0 and BT.709
+// primaries, which is what T has always held; an HDR original arrives as PQ BT.2020
+// and is brought into the same space, so it can exceed 1.0 and leave the BT.709
+// gamut and every mode still places it correctly. An HDR swapchain then takes the
+// result back to PQ BT.2020 with SDR white at the Windows SDR white level, so the
+// DLSS 5 frame sits where every other SDR window on that display does and an HDR
+// original's highlights go above it. PSPresent - the cache capture - references
+// none of this, so fxc leaves its program byte for byte as it was, and HDR_OUTPUT
+// is only ever defined for the backbuffer programs
+// (hdr_output_leaves_the_capture_programs_alone_test).
+float3 PqToNits(float3 e){
+    float3 p=pow(saturate(e),1.0/78.84375);
+    return 10000.0*pow(max(p-0.8359375,0.0)/(18.8515625-18.6875*p),1.0/0.1593017578125);
+}
+float3 NitsToPq(float3 n){
+    float3 y=pow(saturate(n/10000.0),0.1593017578125);
+    return pow((0.8359375+18.8515625*y)/(1.0+18.6875*y),78.84375);
+}
+static const float3x3 Bt709To2020={0.627404,0.329283,0.043313, 0.069097,0.919541,0.011362, 0.016391,0.088013,0.895595};
+static const float3x3 Bt2020To709={1.660491,-0.587641,-0.072850, -0.124551,1.132900,-0.008349, -0.018151,-0.100579,1.118730};
+float3 PqToLinear(float3 e){return mul(Bt2020To709,PqToNits(e))/max(Hdr.x,1.0);}
+float3 LinearToPq(float3 c){return NitsToPq(mul(Bt709To2020,max(c,0.0))*Hdr.x);}
+// The original in the compositor's linear light, whichever way it was uploaded.
+float3 RefToLinear(float3 t){return Hdr.y>0.5?PqToLinear(t):SRGBToLinear(t);}
+// SampleFootprint for the reference, through RefToLinear.
+float3 SampleRefFootprint(float2 uv,float2 footprint){
+    float w,h;Ref.GetDimensions(w,h);
+    int2 taps=clamp(int2(ceil(footprint*float2(w,h)-0.01)),1,8);
+    float3 sum=0;
+    for(int y=0;y<taps.y;++y){
+        for(int x=0;x<taps.x;++x){
+            float2 o=((float2(x,y)+0.5)/float2(taps)-0.5)*footprint;
+            sum+=RefToLinear(Ref.SampleLevel(S,uv+o,0).rgb);
+        }
+    }
+    return sum/float(taps.x*taps.y);
+}
+// An HDR source frame (T, R10G10B10A2 PQ BT.2020) into the colour texture every
+// present reads, in the same linear light an SDR frame reaches it in.
+float4 PSConvertPq(V i):SV_Target{return float4(PqToLinear(T.SampleLevel(S,i.uv,0).rgb),1);}
+// The compositor composes in `o`: sRGB-encoded for an SDR backbuffer, as it always
+// has, and linear for an HDR one, which then encodes it once at the end. The tags
+// are premultiplied sRGB and are brought into linear light to go over it.
+#ifdef HDR_OUTPUT
+#define COMPOSE_ENCODE(c) max(c,0.0)
+#define COMPOSE_OUTPUT(o) LinearToPq(o)
+#define OVERLAY_LINEAR(t) SRGBToLinear(t)
+#define DEBUG_OUTPUT(c) LinearToPq(SRGBToLinear(c))
+#else
+#define COMPOSE_ENCODE(c) LinearToSRGB(c)
+#define COMPOSE_OUTPUT(o) (o)
+#define OVERLAY_LINEAR(t) (t)
+#define DEBUG_OUTPUT(c) (c)
+#endif
 // Subtitles, last of all: premultiplied BGRA drawn at the backbuffer's own size by
 // the player's subtitle child, over whatever the rest of the compositor made - the
 // picture, the panes, the tags, the loupe - and in the sRGB-encoded values every
-// subtitle is authored in. Never in PSPresent, so never in the cache capture, the
-// neural input or an export; while the window is being resized it is stretched
-// until a canvas of the new size arrives.
+// subtitle is authored in. On an HDR backbuffer they are brought into linear light
+// like the tags, so they sit at SDR white with the rest of the SDR content and never
+// at an HDR original's highlights. Never in PSPresent, so never in the cache
+// capture, the neural input or an export; while the window is being resized it is
+// stretched until a canvas of the new size arrives.
 float3 SubtitlesOver(float3 o,float2 uv){
-    if(Subs.x>0.5){float4 s=Subtitles.SampleLevel(S,uv,0);o=s.rgb+o*(1.0-s.a);}
+    if(Subs.x>0.5){float4 s=Subtitles.SampleLevel(S,uv,0);o=OVERLAY_LINEAR(s.rgb)+o*(1.0-s.a);}
     return o;
 }
 // The spatial mask on the Mix: where it is white the neural member stays as dialled,
@@ -429,7 +487,7 @@ float3 LabelOver(float3 c,float2 px,float2 anchor,int row){
     float2 rel=floor(px-anchor);
     if(Label.x>=1.0&&rel.x>=0.0&&rel.y>=0.0&&rel.x<LabelWidth(row)&&rel.y<Label.x){
         float4 t=Labels.Load(int3(int(rel.x),int(float(row)*Label.x+rel.y),0));
-        c=t.rgb+c*(1.0-t.a);
+        c=OVERLAY_LINEAR(t.rgb)+c*(1.0-t.a);
     }
     return c;
 }
@@ -442,14 +500,14 @@ float3 LoupeColour(float2 uv,bool original){
     float w,h;T.GetDimensions(w,h);
     float rw,rh;Ref.GetDimensions(rw,rh);
     float3 c;
-    if(original)c=SRGBToLinear(Ref.Load(int3(min(int2(uv*float2(rw,rh)),int2(rw,rh)-1),0)).rgb);
+    if(original)c=RefToLinear(Ref.Load(int3(min(int2(uv*float2(rw,rh)),int2(rw,rh)-1),0)).rgb);
     else{
         c=T.Load(int3(min(int2(uv*float2(w,h)),int2(w,h)-1),0)).rgb;
-        float3 ref=SRGBToLinear(Ref.SampleLevel(S,uv,0).rgb);
+        float3 ref=RefToLinear(Ref.SampleLevel(S,uv,0).rgb);
         if(ColorB.z!=1.0)c=ApplyNeuralStrength(c,ref,ColorB.z,max(ColorB.w,1.0));
         c=MaskedNeural(c,ref,uv);
     }
-    return LinearToSRGB(ApplyVideoAdjustments(c));
+    return COMPOSE_ENCODE(ApplyVideoAdjustments(c));
 }
 float3 LoupeOver(float3 o,float2 px,bool swap){
     float radius=Loupe.z;
@@ -487,7 +545,7 @@ float4 ComposePanes(float2 wuv,int mode,bool swap){
     float2 footprint=abs(ddx(zoomed))+abs(ddy(zoomed));
     float2 uv=saturate(zoomed);
     float3 n=SampleFootprint(T,uv,footprint,false);
-    float3 ref=SampleFootprint(Ref,uv,footprint,true);
+    float3 ref=SampleRefFootprint(uv,footprint);
     int kind=pane==0?(swap?1:0):pane==1?(swap?0:1):pane==2?2:3;
     float mixS=kind==3?Pane.z:ColorB.z;
     if(mixS!=1.0)n=ApplyNeuralStrength(n,ref,mixS,max(ColorB.w,1.0));
@@ -495,7 +553,7 @@ float4 ComposePanes(float2 wuv,int mode,bool swap){
     float3 c=kind==0?ApplyVideoAdjustments(ref):kind==2?DifferenceOf(n,ref):ApplyVideoAdjustments(n);
     float2 px=wuv*Target.xy;
     bool inside=all(s>=0.0)&&all(s<=1.0);
-    float3 o=inside?LinearToSRGB(c):0.0;
+    float3 o=inside?COMPOSE_ENCODE(c):0.0;
     // A dark two-pixel gutter where panes meet, so four pictures read as four.
     float2 fromMiddle=abs(px-0.5*Target.xy);
     if(fromMiddle.x<1.0||(mode==7&&fromMiddle.y<1.0))o=0.0;
@@ -508,7 +566,7 @@ float4 PSPresentScaled(V i):SV_Target{
         float4 panes=ComposePanes(i.uv,paneMode,Pane.y>0.5);
         if(Loupe.w>0.0)panes.rgb=LoupeOver(panes.rgb,i.uv*Target.xy,Pane.y>0.5);
         panes.rgb=SubtitlesOver(panes.rgb,i.uv);
-        return panes;
+        return float4(COMPOSE_OUTPUT(panes.rgb),1);
     }
     float zoom=max(Misc.y,0.01);
     float2 zc=Compare.zw;
@@ -520,7 +578,7 @@ float4 PSPresentScaled(V i):SV_Target{
     float strength=ColorB.z;
     bool swap=Pane.y>0.5;
     if(mode!=0||strength!=1.0||Diff.z>0.5){
-        float3 ref=SampleFootprint(Ref,uv,footprint,true);
+        float3 ref=SampleRefFootprint(uv,footprint);
         if(strength!=1.0)c=ApplyNeuralStrength(c,ref,strength,max(ColorB.w,1.0));
         c=MaskedNeural(c,ref,uv);
         if(mode==1)c=ref;
@@ -537,7 +595,7 @@ float4 PSPresentScaled(V i):SV_Target{
         if(d<Misc.x*2.5)c=0.0;
         if(d<Misc.x)c=1.0;
     }
-    float3 o=LinearToSRGB(c);
+    float3 o=COMPOSE_ENCODE(c);
     // The tags name what each side of the picture is, pinned to the picture's top
     // corners and clipped to their own side of the divider, so a divider dragged to
     // an edge takes its tag with it rather than printing it over the other member.
@@ -554,7 +612,7 @@ float4 PSPresentScaled(V i):SV_Target{
     }
     if(Loupe.w>0.0)o=LoupeOver(o,i.uv*Target.xy,swap);
     o=SubtitlesOver(o,i.uv);
-    return float4(o,1);
+    return float4(COMPOSE_OUTPUT(o),1);
 }
 // GPU colour conversion for the NV12 capture path. The picture is exactly what the
 // cache-capture pass produces; only the encoding differs, from 8-bit BGRA to BT.709
@@ -606,8 +664,8 @@ float4 PSSourceNv12(V i):SV_Target{
 }
 #endif
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
-float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(c,1);}
-float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
+float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(DEBUG_OUTPUT(c),1);}
+float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(DEBUG_OUTPUT(float3(d,d,d)),1);}
     // Depth comes directly from compact-guide B and is written through SV_Depth into
     // the exact typeless/D32 resource that NGX receives later in the frame.
     float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv,0).b);}
@@ -673,6 +731,15 @@ bool D3D12Renderer::CreatePipelines(){
        !C("PSCaptureLuma","ps_5_1",captureLuma)||!C("PSCaptureChroma","ps_5_1",captureChroma))return false;
     // Only a renderer that presents to a window it follows ever scales the present.
     if(m_followWindow&&!C("PSPresentScaled","ps_5_1",presentScaled))return false;
+    // The HDR backbuffer programs: the compositor and the two debug views with
+    // HDR_OUTPUT defined, which is the only difference from their SDR builds. The
+    // player alone asks for them, and PSPresent is never among them.
+    ComPtr<ID3DBlob>presentHdr,motionHdr,depthHdr,convertPq;
+    if(m_hdrAllowed&&m_followWindow){
+        const D3D_SHADER_MACRO hdrDefines[]={{"HDR_OUTPUT","1"},{nullptr,nullptr}};
+        auto CH=[&](const char*entry,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,hdrDefines,nullptr,entry,"ps_5_1",flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
+        if(!CH("PSPresentScaled",presentHdr)||!CH("PSMotion",motionHdr)||!CH("PSDepth",depthHdr)||!C("PSConvertPq","ps_5_1",convertPq))return false;
+    }
     // Only a renderer that will actually be handed NV12 source frames compiles the
     // conversion, and it compiles exactly the one conversion the source's declared
     // description names. A BGRA source never reaches that draw, so it needs no program
@@ -725,6 +792,18 @@ bool D3D12Renderer::CreatePipelines(){
     if(presentScaled){
         p.PS={presentScaled->GetBufferPointer(),presentScaled->GetBufferSize()};
         p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresentScaled)),"Create scaled present PSO"))return false;
+    }
+    if(presentHdr){
+        p.RTVFormats[0]=DXGI_FORMAT_R10G10B10A2_UNORM;
+        p.PS={presentHdr->GetBufferPointer(),presentHdr->GetBufferSize()};
+        if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresentHdr)),"Create HDR present PSO"))return false;
+        p.PS={motionHdr->GetBufferPointer(),motionHdr->GetBufferSize()};
+        if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebugHdr)),"Create HDR MV debug PSO"))return false;
+        p.PS={depthHdr->GetBufferPointer(),depthHdr->GetBufferSize()};
+        if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebugHdr)),"Create HDR depth debug PSO"))return false;
+        p.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;
+        p.PS={convertPq->GetBufferPointer(),convertPq->GetBufferSize()};
+        if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoConvertPq)),"Create PQ source convert PSO"))return false;
     }
     p.PS={captureLuma->GetBufferPointer(),captureLuma->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoCaptureLuma)),"Create NV12 luma PSO"))return false;
@@ -1038,6 +1117,9 @@ bool D3D12Renderer::CreateVideoResources(){
     // Null until the first subtitle frame, and never read before one: the flag the
     // compositor tests is off (SetPresentConstants).
     srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(SubtitleSRV));
+    // The HDR source texture is allocated by the first PQ frame; until then its slot
+    // is a null view like the reference's.
+    srv.Format=DXGI_FORMAT_R10G10B10A2_UNORM;m_device->CreateShaderResourceView(nullptr,&srv,SRVCPU(PqSourceSRV));
 
     // Two timestamps per frame slot bracket DLSS Evaluate; resolved into a readback
     // buffer and harvested once that slot's fence is known complete.
@@ -1126,6 +1208,10 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     const bool guidesUsed=GuidesRequired();
     if(!bgra||bytes<SourceFrameBytes())return false;
     if(guidesUsed&&(!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH))return false;
+    // Consumed here, whatever happens to the frame: see SetNextSourcePq.
+    const bool pqSource=m_nextSourcePq&&!nv12Source&&m_psoConvertPq;
+    m_nextSourcePq=false;
+    if(pqSource&&!CreatePqSourceResources())return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot, &m_renderSlotWaitNanos)) return false;
     HarvestNeuralTimings();
@@ -1162,6 +1248,12 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
         pre->SetGraphicsRootDescriptorTable(RootView,SRVGPU(SourceLumaSRV));pre->SetGraphicsRootDescriptorTable(RootReference,SRVGPU(SourceChromaSRV));
         const float none[4]={0,0,0,0};pre->SetGraphicsRoot32BitConstants(RootConstants,4,none,0);pre->DrawInstanced(3,1,0,0);
         Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
+    }else if(pqSource){
+        // Byte for byte the BGRA upload, into the R10G10B10A2 texture: the footprint
+        // only has to name the format the bytes are.
+        if(!m_pqSourceInCopyDest)Barrier(pre,m_decodedPq.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        d.pResource=m_decodedPq.Get();s.PlacedFootprint=m_uploadFootprint;s.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R10G10B10A2_UNORM;
+        pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedPq.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_pqSourceInCopyDest=false;
     }else{
         if(!m_sourceInCopyDest)Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
         d.pResource=m_decodedTexture.Get();s.PlacedFootprint=m_uploadFootprint;pre->CopyTextureRegion(&d,0,0,0,&s,nullptr);Barrier(pre,m_decodedTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_sourceInCopyDest=false;
@@ -1197,6 +1289,7 @@ bool D3D12Renderer::RenderFrameInternal(const uint8_t*bgra,size_t bytes,const fl
     // m_frameFence[slot] at a value the GPU had long passed, and the next frame reset
     // an allocator whose list could still be executing and overwrote the upload it
     // was reading.
+    m_framePq=pqSource;
     const bool rendered=RecordAndPresentFrame(slot,cmd,nvofFrame,temporalReset,frameTimeMs,identity);
     return SignalFrameSlot(slot)&&rendered;
 }
@@ -1265,7 +1358,14 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
     // is the reader of this one.
     if(!m_colorInRT)Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_colorInRT=true;
     D3D12_VIEWPORT vp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT sc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
-    auto crt=RTV(FrameCount);cmd->OMSetRenderTargets(1,&crt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoConvert.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(0));
+    auto crt=RTV(FrameCount);cmd->OMSetRenderTargets(1,&crt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if(m_framePq){
+        // An HDR frame lands in the same linear light, SDR white at 1.0, which is
+        // the one constant the conversion reads.
+        const float hdr[4]={m_sdrWhiteNits,0.0f,0.0f,0.0f};
+        cmd->SetPipelineState(m_psoConvertPq.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(PqSourceSRV));
+        cmd->SetGraphicsRoot32BitConstants(RootCompose,4,hdr,ComposeHdrOffset);
+    }else{cmd->SetPipelineState(m_psoConvert.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(0));}
     cmd->DrawInstanced(3,1,0,0);Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,GuideReadState);m_colorInRT=false;
 
     ++m_framesPresented;
@@ -1340,14 +1440,14 @@ bool D3D12Renderer::RecordAndPresentFrame(uint32_t slot,ID3D12GraphicsCommandLis
         D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);auto brt=RTV(bi);cmd->OMSetRenderTargets(1,&brt,FALSE,nullptr);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         const bool finalView=(m_debugView==DebugView::Final);
         SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
-        ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
+        ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,m_hdrOutput);
         // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
         // debug/fallback presentation pass is temporarily made pixel-shader readable.
         ID3D12Resource* debugPixelResource=nullptr;
         D3D12_RESOURCE_STATES debugBefore=GuideReadState;
         switch(m_debugView){
-            case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
-            case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
+            case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_hdrOutput?m_psoMotionDebugHdr.Get():m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
+            case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_hdrOutput?m_psoDepthDebugHdr.Get():m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
             case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
             default:cmd->SetPipelineState(presentPso);if(used)cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));}break;
         }
@@ -1372,17 +1472,24 @@ bool D3D12Renderer::RenderFrameForCache(const uint8_t*bgra,size_t bytes,const Fr
     return CaptureEvaluatedFrame(capture);
 }
 
+ID3D12PipelineState* D3D12Renderer::BackbufferProgram(bool scaled,bool hdrTarget)const{
+    if(hdrTarget)return m_psoPresentHdr.Get();
+    return scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
+}
+
 present_scale::Target D3D12Renderer::CurrentPresentTarget()const{
     // A comparison the capture's PSPresent cannot draw takes the compositor even at 1:1,
-    // and so do subtitles, which PSPresent never draws.
-    const bool compose=m_debugView==DebugView::Final&&
-        ((m_hasReference&&ComparisonNeedsCompositor(m_comparison))||m_subtitleShown);
+    // and so do subtitles, which PSPresent never draws, and an HDR backbuffer, which
+    // PSPresent cannot encode for.
+    const bool compose=(m_debugView==DebugView::Final&&
+        ((m_hasReference&&ComparisonNeedsCompositor(m_comparison))||m_subtitleShown))||m_hdrOutput;
     return present_scale::Choose(m_followWindow,m_psoPresentScaled!=nullptr,m_backbufferW,m_backbufferH,m_outputW,m_outputH,compose);
 }
 
-bool D3D12Renderer::CompilePresentProgram(const char*entry,const char*target,ComPtr<ID3DBlob>&blob){
+bool D3D12Renderer::CompilePresentProgram(const char*entry,const char*target,ComPtr<ID3DBlob>&blob,bool hdrOutput){
     ComPtr<ID3DBlob>err;
-    const HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,nullptr,nullptr,entry,target,
+    const D3D_SHADER_MACRO hdrDefines[]={{"HDR_OUTPUT","1"},{nullptr,nullptr}};
+    const HRESULT hr=D3DCompile(kPresentHlsl,sizeof(kPresentHlsl)-1,nullptr,hdrOutput?hdrDefines:nullptr,nullptr,entry,target,
                                 D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&blob,&err);
     if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}
     return true;
@@ -1409,7 +1516,8 @@ bool D3D12Renderer::ResizeSwapchain(uint32_t width,uint32_t height){
     for(auto& buffer:m_backbuffers)buffer.Reset();
     DXGI_SWAP_CHAIN_DESC1 desc{};
     m_swapchain->GetDesc1(&desc);
-    const HRESULT hr=m_swapchain->ResizeBuffers(SwapchainBuffers,width,height,DXGI_FORMAT_R8G8B8A8_UNORM,desc.Flags);
+    const HRESULT hr=m_swapchain->ResizeBuffers(SwapchainBuffers,width,height,
+        m_hdrOutput?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM,desc.Flags);
     if(FAILED(hr)){
         const HRESULT reason=DeviceRemovedReason();
         if(FAILED(reason))return DeviceHR(hr,"ResizeBuffers");
@@ -1427,19 +1535,133 @@ bool D3D12Renderer::ResizeSwapchain(uint32_t width,uint32_t height){
     return SUCCEEDED(hr);
 }
 
-bool D3D12Renderer::CreateReferenceResources(){
-    if(m_reference)return true;
-    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
-    // The descriptor below replaces the null view that frames still in flight may
-    // have bound, so nothing may be executing when it is written. Once per renderer.
+namespace {
+// Windows' "SDR content brightness" for the display a DXGI output drives, matched by
+// its GDI device name. 0 when the path is not found or the call is refused, which
+// SdrWhiteNits reads as BT.2408's 203 nits.
+uint32_t QuerySdrWhiteLevel(const wchar_t* gdiDeviceName)
+{
+    UINT32 pathCount=0,modeCount=0;
+    if(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS,&pathCount,&modeCount)!=ERROR_SUCCESS)return 0;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if(QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,&pathCount,paths.data(),&modeCount,modes.data(),nullptr)!=ERROR_SUCCESS)return 0;
+    for(UINT32 index=0;index<pathCount;++index){
+        const DISPLAYCONFIG_PATH_INFO& path=paths[index];
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;source.header.size=sizeof(source);
+        source.header.adapterId=path.sourceInfo.adapterId;source.header.id=path.sourceInfo.id;
+        if(DisplayConfigGetDeviceInfo(&source.header)!=ERROR_SUCCESS||wcscmp(source.viewGdiDeviceName,gdiDeviceName)!=0)continue;
+        DISPLAYCONFIG_SDR_WHITE_LEVEL white{};
+        white.header.type=DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;white.header.size=sizeof(white);
+        white.header.adapterId=path.targetInfo.adapterId;white.header.id=path.targetInfo.id;
+        if(DisplayConfigGetDeviceInfo(&white.header)==ERROR_SUCCESS)return white.SDRWhiteLevel;
+        return 0;
+    }
+    return 0;
+}
+} // namespace
+
+D3D12Renderer::DisplayHdrState D3D12Renderer::QueryDisplayHdr()const{
+    DisplayHdrState state{};
+    RECT window{};
+    if(!m_hwnd||!GetWindowRect(m_hwnd,&window))return state;
+    // A factory of its own on every call: one created before a display change
+    // enumerates the outputs as they were, and this is asked because of one.
+    ComPtr<IDXGIFactory1> factory;
+    if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))return state;
+    std::vector<ComPtr<IDXGIOutput>> outputs;
+    std::vector<hdr_policy::DesktopRect> rects;
+    ComPtr<IDXGIAdapter1> adapter;
+    for(UINT a=0;factory->EnumAdapters1(a,&adapter)!=DXGI_ERROR_NOT_FOUND;++a){
+        ComPtr<IDXGIOutput> output;
+        for(UINT o=0;adapter->EnumOutputs(o,&output)!=DXGI_ERROR_NOT_FOUND;++o){
+            DXGI_OUTPUT_DESC desc{};
+            if(SUCCEEDED(output->GetDesc(&desc))&&desc.AttachedToDesktop){
+                rects.push_back({desc.DesktopCoordinates.left,desc.DesktopCoordinates.top,desc.DesktopCoordinates.right,desc.DesktopCoordinates.bottom});
+                outputs.push_back(output);
+            }
+            output.Reset();
+        }
+        adapter.Reset();
+    }
+    const int under=hdr_policy::OutputUnderWindow({window.left,window.top,window.right,window.bottom},rects.data(),rects.size());
+    if(under<0)return state;
+    ComPtr<IDXGIOutput6> output6;
+    DXGI_OUTPUT_DESC1 desc{};
+    if(FAILED(outputs[size_t(under)].As(&output6))||FAILED(output6->GetDesc1(&desc)))return state;
+    state.known=true;
+    state.hdr=desc.ColorSpace==DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    state.maxLuminanceNits=desc.MaxLuminance;
+    state.device=desc.DeviceName;
+    state.sdrWhiteNits=hdr_policy::SdrWhiteNits(QuerySdrWhiteLevel(desc.DeviceName));
+    return state;
+}
+
+bool D3D12Renderer::SetHdrOutput(bool enable,float sdrWhiteNits){
+    if(std::isfinite(sdrWhiteNits)&&sdrWhiteNits>0.0f){
+        const float nits=std::clamp(sdrWhiteNits,80.0f,480.0f);
+        if(nits!=m_sdrWhiteNits){m_sdrWhiteNits=nits;m_presentStale=true;}
+    }
+    if(enable==m_hdrOutput)return true;
+    if(!m_swapchain||!m_device||!m_rtvHeap||m_gpuUnusable)return false;
+    if(enable&&!m_psoPresentHdr){
+        LOG("HDR output refused: this renderer was not built for it.");
+        return false;
+    }
+    // A format change is a ResizeBuffers, with every reference to the old buffers
+    // gone first, exactly as a resize.
     if(!WaitGPUForContinuedUse())return false;
-    // Same layout as the decoded texture, so the decoded upload footprint applies.
+    for(auto& buffer:m_backbuffers)buffer.Reset();
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    m_swapchain->GetDesc1(&desc);
+    const auto apply=[&](bool hdr)->bool{
+        const DXGI_FORMAT format=hdr?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_R8G8B8A8_UNORM;
+        const DXGI_COLOR_SPACE_TYPE space=hdr?DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020:DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+        HRESULT hr=m_swapchain->ResizeBuffers(SwapchainBuffers,desc.Width,desc.Height,format,desc.Flags);
+        if(FAILED(hr)){LOG("ResizeBuffers to "<<(hdr?"R10G10B10A2":"R8G8B8A8")<<" failed hr="<<HexText(hr));return false;}
+        UINT support=0;
+        hr=m_swapchain->CheckColorSpaceSupport(space,&support);
+        if(FAILED(hr)||!(support&DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)){
+            LOG("The output does not present the "<<(hdr?"ST 2084 / BT.2020":"sRGB")<<" colour space (hr="<<HexText(hr)<<" support="<<support<<").");
+            return false;
+        }
+        hr=m_swapchain->SetColorSpace1(space);
+        if(FAILED(hr)){LOG("SetColorSpace1 failed hr="<<HexText(hr));return false;}
+        return true;
+    };
+    const bool switched=apply(enable);
+    // A refused HDR switch goes back to the SDR swapchain it came from.
+    if(!switched&&enable&&!apply(false)){
+        const HRESULT reason=DeviceRemovedReason();
+        if(FAILED(reason))return DeviceHR(reason,"Restore SDR swapchain");
+    }
+    for(uint32_t i=0;i<SwapchainBuffers;++i){
+        if(!DeviceHR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer after colour space change"))return false;
+        m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));
+    }
+    m_hdrOutput=enable&&switched;m_presentStale=true;
+    if(m_hdrOutput)LOG("HDR output on: R10G10B10A2 swapchain, ST 2084 / BT.2020, SDR white at "<<m_sdrWhiteNits<<" nits.");
+    else LOG("HDR output "<<(enable?"refused; the swapchain stays":"off:")<<" R8G8B8A8 sRGB.");
+    return switched;
+}
+
+bool D3D12Renderer::CreateReferenceResources(bool pq){
+    if(m_reference&&m_referencePq==pq)return true;
+    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
+    // The descriptor below replaces the view that frames still in flight may have
+    // bound, so nothing may be executing when it is written. Once per renderer, and
+    // again only when an HDR original starts or stops being compared.
+    if(!WaitGPUForContinuedUse())return false;
+    // Same layout as the decoded texture, so the decoded upload footprint applies;
+    // R10G10B10A2 is four bytes a texel too, so the uploads serve either format.
+    const DXGI_FORMAT format=pq?DXGI_FORMAT_R10G10B10A2_UNORM:DXGI_FORMAT_B8G8R8A8_UNORM;
     auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-    auto src=Tex2D(DXGI_FORMAT_B8G8R8A8_UNORM,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);
+    auto src=Tex2D(format,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);
     ComPtr<ID3D12Resource> reference;
     if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&src,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&reference)),"Create comparison reference"))return false;
-    reference->SetName(L"Comparison_Reference_BGRA_sRGB");
-    for(uint32_t i=0;i<ReferenceUploads;++i){
+    reference->SetName(pq?L"Comparison_Reference_R10G10B10A2_PQ":L"Comparison_Reference_BGRA_sRGB");
+    for(uint32_t i=0;i<ReferenceUploads&&!m_referenceUpload[i];++i){
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; uint32_t rows=0; uint64_t rowBytes=0,total=0;
         if(!CreateUploadForTexture(src,m_referenceUpload[i],m_referenceMapped[i],fp,rows,rowBytes,total,"Create comparison reference upload")){
             for(uint32_t j=0;j<=i;++j){if(m_referenceUpload[j]&&m_referenceMapped[j])m_referenceUpload[j]->Unmap(0,nullptr);m_referenceUpload[j].Reset();m_referenceMapped[j]=nullptr;}
@@ -1447,17 +1669,35 @@ bool D3D12Renderer::CreateReferenceResources(){
         }
     }
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
-    srv.Format=DXGI_FORMAT_B8G8R8A8_UNORM;m_device->CreateShaderResourceView(reference.Get(),&srv,SRVCPU(ReferenceSRV));
-    m_reference=std::move(reference);m_referenceInCopyDest=true;
-    LOG("Comparison reference allocated on first use: "<<m_sourceW<<"x"<<m_sourceH<<" with "<<ReferenceUploads<<" uploads.");
+    srv.Format=format;m_device->CreateShaderResourceView(reference.Get(),&srv,SRVCPU(ReferenceSRV));
+    // A replaced texture holds nothing until the upload that asked for it is copied.
+    if(m_reference)m_hasReference=false;
+    m_reference=std::move(reference);m_referenceInCopyDest=true;m_referencePq=pq;
+    LOG("Comparison reference allocated: "<<m_sourceW<<"x"<<m_sourceH<<(pq?" R10G10B10A2 PQ":" BGRA sRGB")
+        <<" with "<<ReferenceUploads<<" uploads.");
     return true;
 }
 
-bool D3D12Renderer::UploadReferenceFrame(const uint8_t*bgra,size_t bytes){
+bool D3D12Renderer::CreatePqSourceResources(){
+    if(m_decodedPq)return true;
+    if(m_gpuUnusable||!m_device||!m_srvHeap)return false;
+    // A slot no frame has bound yet, so writing its view needs no drain.
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_R10G10B10A2_UNORM,m_sourceW,m_sourceH,D3D12_RESOURCE_FLAG_NONE);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_decodedPq)),"Create HDR source texture"))return false;
+    m_decodedPq->SetName(L"Video_Decoded_R10G10B10A2_PQ");
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+    srv.Format=DXGI_FORMAT_R10G10B10A2_UNORM;m_device->CreateShaderResourceView(m_decodedPq.Get(),&srv,SRVCPU(PqSourceSRV));
+    m_pqSourceInCopyDest=true;
+    LOG("HDR source texture allocated on the first PQ frame: "<<m_sourceW<<"x"<<m_sourceH<<" R10G10B10A2.");
+    return true;
+}
+
+bool D3D12Renderer::UploadReferenceFrame(const uint8_t*bgra,size_t bytes,bool pq){
     if(m_gpuUnusable)return false;
     const size_t row=size_t(m_sourceW)*4u;
     if(!bgra||bytes<row*m_sourceH)return false;
-    if(!CreateReferenceResources())return false;
+    if(!CreateReferenceResources(pq))return false;
     // The next submission (RenderFrame/PresentCurrent/capture) reuses this same slot
     // and records the texture copy, so its fence guards this upload buffer. The
     // buffer is shared with the slot ReferenceUploads away, whose last submission
@@ -1474,6 +1714,7 @@ void D3D12Renderer::RecordReferenceUpload(ID3D12GraphicsCommandList*cmd,uint32_t
     if(!m_referenceInCopyDest)Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION d{};d.pResource=m_reference.Get();d.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     D3D12_TEXTURE_COPY_LOCATION s{};s.pResource=m_referenceUpload[slot%ReferenceUploads].Get();s.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;s.PlacedFootprint=m_uploadFootprint;
+    if(m_referencePq)s.PlacedFootprint.Footprint.Format=DXGI_FORMAT_R10G10B10A2_UNORM;
     cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
     Barrier(cmd,m_reference.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     m_referenceInCopyDest=false;m_referencePending=false;m_hasReference=true;
@@ -1521,7 +1762,8 @@ void D3D12Renderer::SetPresentConstants(ID3D12GraphicsCommandList*cmd,const Colo
         cmp.loupeU,cmp.loupeV,cmp.loupeRadius,loupe?std::max(cmp.loupeMagnification,1.0f):0.0f,
         cmp.loupeLeftX,cmp.loupeLeftY,cmp.loupeRightX,cmp.loupeRightY,
         std::max(cmp.differenceGain,0.0f),cmp.differenceLuma?1.0f:0.0f,mask?1.0f:0.0f,cmp.maskInvert?1.0f:0.0f,
-        m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,0,0,0};
+        m_subtitleShown&&m_debugView==DebugView::Final?1.0f:0.0f,0,0,0,
+        m_sdrWhiteNits,useReference&&m_referencePq?1.0f:0.0f,0,0};
     cmd->SetGraphicsRoot32BitConstants(RootCompose,ComposeConstantCount,compose,0);
     cmd->SetGraphicsRootDescriptorTable(RootOverlay,SRVGPU(OverlaySRV));
 }
@@ -1983,7 +2225,7 @@ bool D3D12Renderer::PresentCurrent(){
 
     uint32_t bi=m_swapchain->GetCurrentBackBufferIndex();
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_PRESENT,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    RecordViewDraw(cmd,RTV(bi),CurrentPresentTarget());
+    RecordViewDraw(cmd,RTV(bi),CurrentPresentTarget(),m_hdrOutput);
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!DeviceHR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
@@ -1992,7 +2234,7 @@ bool D3D12Renderer::PresentCurrent(){
     return SignalFrameSlot(slot)&&presented;
 }
 
-void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target){
+void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCRIPTOR_HANDLE rtv,const present_scale::Target&target,bool hdrTarget){
     D3D12_VIEWPORT ovp{0,0,float(target.width),float(target.height),0,1};
     D3D12_RECT osc{0,0,LONG(target.width),LONG(target.height)};
     cmd->RSSetViewports(1,&ovp);cmd->RSSetScissorRects(1,&osc);
@@ -2001,13 +2243,13 @@ void D3D12Renderer::RecordViewDraw(ID3D12GraphicsCommandList*cmd,D3D12_CPU_DESCR
 
     const bool finalView=(m_debugView==DebugView::Final);
     SetPresentConstants(cmd,finalView?m_colorSettings:ColorSettings{},finalView?m_comparison:ComparisonSettings{},finalView&&m_hasReference,target.width,target.height);
-    ID3D12PipelineState* presentPso=target.scaled?m_psoPresentScaled.Get():m_psoPresent.Get();
+    ID3D12PipelineState* presentPso=BackbufferProgram(target.scaled,hdrTarget);
 
     ID3D12Resource* debugPixelResource=nullptr;
     D3D12_RESOURCE_STATES debugBefore=GuideReadState;
     switch(m_debugView){
-        case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
-        case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
+        case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(hdrTarget?m_psoMotionDebugHdr.Get():m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(2));break;
+        case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(hdrTarget?m_psoDepthDebugHdr.Get():m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(3));break;
         case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(presentPso);cmd->SetGraphicsRootDescriptorTable(RootView,SRVGPU(4));break;
         default:
             cmd->SetPipelineState(presentPso);
@@ -2046,7 +2288,9 @@ bool D3D12Renderer::CaptureComposedView(std::vector<uint8_t>&rgba,uint32_t&width
     auto*cmd=m_uploadCmds[slot].Get();
     if(!DeviceHR(cmd->Reset(m_uploadAllocators[slot].Get(),nullptr),"Reset composed-view list"))return false;
     ID3D12DescriptorHeap*heaps[]={m_srvHeap.Get()};cmd->SetDescriptorHeaps(1,heaps);
-    RecordViewDraw(cmd,RTV(ComposedRTV),target);
+    // The saved picture is 8-bit sRGB whatever the window shows, so it takes the SDR
+    // compositor; an HDR original in it is clipped at SDR white.
+    RecordViewDraw(cmd,RTV(ComposedRTV),target,false);
     Barrier(cmd,composed.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
     D3D12_TEXTURE_COPY_LOCATION source{};source.pResource=composed.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     D3D12_TEXTURE_COPY_LOCATION destination{};destination.pResource=readback.Get();destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;destination.PlacedFootprint=fp;

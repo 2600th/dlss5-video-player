@@ -147,6 +147,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // How the Difference view is drawn.
     add(compare, IDM_COMPARE_DIFFERENCE_LESS, L"menu.compare_difference_less"); add(compare, IDM_COMPARE_DIFFERENCE_MORE, L"menu.compare_difference_more"); add(compare, IDM_COMPARE_DIFFERENCE_LUMA, L"menu.compare_difference_luma"); AppendMenuW(compare, MF_SEPARATOR, 0, nullptr);
     add(compare, IDM_COMPARE_ZOOM, L"menu.compare_zoom"); add(compare, IDM_COMPARE_ZOOM_OUT, L"menu.compare_zoom_out"); add(compare, IDM_COMPARE_ZOOM_FIT, L"menu.compare_zoom_fit"); add(compare, IDM_COMPARE_LOUPE, L"menu.compare_loupe");
+    AppendMenuW(compare, MF_SEPARATOR, 0, nullptr); add(compare, IDM_COMPARE_HDR_AT_SDR, L"menu.compare_hdr_at_sdr");
     // Which image is on screen: the comparison modes and the four debug views
     // are the same question asked two ways, so they are one group.
     const std::wstring compareName = localizer.Get(L"menu.compare");

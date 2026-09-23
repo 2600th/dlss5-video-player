@@ -2,7 +2,9 @@
 
 #include "MediaSource.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cwchar>
 #include <string>
@@ -103,6 +105,87 @@ inline std::string ToneMapIdentityTerm(HdrSignal signal, double peakNits)
     if (signal == HdrSignal::Sdr) return {};
     return std::string("|hdr-sdr-hable-v1-") + (signal == HdrSignal::Hlg ? "hlg" : "pq") + "-peak" +
            std::to_string(static_cast<long long>(std::llround(peakNits)));
+}
+
+// The PQ presentation decode: the same HDR frame kept HDR, as ST 2084 BT.2020
+// R'G'B' in ten bits, for an HDR display to show as it was graded. HLG is
+// converted to PQ on the way (zimg's nominal 1000-nit HLG display), because the
+// swapchain has one colour space. The output is planar 10-bit for the trailing
+// `-pix_fmt x2bgr10le`, which is R10G10B10A2 byte for byte: four bytes a pixel,
+// so the pipe, the frame pool and the upload keep the BGRA sizes.
+inline std::wstring PqPresentationFilter(HdrSignal signal, bool matrixDeclared)
+{
+    return std::wstring(L"zscale=tin=") + ZscaleTransferName(signal) +
+           (matrixDeclared ? L"" : L":min=bt2020nc") +
+           L":pin=bt2020:t=smpte2084:p=bt2020:npl=100,format=gbrp10le";
+}
+
+// --- HDR output ----------------------------------------------------------
+
+// BT.2408's reference white, for an SDR frame on an HDR display when Windows does
+// not say what its "SDR content brightness" is.
+inline constexpr float kReferenceWhiteNits = 203.0f;
+
+// DISPLAYCONFIG_SDR_WHITE_LEVEL::SDRWhiteLevel is a multiplier of 80 nits in
+// thousandths (1000 = 80 nits); 0 is "not answered". The Windows slider spans
+// 80..480 nits, so anything outside it is not a setting.
+inline float SdrWhiteNits(uint32_t sdrWhiteLevel)
+{
+    if (sdrWhiteLevel == 0) return kReferenceWhiteNits;
+    const float nits = static_cast<float>(sdrWhiteLevel) * 80.0f / 1000.0f;
+    return std::clamp(nits, 80.0f, 480.0f);
+}
+
+struct DesktopRect {
+    long left{}, top{}, right{}, bottom{};
+};
+
+// The output a window is on: the one holding the largest part of it, the rule
+// DXGI's own GetContainingOutput follows, computed here from the desktop
+// rectangles so it can be asked again after every move without a swapchain and
+// tested without a monitor. -1 when the window is on none of them - minimised
+// windows sit at -32000.
+inline int OutputUnderWindow(const DesktopRect& window, const DesktopRect* outputs, size_t count)
+{
+    int best = -1;
+    long long bestArea = 0;
+    for (size_t index = 0; index < count; ++index) {
+        const DesktopRect& output = outputs[index];
+        const long long width = static_cast<long long>(std::min(window.right, output.right)) - std::max(window.left, output.left);
+        const long long height = static_cast<long long>(std::min(window.bottom, output.bottom)) - std::max(window.top, output.top);
+        if (width <= 0 || height <= 0) continue;
+        if (width * height > bestArea) {
+            bestArea = width * height;
+            best = static_cast<int>(index);
+        }
+    }
+    return best;
+}
+
+// What the original member is decoded as while it is on screen. PQ - the HDR
+// picture - only when all of these hold:
+//  * the swapchain is HDR: an SDR one would clip it;
+//  * the source is HDR;
+//  * the viewer has not asked to compare at SDR, which shows the original
+//    exactly as the model saw it, tone mapped;
+//  * nothing reads the decoded frame as SDR input: the live upscaler and the
+//    guide estimator both take 8-bit SDR;
+//  * the view does not compute with the original's values (the Mix, the mask,
+//    Difference, 2x2): mixing PQ light with the neural frame's SDR light, or
+//    subtracting one from the other, measures the tone map rather than the
+//    model, so those views compare at SDR.
+struct OriginalPresentation {
+    bool hdrSwapchain{};
+    bool sourceHdr{};
+    bool compareAtSdr{};
+    bool sourceFeedsSdrConsumer{};
+    bool viewCombinesPixels{};
+};
+
+inline bool DecodeOriginalAsPq(const OriginalPresentation& state)
+{
+    return state.hdrSwapchain && state.sourceHdr && !state.compareAtSdr && !state.sourceFeedsSdrConsumer &&
+           !state.viewCombinesPixels;
 }
 
 } // namespace hdr_policy

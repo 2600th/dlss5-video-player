@@ -24,6 +24,7 @@ public:
     }
     PixelLayout Layout()const override{return decoder_.PixelLayout();}
     void PreferNv12(bool prefer)override{preferNv12_=prefer;}
+    void PreferHdrPresentation(bool pq)override{decoder_.SetHdrPresentation(pq);}
     void Close()override{decoder_.Close();}
     VideoReadResult Read(VideoFrame& frame,std::stop_token stop)override{
         return decoder_.ReadNextAvailable(frame,stop);
@@ -178,6 +179,7 @@ struct SynchronizedPlayback::Impl {
     // What the caller asked the members to decode to. Every segment opened
     // later this session inherits it, so one answer covers the whole pair.
     bool preferNv12{};
+    bool originalHdrPresentation{};
 
     std::shared_ptr<const SynchronizedFramePair> Publish(SynchronizedFramePair&& pair)
     {
@@ -670,6 +672,14 @@ SynchronizedPlayback::SynchronizedPlayback(ISynchronizedFrameSource& original,
 SynchronizedPlayback::~SynchronizedPlayback(){Close();}
 SynchronizedPlayback::SynchronizedPlayback(SynchronizedPlayback&&) noexcept=default;
 SynchronizedPlayback& SynchronizedPlayback::operator=(SynchronizedPlayback&&) noexcept=default;
+
+bool SynchronizedPlayback::SetOriginalHdrPresentation(bool pq)
+{
+    if(!impl_->original||impl_->originalHdrPresentation==pq)return false;
+    impl_->originalHdrPresentation=pq;
+    impl_->original->PreferHdrPresentation(pq);
+    return true;
+}
 
 bool SynchronizedPlayback::Open(const std::filesystem::path& originalPath,
                                 const std::filesystem::path& neuralPath,std::stop_token stop,

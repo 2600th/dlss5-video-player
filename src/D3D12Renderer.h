@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 #include "D3D12FenceWait.h"
 #include "DLSSBackend.h"
@@ -196,6 +197,17 @@ inline bool ComparisonReadsReference(const ComparisonSettings& comparison)
            comparison.mask;
 }
 
+// Whether the present computes with the original's pixel values rather than only
+// placing it beside or instead of the neural frame: the Mix off 100%, the mask,
+// Difference, and 2x2 (whose panes include both). Those need the original as the
+// model saw it - tone mapped, for an HDR source - so an HDR display compares them
+// at SDR (HdrPolicy.h) instead of mixing PQ light with SDR light.
+inline bool ComparisonCombinesPixels(const ComparisonSettings& comparison)
+{
+    return comparison.strength != 1.0f || comparison.mask || comparison.mode == ComparisonMode::Blend ||
+           comparison.mode == ComparisonMode::Difference || comparison.mode == ComparisonMode::Quad;
+}
+
 inline bool ComparisonNeedsCompositor(const ComparisonSettings& comparison)
 {
     return (comparison.mode != ComparisonMode::Neural && comparison.mode != ComparisonMode::Blend) ||
@@ -364,6 +376,44 @@ public:
     // its presents and its captures are exactly as they were. Selected before
     // Initialize, which compiles the scaled present only when it is asked for.
     void SetPresentFollowsWindow(bool follow) { m_followWindow = follow; }
+
+    // HDR output (P3.1). A renderer that is allowed it compiles the HDR compositor
+    // at Initialize and can then switch its swapchain between 8-bit sRGB and
+    // R10G10B10A2 in the SMPTE ST 2084 / BT.2020 colour space. Only the visible
+    // player asks: it requires SetPresentFollowsWindow, the offline carrier never
+    // presents anything anyone sees, and the cache capture (PSPresent into the
+    // BGRA8 cache target) is untouched either way - HDR is the backbuffer alone.
+    // Selected before Initialize.
+    void SetHdrOutputAllowed(bool allow) { m_hdrAllowed = allow; }
+    // What the output under the window can show, asked of DXGI on each call: the
+    // window may have moved to another monitor, and the user may have switched
+    // Windows HDR on or off. sdrWhiteNits is the Windows "SDR content brightness"
+    // (DISPLAYCONFIG_SDR_WHITE_LEVEL), or BT.2408's 203 nits where it cannot be read.
+    struct DisplayHdrState {
+        bool known = false;         // an output was found under the window
+        bool hdr = false;           // it is in HDR mode (ST 2084 / BT.2020 desktop)
+        float sdrWhiteNits = 203.0f;
+        float maxLuminanceNits = 0.0f;
+        std::wstring device;        // \\.\DISPLAYn, for the log
+    };
+    DisplayHdrState QueryDisplayHdr() const;
+    // Switches the swapchain. Never touches the Windows HDR setting and never calls
+    // SetHDRMetaData. Enabling fails - and leaves the swapchain in SDR - when HDR
+    // output was not allowed, or the output refuses the ST 2084 colour space; the
+    // return value is whether the swapchain is now what was asked for. The SDR white
+    // level applies to everything SDR on an HDR swapchain: the neural frame, SDR
+    // sources and the overlays.
+    bool SetHdrOutput(bool enable, float sdrWhiteNits);
+    bool HdrOutputActive() const { return m_hdrOutput; }
+    // Distinct for every renderer this process builds, so a caller that applied a
+    // setting to one can tell a replacement from it even at the same address.
+    uint64_t Instance() const { return m_instance; }
+    float HdrSdrWhiteNits() const { return m_sdrWhiteNits; }
+    // The bytes the NEXT RenderFrame receives are ffmpeg's x2bgr10le: R10G10B10A2
+    // holding PQ BT.2020 (VideoDecoder::SetHdrPresentation). Consumed by that one
+    // frame, so a caller that forgets to say so gets the SDR reading, never a stale
+    // HDR one. Ignored for an NV12 source.
+    void SetNextSourcePq(bool pq) { m_nextSourcePq = pq; }
     uint32_t BackbufferW() const { return m_backbufferW; }
     uint32_t BackbufferH() const { return m_backbufferH; }
 
@@ -431,11 +481,14 @@ public:
     const ComparisonSettings& GetComparison() const { return m_comparison; }
     // Compiles one entry point of the presentation program the way CreatePipelines
     // does, without a device, so a test can check the text on any machine.
+    // hdrOutput: the HDR backbuffer build (HDR_OUTPUT defined).
     static bool CompilePresentProgram(const char* entry, const char* target,
-                                      Microsoft::WRL::ComPtr<ID3DBlob>& blob);
+                                      Microsoft::WRL::ComPtr<ID3DBlob>& blob, bool hdrOutput = false);
     // Source-size BGRA reference (the original member of the current pair). May be
     // called before RenderFrame or PresentCurrent; the copy rides on that submission.
-    bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes);
+    // pq: the bytes are x2bgr10le PQ BT.2020 rather than 8-bit sRGB BGRA (see
+    // SetNextSourcePq); the reference texture takes the matching format.
+    bool UploadReferenceFrame(const uint8_t* bgra, size_t bytes, bool pq = false);
     // A reference has been uploaded, or is queued behind the next submission.
     bool HasReference() const { return m_hasReference || m_referencePending; }
     // The tags the compositor draws on the picture: premultiplied BGRA, one row of
@@ -529,9 +582,11 @@ private:
     static constexpr uint32_t RootOverlay = 3, RootCompose = 4;
     // 16 present parameters plus the capture pass's source texel size.
     static constexpr uint32_t PresentConstantCount = 20;
-    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs; see the Compose cbuffer
-    // in D3D12Renderer.cpp.
-    static constexpr uint32_t ComposeConstantCount = 32;
+    // Pane, Label, LabelW, Target, Loupe, LoupeAt, Diff, Subs, Hdr; see the Compose
+    // cbuffer in D3D12Renderer.cpp.
+    static constexpr uint32_t ComposeConstantCount = 36;
+    // Where Hdr sits in Compose, for the PQ source conversion that sets it alone.
+    static constexpr uint32_t ComposeHdrOffset = 32;
     static constexpr uint32_t ReferenceSRV = 6;
     // NV12 source planes, bound at t0/t1 for the one conversion draw.
     static constexpr uint32_t SourceLumaSRV = 7, SourceChromaSRV = 8;
@@ -549,7 +604,10 @@ private:
     // capture to read. Written when the pass first runs; nothing reads them before.
     static constexpr uint32_t TemporalTableSRV = 15, TemporalTableSize = 5;
     static constexpr uint32_t TemporalOutputSRV = TemporalTableSRV + 2 * TemporalTableSize;
-    static constexpr uint32_t SRVCount = TemporalOutputSRV + 2;
+    // An HDR source frame (SetNextSourcePq), R10G10B10A2, for the one draw that
+    // converts it into the linear colour texture.
+    static constexpr uint32_t PqSourceSRV = TemporalOutputSRV + 2;
+    static constexpr uint32_t SRVCount = PqSourceSRV + 1;
     // RTV heap: FrameCount backbuffers, then [+0] DLSS colour, [+1] motion, [+2] cache
     // output, [+3] capture luma, [+4] capture chroma, [+5] decoded texture (NV12 source),
     // [+6] the composed-view capture (CaptureComposedView), [+7] and [+8] the two
@@ -573,7 +631,10 @@ private:
                                   Microsoft::WRL::ComPtr<ID3DBlob>& blob);
     bool CreateVideoResources();
     // The comparison reference and its uploads, on first use; see CreateVideoResources.
-    bool CreateReferenceResources();
+    // pq selects the texture's format, and a reference of the other kind is replaced.
+    bool CreateReferenceResources(bool pq = false);
+    // The HDR source texture, on the first PQ frame.
+    bool CreatePqSourceResources();
     bool InitializeDLSS(bool& gpuSynchronized);
     bool CreateUploadForTexture(const D3D12_RESOURCE_DESC& desc,
                                 Microsoft::WRL::ComPtr<ID3D12Resource>& upload,
@@ -642,8 +703,13 @@ private:
                              const uint8_t* pixels, uint32_t width, uint32_t height,
                              uint32_t bytesPerPixel, uint32_t srvIndex, const wchar_t* name);
     // PresentCurrent's draw into `rtv`: viewport, constants, program, the view it reads.
+    // hdrTarget: `rtv` is the HDR backbuffer, which takes the HDR compositor.
     void RecordViewDraw(ID3D12GraphicsCommandList* cmd, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
-                        const present_scale::Target& target);
+                        const present_scale::Target& target, bool hdrTarget);
+    // The program and view the backbuffer pass binds for the current debug view,
+    // shared by the frame path and PresentCurrent so the two cannot disagree about
+    // which program an HDR backbuffer takes.
+    ID3D12PipelineState* BackbufferProgram(bool scaled, bool hdrTarget) const;
     // What the backbuffer pass draws into: the window-sized backbuffer through the
     // scaled present, or - when the sizes agree, or the renderer does not follow its
     // window - the output's size through PSPresent, exactly as before.
@@ -703,6 +769,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentScaled; // only when m_followWindow
+    // HDR output, only when m_hdrAllowed: PSPresentScaled and the two debug views
+    // compiled with HDR_OUTPUT into R10G10B10A2, and the PQ source conversion.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresentHdr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebugHdr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebugHdr;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvertPq;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCacheCapture; // present shader into a BGRA8 target
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureLuma;   // present shader into an R8 Y plane
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoCaptureChroma; // ...and a half-size R8G8 UV plane
@@ -738,6 +810,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_stableOutput[2];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_stableSource[2];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_reference;   // source-size BGRA original member
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedPq;   // source-size R10G10B10A2 PQ frame
     Microsoft::WRL::ComPtr<ID3D12Resource> m_referenceUpload[ReferenceUploads];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_labelAtlas;  // premultiplied BGRA tags, see SetLabelAtlas
     Microsoft::WRL::ComPtr<ID3D12Resource> m_mask;        // R8 spatial mask, see SetMask
@@ -811,6 +884,15 @@ private:
     bool m_dlssEnabled = true;
     bool m_requestedTearing = false;
     bool m_followWindow = false;
+    static inline std::atomic<uint64_t> s_instances{0};
+    const uint64_t m_instance = ++s_instances;
+    bool m_hdrAllowed = false;
+    bool m_hdrOutput = false;       // the swapchain is R10G10B10A2 / ST 2084
+    float m_sdrWhiteNits = 203.0f;
+    bool m_nextSourcePq = false;    // consumed by the next RenderFrame
+    bool m_framePq = false;         // the frame being recorded was a PQ one
+    bool m_referencePq = false;     // m_reference is R10G10B10A2 PQ
+    bool m_pqSourceInCopyDest = true;
     uint32_t m_backbufferW = 0, m_backbufferH = 0;
     bool m_allowTearing = false;
     bool m_recreateRequested = false;
