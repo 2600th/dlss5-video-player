@@ -829,6 +829,36 @@ void manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test()
     CHECK(!IsReusableNeuralCacheManifest(manifest));
 }
 
+// P1.16: the manifest's JsonEscape wrote "" for a control character without a
+// short form, so the whole field came back as a different, valid value - an
+// environment term of the render identity among them. Every control character
+// now escapes, and the reader takes back exactly what the writer produces.
+void manifest_fields_with_control_characters_round_trip_test()
+{
+    std::string every;
+    for (char character = 1; character < 0x20; ++character) every.push_back(character);
+    CHECK_EQ(std::string("\\u0001\\b\\t\\n\\f\\r\\u001f\\\"\\\\"),
+             JsonEscape(std::string("\x01\b\t\n\f\r\x1f\"\\")));
+    CHECK_EQ(std::string("caf\xc3\xa9"), JsonEscape("caf\xc3\xa9"));
+
+    auto manifest = CompleteRenderManifest();
+    manifest.state = NeuralCacheState::Complete;
+    manifest.neuralDigest = std::string(64, 'c');
+    manifest.environment = {"app" + every, "installation\x01", "driver\x1b[0m", std::string(64, 'd')};
+    const auto parsed = ParseNeuralCacheManifest(SerializeNeuralCacheManifest(manifest));
+    CHECK(parsed.has_value());
+    if (parsed) CHECK(manifest.environment == parsed->environment);
+    // Strict still: only the escapes the writer produces.
+    for (const std::string_view foreign : {"\\u0020", "\\u00e9", "\\u12ab", "\\u00G1", "\\u001"}) {
+        std::string planted = SerializeNeuralCacheManifest(manifest);
+        const size_t at = planted.find(R"(installation\u0001)");
+        CHECK(at != std::string::npos);
+        if (at == std::string::npos) continue;
+        planted.insert(at + 12, foreign);
+        CHECK(!ParseNeuralCacheManifest(planted).has_value());
+    }
+}
+
 void source_and_render_promotion_are_hash_validated_and_immutable_test()
 {
     TempDirectory fixture;
@@ -5171,6 +5201,7 @@ int wmain(int argc, wchar_t* argv[])
     hashed_runtime_set_covers_the_worker_and_the_lock_set_does_not_test();
     runtime_digest_is_order_independent_byte_sensitive_and_rejects_duplicates_test();
     manifest_round_trip_rejects_partial_duplicate_and_unknown_state_test();
+    manifest_fields_with_control_characters_round_trip_test();
     source_and_render_promotion_are_hash_validated_and_immutable_test();
     promotion_waits_out_a_transient_lock_and_names_the_failing_step_test();
     interrupted_staging_is_never_reusable_and_clear_stays_inside_root_test();

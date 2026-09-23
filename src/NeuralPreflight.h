@@ -13,6 +13,7 @@
 // back to the driver version, so that fallback is on the receipt rather than
 // silent.
 
+#include "JsonEscape.h"
 #include "RuntimePolicy.h"
 
 #include <windows.h>
@@ -113,7 +114,7 @@ struct RuntimeModuleReceipt {
 std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::path& directory,
                                                          std::span<const std::wstring_view> names);
 
-std::string JsonEscape(std::string_view text);
+// JsonEscape (JsonEscape.h) over the UTF-8 of `text`.
 std::string JsonEscapeWide(std::wstring_view text);
 std::string BuildPreflightFailureJson(std::wstring_view detail);
 

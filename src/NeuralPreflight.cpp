@@ -592,31 +592,6 @@ std::vector<RuntimeModuleReceipt> DescribeRuntimeModules(const std::filesystem::
     return modules;
 }
 
-std::string JsonEscape(std::string_view text)
-{
-    std::string escaped;
-    escaped.reserve(text.size() + 8);
-    for (const unsigned char character : text) {
-        switch (character) {
-            case '"': escaped += "\\\""; break;
-            case '\\': escaped += "\\\\"; break;
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            case '\t': escaped += "\\t"; break;
-            default:
-                if (character < 0x20) {
-                    constexpr char digits[] = "0123456789abcdef";
-                    escaped += "\\u00";
-                    escaped += digits[character >> 4];
-                    escaped += digits[character & 0xF];
-                } else {
-                    escaped += static_cast<char>(character);
-                }
-        }
-    }
-    return escaped;
-}
-
 std::string JsonEscapeWide(std::wstring_view text)
 {
     return JsonEscape(Utf8(text));

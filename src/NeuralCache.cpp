@@ -3,6 +3,7 @@
 #include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "GuideControls.h"
+#include "JsonEscape.h"
 #include "LiveSessionPolicy.h"
 #include "Log.h"
 
@@ -120,27 +121,6 @@ void AppendField(std::string& output, std::string_view name, std::string_view va
     output.push_back('\n');
 }
 
-std::string JsonEscape(std::string_view value)
-{
-    std::string result;
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': result += "\\\""; break;
-        case '\\': result += "\\\\"; break;
-        case '\b': result += "\\b"; break;
-        case '\f': result += "\\f"; break;
-        case '\n': result += "\\n"; break;
-        case '\r': result += "\\r"; break;
-        case '\t': result += "\\t"; break;
-        default:
-            if (character < 0x20) return {};
-            result.push_back(static_cast<char>(character));
-            break;
-        }
-    }
-    return result;
-}
-
 std::string_view KindName(NeuralCacheEntryKind kind)
 {
     return kind == NeuralCacheEntryKind::Source ? "source" : "render";
@@ -197,6 +177,23 @@ public:
             case 'n': result.push_back('\n'); break;
             case 'r': result.push_back('\r'); break;
             case 't': result.push_back('\t'); break;
+            // What JsonEscape writes for the other control characters, and
+            // nothing else: the writer never produces any other \u escape.
+            case 'u': {
+                if (bytes_.size() - position_ < 4 || bytes_.substr(position_, 2) != "00")
+                    return std::nullopt;
+                int value = 0;
+                for (const char digit : bytes_.substr(position_ + 2, 2)) {
+                    const int nibble = digit >= '0' && digit <= '9' ? digit - '0'
+                                     : digit >= 'a' && digit <= 'f' ? digit - 'a' + 10 : -1;
+                    if (nibble < 0) return std::nullopt;
+                    value = value * 16 + nibble;
+                }
+                if (value >= 0x20) return std::nullopt;
+                result.push_back(static_cast<char>(value));
+                position_ += 4;
+                break;
+            }
             default: return std::nullopt;
             }
         }
