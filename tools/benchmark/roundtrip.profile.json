@@ -1,0 +1,78 @@
+{
+  "rt-cpu-dump": {
+    "guides": "mv=cpu,depth=1",
+    "worker_flags": [
+      "--guide-dump",
+      "{work}/guides/{clip}/cpu"
+    ],
+    "description": "shipped state, CPU block matcher forced, guides dumped (the reference a grid file can reproduce); NRNormGovernor=0 because the add-on's default governor makes repeats of one configuration differ (docs/measurements/knobs-653-20260924)",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "rt-cpu-replay": {
+    "guides": "mv=file:{work}/guides/{clip}/cpu/mv,depth=file:{work}/guides/{clip}/cpu/depth",
+    "description": "shipped state, motion and depth read back from rt-cpu-dump's files; NRNormGovernor=0 because the add-on's default governor makes repeats of one configuration differ (docs/measurements/knobs-653-20260924)",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "rt-shipped-dump": {
+    "guides": "mv=1,depth=1",
+    "worker_flags": [
+      "--guide-dump",
+      "{work}/guides/{clip}/shipped"
+    ],
+    "description": "shipped state and shipped guides (hardware flow where present), guides dumped; NRNormGovernor=0 because the add-on's default governor makes repeats of one configuration differ (docs/measurements/knobs-653-20260924)",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "rt-shipped-depth-replay": {
+    "guides": "mv=1,depth=file:{work}/guides/{clip}/shipped/depth",
+    "description": "shipped state, hardware motion, depth read back from rt-shipped-dump's files; NRNormGovernor=0 because the add-on's default governor makes repeats of one configuration differ (docs/measurements/knobs-653-20260924)",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  }
+}

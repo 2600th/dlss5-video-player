@@ -1,4 +1,5 @@
 #include "CrashDump.h"
+#include "GuideFiles.h"
 #include "NarrowText.h"
 #include "PlatformPaths.h"
 #include "Log.h"
@@ -570,8 +571,18 @@ int wmain(int argc, wchar_t** argv)
     std::vector<std::wstring_view> values;
     values.reserve(static_cast<size_t>(argc));
     for (int index = 0; index < argc; ++index) values.emplace_back(argv[index]);
+    // The benchmark's guide sources (GuideFiles.h) come off the line before the
+    // shared parser sees it, so that parser - and the cache key and receipt built
+    // from what it accepts - only ever meets the canonical guide string.
+    std::vector<std::wstring> line;
+    guide_files::Sources guideFiles;
+    if (!guide_files::ExtractBenchmarkArguments(values, line, guideFiles)) return 2;
+    values.assign(line.begin(), line.end());
     const auto arguments = neural_worker_detail::ParseWorkerArguments(values);
     if (!arguments) return 2;
+    // Only a single-shot job can carry them: a resident helper's jobs arrive over
+    // its channel, which has no field for them, and the probe renders no guides.
+    if (guideFiles.Active() && (arguments->preflight || arguments->command)) return 2;
     MetadataWriter metadata(arguments->metadata);
     const uint64_t jobId = arguments->request.jobId;
     auto fail = [&](std::wstring detail) {
@@ -676,6 +687,7 @@ int wmain(int argc, wchar_t** argv)
 
     NeuralRenderRequest request = arguments->request;
     request.renderWindow = renderWindow;
+    request.guideFiles = guideFiles;
     NeuralRenderResult result;
     const bool pumped = RunWithMessagePump([&] {
         OfflineNeuralRenderer renderer;

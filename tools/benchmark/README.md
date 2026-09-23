@@ -18,12 +18,17 @@ python tools/benchmark/run.py --ablation --repeats 2   # every profile in run.AB
 python tools/benchmark/run.py --profiles depth-constant depth-proxy  # the depth A/B
 python tools/benchmark/analyze.py                      # build-upscaling/benchmark-work/analysis/report.md
 python tools/benchmark/blind.py --pairs-per-clip 3     # sealed A/B pairs for one-pass vs two-pass
+python tools/benchmark/guidefiles.py truth             # true depth/motion of the near/far clips
+python tools/benchmark/guidefiles.py prove             # guide files render byte-identically to the estimator
 ```
 
 Requirements: Python 3.12 with `requirements.txt`, `external/ffmpeg/bin/ffmpeg.exe`
 and `ffprobe.exe`, a built `build-upscaling/Release/neural-runtime/NeuralWorker.exe`
 with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
-(NVML sampling degrades gracefully when it is missing).
+(NVML sampling degrades gracefully when it is missing). In a checkout without the
+staged `external/` binaries, set `DLSS_BENCHMARK_BUILD` to a scratch directory (it
+replaces `build-upscaling/` for everything below) and `DLSS_BENCHMARK_FFMPEG` to a
+directory holding `ffmpeg.exe` and `ffprobe.exe`.
 
 ## Layout
 
@@ -35,6 +40,8 @@ with the RenoDX/ReShade runtime beside it, and an NVIDIA GPU with `nvml.dll`
 | `cutmirror.py` | The mirror of `src/TemporalGuides.cpp`'s cut path (analysis grid, cell luma, global search, histogram overlap, per-cell match costs, both criteria, the debounce), shared by `analyze.py` and `cutlab.py` |
 | `cutlab.py` | Scores the cut criterion itself against the manifest's labelled cuts and sweeps it; `--ladder` scores the four Scene cuts rungs the player offers; needs no GPU, no worker and no render |
 | `duplab.py` | Scores `scene_cut::IsDuplicateDecodedPair` - frame generation's hold-a-repeat test - on corpus clips re-timed onto twos through libx264, against the real pairs of the same files and a small object crossing a still frame; needs no GPU |
+| `guidefiles.py` | The `depth=file:` / `mv=file:` layout (PFM read/write, area average), `truth` for the near/far clips, `convert` for offline depth maps, `compare`, and `prove` - the byte-identical round trip |
+| `roundtrip.profile.json` | The four arms `guidefiles.py prove` renders |
 | `blind.py` | Randomized A/B stills + excerpts with a sealed `key.json`; every candidate frame is provably inside a manifest shot and each excerpt is clipped to that shot, so `--seconds` caps a length it does not guarantee; `--score` tallies a ballot |
 | `common.py` | Paths, `ffprobe`/`framemd5` helpers, NWR1 protocol v6 decoder (progress, result, preflight, segment, timeline, and the render's own temporal metrics - the in-app counterpart of `analyze.py`'s flicker and sigma; unknown kinds are skipped by payload length, so a helper that adds one stays readable) |
 | `build-upscaling/benchmark-corpus/` | Generated clips and `manifest.json` |
@@ -68,6 +75,8 @@ must never reset.
 | `zoom-fast` | cuts | 1.5 s centre zoom 1.0× → 2.2× on a fractal still, which no global translation can model. No cut |
 | `dissolve` | cuts | 0.7 s cross-fade between two shots. `cuts` is empty and `soft_cuts` marks the fade: one reset inside it is tolerated, a second is a false positive |
 | `flash-exposure` | cuts | 3 s slow pan with a 4-frame flash and a sustained exposure step. Neither is a cut; both collapse the luma histogram |
+| `depth-pan` | depth | Near/far **landscape pan** from three layers at known depth and whole-pixel speed: fractal sky at 0.9 moving 3 px/frame, hills at 0.5 moving 9, roadside posts at 0.15 moving 24. True guides from `guidefiles.py truth`. No cut |
+| `depth-subject` | depth | Near/far **interior**: a fractal room at 0.85 drifting 1 px/frame behind a person-sized textured ellipse at 0.2 crossing 14 px/frame and bobbing ±18 px. True guides from `guidefiles.py truth`. No cut |
 | `faces` | faces | **Not synthetic**: seconds 12-20 of `build-upscaling/runtime-comparison-20260907/fixtures/mafia-60s.mkv` (frontal/three-quarter faces, skin, hair). Skipped when the fixture is absent |
 | `real-film-cuts` | real | **NR-processed capture** (see below): 102 frames, four trailer shots cut at 20/47/70, grain and motion blur, a two-frame muzzle flash *inside* one shot that is deliberately unlabelled — then a static paused player frame from local 87, which is why the cut at 87 is the demo's scene boundary and not a film edit. 37 % of its consecutive pairs carry no motion (frozen tail plus 23.976→30 fps capture duplicates) |
 | `real-game-cuts` | real | **NR-processed capture**: 68 frames, one hard cut at 32 from a race exterior to a store interior, with the game's own static HUD over fast camera motion |
@@ -165,8 +174,8 @@ the evidence that rung was chosen on.
 
 A profile is `{guides, overrides, passes}`:
 
-- `guides` is the canonical `--guides` string (`mv=1,depth=1`). A disabled guide is still uploaded with neutral values (motion 0, depth 0.75) so the DLSS input contract is unchanged.
-- `overrides` are exact-case `[RenoDX.DLSS5]` keys written into the profile's `ReShade.ini` after the four managed keys (`EnableHooks=2`, `NeuralUplift=1`, `NRFollowInputRes=0`, `NRResolutionScale=1`). The resolution pair replaced 4.70's single `NREnableUpscaling=0` when 6.x split the working resolution into a mode and a scale; the scale is a multiplier, so `1` is native. Known RenoDX 6.5.3 keys: `NRIntensity`, `NRLocalTone`, `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset` (0-3), `NRStyle` (0 default, 1 natural, 2 cinematic), `NRAutoMask`, `NRPasses` (1-4) and `NRChainedHistory`.
+- `guides` is the `--guides` string: the canonical `mv=0|1,depth=0|1`, or the benchmark-only guide sources `mv=cpu`, `mv=file:<dir>` and `depth=file:<dir>` (see *Guide files* below). A disabled guide is still uploaded with neutral values (motion 0, depth 0.75) so the DLSS input contract is unchanged. `{clip}` and `{work}` are replaced per run.
+- `overrides` are exact-case `[RenoDX.DLSS5]` keys written into the profile's `ReShade.ini` after the managed keys: the player's four (`EnableHooks=2`, `NeuralUplift=1`, `NRFollowInputRes=0`, `NRResolutionScale=1`) and `ConfigVersion=6`, the schema stamp the add-on writes on first load - without it 6.5.3 migrates the section as schema v0 and resets `NRChainedHistory` to 1. The resolution pair replaced 4.70's single `NREnableUpscaling=0` when 6.x split the working resolution into a mode and a scale; the scale is a multiplier, so `1` is native. Known RenoDX 6.5.3 keys: `NRIntensity`, `NRLocalTone`, `NRLocalStructure`, `NRSkinStructure`, `NRColorStrength`, `NRPreset` (0-3), `NRStyle` (0 default, 1 natural, 2 cinematic), `NRAutoMask`, `NRPasses` (1-4) and `NRChainedHistory`, which the player writes; and `NRGlobalTone` (default 1), `NRUICorrection` (default 0) and `NRNormGovernor` (0 off, 1 slew, 2 stable; default 2), which it does not. **The default governor makes a repeat of one configuration differ from itself** on this runtime, so any byte-for-byte comparison writes `NRNormGovernor=0`; see `docs/measurements/knobs-653-20260924/REPORT.md`.
 - `passes` 1 or 2.
 
 `run.ABLATION` changes one factor per profile: `baseline`, `mv-off`, `depth-off`,
@@ -193,9 +202,10 @@ and differ only in `guides`.
 The depth A/B is `--profiles depth-constant depth-proxy`; both name guide
 strings the matrix already carries (`depth=0` *is* the constant 0.75 field), so they
 resolve to `depth-off` and `baseline` and reuse their run directories rather than
-rendering the same configuration twice. `depth-of` is refused by name: `--guides`
-expresses only `mv=0|1,depth=0|1`, so depth from the NVOFA structure cannot be
-requested. `--list-profiles` prints the matrix, the two aliases and that refusal.
+rendering the same configuration twice. `depth-of` is refused by name: no estimator
+in the worker derives depth from the NVOFA structure; compute it offline and pass it
+as `depth=file:` instead. `--list-profiles` prints the matrix, the two aliases and
+that refusal.
 
 Every profile runs `--neural-preflight` once; the Feature 18 probe receipt (GPU,
 driver, ReShade/RenoDX/DLSS-NR versions, locked module hashes, feature18
@@ -213,6 +223,100 @@ in a second runtime clone with `NRIntensity=0.750000` added. `result.json`
 carries `pass2_reencoded_input: true` and both pass results; the second pass
 never sees lossless frames, so every two-pass metric includes one lossy
 generation on top of the model's effect.
+
+## Guide files (`guidefiles.py`, P2.4)
+
+`depth=file:` and `mv=file:` let a guide computed offline - by a model this player
+does not ship - be rendered through the unchanged neural pass and scored against the
+built-in guides by the rest of this harness. They exist only on the helper's own
+command line: `NeuralWorker.exe` takes them off before the shared worker parser runs
+(`src/GuideFiles.h`), so the player cannot send them, and no cached render can be
+made from a file.
+
+| `--guides` value | motion | depth |
+|---|---|---|
+| `mv=1,depth=1` | built-in: hardware optical flow (NVOFA) where the engine comes up, else the CPU block matcher | built-in depth proxy |
+| `mv=cpu,depth=1` | the CPU block matcher even where NVOFA is present | built-in |
+| `mv=file:<dir>,depth=1` | `<dir>/NNNNNN.pfm` | built-in |
+| `mv=1,depth=file:<dir>` | built-in | `<dir>/NNNNNN.pfm` |
+| `--guide-dump <dir>` (worker flag) | writes what each frame was rendered with to `<dir>/mv` and `<dir>/depth` | |
+
+Profiles may use `{clip}` and `{work}` in `guides` and `worker_flags`; `run.py`
+replaces them per run, so one profile names every clip's own directory
+(`depth=file:{work}/truth/{clip}/depth`).
+
+**Layout.** One directory per guide, one Portable Float Map per source frame, named by
+the frame's number - `round(pts × fps)`, the zero-based decoded index for a file that
+starts at pts 0 - as `000000.pfm`, `000001.pfm`, ... Depth is a one-channel `Pf` map in
+[0, 1] with **0 = near, 1 = far** (DLSSBackend's convention; outside values are clamped
+on the GPU). Motion is a three-channel `PF` map of (x, y, 0) in **DLSS input pixels**
+(the source size at 100 % processing scale), pointing **from the current frame to where
+the content was in the previous one**: content that moved 3 px left carries +3. PFM
+rows are stored bottom-up, as the format specifies; `guidefiles.read_pfm` /
+`write_pfm` hand you top-down arrays. Any size is accepted: a file at the analysis
+grid's size (160×90 for a 30-fps 1080p clip) is taken exactly, anything else is
+area-averaged onto that grid, because the grid is what the renderer's expansion pass
+reads - a full-resolution depth map therefore reaches NGX at the same 12-pixel cell
+pitch the built-in proxy does. A missing or malformed file fails the render; it never
+falls back to the estimator for a frame.
+
+**File motion replaces hardware flow.** On a card with NVOFA the built-in `mv=1`
+motion is the engine's full-resolution field, which never passes through the grid, so
+it cannot be dumped or replayed as a grid file; any `mv=` other than `0`/`1` switches
+the engine off for that render and uses the grid. `mv=cpu` is therefore the reference a
+motion file is compared with, and the arm that says how much the engine itself is
+worth.
+
+**The proof that the file path is transparent** is `guidefiles.py prove`, which renders
+`roundtrip.profile.json` in order: `rt-cpu-dump` (CPU motion, built-in depth, dumped)
+then `rt-cpu-replay` (both read back), and `rt-shipped-dump` (the shipped guides,
+dumped) then `rt-shipped-depth-replay` (hardware motion, depth read back). Each pair
+must be byte-identical by output digest, and the command fails if either is not.
+
+**Near/far clips.** `depth-pan` (a landscape pan: fractal sky at depth 0.9 moving
+3 px/frame, hills at 0.5 moving 9, roadside posts at 0.15 moving 24) and
+`depth-subject` (an interior: a fractal room at 0.85 drifting 1 px/frame behind a
+person-sized ellipse at 0.2 crossing 14 px/frame and bobbing ±18 px) are built by
+`corpus.py` from layers at known depth and whole-pixel speeds, so their **true** depth
+and motion are known exactly: `guidefiles.py truth` writes them from the same constants
+(`corpus.DEPTH_PAN`, `corpus.DEPTH_SUBJECT`) into `benchmark-work/truth/<clip>/`.
+`docs/measurements/guide-files-20260924/truth.profile.json` runs the estimator against
+the truth on them.
+
+### Evaluating Video Depth Anything (owner steps)
+
+This machine has no torch and must not download a model, so the evaluation itself is
+yours to run. Everything from step 4 on is this harness.
+
+1. Environment: a separate venv with `torch` (CUDA build), `torchvision`, `opencv-python`,
+   `matplotlib`, `imageio` per the upstream `requirements.txt`, and a clone of
+   <https://github.com/DepthAnything/Video-Depth-Anything>. Use **Small only**: its
+   weights are Apache-2.0, Base and Large are CC-BY-NC-4.0 and cannot ship. Fetch
+   `video_depth_anything_vits.pth` into `checkpoints/` as its README says.
+2. Run it over the whole clip in one call - its temporal head needs the sequence, and
+   one call keeps one scale - with the Small encoder (`--encoder vits`), on the corpus
+   file itself (`--input_video <corpus>/<clip>.mkv`), saving the **raw** output
+   (relative inverse depth, float; `--save_npz`), not the colourised video. Keep every
+   frame at its own index: if the script resamples the frame rate or caps the length,
+   turn that off, because frame *i* of the maps must be frame *i* of the render.
+   `convert` refuses a map count that differs from the clip's frame count.
+3. Split the stacked array into one file per frame in frame order:
+   `for i, d in enumerate(np.load("depths.npz")["depths"]): np.save(f"vda/{i:06d}.npy", d)`
+   (use whatever key the saved archive holds). Resolution does not matter.
+4. `python tools/benchmark/guidefiles.py convert --clip <clip> --depth-dir vda --inverse`
+   normalises **over the whole clip** (the 1st-99th percentile of every frame together,
+   never per frame, which would make a static wall's depth pump when something nearer
+   walks in), flips it so 0 = near, and writes `benchmark-work/offline-depth/<clip>/depth/`.
+5. Render the A/B at the shipped state with a profile file whose arms differ only in
+   `guides`: `mv=1,depth=1` against `mv=1,depth=file:{work}/offline-depth/{clip}/depth`,
+   plus `mv=1,depth=0` as the constant-depth control, e.g.
+   `python tools/benchmark/run.py --profile-file vda.profile.json --profiles vda-proxy vda-file vda-off --clips depth-pan depth-subject orig-film-motion-a orig-game-motion --repeats 2`.
+6. `python tools/benchmark/analyze.py --no-ocr --no-faces` and read the guide A/B table:
+   sigma+, false mv and flicker+ against the proxy and against constant depth. On the
+   two near/far clips the `truth-depth` arm of `truth.profile.json` is the ceiling a
+   depth model can reach on this pipeline; a model is worth shipping (ONNX Runtime's
+   TensorRT-RTX provider, P2.4's deployment plan) only if it closes part of the gap
+   between the proxy and that ceiling on the camera-original clips as well.
 
 ## Metrics (`analyze.py`)
 

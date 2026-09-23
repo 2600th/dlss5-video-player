@@ -1,4 +1,5 @@
 #include "CrashDump.h"
+#include "GuideFiles.h"
 #include "NarrowText.h"
 #include "NeuralWorker.h"
 #include "NeuralWorkerProtocol.h"
@@ -680,6 +681,139 @@ void temporal_settings_reach_the_helper_only_off_their_defaults_test()
         if (unknown[index] == L"--temporal") unknown[index + 1] = L"cuts=sometimes,stability=off";
     const auto unknownView = view(unknown);
     CHECK(!neural_worker_detail::ParseWorkerArguments(unknownView).has_value());
+}
+
+// The benchmark's guide sources (P2.4) come off the helper's line before the shared
+// parser runs, which then sees only the canonical guide string: a line without them
+// is untouched, and nothing the player could send reaches a file.
+void benchmark_guide_sources_leave_the_shared_parser_canonical_test()
+{
+    NeuralRenderRequest request = TestRequest(L"source.mkv");
+    const HANDLE metadata = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(123));
+    const auto plain = neural_worker_detail::BuildWorkerArguments(request, metadata, nullptr, false);
+    std::vector<std::wstring_view> plainView{L"NeuralWorker.exe"};
+    for (const auto& argument : plain) plainView.emplace_back(argument);
+    std::vector<std::wstring> rewritten;
+    guide_files::Sources sources;
+    CHECK(guide_files::ExtractBenchmarkArguments(plainView, rewritten, sources));
+    CHECK(!sources.Active());
+    CHECK(std::ranges::equal(rewritten, plainView));
+
+    auto withGuides = [&](std::wstring spec, std::vector<std::wstring> extra = {}) {
+        std::vector<std::wstring> line{L"NeuralWorker.exe"};
+        line.insert(line.end(), plain.begin(), plain.end());
+        for (size_t index = 0; index + 1 < line.size(); ++index)
+            if (line[index] == L"--guides") line[index + 1] = spec;
+        line.insert(line.end(), extra.begin(), extra.end());
+        return line;
+    };
+    auto extract = [&](const std::vector<std::wstring>& line, guide_files::Sources& out) {
+        std::vector<std::wstring_view> view(line.begin(), line.end());
+        return guide_files::ExtractBenchmarkArguments(view, rewritten, out);
+    };
+    const auto files = withGuides(L"mv=file:C:\\g\\a,b\\mv,depth=file:D:\\depth dir",
+                                  {L"--guide-dump", L"C:\\dump"});
+    CHECK(extract(files, sources));
+    CHECK(sources.motion == guide_files::MotionSource::File);
+    CHECK(sources.motionDirectory == std::filesystem::path(L"C:\\g\\a,b\\mv"));
+    CHECK(sources.depthFromFile);
+    CHECK(sources.depthDirectory == std::filesystem::path(L"D:\\depth dir"));
+    CHECK(sources.dumpDirectory == std::filesystem::path(L"C:\\dump"));
+    CHECK(std::ranges::find(rewritten, std::wstring(L"--guide-dump")) == rewritten.end());
+    CHECK(std::ranges::find(rewritten, std::wstring(L"mv=1,depth=1")) != rewritten.end());
+    std::vector<std::wstring_view> rewrittenView(rewritten.begin(), rewritten.end());
+    const auto parsed = neural_worker_detail::ParseWorkerArguments(rewrittenView);
+    CHECK(parsed.has_value());
+    if (parsed) CHECK(parsed->request.guides == GuideControls{});
+
+    CHECK(extract(withGuides(L"mv=cpu,depth=0"), sources));
+    CHECK(sources.motion == guide_files::MotionSource::Cpu && !sources.depthFromFile);
+    CHECK(std::ranges::find(rewritten, std::wstring(L"mv=1,depth=0")) != rewritten.end());
+    CHECK(extract(withGuides(L"mv=0,depth=1"), sources) && !sources.Active());
+    for (const wchar_t* bad : {L"mv=2,depth=1", L"mv=file:,depth=1", L"mv=1,depth=cpu", L"mv=1",
+                               L"depth=1,mv=1", L"mv=1,depth=file:"})
+        CHECK(!extract(withGuides(bad), sources));
+    CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--guide-dump"}), sources));
+    CHECK(!extract(withGuides(L"mv=1,depth=1", {L"--guide-dump", L"a", L"--guide-dump", L"b"}), sources));
+}
+
+// A dump of the estimator's grid, fed back as files, restores the grid bit for bit:
+// the property the byte-identical render proof in docs/measurements rests on. A
+// file that is missing fails the frame instead of falling back to the estimator,
+// and motion from anywhere but the estimator keeps the hardware flow off.
+void guide_files_round_trip_the_estimator_grid_bit_for_bit_test()
+{
+    const auto root = std::filesystem::temp_directory_path() /
+        (L"dlss-guide-files-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+    GuideFrame estimator;
+    estimator.gridW = 7;
+    estimator.gridH = 5;
+    estimator.guideGridRGBA32F.resize(size_t(7) * 5 * 4);
+    uint32_t state = 12345u;
+    for (float& value : estimator.guideGridRGBA32F) {
+        state = state * 1664525u + 1013904223u;
+        value = (static_cast<float>(state >> 8) / 16777216.0f - 0.5f) * 37.0f;
+    }
+    guide_files::Sources dump;
+    dump.dumpDirectory = root;
+    GuideFrame dumped = estimator;
+    std::string error;
+    CHECK(guide_files::Apply(dump, 41, dumped, &error));
+    CHECK(dumped.guideGridRGBA32F == estimator.guideGridRGBA32F);
+    CHECK(dumped.motionVectors);
+    CHECK(std::filesystem::exists(root / L"mv" / L"000041.pfm"));
+    CHECK(std::filesystem::exists(root / L"depth" / L"000041.pfm"));
+
+    guide_files::Sources replay;
+    replay.motion = guide_files::MotionSource::File;
+    replay.motionDirectory = root / L"mv";
+    replay.depthFromFile = true;
+    replay.depthDirectory = root / L"depth";
+    GuideFrame blank = estimator;
+    for (size_t cell = 0; cell < size_t(7) * 5; ++cell) {
+        blank.guideGridRGBA32F[cell * 4] = blank.guideGridRGBA32F[cell * 4 + 1] = 0.0f;
+        blank.guideGridRGBA32F[cell * 4 + 2] = 0.75f;
+    }
+    CHECK(guide_files::Apply(replay, 41, blank, &error));
+    CHECK(std::memcmp(blank.guideGridRGBA32F.data(), estimator.guideGridRGBA32F.data(),
+                      estimator.guideGridRGBA32F.size() * sizeof(float)) == 0);
+    CHECK(!blank.motionVectors);
+    GuideFrame missing = estimator;
+    CHECK(!guide_files::Apply(replay, 42, missing, &error));
+    CHECK(error.find("000042.pfm") != std::string::npos);
+
+    // PFM rows are stored bottom first: the first data row on disk is the grid's last.
+    const guide_files::Plane ramp{2, 2, 1, {1.0f, 2.0f, 3.0f, 4.0f}};
+    const auto encoded = guide_files::EncodePfm(ramp);
+    float firstStored = 0.0f;
+    std::memcpy(&firstStored, encoded.data() + (encoded.size() - 4 * sizeof(float)), sizeof(float));
+    CHECK_EQ(3.0f, firstStored);
+    const auto decoded = guide_files::ParsePfm(encoded);
+    CHECK(decoded.has_value() && decoded->values == ramp.values);
+    // The same map written big-endian: a positive scale and every float byte-swapped.
+    auto bigEndian = encoded;
+    const size_t scaleAt = encoded.size() - 4 * sizeof(float) - 5;
+    bigEndian[scaleAt] = '+';
+    for (size_t offset = bigEndian.size() - 4 * sizeof(float); offset < bigEndian.size(); offset += 4)
+        std::reverse(bigEndian.begin() + static_cast<std::ptrdiff_t>(offset),
+                     bigEndian.begin() + static_cast<std::ptrdiff_t>(offset + 4));
+    const auto swapped = guide_files::ParsePfm(bigEndian);
+    CHECK(swapped.has_value() && swapped->values == ramp.values);
+    auto truncated = encoded;
+    truncated.pop_back();
+    CHECK(!guide_files::ParsePfm(truncated).has_value());
+    const std::string notPfm = "P6\n2 2\n255\n";
+    CHECK(!guide_files::ParsePfm(std::span(reinterpret_cast<const uint8_t*>(notPfm.data()), notPfm.size()))
+               .has_value());
+
+    // Any other size is area-averaged onto the grid.
+    const guide_files::Plane fine{4, 2, 1, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}};
+    const auto coarse = guide_files::ResampleArea(fine, 2, 1);
+    CHECK(coarse.width == 2 && coarse.height == 1);
+    CHECK(coarse.values == std::vector<float>({2.5f, 4.5f}));
+    std::filesystem::remove_all(root, ignored);
 }
 
 void helper_main_parser_accepts_normal_and_restarted_contracts_test()
@@ -2608,6 +2742,8 @@ int wmain(int argc, wchar_t** argv)
     nonexistent_helper_fails_test();
     helper_main_parser_accepts_normal_and_restarted_contracts_test();
     temporal_settings_reach_the_helper_only_off_their_defaults_test();
+    benchmark_guide_sources_leave_the_shared_parser_canonical_test();
+    guide_files_round_trip_the_estimator_grid_bit_for_bit_test();
     cancellation_of_running_child_is_bounded_test();
     a_still_running_helper_is_not_reported_as_exit_code_259_test();
     a_shutdown_frame_to_an_unread_pipe_gives_up_instead_of_hanging_test();

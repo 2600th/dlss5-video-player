@@ -57,7 +57,7 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
 | [P2.2](#p22) | Dither wherever the image is cut to 8 bits | S | Pipeline, Player | ✅ |
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
-| [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
+| [P2.4](#p24) | Evaluate Video Depth Anything through the guide harness | M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
@@ -157,27 +157,21 @@ about export.
 ---
 
 <a id="p24"></a>
-### P2.4 · Guide A/B harness, then evaluate Video Depth Anything
+### P2.4 · Evaluate Video Depth Anything through the guide harness
 
-`S` harness · `M-L` to ship a model · **Pipeline**
+`M-L` · **Pipeline** · _the harness half shipped: `depth=file:` / `mv=file:` guide modes_
 
-Add `depth=file:` / `mv=file:` guide modes, so depth and flow computed offline
-in Python can be A/B'd in `tools/benchmark` without shipping a model. Add
-near/far test clips; your reply on issue #8 sets exactly that bar.
+The harness is in: offline depth and flow can be fed to the worker from
+files and A/B'd through `tools/benchmark` (see its README for the exact
+steps), with near/far clips `depth-pan` and `depth-subject`. Feeding the
+built-in guides back through files is byte-identical.
 
-The candidate is **Video Depth Anything Small**: Apache-2.0 (Base and Large
-are non-commercial), 28.4M parameters, about 7.5 ms per frame at 518².
-- **Normalise over the clip, not per frame.** Its inverse depth must use a
-  stable scale, or depth will pump.
-- **Map to the convention `DLSSBackend.cpp:255` expects**: 0 = near, 1 = far.
-- **Deployment:** ONNX Runtime's TensorRT-RTX execution provider, which
-  covers RTX 30 and newer.
-
-Refs: [Video-Depth-Anything](https://github.com/DepthAnything/Video-Depth-Anything) ·
-[TensorRT-RTX EP](https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html)
-
-**Impact** — Pipeline: the deciding test for better depth and flow, and a
-prerequisite for P3.6.
+**What is left** needs torch and a model download, so it is the owner's to
+run: generate Video Depth Anything Small depth for the corpus, normalised
+over each clip (not per frame), and A/B it. The first harness result sets
+expectations: even *exact* synthetic depth moves the output by at most
+0.03 dB PSNR, so depth has little headroom on this pipeline; flow is the
+more promising guide (P3.6).
 
 ---
 

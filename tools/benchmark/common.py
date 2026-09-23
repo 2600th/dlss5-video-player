@@ -1,6 +1,9 @@
 """Shared paths, FFmpeg helpers and the NeuralWorker metadata-pipe decoder.
 
-Every benchmark script writes only below ``build-upscaling/`` (gitignored).
+Every benchmark script writes only below ``build-upscaling/`` (gitignored), or
+below ``DLSS_BENCHMARK_BUILD`` when that is set: a worktree without the staged
+``external/`` binaries points ``DLSS_BENCHMARK_BUILD`` at a scratch directory and
+``DLSS_BENCHMARK_FFMPEG`` at a directory holding ``ffmpeg.exe``/``ffprobe.exe``.
 """
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD = REPO / "build-upscaling"
+BUILD = Path(os.environ["DLSS_BENCHMARK_BUILD"]) if os.environ.get("DLSS_BENCHMARK_BUILD") else     REPO / "build-upscaling"
 WORK = BUILD / "benchmark-work"
 CORPUS = BUILD / "benchmark-corpus"
 RUNS = WORK / "runs"
@@ -21,8 +24,9 @@ ANALYSIS = WORK / "analysis"
 BLIND = WORK / "blind"
 RUNTIME_SNAPSHOT = WORK / "runtime-snapshot"
 RELEASE_RUNTIME = BUILD / "Release" / "neural-runtime"
-FFMPEG = REPO / "external" / "ffmpeg" / "bin" / "ffmpeg.exe"
-FFPROBE = REPO / "external" / "ffmpeg" / "bin" / "ffprobe.exe"
+FFMPEG_DIR = Path(os.environ["DLSS_BENCHMARK_FFMPEG"]) if os.environ.get("DLSS_BENCHMARK_FFMPEG") else     REPO / "external" / "ffmpeg" / "bin"
+FFMPEG = FFMPEG_DIR / "ffmpeg.exe"
+FFPROBE = FFMPEG_DIR / "ffprobe.exe"
 FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # src/NeuralWorkerProtocol.h

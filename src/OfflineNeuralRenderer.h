@@ -2,6 +2,7 @@
 
 #include "FrameIdentity.h"
 #include "GuideControls.h"
+#include "GuideFiles.h"
 #include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
 #include "TemporalGuides.h"
@@ -100,6 +101,10 @@ struct NeuralRenderRequest {
     // How readily a scene cut resets the history (TemporalSettings.h). Defaults to
     // what every job did before the setting existed.
     TemporalSettings temporal{};
+    // Benchmark-only guide sources (GuideFiles.h): guides read from files, the CPU
+    // estimator forced, or the guides dumped. Only the helper's own command line
+    // can set them, never the player, and only the production evaluator reads them.
+    guide_files::Sources guideFiles{};
 };
 
 struct NeuralRenderProgress {

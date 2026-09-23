@@ -522,6 +522,115 @@ def build_orig_dissolve(corpus: Path) -> dict | None:
               "and no pair above |dY| 5.2 in the whole clip."))
 
 
+# ---------------------------------------------------------------------------
+# Near/far clips (P2.4). The depth guide is only worth questioning on footage whose
+# depth is known, and nothing else here knows it: every other clip is flat - a
+# fractal, a pattern, a capture - and the camera-original ones have depth nobody
+# measured. These two are built from layers at known distances moving at known
+# integer speeds, so their true depth and true motion can be written per frame by
+# `guidefiles.py truth` from the same numbers the graph below uses, and fed through
+# `depth=file:`/`mv=file:` beside the estimator's own guides.
+#
+# Layer speeds are content displacement in whole pixels per frame, leftward for a
+# positive number (the window over each wide still advances by that much), so every
+# layer's motion is exact and constant. Depth follows the convention the renderer
+# hands DLSS: 0 = near, 1 = far.
+DEPTH_PAN = dict(
+    frames=90,
+    # A landscape seen from a moving car: sky and distant ridge, rolling hills, and
+    # posts right beside the road. Speeds 3 / 9 / 24 px per frame: 0.25, 0.75 and 2.0
+    # analysis cells, so the far layer is slow enough to look still to a coarse test
+    # and the near one is fast.
+    far=dict(speed=3, depth=0.9),
+    mid=dict(speed=9, depth=0.5, horizon=600, amplitude=120, period=700),
+    near=dict(speed=24, depth=0.15, pitch=400, width=90),
+)
+DEPTH_SUBJECT = dict(
+    frames=90,
+    # An interior with a person-sized subject crossing close to the camera while the
+    # camera itself drifts: the background moves 1 px per frame, the subject 14 px
+    # right and bobs +-18 px vertically, so it occludes and disoccludes the room.
+    room=dict(speed=1, depth=0.85),
+    subject=dict(depth=0.2, rx=260, ry=420, x0=160, dx=14, y0=150, bob=18, bob_period=45),
+)
+
+
+def depth_pan_layers(n: int, x, y):
+    """(depth, content speed) of the layer visible at (x, y) in frame n, vectorised."""
+    import numpy as np
+    p = DEPTH_PAN
+    mid, near = p["mid"], p["near"]
+    xm = x + mid["speed"] * n
+    xn = x + near["speed"] * n
+    in_near = np.mod(xn, near["pitch"]) < near["width"]
+    in_mid = y > mid["horizon"] + mid["amplitude"] * np.sin(xm * 2 * np.pi / mid["period"])
+    depth = np.where(in_near, near["depth"], np.where(in_mid, mid["depth"], p["far"]["depth"]))
+    speed = np.where(in_near, near["speed"], np.where(in_mid, mid["speed"], p["far"]["speed"]))
+    return depth, speed
+
+
+def depth_subject_position(n: int) -> tuple[int, int]:
+    """Top-left of the subject's box in frame n; the graph's overlay uses the same expression."""
+    import math
+    s = DEPTH_SUBJECT["subject"]
+    return s["x0"] + s["dx"] * n, s["y0"] + math.trunc(s["bob"] * math.sin(2 * math.pi * n / s["bob_period"]))
+
+
+def depth_subject_mask(n: int, x, y):
+    """True where the subject covers (x, y) in frame n."""
+    s = DEPTH_SUBJECT["subject"]
+    left, top = depth_subject_position(n)
+    return ((x - left - s["rx"]) / s["rx"]) ** 2 + ((y - top - s["ry"]) / s["ry"]) ** 2 < 1.0
+
+
+def build_depth_pan(corpus: Path) -> dict:
+    p = DEPTH_PAN
+    frames, seconds = p["frames"], p["frames"] / FPS
+    far, mid, near = p["far"], p["mid"], p["near"]
+    wide = lambda speed: WIDTH + speed * frames + 16  # noqa: E731 - the still each window slides over
+    mid_alpha = f"if(gt(Y\\,{mid['horizon']}+{mid['amplitude']}*sin(X*2*PI/{mid['period']}))\\,255\\,0)"
+    near_alpha = f"if(lt(mod(X\\,{near['pitch']})\\,{near['width']})\\,255\\,0)"
+    rgba = "format=rgba,geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='{alpha}'"
+    graph = (
+        frozen(f"mandelbrot=s={wide(far['speed'])}x{HEIGHT}:r={FPS}:maxiter=300:start_scale=1.4:end_scale=1.4",
+               seconds) + f",crop={WIDTH}:{HEIGHT}:x='{far['speed']}*n':y=0,format=rgba[far];"
+        f"sierpinski=s={wide(mid['speed'])}x{HEIGHT}:r={FPS}:seed=3:jump=100:type=carpet,trim=end_frame=1,"
+        + rgba.format(alpha=mid_alpha) + f",loop=loop=-1:size=1:start=0,trim=duration={seconds},"
+        f"crop={WIDTH}:{HEIGHT}:x='{mid['speed']}*n':y=0[mid];"
+        f"testsrc2=s={wide(near['speed'])}x{HEIGHT}:r={FPS},trim=end_frame=1,"
+        + rgba.format(alpha=near_alpha) + f",loop=loop=-1:size=1:start=0,trim=duration={seconds},"
+        f"crop={WIDTH}:{HEIGHT}:x='{near['speed']}*n':y=0[near];"
+        f"[far][mid]overlay=shortest=1[fm];[fm][near]overlay=shortest=1,format=yuv420p")
+    ffmpeg(["-filter_complex", graph, "-frames:v", str(frames), *ENCODE, "depth-pan.mkv"], corpus)
+    return dict(name="depth-pan", category="depth", synthetic=True, cuts=[], text=[], depth_truth=True,
+                notes="Near/far landscape pan built from three layers at known depth and known whole-pixel "
+                      "speeds: a fractal sky/ridge at depth 0.9 moving 3 px/frame, sinusoidal hills at 0.5 "
+                      "moving 9, and roadside posts at 0.15 moving 24. `guidefiles.py truth` writes its true "
+                      "depth and motion from the same constants (corpus.DEPTH_PAN). No cut.")
+
+
+def build_depth_subject(corpus: Path) -> dict:
+    p = DEPTH_SUBJECT
+    frames, seconds = p["frames"], p["frames"] / FPS
+    room, s = p["room"], p["subject"]
+    ellipse = (f"if(lt(pow((X-{s['rx']})/{s['rx']}\\,2)+pow((Y-{s['ry']})/{s['ry']}\\,2)\\,1)\\,255\\,0)")
+    graph = (
+        frozen(f"mandelbrot=s={WIDTH + room['speed'] * frames + 16}x{HEIGHT}:r={FPS}:maxiter=400"
+               f":start_scale=0.55:end_scale=0.55", seconds) +
+        f",crop={WIDTH}:{HEIGHT}:x='{room['speed']}*n':y=0,format=rgba[room];"
+        f"testsrc2=s={2 * s['rx']}x{2 * s['ry']}:r={FPS},trim=end_frame=1,format=rgba,"
+        f"geq=r='r(X\\,Y)':g='g(X\\,Y)':b='b(X\\,Y)':a='{ellipse}',"
+        f"loop=loop=-1:size=1:start=0,trim=duration={seconds}[subject];"
+        f"[room][subject]overlay=shortest=1:eval=frame:x='{s['x0']}+{s['dx']}*n'"
+        f":y='{s['y0']}+trunc({s['bob']}*sin(2*PI*n/{s['bob_period']}))',format=yuv420p")
+    ffmpeg(["-filter_complex", graph, "-frames:v", str(frames), *ENCODE, "depth-subject.mkv"], corpus)
+    return dict(name="depth-subject", category="depth", synthetic=True, cuts=[], text=[], depth_truth=True,
+                notes="Near/far interior: a fractal 'room' at depth 0.85 drifting 1 px/frame behind a "
+                      "person-sized textured ellipse at depth 0.2 that crosses 14 px/frame and bobs +-18 px, "
+                      "occluding and disoccluding the background. True depth and motion are written by "
+                      "`guidefiles.py truth` from corpus.DEPTH_SUBJECT. No cut.")
+
+
 def describe(corpus: Path, clip: dict) -> dict:
     path = corpus / f"{clip['name']}.mkv"
     info = probe(path)
@@ -542,7 +651,8 @@ BUILDERS = {"text-subtitles": build_text, "fine-detail": build_detail,
             "orig-game-cuts": build_orig_game_cuts, "orig-game-motion": build_orig_game_motion,
             "orig-dissolve": build_orig_dissolve,
             "orig-film-motion-a": build_orig_film_motion_a,
-            "orig-film-motion-b": build_orig_film_motion_b}
+            "orig-film-motion-b": build_orig_film_motion_b,
+            "depth-pan": build_depth_pan, "depth-subject": build_depth_subject}
 
 
 def main() -> int:

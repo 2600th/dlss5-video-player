@@ -1,0 +1,87 @@
+{
+  "truth-shipped": {
+    "guides": "mv=1,depth=1",
+    "description": "shipped state and shipped guides",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "truth-depth": {
+    "guides": "mv=1,depth=file:{work}/truth/{clip}/depth",
+    "description": "shipped motion, TRUE depth",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "truth-both": {
+    "guides": "mv=file:{work}/truth/{clip}/mv,depth=file:{work}/truth/{clip}/depth",
+    "description": "TRUE motion and TRUE depth",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "truth-cpu": {
+    "guides": "mv=cpu,depth=1",
+    "description": "CPU block matcher and proxy depth: the estimator the true-motion arm replaces",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  },
+  "truth-depth-off": {
+    "guides": "mv=1,depth=0",
+    "description": "shipped motion, constant depth 0.75",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1",
+      "NRNormGovernor": "0"
+    }
+  }
+}

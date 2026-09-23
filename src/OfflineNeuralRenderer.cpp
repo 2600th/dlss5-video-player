@@ -2010,6 +2010,16 @@ struct ProductionEvaluatorAdapter {
     // The job's temporal choices (TemporalSettings.h), set before Initialize like the
     // conversion flags above. Pure CPU state, applied wherever the guide controls are.
     TemporalSettings temporal{};
+    // Benchmark guide sources (GuideFiles.h), set before Initialize like the temporal
+    // choices. Applied inside the guide stage, so the stage clock counts a file read
+    // where it would have counted the estimator.
+    guide_files::Sources guideFiles{};
+    bool ApplyGuideFiles(const FrameIdentity& id,GuideFrame& guide){
+        std::string error;
+        if(guide_files::Apply(guideFiles,id.frameNumber,guide,&error))return true;
+        LOG("Benchmark guide files failed at frame#"<<id.frameNumber<<": "<<error);
+        lastFailure=NeuralRenderFailure::Source;return false;
+    }
     void ApplyGuideSettings(const GuideControls& controls){
         guides.SetControls(controls);guides.SetSceneCutSensitivity(temporal.sceneCuts);
         if(renderer)renderer->SetTemporalStability(temporal.stability);
@@ -2183,6 +2193,7 @@ struct ProductionEvaluatorAdapter {
             if(!guides.Generate(frame.bgra.data(),frame.bgra.size(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
+            if(guideFiles.Active()&&!ApplyGuideFiles(id,guide))return false;
         }
         out.guideMs=MillisecondsSince(guideStart);
         if(capture)CopyGuideMotion(guide,width,height,out);
@@ -2241,6 +2252,7 @@ struct ProductionEvaluatorAdapter {
             if(!guides.Generate(frame.bgra.data(),frame.bgra.size(),width,height,width,height,fps,id,guide,sourceLayout)){
                 lastFailure=NeuralRenderFailure::Neural;return false;
             }
+            if(guideFiles.Active()&&!ApplyGuideFiles(id,guide))return false;
         }
         out.guideMs=MillisecondsSince(guideStart);
         CopyGuideMotion(guide,width,height,out);
@@ -2854,6 +2866,15 @@ NeuralRenderResult OfflineNeuralRenderer::Run(const NeuralRenderRequest& request
             request.outputWidth?request.outputWidth:request.width,request.outputHeight?request.outputHeight:request.height);
     }
     state.evaluator.temporal=request.temporal;
+    state.evaluator.guideFiles=request.guideFiles;
+    if(request.guideFiles.Active()){
+        const auto& files=request.guideFiles;
+        LOG("Benchmark guide sources: motion="
+            <<(files.motion==guide_files::MotionSource::File?"file:"+files.motionDirectory.string()
+               :files.motion==guide_files::MotionSource::Cpu?std::string("cpu"):std::string("estimator"))
+            <<" depth="<<(files.depthFromFile?"file:"+files.depthDirectory.string():std::string("estimator"))
+            <<" dump="<<(files.dumpDirectory.empty()?std::string("none"):files.dumpDirectory.string()));
+    }
     // Read before the reset, because the reset is allowed to drop the feature.
     const bool inheritedArmedFeature=state.evaluator.renderer&&state.evaluator.FeatureCreated();
     state.evaluator.ResetForJob(request.guides);

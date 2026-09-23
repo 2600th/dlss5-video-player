@@ -39,7 +39,7 @@ from pathlib import Path
 import psutil
 
 from common import (CONFIGURATION_CHANGED_EXIT, CORPUS, FFMPEG, FFPROBE, FLAGS, PROFILES, RELEASE_RUNTIME,
-                    RUNS, RUNTIME_SNAPSHOT, decode_metadata, load_manifest, probe, write_json)
+                    RUNS, RUNTIME_SNAPSHOT, WORK, decode_metadata, load_manifest, probe, write_json)
 
 DEFAULT_GUIDES = "mv=1,depth=1"
 PASS2_OVERRIDES = {"NRIntensity": "0.750000"}
@@ -81,10 +81,11 @@ ABLATION = {
 # determinism grouping in the analysis.
 ALIASES = {"depth-proxy": "baseline", "depth-constant": "depth-off"}
 
-# The third depth profile the roadmap names has no argument behind it. Refusing it by
-# name beats letting it read as a typo, and beats inventing a player flag for it.
-UNAVAILABLE = {"depth-of": "depth would have to come from the gated NVOFA structure, and --guides "
-                           "selects only mv=0|1,depth=0|1 - there is no depth source to ask for"}
+# The third depth profile the roadmap names has no estimator behind it. Refusing it by
+# name beats letting it read as a typo; the file guide mode is how to supply one.
+UNAVAILABLE = {"depth-of": "depth would have to come from the gated NVOFA structure, and no estimator in "
+                           "the worker derives it - compute it offline and pass depth=file:<dir> "
+                           "(guidefiles.py)"}
 
 
 def resolve(names: list[str], profiles: dict, parser: argparse.ArgumentParser) -> list[str]:
@@ -202,7 +203,15 @@ def write_overrides(ini: Path, overrides: dict[str, str]) -> None:
             kept.append(line)
     while kept and not kept[-1].strip():
         kept.pop()
-    managed = {"EnableHooks": "2", "NeuralUplift": "1", "NREnableUpscaling": "0"}
+    # The player's own managed contract (kManagedNeuralSettings, src/ReShadeConfig.cpp),
+    # plus the schema version the add-on stamps on a config it has loaded once, which
+    # is the state every player runtime is in after its first launch. Without it 6.5.3
+    # reads the section as schema v0 and migrates it on load - "inherited
+    # NRCodecMode/NRChainedHistory defaults adopted", a .bak beside the add-on - so a
+    # profile's NRChainedHistory=0 was silently rendered as 1. This used to write
+    # 4.70's NREnableUpscaling=0 as well, which 6.x removed.
+    managed = {"ConfigVersion": "6", "EnableHooks": "2", "NeuralUplift": "1", "NRFollowInputRes": "0",
+               "NRResolutionScale": "1"}
     body = ["", "[RenoDX.DLSS5]"] + [f"{k}={v}" for k, v in managed.items()] + \
            [f"{k}={v}" for k, v in overrides.items() if k not in managed]
     ini.write_text("\n".join(kept + body) + "\n", encoding="utf-8")
@@ -338,6 +347,17 @@ def render(runtime: Path, source: Path, output: Path, dest: Path, stem: str, gui
                 processing_fps=processing_fps, nvml={k: v for k, v in last.items() if k.startswith("nvml_")})
 
 
+def expand(text: str, clip: dict) -> str:
+    """Per-clip values in a profile's guides or worker flags.
+
+    ``{clip}`` is the clip name and ``{work}`` the benchmark work directory, so one
+    profile can name a directory of per-frame guide files for every clip it renders
+    (``depth=file:{work}/guides/{clip}/depth``, ``--guide-dump {work}/guides/{clip}``;
+    see guidefiles.py).
+    """
+    return text.replace("{clip}", clip["name"]).replace("{work}", str(WORK))
+
+
 def run_one(clip: dict, name: str, spec: dict, rep: int, timeout: float, corpus: Path, fresh: bool) -> dict:
     dest = RUNS / f"{clip['name']}__{name}__{rep}"
     if (dest / "result.json").exists():
@@ -350,22 +370,21 @@ def run_one(clip: dict, name: str, spec: dict, rep: int, timeout: float, corpus:
     receipt1 = preflight(name, runtime1, timeout)
     source = corpus / clip["file"]
     job_base = (hash((clip["name"], name, rep)) & 0xFFFF_FFFF) + 1
-    passes = [render(runtime1, source, dest / "output.mkv", dest, "pass1", spec["guides"], job_base, timeout,
-                     spec.get("worker_flags"))]
+    guides, flags = expand(spec["guides"], clip), [expand(f, clip) for f in spec.get("worker_flags", ())]
+    passes = [render(runtime1, source, dest / "output.mkv", dest, "pass1", guides, job_base, timeout, flags)]
     passes[0]["pass"] = 1
     if spec["passes"] == 2 and passes[0]["result"].get("ok"):
         shutil.move(dest / "output.mkv", dest / "pass1.mkv")
         passes[0]["output"] = str(dest / "pass1.mkv")
         runtime2 = prepare(name, spec, 2, fresh)
         preflight(f"{name}--pass2", runtime2, timeout)
-        passes.append(render(runtime2, dest / "pass1.mkv", dest / "output.mkv", dest, "pass2", spec["guides"],
-                             job_base + 1, timeout, spec.get("worker_flags")))
+        passes.append(render(runtime2, dest / "pass1.mkv", dest / "output.mkv", dest, "pass2", guides,
+                             job_base + 1, timeout, flags))
         passes[-1]["pass"] = 2
     final = passes[-1]
     result = dict(
         schema=1, run=dest.name, clip=clip["name"], category=clip["category"], profile=name, repeat=rep,
-        guides=spec["guides"], overrides=spec["overrides"], passes=spec["passes"],
-        worker_flags=spec.get("worker_flags", []),
+        guides=guides, overrides=spec["overrides"], passes=spec["passes"], worker_flags=flags,
         pass2_reencoded_input=spec["passes"] == 2, pass2_overrides=PASS2_OVERRIDES if spec["passes"] == 2 else {},
         preflight_ok=receipt1["ok"], preflight=receipt1["receipt"], source=str(source),
         output=str(dest / "output.mkv"), width=clip["width"], height=clip["height"], fps=clip["fps"],
