@@ -386,6 +386,15 @@ NeuralRenderReceiptInputs SampleInputs()
     inputs.result.frameRetries = 1;
     inputs.result.sceneCuts = {.acceptedStrong = 1, .acceptedWeak = 2, .suppressed = 4};
     inputs.result.firstTimestamp100ns = 10000000;
+    inputs.result.metrics.frames = 48;
+    inputs.result.metrics.pairs = 46;
+    inputs.result.metrics.shots = 2;
+    inputs.result.metrics.sourceWarpError = 2.0;
+    inputs.result.metrics.outputWarpError = 2.5;
+    inputs.result.metrics.sourceSigma = 3.0;
+    inputs.result.metrics.outputSigma = 2.75;
+    inputs.result.metrics.lumaShift = -0.5;
+    inputs.result.metrics.colorDelta = 4.0;
     inputs.result.timing.samples = 48;
     inputs.result.timing.neuralGpuMsP50 = 4.25;
     inputs.result.timing.peakLocalVramMiB = 3072;
@@ -461,6 +470,11 @@ void receipt_json_records_failure_lock_status_and_preflight_verbatim_test()
     CHECK(Contains(json, "\"acceptedWeak\":2"));
     CHECK(Contains(json, "\"suppressed\":4"));
     CHECK(Contains(json, "\"firstTimestamp100ns\":10000000"));
+    // The render report's numbers, and the two differences it leads with.
+    CHECK(Contains(json, "\"metrics\":{\"frames\":48,\"pairs\":46,\"shots\":2,"));
+    CHECK(Contains(json, "\"flickerAdded\":0.5"));
+    CHECK(Contains(json, "\"sigmaAdded\":-0.25"));
+    CHECK(Contains(json, "\"colorDelta\":4"));
     CHECK(Contains(json, "\"samples\":48"));
     CHECK(Contains(json, "\"neuralGpuMsP50\":4.25"));
     CHECK(Contains(json, "\"peakLocalVramMiB\":3072"));

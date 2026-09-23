@@ -336,6 +336,8 @@ public:
     const PreflightPayload& Preflight() const { return *preflight_; }
     // Empty until the helper reports its share of the cold-start timeline.
     const NeuralColdStartTimeline& Timeline() const { return timeline_; }
+    // The job's temporal metrics, when the helper measured any.
+    const std::optional<TemporalMetrics>& Metrics() const { return metrics_; }
     // The two idle-VRAM samples this job saw, if the helper took them. The
     // PostJob one belongs to this job; the Idle one arrived before it and
     // describes the grace this job's helper spent parked beforehand, which is
@@ -362,7 +364,8 @@ private:
                  header.kind != static_cast<uint16_t>(WireKind::Segment) &&
                  header.kind != static_cast<uint16_t>(WireKind::Timeline) &&
                  header.kind != static_cast<uint16_t>(WireKind::Ready) &&
-                 header.kind != static_cast<uint16_t>(WireKind::Memory))) {
+                 header.kind != static_cast<uint16_t>(WireKind::Memory) &&
+                 header.kind != static_cast<uint16_t>(WireKind::Metrics))) {
                 malformed_ = true;
                 return false;
             }
@@ -438,6 +441,13 @@ private:
                     announced_ = true;
                     break;
                 }
+                case WireKind::Metrics: {
+                    // One per job: the helper measures the job once, at its end.
+                    auto metrics = DecodeMetrics(payload);
+                    if (!metrics || metrics_) { malformed_ = true; return false; }
+                    metrics_ = *metrics;
+                    break;
+                }
                 case WireKind::Memory: {
                     const auto sample = DecodeMemory(payload);
                     if (!sample) { malformed_ = true; return false; }
@@ -466,6 +476,7 @@ private:
     std::optional<PreflightPayload> preflight_;
     std::optional<MemorySample> postJobMemory_;
     std::optional<MemorySample> idleMemory_;
+    std::optional<TemporalMetrics> metrics_;
     bool malformed_{};
     bool announced_{};
 };
@@ -895,6 +906,7 @@ NeuralRenderResult AcceptResult(const MetadataReader& reader, const NeuralRender
 void StampHelperObservations(const MetadataReader& reader, NeuralRenderResult& result)
 {
     result.coldStart = reader.Timeline();
+    if (const auto& metrics = reader.Metrics()) result.metrics = *metrics;
     // The idle sample was taken before this job by the same process, so it
     // names the same policy; the job's own sample wins where both are present.
     if (const auto& idle = reader.IdleMemory()) {
@@ -1804,6 +1816,7 @@ neural_worker_detail::MetadataStreamOutcome neural_worker_detail::DecodeMetadata
     outcome.malformed = reader.Malformed();
     outcome.complete = reader.Complete();
     outcome.timeline = reader.Timeline();
+    if (const auto& metrics = reader.Metrics()) outcome.metrics = *metrics;
     return outcome;
 }
 

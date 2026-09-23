@@ -12,6 +12,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -44,7 +45,8 @@ inline constexpr uint32_t kMaximumJobArguments = 64;
 inline constexpr uint32_t kMaximumJobArgumentBytes = 4 * 1024;
 
 enum class WireKind : uint16_t {
-    Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5, Ready = 6, Memory = 7
+    Progress = 1, Result = 2, Preflight = 3, Segment = 4, Timeline = 5, Ready = 6, Memory = 7,
+    Metrics = 8
 };
 
 // Where in a resident helper's cycle a WireMemory sample was taken. The pair
@@ -176,6 +178,21 @@ struct WireMemory {
     uint8_t reserved[5];
     uint64_t localVramMiB;
 };
+// The render's temporal metrics (TemporalMetrics.h), at most once per job and
+// ahead of its result. Its own message for the reason the timeline has one:
+// WireResult is a fixed layout a released decoder reads by offset.
+struct WireMetrics {
+    uint64_t frames;
+    uint64_t pairs;
+    uint32_t shots;
+    uint8_t reserved[4];
+    double sourceWarpError;
+    double outputWarpError;
+    double sourceSigma;
+    double outputSigma;
+    double lumaShift;
+    double colorDelta;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(WireHeader) == 12);
@@ -185,6 +202,7 @@ static_assert(sizeof(WirePreflight) == 8);
 static_assert(sizeof(WireSegment) == 44);
 static_assert(sizeof(WireTimeline) == 80);
 static_assert(sizeof(WireMemory) == 16);
+static_assert(sizeof(WireMetrics) == 72);
 
 inline bool IsKnownPhase(uint32_t phase) noexcept
 {
@@ -422,6 +440,49 @@ inline std::optional<NeuralColdStartTimeline> DecodeTimeline(std::span<const std
                         std::chrono::microseconds(wire.microseconds[index]));
     }
     return timeline;
+}
+
+inline WireMetrics EncodeMetrics(const TemporalMetrics& metrics)
+{
+    WireMetrics wire{};
+    wire.frames = metrics.frames;
+    wire.pairs = metrics.pairs;
+    wire.shots = metrics.shots;
+    wire.sourceWarpError = metrics.sourceWarpError;
+    wire.outputWarpError = metrics.outputWarpError;
+    wire.sourceSigma = metrics.sourceSigma;
+    wire.outputSigma = metrics.outputSigma;
+    wire.lumaShift = metrics.lumaShift;
+    wire.colorDelta = metrics.colorDelta;
+    return wire;
+}
+
+// Refused unless it could describe a render: counts that cannot coexist, or a
+// value no 8-bit picture can produce, are a malformed helper and not a number to
+// publish in a receipt.
+inline std::optional<TemporalMetrics> DecodeMetrics(std::span<const std::byte> payload)
+{
+    if (payload.size() != sizeof(WireMetrics)) return std::nullopt;
+    WireMetrics wire{};
+    std::memcpy(&wire, payload.data(), sizeof(wire));
+    for (const uint8_t byte : wire.reserved) if (byte) return std::nullopt;
+    if (!wire.frames || wire.pairs >= wire.frames || wire.shots > wire.frames) return std::nullopt;
+    const double values[]{wire.sourceWarpError, wire.outputWarpError, wire.sourceSigma, wire.outputSigma,
+                          wire.lumaShift, wire.colorDelta};
+    for (const double value : values) if (!std::isfinite(value) || std::abs(value) > 512.0) return std::nullopt;
+    if (wire.sourceWarpError < 0.0 || wire.outputWarpError < 0.0 || wire.sourceSigma < 0.0 ||
+        wire.outputSigma < 0.0 || wire.colorDelta < 0.0) return std::nullopt;
+    TemporalMetrics metrics;
+    metrics.frames = wire.frames;
+    metrics.pairs = wire.pairs;
+    metrics.shots = wire.shots;
+    metrics.sourceWarpError = wire.sourceWarpError;
+    metrics.outputWarpError = wire.outputWarpError;
+    metrics.sourceSigma = wire.sourceSigma;
+    metrics.outputSigma = wire.outputSigma;
+    metrics.lumaShift = wire.lumaShift;
+    metrics.colorDelta = wire.colorDelta;
+    return metrics;
 }
 
 // One VRAM sample as the parent reads it back.

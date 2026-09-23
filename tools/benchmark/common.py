@@ -29,6 +29,7 @@ FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 WIRE_MAGIC = 0x3152574E  # NWR1
 WIRE_VERSION = 6
 KIND_PROGRESS, KIND_RESULT, KIND_PREFLIGHT, KIND_SEGMENT, KIND_TIMELINE = 1, 2, 3, 4, 5
+KIND_METRICS = 8  # the render's temporal metrics (src/TemporalMetrics.h), ahead of the result
 PHASES = ["Idle", "Decoding", "Priming", "Rendering", "Encoding", "Validating", "Completed", "Failed",
           "Cancelled", "Ready", "Preflight", "Paused", "Recovering"]
 FAILURES = ["None", "Source", "Encoder", "Neural", "GpuStall", "DeviceRemoved", "WorkerCrashed",
@@ -43,8 +44,9 @@ RESULT_STRUCT = struct.Struct("<10B6xQqQQQQIIqdddddQQIIII")  # 152 bytes
 PREFLIGHT_STRUCT = struct.Struct("<B3xI")  # 8 bytes
 SEGMENT_STRUCT = struct.Struct("<QQqQqI")  # 44 bytes, then nameBytes of UTF-16LE
 TIMELINE_STRUCT = struct.Struct("<I4x9q")  # 80 bytes
+METRICS_STRUCT = struct.Struct("<QQI4x6d")  # 72 bytes
 assert PROGRESS_STRUCT.size == 52 and RESULT_STRUCT.size == 152 and PREFLIGHT_STRUCT.size == 8
-assert SEGMENT_STRUCT.size == 44 and TIMELINE_STRUCT.size == 80
+assert SEGMENT_STRUCT.size == 44 and TIMELINE_STRUCT.size == 80 and METRICS_STRUCT.size == 72
 assert len(COLD_START_PHASES) == 9
 
 
@@ -52,9 +54,11 @@ def decode_metadata(data: bytes) -> list[dict]:
     """Decodes every complete NWR1 v6 message in ``data``.
 
     Progress records carry ``kind='progress'``, the final record ``kind='result'``,
-    a preflight probe ``kind='preflight'`` with the parsed JSON receipt, and the
-    helper's cold-start breakdown ``kind='timeline'``. A timeline phase the helper
-    did not measure is None rather than 0.
+    a preflight probe ``kind='preflight'`` with the parsed JSON receipt, the
+    helper's cold-start breakdown ``kind='timeline'``, and the render's own temporal
+    metrics ``kind='metrics'`` (8-bit codes; the in-app counterpart of this harness's
+    flicker and sigma). A timeline phase the helper did not measure is None rather
+    than 0.
     """
     records: list[dict] = []
     pos = 0
@@ -101,6 +105,13 @@ def decode_metadata(data: bytes) -> list[dict]:
             records.append(dict(kind="segment", index=index, first_frame_number=first_frame,
                                 first_timestamp_100ns=first_pts, frame_count=frames,
                                 frame_duration_100ns=frame_duration, name=name))
+        elif kind == KIND_METRICS and len(payload) == METRICS_STRUCT.size:
+            frames, pairs, shots, src_warp, out_warp, src_sigma, out_sigma, luma, colour =                 METRICS_STRUCT.unpack(payload)
+            records.append(dict(kind="metrics", frames=frames, pairs=pairs, shots=shots,
+                                source_warp_error=src_warp, output_warp_error=out_warp,
+                                flicker_added=out_warp - src_warp, source_sigma=src_sigma,
+                                output_sigma=out_sigma, sigma_added=out_sigma - src_sigma,
+                                luma_shift=luma, color_delta=colour))
         elif kind == KIND_TIMELINE and len(payload) == TIMELINE_STRUCT.size:
             values = TIMELINE_STRUCT.unpack(payload)
             present = values[0]

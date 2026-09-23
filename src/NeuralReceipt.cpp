@@ -224,6 +224,24 @@ std::string BuildNeuralRenderReceiptJson(const NeuralRenderReceiptInputs& inputs
     json += ",\"acceptedWeak\":" + std::to_string(cuts.acceptedWeak);
     json += ",\"suppressed\":" + std::to_string(cuts.suppressed) + "}";
     json += ",\"firstTimestamp100ns\":" + std::to_string(result.firstTimestamp100ns);
+    // What the render did to motion (TemporalMetrics.h), in 8-bit codes; null when
+    // nothing was measured. The report view reads these back.
+    const TemporalMetrics& metrics = result.metrics;
+    if (metrics.Measured()) {
+        json += ",\"metrics\":{\"frames\":" + std::to_string(metrics.frames);
+        json += ",\"pairs\":" + std::to_string(metrics.pairs);
+        json += ",\"shots\":" + std::to_string(metrics.shots);
+        json += ",\"sourceWarpError\":" + Number(metrics.sourceWarpError);
+        json += ",\"outputWarpError\":" + Number(metrics.outputWarpError);
+        json += ",\"flickerAdded\":" + Number(metrics.FlickerAdded());
+        json += ",\"sourceSigma\":" + Number(metrics.sourceSigma);
+        json += ",\"outputSigma\":" + Number(metrics.outputSigma);
+        json += ",\"sigmaAdded\":" + Number(metrics.SigmaAdded());
+        json += ",\"lumaShift\":" + Number(metrics.lumaShift);
+        json += ",\"colorDelta\":" + Number(metrics.colorDelta) + "}";
+    } else {
+        json += ",\"metrics\":null";
+    }
     const NeuralRenderTiming& timing = result.timing;
     json += ",\"timing\":{\"samples\":" + std::to_string(timing.samples);
     json += ",\"neuralGpuMsP50\":" + Number(timing.neuralGpuMsP50);

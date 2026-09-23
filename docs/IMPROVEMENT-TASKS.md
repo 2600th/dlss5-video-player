@@ -60,7 +60,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
 | [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
 | [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
-| [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
 | [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
 | [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
 | **P3** | | | | |
@@ -237,27 +236,6 @@ same frame during a live render.** At 1× it also doubles as a
 compression-cleanup pre-pass.
 
 Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
-
----
-
-<a id="p211"></a>
-### P2.11 · Quality metrics in the app
-
-`M` · **Player, Pipeline** · _old 3.11, expanded_
-
-PSNR and VMAF against the source penalise the very change the user asked for.
-Measure what the model did to **motion** instead:
-- **tOF** — the difference between the output's flow and the source's flow;
-  NVOFA can compute it in the app.
-- **Warping-error delta** — how much more the output flickers than the
-  source did.
-- **Temporal sigma** — already computed in `tools/benchmark`.
-
-Show them next to a blind A/B for the current settings on the current clip.
-For offline work, add CGVQM and ColorVideoVDP error maps to `tools/benchmark`.
-
-Refs: [CGVQM](https://github.com/IntelLabs/cgvqm) ·
-[ColorVideoVDP](https://github.com/gfxdisp/ColorVideoVDP)
 
 ---
 

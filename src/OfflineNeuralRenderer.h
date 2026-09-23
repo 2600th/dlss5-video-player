@@ -5,6 +5,7 @@
 #include "MediaPipeline.h"
 #include "NeuralRenderTypes.h"
 #include "TemporalGuides.h"
+#include "TemporalMetrics.h"
 #include "TemporalSettings.h"
 
 #include <windows.h>
@@ -138,6 +139,9 @@ struct NeuralRenderResult {
     // Absolute source pts of the first captured frame (== range.start100ns
     // for range renders, 0 for whole-source renders).
     int64_t firstTimestamp100ns{};
+    // What the captured frames did to motion against their source, measured on the
+    // job's last attempt (TemporalMetrics.h). A receipt field, never a key term.
+    TemporalMetrics metrics{};
     NeuralRenderTiming timing{};
     // Cold-start phases this run measured. The helper fills its own five; the
     // player merges the four it owns before the receipt is written.

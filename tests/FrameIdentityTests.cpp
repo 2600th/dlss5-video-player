@@ -1,6 +1,7 @@
 #include "SceneCut.h"
 #include "SynchronizedPlayback.h"
 #include "TemporalGuides.h"
+#include "TemporalMetrics.h"
 #include "TestSupport.h"
 
 #include <algorithm>
@@ -1166,6 +1167,125 @@ void reused_guide_storage_reports_what_fresh_storage_does_test()
     }
 }
 
+// P2.11: the metrics a render records about itself. Each is checked against a
+// picture whose answer is known by construction.
+namespace metrics_test {
+constexpr uint32_t kW = 320, kH = 180, kGridW = 32, kGridH = 18;
+
+// A textured frame translated `shift` pixels right, plus `lift` codes on every channel.
+std::vector<uint8_t> Frame(int shift, int lift = 0, int redLift = 0)
+{
+    std::vector<uint8_t> bgra(size_t(kW) * kH * 4u);
+    for (uint32_t y = 0; y < kH; ++y) {
+        for (uint32_t x = 0; x < kW; ++x) {
+            const int u = int(x) - shift;
+            const int base = 60 + int((u * 7 + int(y) * 3) & 63) + int(std::lround(40.0 * std::sin(u * 0.05)));
+            uint8_t* p = bgra.data() + (size_t(y) * kW + x) * 4u;
+            p[0] = uint8_t(std::clamp(base + lift, 0, 255));
+            p[1] = uint8_t(std::clamp(base + lift, 0, 255));
+            p[2] = uint8_t(std::clamp(base + lift + redLift, 0, 255));
+            p[3] = 255;
+        }
+    }
+    return bgra;
+}
+
+temporal_metrics::Plane Planar(const std::vector<uint8_t>& bgra)
+{
+    temporal_metrics::Plane plane;
+    CHECK(temporal_metrics::Sample(bgra, PixelLayout::Bgra, kW, kH, kGridW, kGridH, plane));
+    return plane;
+}
+} // namespace metrics_test
+
+void render_metrics_are_zero_for_an_output_that_is_its_source_test()
+{
+    using namespace metrics_test;
+    temporal_metrics::Accumulator metrics;
+    for (int frame = 0; frame < 6; ++frame) {
+        const auto plane = Planar(Frame(0));
+        metrics.Add(plane, plane, {}, frame == 0);
+    }
+    const TemporalMetrics result = metrics.Finish();
+    CHECK_EQ(uint64_t{6}, result.frames);
+    CHECK_EQ(uint64_t{5}, result.pairs);
+    CHECK_EQ(uint32_t{1}, result.shots);
+    CHECK(result.Measured());
+    CHECK(std::abs(result.FlickerAdded()) < 1e-9);
+    CHECK(std::abs(result.SigmaAdded()) < 1e-9);
+    CHECK(std::abs(result.lumaShift) < 1e-9 && std::abs(result.colorDelta) < 1e-9);
+    CHECK(!TemporalMetrics{}.Measured());
+}
+
+void render_metrics_see_flicker_the_source_did_not_have_test()
+{
+    using namespace metrics_test;
+    // The output alternates 4 codes up and down on a still source: 8 codes of
+    // frame-to-frame change the source never had, and a sigma of 4.
+    temporal_metrics::Accumulator metrics;
+    const auto source = Planar(Frame(0));
+    for (int frame = 0; frame < 8; ++frame) metrics.Add(source, Planar(Frame(0, frame % 2 ? 4 : -4)), {}, frame == 0);
+    const TemporalMetrics result = metrics.Finish();
+    CHECK(std::abs(result.sourceWarpError) < 1e-6);
+    CHECK(std::abs(result.FlickerAdded() - 8.0) < 0.05);
+    CHECK(std::abs(result.SigmaAdded() - 4.0) < 0.05);
+    CHECK(std::abs(result.lumaShift) < 0.05);
+}
+
+void render_metrics_follow_the_flow_and_stop_at_a_cut_test()
+{
+    using namespace metrics_test;
+    // A pan of one cell (10 px) per frame. With the vectors, the warping error of
+    // an unchanged output is the source's own, and both are near zero; without
+    // them, both are large and still equal, so nothing is attributed to the render.
+    std::vector<float> motion(size_t(kGridW) * kGridH * 2, 0.0f);
+    for (size_t cell = 0; cell < size_t(kGridW) * kGridH; ++cell) motion[cell * 2] = -1.0f;
+    temporal_metrics::Accumulator followed, still;
+    for (int frame = 0; frame < 5; ++frame) {
+        const auto plane = Planar(Frame(frame * 10));
+        followed.Add(plane, plane, motion, frame == 0);
+        still.Add(plane, plane, {}, frame == 0);
+    }
+    const TemporalMetrics withFlow = followed.Finish(), withoutFlow = still.Finish();
+    CHECK(withFlow.sourceWarpError < 0.25 * withoutFlow.sourceWarpError);
+    CHECK(std::abs(withFlow.FlickerAdded()) < 1e-9 && std::abs(withoutFlow.FlickerAdded()) < 1e-9);
+
+    // A cut ends a shot: its pair is not measured, and two shots are reported.
+    temporal_metrics::Accumulator cut;
+    for (int frame = 0; frame < 8; ++frame) {
+        const auto plane = Planar(Frame(frame < 4 ? 0 : 100, frame < 4 ? 0 : 50));
+        cut.Add(plane, plane, {}, frame == 0 || frame == 4);
+    }
+    const TemporalMetrics shots = cut.Finish();
+    CHECK_EQ(uint64_t{6}, shots.pairs);
+    CHECK_EQ(uint32_t{2}, shots.shots);
+    CHECK(std::abs(shots.sourceWarpError) < 1e-9);
+}
+
+void render_metrics_report_colour_in_one_scale_for_both_layouts_test()
+{
+    using namespace metrics_test;
+    // Ten codes more red: luma moves by 0.2126 of that, and the colour delta is the
+    // length of the whole (dY, dCb, dCr) step.
+    temporal_metrics::Accumulator metrics;
+    metrics.Add(Planar(Frame(0)), Planar(Frame(0, 0, 10)), {}, true);
+    const TemporalMetrics result = metrics.Finish();
+    CHECK(std::abs(result.lumaShift - 2.126) < 0.05);
+    const double dy = 2.126, dcb = -dy / 1.8556, dcr = (10.0 - dy) / 1.5748;
+    CHECK(std::abs(result.colorDelta - std::sqrt(dy * dy + dcb * dcb + dcr * dcr)) < 0.05);
+
+    // A mid-grey frame reads the same from BGRA and from limited-range NV12.
+    std::vector<uint8_t> bgra(size_t(kW) * kH * 4u, 128), nv12(size_t(kW) * kH * 3u / 2u, 128);
+    std::fill(nv12.begin(), nv12.begin() + size_t(kW) * kH, uint8_t(126));  // 16 + 219 * 128/255
+    temporal_metrics::Plane fromBgra, fromNv12;
+    CHECK(temporal_metrics::Sample(bgra, PixelLayout::Bgra, kW, kH, kGridW, kGridH, fromBgra));
+    CHECK(temporal_metrics::Sample(nv12, PixelLayout::Nv12, kW, kH, kGridW, kGridH, fromNv12));
+    CHECK(std::abs(fromBgra.y[0] - fromNv12.y[0]) < 0.5f);
+    CHECK(std::abs(fromNv12.cb[0]) < 0.01f && std::abs(fromNv12.cr[0]) < 0.01f);
+    // A buffer too small for its declared layout is refused rather than read past.
+    CHECK(!temporal_metrics::Sample(std::span<const uint8_t>(nv12), PixelLayout::Bgra, kW, kH, kGridW, kGridH, fromBgra));
+}
+
 int main()
 {
     reused_guide_storage_reports_what_fresh_storage_does_test();
@@ -1192,5 +1312,9 @@ int main()
     synchronized_range_seek_clamps_into_the_window_test();
     synchronized_playback_reports_a_frame_number_mismatch_test();
     identity_of_copies_the_decoded_frame_fields_test();
+    render_metrics_are_zero_for_an_output_that_is_its_source_test();
+    render_metrics_see_flicker_the_source_did_not_have_test();
+    render_metrics_follow_the_flow_and_stop_at_a_cut_test();
+    render_metrics_report_colour_in_one_scale_for_both_layouts_test();
     return test_support::failure_count == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

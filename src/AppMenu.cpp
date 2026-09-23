@@ -272,6 +272,7 @@ HMENU CreateMenuBar(const Localizer& localizer, bool youtubeAvailable)
     // What this render left behind, and what it reported.
     add(advanced, IDM_CLEAR_NEURAL_CACHE, L"menu.clear_neural_cache");
     add(advanced, IDM_OPEN_RENDER_RECEIPT, L"menu.open_receipt");
+    add(advanced, IDM_RENDER_REPORT, L"menu.render_report");
     AppendMenuW(advanced, MF_SEPARATOR, 0, nullptr);
     // Getting the runtime and the app back into a known state. Three separators
     // for five items made four groups, three of them a single row each.
@@ -514,6 +515,8 @@ bool UpdateRenderActionAvailability(HMENU menuBar, bool markersAvailable, bool r
     ok = enable(IDM_PAUSE_NEURAL_RENDER, jobActive) && ok;
     const HMENU pauseMenu = find_menu_containing_command(menuBar, IDM_PAUSE_NEURAL_RENDER);
     ok = pauseMenu && CheckMenuItem(pauseMenu, IDM_PAUSE_NEURAL_RENDER, MF_BYCOMMAND | (jobActive && jobPaused ? MF_CHECKED : MF_UNCHECKED)) != static_cast<DWORD>(-1) && ok;
+    // The report is read out of the receipt, so it is available exactly when it is.
+    ok = enable(IDM_RENDER_REPORT, receiptAvailable) && ok;
     return enable(IDM_OPEN_RENDER_RECEIPT, receiptAvailable) && ok;
 }
 

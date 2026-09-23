@@ -323,6 +323,7 @@ struct MetadataStreamOutcome {
     size_t restarts{};                  // sequences that began again at index 0
     std::vector<NeuralRenderSegment> segments;
     NeuralColdStartTimeline timeline;  // empty unless the helper reported one
+    TemporalMetrics metrics;           // unmeasured unless the helper reported them
 };
 MetadataStreamOutcome DecodeMetadataStream(std::span<const std::byte> bytes);
 

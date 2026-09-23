@@ -84,6 +84,12 @@ public:
     {
         const std::vector<std::byte> payload = EncodeResult(result);
         std::lock_guard lock(mutex_);
+        // Ahead of the result, which is the job's terminal message. A job that
+        // measured nothing - refused, failed before its first capture - sends none.
+        if (result.metrics.Measured()) {
+            const WireMetrics metrics = EncodeMetrics(result.metrics);
+            if (!WriteMessage(handle_, WireKind::Metrics, &metrics, sizeof(metrics))) return false;
+        }
         return WriteMessage(handle_, WireKind::Result, payload.data(), static_cast<uint32_t>(payload.size()));
     }
 

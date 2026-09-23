@@ -217,6 +217,11 @@ private:
             {L"menu.encoder_settings", L"Encoder settings"},
             {L"menu.advanced", L"Advanced"}, {L"menu.safe_mode", L"Restart in DLSS SR safe mode"},
             {L"menu.clear_neural_cache", L"Clear Neural Cache"}, {L"menu.open_receipt", L"Open render receipt"},
+            {L"menu.render_report", L"Render report..."},
+            {L"report.title", L"Render report"},
+            {L"report.unavailable", L"This render's receipt could not be read, so there is nothing to report."},
+            {L"report.unmeasured", L"This render was made before the player measured its renders, or measured no frame, so its receipt carries no temporal metrics.\nRender it again to measure it."},
+            {L"report.body", L"%s\n\nMeasured on %s output frames against their source (%s consecutive pairs, %s shots), in 8-bit codes.\n\nFlicker added: %s\n    change after following the video's own motion - source %s, render %s\nTemporal sigma added: %s\n    per-pixel spread inside a shot - source %s, render %s\nColour: %s from the source on average, brightness %s\n\nScene cuts %s, temporal stability %s.\nNegative flicker and sigma mean the render is steadier than its source."},
             {L"menu.check_updates", L"Check for updates"},
             // The badge sits right-justified in the menu bar; the arrow reads as
             // "newer than this build" without needing colour, which a native

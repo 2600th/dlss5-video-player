@@ -36,6 +36,7 @@
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
 #include "TemporalSettings.h"
+#include "StrictJson.h"
 #include "AudioPlayer.h"
 #include "Localization.h"
 #include "AppMenu.h"
@@ -8439,6 +8440,57 @@ private:
         if(!m_loaded)return;
         PromptForTimecode(m_hwnd,m_loc,m_font,FormatTimecode(Position100ns(),m_decoder.FrameRate(),true),[this](const std::wstring& text,TimecodeAction action){return ApplyTimecodeText(text,action);});
     }
+    // The render report (P2.11): the receipt's temporal metrics in words. Static and
+    // fed the receipt's text, so what it says about a receipt is testable without a
+    // render; the caller reads the file and shows the result.
+    static std::wstring RenderReportText(const Localizer& localizer,std::string_view receipt,const std::wstring& title){
+        strict_json::JsonValue document;
+        if(!strict_json::JsonParser(receipt).ParseDocument(document))return localizer.Get(L"report.unavailable");
+        const strict_json::JsonValue* result=document.Member("result");
+        const strict_json::JsonValue* metrics=result?result->Member("metrics"):nullptr;
+        if(!metrics||metrics->kind!=strict_json::JsonValue::Kind::Object)return localizer.Get(L"report.unmeasured");
+        const auto number=[&](std::string_view key)->std::optional<double>{
+            const strict_json::JsonValue* value=metrics->Member(key);
+            if(!value||value->kind!=strict_json::JsonValue::Kind::Number)return std::nullopt;
+            char* end=nullptr;const double parsed=std::strtod(value->text.c_str(),&end);
+            if(end==value->text.c_str()||!std::isfinite(parsed))return std::nullopt;
+            return parsed;
+        };
+        const auto codes=[](double value,bool sign){
+            wchar_t text[32]{};swprintf_s(text,sign?L"%+.2f":L"%.2f",value);return std::wstring(text);
+        };
+        const auto count=[&](std::string_view key){const auto value=number(key);return value?std::to_wstring(uint64_t(*value)):std::wstring(L"-");};
+        const auto frames=number("frames"),sourceWarp=number("sourceWarpError"),outputWarp=number("outputWarpError"),
+                   sourceSigma=number("sourceSigma"),outputSigma=number("outputSigma"),luma=number("lumaShift"),
+                   colour=number("colorDelta");
+        if(!frames||!sourceWarp||!outputWarp||!sourceSigma||!outputSigma||!luma||!colour)
+            return localizer.Get(L"report.unavailable");
+        // The settings the render was made with, as its receipt recorded them.
+        TemporalSettings temporal;
+        if(const strict_json::JsonValue* request=document.Member("request"))
+            if(const strict_json::JsonValue* recorded=request->Member("temporal");recorded&&recorded->kind==strict_json::JsonValue::Kind::String)
+                temporal=ParseTemporalSettings(recorded->text).value_or(TemporalSettings{});
+        const std::wstring cuts=Utf8ToWide(std::string(scene_cut::SensitivityName(temporal.sceneCuts)));
+        const std::wstring stability=Utf8ToWide(std::string(TemporalStabilityName(temporal.stability)));
+        wchar_t body[2048]{};
+        swprintf_s(body,localizer.Get(L"report.body").c_str(),title.c_str(),count("frames").c_str(),count("pairs").c_str(),
+                   count("shots").c_str(),codes(*outputWarp-*sourceWarp,true).c_str(),codes(*sourceWarp,false).c_str(),
+                   codes(*outputWarp,false).c_str(),codes(*outputSigma-*sourceSigma,true).c_str(),
+                   codes(*sourceSigma,false).c_str(),codes(*outputSigma,false).c_str(),codes(*colour,false).c_str(),
+                   codes(*luma,true).c_str(),cuts.c_str(),stability.c_str());
+        return body;
+    }
+    void ShowRenderReport(){
+        if(m_cachedReceiptPath.empty())return;
+        std::string receipt;
+        {
+            std::ifstream file(m_cachedReceiptPath,std::ios::binary);
+            receipt.assign(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());
+        }
+        const std::wstring title=m_displayTitle.empty()?m_cachedReceiptPath.parent_path().filename().wstring():m_displayTitle;
+        const std::wstring text=RenderReportText(Localizer{},receipt,title);
+        MessageBoxW(m_hwnd,text.c_str(),T(L"report.title").c_str(),MB_OK|MB_ICONINFORMATION);
+    }
     void OpenRenderReceipt(){
         if(m_cachedReceiptPath.empty())return;
         const auto result=reinterpret_cast<INT_PTR>(ShellExecuteW(m_hwnd,L"open",m_cachedReceiptPath.c_str(),nullptr,nullptr,SW_SHOWNORMAL));
@@ -9963,7 +10015,7 @@ private:
         // Handled before the switch would reach an unknown id, because the
         // presets are a contiguous range rather than named commands.
         case IDM_NEURAL_PRESET_CUSTOM:break;// reports state; not selectable
-case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;
+case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExportStages();break;case IDM_ENCODER_SETTINGS:ShowEncoderSettings();break;case IDM_OPEN_RENDER_RECEIPT:OpenRenderReceipt();break;case IDM_RENDER_REPORT:ShowRenderReport();break;
         case IDM_CHECK_FOR_UPDATES:MaybeStartUpdateCheck(true);break;
         case IDM_KEYBOARD_SHORTCUTS:ToggleShortcutSheet();break;
         case IDM_COMPARE_TOGGLE:ToggleSideBySide();break;

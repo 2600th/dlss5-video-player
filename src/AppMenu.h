@@ -135,6 +135,8 @@ inline constexpr UINT IDM_COMPARE_MASK_FEATHER_COUNT = 6;
 inline constexpr UINT IDM_ADVANCED_SAFE_MODE = 450;
 inline constexpr UINT IDM_CLEAR_NEURAL_CACHE = 451;
 inline constexpr UINT IDM_OPEN_RENDER_RECEIPT = 452;
+// The receipt's temporal metrics, read back and shown as a report (P2.11).
+inline constexpr UINT IDM_RENDER_REPORT = 453;
 inline constexpr UINT IDM_CHECK_FOR_UPDATES = 460;
 // One contiguous radio block, like the upscaling rungs: CheckMenuRadioItem
 // clears every command in the range it is given, so exactly one preset - or

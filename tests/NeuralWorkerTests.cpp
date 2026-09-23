@@ -1830,6 +1830,60 @@ void cold_start_timeline_messages_are_validated_test()
     CHECK(neural_worker_detail::DecodeMetadataStream(truncated).malformed);
 }
 
+// The render report's metrics (P2.11) travel as their own message ahead of the
+// result, at most once, and only as numbers an 8-bit render could produce.
+void render_metrics_messages_are_validated_test()
+{
+    TemporalMetrics metrics;
+    metrics.frames = 120;
+    metrics.pairs = 117;
+    metrics.shots = 3;
+    metrics.sourceWarpError = 2.5;
+    metrics.outputWarpError = 3.25;
+    metrics.sourceSigma = 4.0;
+    metrics.outputSigma = 3.5;
+    metrics.lumaShift = -1.2;
+    metrics.colorDelta = 6.4;
+    const auto resultPayload = EncodeResult(ValidFakeResult(9002));
+    const WireMetrics valid = EncodeMetrics(metrics);
+    std::vector<std::byte> stream;
+    AppendMessage(stream, WireKind::Metrics, AsBytes(valid));
+    AppendMessage(stream, WireKind::Result, resultPayload);
+    const auto accepted = neural_worker_detail::DecodeMetadataStream(stream);
+    CHECK(!accepted.malformed);
+    CHECK(accepted.complete);
+    CHECK(accepted.metrics == metrics);
+
+    // Absent is fine - a refused or failed job measures nothing - and reads as
+    // unmeasured rather than as zeros.
+    std::vector<std::byte> none;
+    AppendMessage(none, WireKind::Result, resultPayload);
+    const auto without = neural_worker_detail::DecodeMetadataStream(none);
+    CHECK(without.complete && !without.metrics.Measured());
+
+    for (const WireMetrics broken : {
+             [&] { WireMetrics value = valid; value.frames = 0; return value; }(),
+             [&] { WireMetrics value = valid; value.pairs = value.frames; return value; }(),
+             [&] { WireMetrics value = valid; value.sourceSigma = -1.0; return value; }(),
+             [&] { WireMetrics value = valid; value.colorDelta = std::numeric_limits<double>::quiet_NaN(); return value; }(),
+             [&] { WireMetrics value = valid; value.lumaShift = 1.0e9; return value; }(),
+             [&] { WireMetrics value = valid; value.reserved[1] = 1; return value; }()}) {
+        std::vector<std::byte> rejected;
+        AppendMessage(rejected, WireKind::Metrics, AsBytes(broken));
+        AppendMessage(rejected, WireKind::Result, resultPayload);
+        CHECK(neural_worker_detail::DecodeMetadataStream(rejected).malformed);
+    }
+    std::vector<std::byte> twice;
+    AppendMessage(twice, WireKind::Metrics, AsBytes(valid));
+    AppendMessage(twice, WireKind::Metrics, AsBytes(valid));
+    CHECK(neural_worker_detail::DecodeMetadataStream(twice).malformed);
+    // After the result is after the job: a terminal message ends what describes it.
+    std::vector<std::byte> late;
+    AppendMessage(late, WireKind::Result, resultPayload);
+    AppendMessage(late, WireKind::Metrics, AsBytes(valid));
+    CHECK(neural_worker_detail::DecodeMetadataStream(late).malformed);
+}
+
 // --- The resident command channel and its job loop -------------------------
 
 using resident_worker::CommandChannel;
@@ -2583,6 +2637,7 @@ int wmain(int argc, wchar_t** argv)
     configuration_retry_is_sequential_and_bounded_test();
     helper_cold_start_timeline_reaches_the_parent_test();
     cold_start_timeline_messages_are_validated_test();
+    render_metrics_messages_are_validated_test();
     resident_loop_answers_hello_and_serves_jobs_test();
     resident_loop_refuses_frames_it_cannot_trust_test();
     resident_loop_exits_on_shutdown_and_on_idle_test();

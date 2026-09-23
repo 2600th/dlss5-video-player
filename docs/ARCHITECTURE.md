@@ -367,6 +367,18 @@ discontinuity. The counters count the job's guide generator over its whole life 
 preroll and every encoder attempt included - and a re-evaluated frame counts
 once, so they are not bounded by `historyResets`.
 
+And it records what the render did to motion (`TemporalMetrics.h`), which is what
+**Advanced > Render report** reads back. The job reduces each captured frame and
+its source to the guide generator's analysis grid - the source when it is
+submitted, the capture when it comes back - and accumulates, in 8-bit codes of
+full-range BT.709 Y'CbCr whatever layout either side arrived in: the warping
+error of both after moving the previous frame by the guide generator's own flow,
+per-sample temporal sigma inside each shot, and the mean colour distance and
+luma shift. That is `analyze.py`'s flicker and sigma on a grid rather than every
+pixel, computed where the pixels already are, at a cost below a millisecond a
+frame. The helper sends them as one `Metrics` message ahead of the result; they
+are receipt fields and never key terms.
+
 The runtime directory has exactly one writer at a time. A job holds a
 session-scoped lease (a named mutex derived from that directory) from the
 settings write until the helper exits, so a second player instance cannot

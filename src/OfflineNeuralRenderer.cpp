@@ -102,6 +102,20 @@ struct JobEvaluation {
     double guideMs{};
     double captureMs{};
     double neuralGpuMs{};
+    // The guide generator's motion for this frame, per analysis-grid cell and in
+    // cells, x and y interleaved: what the render report's warping error moves the
+    // previous frame by. Empty from an evaluator with no guide generator.
+    std::vector<float> motionCells;
+    uint32_t gridWidth{}, gridHeight{};
+};
+
+// One captured frame's side of the render report: its source reduced to the
+// metric grid when it was submitted, since the decoder has recycled the pixels by
+// the time the capture comes back.
+struct MetricSample {
+    temporal_metrics::Plane source;
+    std::vector<float> motion;
+    bool newShot{};
 };
 
 // Wall time of each render-loop stage, one sample per captured frame. Six
@@ -165,6 +179,9 @@ struct AttemptResult {
     int64_t lastTimestamp{};
     std::vector<double> neuralGpuMs;
     StageSamples stages;
+    // The render report's metrics over this attempt's captured frames. A software
+    // retry measures its own frames from the start, like every counter above.
+    temporal_metrics::Accumulator metrics;
 };
 
 template <class F>
@@ -1261,6 +1278,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             FrameIdentity id{};
             double readMs{},guideMs{},evalMs{},neuralGpuMs{};
             SteadyClock::time_point frameStart{};
+            MetricSample metric;
         };
         std::deque<InFlightCapture> inFlight;
         uint64_t submitted = 0;
@@ -1270,6 +1288,34 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         // keeping the two apart is what stops pipeline latency leaking into the
         // throughput numbers. Reset at the top of every iteration.
         double iterationDrainMs = 0.0;
+
+        // The render report's two halves (TemporalMetrics.h). The source is reduced
+        // at submit, on the guide generator's own grid so its vectors move the cells
+        // they were solved for; the capture is reduced when it comes back, in the
+        // layout it was captured in. A frame that cannot be sampled is left out of
+        // the report and never fails the render.
+        const PixelLayout captureLayout=evaluator.CapturePixelFormat()==EncoderPixelFormat::Nv12
+            ?PixelLayout::Nv12:PixelLayout::Bgra;
+        auto sampleSource=[&](const JobFrame& submittedFrame,JobEvaluation& evaluation)->MetricSample{
+            MetricSample sample;
+            uint32_t gridWidth=evaluation.gridWidth,gridHeight=evaluation.gridHeight;
+            if(!gridWidth||!gridHeight){
+                const auto grid=TemporalGuideGenerator::AnalysisGrid(request.width,request.height,request.fps);
+                gridWidth=grid.first;gridHeight=grid.second;
+            }
+            if(!temporal_metrics::Sample(submittedFrame.bgra,source.Layout(),request.width,request.height,
+                                         gridWidth,gridHeight,sample.source))sample.source={};
+            sample.motion=std::move(evaluation.motionCells);
+            sample.newShot=evaluation.id.reset!=HistoryReset::None;
+            return sample;
+        };
+        auto measure=[&](const MetricSample& sample,std::span<const uint8_t> captured){
+            if(sample.source.y.empty())return;
+            temporal_metrics::Plane output;
+            if(!temporal_metrics::Sample(captured,captureLayout,outputWidth,outputHeight,
+                                         sample.source.width,sample.source.height,output))return;
+            attempt.metrics.Add(sample.source,output,sample.motion,sample.newShot);
+        };
 
         // Waits on the oldest in-flight capture only, then hands its pixels to the
         // segment writer or the encoder's feeder thread. The buffer is recycled from a
@@ -1300,6 +1346,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     << " pts=" << resolved.pts100ns);
                 return NeuralRenderFailure::Identity;
             }
+            measure(queued.metric,pixels);
             const size_t written = pixels.size();
             double writeMs = 0.0;
             EncodeError writeError;
@@ -1548,6 +1595,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 queued.readMs = readMs;queued.guideMs = evaluation.guideMs;
                 queued.evalMs = evalMs;queued.neuralGpuMs = evaluation.neuralGpuMs;
                 queued.frameStart = frameStart;
+                queued.metric = sampleSource(frame, evaluation);
                 inFlight.push_back(std::move(queued));
                 ++submitted;
                 if (evaluator.Pending() >= evaluator.MaxPending()) {
@@ -1564,6 +1612,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             // the pixels in hand, and they are written here once the gate opens. A
             // segmented job takes ownership of them; the single-file encoder hands
             // them to its feeder thread.
+            measure(sampleSource(frame, evaluation), evaluation.bgra);
             const uint64_t captured = evaluation.bgra.size();
             double writeMs = 0.0;
             EncodeError writeError;
@@ -1657,6 +1706,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         return fail(attempt.failure, AttemptFailureDetail(attempt.failure));
     }
     source.Close();
+    result.metrics=attempt.metrics.Finish();
     emit(NeuralRenderPhase::Encoding,attempt.frames,attempt.bytes,false);
     emit(NeuralRenderPhase::Validating,attempt.frames,attempt.bytes,false);
     result.evidence=ParseNeuralRuntimeEvidence(evidenceProvider());
@@ -2089,6 +2139,19 @@ struct ProductionEvaluatorAdapter {
     // reset or a cut detected by the guide generator). A capture carries the
     // identity its readback slot recorded when the copy was queued, so the job
     // can verify it received the frame it submitted.
+    // The guide's motion in analysis-grid cells, for the render report. The grid
+    // carries render pixels, and this adapter always renders at the source size.
+    static void CopyGuideMotion(const GuideFrame& guide,uint32_t renderWidth,uint32_t renderHeight,JobEvaluation& out){
+        out.gridWidth=guide.gridW;out.gridHeight=guide.gridH;
+        const size_t cells=size_t(guide.gridW)*guide.gridH;
+        if(!cells||!renderWidth||!renderHeight||guide.guideGridRGBA32F.size()<cells*4u){out.motionCells.clear();return;}
+        const float toCellsX=float(guide.gridW)/float(renderWidth),toCellsY=float(guide.gridH)/float(renderHeight);
+        out.motionCells.resize(cells*2u);
+        for(size_t cell=0;cell<cells;++cell){
+            out.motionCells[cell*2u]=guide.guideGridRGBA32F[cell*4u]*toCellsX;
+            out.motionCells[cell*2u+1u]=guide.guideGridRGBA32F[cell*4u+1u]*toCellsY;
+        }
+    }
     bool Submit(const JobFrame& frame,const FrameIdentity& id,bool capture,JobEvaluation& out){
         GuideFrame guide;const auto guideStart=SteadyClock::now();
         {
@@ -2098,6 +2161,7 @@ struct ProductionEvaluatorAdapter {
             }
         }
         out.guideMs=MillisecondsSince(guideStart);
+        if(capture)CopyGuideMotion(guide,width,height,out);
         const float frameMs=static_cast<float>(1000.0/fps);
         if(!capture){
             if(!renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)){
@@ -2155,6 +2219,7 @@ struct ProductionEvaluatorAdapter {
             }
         }
         out.guideMs=MillisecondsSince(guideStart);
+        CopyGuideMotion(guide,width,height,out);
         const float frameMs=static_cast<float>(1000.0/fps);
         if(!renderer->RenderFrame(frame.bgra.data(),frame.bgra.size(),id,guide,frameMs)){
             lastFailure=ClassifyRendererFailure(*renderer);return false;

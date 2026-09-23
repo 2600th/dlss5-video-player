@@ -103,7 +103,15 @@ result opens as cached playback of that range, seeking stays inside it and the
 status line shows `Range hh:mm:ss:ff–hh:mm:ss:ff` plus a short
 `NR intensity/struct/tone` summary of the settings it was rendered with.
 **Advanced > Open render receipt** opens the entry's `receipt.json` with the
-full record. The recent-video history keeps one render per source, so a new
+full record. **Advanced > Render report** reads the part of it that says what
+the render did to motion, measured while it rendered, against the source and in
+8-bit codes: **flicker added** - how much more each frame changes from the one
+before, once both are moved along the video's own motion, than the source does;
+**temporal sigma added** - how much more each pixel wanders inside a shot; and
+how far the colour and brightness sit from the source on average. Negative
+flicker and sigma mean the render is steadier than its source. A render made
+before the player measured its renders says so instead of printing zeros. The
+recent-video history keeps one render per source, so a new
 preview or range render for the same file displaces the previous entry.
 
 Neural settings preview themselves. With playback paused, changing a slider in

@@ -556,6 +556,13 @@ struct PlayerAppTestAccess {
         CheckSettingsAheadNotice(app);
     }
 
+    static void render_report_test()
+    {
+        PlayerApp& app = fixture->app;
+
+        CheckRenderReport(app);
+    }
+
     static void encoder_settings_dialog_test()
     {
         PlayerApp& app = fixture->app;
@@ -1882,6 +1889,7 @@ struct PlayerAppTestAccess {
         UI_CASE(export_stages_dialog_test),
         UI_CASE(neural_settings_dialog_test),
         UI_CASE(settings_ahead_notice_test),
+        UI_CASE(render_report_test),
         UI_CASE(encoder_settings_dialog_test),
         UI_CASE(settings_dialog_tips_survive_a_second_dialog_test),
         UI_CASE(live_export_entry_test),
@@ -3252,6 +3260,28 @@ struct PlayerAppTestAccess {
         app.NeuralWndProc(dialog, WM_COMMAND, MAKEWPARAM(IDC_NS_CLOSE, BN_CLICKED), 0);
         CHECK(app.m_neuralWnd == nullptr);
         CHECK(!IsWindow(dialog));
+    }
+
+    // The render report (P2.11) is the receipt's metrics in words: the numbers it
+    // prints are the receipt's, the settings are the ones the render was made with,
+    // and a receipt without metrics - every render made before them - says so
+    // rather than printing zeros.
+    static void CheckRenderReport(PlayerApp& app)
+    {
+        (void)app;
+        const std::string receipt =
+            "{\"schema\":1,\"request\":{\"temporal\":\"cuts=more,stability=medium\"},"
+            "\"result\":{\"ok\":true,\"metrics\":{\"frames\":120,\"pairs\":117,\"shots\":3,"
+            "\"sourceWarpError\":2.5,\"outputWarpError\":3.25,\"flickerAdded\":0.75,"
+            "\"sourceSigma\":4,\"outputSigma\":3.5,\"sigmaAdded\":-0.5,"
+            "\"lumaShift\":-1.2,\"colorDelta\":6.4}}}";
+        const std::wstring text = PlayerApp::RenderReportText(Localizer{}, receipt, L"Clip");
+        for (const wchar_t* expected : {L"Clip", L"120", L"117", L"+0.75", L"2.50", L"3.25", L"-0.50",
+                                        L"6.40", L"-1.20", L"more", L"medium"})
+            CHECK(text.find(expected) != std::wstring::npos);
+        const std::string legacy = "{\"schema\":1,\"request\":{},\"result\":{\"ok\":true,\"metrics\":null}}";
+        CHECK_EQ(Localizer{}.Get(L"report.unmeasured"), PlayerApp::RenderReportText(Localizer{}, legacy, L"Clip"));
+        CHECK_EQ(Localizer{}.Get(L"report.unavailable"), PlayerApp::RenderReportText(Localizer{}, "{truncated", L"Clip"));
     }
 
     // A settings change the player cannot preview - the picture is playing - used to
