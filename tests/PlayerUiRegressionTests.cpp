@@ -823,6 +823,54 @@ struct PlayerAppTestAccess {
         CheckLoadingFeedback(app);
     }
 
+    // A menu, a window drag and a message box each run a modal loop that never
+    // returns to the main pump, so Tick stopped and the video froze under a
+    // playing audio track. A timer the modal loop dispatches drives Tick until
+    // the loop ends, and a Tick is never entered twice.
+    static void modal_loops_keep_ticking_test()
+    {
+        PlayerApp& app = fixture->app;
+        CHECK(app.m_hwnd != nullptr);
+        const bool loaded = app.m_loaded;
+        app.m_loaded = false;
+        CHECK_EQ(app.m_modalTickTimer, UINT_PTR{0});
+        app.WndProc(app.m_hwnd, WM_ENTERMENULOOP, FALSE, 0);
+        CHECK(app.m_modalTickTimer != 0);
+        // The modal timer's WM_TIMER runs a Tick: a pending seek is consumed
+        // (and refused, since nothing is loaded).
+        app.m_seekPending = true;
+        app.WndProc(app.m_hwnd, WM_TIMER, PlayerApp::kModalTickTimerId, 0);
+        CHECK(!app.m_seekPending);
+        // ...but not from inside a Tick: a message box raised by one dispatches
+        // the same timer.
+        app.m_seekPending = true; app.m_inTick = true;
+        app.WndProc(app.m_hwnd, WM_TIMER, PlayerApp::kModalTickTimerId, 0);
+        CHECK(app.m_seekPending);
+        app.m_inTick = false;
+        app.WndProc(app.m_hwnd, WM_EXITMENULOOP, FALSE, 0);
+        CHECK_EQ(app.m_modalTickTimer, UINT_PTR{0});
+        // A stray WM_TIMER after the loop ended is not a Tick.
+        app.WndProc(app.m_hwnd, WM_TIMER, PlayerApp::kModalTickTimerId, 0);
+        CHECK(app.m_seekPending);
+        app.m_seekPending = false;
+
+        app.WndProc(app.m_hwnd, WM_ENTERSIZEMOVE, 0, 0);
+        CHECK(app.m_modalTickTimer != 0);
+        app.WndProc(app.m_hwnd, WM_EXITSIZEMOVE, 0, 0);
+        CHECK_EQ(app.m_modalTickTimer, UINT_PTR{0});
+
+        // A message box or owned dialog does not tick: it is raised from inside
+        // a command handler, where a Tick could act on half-updated state.
+        app.WndProc(app.m_hwnd, WM_ENTERIDLE, MSGF_DIALOGBOX, 0);
+        CHECK_EQ(app.m_modalTickTimer, UINT_PTR{0});
+        // The main pump's Tick still ends a timer a modal loop left running.
+        app.WndProc(app.m_hwnd, WM_ENTERSIZEMOVE, 0, 0);
+        CHECK(app.m_modalTickTimer != 0);
+        app.Tick();
+        CHECK_EQ(app.m_modalTickTimer, UINT_PTR{0});
+        app.m_loaded = loaded;
+    }
+
     static void window_and_menu_teardown_test()
     {
         PlayerApp& app = fixture->app;
@@ -1017,6 +1065,7 @@ struct PlayerAppTestAccess {
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),
+        UI_CASE(modal_loops_keep_ticking_test),
         UI_CASE(window_and_menu_teardown_test),
         UI_CASE(fullscreen_lifecycle_test),
     };

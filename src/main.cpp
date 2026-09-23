@@ -1334,7 +1334,40 @@ public:
     MediaSourceKind DecodeKind()const{return m_cachedSourceFile?MediaSourceKind::LocalFile:m_sourceKind;}
 
 
-    void Tick() {
+    // The main pump's entry. Reaching it means no modal loop is running on this
+    // thread - they do not return until they end - so whatever started the
+    // modal tick timer has finished with it.
+    void Tick(){StopModalTick();RunTick();}
+    // A modal loop - a menu, a window move or resize - never returns to the
+    // main pump, so Tick stopped while audio kept playing: the video froze for
+    // as long as the menu was open, then a local file decoded and dropped the
+    // whole backlog in one Tick, and a neural pair re-anchored, which counts
+    // toward the "cannot follow" limit. A USER timer is dispatched by every
+    // modal loop, so it drives Tick until the loop ends. Its ~16 ms resolution
+    // judders a 60 fps source, which is acceptable for the length of a menu
+    // visit; the main pump takes back over on return.
+    //
+    // Message boxes and owned dialogs deliberately do NOT tick: they are raised
+    // from inside command handlers, often between two halves of a state change
+    // (a confirm before an unload, an error mid-load), and a Tick there would
+    // present or seek against half-updated state. Video holds for the length
+    // of a dialog instead.
+    void StartModalTick(){
+        if(!m_modalTickTimer&&m_hwnd)m_modalTickTimer=SetTimer(m_hwnd,kModalTickTimerId,USER_TIMER_MINIMUM,nullptr);
+    }
+    void StopModalTick(){
+        if(m_modalTickTimer){if(m_hwnd)KillTimer(m_hwnd,m_modalTickTimer);m_modalTickTimer=0;}
+    }
+    // Never re-entered. Tick itself can open a message box (a failed seek, a
+    // lost device), whose modal loop dispatches the timer above; a nested Tick
+    // would run a seek or a present in the middle of the one that raised it.
+    void RunTick(){
+        if(m_inTick)return;
+        m_inTick=true;
+        struct TickScope{bool& active;~TickScope(){active=false;}}scope{m_inTick};
+        TickOnce();
+    }
+    void TickOnce() {
         ReapSourcePrefetch();
         // Headphones unplugged, a default-device change, a driver restart: the
         // endpoint reports itself invalidated and audio restarts on the new
@@ -1456,6 +1489,7 @@ private:
     static constexpr UINT_PTR kActivityTimerId=0xD155;
     static constexpr UINT_PTR kFullscreenTimerId=0xD156;
     static constexpr UINT_PTR kPreviewTimerId=0xD157;
+    static constexpr UINT_PTR kModalTickTimerId=0xD158;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -7499,9 +7533,11 @@ private:
         case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}break;
-        case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();break;
-        case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}break;
+        case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
+        case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
+        case WM_ENTERSIZEMOVE:StartModalTick();break;
+        case WM_EXITSIZEMOVE:StopModalTick();break;
         case WM_SYSKEYDOWN:if(w==VK_MENU)RevealFullscreenControls();break;
         case WM_SYSCOMMAND:if((w&0xfff0)==SC_KEYMENU)RevealFullscreenControls();break;
         case WM_NCDESTROY:
@@ -7510,7 +7546,7 @@ private:
             break;
         case WM_SETTINGCHANGE:ReadAnimationPreference();InvalidateRect(h,nullptr,FALSE);break;
         case WM_SHOWWINDOW:SyncActivityFeedback();break;
-        case WM_DESTROY:CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
+        case WM_DESTROY:CancelExport();DrainStageExportMessages();if(m_activityTimer){KillTimer(h,m_activityTimer);m_activityTimer=0;}StopModalTick();CancelNeuralJob(false);DrainNeuralMessages();CancelYouTubeResolution(false);DrainYouTubeCompletions();CancelSourcePrefetch();CancelUpdateCheck();m_running=false;PostQuitMessage(0);return 0;
         case WM_CLOSE:CancelExport();CancelNeuralJob(false);CancelYouTubeResolution(false);CancelSourcePrefetch();CancelUpdateCheck();DestroyWindow(h);return 0;
         case WM_GETMINMAXINFO:{
             auto* info=reinterpret_cast<MINMAXINFO*>(l);
@@ -7786,6 +7822,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_guidesSkipped=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
     UINT_PTR m_activityTimer=0;
+    // Drives Tick while a modal loop owns the thread; see StartModalTick.
+    UINT_PTR m_modalTickTimer=0;bool m_inTick=false;
     bool m_activityBusy=false,m_activityMotionEnabled=true;
     Clock::time_point m_activityStarted=Clock::now();
     // The manual rung, only consulted when m_upscaleAuto is false. Auto is the

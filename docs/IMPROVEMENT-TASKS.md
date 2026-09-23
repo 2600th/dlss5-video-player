@@ -55,7 +55,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
-| [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
 | [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
 | **P1** | | | | |
 | [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
@@ -189,26 +188,6 @@ flag at `:1978` guards against, shuffled frames are published as verified.
 **Fix** — record the identity in the readback slot when the copy is queued,
 return it when the slot resolves, and compare it with the frame queued in
 that position.
-
----
-
-<a id="p09"></a>
-### P0.9 · Video freezes while a menu, drag or message box is open
-
-`S` · **Player** · 🔍
-
-**Where** — `main.cpp:7837-7846` (the only caller of `Tick`), `:7419`
-
-Modal loops (menus, window moves and resizes, `MessageBox`) never return to
-the message pump, so `Tick` stops while audio keeps playing. On return, a
-local file decodes and drops the whole backlog in one Tick. A neural pair
-re-anchors, and that counts toward the "cannot follow" limit.
-
-**Impact** — Player: every menu visit freezes the video, then it catches up
-with a hitch.
-
-**Fix** — start a `SetTimer` on `WM_ENTERMENULOOP` / `WM_ENTERSIZEMOVE` that
-drives `Tick`, and kill it on exit. Or pause the clocks for the duration.
 
 ---
 
