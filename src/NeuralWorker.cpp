@@ -3,6 +3,7 @@
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
+#include "AtomicFile.h"
 #include "KillOnCloseJob.h"
 #include "StrictJson.h"
 
@@ -1988,28 +1989,11 @@ bool StoreNeuralPreflightReceipt(const std::filesystem::path& cacheRoot,
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error) return false;
-    const std::string bytes = PreflightIdentity(key) + "\n" + std::string(json);
-    if (bytes.size() > MAXDWORD) return false;
-    // Written beside the destination, flushed, then renamed over it, so a
-    // reader sees the previous verdict or the new one and never part of one.
-    // Unique per process and call: two players storing the same verdict must
-    // not share a temporary file.
-    static std::atomic<unsigned long> sequence{};
-    std::filesystem::path temporary = path;
-    temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-                 std::to_wstring(sequence.fetch_add(1));
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written = 0;
-    const bool flushed = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr) &&
-                         written == bytes.size() && FlushFileBuffers(file);
-    const bool closed = CloseHandle(file) != FALSE;
-    const bool replaced = flushed && closed &&
-        MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-    // CREATE_NEW made this exact temporary ours; nothing else is removed.
-    if (!replaced) DeleteFileW(temporary.c_str());
-    return replaced;
+    // A reader sees the previous verdict or the new one and never part of one;
+    // the temporary is unique per process and call, so two players storing the
+    // same verdict never share one.
+    return static_cast<bool>(
+        atomic_file::Replace(path, PreflightIdentity(key) + "\n" + std::string(json)));
 }
 
 std::string MarkReusedNeuralPreflight(std::string_view json)

@@ -1,5 +1,7 @@
 #include "ReShadeConfig.h"
 
+#include "AtomicFile.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -582,39 +584,15 @@ WriteResult WriteUpdatedIni(const std::filesystem::path& iniPath, std::string_vi
     }
     temporary.resize(std::wcslen(temporary.c_str()));
 
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        const std::wstring error = Win32Error(L"Opening ReShade.ini temporary file");
-        DeleteFileW(temporary.c_str());
-        return {false, error};
-    }
-
-    bool wrote = true;
-    DWORD written = 0;
-    size_t offset = 0;
-    while (offset < content.size()) {
-        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(content.size() - offset, MAXDWORD));
-        if (!WriteFile(file, content.data() + offset, chunk, &written, nullptr) || written != chunk) {
-            wrote = false;
-            break;
-        }
-        offset += written;
-    }
-    const bool flushed = wrote && FlushFileBuffers(file) != FALSE;
-    const DWORD writeError = wrote && !flushed ? GetLastError() : (wrote ? ERROR_SUCCESS : GetLastError());
-    CloseHandle(file);
-    if (!wrote || !flushed) {
-        DeleteFileW(temporary.c_str());
-        return {false, L"Writing ReShade.ini temporary file failed (Win32 error " + std::to_wstring(writeError) + L")"};
-    }
-
-    if (!MoveFileExW(temporary.c_str(), iniPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const std::wstring error = Win32Error(L"Replacing ReShade.ini");
-        DeleteFileW(temporary.c_str());
-        return {false, error};
-    }
-    return {true, {}};
+    // GetTempFileNameW created the file, so it is ours to overwrite and remove.
+    const atomic_file::Outcome written =
+        atomic_file::WriteAndReplace(temporary, CREATE_ALWAYS, iniPath, content);
+    if (written) return {true, {}};
+    const wchar_t* step = written.failed == atomic_file::Step::CreateTemporary
+        ? L"Opening ReShade.ini temporary file"
+        : written.failed == atomic_file::Step::Write ? L"Writing ReShade.ini temporary file"
+                                                     : L"Replacing ReShade.ini";
+    return {false, std::wstring(step) + L" failed (Win32 error " + std::to_wstring(written.error) + L")"};
 }
 
 } // namespace

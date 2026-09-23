@@ -48,6 +48,7 @@
 #include "Nv12Convert.h"
 #include "NeuralPresets.h"
 #include "HexText.h"
+#include "AtomicFile.h"
 #ifdef small
 #undef small
 #endif
@@ -10060,6 +10061,56 @@ void hex_text_is_zero_padded_to_the_width_of_its_type_test()
     CHECK(HexResultTextWide(0xbad00002u) == L"0xbad00002");
 }
 
+// P1.16: one atomic replace for every writer. It publishes whole files,
+// leaves no temporary behind whichever step fails, and never removes a file
+// it did not create.
+void atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test()
+{
+    const std::filesystem::path directory = test_support::FixtureTempRoot() /
+        (L"PolicyTests-AtomicFile-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code error;
+    std::filesystem::remove_all(directory, error);
+    REQUIRE(std::filesystem::create_directories(directory, error));
+    const auto count = [&] {
+        size_t files = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(directory)) { (void)entry; ++files; }
+        return files;
+    };
+    const auto read = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    };
+    const auto destination = directory / L"settings.dat";
+    CHECK(static_cast<bool>(atomic_file::Replace(destination, "first")));
+    CHECK_EQ(std::string("first"), read(destination));
+    CHECK(static_cast<bool>(atomic_file::Replace(destination, std::string("second\0bytes", 12))));
+    CHECK_EQ(std::string("second\0bytes", 12), read(destination));
+    CHECK_EQ(size_t{1}, count());
+
+    // A missing directory fails at the temporary and creates nothing.
+    const auto missing = atomic_file::Replace(directory / L"absent" / L"file.dat", "x");
+    CHECK(missing.failed == atomic_file::Step::CreateTemporary);
+    CHECK(missing.error != ERROR_SUCCESS);
+
+    // A destination that cannot be replaced fails at the rename; the temporary
+    // goes and the destination stays as it was.
+    const auto occupied = directory / L"occupied";
+    REQUIRE(std::filesystem::create_directory(occupied, error));
+    const auto refused = atomic_file::Replace(occupied, "x");
+    CHECK(refused.failed == atomic_file::Step::Replace);
+    CHECK(std::filesystem::is_directory(occupied));
+    CHECK_EQ(size_t{2}, count());
+
+    // A temporary name that is already taken belongs to someone else.
+    const auto taken = directory / L"taken.tmp";
+    { std::ofstream(taken, std::ios::binary) << "theirs"; }
+    const auto collided = atomic_file::WriteAndReplace(taken, CREATE_NEW, destination, "mine");
+    CHECK(collided.failed == atomic_file::Step::CreateTemporary);
+    CHECK_EQ(std::string("theirs"), read(taken));
+    CHECK_EQ(std::string("second\0bytes", 12), read(destination));
+    std::filesystem::remove_all(directory, error);
+}
+
 constexpr test_support::TestCase kCases[] = {
     TEST_CASE(harness_isolates_a_failing_case_from_the_ones_after_it_test),
     TEST_CASE(youtube_bitrate_selection_uses_real_helper_without_network_test),
@@ -10349,6 +10400,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(audio_endpoint_callbacks_never_reach_a_detached_renderer_test),
     TEST_CASE(audio_sink_is_declared_dead_only_after_a_playing_stream_goes_quiet_test),
     TEST_CASE(hex_text_is_zero_padded_to_the_width_of_its_type_test),
+    TEST_CASE(atomic_file_replace_publishes_whole_files_and_cleans_up_only_its_own_test),
 };
 
 

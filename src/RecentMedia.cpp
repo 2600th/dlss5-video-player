@@ -1,5 +1,7 @@
 #include "RecentMedia.h"
 
+#include "AtomicFile.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -171,23 +173,9 @@ bool RecentMediaHistory::Save() const
     const auto bytes = output.str();
     if (bytes.size() > kMaximumFileBytes || file_.empty()) return false;
 
-    static std::atomic<unsigned long> sequence{};
-    auto temporary = file_;
-    temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-        std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(sequence.fetch_add(1));
-    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    DWORD written{};
-    const bool flushed = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()),
-        &written, nullptr) && written == bytes.size() && FlushFileBuffers(file);
-    const bool closed = CloseHandle(file) != FALSE;
-    const bool replaced = flushed && closed && MoveFileExW(temporary.c_str(), file_.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-    // CREATE_NEW above establishes ownership of this exact temporary file.
-    // Never remove the destination history or any source/render cache files.
-    if (!replaced) DeleteFileW(temporary.c_str());
-    return replaced;
+    // Only the temporary this call created is ever removed, never the history
+    // itself or any source or render cache file.
+    return static_cast<bool>(atomic_file::Replace(file_, bytes));
 }
 
 std::vector<RecentMediaEntry> RecentMediaHistory::Remember(RecentMediaEntry entry)
