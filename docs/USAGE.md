@@ -492,10 +492,9 @@ Refusals are named rather than generic, and they appear as you tick:
 
 **Super Resolution on its own runs without the neural model.** Tick it with
 Neural rendering unticked and the helper starts with the neural add-on
-disabled, so the file is DLSS Super Resolution alone. Switching between an
-upscale-only export and one with the neural pass costs one extra helper start,
-because the add-on is chosen when the helper loads. The render is refused
-rather than written if the add-on turns out to have run anyway.
+disabled, so the file is DLSS Super Resolution alone. The render is refused
+rather than written if the add-on turns out to have run anyway. With Neural
+rendering ticked, the pass uses the look set in **Neural settings**.
 
 While it runs, the panel over the video names the pass, the percentage, frames
 done of total, elapsed time and an ETA once enough frames have gone through for
@@ -507,6 +506,48 @@ This does not touch the neural cache. A cache entry is a playback carrier keyed
 on the source and its settings; this is a one-off at a size and a rate you
 picked. **Save converted video** is still how you keep the render you are
 already watching.
+
+### From the command line
+
+The same export runs without opening the player:
+
+```
+DLSSVideoPlayer.exe --render <input> [--stages sr,nr,fg] [--height 1080|1440|2160]
+                    [--multiplier 2-5] [--preset NAME] [--range START-END]
+                    [--out FILE.mkv] [--quiet]
+```
+
+- `--stages` picks the stages as the dialog's ticks do: `sr` (Super
+  Resolution), `nr` (neural rendering), `fg` (frame generation). They run in
+  the fixed order above whatever order they are listed in. Without it, `nr`.
+- `--height` is the Super Resolution rung and `--multiplier` the frame
+  generation rate, 1440 and 2 by default. Each needs its stage.
+- `--preset` is one of `natural`, `detail-only`, `gentle` or `strong`, the
+  presets in **Neural settings**. Without it the render uses the Neural
+  settings the player saved.
+- `--range` renders part of the source, in the timecode forms **Go to
+  timecode** accepts, for example `0:10-0:25` or `f0-f300`. It needs `sr` or
+  `nr`: frame generation then converts that pass's result rather than the whole
+  film, and the file has no audio, as an export without frame generation never
+  does.
+- `--out` names the `.mkv` to write and replaces an existing file. Without it
+  the file is `<input>-dlss.mkv` beside the input, and an existing one is
+  refused rather than overwritten.
+- `--quiet` prints only the last line; `--help` prints the options.
+
+It prints the plan, a progress line per pass at most once a second, and a final
+`done:`, `refused:`, `failed:` or `cancelled` line. The exit code says which:
+0 done, 2 bad arguments, 3 refused (the reason is printed - the same refusals
+the dialog names, plus a busy neural runtime or a missing one), 4 failed, 5
+cancelled with Ctrl+C.
+
+The player is a Windows program rather than a console one, so `cmd.exe` does
+not wait for it: use `start /wait "" DLSSVideoPlayer.exe --render ...` and read
+`%ERRORLEVEL%`, or in PowerShell
+`$p = Start-Process DLSSVideoPlayer.exe -ArgumentList '--render','clip.mp4' -Wait -PassThru -NoNewWindow; $p.ExitCode`.
+Output redirected to a file or a pipe is written there as UTF-8. It shares the
+neural runtime with a running player, so it waits for a render the player is
+doing, and refuses after five seconds rather than interleaving with it.
 
 ## Save a converted video
 

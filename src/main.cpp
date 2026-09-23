@@ -106,6 +106,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "RuntimeModulePolicy.h"
 #include "UpscalingPolicy.h"
 #include "ExportPipeline.h"
+#include "RenderCommandLine.h"
 #include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
 #include "StatusChipPolicy.h"
@@ -1367,6 +1368,148 @@ static SourceAcquisition AcquireYouTubeSource(NeuralCacheManager& cache,
     if(!promoted){result.detail=L"The acquired source was not reusable.";return result;}
     result.path=promoted->payloadPath;
     return result;
+}
+
+static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
+    switch(refusal){
+    case ExportRefusal::NothingSelected:return L"export.stages.refusal.nothing";
+    case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
+    case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
+    case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
+    case ExportRefusal::StillImage:return L"export.stages.refusal.still";
+    case ExportRefusal::None:break;
+    }
+    return L"export.stages.refusal.nothing";
+}
+
+// ---- Export with DLSS stages, the passes themselves --------------------
+//
+// Shared by the dialog and by `--render`, so a script gets the file the dialog
+// would have written rather than a second implementation of it that drifts.
+// Everything the two callers differ in - where progress goes, how the outcome
+// is shown, whether a range was asked for - is a parameter.
+struct StageExportJob {
+    ExportPlan plan;
+    std::filesystem::path source;
+    std::filesystem::path destination;
+    // Where the intermediate passes are written: the cache root's
+    // export-stages directory, beside the other derived carriers.
+    std::filesystem::path scratch;
+    // The player's directory: ffmpeg beside it, the helper in neural-runtime.
+    std::filesystem::path helpers;
+    uint32_t sourceWidth{},sourceHeight{};
+    double fps{},duration{};
+    // Whole for the dialog. A range reaches the worker pass only; frame
+    // generation then reads that pass's carrier, which covers just the range.
+    NeuralRenderRange range{};
+    uint32_t nvencPreset{5};
+    // Written to the add-on before a neural pass. The dialog's tooltip has
+    // always said the neural stage "runs the neural model with the settings
+    // from Neural settings", but nothing wrote them: the export used whatever
+    // the last live render had left in ReShade.ini.
+    NeuralSettings neuralSettings{};
+};
+
+// `passKey` null is the end of the passes, when the finished file is moved
+// into place.
+struct StageExportUpdate {
+    uint32_t pass{},passes{};
+    const wchar_t* passKey{};
+    uint64_t completedFrames{},totalFrames{};
+};
+
+enum class StageExportStatus { Done, Refused, Failed, Cancelled };
+
+struct StageExportOutcome {
+    StageExportStatus status{StageExportStatus::Failed};
+    std::wstring detail;
+};
+
+static StageExportOutcome RunStageExport(const StageExportJob& job,std::stop_token stop,
+                                         const std::function<void(const StageExportUpdate&)>& progress){
+    const ExportPlan& plan=job.plan;
+    const uint64_t tag=GetTickCount64();
+    const auto stageOne=job.scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
+    const auto stageTwo=job.scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
+    std::filesystem::path produced=job.source;
+    const auto sweep=[&]{std::error_code ec;
+        if(stageOne!=produced)std::filesystem::remove(stageOne,ec);
+        if(stageTwo!=produced)std::filesystem::remove(stageTwo,ec);};
+    const auto report=[&](StageExportUpdate update){if(progress)progress(update);};
+    const uint32_t passes=ExportStageCount(plan);
+    if(plan.workerStage){
+        NeuralRenderRequest request{};
+        request.sourcePath=produced;request.stagingVideoPath=stageOne;
+        request.width=job.sourceWidth;request.height=job.sourceHeight;
+        request.fps=job.fps;request.durationSeconds=job.duration;
+        request.range=job.range;
+        request.nvencPreset=job.nvencPreset;
+        request.requireNeural=plan.requireNeural;
+        if(plan.outputWidth!=job.sourceWidth||plan.outputHeight!=job.sourceHeight){
+            request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
+        }
+        const wchar_t* passKey=plan.requireNeural
+            ?(plan.outputWidth!=job.sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
+            :L"export.progress.pass_sr";
+        const auto runtimeDirectory=job.helpers/L"neural-runtime";
+        // One writer at a time, exactly as a live render: the settings written
+        // below and the helper's proxy log are shared per runtime directory, and
+        // `--render` can run beside a player that is rendering.
+        NeuralRuntimeLease runtimeLease(runtimeDirectory);
+        if(!runtimeLease.Held())
+            return {StageExportStatus::Refused,L"Another neural render is using the experimental runtime. Wait for it to finish, then try again."};
+        // The add-on state the job needs, with the neural settings when it runs
+        // the model. The helper checks the same state itself and relaunches when
+        // it had to change it; writing it here first saves that relaunch.
+        const auto overrides=plan.requireNeural?NeuralAddonOverridesFor(job.neuralSettings):std::vector<NeuralAddonOverride>{};
+        const auto configured=ConfigureNeuralAddon(runtimeDirectory/L"ReShade.ini",plan.requireNeural,overrides);
+        if(!configured.ok){
+            LOG("Stage export could not prepare the neural add-on: "<<WideToUtf8(configured.error));
+            return {StageExportStatus::Failed,L"The neural settings could not be prepared."};
+        }
+        report({1,passes,passKey,0,0});
+        const NeuralRenderResult result=RunNeuralWorker(job.helpers/L"neural-runtime"/L"NeuralWorker.exe",request,
+            [&](const NeuralRenderProgress& p){report({1,passes,passKey,p.completedFrames,p.totalFrames});},stop);
+        if(!result.ok){
+            sweep();
+            return {result.cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
+        }
+        produced=stageOne;
+    }
+    if(plan.frameGenStage){
+        FrameGenerationRequest request{};
+        request.source=produced;
+        // Audio, subtitles and chapters come from the original: every carrier
+        // this project writes is video-only. A ranged carrier is shorter than
+        // the original, and the pass copies streams with no retime, so it
+        // takes them from the carrier - which has none - instead.
+        request.streamSource=job.range.Whole()?job.source:produced;
+        request.output=stageTwo;
+        request.multiplier=plan.multiplier;
+        request.nvencPreset=job.nvencPreset;
+        const uint32_t generatePass=plan.workerStage?2u:1u;
+        report({generatePass,passes,L"export.progress.pass_framegen",0,0});
+        const FrameGenerationResult result=FrameGenerationPass(job.helpers).Run(request,stop,
+            [&](const FrameGenerationProgress& p){report({generatePass,passes,L"export.progress.pass_framegen",p.sourceFramesRead,p.sourceFramesTotal});});
+        if(!result.ok){
+            sweep();
+            return {result.error==FrameGenerationError::Cancelled?StageExportStatus::Cancelled:StageExportStatus::Failed,result.detail};
+        }
+        produced=stageTwo;
+    }
+    std::error_code moveError;
+    std::filesystem::remove(job.destination,moveError);
+    std::filesystem::rename(produced,job.destination,moveError);
+    if(moveError){
+        // A rename across volumes fails; a copy is the fallback the user's
+        // chosen folder may require.
+        moveError.clear();
+        std::filesystem::copy_file(produced,job.destination,std::filesystem::copy_options::overwrite_existing,moveError);
+    }
+    report({});
+    sweep();
+    if(moveError)return {StageExportStatus::Failed,L"The finished export could not be written to the chosen file."};
+    return {StageExportStatus::Done,{}};
 }
 
 // How a neural job relates to what is on screen: an offline job replaces
@@ -4485,18 +4628,6 @@ private:
                           m_decoder.FrameRate(),ExportMaxMultiplier(),m_decoder.IsStillImage());
     }
 
-    static const wchar_t* ExportRefusalKey(ExportRefusal refusal){
-        switch(refusal){
-        case ExportRefusal::NothingSelected:return L"export.stages.refusal.nothing";
-        case ExportRefusal::SourceGeometryUnknown:return L"export.stages.refusal.geometry";
-        case ExportRefusal::AlreadyAtTarget:return L"export.stages.refusal.target";
-        case ExportRefusal::MultiplierUnsupported:return L"export.stages.refusal.multiplier";
-        case ExportRefusal::StillImage:return L"export.stages.refusal.still";
-        case ExportRefusal::None:break;
-        }
-        return L"export.stages.refusal.nothing";
-    }
-
     // The file this export reads. A stream has to have finished copying first:
     // the passes hand a path to ffmpeg and to a decoder of their own, exactly as
     // frame generation does, so they cannot read a URL.
@@ -4641,97 +4772,28 @@ private:
             <<" output="<<plan.outputWidth<<"x"<<plan.outputHeight<<" fps="<<plan.outputFps
             <<" passes="<<ExportStageCount(plan)<<" source="<<WideToUtf8(source.wstring()));
 
-        const auto helpers=ExecutableDirectory();
-        const auto worker=helpers/L"neural-runtime"/L"NeuralWorker.exe";
-        const double fps=m_decoder.FrameRate(),duration=m_decoder.DurationSeconds();
-        const uint32_t sourceWidth=m_decoder.Width(),sourceHeight=m_decoder.Height();
-        const uint32_t nvencPreset=m_nvencPreset;
+        StageExportJob job;
+        job.plan=plan;job.source=source;job.destination=destination;job.scratch=scratch;
+        job.helpers=ExecutableDirectory();
+        job.sourceWidth=m_decoder.Width();job.sourceHeight=m_decoder.Height();
+        job.fps=m_decoder.FrameRate();job.duration=m_decoder.DurationSeconds();
+        job.nvencPreset=m_nvencPreset;job.neuralSettings=m_neuralSettings;
         HWND target=m_hwnd;auto* completions=&m_exportCompletions;
         try{
             m_exportWorker=std::jthread([=](std::stop_token stop){
                 auto completion=std::make_unique<ExportCompletion>();
-                completion->output=destination;
-                const uint64_t tag=GetTickCount64();
-                const auto stageOne=scratch/(L"stage1-"+std::to_wstring(tag)+L".mkv");
-                const auto stageTwo=scratch/(L"stage2-"+std::to_wstring(tag)+L".mkv");
-                std::filesystem::path produced=source;
-                const auto sweep=[&]{std::error_code ec;
-                    if(stageOne!=produced)std::filesystem::remove(stageOne,ec);
-                    if(stageTwo!=produced)std::filesystem::remove(stageTwo,ec);};
-                if(plan.workerStage){
-                    NeuralRenderRequest request{};
-                    request.sourcePath=produced;request.stagingVideoPath=stageOne;
-                    request.width=sourceWidth;request.height=sourceHeight;
-                    request.fps=fps;request.durationSeconds=duration;
-                    request.nvencPreset=nvencPreset;
-                    request.requireNeural=plan.requireNeural;
-                    if(plan.outputWidth!=sourceWidth||plan.outputHeight!=sourceHeight){
-                        request.outputWidth=plan.outputWidth;request.outputHeight=plan.outputHeight;
-                    }
-                    // The callback this used to pass empty. The worker has
-                    // always reported frames; nothing was listening.
-                    const uint32_t passes=(plan.workerStage?1u:0u)+(plan.frameGenStage?1u:0u);
-                    const wchar_t* passKey=plan.requireNeural
-                        ?(plan.outputWidth!=sourceWidth?L"export.progress.pass_sr_neural":L"export.progress.pass_neural")
-                        :L"export.progress.pass_sr";
-                    const auto post=[&](uint32_t pass,const wchar_t* key,uint64_t done,uint64_t total){
-                        auto* update=new StageExportProgress{true,pass,passes,key,done,total,{}};
-                        if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(update)))delete update;
-                    };
-                    post(1,passKey,0,0);
-                    const NeuralRenderResult result=RunNeuralWorker(worker,request,
-                        [&](const NeuralRenderProgress& p){post(1,passKey,p.completedFrames,p.totalFrames);},stop);
-                    if(!result.ok){
-                        completion->result={false,result.cancelled?MaterializeError::Cancelled:MaterializeError::ProcessFailed,result.detail};
-                        sweep();
-                        completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
-                        return;
-                    }
-                    produced=stageOne;
-                }
-                if(plan.frameGenStage){
-                    FrameGenerationRequest request{};
-                    request.source=produced;
-                    // Audio, subtitles and chapters come from the original: every
-                    // carrier this project writes is video-only.
-                    request.streamSource=source;
-                    request.output=stageTwo;
-                    request.multiplier=plan.multiplier;
-                    request.nvencPreset=nvencPreset;
-                    const uint32_t generatePass=plan.workerStage?2u:1u;
-                    const uint32_t generatePasses=(plan.workerStage?1u:0u)+1u;
-                    const auto postGenerate=[&](uint64_t done,uint64_t total){
-                        auto* update=new StageExportProgress{true,generatePass,generatePasses,
-                                                             L"export.progress.pass_framegen",done,total,{}};
-                        if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(update)))delete update;
-                    };
-                    postGenerate(0,0);
-                    const FrameGenerationResult result=FrameGenerationPass(helpers).Run(request,stop,
-                        [&](const FrameGenerationProgress& p){postGenerate(p.sourceFramesRead,p.sourceFramesTotal);});
-                    if(!result.ok){
-                        completion->result={false,result.error==FrameGenerationError::Cancelled?MaterializeError::Cancelled:MaterializeError::ProcessFailed,result.detail};
-                        sweep();
-                        completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
-                        return;
-                    }
-                    produced=stageTwo;
-                }
-                std::error_code moveError;
-                std::filesystem::remove(destination,moveError);
-                std::filesystem::rename(produced,destination,moveError);
-                if(moveError){
-                    // A rename across volumes fails; a copy is the fallback the
-                    // user's chosen folder may require.
-                    moveError.clear();
-                    std::filesystem::copy_file(produced,destination,std::filesystem::copy_options::overwrite_existing,moveError);
-                }
-                {
-                    auto* done=new StageExportProgress{};
-                    if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(done)))delete done;
-                }
-                completion->result={!moveError,moveError?MaterializeError::ProcessFailed:MaterializeError::None,
-                                    moveError?L"The finished export could not be written to the chosen file.":std::wstring{}};
-                sweep();
+                completion->output=job.destination;
+                // The worker has always reported frames; this is what listens.
+                const StageExportOutcome outcome=RunStageExport(job,stop,[&](const StageExportUpdate& u){
+                    auto* update=u.passKey
+                        ?new StageExportProgress{true,u.pass,u.passes,u.passKey,u.completedFrames,u.totalFrames,{}}
+                        :new StageExportProgress{};
+                    if(!PostMessageW(target,WM_STAGE_EXPORT_PROGRESS,0,reinterpret_cast<LPARAM>(update)))delete update;
+                });
+                const bool done=outcome.status==StageExportStatus::Done;
+                completion->result={done,done?MaterializeError::None
+                                        :outcome.status==StageExportStatus::Cancelled?MaterializeError::Cancelled
+                                        :MaterializeError::ProcessFailed,outcome.detail};
                 completions->RegisterAndPost(std::move(completion),[&](uint64_t token){return PostMessageW(target,WM_EXPORT_COMPLETE,static_cast<WPARAM>(token),0)!=FALSE;});
             });
         }catch(const std::system_error&){
@@ -9501,6 +9563,212 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     RECT m_bufferAnchor{};
 };
 
+// ---- --render: Export with DLSS stages, headless -----------------------
+//
+// This executable is GUI-subsystem, so it starts with no console. Output that
+// was redirected (a pipe, a file) arrives as inherited handles and is written
+// as UTF-8; otherwise the process attaches to the console it was started from.
+// cmd.exe does not wait for a GUI-subsystem program, so an interactive caller
+// wants `start /wait`, and a script reads the exit code the same way.
+class RenderConsole {
+public:
+    RenderConsole(){
+        out_=Private(GetStdHandle(STD_OUTPUT_HANDLE));err_=Private(GetStdHandle(STD_ERROR_HANDLE));
+        // Attached even when both streams are redirected: Ctrl+C is delivered
+        // to the processes attached to a console, and `> log.txt` must not
+        // make a render uncancellable.
+        if(AttachConsole(ATTACH_PARENT_PROCESS)&&(!out_||!err_)){
+            console_=CreateFileW(L"CONOUT$",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+            if(console_==INVALID_HANDLE_VALUE)console_=nullptr;
+        }
+        // Everything else in this process loses the caller's stream. NGX
+        // prints its whole startup log to a standard output it can see - over
+        // 900 lines for one frame-generation export, plus a bare result code -
+        // and a script reading this output wants the lines below, not that.
+        // The private duplicates above keep the caller's handles alive through
+        // the CRT closing its own.
+        HANDLE nul=CreateFileW(L"NUL",GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+        if(nul!=INVALID_HANDLE_VALUE){SetStdHandle(STD_OUTPUT_HANDLE,nul);SetStdHandle(STD_ERROR_HANDLE,nul);nul_=nul;}
+        FILE* reopened=nullptr;
+        freopen_s(&reopened,"NUL","w",stdout);
+        freopen_s(&reopened,"NUL","w",stderr);
+    }
+    ~RenderConsole(){for(HANDLE handle:{out_,err_,console_,nul_})if(handle)CloseHandle(handle);}
+    RenderConsole(const RenderConsole&)=delete;
+    RenderConsole& operator=(const RenderConsole&)=delete;
+    void Out(std::wstring_view line){Write(out_?out_:console_,line);}
+    void Err(std::wstring_view line){Write(err_?err_:console_,line);}
+private:
+    // A handle the caller redirected (a pipe or a file), duplicated so it is
+    // this object's alone; null when there is none, which is the normal case
+    // for a GUI-subsystem program started from a console.
+    static HANDLE Private(HANDLE handle){
+        if(!handle||handle==INVALID_HANDLE_VALUE||GetFileType(handle)==FILE_TYPE_UNKNOWN)return nullptr;
+        HANDLE duplicate=nullptr;
+        if(!DuplicateHandle(GetCurrentProcess(),handle,GetCurrentProcess(),&duplicate,0,FALSE,DUPLICATE_SAME_ACCESS))return nullptr;
+        return duplicate;
+    }
+    static void Write(HANDLE handle,std::wstring_view line){
+        if(!handle)return;
+        std::wstring text;text.reserve(line.size()+2);
+        for(const wchar_t character:line){if(character==L'\n')text+=L'\r';text+=character;}
+        text+=L"\r\n";
+        DWORD mode=0,written=0;
+        if(GetConsoleMode(handle,&mode)){WriteConsoleW(handle,text.data(),static_cast<DWORD>(text.size()),&written,nullptr);return;}
+        const std::string bytes=WideToUtf8(text);
+        WriteFile(handle,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr);
+    }
+    HANDLE out_{},err_{},console_{},nul_{};
+};
+
+// Ctrl+C and Ctrl+Break request the same stop the dialog's Cancel does. The
+// handler runs on a thread the system creates, and std::stop_source is safe
+// to signal from one.
+static std::stop_source& RenderStopSource(){static std::stop_source source;return source;}
+static BOOL WINAPI RenderConsoleControl(DWORD event){
+    if(event!=CTRL_C_EVENT&&event!=CTRL_BREAK_EVENT)return FALSE;
+    RenderStopSource().request_stop();
+    return TRUE;
+}
+
+// Where the dialog stages its passes: the configured cache root, or the
+// automatic one. Only the scratch directory is read from it, so the legacy
+// path migration the player runs on startup does not matter here - an old
+// absolute default is still a directory the passes can write to.
+static std::filesystem::path RenderScratchRoot(const std::filesystem::path& settings){
+    std::wstring directory(32768,L'\0');
+    const DWORD length=GetPrivateProfileStringW(L"Storage",L"CacheDirectory",L"",directory.data(),static_cast<DWORD>(directory.size()),settings.c_str());
+    directory.resize(length);
+    const std::filesystem::path root(directory);
+    const UINT automatic=GetPrivateProfileIntW(L"Storage",L"CacheDirectoryAutomatic",-1,settings.c_str());
+    return root.is_absolute()&&length<32767&&automatic!=1?root:std::filesystem::path{};
+}
+
+static int RunRenderCommand(const render_command::Parsed& parsed,const std::vector<std::wstring>& userArguments){
+    using namespace render_command;
+    RenderConsole console;
+    const Localizer loc;
+    if(parsed.mode==Mode::Help){console.Out(Usage());return kExitOk;}
+    if(parsed.mode==Mode::BadArguments){
+        console.Err(L"error: "+parsed.error);console.Err(L"Run with --help for the options.");
+        LOG("--render refused its arguments: "<<WideToUtf8(parsed.error));
+        return kExitBadArguments;
+    }
+    const Command& command=parsed.command;
+    const bool quiet=command.quiet;
+    const auto say=[&](const std::wstring& line){if(!quiet)console.Out(line);};
+    const auto refuse=[&](const std::wstring& reason){console.Err(L"refused: "+reason);LOG("--render refused: "<<WideToUtf8(reason));return kExitRefused;};
+    const auto failed=[&](const std::wstring& reason){console.Err(L"failed: "+reason);LOG("--render failed: "<<WideToUtf8(reason));return kExitFailed;};
+    std::wstring joined;for(const auto& argument:userArguments){if(!joined.empty())joined+=L' ';joined+=argument;}
+    LOG("--render starting: "<<WideToUtf8(joined));
+
+    std::error_code fileError;
+    const std::filesystem::path input=std::filesystem::absolute(command.input,fileError);
+    if(fileError||!std::filesystem::is_regular_file(input,fileError)){
+        console.Err(L"error: the input is not a file: "+command.input);return kExitBadArguments;
+    }
+    const bool defaultOutput=command.output.empty();
+    const std::filesystem::path output=defaultOutput?DefaultOutput(input):std::filesystem::absolute(command.output,fileError);
+    if(fileError){console.Err(L"error: the output path is not usable: "+command.output);return kExitBadArguments;}
+    if(defaultOutput&&std::filesystem::exists(output,fileError))
+        return refuse(output.wstring()+L" already exists. Name the file to write with --out, which replaces it.");
+    if(output.has_parent_path()&&!std::filesystem::is_directory(output.parent_path(),fileError))
+        return refuse(L"the output folder does not exist: "+output.parent_path().wstring());
+    if(command.safeMode&&command.selection.neural)
+        return refuse(L"--safe-mode turns neural rendering off, and the nr stage needs it.");
+
+    std::filesystem::path executable;std::wstring pathError;
+    if(!CurrentExecutablePath(executable,pathError))return failed(pathError);
+    const std::filesystem::path helpers=executable.parent_path();
+    const std::filesystem::path settings=helpers/L"DLSSVideoPlayer.ini";
+
+    if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE)))return failed(L"COM could not be initialized.");
+    if(FAILED(MFStartup(MF_VERSION,MFSTARTUP_FULL))){CoUninitialize();return failed(L"Media Foundation could not be started.");}
+    return RunPlayerRuntime([&]() -> int {
+        VideoDecoder decoder;
+        if(!decoder.OpenMetadata(input.wstring()))return failed(L"the input could not be read as a video or an image.");
+        const uint32_t width=decoder.Width(),height=decoder.Height();
+        const double fps=decoder.FrameRate(),duration=decoder.DurationSeconds();
+        const bool still=decoder.IsStillImage();
+        decoder.Close();
+
+        // The dialog's own order: measured only when frame generation was asked
+        // for, because the probe brings up a device of its own.
+        uint32_t maxMultiplier=2;
+        if(command.selection.frameGeneration){
+            const FrameGenerationCapability capability=QueryFrameGenerationCapability();
+            maxMultiplier=capability.available?1u+capability.multiFrameCountMax:0u;
+        }
+        const ExportPlan plan=PlanExport(command.selection,width,height,fps,maxMultiplier,still);
+        if(!plan.valid)return refuse(loc.Get(ExportRefusalKey(plan.refusal)));
+
+        NeuralRenderRange range{};
+        if(command.hasRange){
+            if(!plan.workerStage)return refuse(L"--range needs the sr or nr stage.");
+            const auto in=ParseTimecode(command.rangeStart,fps);
+            const auto out=ParseTimecode(command.rangeEnd,fps);
+            if(!in||!out){console.Err(L"error: --range holds a timecode this source cannot read.");return kExitBadArguments;}
+            const auto snapped=RangeFromMarkers({in,out},fps,static_cast<int64_t>(std::llround(duration*10000000.0)));
+            if(!snapped){console.Err(L"error: --range does not name a part of this source.");return kExitBadArguments;}
+            range=*snapped;
+        }
+        if(plan.workerStage&&!std::filesystem::is_regular_file(helpers/L"neural-runtime"/L"NeuralWorker.exe",fileError))
+            return refuse(L"the neural runtime is not installed beside the player, and the sr and nr stages run in it.");
+
+        NeuralSettings neuralSettings{};
+        if(command.preset)neuralSettings=neural_presets::kPresets[*command.preset].settings;
+        else LoadNeuralSettings(settings,neuralSettings);
+        NeuralCacheManager cache(RenderScratchRoot(settings));
+        if(!cache.Valid())return failed(L"no writable cache directory for the intermediate passes.");
+        const std::filesystem::path scratch=cache.Root()/L"export-stages";
+        std::filesystem::create_directories(scratch,fileError);
+        if(fileError)return failed(L"the intermediate directory could not be created: "+scratch.wstring());
+
+        StageExportJob job;
+        job.plan=plan;job.source=input;job.destination=output;job.scratch=scratch;job.helpers=helpers;
+        job.sourceWidth=width;job.sourceHeight=height;job.fps=fps;job.duration=duration;job.range=range;
+        job.nvencPreset=std::clamp<uint32_t>(uint32_t(GetPrivateProfileIntW(L"Encoding",L"NvencPreset",5,settings.c_str())),1,7);
+        job.neuralSettings=neuralSettings;
+
+        wchar_t summary[256];
+        swprintf_s(summary,L"%u x %u at %.4g fps -> %u x %u at %.4g fps, %u pass%s",width,height,fps,
+                   plan.outputWidth,plan.outputHeight,plan.outputFps,ExportStageCount(plan),ExportStageCount(plan)==1?L"":L"es");
+        say(summary);
+        say(L"writing "+output.wstring());
+        LOG("--render plan: upscale="<<command.selection.upscale<<" neural="<<command.selection.neural
+            <<" framegen="<<command.selection.frameGeneration<<" output="<<plan.outputWidth<<"x"<<plan.outputHeight
+            <<" fps="<<plan.outputFps<<" range=["<<range.start100ns<<","<<range.end100ns<<") preset="
+            <<(command.preset?std::string(neural_presets::kPresets[*command.preset].key):std::string("saved")));
+
+        SetConsoleCtrlHandler(nullptr,FALSE);
+        SetConsoleCtrlHandler(RenderConsoleControl,TRUE);
+        // A line when a pass starts, when it reaches its last frame, and at most
+        // one a second in between: a two-hour film is 170,000 frames, and a
+        // caller redirecting this to a file wants a trace, not a frame log.
+        uint32_t lastPass=0;uint64_t lastDone=~uint64_t{0};auto lastLine=std::chrono::steady_clock::time_point{};
+        const StageExportOutcome outcome=RunStageExport(job,RenderStopSource().get_token(),[&](const StageExportUpdate& update){
+            if(quiet)return;
+            if(!update.passKey){console.Out(loc.Get(L"export.progress.writing"));return;}
+            const auto now=std::chrono::steady_clock::now();
+            const bool finished=update.totalFrames&&update.completedFrames>=update.totalFrames;
+            // The pass reports its last frame again while it encodes and
+            // validates; one line says it got there.
+            if(update.pass==lastPass&&(update.completedFrames==lastDone||(!finished&&now-lastLine<std::chrono::seconds(1))))return;
+            lastPass=update.pass;lastDone=update.completedFrames;lastLine=now;
+            console.Out(ProgressLine(update.pass,update.passes,loc.Get(update.passKey),update.completedFrames,update.totalFrames));
+        });
+        SetConsoleCtrlHandler(RenderConsoleControl,FALSE);
+        if(outcome.status==StageExportStatus::Cancelled||RenderStopSource().stop_requested()){
+            console.Err(L"cancelled");LOG("--render cancelled.");return kExitCancelled;
+        }
+        if(outcome.status==StageExportStatus::Refused)return refuse(outcome.detail);
+        if(outcome.status!=StageExportStatus::Done)return failed(outcome.detail.empty()?std::wstring(L"the export did not finish."):outcome.detail);
+        console.Out(L"done: "+output.wstring());
+        LOG("--render finished: "<<WideToUtf8(output.wstring()));
+        return kExitOk;
+    },[]{MFShutdown();},[]{CoUninitialize();});
+}
+
 int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
 {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
@@ -9509,6 +9777,13 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     crash_dump::Install();
     EnablePerMonitorDpiAwareness();
     AppOptions options=ParseArgs();
+    // --render and --help run headless and never reach the player, its
+    // bootstrap or a window. ParseRuntimeArguments has already run, so the
+    // safe-mode flag means the same thing to both.
+    if(options.argumentsOk){
+        const auto render=render_command::Parse(options.userArguments);
+        if(render.mode!=render_command::Mode::Player)return RunRenderCommand(render,options.userArguments);
+    }
     if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS 5 Video Player",MB_OK|MB_ICONERROR);return 1;}
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;

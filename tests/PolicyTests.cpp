@@ -40,6 +40,7 @@
 #include "NeuralCoverage.h"
 #include "RangeSelection.h"
 #include "ExportPipeline.h"
+#include "RenderCommandLine.h"
 #include "SynchronizedPlayback.h"
 #include "HardErrorSuppression.h"
 #include "DeferredCapture.h"
@@ -4681,6 +4682,101 @@ void export_plan_runs_super_resolution_and_neural_as_one_pass_test()
     // Blackwell's higher multiples are admitted when the runtime says so.
     const ExportPlan quad = plan(false, false, true, 1440, 4, 4);
     CHECK(quad.valid); CHECK_EQ(uint32_t{4}, quad.multiplier); CHECK_EQ(120.0, quad.outputFps);
+}
+
+// `--render` is parsed before anything else runs, so the one thing it must
+// never do is claim a launch that was meant for the player - a bare file path
+// (dragged onto the exe), --output, --safe-mode - and the one thing it must
+// always do is refuse a render it cannot describe rather than guess.
+void render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test()
+{
+    using namespace render_command;
+    const auto parse = [](std::initializer_list<const wchar_t*> arguments) {
+        std::vector<std::wstring> values(arguments.begin(), arguments.end());
+        return Parse(values);
+    };
+    // The player's own launches are left alone.
+    CHECK(parse({}).mode == Mode::Player);
+    CHECK(parse({L"C:/films/clip.mp4"}).mode == Mode::Player);
+    CHECK(parse({L"--safe-mode", L"--output", L"1920x1080", L"clip.mp4"}).mode == Mode::Player);
+    // Help wins wherever it appears, with or without --render.
+    CHECK(parse({L"--help"}).mode == Mode::Help);
+    CHECK(parse({L"/?"}).mode == Mode::Help);
+    CHECK(parse({L"--render", L"clip.mp4", L"-h"}).mode == Mode::Help);
+
+    // The default is the dialog's: the neural pass alone, at the saved settings.
+    const Parsed plain = parse({L"--render", L"clip.mp4"});
+    CHECK(plain.mode == Mode::Render);
+    CHECK(plain.command.input == L"clip.mp4");
+    CHECK(plain.command.selection.neural);
+    CHECK(!plain.command.selection.upscale); CHECK(!plain.command.selection.frameGeneration);
+    CHECK(!plain.command.preset); CHECK(plain.command.output.empty()); CHECK(!plain.command.hasRange);
+    CHECK_EQ(uint32_t{1440}, plain.command.selection.targetHeight);
+    CHECK_EQ(uint32_t{2}, plain.command.selection.multiplier);
+
+    // Every option, in any order, and stages in any order - the pipeline runs
+    // them in NVIDIA's order whatever the list says.
+    const Parsed full = parse({L"--quiet", L"--stages", L"FG,nr,sr", L"--height", L"2160",
+                               L"--multiplier", L"3", L"--preset", L"Gentle", L"--range", L"0:10-0:25.5",
+                               L"--out", L"D:/out/film.MKV", L"--render", L"in put.mp4", L"--safe-mode"});
+    CHECK(full.mode == Mode::Render);
+    CHECK(full.command.quiet); CHECK(full.command.safeMode);
+    CHECK(full.command.selection.upscale && full.command.selection.neural &&
+          full.command.selection.frameGeneration);
+    CHECK_EQ(uint32_t{2160}, full.command.selection.targetHeight);
+    CHECK_EQ(uint32_t{3}, full.command.selection.multiplier);
+    CHECK(full.command.preset && neural_presets::kPresets[*full.command.preset].key == "gentle");
+    CHECK(full.command.hasRange);
+    CHECK(full.command.rangeStart == L"0:10"); CHECK(full.command.rangeEnd == L"0:25.5");
+    CHECK(full.command.output == L"D:/out/film.MKV");
+    CHECK(full.command.input == L"in put.mp4");
+    // What it asks for goes through the dialog's own planner unchanged.
+    const ExportPlan plan = PlanExport(full.command.selection, 1280, 720, 30.0, 4, false);
+    CHECK(plan.valid); CHECK_EQ(uint32_t{3840}, plan.outputWidth); CHECK_EQ(90.0, plan.outputFps);
+    // Super Resolution alone is a render like any other now.
+    const Parsed upscaleOnly = parse({L"--render", L"clip.mp4", L"--stages", L"sr"});
+    CHECK(upscaleOnly.mode == Mode::Render);
+    CHECK(!PlanExport(upscaleOnly.command.selection, 1280, 720, 30.0, 2, false).requireNeural);
+
+    // Refused, each with a reason, rather than guessed at.
+    const std::vector<std::vector<std::wstring>> refusedCases{
+             {L"--render"},                                              // no input
+             {L"--render", L""},                                         // empty input
+             {L"--render", L"a.mp4", L"--render", L"b.mp4"},             // twice
+             {L"--render", L"a.mp4", L"--output", L"1920x1080"},         // the player's flag
+             {L"--render", L"a.mp4", L"--stages", L""},                  // no stage
+             {L"--render", L"a.mp4", L"--stages", L"sr,"},               // empty stage
+             {L"--render", L"a.mp4", L"--stages", L"sr,sr"},             // repeated stage
+             {L"--render", L"a.mp4", L"--stages", L"upscale"},           // unknown stage
+             {L"--render", L"a.mp4", L"--stages", L"sr", L"--height", L"720"},   // not a rung
+             {L"--render", L"a.mp4", L"--stages", L"sr", L"--height", L"+1440"},
+             {L"--render", L"a.mp4", L"--height", L"1440"},              // no sr stage
+             {L"--render", L"a.mp4", L"--stages", L"fg", L"--multiplier", L"6"},
+             {L"--render", L"a.mp4", L"--stages", L"fg", L"--multiplier", L"1"},
+             {L"--render", L"a.mp4", L"--multiplier", L"2"},             // no fg stage
+             {L"--render", L"a.mp4", L"--preset", L"vivid"},             // unknown preset
+             {L"--render", L"a.mp4", L"--stages", L"sr", L"--preset", L"natural"},  // no nr
+             {L"--render", L"a.mp4", L"--range", L"10"},                 // no end
+             {L"--render", L"a.mp4", L"--range", L"-10"},
+             {L"--render", L"a.mp4", L"--range", L"1-2-3"},
+             {L"--render", L"a.mp4", L"--stages", L"fg", L"--range", L"0:01-0:02"},  // fg alone
+             {L"--render", L"a.mp4", L"--out", L"a.mp4"},                // not Matroska
+             {L"--render", L"a.mp4", L"--out"},                          // no value
+             {L"--render", L"a.mp4", L"--quiet", L"--quiet"},
+    };
+    for (const auto& arguments : refusedCases) {
+        const Parsed refused = Parse(arguments);
+        CHECK(refused.mode == Mode::BadArguments);
+        CHECK(!refused.error.empty());
+    }
+
+    CHECK(DefaultOutput(L"C:/films/clip.final.mp4") == std::filesystem::path(L"C:/films/clip.final-dlss.mkv"));
+    CHECK(ProgressLine(1, 2, L"Neural rendering", 0, 0) == L"1/2 Neural rendering: 0 frames");
+    CHECK(ProgressLine(2, 2, L"Frame generation", 30, 120) == L"2/2 Frame generation: 30/120 frames (25%)");
+    // A pass that reports past its estimate says 100%, not 104%.
+    CHECK(ProgressLine(1, 1, L"Super Resolution", 125, 120) == L"1/1 Super Resolution: 125/120 frames (100%)");
+    CHECK(Usage().find(L"--render <input>") != std::wstring::npos);
+    CHECK_EQ(3, kExitRefused); CHECK_EQ(5, kExitCancelled);
 }
 
 void one_step_of_the_frame_grid_is_always_work_test()
@@ -10932,6 +11028,7 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(feature_pills_are_visually_distinguishable_test),
     TEST_CASE(menus_group_two_to_seven_related_items_per_block_test),
     TEST_CASE(export_plan_runs_super_resolution_and_neural_as_one_pass_test),
+    TEST_CASE(render_command_line_parses_the_stages_and_refuses_what_it_cannot_describe_test),
     TEST_CASE(one_step_of_the_frame_grid_is_always_work_test),
     TEST_CASE(every_hole_the_session_keeps_is_a_hole_a_job_can_start_on_test),
     TEST_CASE(render_start_snaps_into_the_frame_it_lands_in_not_past_it_test),
