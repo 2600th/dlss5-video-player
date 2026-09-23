@@ -1920,6 +1920,10 @@ public:
     {
         submitted.push_back(frame.timestamp100ns);resets.push_back(id.reset!=HistoryReset::None);
         ids.push_back(id);
+        // Submissions since the last reset, including this one: what a temporal
+        // model's output for this frame depends on.
+        history=id.reset!=HistoryReset::None?1:history+1;
+        if(capture)historyAtCapture.push_back(history);
         out.id=id;
         if(id.reset!=HistoryReset::None)++historyGeneration;
         out.id.historyGeneration=historyGeneration;
@@ -1948,7 +1952,7 @@ public:
     bool FeatureCreated() const override { return featureCreated; }
     uint64_t EvaluationCount() const override { return evaluations; }
     uint64_t NeuralEvaluations() const override { return backendEvaluations; }
-    void ResetTemporal() override { ++temporalResets; }
+    void ResetTemporal() override { ++temporalResets;history=0; }
     NeuralRenderFailure LastFailure() const override { return lastFailure; }
     double LastNeuralGpuMs() const override { return neuralGpuMs; }
     uint64_t PeakLocalVideoMemoryMiB() const override { return peakVramMiB; }
@@ -1967,6 +1971,7 @@ public:
     double neuralGpuMs{3.7};uint64_t peakVramMiB{};uint32_t historyGeneration{};
     GuideControls controls;
     std::vector<int64_t> submitted,captured;std::vector<bool> resets;std::vector<FrameIdentity> ids;
+    uint64_t history{};std::vector<uint64_t> historyAtCapture;
 };
 
 class FakeFrameEncoder final : public IFrameEncoder {
@@ -2096,7 +2101,11 @@ void offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_
     CHECK(!IsReusableNeuralCacheManifest(manifest));
 }
 
-void offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_test()
+// The gate resubmits frame 0 until the add-on logs a receipt past the armed
+// baseline. Those resubmits are not captures: each used to be a synchronous
+// capture and readback, and the frame that was finally encoded had been fed
+// into history as many times as the log took to flush.
+void offline_receipt_gate_resubmits_without_capturing_and_captures_each_frame_once_test()
 {
     for (const bool photo : {true, false}) {
         TempDirectory fixture;
@@ -2114,24 +2123,67 @@ void offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_te
         const auto result = job.Run(request);
         CHECK(result.ok);
         CHECK_EQ(static_cast<uint64_t>(frames.size()), result.frameCount);
-        // The backend's tally counts the receipt gate's resubmits of the first
-        // frame, which the encoded frame count does not.
-        CHECK_EQ(uint64_t{60} + frames.size() - 1, result.nativeEvaluations);
+        // The backend's tally covers the captured frames only; the gate's
+        // resubmits happened before it was sampled.
+        CHECK_EQ(static_cast<uint64_t>(frames.size()), result.nativeEvaluations);
+        CHECK(evaluator.EvaluationCount() >= 60);
         CHECK_EQ(uint64_t{60}, result.evidence.highestObservedEvaluation);
         CHECK_EQ(2, source.opens);
         CHECK_EQ(size_t{1}, encoder.attempts.size());
         if (!encoder.attempts.empty()) {
             CHECK_EQ(frames.size(), encoder.attempts.front().size());
-            if (!encoder.attempts.front().empty()) CHECK_EQ(uint8_t{60}, encoder.attempts.front().front().front());
+            if (!encoder.attempts.front().empty()) CHECK_EQ(uint8_t{1}, encoder.attempts.front().front().front());
         }
-        CHECK_EQ(size_t{60} + frames.size() - 1, evaluator.captured.size());
-        if (evaluator.captured.size() >= 60) {
-            CHECK(std::all_of(evaluator.captured.begin(), evaluator.captured.begin() + 60,
-                             [](int64_t timestamp) { return timestamp == 0; }));
-            for (size_t index = 1; index < frames.size(); ++index)
-                CHECK_EQ(frames[index].timestamp100ns, evaluator.captured[59 + index]);
-        }
+        CHECK_EQ(static_cast<int>(frames.size()), evaluator.captureSubmissions);
+        CHECK_EQ(frames.size(), evaluator.captured.size());
+        for (size_t index = 0; index < std::min(frames.size(), evaluator.captured.size()); ++index)
+            CHECK_EQ(frames[index].timestamp100ns, evaluator.captured[index]);
+        // Frame 0 is captured on fresh history, as if the gate had not run.
+        if (!evaluator.historyAtCapture.empty()) CHECK_EQ(uint64_t{1}, evaluator.historyAtCapture.front());
         if (photo) CHECK_EQ(int64_t{10000000}, result.duration100ns);
+    }
+}
+
+// The same cache key has to produce the same bytes whenever the add-on's log
+// happens to flush. How many resubmits the gate takes varies run to run, so
+// the history every captured frame is evaluated on must not depend on it.
+void offline_receipt_gate_output_does_not_depend_on_when_the_log_flushed_test()
+{
+    const auto run = [](uint64_t flushedAt, bool preroll) {
+        TempDirectory fixture;
+        FakeOfflineSource source(OfflineFramesAt25Fps(20));
+        FakeNeuralEvaluator evaluator;
+        FakeFrameEncoder encoder;
+        // The line past the baseline appears once `flushedAt` evaluations ran.
+        OfflineNeuralRenderer job(source, evaluator, encoder, [&evaluator, flushedAt] {
+            return NeuralEvidenceWithCount(evaluator.EvaluationCount() >= flushedAt ? 60 : 1);
+        });
+        auto request = OfflineRequest(fixture.Path());
+        request.width = 2; request.height = 2; request.fps = 25.0; request.durationSeconds = 20.0 / 25.0;
+        if (preroll) { request.range = {4000000, 0}; request.prerollFrames = 5; }
+        const auto result = job.Run(request);
+        CHECK(result.ok);
+        return std::make_pair(evaluator.historyAtCapture, source.opens);
+    };
+    for (const bool preroll : {false, true}) {
+        // 2 opens: the log flushed during the preroll, so the gate never resubmitted.
+        const auto [early, earlyOpens] = run(preroll ? 6 : 2, preroll);
+        const auto [late, lateOpens] = run(40, preroll);
+        const auto [later, laterOpens] = run(90, preroll);
+        CHECK(!early.empty());
+        CHECK(early == late);
+        CHECK(early == later);
+        if (preroll) {
+            // A preroll is replayed rather than thrown away: frame 0 is still
+            // evaluated on the five frames before the range.
+            if (!early.empty()) CHECK_EQ(uint64_t{6}, early.front());
+            CHECK_EQ(2, earlyOpens);
+            CHECK_EQ(3, lateOpens);
+            CHECK_EQ(3, laterOpens);
+        } else {
+            if (!early.empty()) CHECK_EQ(uint64_t{1}, early.front());
+            CHECK_EQ(2, lateOpens);
+        }
     }
 }
 
@@ -2189,8 +2241,9 @@ void offline_software_retry_after_the_log_counter_went_quiet_succeeds_test()
             CHECK(encoder.attempts.front().empty());
             CHECK_EQ(size_t{1}, encoder.attempts.back().size());
         }
-        // 60 gate captures on the first pass, then exactly one on the retry.
-        CHECK_EQ(61, evaluator.captureSubmissions);
+        // One capture per pass: the first pass's 60 gate resubmits are not
+        // captures, and the retry has no gate.
+        CHECK_EQ(2, evaluator.captureSubmissions);
     }
     // A clip whose NVENC encoder fails after N frames were written.
     {
@@ -2239,9 +2292,9 @@ void offline_software_retry_after_the_log_counter_went_quiet_succeeds_test()
         FakeFrameEncoder encoder;
         encoder.failNvencWriteAt = 3;
         OfflineNeuralRenderer job(source, evaluator, encoder, LogCounterThatStopsAt60(evaluator));
-        // First pass: 60 gate captures plus frames 1-4, so 66 is the retry's
-        // second frame.
-        evaluator.backendMissesCaptureAt = 66;
+        // First pass: frames 0-4 captured (the gate's resubmits are not
+        // captures), so 7 is the retry's second frame.
+        evaluator.backendMissesCaptureAt = 7;
         const auto result = job.Run(EvenOfflineRequest(fixture.Path()));
         CHECK(!result.ok);
         CHECK_EQ(NeuralRenderFailure::Neural, result.failure);
@@ -2258,7 +2311,7 @@ void offline_receipt_gate_stops_before_encoding_on_failure_or_cancel_test()
         FakeFrameEncoder encoder;
         std::stop_source stop;
         OfflineNeuralRenderer job(source, evaluator, encoder, [&] {
-            if (evaluator.captureSubmissions >= 10) {
+            if (evaluator.EvaluationCount() >= 10) {
                 if (cancel) stop.request_stop();
                 else return NeuralEvidenceWithCount(60) + "inline feature 18 evaluation failed\n";
             }
@@ -2267,7 +2320,9 @@ void offline_receipt_gate_stops_before_encoding_on_failure_or_cancel_test()
         const auto result = job.Run(OfflineRequest(fixture.Path()), {}, stop.get_token());
         CHECK(!result.ok);
         CHECK_EQ(cancel, result.cancelled);
-        CHECK_EQ(10, evaluator.captureSubmissions);
+        // Stopped inside the gate: nothing was captured, let alone encoded.
+        CHECK_EQ(0, evaluator.captureSubmissions);
+        CHECK_EQ(uint64_t{10}, evaluator.EvaluationCount());
         CHECK_EQ(0, encoder.finishes);
         CHECK_EQ(size_t{1}, encoder.attempts.size());
         if (!encoder.attempts.empty()) CHECK(encoder.attempts.front().empty());
@@ -2297,9 +2352,12 @@ void offline_photo_reuses_warmup_frame_but_encodes_exactly_one_frame_test()
         CHECK_EQ(int64_t{10000000}, result.duration100ns);
         CHECK(result.feature18ArmedBeforeCapture);
         CHECK(result.evidence.Valid());
-        CHECK_EQ(warmupFrames, evaluator.primeSubmissions);
+        // The fake counts every uncaptured submit as priming, and the receipt
+        // gate took one uncaptured resubmit of the photo before it opened,
+        // then reset the guides so the capture starts from nothing.
+        CHECK_EQ(warmupFrames + 1, evaluator.primeSubmissions);
         CHECK_EQ(2, source.opens);
-        CHECK_EQ(1, evaluator.temporalResets);
+        CHECK_EQ(2, evaluator.temporalResets);
         CHECK_EQ(std::vector<int64_t>{0}, evaluator.captured);
         CHECK_EQ(size_t{1}, encoder.attempts.size());
         if (!encoder.attempts.empty()) {
@@ -2308,7 +2366,8 @@ void offline_photo_reuses_warmup_frame_but_encodes_exactly_one_frame_test()
         }
         CHECK_EQ(1, encoder.finishes);
         // A replayed still is continuous during warm-up; capture starts fresh.
-        if (evaluator.resets.size() == static_cast<size_t>(warmupFrames + 1)) {
+        CHECK_EQ(static_cast<size_t>(warmupFrames + 2), evaluator.resets.size());
+        if (evaluator.resets.size() == static_cast<size_t>(warmupFrames + 2)) {
             CHECK(evaluator.resets.front());
             CHECK(!evaluator.resets[1]);
             CHECK(evaluator.resets.back());
@@ -2342,7 +2401,8 @@ void offline_job_rejects_when_feature18_receipt_does_not_advance_after_capture_t
     OfflineNeuralRenderer job(source,evaluator,encoder,[]{return ValidNeuralEvidence();});
     const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
     CHECK(!result.ok);CHECK(!result.cancelled);CHECK_EQ(0,encoder.finishes);
-    CHECK_EQ(120,evaluator.captureSubmissions);
+    // 120 uncaptured resubmits of frame 0, and not one capture.
+    CHECK_EQ(0,evaluator.captureSubmissions);CHECK_EQ(2+120,evaluator.primeSubmissions);
     CHECK(encoder.attempts.front().empty());
 }
 
@@ -4781,7 +4841,8 @@ int wmain(int argc, wchar_t* argv[])
     encoder_blocked_write_is_interrupted_by_stop_test();
     offline_job_primes_feature_then_restarts_source_and_captures_every_frame_test();
     offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_test();
-    offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_test();
+    offline_receipt_gate_resubmits_without_capturing_and_captures_each_frame_once_test();
+    offline_receipt_gate_output_does_not_depend_on_when_the_log_flushed_test();
     offline_odd_dimensions_use_geometry_preserving_software_encoder_test();
     offline_software_retry_after_the_log_counter_went_quiet_succeeds_test();
     offline_receipt_gate_stops_before_encoding_on_failure_or_cancel_test();

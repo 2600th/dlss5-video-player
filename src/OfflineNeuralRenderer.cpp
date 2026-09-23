@@ -141,8 +141,8 @@ struct AttemptResult {
     uint64_t frames{};
     uint64_t bytes{};
     // Evaluate calls the neural backend itself completed while this attempt
-    // captured: sampled from the first capture, so the preroll is left out,
-    // and every resubmit counts. Published as the result's nativeEvaluations,
+    // captured: sampled at the first capture, so the preroll and the receipt
+    // gate's uncaptured resubmits are left out, and every frame retry counts. Published as the result's nativeEvaluations,
     // which is what makes the cache's evidence gate a second witness rather
     // than a copy of `frames`.
     uint64_t neuralEvaluations{};
@@ -1139,6 +1139,16 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     // to it; a reused evaluator and a software-encoder retry are held to the
     // backend's own count and the timing floor instead.
     bool holdToLogReceipt=!evaluatorReused;
+    // Set once the gate has seen that receipt. The log only grows, so a pass that
+    // restarts after the gate opened has nothing left to wait for.
+    bool receiptGateOpened=false;
+    // The gate's polls. It needs to know whether a line has appeared, not to wait
+    // for the file to settle, so a reader that can tail the log without the
+    // stability wait is asked that way; every verdict read below still waits.
+    auto pollEvidence=[&]()->std::string{
+        if constexpr(requires{evidenceProvider.get().Poll();})return evidenceProvider.get().Poll();
+        else return evidenceProvider();
+    };
 
     // Capture restarts from the preroll position: frames before the range are
     // evaluated without capture so the history at range.start matches a
@@ -1336,7 +1346,9 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
         };
         // Joined on every exit from the attempt, so no thread is left holding
         // the decoder when the caller closes or reopens it.
-        FramePrefetch<Source> prefetch(source, stop);
+        // Optional only so the receipt gate can restart the pass from the preroll.
+        std::optional<FramePrefetch<Source>> prefetch;
+        prefetch.emplace(source, stop);
         // Lives across iterations only so its BGRA buffer can be handed back to the
         // decoder on the next read. Every read assigns the whole frame, so nothing
         // from the previous iteration survives into this one.
@@ -1359,7 +1371,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             JobRead read;
             {
                 StageClock clock(stages.source);
-                read = prefetch.Next(frame);
+                read = prefetch->Next(frame);
             }
             // What the loop still pays for the decode: the residual wait for a
             // frame the decoder started while the previous one was on the GPU.
@@ -1392,17 +1404,7 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 if (submitted == 0) {abort(NeuralRenderFailure::Source);return attempt;}
                 break;
             }
-            if (submitted == 0) neuralEvaluationsBefore = neuralEvaluations();
-            const auto evalStart = SteadyClock::now();
-            JobEvaluation evaluation;
-            const bool pipelined = submitted > 0;
-            for (uint64_t capture = 1; ; ++capture) {
-                const HistoryReset reason = capture > 1 ? HistoryReset::None
-                    : (attempt.frames == 0 && !prerollEvaluated) ? HistoryReset::FirstFrame
-                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
-                const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
-                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
-                if (pipelined) break;
+            if (submitted == 0 && holdToLogReceipt && !receiptGateOpened) {
                 // The add-on's log counter is a one-shot proof per PROCESS, not
                 // per job. It reports "inline feature 18 evaluation succeeded
                 // (count=N)" at N=1 and N=60 and then goes quiet: measured on
@@ -1423,23 +1425,70 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 // is the check that actually catches the failure this gate was
                 // built for). The session evidence itself was already verified
                 // before capture and describes the live feature this job used.
-                if (!holdToLogReceipt) break;
-                // The runtime logs successful evaluations sparsely. Capture the
-                // first source frame until a fresh receipt exists, retaining
-                // only its latest pixels for encoding. These extra captures
-                // never extend the timeline.
-                if (capture == 1 || capture % 10 == 0) {
-                    const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
-                    if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
-                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
-                }
+                //
+                // A fresh process is held to the counter as well: frame 0 is
+                // resubmitted until a receipt past the armed baseline exists.
+                // The resubmits are not captured - each used to be a full
+                // synchronous capture and readback - and a preroll of about 60
+                // frames usually opens the gate before the first one.
+                const HistoryReset firstReason = !prerollEvaluated ? HistoryReset::FirstFrame
+                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
                 // The observed add-on cadence is one log line every sixty
                 // evaluations, so twice that carries a full cadence of margin
                 // wherever the baseline happened to land. Nothing may release
                 // the NGX feature while this gate is running: the counter it
                 // waits for stops advancing when the add-on's worksets go.
                 constexpr uint64_t kReceiptGateResubmits = 120;
-                if (capture >= kReceiptGateResubmits) {abort(NeuralRenderFailure::Neural);return attempt;}
+                uint64_t resubmits = 0;
+                for (;; ++resubmits) {
+                    if (stop.stop_requested()) {abort(NeuralRenderFailure::Cancelled);return attempt;}
+                    const auto receipt = ParseNeuralRuntimeEvidence(pollEvidence());
+                    if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
+                    if (receipt.highestObservedEvaluation > successfulAttemptBaseline) break;
+                    if (resubmits >= kReceiptGateResubmits) {abort(NeuralRenderFailure::Neural);return attempt;}
+                    JobEvaluation ignored;
+                    const NeuralRenderFailure failure = evaluate(
+                        frame, resubmits == 0 ? firstReason : HistoryReset::None, false, false, ignored);
+                    if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
+                }
+                receiptGateOpened = true;
+                if (resubmits) {
+                    // Every resubmit fed frame 0 into the temporal history again, and
+                    // how many it took depends on when the add-on's log flushed, so
+                    // the same cache key produced different bytes run to run. The
+                    // capture starts from the history it would have had with none.
+                    LOG("Feature 18 receipt gate opened after " << resubmits
+                        << " uncaptured resubmit(s) of the first frame; restoring its history.");
+                    if (prerollEvaluated) {
+                        // Resetting here would throw the preroll away, and the preroll
+                        // is what makes a range's first frame match a continuous render.
+                        // Run it again instead; the gate stays open.
+                        prefetch.reset();
+                        if (!reopenAtPreroll()) {
+                            abort(stop.stop_requested() ? NeuralRenderFailure::Cancelled
+                                                        : NeuralRenderFailure::Source);
+                            return attempt;
+                        }
+                        prefetch.emplace(source, stop);
+                        prerollEvaluated = false;hasPrevious = false;
+                        continue;
+                    }
+                    // No preroll: frame 0 resets history anyway, and a full reset of
+                    // the guides with it leaves nothing the resubmits touched.
+                    evaluator.ResetTemporal();
+                }
+            }
+            // Sampled here, after any gate resubmits, so the backend's count is held
+            // to exactly the submissions that produced captured frames and their retries.
+            if (submitted == 0) neuralEvaluationsBefore = neuralEvaluations();
+            const auto evalStart = SteadyClock::now();
+            JobEvaluation evaluation;
+            const bool pipelined = submitted > 0;
+            {
+                const HistoryReset reason = (attempt.frames == 0 && !prerollEvaluated) ? HistoryReset::FirstFrame
+                    : frame.discontinuity ? HistoryReset::SourceChange : HistoryReset::None;
+                const NeuralRenderFailure failure = evaluate(frame, reason, true, pipelined, evaluation);
+                if (failure != NeuralRenderFailure::None) {abort(failure);return attempt;}
             }
             const double evalMs = MillisecondsSince(evalStart);
             if (pipelined) {
@@ -2272,6 +2321,41 @@ std::filesystem::path ResolveNeuralRuntimeLogPath(const std::filesystem::path& r
 
 namespace {
 
+// What has been read of one session log so far. The log is append-only for
+// the life of the proxy that writes it, so every read after the first fetches
+// only the bytes appended since the last one instead of the whole file again.
+// A different file, or one shorter than what was read, starts over.
+class SessionLogTail {
+public:
+    // Brings the text up to the file's current end. False when the file cannot
+    // be read or is larger than `limit`, which the caller reports as unreadable.
+    bool Refresh(const std::filesystem::path& path, uintmax_t limit)
+    {
+        if (path.empty()) return false;
+        std::error_code error;
+        const uintmax_t size = std::filesystem::file_size(path, error);
+        if (error || size > limit) return false;
+        if (path != path_ || size < text_.size()) {
+            path_ = path;
+            text_.clear();
+        }
+        if (size == text_.size()) return true;
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return false;
+        const size_t read = text_.size();
+        input.seekg(static_cast<std::streamoff>(read));
+        text_.resize(static_cast<size_t>(size));
+        input.read(text_.data() + read, static_cast<std::streamsize>(size - read));
+        text_.resize(read + static_cast<size_t>(std::max<std::streamsize>(0, input.gcount())));
+        return true;
+    }
+    const std::string& Text() const { return text_; }
+
+private:
+    std::filesystem::path path_;
+    std::string text_;
+};
+
 // The session-log read, with the two knobs residency needs.
 //
 // `resolve` is called per attempt because a single-shot helper may start before
@@ -2281,27 +2365,25 @@ namespace {
 //
 // `stabilize` waits for the add-on's asynchronous arming to appear and for the
 // file to stop growing. Without it the log is read once and returned as it
-// stands, which is all a job that reused an already-armed feature needs.
+// stands, which is all a job that reused an already-armed feature needs, and
+// all the receipt gate's polls need.
+//
+// `tail` carries what earlier reads already fetched, so a poll reads only what
+// was appended since.
 template <class Resolve>
-std::string ReadSessionLog(Resolve resolve, bool stabilize)
+std::string ReadSessionLog(Resolve resolve, bool stabilize, SessionLogTail& tail)
 {
     constexpr uintmax_t Limit=4u*1024u*1024u;std::string latest;
-    uintmax_t lastSize=std::numeric_limits<uintmax_t>::max();
+    size_t lastSize=std::numeric_limits<size_t>::max();
     int stableSamples=0;
     for(int attempt=0;attempt<20;++attempt){
-        const std::filesystem::path path=resolve();
-        std::error_code error;
-        const auto size=path.empty()?uintmax_t{0}:std::filesystem::file_size(path,error);
-        if(!path.empty()&&!error&&size<=Limit){
-            std::ifstream input(path,std::ios::binary);
-            if(input){
-                latest={std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
-                if(!stabilize)return latest;
-                const auto evidence=ParseNeuralRuntimeEvidence(latest);
-                stableSamples=size==lastSize?stableSamples+1:1;
-                lastSize=size;
-                if((evidence.Valid()||evidence.laterFailure)&&stableSamples>=3)return latest;
-            }
+        if(tail.Refresh(resolve(),Limit)){
+            latest=tail.Text();
+            if(!stabilize)return latest;
+            const auto evidence=ParseNeuralRuntimeEvidence(latest);
+            stableSamples=latest.size()==lastSize?stableSamples+1:1;
+            lastSize=latest.size();
+            if((evidence.Valid()||evidence.laterFailure)&&stableSamples>=3)return latest;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -2312,12 +2394,14 @@ std::string ReadSessionLog(Resolve resolve, bool stabilize)
 
 std::string ReadNeuralRuntimeSessionLog(const std::filesystem::path& runtimeDirectory)
 {
-    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},true);
+    SessionLogTail tail;
+    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},true,tail);
 }
 
 std::string ReadNeuralRuntimeSessionLogSnapshot(const std::filesystem::path& runtimeDirectory)
 {
-    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},false);
+    SessionLogTail tail;
+    return ReadSessionLog([&]{return ResolveNeuralRuntimeLogPath(runtimeDirectory);},false,tail);
 }
 
 
@@ -2423,10 +2507,16 @@ public:
     {
         const bool stabilize = !skipStabilityOnce_;
         skipStabilityOnce_ = false;
-        return ReadSessionLog([this] {
-            if (pinned_.empty()) pinned_ = ResolveNeuralRuntimeLogPath(runtimeDirectory_);
-            return pinned_;
-        }, stabilize);
+        return ReadSessionLog([this] { return Pinned(); }, stabilize, tail_);
+    }
+
+    // The log as it stands, tailed from the last read: the receipt gate asks
+    // this between resubmits, where waiting for the file to settle was at least
+    // 200 ms per poll and bought nothing - a line not there yet is there on a
+    // later poll, and every verdict is still read through operator().
+    std::string Poll()
+    {
+        return ReadSessionLog([this] { return Pinned(); }, false, tail_);
     }
 
     // True once the pinned log has grown past what a read can return. Past that
@@ -2442,11 +2532,18 @@ public:
     }
 
 private:
+    const std::filesystem::path& Pinned()
+    {
+        if (pinned_.empty()) pinned_ = ResolveNeuralRuntimeLogPath(runtimeDirectory_);
+        return pinned_;
+    }
+
     // Half the read limit, so a job that starts under it cannot grow past it
     // and read empty before it finishes.
     static constexpr uintmax_t kReuseLogLimit = 2u * 1024u * 1024u;
     std::filesystem::path runtimeDirectory_;
     std::filesystem::path pinned_;
+    SessionLogTail tail_;
     bool skipStabilityOnce_{};
 };
 

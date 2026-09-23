@@ -54,7 +54,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
 | **P1** | | | | |
-| [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
 | [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
@@ -139,25 +138,6 @@ from an extracted zip with no repository around it. Correct the README command.
 ## Player: reliability and quality-neutral performance
 
 ## Pipeline: helper, cache, runtime
-
-<a id="p110"></a>
-### P1.10 · The first-frame receipt gate: cost and reproducibility
-
-`S` · **Pipeline** · 🔍 · _includes the log-polling row of old 2.10_
-
-**Where** — `OfflineNeuralRenderer.cpp:1362-1406`, `:1886-1893`, `:2221-2244`
-
-Each resubmit of frame 0 is a synchronous full capture and readback. Each
-log read waits at least 200 ms for the file to stop growing. A cold job
-resubmits about 60 times with history building up, and the number depends
-on when the log flushes, so **the same cache key can produce different
-bytes on different runs**.
-
-**Fix** — resubmit without capturing, capture once when the gate opens, and
-reset history immediately before that capture. Tail the log from the last
-offset instead of re-reading it.
-
----
 
 <a id="p114"></a>
 ### P1.14 · Live-session write amplification
