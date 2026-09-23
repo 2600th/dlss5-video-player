@@ -36,6 +36,10 @@ inline constexpr COLORREF SecondaryText = RGB(160, 164, 172);
 inline constexpr COLORREF MarkedRange = RGB(158, 112, 240);
 inline constexpr COLORREF MarkedRangeEdge = RGB(206, 178, 255);
 inline constexpr COLORREF NeuralCoverage = RGB(72, 196, 178);
+// Something went wrong that the viewer may want to know about - a dropped
+// frame - without it being an error. The Out marker's amber, so the player has
+// one warm colour rather than two.
+inline constexpr COLORREF Attention = RGB(255, 168, 64);
 
 } // namespace ui_palette
 

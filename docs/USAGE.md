@@ -52,8 +52,9 @@ behind playback; `Space` pauses playback rather than the render.
 The session's job is the whole video — or the marked range, when the playhead
 sits inside one — not just the part after the playhead. It renders the stretch
 you are watching first and then fills what is left, nearest to the playhead
-first, until every frame of the range is rendered; the status line reports how
-much of it is done. **Seeking is not limited to what has been rendered.** Seek
+first, until every frame of the range is rendered; the **Render** chip at the
+right of the status line reports how much of it is done and, once the pace is
+known, how long the rest will take. **Seeking is not limited to what has been rendered.** Seek
 into rendered frames and playback continues on them, wherever they are on the
 timeline. Seek into frames nobody has rendered yet and the original plays there
 while the render moves to that part of the video, and playback switches over
@@ -103,13 +104,23 @@ entry that was rendered with settings you have since changed, and offers to
 convert that range again.
 
 The three feature buttons in the bottom bar each carry their own icon and
-colour, so the bar still tells them apart when it narrows to icons only and the
-labels are gone. A button is grey when the feature is unavailable, plain when it
+colour, so the bar still tells them apart when it narrows. A narrower window
+first shrinks the three buttons, and one too narrow for its whole label keeps
+the state (`On`, `Generate`, `Panel too small`) and drops the feature name,
+which the icon and the tooltip still give; only below 850 dip do they go to
+icons with a short label underneath. A button is grey when the feature is unavailable, plain when it
 is off, highlighted when it is on, and teal while it is working - the same teal
 the timeline uses for rendered coverage, because both mean "this is being made
 right now". Hovering one says what it does and, when it is unavailable, why: a
 source that already fills the panel has nothing to upscale, and the button says
 so instead of only greying out.
+
+Three chips at the right end of the status line keep the numbers you watch
+during playback in fixed places: **Render** (how much of the session's range is
+rendered, with an ETA), the **frame rate** (presented / source) and
+**Dropped** frames. Each flashes briefly when the fact it reports changes - a
+render starting or passing another tenth, playback falling behind the source
+or catching up, a newly dropped frame - rather than on every repaint.
 
 The timeline shows both states at once: the marked range is a solid violet block
 between a green In tick and an orange Out tick, played progress is blue, and

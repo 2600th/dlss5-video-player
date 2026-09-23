@@ -51,6 +51,7 @@
 #include "AtomicFile.h"
 #include "MediaTools.h"
 #include "Utf8Text.h"
+#include "StatusChipPolicy.h"
 #ifdef small
 #undef small
 #endif
@@ -642,7 +643,9 @@ void volume_slider_never_intersects_compact_or_threshold_toolbar_test()
         CHECK(!LayoutVolumeSlider(width, 180, 96, items).has_value());
     }
 
-    const int thresholdWidth = MinimumToolbarClientWidth(96) + 185;
+    // The slider needs the room the pills leave once they are at full width;
+    // below that they take every pixel between the gutters.
+    const int thresholdWidth = FullPillToolbarClientWidth(96) + 185;
     const auto thresholdItems = LayoutToolbar(thresholdWidth, 180, 96);
     const auto slider = LayoutVolumeSlider(thresholdWidth, 180, 96, thresholdItems);
     CHECK(slider.has_value());
@@ -848,6 +851,153 @@ void dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test()
     CHECK_EQ(alreadyLarge.bottom, unchanged.bottom);
 }
 
+void status_chips_carry_the_rate_the_drops_and_the_render_test()
+{
+    using namespace status_chips;
+    // The format itself, not the digits in isolation, and rounded, never the
+    // raw double: "58.4" implies a precision a sampled rate does not have.
+    CHECK_EQ(std::wstring(L"58 / 60 fps"), FpsText(58.4, 59.94));
+    CHECK_EQ(std::wstring(L"Dropped 3"), DroppedText(3));
+    CHECK_EQ(std::wstring(L"Render 16% \u00b7 ETA 3:10"), RenderText(0.16, 190.0));
+    CHECK_EQ(std::wstring(L"Render 42% \u00b7 ETA 1:02:03"), RenderText(0.42, 3723.0));
+    // No ETA without a pace, and none once it is done.
+    CHECK_EQ(std::wstring(L"Render 42%"), RenderText(0.42, std::nullopt));
+    CHECK_EQ(std::wstring(L"Render 100%"), RenderText(1.0, 12.0));
+    // 99.6% rendered is not rendered: only a finished render says 100.
+    CHECK_EQ(std::wstring(L"Render 99%"), RenderText(0.996, std::nullopt));
+
+    CHECK(!SecondsToFullCoverage(30.0, 0.0).has_value());
+    CHECK_EQ(0.0, *SecondsToFullCoverage(0.0, 0.0));
+    CHECK_EQ(60.0, *SecondsToFullCoverage(30.0, 0.5));
+
+    // Nothing is shown without media; a still image has no rate to report; a
+    // render chip exists only while something renders.
+    const Snapshot empty = Build(false, {true, 0.5, 10.0}, 60.0, 60.0, 0);
+    for (const Content& chip : empty) CHECK(!chip.visible);
+    const Snapshot still = Build(true, {}, 0.0, 0.0, 0);
+    CHECK(!At(still, Chip::Fps).visible);
+    CHECK(!At(still, Chip::Dropped).visible);
+    CHECK(!At(still, Chip::Render).visible);
+    const Snapshot playing = Build(true, {true, 0.25, 90.0}, 59.7, 60.0, 0);
+    CHECK(At(playing, Chip::Render).visible);
+    CHECK_EQ(std::wstring(L"Render 25% \u00b7 ETA 1:30"), At(playing, Chip::Render).text);
+    CHECK_EQ(std::wstring(L"60 / 60 fps"), At(playing, Chip::Fps).text);
+    // No dropped frames is a fine state, so the chip says it quietly.
+    CHECK(At(playing, Chip::Dropped).quiet);
+    CHECK(!At(Build(true, {}, 60.0, 60.0, 4), Chip::Dropped).quiet);
+}
+
+void status_chips_flash_on_the_fact_not_on_every_repaint_test()
+{
+    using namespace status_chips;
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point start{};
+    Flash flash;
+    // The first frame rate measured flashes once; a wobble within the 2%
+    // tolerance does not, and falling behind does.
+    CHECK(flash.Observe(Build(true, {}, 60.0, 60.0, 0), start));
+    CHECK_EQ(1.0, flash.Level(Chip::Fps, start));
+    CHECK_EQ(0.0, flash.Level(Chip::Dropped, start));
+    const auto later = start + std::chrono::seconds(2);
+    CHECK(!flash.Animating(later));
+    CHECK(!flash.Observe(Build(true, {}, 59.2, 60.0, 0), later));
+    CHECK(flash.Observe(Build(true, {}, 41.0, 60.0, 0), later));
+    CHECK(flash.Level(Chip::Fps, later) > 0.99);
+    // Fades out over the flash duration, and holds flat without motion.
+    const auto midway = later + kFlashDuration / 2;
+    CHECK(std::abs(flash.Level(Chip::Fps, midway) - 0.5) < 0.01);
+    CHECK_EQ(1.0, flash.Level(Chip::Fps, midway, false));
+    CHECK_EQ(0.0, flash.Level(Chip::Fps, later + kFlashDuration));
+    // Every newly dropped frame flashes; a reload's reset to zero does not.
+    const auto dropAt = later + std::chrono::seconds(5);
+    CHECK(flash.Observe(Build(true, {}, 41.0, 60.0, 1), dropAt));
+    CHECK(flash.Level(Chip::Dropped, dropAt) > 0.99);
+    CHECK(!flash.Observe(Build(true, {}, 41.0, 60.0, 0), dropAt + std::chrono::seconds(5)));
+    // The render chip flashes as it appears and at each tenth, not each percent.
+    const auto renderAt = dropAt + std::chrono::seconds(10);
+    CHECK(flash.Observe(Build(true, {true, 0.01, {}}, 41.0, 60.0, 0), renderAt));
+    CHECK(!flash.Observe(Build(true, {true, 0.05, {}}, 41.0, 60.0, 0), renderAt));
+    CHECK(flash.Observe(Build(true, {true, 0.11, {}}, 41.0, 60.0, 0), renderAt));
+}
+
+void status_chips_keep_fixed_places_and_give_the_line_the_rest_test()
+{
+    using namespace status_chips;
+    const RECT row{145, 500, 1424, 523};
+    const RowLayout all = LayoutRow(row, 96, {true, true, true});
+    // Fixed order, fixed widths, right-aligned with a gap between.
+    CHECK_EQ(1424L, all.chips[2].right);
+    CHECK_EQ(LONG(kDroppedChipWidthDip), all.chips[2].right - all.chips[2].left);
+    CHECK_EQ(LONG(kFpsChipWidthDip), all.chips[1].right - all.chips[1].left);
+    CHECK_EQ(LONG(kRenderChipWidthDip), all.chips[0].right - all.chips[0].left);
+    CHECK_EQ(LONG(kChipGapDip), all.chips[2].left - all.chips[1].right);
+    CHECK_EQ(LONG(kChipGapDip), all.chips[1].left - all.chips[0].right);
+    CHECK_EQ(all.chips[0].left - LONG(kChipGapDip), all.text.right);
+    CHECK_EQ(LONG(kChipHeightDip), all.chips[0].bottom - all.chips[0].top);
+    // A chip that is not shown gives its room to the line, and the others do
+    // not move.
+    const RowLayout noRender = LayoutRow(row, 96, {false, true, true});
+    CHECK(noRender.chips[0].right == noRender.chips[0].left);
+    CHECK_EQ(all.chips[1].left, noRender.chips[1].left);
+    CHECK_EQ(all.chips[1].left - LONG(kChipGapDip), noRender.text.right);
+    // Too narrow for every chip and the line's minimum: the render chip goes
+    // first, never one from the middle.
+    const RECT narrow{145, 500, 145 + kMinimumTextWidthDip + 260, 523};
+    const RowLayout squeezed = LayoutRow(narrow, 96, {true, true, true});
+    CHECK(squeezed.chips[0].right == squeezed.chips[0].left);
+    CHECK(squeezed.chips[1].right > squeezed.chips[1].left);
+    CHECK(squeezed.chips[2].right > squeezed.chips[2].left);
+    CHECK(squeezed.text.right - squeezed.text.left >= kMinimumTextWidthDip);
+    // Scales with dpi.
+    const RowLayout scaled = LayoutRow(RECT{218, 750, 2136, 785}, 144, {true, true, true});
+    CHECK_EQ(LONG(MulDiv(kDroppedChipWidthDip, 144, 96)), scaled.chips[2].right - scaled.chips[2].left);
+}
+
+void feature_pills_shrink_before_the_bar_goes_compact_test()
+{
+    // The floor, measured in UiLayout terms: 1114 dip at 96 dpi while the
+    // three feature pills were fixed at 270/270/264, 850 now that they shrink
+    // to kFeaturePillNarrowWidthDip.
+    CHECK_EQ(850, MinimumToolbarClientWidth(96));
+    CHECK_EQ(1114, FullPillToolbarClientWidth(96));
+    const auto width = [](const std::vector<ToolbarItem>& items, ToolbarAction action) {
+        for (const auto& item : items) if (item.action == action) return int(item.bounds.right - item.bounds.left);
+        return 0;
+    };
+    // At the floor the pills are at their narrow width, not compact.
+    const auto floor = LayoutToolbar(850, 180, 96);
+    for (const ToolbarAction action : {ToolbarAction::ToggleNeuralRendering, ToolbarAction::ToggleUpscaling,
+                                       ToolbarAction::ToggleFrameGeneration}) {
+        CHECK_EQ(kFeaturePillNarrowWidthDip, width(floor, action));
+    }
+    // Between the floor and the full-pill width they share the room evenly,
+    // and the bar still ends exactly at the gutter.
+    const auto between = LayoutToolbar(970, 180, 96);
+    CHECK_EQ(220, width(between, ToolbarAction::ToggleNeuralRendering));
+    CHECK_EQ(220, width(between, ToolbarAction::ToggleUpscaling));
+    CHECK_EQ(220, width(between, ToolbarAction::ToggleFrameGeneration));
+    CHECK_EQ(970L - kToolbarOuterGutterDip, between.back().bounds.right);
+    for (const auto& item : between) CHECK(!item.compact);
+    check_toolbar_items_do_not_overlap(between);
+    // A pill that reaches its full width stops growing and the rest share the
+    // remainder: frame generation tops out at 264 before the other two at 270.
+    const auto nearlyFull = LayoutToolbar(1112, 180, 96);
+    CHECK_EQ(264, width(nearlyFull, ToolbarAction::ToggleFrameGeneration));
+    CHECK_EQ(538, width(nearlyFull, ToolbarAction::ToggleNeuralRendering) +
+                  width(nearlyFull, ToolbarAction::ToggleUpscaling));
+    // At the full-pill width the pills are exactly as they were.
+    const auto full = LayoutToolbar(1114, 180, 96);
+    CHECK_EQ(270, width(full, ToolbarAction::ToggleNeuralRendering));
+    CHECK_EQ(270, width(full, ToolbarAction::ToggleUpscaling));
+    CHECK_EQ(264, width(full, ToolbarAction::ToggleFrameGeneration));
+
+    // What a narrowed pill keeps: the state, never the name.
+    CHECK(FeaturePillStateLabel(L"Neural Rendering \u00b7 Queued for the seek") == L"Queued for the seek");
+    CHECK(FeaturePillStateLabel(L"Neural Rendering \u00b7 Seeking \u00b7 On") == L"Seeking \u00b7 On");
+    CHECK(FeaturePillStateLabel(L"Frame Generation \u00b7 Generate") == L"Generate");
+    CHECK(FeaturePillStateLabel(L"Open") == L"Open");
+}
+
 void player_status_formats_exact_runtime_and_playback_states_test()
 {
     PlayerStatusSnapshot status{};
@@ -867,9 +1017,6 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.outputWidth = 3840;
     status.outputHeight = 2160;
     status.quality = L"Quality";
-    status.renderedFps = 58.4;
-    status.sourceFps = 59.94;
-    status.droppedFrames = 3;
     // Stand-ins for whatever the two producers say: the bar does not compose
     // this copy, it carries it, so the test states that and not the wording of
     // the day. Both fields are always assigned by their producers, and the old
@@ -878,9 +1025,9 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     status.frameGenerationStatus = L"<frame generation segment>";
     // The components a viewer reads off the bar: which runtime is active, both
     // feature segments verbatim, the source geometry, the output geometry when
-    // the pipeline changed it, the quality name, both frame rates rounded to
-    // whole frames, and a dropped count only when frames were dropped. Their
-    // separator and order are the bar's own business.
+    // the pipeline changed it and the quality name. Their separator and order
+    // are the bar's own business. The frame rates and the dropped count are
+    // status chips now, and are pinned in status_chips_* below.
     //
     // The DLSS input geometry is deliberately NOT here: it only ever repeated
     // the source or the output, and this line is drawn into one ellipsised row
@@ -895,21 +1042,16 @@ void player_status_formats_exact_runtime_and_playback_states_test()
     CHECK(shows(neural, L"1920\u00d71080"));
     CHECK(shows(neural, L"3840\u00d72160"));
     CHECK(shows(neural, L"Quality"));
-    // The format itself, not the digits in isolation: "60" alone is satisfied by
-    // the 2160 in a geometry, and "fps" by any segment carrying a rate.
-    CHECK(shows(neural, L"58 / 60 fps"));
-    CHECK(shows(neural, L"Dropped 3"));
-    // Rounded, never the raw double: a status line that reads 58.4 implies a
-    // precision the sampled rate does not have.
-    CHECK(!shows(neural, L"58.4"));
-    CHECK(!shows(neural, L"59.94"));
+    // Nothing the chips carry is repeated on the line: a repeat is exactly
+    // what used to push the feature states past the ellipsis.
+    CHECK(!shows(neural, L"fps"));
+    CHECK(!shows(neural, L"Dropped"));
 
     // A source the pipeline did not resize prints ONE geometry, not the same
     // numbers two or three times.
     PlayerStatusSnapshot unresized = status;
     unresized.outputWidth = unresized.sourceWidth;
     unresized.outputHeight = unresized.sourceHeight;
-    unresized.droppedFrames = 0;
     const std::wstring passthrough = BuildPlayerStatusText(unresized);
     const auto occurrences = [](const std::wstring& text, std::wstring_view part) {
         size_t count = 0;
@@ -917,8 +1059,6 @@ void player_status_formats_exact_runtime_and_playback_states_test()
         return count;
     };
     CHECK_EQ(size_t(1), occurrences(passthrough, L"1920\u00d71080"));
-    // And a clean run says nothing about dropped frames at all.
-    CHECK(!shows(passthrough, L"Dropped"));
 
     // Changing one segment changes only that segment.
     status.upscalingStatus = L"DLSS Upscaling on \u00b7 3840\u00d72160 (auto)";
@@ -10212,6 +10352,10 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(idle_surface_exposes_file_and_disabled_youtube_without_focusing_it_test),
     TEST_CASE(dpi_change_suggested_rect_respects_new_monitor_minimum_track_size_test),
     TEST_CASE(player_status_formats_exact_runtime_and_playback_states_test),
+    TEST_CASE(status_chips_carry_the_rate_the_drops_and_the_render_test),
+    TEST_CASE(status_chips_flash_on_the_fact_not_on_every_repaint_test),
+    TEST_CASE(status_chips_keep_fixed_places_and_give_the_line_the_rest_test),
+    TEST_CASE(feature_pills_shrink_before_the_bar_goes_compact_test),
     TEST_CASE(playback_timeline_follows_the_presented_frame_test),
     TEST_CASE(playback_lateness_is_bounded_to_one_and_a_half_frames_test),
     TEST_CASE(long_media_title_is_bounded_with_a_real_ellipsis_test),

@@ -104,6 +104,7 @@ inline std::optional<std::string> MemoisedSourceDigest(SharedSourceDigest& memo,
 #include "ExportPipeline.h"
 #include "UpdateCheck.h"
 #include "SynchronizedPlayback.h"
+#include "StatusChipPolicy.h"
 #include "resources.h"
 
 using Clock = std::chrono::steady_clock;
@@ -1484,6 +1485,7 @@ private:
     static constexpr UINT_PTR kFullscreenTimerId=0xD156;
     static constexpr UINT_PTR kPreviewTimerId=0xD157;
     static constexpr UINT_PTR kModalTickTimerId=0xD158;
+    static constexpr UINT_PTR kChipFlashTimerId=0xD159;
     static constexpr auto kFullscreenIdleDelay=std::chrono::milliseconds(2500);
     // How long a live or cached pair may stay NotReady before the player stops
     // waiting for it. A segment source is reopened at every boundary and after
@@ -4790,7 +4792,17 @@ private:
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
     RECT TimeTextRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(16),c.bottom-Dip(55),Dip(142),c.bottom-Dip(32)};}
-    RECT StatusRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(143),c.bottom-Dip(55),VolumeRect()?c.right-Dip(203):c.right-Dip(16),c.bottom-Dip(32)};}
+    // The status line and its chips. The line used to stop 203 dip short of
+    // the right edge whenever the volume slider was shown, but the slider and
+    // its label sit in the toolbar row above (69 and 75 dip up), so that was
+    // room nothing used; the chips take it now.
+    RECT StatusRowRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{Dip(145),c.bottom-Dip(55),c.right-Dip(16),c.bottom-Dip(32)};}
+    RECT StatusRect()const{RECT row=StatusRowRect();row.left-=Dip(2);return row;}
+    status_chips::RowLayout StatusRowLayout()const{
+        std::array<bool,status_chips::kChipCount> visible{};
+        for(size_t index=0;index<status_chips::kChipCount;++index)visible[index]=m_cachedChips[index].visible;
+        return status_chips::LayoutRow(StatusRowRect(),ActiveWindowDpi(m_hwnd),visible);
+    }
     void InvalidatePlaybackProgress(){
         if(!m_hwnd||!m_loaded||!ControlsVisible())return;
         RECT timeline=TimelineRect();InflateRect(&timeline,Dip(6),Dip(4));InvalidateRect(m_hwnd,&timeline,FALSE);
@@ -4805,8 +4817,71 @@ private:
         for(const auto& item:items)if(item.action==action){InvalidateRect(m_hwnd,&item.bounds,FALSE);return;}
     }
     void UpdateCachedStatus(){
+        UpdateStatusChips();
         const std::wstring status=BuildStatusText();if(status==m_cachedStatus)return;
         m_cachedStatus=status;if(m_hwnd){if(m_loaded){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}else InvalidateRect(m_hwnd,nullptr,FALSE);}
+    }
+    // How far the render behind playback has got, for the render chip. A live
+    // session reports its whole range, holes and all, at the pace it is
+    // actually managing; a settings preview reports its own job.
+    status_chips::RenderProgress RenderChipProgress()const{
+        if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
+            const CoverageSpan range{m_liveRange.start100ns,m_liveRange.end100ns};
+            const double fraction=LiveSessionFinished()?1.0:std::min(CoveredFraction(LiveCoverage(),range),0.999);
+            const double remaining=(1.0-fraction)*double(range.Width())*1e-7;
+            return {true,fraction,status_chips::SecondsToFullCoverage(remaining,LivePaceRatio())};
+        }
+        if(m_previewJob&&NeuralJobActive()&&m_neuralProgress.totalFrames>0){
+            const double fraction=double(std::min(m_neuralProgress.completedFrames,m_neuralProgress.totalFrames))/double(m_neuralProgress.totalFrames);
+            const double eta=std::chrono::duration<double>(m_neuralProgress.estimatedRemaining).count();
+            return {true,fraction,eta>0.0?std::optional<double>(eta):std::nullopt};
+        }
+        return {};
+    }
+    status_chips::Snapshot BuildStatusChips()const{
+        return status_chips::Build(m_loaded&&m_renderer!=nullptr,RenderChipProgress(),m_submitFps,
+                                   m_decoder.FrameRate(),m_droppedFrames);
+    }
+    // Called with the status line, which every state change and every
+    // presented frame already reaches. Only a changed chip repaints, and only
+    // a changed FACT - see status_chips::Flash - starts a flash.
+    void UpdateStatusChips(){
+        const status_chips::Snapshot chips=BuildStatusChips();
+        if(chips==m_cachedChips)return;
+        bool layoutChanged=false;
+        for(size_t index=0;index<status_chips::kChipCount;++index)layoutChanged=layoutChanged||chips[index].visible!=m_cachedChips[index].visible;
+        m_cachedChips=chips;
+        const bool flashed=m_chipFlash.Observe(chips,Clock::now());
+        if(!m_hwnd||!m_loaded)return;
+        // A chip appearing or going moves the line's right edge, so the whole
+        // row repaints; otherwise only the chips do.
+        RECT dirty=StatusRect();
+        if(!layoutChanged){LONG left=dirty.right;for(const RECT& chip:StatusRowLayout().chips)if(chip.right>chip.left)left=std::min(left,chip.left);dirty.left=left;}
+        InvalidateRect(m_hwnd,&dirty,FALSE);
+        if(flashed&&!m_chipFlashTimer)m_chipFlashTimer=SetTimer(m_hwnd,kChipFlashTimerId,m_activityMotionEnabled?40u:UINT(status_chips::kFlashDuration.count()),nullptr);
+    }
+    void AnimateStatusChips(){
+        if(m_hwnd){const RECT dirty=StatusRect();InvalidateRect(m_hwnd,&dirty,FALSE);}
+        if(!m_chipFlash.Animating(Clock::now())&&m_chipFlashTimer){if(m_hwnd)KillTimer(m_hwnd,m_chipFlashTimer);m_chipFlashTimer=0;}
+    }
+    // One chip: a quiet surface normally, lit toward its own colour for a
+    // moment after the fact it reports changes. Teal for the render, as the
+    // coverage lane and a working pill are; blue for the rate, as progress is;
+    // amber for a dropped frame, the only one of the three that is never good
+    // news.
+    void DrawStatusChip(HDC dc,const RECT& bounds,const status_chips::Content& chip,COLORREF accent,double level){
+        if(bounds.right<=bounds.left||!chip.visible)return;
+        const auto mix=[](COLORREF from,COLORREF to,double amount){
+            const auto channel=[&](int a,int b){return BYTE(std::clamp(int(std::lround(a+(b-a)*amount)),0,255));};
+            return RGB(channel(GetRValue(from),GetRValue(to)),channel(GetGValue(from),GetGValue(to)),channel(GetBValue(from),GetBValue(to)));
+        };
+        HBRUSH brush=CreateSolidBrush(mix(ui_palette::Inactive,accent,0.35*level));HPEN pen=CreatePen(PS_SOLID,1,mix(RGB(62,65,70),accent,level));
+        const HGDIOBJ oldBrush=SelectObject(dc,brush),oldPen=SelectObject(dc,pen);
+        const int radius=std::max(1,Dip(4));RoundRect(dc,bounds.left,bounds.top,bounds.right,bounds.bottom,radius*2,radius*2);
+        SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(brush);DeleteObject(pen);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,chip.quiet&&level<=0.0?ui_palette::SecondaryText:ui_palette::PrimaryText);
+        RECT text=bounds;InflateRect(&text,-Dip(status_chips::kChipPaddingDip),0);
+        DrawTextW(dc,chip.text.c_str(),-1,&text,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     }
     ToolbarAction ToolbarActionAt(int x,int y)const{
         const auto items=FocusableItems();return ResolveToolbarHover(items,POINT{x,y},ToolbarState());
@@ -4923,14 +4998,24 @@ private:
         const bool stacked=compact&&showIcon;SIZE iconSize{},textSize{};
         if(showIcon){const HGDIOBJ measured=SelectObject(dc,m_iconFont);GetTextExtentPoint32W(dc,&glyph,1,&iconSize);SelectObject(dc,measured);}
         const HFONT textFont=m_fontSmall?m_fontSmall:m_font;const HGDIOBJ measuredText=SelectObject(dc,textFont);
-        GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);SelectObject(dc,measuredText);
+        GetTextExtentPoint32W(dc,label.c_str(),static_cast<int>(label.size()),&textSize);
         const bool featureLabel=action==ToolbarAction::ToggleNeuralRendering||action==ToolbarAction::ToggleUpscaling||action==ToolbarAction::ToggleFrameGeneration;
-        const int neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
+        int neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
+        // A feature pill the layout has narrowed keeps its state and drops its
+        // name, rather than ellipsising the state - the one part of the label
+        // that changes - off the end. The icon and the tooltip carry the name.
+        std::wstring shown=label;
+        if(featureLabel&&neededWidth>r.right-r.left){
+            shown=std::wstring(FeaturePillStateLabel(label));
+            GetTextExtentPoint32W(dc,shown.c_str(),static_cast<int>(shown.size()),&textSize);
+            neededWidth=iconSize.cx+textSize.cx+Dip(2*kButtonHorizontalInsetDip+kButtonIconLabelGapDip);
+        }
+        SelectObject(dc,measuredText);
         const bool showText=!showIcon||featureLabel||neededWidth<=r.right-r.left;
         const ButtonContentLayout content=LayoutButtonContent(r,iconSize,showText?textSize:SIZE{},stacked&&showText,ActiveWindowDpi(m_hwnd));
         if(showIcon){const HGDIOBJ oldFont=SelectObject(dc,m_iconFont);RECT iconRect=content.icon;DrawTextW(dc,&glyph,1,&iconRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_NOPREFIX);SelectObject(dc,oldFont);}
         if(showText){const HGDIOBJ oldFont=SelectObject(dc,textFont);RECT textRect=content.text;
-            DrawTextW(dc,label.c_str(),-1,&textRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+            DrawTextW(dc,shown.c_str(),-1,&textRect,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
             SelectObject(dc,oldFont);}
         if(visual.drawFocus&&action!=ToolbarAction::None){RECT focusRect=r;InflateRect(&focusRect,-Dip(3),-Dip(3));DrawFocusRect(dc,&focusRect);}
     }
@@ -5115,7 +5200,17 @@ private:
         if(m_markers.in100ns)markerTick(*m_markers.in100ns,RGB(96,220,130));if(m_markers.out100ns)markerTick(*m_markers.out100ns,RGB(255,168,64));
         const int knobR=std::max(4,Dip(6));int kx=done.right;DrawSolidEllipse(dc,RECT{kx-knobR,tr.top-Dip(2),kx+knobR,tr.bottom+Dip(2)},RGB(246,246,248),"Timeline knob");
         SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,Dip(18),c.bottom-Dip(50),time.c_str(),int(time.size()));
-        RECT sr{Dip(145),c.bottom-Dip(53),volumeRect?c.right-Dip(205):c.right-Dip(18),c.bottom-Dip(34)};
+        const status_chips::RowLayout statusRow=StatusRowLayout();
+        {
+            const auto now=Clock::now();
+            constexpr std::array<COLORREF,status_chips::kChipCount> accents{ui_palette::NeuralCoverage,ui_palette::PrimaryBlue,ui_palette::Attention};
+            const HGDIOBJ chipFont=SelectObject(dc,m_fontSmall?m_fontSmall:m_font);
+            for(size_t index=0;index<status_chips::kChipCount;++index)
+                DrawStatusChip(dc,statusRow.chips[index],m_cachedChips[index],accents[index],
+                               m_chipFlash.Level(static_cast<status_chips::Chip>(index),now,m_activityMotionEnabled));
+            SelectObject(dc,chipFont);SetTextColor(dc,RGB(206,208,212));
+        }
+        RECT sr{statusRow.text.left,statusRow.text.top+Dip(2),std::max(statusRow.text.left,statusRow.text.right-Dip(2)),statusRow.text.bottom-Dip(2)};
         if(m_youtubeLifecycle.IsResolving()){
             const RECT spinner{sr.left,sr.top,sr.left+Dip(18),sr.top+Dip(18)};
             DrawActivitySpinner(dc,spinner,ResolveActivityVisual({},ActivityElapsedMs(),0,0,false,m_activityMotionEnabled).spinnerStep);sr.left+=Dip(25);
@@ -7306,15 +7401,10 @@ private:
     std::wstring LiveSessionStatusText()const{
         wchar_t lead[64]={};swprintf_s(lead,L"%.1f s",LiveLeadSeconds());
         std::wstring text=(m_liveBuffering?T(L"neural.live.buffering"):T(L"neural.live.title"))+L" \u00b7 "+lead+L" "+T(L"neural.live.lead");
-        // How much of the video is rendered, not where the newest frame is: a
-        // session fills holes in any order, so a single timestamp cannot say
-        // whether the part the user is about to seek back to exists.
-        if(m_liveSession&&m_liveRange.end100ns>m_liveRange.start100ns){
-            wchar_t done[48]={};
-            swprintf_s(done,L" \u00b7 %.0f%% rendered",
-                       100.0*CoveredFraction(LiveCoverage(),CoverageSpan{m_liveRange.start100ns,m_liveRange.end100ns}));
-            text+=done;
-        }
+        // How much of the video is rendered is the render chip's to say
+        // (RenderChipProgress), as a share of the whole range rather than of
+        // where the newest frame is: it was a segment of a line that lost its
+        // tail to the ellipsis first.
         // What the next buffer fill will do with the press the user already made.
         if(m_liveBuffering)text+=L" \u00b7 "+T(LiveResumePending()?L"neural.live.will_play":L"neural.live.will_stay_paused");
         // The forecast is a constant for one GPU; this is what the render is
@@ -7405,8 +7495,7 @@ private:
             status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();
             status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();
             status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();
-            status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;
-            status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
+            status.quality=QualityNameW(m_activeQuality);
             status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();
             std::wstring text=(m_liveSession?std::wstring{}:std::wstring(L"Neural video \u00b7 "))+
                 T(m_comparisonView==ComparisonView::Neural?L"neural.view.rendered":L"neural.view.original")+
@@ -7419,7 +7508,7 @@ private:
             if(const std::wstring dropped=m_dropNote.Visible(m_loaded,m_path);!dropped.empty())text=dropped+L" \u00b7 "+text;
             return text;
         }
-        const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);status.renderedFps=m_submitFps;status.sourceFps=m_decoder.FrameRate();status.droppedFrames=m_droppedFrames;
+        const PlayerRuntimeStatus runtime=RuntimeStatus();status.mediaLoaded=true;status.runtimeConfiguration=runtime.configuration;status.dlssState=runtime.dlssState;status.sourceWidth=m_decoder.NativeWidth();status.sourceHeight=m_decoder.NativeHeight();status.inputWidth=m_renderer->DLSSInputW();status.inputHeight=m_renderer->DLSSInputH();status.outputWidth=m_renderer->OutputW();status.outputHeight=m_renderer->OutputH();status.quality=QualityNameW(m_activeQuality);
         status.upscalingStatus=UpscalingStatus();status.frameGenerationStatus=FrameGenerationStatus();std::wstring text=BuildPlayerStatusText(status);
         // Lead with what was marked, or with how to mark, because the runtime
         // detail behind it is what a narrow window truncates.
@@ -7706,7 +7795,7 @@ private:
         case WM_FRAMEGEN_PROGRESS:CompleteFrameGenerationProgress(static_cast<uint64_t>(w));return 0;
         case WM_FRAMEGEN_COMPLETE:CompleteFrameGeneration(static_cast<uint64_t>(w));return 0;
         case WM_UPDATE_CHECKED:CompleteUpdateCheck(static_cast<uint64_t>(w));return 0;
-        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}break;
+        case WM_TIMER:if(w==kActivityTimerId){AnimateActivity();return 0;}if(w==kFullscreenTimerId){AutoHideFullscreenControls();return 0;}if(w==kPreviewTimerId){StartPausedSettingsPreview();return 0;}if(w==kModalTickTimerId){if(m_modalTickTimer)RunTick();return 0;}if(w==kChipFlashTimerId){AnimateStatusChips();return 0;}break;
         case WM_ENTERMENULOOP:m_fullscreenMenuLoop=true;RevealFullscreenControls();StartModalTick();break;
         case WM_EXITMENULOOP:m_fullscreenMenuLoop=false;m_fullscreenLastInput=Clock::now();StopModalTick();break;
         case WM_ENTERSIZEMOVE:StartModalTick();break;
@@ -8003,6 +8092,9 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_guidesSkipped=false;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0;uint32_t m_historyGeneration=0;
     bool m_upscalingRequested=false;
     UINT_PTR m_activityTimer=0;
+    // The status chips as last painted, what each last flashed on, and the
+    // repaint timer that runs only while one is still fading.
+    status_chips::Snapshot m_cachedChips{};status_chips::Flash m_chipFlash;UINT_PTR m_chipFlashTimer=0;
     // Drives Tick while a modal loop owns the thread; see StartModalTick.
     UINT_PTR m_modalTickTimer=0;bool m_inTick=false;
     // The paused frame needs presenting again: the window under it was resized

@@ -17,6 +17,9 @@ struct ToolbarDefinition {
     int widthDip;
     int group;
     bool requiredAtNarrowWidths;
+    // The width a feature pill may shrink to before the bar goes compact, or 0
+    // for a control whose width is fixed. See kFeaturePillNarrowWidthDip.
+    int narrowWidthDip{0};
 };
 
 constexpr std::array kToolbarDefinitions{
@@ -26,7 +29,7 @@ constexpr std::array kToolbarDefinitions{
     ToolbarDefinition{ToolbarAction::Stop, 48, 0, false},
     ToolbarDefinition{ToolbarAction::Forward10, 44, 0, false},
     ToolbarDefinition{ToolbarAction::Mute, 54, 0, true},
-    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleNeuralRendering, 270, 1, true, kFeaturePillNarrowWidthDip},
     // 270 dip, the same as the neural pill beside it and for the same kind of
     // measurement: the widest arm is now a reason rather than "Unavailable".
     // "DLSS Upscaling · Panel too small" is 225 dip in Segoe UI 16, plus the
@@ -34,7 +37,7 @@ constexpr std::array kToolbarDefinitions{
     // drawn as "DLSS Upscaling · Source mee..." in the DEFAULT 1440 dip window
     // - verified on screen - which is a truncated explanation, the one thing
     // worse than none.
-    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 270, 1, true},
+    ToolbarDefinition{ToolbarAction::ToggleUpscaling, 270, 1, true, kFeaturePillNarrowWidthDip},
     // 264 dip = the widest arm, "Frame Generation · Unavailable" (217 dip in
     // Segoe UI 16), plus the 17 dip icon, the 7 dip gap and both 10 dip insets.
     // 320 was budgeted for no arm that exists: "· Generate" needs 243.
@@ -43,11 +46,14 @@ constexpr std::array kToolbarDefinitions{
     // rather than symmetry: with it optional the full bar no longer fits the
     // DEFAULT 1440 dip window, so the layout fell back to the required set and
     // the only toolbar control for a shipped feature disappeared at the size
-    // the player opens at - verified on screen. The cost is the minimum window
-    // width, which this pill raises to about 1070 dip at 96 dpi; that is a
-    // window a video player may insist on, and a control the user cannot find
-    // is not.
-    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 264, 1, true},
+    // the player opens at - verified on screen.
+    //
+    // The cost used to be the minimum window width: three full pills held it
+    // at 1114 dip at 96 dpi. They now shrink to kFeaturePillNarrowWidthDip
+    // before anything goes compact, and a pill too narrow for its whole label
+    // keeps the state and drops the feature name (FeaturePillStateLabel) - the
+    // icon and the tooltip still name it - so the floor is 850 dip.
+    ToolbarDefinition{ToolbarAction::ToggleFrameGeneration, 264, 1, true, kFeaturePillNarrowWidthDip},
     ToolbarDefinition{ToolbarAction::Aspect, 72, 1, false},
     ToolbarDefinition{ToolbarAction::Adjustments, 66, 1, false},
     ToolbarDefinition{ToolbarAction::DebugView, 72, 2, false},
@@ -76,13 +82,19 @@ int GapPixels(const ToolbarDefinition& previous, const ToolbarDefinition& curren
     return DipToPixels(previous.group == current.group ? kToolbarSpacingDip : kToolbarGroupGapDip, dpi);
 }
 
-int LayoutWidth(std::span<const ToolbarDefinition* const> definitions, int itemWidthDip, UINT dpi)
+int DefinitionWidthDip(const ToolbarDefinition& definition, int itemWidthDip, bool narrow)
+{
+    if (itemWidthDip != 0) return itemWidthDip;
+    return narrow && definition.narrowWidthDip != 0 ? definition.narrowWidthDip : definition.widthDip;
+}
+
+int LayoutWidth(std::span<const ToolbarDefinition* const> definitions, int itemWidthDip, UINT dpi,
+                bool narrow = false)
 {
     int width = 0;
     for (size_t index = 0; index < definitions.size(); ++index) {
         if (index != 0) width += GapPixels(*definitions[index - 1], *definitions[index], dpi);
-        const int widthDip = itemWidthDip == 0 ? definitions[index]->widthDip : itemWidthDip;
-        width += DipToPixels(widthDip, dpi);
+        width += DipToPixels(DefinitionWidthDip(*definitions[index], itemWidthDip, narrow), dpi);
     }
     return width;
 }
@@ -294,15 +306,53 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
     const int availableWidth = std::max(0, clientWidth - 2 * gutter);
     std::span<const ToolbarDefinition* const> selected{all};
     bool compact = false;
+    bool flexible = false;
     int itemWidthDip = 0;
 
+    // Widest first: every control at full width, then the required set at full
+    // width, then the required set with the feature pills sharing whatever is
+    // left between their narrow and full widths, and only then the compact
+    // icon-over-label cells. The flexible step is what keeps a readable label
+    // on the three feature pills between 850 and 1114 dip, where the bar used
+    // to collapse straight to 44-dip cells.
     if (LayoutWidth(selected, 0, dpi) > availableWidth) {
         selected = std::span<const ToolbarDefinition* const>{required};
         if (LayoutWidth(selected, 0, dpi) > availableWidth) {
-            compact = true;
-            itemWidthDip = kToolbarCompactWidthDip;
-            if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
-                itemWidthDip = kToolbarSmallestWidthDip;
+            if (LayoutWidth(selected, 0, dpi, true) <= availableWidth) {
+                flexible = true;
+            } else {
+                compact = true;
+                itemWidthDip = kToolbarCompactWidthDip;
+                if (LayoutWidth(selected, itemWidthDip, dpi) > availableWidth) {
+                    itemWidthDip = kToolbarSmallestWidthDip;
+                }
+            }
+        }
+    }
+
+    std::vector<int> widths(selected.size());
+    for (size_t index = 0; index < selected.size(); ++index) {
+        widths[index] = DipToPixels(DefinitionWidthDip(*selected[index], itemWidthDip, flexible), dpi);
+    }
+    if (flexible) {
+        // The room past every pill's narrow width is shared out evenly, and a
+        // pill that reaches its full width stops taking any: the full widths
+        // are measured to the longest label, so more would be empty padding.
+        int slack = std::max(0, availableWidth - LayoutWidth(selected, 0, dpi, true));
+        while (slack > 0) {
+            std::vector<size_t> growing;
+            for (size_t index = 0; index < selected.size(); ++index) {
+                if (selected[index]->narrowWidthDip != 0 &&
+                    widths[index] < DipToPixels(selected[index]->widthDip, dpi)) growing.push_back(index);
+            }
+            if (growing.empty()) break;
+            const int share = std::max(1, slack / static_cast<int>(growing.size()));
+            for (const size_t index : growing) {
+                const int room = DipToPixels(selected[index]->widthDip, dpi) - widths[index];
+                const int granted = std::min({share, room, slack});
+                widths[index] += granted;
+                slack -= granted;
+                if (slack == 0) break;
             }
         }
     }
@@ -314,8 +364,7 @@ std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT d
     items.reserve(selected.size());
     for (size_t index = 0; index < selected.size(); ++index) {
         if (index != 0) left += GapPixels(*selected[index - 1], *selected[index], dpi);
-        const int widthDip = itemWidthDip == 0 ? selected[index]->widthDip : itemWidthDip;
-        const int width = DipToPixels(widthDip, dpi);
+        const int width = widths[index];
         items.push_back(ToolbarItem{
             selected[index]->action,
             RECT{left, top, left + width, top + itemHeight},
@@ -331,7 +380,22 @@ int MinimumToolbarClientWidth(UINT dpi)
     const auto required = RequiredToolbarDefinitions();
     const std::span<const ToolbarDefinition* const> selected{required};
     return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
+           LayoutWidth(selected, 0, dpi, true);
+}
+
+int FullPillToolbarClientWidth(UINT dpi)
+{
+    const auto required = RequiredToolbarDefinitions();
+    const std::span<const ToolbarDefinition* const> selected{required};
+    return 2 * DipToPixels(kToolbarOuterGutterDip, dpi) +
            LayoutWidth(selected, 0, dpi);
+}
+
+std::wstring_view FeaturePillStateLabel(std::wstring_view label)
+{
+    constexpr std::wstring_view separator = L" · ";
+    const size_t at = label.find(separator);
+    return at == std::wstring_view::npos ? label : label.substr(at + separator.size());
 }
 
 int MinimumIdleClientHeight(UINT dpi)
@@ -559,11 +623,12 @@ std::wstring BuildPlayerStatusText(const PlayerStatusSnapshot& status)
         text << L" \u2192 " << status.outputWidth << L'\u00d7' << status.outputHeight;
     }
     if (!status.quality.empty()) text << L" \u00b7 " << status.quality;
-    text << L" \u00b7 " << static_cast<int>(std::lround(status.renderedFps)) << L" / "
-         << static_cast<int>(std::lround(status.sourceFps)) << L" fps";
-    // Dropped frames are silent when there are none: a zero is the state a
-    // viewer never needs told, and it cost the segment that says the rate.
-    if (status.droppedFrames != 0) text << L" \u00b7 Dropped " << status.droppedFrames;
+    // The frame rate and the dropped count are not on this line any more: they
+    // are the two numbers that change while nothing else does, so they were
+    // the ones a viewer looked for, and at the end of an ellipsised row they
+    // were the first thing cut ("...Frame Generat..."). They live in fixed
+    // status chips now - see StatusChipPolicy.h - where they cannot be pushed
+    // off by a notice.
     return text.str();
 }
 

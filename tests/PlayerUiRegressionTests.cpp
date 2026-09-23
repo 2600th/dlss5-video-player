@@ -801,6 +801,99 @@ struct PlayerAppTestAccess {
         app.CompleteNeuralJob(staleToken);
     }
 
+    // Measured with the fonts the player draws with, at every dpi it scales
+    // to, because the widths in StatusChipPolicy.h and UiLayout.h are only
+    // true of those: a chip or a narrowed pill too small for its text would
+    // pass every layout test and still be cut on screen.
+    static void status_chips_and_narrow_pills_fit_test()
+    {
+        PlayerApp& app = fixture->app;
+        HDC dc = CreateCompatibleDC(nullptr);
+        REQUIRE(dc != nullptr);
+        const auto measure = [&](HFONT font, std::wstring_view text) {
+            const HGDIOBJ previous = SelectObject(dc, font);
+            SIZE size{};
+            CHECK(GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &size));
+            SelectObject(dc, previous);
+            return size;
+        };
+        // Every state a narrowed feature pill can show. The neural and
+        // upscaling arms are literals in ButtonContent; frame generation's
+        // come from the localizer, through the same cut the pill makes.
+        std::vector<std::wstring> states{L"Queued for the seek", L"Previewing settings", L"Settings preview",
+                                         L"Seeking · Off", L"Preparing cache", L"No cache", L"On", L"Off",
+                                         L"No video", L"Starting up", L"No DLSS", L"No frame yet",
+                                         L"Panel too small", L"Meets output"};
+        for (const wchar_t* key : {L"framegen.pill.generate", L"framegen.pill.cancel", L"framegen.pill.busy",
+                                   L"framegen.pill.unavailable", L"framegen.pill.get_copy", L"framegen.pill.copying"}) {
+            const std::wstring label = app.T(key);
+            CHECK(FeaturePillStateLabel(label) != label);
+            states.emplace_back(FeaturePillStateLabel(label));
+        }
+        const wchar_t glyph = GlyphForIcon(UiIcon::Sparkles);
+        struct ChipCase { status_chips::Chip chip; const wchar_t* widest; };
+        const std::array chips{
+            ChipCase{status_chips::Chip::Render, L"Render 99% · ETA 99:59:59"},
+            ChipCase{status_chips::Chip::Fps, L"240 / 240 fps"},
+            ChipCase{status_chips::Chip::Dropped, L"Dropped 99999"},
+        };
+        for (const UINT dpi : {96u, 120u, 144u, 192u}) {
+            app.UpdateFontsForDpi(dpi);
+            const HFONT font = app.m_fontSmall ? app.m_fontSmall : app.m_font;
+            const SIZE icon = measure(app.m_iconFont, std::wstring_view(&glyph, 1));
+            const int pill = MulDiv(kFeaturePillNarrowWidthDip, static_cast<int>(dpi), 96);
+            const int chrome = icon.cx + MulDiv(2 * kButtonHorizontalInsetDip + kButtonIconLabelGapDip, static_cast<int>(dpi), 96);
+            for (const auto& state : states) CHECK(measure(font, state).cx + chrome <= pill);
+            for (const auto& chip : chips) {
+                const int inner = MulDiv(status_chips::WidthDip(chip.chip) - 2 * status_chips::kChipPaddingDip,
+                                         static_cast<int>(dpi), 96);
+                CHECK(measure(font, chip.widest).cx <= inner);
+            }
+        }
+        app.UpdateFontsForDpi(96);
+
+        // A narrowed pill paints its state and not a truncated name.
+        drawnText.clear();
+        app.DrawButton(dc, ToolbarAction::ToggleNeuralRendering, UiIcon::Sparkles,
+                       L"Neural Rendering · Queued for the seek", RECT{0, 0, kFeaturePillNarrowWidthDip, 36},
+                       true, false, false, false, false, false);
+        CHECK(Contains(L"Queued for the seek"));
+        drawnText.clear();
+        app.DrawButton(dc, ToolbarAction::ToggleNeuralRendering, UiIcon::Sparkles,
+                       L"Neural Rendering · On", RECT{0, 0, 270, 36}, true, true, false, false, false, false);
+        CHECK(Contains(L"Neural Rendering · On"));
+
+        // The bar paints the chips it holds, beside the line and not over it.
+        // The case before this one leaves a job's lifecycle running, which
+        // would put the whole-window progress panel up instead of the bar.
+        const NeuralPlaybackLifecycle lifecycle = app.m_neuralLifecycle;
+        app.m_neuralLifecycle.state = NeuralPlaybackState::Idle;
+        const bool loaded = app.m_loaded, hadRenderer = app.m_renderer != nullptr;
+        app.m_loaded = true;
+        if (!hadRenderer) app.m_renderer = MakeD3D12Renderer();
+        app.m_cachedChips = status_chips::Build(true, {true, 0.42, 75.0}, 58.6, 60.0, 2);
+        app.m_cachedStatus = L"Status line";
+        drawnText.clear();
+        RECT client{};
+        GetClientRect(app.m_hwnd, &client);
+        app.RenderUi(dc, client);
+        CHECK(Contains(L"Render 42% · ETA 1:15"));
+        CHECK(Contains(L"59 / 60 fps"));
+        CHECK(Contains(L"Dropped 2"));
+        CHECK(Contains(L"Status line"));
+        const auto row = app.StatusRowLayout();
+        for (const RECT& chip : row.chips) {
+            CHECK(chip.right > chip.left);
+            CHECK(chip.left >= row.text.right);
+        }
+        app.m_loaded = loaded;
+        app.m_neuralLifecycle = lifecycle;
+        if (!hadRenderer) app.m_renderer.reset();
+        app.m_cachedChips = {};
+        app.m_cachedStatus.clear();
+        CHECK(DeleteDC(dc));
+    }
+
     static void source_menus_are_disabled_without_media_test()
     {
         PlayerApp& app = fixture->app;
@@ -1228,6 +1321,7 @@ struct PlayerAppTestAccess {
         UI_CASE(nv12_reference_inverse_is_bt709_limited_test),
         UI_CASE(live_pace_confirmation_test),
         UI_CASE(toolbar_pills_and_progress_panel_test),
+        UI_CASE(status_chips_and_narrow_pills_fit_test),
         UI_CASE(source_menus_are_disabled_without_media_test),
         UI_CASE(source_menus_return_after_a_cancelled_job_test),
         UI_CASE(loading_feedback_test),

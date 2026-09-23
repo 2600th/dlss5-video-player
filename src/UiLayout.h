@@ -104,9 +104,8 @@ struct PlayerStatusSnapshot {
     // control could only be unavailable, and it became a contradiction the
     // moment the toolbar pill could read "Generate".
     std::wstring frameGenerationStatus;
-    double renderedFps{};
-    double sourceFps{};
-    uint64_t droppedFrames{};
+    // No frame rate or dropped count: those are status chips now, built by
+    // StatusChipPolicy.h, so nothing here can push them past the ellipsis.
 };
 
 struct PaintBufferLayout {
@@ -156,11 +155,23 @@ inline constexpr int kToolbarMinHitHeightDip = 36;
 inline constexpr int kToolbarCornerRadiusDip = 8;
 inline constexpr int kToolbarOuterGutterDip = 16;
 inline constexpr int kToolbarGroupGapDip = 12;
+// How narrow a feature pill may get before the bar goes compact. Only its
+// state, never its name, has to fit then: the longest state is "Queued for the
+// seek", 134 px in Segoe UI at the 14 px the pills draw with, plus the 17 dip
+// icon, the 7 dip gap and both 10 dip insets.
+inline constexpr int kFeaturePillNarrowWidthDip = 180;
 
 std::vector<ToolbarItem> LayoutToolbar(int clientWidth, int clientHeight, UINT dpi);
 IdleSurfaceLayout LayoutIdleSurface(int clientWidth, int clientHeight, UINT dpi);
 ToolbarAction HitTestToolbar(std::span<const ToolbarItem> items, POINT point);
 int MinimumToolbarClientWidth(UINT dpi);
+// The narrowest client at which the required set still has its feature pills
+// at full width. Between this and MinimumToolbarClientWidth they shrink.
+int FullPillToolbarClientWidth(UINT dpi);
+// A feature pill reads "<feature> · <state>". One too narrow for all of it
+// keeps the state, which is the part that changes; its icon and tooltip still
+// name the feature. A label without the separator comes back whole.
+std::wstring_view FeaturePillStateLabel(std::wstring_view label);
 int MinimumIdleClientHeight(UINT dpi);
 RECT ClampWindowRectToMinimumTrackSize(RECT suggested, POINT minimumTrackSize);
 std::optional<RECT> LayoutVolumeSlider(int clientWidth, int clientHeight, UINT dpi,

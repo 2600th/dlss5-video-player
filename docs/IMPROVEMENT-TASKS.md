@@ -73,7 +73,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
 | [P2.17](#p217) | A difference view | S-M | Player | |
 | [P2.18](#p218) | The timeline as a render map | S / M | Player | |
-| [P2.19](#p219) | Status chips instead of one overflowing line | S | Player | |
 | [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
 | [P2.21](#p221) | Export the comparison itself | S / M | Player | |
 | [P2.22](#p222) | Dark, DPI-aware menus and dialogs | M | Player | |
@@ -455,21 +454,6 @@ the timeline: seeking itself works since P1.6, but the bar shows nothing.
 the render head, the time on hover, time-to-full-coverage, and chapter
 markers. Then hover thumbnails: the cached neural frame where one exists,
 otherwise the original. uosc with thumbfast is the model.
-
----
-
-<a id="p219"></a>
-### P2.19 · Status chips instead of one overflowing line
-
-`S` · **Player**
-
-`BuildPlayerStatusText` (`UiLayout.cpp:526`) is trimmed for width and still
-overflows ("…Frame Generat…" in `neural-playback.jpg`). The three feature
-buttons are 264-270 dip wide each (`UiLayout.cpp:29-50`), which forces a
-minimum width of about 1,070 dip.
-
-**Do** — fixed chips (`Render 16% · ETA`, `fps`, `Dropped`) that flash briefly
-when a value changes, and narrower buttons.
 
 ---
 
