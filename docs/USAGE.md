@@ -19,7 +19,9 @@ measured prior - the frame rate the live neural render is expected to manage
 at 1080p and 1440p. A failed check is marked and offers **Restart in DLSS SR
 safe mode**. Below that are your recent videos, each with a frame of its
 neural render and a badge for how much of it is rendered, and the game
-trailers; a click opens one, exactly as the File menu does. The checks that
+trailers (offered only while YouTube playback is available); a click opens
+one, exactly as the File menu does. In a short window the tiles get smaller
+before a row is left out, and the trailers are left out first. The checks that
 touch the disk run in the background, so the screen fills in a moment after
 the window appears.
 
@@ -178,7 +180,9 @@ network.
 The **compare bar** sits above the toolbar whenever a video is loaded, and works
 during cached playback on the neural view (it grays out otherwise; `D` turns the
 neural view on). It holds the mode, the Mix, the zoom and the swap, which are
-also under **Video > Compare**:
+also under **Video > Compare**. In a narrower window it shortens the mode
+names and shows Swap and Loupe as icons (hover for their names); narrower
+still, the modes fold into one button that opens a menu of them:
 
 - **DLSS 5** shows the neural frame, **Original** the source frame. `C` steps
   through the modes and `Shift+C` steps back.
