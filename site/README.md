@@ -11,7 +11,7 @@ and copies screenshots out of `docs/`.
 
 ```powershell
 .\site\build.ps1          # writes site/dist
-.\site\test.ps1           # 24 assertions, no network needed
+.\site\test.ps1           # 31 assertions, no network needed
 ```
 
 Then serve `site/dist` over HTTP - opening `index.html` from the filesystem

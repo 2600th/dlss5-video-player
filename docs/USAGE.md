@@ -280,16 +280,19 @@ to fall back to the generation's prior. Keep the player in a writable folder
 to persist preferences.
 
 **DLSS > Encoder settings** holds the three `[Encoding]` keys, kept apart from
-the model settings because they apply to the next render. Two of them never
-invalidate a cache entry; `GpuSourceConversion` does, because it changes what
-the model is shown rather than how the result is written:
+the model settings because they apply to the next render. All three are part of
+the render identity, so changing one re-renders instead of serving a cached
+range made under the other value. At their defaults they add nothing to the
+key, so a default render keeps the cache entries it already has:
 
-- `NvencPreset` (1-7, default 7). p7 is the slowest and best; drop it if NVENC
-  is the bottleneck on your card.
+- `NvencPreset` (1-7, default 5). p7 is the slowest and best; drop it if NVENC
+  is the bottleneck on your card. A non-default preset adds `nvenc-p<N>` to the
+  key.
 - `GpuColorConversion` (default off). Converts the rendered frame to NV12 on the
   GPU instead of letting ffmpeg do it on the CPU. Off because with the neural
   pass running the GPU is the scarce resource: 8.35 ms/frame against 8.66 on an
-  RTX 5070 Ti.
+  RTX 5070 Ti. On, it adds `nv12-output-v1` to the key: the GPU's 2x2 box
+  chroma downsample and ffmpeg's conversion are different filters.
 - `GpuSourceConversion` (default off). Decodes the source to NV12 and converts
   it on the GPU, which saves 2.6x on pipe traffic. It is part of the render
   identity - the key carries `nv12-source-v1` when it is on - so a render made

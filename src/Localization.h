@@ -17,7 +17,7 @@ private:
 
     static const Map& EnglishDefaults() {
         static const Map strings = {
-            {L"app.title", L"DLSS Video Player"},
+            {L"app.title", L"DLSS 5 Video Player"},
             {L"menu.file", L"File"}, {L"menu.open", L"Open file\tCtrl+O"}, {L"menu.open_youtube", L"Open YouTube URL\u2026\tCtrl+L"}, {L"menu.exit", L"Exit"},
             {L"menu.playback", L"Playback"}, {L"menu.playpause", L"Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)"}, {L"menu.stop", L"Stop\tS"},
             {L"menu.back10", L"Back 10 s\tLeft"}, {L"menu.forward10", L"Forward 10 s\tRight"}, {L"menu.mute", L"Mute\tM"}, {L"menu.audio_track", L"Audio track"},

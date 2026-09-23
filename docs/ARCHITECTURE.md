@@ -904,6 +904,134 @@ A frozen video frame can be re-presented while paused without advancing decoding
 or neural temporal history. Cached comparison and image-adjustment changes can
 therefore update the displayed frame without starting a new neural render.
 
+## Decisions and the measurements behind them
+
+These were recorded in the changelog of the release that made them. They moved
+here when the changelog was cut back to user-visible changes, because each one
+answers a question someone will ask again. Figures are from the machine and
+build named; the full entries are in `CHANGELOG.md` at tag
+`dlss5-video-player-v0.25.0`.
+
+**Runtime and NGX**
+
+- **The NGX feature is created once and kept** (0.17.2). The renderer used to
+  release and re-create it at the 60th present, which collided with the
+  receipt gate re-presenting one frame up to 120 times: the release tore down
+  the add-on's inline worksets and the job aborted ("A frame was not produced by
+  feature 18") on an RTX 4070 Ti and an RTX PRO 6000. NVIDIA's DLSS Programming
+  Guide 310.6.0 limits re-creation to display-resolution, RTX and buffer-format
+  changes (S3.2) and requires that no command list referencing the feature is
+  in flight when it is released (S5.5). A re-hook is now explicit and happens
+  before capture starts. 0.16.0 had already made the renderer drain the queue
+  before releasing any feature.
+- **The preflight probe renders its whole 120-frame budget** (0.25.0). RenoDX
+  6.x installs a compute-state shadow on the first NGX evaluate and injects
+  only after that shadow has seen a command-list Reset ("injection admitted
+  after 2 incomplete-target decline(s)"). A probe that stopped once the
+  player's own DLSS/DLAA carrier existed stopped submitting the only thing that
+  could arm feature 18, and latched neural rendering off for the session. The
+  probe polls the add-on's log every fourth frame and takes its verdict from
+  the settled read after the loop, so the two cannot disagree.
+- **Evidence is what the add-on reports building and evaluating** (0.25.0):
+  inline NR resources at `(native 1:1)` and an evaluate line ending `[native]`.
+  6.x deleted `NREnableUpscaling` and the startup architecture banners, the two
+  things the old proof read. The working resolution is pinned by
+  `NRFollowInputRes=0` and `NRResolutionScale=1`; the scale is a multiplier,
+  not a percentage (a written `100` came back from the add-on as `1`). A
+  leftover `NREnableUpscaling` is left alone, because writing it makes 6.x
+  re-run a pre-v4 migration that backs up `ReShade.ini` each time. The
+  parenthesised `NR skipped (after-upscale): ... incomplete` line is a startup
+  notice on a healthy run; the bare `NR skipped:` form is still a failure.
+- **Streamline stays at 2.13.0.0** (0.25.0). 2.14.1.0 drops `sl.dlss_nr.dll`
+  and buys nothing back: at `EnableHooks=2` Streamline is never patched and no
+  `sl.*` module appears in a render log.
+- **A neural render must cost real GPU time** (0.21.0). A DLAA-only run
+  satisfied every other check (`frames=900/900 verified=900`) at 0.46 ms of
+  neural GPU time per frame against a healthy 5.7 ms.
+  `NeuralTimingClearsFloor` requires 0.59 ms per output megapixel, the
+  geometric midpoint of that failure and the lowest healthy median on record
+  (3.26 ms at 1080p). Per-pixel cost only rises on slower hardware, so the risk
+  is one-sided.
+- **`nvngx_dlssg.dll` is not in `packaging/runtime-lock.json`** (0.24.0). That
+  lock is the helper's runtime set and feeds `runtimeDigest`; adding a file the
+  helper never loads retired every cached render and refused neural rendering
+  on existing installs until they were re-staged. It was tried and reverted.
+  `tools/verify_package.ps1` holds it to the pinned SDK's bytes instead.
+- **Frame Generation admission is probed inside the click that needs it**
+  (0.24.0). Probing at load - a second device and a second NGX create 0.2 s
+  after the renderer's own deferred create - froze presentation on the 19th
+  frame of a 600-frame clip. From a settled playing session the probe, the
+  conversion and a live SR feature coexisted.
+- **`DLSSG.MVecs` do not drive the generated frame on this runtime** (0.24.0).
+  The same pair evaluated with motion in pixels, in normalised units and zeroed
+  gave the same frame (centroids 812.73 / 812.73 / 812.79), so a better motion
+  estimate buys frame generation nothing. `DlssgEvaluateSmoke` is the
+  experiment, zero-motion control included.
+
+**Encode and colour**
+
+- **NVENC p5 is the default** (0.24.0). `hevc_nvenc`, 120 frames of 2560x1440 on
+  an RTX 5090: p7 took 1.51 s against p5's 0.75 s for 0.12 VMAF on ordinary
+  content and 0.53 on noise-heavy content, at 95-98 VMAF, far below the ~6 VMAF
+  usually quoted as just noticeable. The encoder is the long pole of a
+  frame-generation conversion (9.86 ms per output frame on p7, 5.08 on p5,
+  matching the standalone encode), so the preset is the one knob on that path
+  worth turning. A non-default preset is a cache-key term.
+- **Renders are written as BT.709** (0.22.0). The encoder stated colorimetry
+  only for the GPU conversion, so a BT.709 source became an untagged file of
+  BT.601 pixels (a pure-red frame came back Y=81 U=90 V=240). Both paths now
+  tag `bt709`/`tv`, the CPU path converts with `out_color_matrix=bt709`, and
+  `setparams` keeps the primaries and transfer tags this FFmpeg otherwise drops.
+  With all four tags stamped the GPU-converted capture matches the CPU path
+  exactly (30.10 dB either way; it had been 0.64 dB behind). The pipeline term
+  moved to `bt709-export-v1`.
+- **The model-store digest is not memoised** (0.22.0). The memo used elsewhere
+  keys on path, size and write time, and Windows write times move in ~15 ms
+  ticks, enough for a selector file rewritten in place at the same size to
+  reuse a stale digest.
+
+**Session and publish**
+
+- **A retarget waits for the playhead to settle for a second** (0.22.0). Six
+  back-seeks 900 ms apart: without the wait, 5 retargets, 5 job restarts and 0
+  segments rendered during the burst; with it, 1, 1 and 6. The cost is that
+  frames at the destination arrive about 2.5 s after the last press instead of
+  0.5 s; the original plays there meanwhile. A held key auto-repeats at ~30 Hz
+  and was already coalesced by the seek-in-flight rule.
+- **A running job is not moved for a hole narrower than about 7.3 s** (0.22.0),
+  which is what moving a job costs twice (there and back); the original covers
+  such a hole in the second or two it takes to cross. A paused viewer is the
+  exception.
+- **Publishing retries sharing violations for up to 3 s** (0.21.1), 24 attempts
+  125 ms apart. Publication is a directory rename, and Windows refuses it while
+  any file inside is open, which is what an antivirus scanner does to a freshly
+  closed 186 MB file. A 2871/2871-verified render was lost to this before.
+  `promoteStage=` names the step that refused.
+- **The join cost is per part, not per megabyte** (0.22.0): about 9.8 ms per
+  segment file (the same 15 minutes of 1440p joined 3.35 s faster in 30 files
+  than in 450). An hour-long render is ~1800 parts, about 18 s of join; the fix,
+  not yet made, is to stop gating the next hole on the publish.
+- **Segments after the first are opened without a probe** (0.20.1).
+  `ffprobe.exe` is 98 MB, and an antivirus that scans process starts made each
+  probe 684 ms against 32 ms inside an exclusion; paid every two seconds, that
+  dropped 1110 of 2525 frames. `VideoDecoder::OpenKnown` reuses the first
+  segment's parameters, on a worker thread.
+- **The decode pipe holds two frames of the largest source** (0.22.0), 2160p
+  BGRA at 63.28 MiB. Its old 16 MiB ceiling was two 1080p frames but 1.14 of a
+  1440p one, which held a 1440p30 YouTube source to 28.85 fps.
+- **An idle helper keeps its feature memory by default** (0.22.0).
+  `IdleVramPolicy=free` returns 361 MiB of the 1061 MiB it holds and costs
+  +0.604 s on every reuse (2.400 s against 3.004 s median, three sessions per
+  arm), and reuse latency is the point of keeping a helper.
+
+**Claims checked and refuted**, so nobody chases them again. Helpers are not
+orphaned by a force-kill: a live session's worker and six `ffmpeg` children
+were reaped within four seconds of `Stop-Process -Force` (0.23.0). The pinned
+`ffmpeg` 9.0.1 verifies TLS certificates by default; the flag is passed
+explicitly anyway because the pin will move (0.23.0). Colour strength and the
+render preset change no pixels on the pinned runtime, measured on four preset
+pairs and two colour baselines while intensity moved 84.75 % of bytes (0.15.0).
+
 ## Remaining work
 
 The shipped cache/settings/history/export work is described in [Usage](USAGE.md).

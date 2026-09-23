@@ -2142,7 +2142,7 @@ void legacy_language_configuration_is_ignored_and_english_lookup_remains_builtin
 
     Localizer localizer;
 
-    CHECK_EQ(std::wstring(L"DLSS Video Player"), localizer.Get(L"app.title"));
+    CHECK_EQ(std::wstring(L"DLSS 5 Video Player"), localizer.Get(L"app.title"));
     CHECK_EQ(std::wstring(L"File"), localizer.Get(L"menu.file"));
 
     restorePortuguesePack.Restore();

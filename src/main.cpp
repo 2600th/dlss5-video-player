@@ -946,7 +946,7 @@ static bool LaunchSameExecutable(const std::vector<std::wstring>& arguments,std:
 
 static StartupResult FailBootstrap(std::wstring_view technicalError) {
     LOG("Neural addon bootstrap failed: " << WideToUtf8(technicalError));
-    MessageBoxW(nullptr,L"The experimental neural add-on could not be configured safely. The player will close.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS Video Player",MB_OK|MB_ICONERROR);
+    MessageBoxW(nullptr,L"The experimental neural add-on could not be configured safely. The player will close.\n\nSee DLSSVideoPlayer.log for details.",L"DLSS 5 Video Player",MB_OK|MB_ICONERROR);
     return StartupResult::ExitFailure;
 }
 
@@ -8088,7 +8088,7 @@ int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int)
     crash_dump::Install();
     EnablePerMonitorDpiAwareness();
     AppOptions options=ParseArgs();
-    if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS Video Player",MB_OK|MB_ICONERROR);return 1;}
+    if(!options.argumentsOk){LOG("Invalid command line: "<<WideToUtf8(options.argumentError));MessageBoxW(nullptr,options.argumentError.c_str(),L"DLSS 5 Video Player",MB_OK|MB_ICONERROR);return 1;}
     const StartupResult startup=RunNeuralAddonBootstrap(options);
     if(startup==StartupResult::ExitSuccess)return 0;
     if(startup==StartupResult::ExitFailure)return 1;

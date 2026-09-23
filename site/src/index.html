@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DLSS 5 Video Player — AI video upscaling on your RTX card, for Windows</title>
+<title>DLSS 5 Video Player — DLSS 5 neural rendering, checked against the original on the same frame</title>
 <meta name="description" content="Free, open-source Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer on your own RTX GPU while you watch, then compares the render with the original frame by frame. Export to MP4 or MKV. No upload, no subscription.">
 <link rel="canonical" href="{{SITE_URL}}">
 <meta name="theme-color" content="#050506">
@@ -13,7 +13,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="DLSS 5 Video Player">
 <meta property="og:locale" content="en">
-<meta property="og:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
+<meta property="og:title" content="DLSS 5 Video Player — neural rendering you can check against the original, frame by frame">
 <meta property="og:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame. Free and open source, for Windows.">
 <meta property="og:url" content="{{SITE_URL}}">
 <meta property="og:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
@@ -21,7 +21,7 @@
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="One frame of Grand Theft Auto VI Trailer 2 split down the face: the original on the left, the DLSS 5 neural render on the right.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="DLSS 5 Video Player — AI video upscaling on your own RTX card">
+<meta name="twitter:title" content="DLSS 5 Video Player — neural rendering you can check against the original, frame by frame">
 <meta name="twitter:description" content="Run video through NVIDIA's DLSS 5 neural renderer while you watch, then compare the render with the original on the same frame.">
 <meta name="twitter:image" content="{{SITE_URL}}assets/hero/social-card.jpg">
 
@@ -42,7 +42,7 @@
       "url": "{{SITE_URL}}",
       "description": "A Windows player that runs video, photos and GIFs through NVIDIA's DLSS 5 neural renderer while you watch, and holds the original and the render on the same frame for comparison.",
       "applicationCategory": "MultimediaApplication",
-      "applicationSubCategory": "Video upscaling",
+      "applicationSubCategory": "Neural video rendering",
       "operatingSystem": "Windows 10, Windows 11",
       "processorRequirements": "NVIDIA RTX graphics card",
       "softwareRequirements": "NVIDIA driver 610.47 or newer, NVIDIA RTX graphics card",
@@ -422,8 +422,9 @@
         It depends on the card, the resolution and the clip. The point of the
         design is that you do not wait for it: playback joins the render a few
         seconds after you press <kbd>D</kbd>, and the rest fills in while you
-        watch. Measured figures for each release are in the
-        <a href="{{REPO_URL}}/blob/main/CHANGELOG.md" rel="noopener">changelog</a>.
+        watch. Measured figures, each with the card and the build it came
+        from, are in the README&rsquo;s
+        <a href="{{REPO_URL}}#limits" rel="noopener">limits</a>.
       </p>
     </details>
     <details class="faq__item">

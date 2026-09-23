@@ -2,9 +2,15 @@
 
 _Verified against 0.25.0 (1988cac) on 2026-09-22._
 
-Run any video, photo or GIF through NVIDIA's DLSS 5 neural renderer and watch
-the result next to the original, on the same frame. Free and open source, for
+Run any video, photo or GIF through NVIDIA's DLSS 5 neural renderer and check
+what it did: the original and the render sit on the same frame, one key apart,
+while the rest of the video renders behind you. Free and open source, for
 Windows with an RTX card.
+
+Other DLSS 5 tools convert files or filter the desktop live. This one renders
+the whole video progressively, keeps every frame, and shows the original and
+the render on the same frame while it is still rendering.
+[How it compares](docs/RELATED_PROJECTS.md).
 
 [Website](https://2600th.github.io/dlss5-video-player/) · [Download](#download) · [First run](#first-run) · [Usage guide](docs/USAGE.md) · [Build it yourself](docs/BUILDING.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
@@ -114,7 +120,7 @@ the render covered the whole video. Press `D` at the start to get one.
 - **Tidier menus and toolbar.** The DLSS menu follows the order the stages run
   in, and each toolbar button has its own icon, a busy state and hover text.
 
-Earlier releases and the full detail are in [CHANGELOG.md](CHANGELOG.md).
+Earlier releases are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Controls
 
