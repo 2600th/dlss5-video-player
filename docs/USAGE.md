@@ -506,14 +506,17 @@ already has:
   key.
 - `CacheQuality` (`standard`, `high` or `lossless`; default `standard`). The
   quality ladder for what a render is written as, in the cache and in any export
-  made from it. Standard is HEVC 8-bit at CQ 16, what every earlier render used.
-  High captures 10 bits on the GPU (P010) and writes HEVC Main10 at CQ 14 without
-  NVENC's default bitrate ceiling; Lossless writes the same 10-bit capture as
-  FFV1, exactly. Measured on five 1080p clips against the Lossless render: VMAF
-  93.7 for Standard (81.7 on the most detailed clip, where that ceiling binds)
-  against 97.6 for High, at about 9 against 19 Mbit/s; Lossless is about 240
-  Mbit/s, 1.8 GB a minute at 1080p30. Render time did not change between rungs.
-  The key carries `high-main10-cq14-v1` or `lossless-ffv1-10bit-v1`, and a
+  made from it. Standard is HEVC 8-bit at CQ 16. High captures 10 bits on the
+  GPU (P010) and writes HEVC Main10 at CQ 14; Lossless writes the same 10-bit
+  capture as FFV1, exactly. Both NVENC rungs run without NVENC's default bitrate
+  ceiling, which used to hold Standard near 11 Mbit/s at 1080p whatever the CQ:
+  lifting it took Standard from VMAF 93.5 to 96.9 on five 1080p clips (80.3 to
+  96.8 on the most detailed one) at about 17 Mbit/s instead of 9, and changed
+  its bytes, so its key carries `standard-cq16-uncapped-v1` and renders made
+  under the ceiling are rendered again. High scores 97.6 at about 19 Mbit/s;
+  Lossless is about 240 Mbit/s, 1.8 GB a minute at 1080p30. Render time did not
+  change between rungs. The key carries `high-main10-cq14-v1` or
+  `lossless-ffv1-10bit-v1` for the other two, and a
   10-bit rung ignores `GpuColorConversion` and `CaptureDither`, which have
   nothing to act on there. Cached playback and **Save converted video** take
   every rung: MKV copies the stream, MP4 carries High's HEVC as it is and turns

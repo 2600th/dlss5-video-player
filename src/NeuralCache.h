@@ -191,7 +191,9 @@ inline constexpr bool kDefaultGpuColorConversion = false;
 //
 // `quality` is the rung of the ladder (EncoderQuality). A 10-bit rung captures P010
 // and has no 8-bit store, so the dither term is dropped there: flipping an inert
-// switch must not re-render anything. The High term carries its CQ.
+// switch must not re-render anything. The High term carries its CQ. Standard has a
+// term too, although it is the default: lifting NVENC's bitrate ceiling changed its
+// bytes, so the renders written under the ceiling must not be served for it.
 //
 // `sourceDeband` is the deband pre-pass on the decoded source (DebandPolicy.h),
 // which changes what the model is shown; the term spells out its parameters and

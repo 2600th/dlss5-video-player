@@ -103,7 +103,9 @@ constexpr uint64_t EncoderFrameBytes(EncoderPixelFormat format, uint32_t width, 
 // one cache-key term (NeuralRenderPipelineIdentity) and one line in Encoder settings.
 //
 //  * Standard - HEVC 8-bit at CQ 16 through NVENC, libx264 CRF 16 when NVENC is
-//    unavailable. Every render before the ladder existed, and still the default.
+//    unavailable. The default. Before 2026-09-23 NVENC's hidden VBR ceiling held it
+//    near 10.7 Mbit/s at 1080p whatever the CQ; the ceiling is lifted now (see
+//    BuildEncoderArguments), so CQ 16 is what sets its quality.
 //  * High - HEVC Main10 through NVENC from a 10-bit P010 capture (libx264 High 10 when
 //    NVENC is unavailable), at kHighRungCq.
 //  * Lossless - FFV1 10-bit, every frame intra, from the same P010 capture: exact to the

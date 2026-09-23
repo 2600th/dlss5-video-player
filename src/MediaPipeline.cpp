@@ -612,15 +612,17 @@ std::vector<std::wstring> BuildEncoderArguments(const EncoderSpec& spec,
             // `auto` lets the encoder enable striping where it is supported and
             // costs only the preset/tune pairs NVENC declines to stripe.
             L"-split_encode_mode", L"auto"});
-        // The High rung lifts NVENC's own ceiling. With -b:v 0 and no -maxrate, VBR is
-        // not constant quality at all on detailed content: measured at 1080p it held
-        // every CQ from 10 to 20 at the same ~10.7 Mbit/s (43.7 KiB a frame) on the
-        // fractal clip, and ~32 Mbit/s at 4K, while the uncapped encode wanted 53.7 and
-        // 161. 800M is far above anything CQ 14 asked for and within what NVENC accepts
-        // (1000M with a 2000M buffer was refused as an invalid parameter). The Standard
-        // rung keeps the ceiling, because its bytes are every cached render's bytes.
-        if (tenBit) arguments.insert(arguments.end(), {L"-maxrate", L"800M", L"-bufsize", L"800M",
-                                                       L"-profile:v", L"main10", L"-pix_fmt", L"p010le"});
+        // Every rung lifts NVENC's own ceiling. With -b:v 0 and no -maxrate, VBR is not
+        // constant quality at all on detailed content: measured at 1080p it held every
+        // CQ from 10 to 20 at the same ~10.7 Mbit/s (43.7 KiB a frame) on the fractal
+        // clip, and ~32 Mbit/s at 4K, while the uncapped encode wanted 53.7 and 161 - the
+        // Standard rung scored VMAF 81.7 there against its own lossless render. 800M is
+        // far above anything CQ 14 or 16 asked for and within what NVENC accepts (1000M
+        // with a 2000M buffer was refused as an invalid parameter), so it never binds and
+        // -cq alone sets the quality. This changed the Standard rung's bytes, which is
+        // why its key term names it (CaptureQualityIdentityTerm).
+        arguments.insert(arguments.end(), {L"-maxrate", L"800M", L"-bufsize", L"800M"});
+        if (tenBit) arguments.insert(arguments.end(), {L"-profile:v", L"main10", L"-pix_fmt", L"p010le"});
         // NVENC takes NV12 and P010 as they stand, so an already-converted capture
         // reaches the encoder without ffmpeg touching a single pixel.
         else arguments.insert(arguments.end(), {L"-pix_fmt", nv12 ? L"nv12" : L"yuv420p"});

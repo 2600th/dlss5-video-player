@@ -929,7 +929,8 @@ std::string CaptureQualityIdentityTerm(const CaptureQualityTerms& terms)
     std::string term;
     const bool tenBit = EncoderQualityIsTenBit(terms.quality);
     if (terms.captureDither != kDefaultCaptureDither && !tenBit) term += "|dither-bayer8-v1";
-    if (terms.quality == EncoderQuality::High)
+    if (terms.quality == EncoderQuality::Standard) term += "|standard-cq16-uncapped-v1";
+    else if (terms.quality == EncoderQuality::High)
         term += "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1";
     else if (terms.quality == EncoderQuality::Lossless)
         term += "|lossless-ffv1-10bit-v1";

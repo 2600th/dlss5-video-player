@@ -363,21 +363,21 @@ void capture_dither_changes_the_render_key_and_names_its_map()
     // The dither leaves the picture where it was and changes the bytes of every
     // captured frame, so a dithered render must never be served for an
     // undithered request or the other way round. The term follows every other
-    // pipeline term, and adds nothing while the capture writes what it always did.
-    CHECK_EQ(std::string{}, CaptureQualityIdentityTerm(CaptureQualityTerms{}));
+    // pipeline term, ahead of the rung's.
+    CaptureQualityTerms plain;
+    plain.captureDither = false;
     CaptureQualityTerms dithered;
     dithered.captureDither = true;
-    CHECK_EQ(std::string("|dither-bayer8-v1"), CaptureQualityIdentityTerm(dithered));
+    CHECK_EQ(std::string("|standard-cq16-uncapped-v1"), CaptureQualityIdentityTerm(plain));
+    CHECK_EQ(std::string("|dither-bayer8-v1|standard-cq16-uncapped-v1"), CaptureQualityIdentityTerm(dithered));
     const std::string pipeline =
         NeuralRenderPipelineIdentity(false, kDefaultNvencPreset, kDefaultGpuColorConversion) +
         TemporalPipelineTerm(TemporalSettings{});
     NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
-                                 std::string(64, 'b'), pipeline, false};
-    const auto shippedKey = BuildNeuralCacheKey(identity);
-    identity.quality = pipeline + CaptureQualityIdentityTerm(CaptureQualityTerms{});
-    CHECK_EQ(shippedKey, BuildNeuralCacheKey(identity));
+                                 std::string(64, 'b'), pipeline + CaptureQualityIdentityTerm(plain), false};
+    const auto plainKey = BuildNeuralCacheKey(identity);
     identity.quality = pipeline + CaptureQualityIdentityTerm(dithered);
-    CHECK(BuildNeuralCacheKey(identity) != shippedKey);
+    CHECK(BuildNeuralCacheKey(identity) != plainKey);
 }
 
 void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
@@ -389,18 +389,18 @@ void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
                                             KeyedGpuColorConversion(colour, rung)) +
                TemporalPipelineTerm(TemporalSettings{}) + CaptureQualityIdentityTerm({dither, rung});
     };
-    // Standard is the key every field render was published under.
-    CHECK_EQ(shipped, keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::Standard));
+    // Standard is constant quality now, which changed its bytes: its key must not be
+    // the one every capped render in the field was published under.
+    const auto standard = keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::Standard);
+    CHECK_EQ(shipped + "|standard-cq16-uncapped-v1", standard);
+    CHECK(standard != shipped);
     const auto high = keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::High);
     const auto lossless = keyed(false, kDefaultNvencPreset, kDefaultGpuColorConversion, false, EncoderQuality::Lossless);
     // The High term carries its CQ, so retuning the rung retires its renders; the
     // rung's term comes after the dither's, and both after every other term.
     CHECK_EQ(shipped + "|high-main10-cq" + std::to_string(kHighRungCq) + "-v1", high);
     CHECK_EQ(shipped + "|lossless-ffv1-10bit-v1", lossless);
-    CaptureQualityTerms both;
-    both.captureDither = true;
-    CHECK_EQ(std::string("|dither-bayer8-v1"), CaptureQualityIdentityTerm(both));
-    CHECK(high != lossless);
+    CHECK(high != lossless && high != standard && lossless != standard);
     // A 10-bit rung captures P010 whatever the colour switch says, and has no 8-bit
     // store to dither: neither switch may split its entries.
     CHECK_EQ(high, keyed(false, kDefaultNvencPreset, true, true, EncoderQuality::High));
@@ -409,7 +409,8 @@ void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
     CHECK_EQ(lossless, keyed(false, 7, false, false, EncoderQuality::Lossless));
     CHECK(high != keyed(false, 7, false, false, EncoderQuality::High));
     // Standard keeps both switches.
-    CHECK(keyed(false, 7, true, true, EncoderQuality::Standard) != shipped);
+    CHECK(keyed(false, 7, true, false, EncoderQuality::Standard) != standard);
+    CHECK(keyed(false, kDefaultNvencPreset, false, true, EncoderQuality::Standard) != standard);
     // What the model is shown is not the encoder's business: the source term stays.
     CHECK(lossless != keyed(true, kDefaultNvencPreset, false, false, EncoderQuality::Lossless));
     NeuralCacheIdentity identity{std::string(64, 'a'), 1920, 1080, "test", "rtx50",
@@ -425,13 +426,13 @@ void quality_rung_changes_the_render_key_and_drops_the_switches_it_makes_inert()
 
 void deband_changes_the_render_key_on_every_rung()
 {
-    CHECK_EQ(std::string{}, CaptureQualityIdentityTerm(CaptureQualityTerms{}));
     CaptureQualityTerms debanded;
+    debanded.captureDither = false;
     debanded.sourceDeband = true;
-    CHECK_EQ(std::string("|deband-i1t3r16g4-static-v1"), CaptureQualityIdentityTerm(debanded));
+    CHECK_EQ(std::string("|standard-cq16-uncapped-v1|deband-i1t3r16g4-static-v1"), CaptureQualityIdentityTerm(debanded));
     // It changes what the model is shown, so no rung makes it inert, and it follows
     // the rung's term.
-    for (const EncoderQuality rung : {EncoderQuality::High, EncoderQuality::Lossless}) {
+    for (const EncoderQuality rung : {EncoderQuality::Standard, EncoderQuality::High, EncoderQuality::Lossless}) {
         CaptureQualityTerms plain;
         plain.quality = rung;
         CaptureQualityTerms withDeband = plain;
@@ -445,8 +446,9 @@ void deband_changes_the_render_key_on_every_rung()
 void supplied_exposure_changes_the_render_key()
 {
     CaptureQualityTerms exposed;
+    exposed.captureDither = false;
     exposed.suppliedExposure = true;
-    CHECK_EQ(std::string("|exposure-key018-p20-cut-v1"), CaptureQualityIdentityTerm(exposed));
+    CHECK_EQ(std::string("|standard-cq16-uncapped-v1|exposure-key018-p20-cut-v1"), CaptureQualityIdentityTerm(exposed));
     // Last of the four, whatever else is set, so the order stays stable.
     CaptureQualityTerms all{true, EncoderQuality::Lossless, true, true};
     CHECK_EQ(std::string("|lossless-ffv1-10bit-v1|deband-i1t3r16g4-static-v1|exposure-key018-p20-cut-v1"),

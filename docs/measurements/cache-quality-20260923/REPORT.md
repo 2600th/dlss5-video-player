@@ -12,11 +12,13 @@ bytes on average (1x on easy content, 5x on the detailed clip). Render time did 
 change between rungs. Standard stays the default, as the brief requires; **whether High
 should become the default is the product decision this measurement is for** - the
 visible blocking reported on the GTA VI trailer (issue #13) is what a 10.7 Mbit/s
-ceiling on detailed 1080p footage looks like.
+ceiling on detailed 1080p footage looks like. **Review ruling (section "Ruling A"
+below): the ceiling is now lifted on Standard too**, so Standard is constant quality
+at CQ 16 (VMAF 93.5 -> 96.9 on the rebased tree) and stays the default.
 
-The Standard rung's own bytes did not move: `real-film-cuts` rendered at Standard before
-the ladder existed (21:13) and after every change in this package (22:20) decodes to the
-same frame digest. The worker's own High renders, run after the ceiling was lifted,
+Before that ruling the Standard rung's own bytes did not move: `real-film-cuts` rendered
+at Standard before the ladder existed (21:13) and after every change in the package
+(22:20) decoded to the same frame digest. The worker's own High renders, run after the ceiling was lifted,
 match the re-encoded `main10u` CQ 14 arm below to within 0.03 VMAF and 2 % in size.
 
 The capture dither is off by default on a strict reading of the brief's bar, with a
@@ -200,6 +202,43 @@ of it is two orders of magnitude below a visible difference and mixed in sign, s
 recommendation is to turn it on; that call is left to review rather than taken against
 the stated bar. The High rung removes the banding at the source instead (CAMBI 0.9),
 which is why the dither matters only to Standard.
+
+## Ruling A: the Standard rung made constant quality
+
+The review ruled that Standard should be what its name says. `BuildEncoderArguments`
+now passes `-maxrate 800M -bufsize 800M` to NVENC on every rung, so `-cq 16` alone sets
+Standard's quality; the libx264 fallback (CRF 16) had no ceiling to lift. Standard's bytes
+changed, so its key term is `standard-cq16-uncapped-v1`, and every render made under the
+ceiling is retired.
+
+Measured on the rebased tree (integration branch `07730d7` plus this package), through the
+worker, on the same five clips. **The reference was re-rendered for this section**: the
+rebased tree shows the model different input on these untagged corpus clips (the
+integration branch's untagged-colour and temporal changes), so a render from before the
+rebase is not comparable with one from after it, and the tables above stay against their
+own reference. "Capped" is the Standard rung from a worker built at `8b22363` (the commit
+before the ruling); "uncapped" is the ruling's worker; both render bit-identical neural
+frames, so the encode is the only difference. Mbit/s at 30 fps.
+
+| clip | arm | VMAF | VMAF p1 | PSNR-Y | CAMBI | temporal error | Mbit/s |
+|---|---|---:|---:|---:|---:|---:|---:|
+| highlights-gradients | capped | 93.78 | 92.79 | 54.11 | 11.06 | 0.385 | 9.0 |
+| highlights-gradients | uncapped | 93.88 | 92.98 | 54.16 | 11.02 | 0.383 | 9.4 |
+| fine-detail | capped | 80.32 | 71.09 | 34.83 | 1.45 | 3.634 | 10.7 |
+| fine-detail | uncapped | 96.81 | 92.79 | 41.39 | 1.57 | 1.934 | 42.8 |
+| text-subtitles | capped | 97.32 | 97.16 | 55.27 | 10.26 | 0.169 | 4.0 |
+| text-subtitles | uncapped | 97.32 | 97.18 | 55.29 | 10.25 | 0.169 | 4.0 |
+| real-film-cuts | capped | 96.87 | 94.07 | 53.17 | 8.76 | 0.310 | 8.1 |
+| real-film-cuts | uncapped | 96.98 | 94.96 | 53.37 | 8.76 | 0.304 | 9.1 |
+| real-game-motion | capped | 98.99 | 95.06 | 49.36 | 2.00 | 0.734 | 11.3 |
+| real-game-motion | uncapped | 99.44 | 96.20 | 50.82 | 1.96 | 0.647 | 17.9 |
+
+Means: VMAF 93.46 -> 96.89 (worst clip 80.32 -> 93.88), 8.6 -> 16.7 Mbit/s (largest 11.3 ->
+42.8). Where the ceiling never bound (text) nothing moved; where it did, the encode spent
+what CQ 16 asks for and the error that flickered frame to frame fell with it (temporal error
+3.63 -> 1.93 on `fine-detail`). Worker throughput was unchanged: 101.6-104.4 frames a second
+capped, 101.8-104.7 uncapped. Frame generation's encoder shares these arguments, so its
+conversions are constant quality now too; they are not cached, so no key moves for them.
 
 ## Reproducing
 

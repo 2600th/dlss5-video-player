@@ -1908,7 +1908,14 @@ void encoder_quality_ladder_arguments_test()
     EncoderSpec explicitStandard = standard;
     explicitStandard.quality = EncoderQuality::Standard;
     CHECK(BuildEncoderArguments(standard, output) == BuildEncoderArguments(explicitStandard, output));
-    CHECK(!has(BuildEncoderArguments(standard, output), L"-maxrate"));
+    // Standard is constant quality too: NVENC's bitrate ceiling is lifted on every rung,
+    // and the software fallback has none to lift.
+    CHECK_EQ((std::vector<std::wstring>{L"800M"}), value(BuildEncoderArguments(standard, output), L"-maxrate"));
+    CHECK_EQ((std::vector<std::wstring>{L"800M"}), value(BuildEncoderArguments(standard, output), L"-bufsize"));
+    CHECK_EQ((std::vector<std::wstring>{L"16"}), value(BuildEncoderArguments(standard, output), L"-cq"));
+    EncoderSpec standardSoftware = standard;
+    standardSoftware.kind = EncoderKind::H264Software;
+    CHECK(!has(BuildEncoderArguments(standardSoftware, output), L"-maxrate"));
 
     // High through NVENC: P010 in and out, Main10, the rung's CQ, the ceiling lifted,
     // and only setparams - the capture shader already converted the colour.

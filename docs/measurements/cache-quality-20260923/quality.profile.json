@@ -116,5 +116,138 @@
       "--capture-dither",
       "1"
     ]
+  },
+  "q-lossless-deband": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Lossless rung plus the deband pre-pass on the source",
+    "worker_flags": [
+      "--cache-quality",
+      "lossless",
+      "--deband",
+      "1"
+    ]
+  },
+  "x-auto": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "exposure A/B, auto arm: shipped state, DLSS AutoExposure (identical to q-standard)",
+    "worker_flags": []
+  },
+  "x-supplied": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "exposure A/B, supplied arm: shipped state plus the smoothed metered exposure",
+    "worker_flags": [
+      "--supplied-exposure",
+      "1"
+    ]
+  },
+  "a-standard-uncapped": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Standard rung after the NVENC ceiling was lifted (Ruling A), no capture dither",
+    "worker_flags": []
+  },
+  "b-standard-uncapped-dither": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Standard rung, ceiling lifted, ordered capture dither on (Ruling B: the new default)",
+    "worker_flags": [
+      "--capture-dither",
+      "1"
+    ]
+  },
+  "r-standard-capped": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Standard rung before Ruling A (NVENC ceiling in place), worker built from 8b22363",
+    "worker_flags": []
+  },
+  "r-lossless": {
+    "guides": "mv=1,depth=1",
+    "overrides": {
+      "NRIntensity": "1.000000",
+      "NRLocalTone": "1.000000",
+      "NRLocalStructure": "1.000000",
+      "NRSkinStructure": "-1.000000",
+      "NRColorStrength": "1.000000",
+      "NRPreset": "0",
+      "NRStyle": "0",
+      "NRAutoMask": "1",
+      "NRPasses": "1",
+      "NRChainedHistory": "1"
+    },
+    "description": "Lossless reference on the rebased tree",
+    "worker_flags": [
+      "--cache-quality",
+      "lossless"
+    ]
   }
 }
