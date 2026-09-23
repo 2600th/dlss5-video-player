@@ -1117,7 +1117,13 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
     if (!evaluatorReused || primed > 0) markColdStart(NeuralColdStartPhase::FeatureArm);
     // Baseline read after any re-hook, so a create the add-on observed late
     // cannot be mistaken for the captured sequence's own evaluation.
-    uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
+    const uint64_t successfulAttemptBaseline=armedEvidence.highestObservedEvaluation;
+    // Whether the capture pass is held to the add-on's log counter advancing
+    // past that baseline. It is a one-shot proof per process (see the receipt
+    // gate), so only the first capture pass of a fresh evaluator can be held
+    // to it; a reused evaluator and a software-encoder retry are held to the
+    // backend's own count and the timing floor instead.
+    bool holdToLogReceipt=!evaluatorReused;
 
     // Capture restarts from the preroll position: frames before the range are
     // evaluated without capture so the history at range.start matches a
@@ -1386,11 +1392,11 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                 // is the check that actually catches the failure this gate was
                 // built for). The session evidence itself was already verified
                 // before capture and describes the live feature this job used.
-                if (evaluatorReused) break;
+                if (!holdToLogReceipt) break;
                 // The runtime logs successful evaluations sparsely. Capture the
                 // first source frame until a fresh receipt exists, retaining
-                // only its latest pixels for encoding. Each retry has its own
-                // baseline, and these extra captures never extend the timeline.
+                // only its latest pixels for encoding. These extra captures
+                // never extend the timeline.
                 if (capture == 1 || capture % 10 == 0) {
                     const auto receipt = ParseNeuralRuntimeEvidence(evidenceProvider());
                     if (!receipt.Valid()) {abort(NeuralRenderFailure::Neural);return attempt;}
@@ -1499,7 +1505,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
             return fail(NeuralRenderFailure::Neural,
                         L"Feature 18 evidence was not valid before the software retry.");
         }
-        successfulAttemptBaseline=retryEvidence.highestObservedEvaluation;
+        // The retry is held to the reused-evaluator standard. The first pass
+        // already watched the log counter advance, which is what vouches for
+        // this process; the counter then stops at 60, and NVENC failing after
+        // the first 60 evaluations - every range render's preroll, every live
+        // session - left the retry resubmitting frame 0 120 times for a line
+        // that never came, then failing with "evidence did not advance". The
+        // backend's per-frame count and the timing floor below still judge
+        // every frame this pass captures.
+        holdToLogReceipt=false;
         selected=EncoderKind::H264Software;
         attempt=runAttempt(selected);
     }
@@ -1532,11 +1546,15 @@ NeuralRenderResult RunJob(const NeuralRenderRequest& request,
                     L"Feature 18 runtime evidence was incomplete or contained a later failure.");
     }
     // The add-on's log counter can only be watched to advance once per process
-    // (see the receipt gate). The first job in a process is held to it exactly
-    // as a single-shot helper is; a reused evaluator cannot be. Every job is
-    // held to the backend's own count as well, which is per process, monotonic,
-    // and has to have advanced at least once for every frame this attempt
-    // captured - the count the cache entry then carries as its own evidence.
+    // (see the receipt gate). A fresh evaluator is held to it for the job as a
+    // whole: the baseline was read when the feature was armed, so an advance
+    // the first pass watched still counts after a software-encoder retry, and
+    // a retry whose first pass never got that far is still refused when the
+    // counter never moved. Only the in-loop gate skips it on the retry. A
+    // reused evaluator cannot be held to it at all. Every job is held to the
+    // backend's own count as well, which is per process, monotonic, and has to
+    // have advanced at least once for every frame this attempt captured - the
+    // count the cache entry then carries as its own evidence.
     if(request.requireNeural&&!evaluatorReused&&
        result.evidence.highestObservedEvaluation<=successfulAttemptBaseline){
         return fail(NeuralRenderFailure::Neural,

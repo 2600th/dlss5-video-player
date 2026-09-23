@@ -2144,32 +2144,101 @@ void offline_odd_dimensions_use_geometry_preserving_software_encoder_test()
     CHECK_EQ(2, source.opens);
 }
 
-void offline_sparse_receipt_gate_restarts_independently_for_software_retry_test()
+// The add-on logs its evaluation counter at N=1 and N=60 in a process and
+// then goes quiet, so a software retry can never watch it advance. The first
+// pass's gate already proved the process; the retry is held to the backend's
+// own per-frame count and the timing floor, as a reused evaluator is, and
+// captures its first frame once instead of waiting 120 resubmits for a line.
+std::function<std::string()> LogCounterThatStopsAt60(const FakeNeuralEvaluator& evaluator)
 {
-    TempDirectory fixture;
-    FakeOfflineSource source({OfflineDecodedFrame{{12, 34, 56, 255}, 0, true}});
-    FakeNeuralEvaluator evaluator;
-    evaluator.stampCaptureCount = true;
-    FakeFrameEncoder encoder;
-    encoder.failNvencWriteAt = 0;
-    OfflineNeuralRenderer job(source, evaluator, encoder, [&] {
-        return NeuralEvidenceWithCount(std::max<uint64_t>(1, (evaluator.EvaluationCount() / 60) * 60));
-    });
-    auto request = EvenOfflineRequest(fixture.Path());
-    request.fps = 1; request.durationSeconds = 1;
-    const auto result = job.Run(request);
-    CHECK(result.ok);
-    CHECK_EQ(EncoderKind::H264Software, result.encoder);
-    CHECK_EQ(uint64_t{1}, result.frameCount);
-    CHECK_EQ(uint64_t{120}, result.evidence.highestObservedEvaluation);
-    CHECK_EQ(3, source.opens);
-    CHECK_EQ(size_t{2}, encoder.attempts.size());
-    if (encoder.attempts.size() == 2) {
-        CHECK(encoder.attempts.front().empty());
-        CHECK_EQ(size_t{1}, encoder.attempts.back().size());
-        if (!encoder.attempts.back().empty()) CHECK_EQ(uint8_t{120}, encoder.attempts.back().front().front());
+    return [&evaluator] {
+        return NeuralEvidenceWithCount(evaluator.EvaluationCount() >= 60 ? 60 : 1);
+    };
+}
+
+void offline_software_retry_after_the_log_counter_went_quiet_succeeds_test()
+{
+    // A photo, where the whole first pass is the receipt gate.
+    {
+        TempDirectory fixture;
+        FakeOfflineSource source({OfflineDecodedFrame{{12, 34, 56, 255}, 0, true}});
+        FakeNeuralEvaluator evaluator;
+        evaluator.stampCaptureCount = true;
+        FakeFrameEncoder encoder;
+        encoder.failNvencWriteAt = 0;
+        OfflineNeuralRenderer job(source, evaluator, encoder, LogCounterThatStopsAt60(evaluator));
+        auto request = EvenOfflineRequest(fixture.Path());
+        request.fps = 1; request.durationSeconds = 1;
+        const auto result = job.Run(request);
+        CHECK(result.ok);
+        CHECK_EQ(EncoderKind::H264Software, result.encoder);
+        CHECK_EQ(uint64_t{1}, result.frameCount);
+        CHECK_EQ(uint64_t{1}, result.nativeEvaluations);
+        CHECK_EQ(uint64_t{60}, result.evidence.highestObservedEvaluation);
+        CHECK_EQ(3, source.opens);
+        CHECK_EQ(size_t{2}, encoder.attempts.size());
+        if (encoder.attempts.size() == 2) {
+            CHECK(encoder.attempts.front().empty());
+            CHECK_EQ(size_t{1}, encoder.attempts.back().size());
+        }
+        // 60 gate captures on the first pass, then exactly one on the retry.
+        CHECK_EQ(61, evaluator.captureSubmissions);
     }
-    CHECK_EQ(120, evaluator.captureSubmissions);
+    // A clip whose NVENC encoder fails after N frames were written.
+    {
+        TempDirectory fixture;
+        FakeOfflineSource source;
+        FakeNeuralEvaluator evaluator;
+        FakeFrameEncoder encoder;
+        encoder.failNvencWriteAt = 3;
+        OfflineNeuralRenderer job(source, evaluator, encoder, LogCounterThatStopsAt60(evaluator));
+        const auto result = job.Run(EvenOfflineRequest(fixture.Path()));
+        CHECK(result.ok);
+        CHECK_EQ(EncoderKind::H264Software, result.encoder);
+        CHECK_EQ(uint64_t{5}, result.frameCount);
+        CHECK_EQ(uint64_t{5}, result.nativeEvaluations);
+        CHECK_EQ(uint64_t{60}, result.evidence.highestObservedEvaluation);
+        CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc, EncoderKind::H264Software}),
+                 encoder.starts);
+        if (encoder.attempts.size() == 2) {
+            CHECK_EQ(size_t{3}, encoder.attempts.front().size());
+            CHECK_EQ(size_t{5}, encoder.attempts.back().size());
+        }
+    }
+    // The retry is still held to the timing floor: a pass whose neural GPU
+    // time says DLAA alone ran is refused, receipt or no receipt.
+    {
+        TempDirectory fixture;
+        FakeOfflineSource source;
+        FakeNeuralEvaluator evaluator;
+        evaluator.neuralGpuMs = 0.0;
+        FakeFrameEncoder encoder;
+        encoder.failNvencWriteAt = 3;
+        OfflineNeuralRenderer job(source, evaluator, encoder, LogCounterThatStopsAt60(evaluator));
+        const auto result = job.Run(EvenOfflineRequest(fixture.Path()));
+        CHECK(!result.ok);
+        CHECK(!result.cancelled);
+        CHECK_EQ(NeuralRenderFailure::Neural, result.failure);
+        CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc, EncoderKind::H264Software}),
+                 encoder.starts);
+    }
+    // And to the backend's count: a retry frame the backend never evaluated
+    // is refused exactly as it is on a first pass.
+    {
+        TempDirectory fixture;
+        FakeOfflineSource source;
+        FakeNeuralEvaluator evaluator;
+        FakeFrameEncoder encoder;
+        encoder.failNvencWriteAt = 3;
+        OfflineNeuralRenderer job(source, evaluator, encoder, LogCounterThatStopsAt60(evaluator));
+        // First pass: 60 gate captures plus frames 1-4, so 66 is the retry's
+        // second frame.
+        evaluator.backendMissesCaptureAt = 66;
+        const auto result = job.Run(EvenOfflineRequest(fixture.Path()));
+        CHECK(!result.ok);
+        CHECK_EQ(NeuralRenderFailure::Neural, result.failure);
+        CHECK_EQ(size_t{2}, encoder.starts.size());
+    }
 }
 
 void offline_receipt_gate_stops_before_encoding_on_failure_or_cancel_test()
@@ -2367,7 +2436,10 @@ void offline_job_nvenc_write_failure_restarts_the_whole_sequence_with_h264_test(
     }
 }
 
-void offline_job_rejects_retry_when_only_abandoned_attempt_advanced_feature18_receipt_test()
+// This used to be refused: the log counter advanced only during the abandoned
+// NVENC pass. That is the real add-on's behaviour after N=60, so the retry is
+// held to the backend count and the timing floor instead (P0.5).
+void offline_job_accepts_retry_when_only_abandoned_attempt_advanced_feature18_receipt_test()
 {
     TempDirectory fixture;FakeOfflineSource source;FakeNeuralEvaluator evaluator;FakeFrameEncoder encoder;
     encoder.failNvencWriteAt=2;int calls=0;
@@ -2375,9 +2447,10 @@ void offline_job_rejects_retry_when_only_abandoned_attempt_advanced_feature18_re
         ++calls;return NeuralEvidenceWithCount(calls==1?1:5);
     });
     const auto result=job.Run(EvenOfflineRequest(fixture.Path()),{},{});
-    CHECK(!result.ok);CHECK(!result.cancelled);CHECK(calls>3);
+    CHECK(result.ok);CHECK(!result.cancelled);
     CHECK_EQ(std::vector<EncoderKind>({EncoderKind::HevcNvenc,EncoderKind::H264Software}),encoder.starts);
-    CHECK(encoder.attempts.back().empty());
+    CHECK_EQ(size_t{5},encoder.attempts.back().size());
+    CHECK_EQ(uint64_t{5},result.nativeEvaluations);
 }
 
 void offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test()
@@ -4653,7 +4726,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_refuses_a_backend_that_evaluated_fewer_frames_than_it_captured_test();
     offline_sparse_receipt_gate_encodes_latest_capture_once_per_source_frame_test();
     offline_odd_dimensions_use_geometry_preserving_software_encoder_test();
-    offline_sparse_receipt_gate_restarts_independently_for_software_retry_test();
+    offline_software_retry_after_the_log_counter_went_quiet_succeeds_test();
     offline_receipt_gate_stops_before_encoding_on_failure_or_cancel_test();
     offline_photo_reuses_warmup_frame_but_encodes_exactly_one_frame_test();
     offline_photo_stops_after_bounded_warmup_without_encoding_test();
@@ -4665,7 +4738,7 @@ int wmain(int argc, wchar_t* argv[])
     offline_job_cancel_stops_before_promotion_and_marks_result_cancelled_test();
     offline_job_nvenc_start_failure_restarts_from_frame_zero_with_h264_test();
     offline_job_nvenc_write_failure_restarts_the_whole_sequence_with_h264_test();
-    offline_job_rejects_retry_when_only_abandoned_attempt_advanced_feature18_receipt_test();
+    offline_job_accepts_retry_when_only_abandoned_attempt_advanced_feature18_receipt_test();
     offline_job_does_not_retry_a_temporal_render_from_an_arbitrary_frame_test();
     offline_range_render_prerolls_without_capture_and_encodes_only_the_range_test();
     offline_render_refuses_a_dlaa_only_median_neural_gpu_time_test();

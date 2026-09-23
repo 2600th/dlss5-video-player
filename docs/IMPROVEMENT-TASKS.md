@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
-| [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
 | [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
 | **P1** | | | | |
 | [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
@@ -132,35 +131,6 @@ nobody can verify what they downloaded.
 **Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
 or the folder name, and checks against the manifest's hashes. Have CI run it
 from an extracted zip with no repository around it. Correct the README command.
-
----
-
-<a id="p05"></a>
-### P0.5 · The software-encoder retry cannot pass the receipt gate
-
-`S` · **Pipeline** · ✅
-
-**Where** — `OfflineNeuralRenderer.cpp:1369-1406` (the gate), `:1496-1502`
-(the retry baseline), `:1540-1544` (the final check)
-
-The code's own comment records that the add-on logs its evaluation counter
-only at N=1 and N=60 in each process, then goes quiet. The NVENC → x264 retry
-sets its baseline to the last value logged, so the gate and the final check
-both wait for a line that never comes. The retry resubmits frame 0 120 times
-and then fails.
-
-**Scenario** — NVENC fails after the first 60 evaluations. That happens on
-every range render (60 preroll frames), every live session, and whenever
-another app holds the NVENC sessions.
-
-**Impact** — Pipeline: the fallback that exists for this case never works.
-Player: a live session or export ends with the misleading *"Feature 18
-evidence did not advance"*.
-
-**Fix** — hold the retry to the same test a reused evaluator gets: the
-backend's evaluation count plus `NeuralTimingClearsFloor`, not the log
-counter. Add a range-render case to `NeuralRangeRenderSmoke` with a forced
-encoder failure.
 
 ---
 
