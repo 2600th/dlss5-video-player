@@ -180,8 +180,11 @@ bool GenerateDefaultSource(const fs::path& ffmpeg, const fs::path& clip)
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-y",
         L"-f", L"lavfi", L"-i", L"smptehdbars=s=1280x720:r=30:d=2",
         L"-f", L"lavfi", L"-i", L"sine=frequency=440:duration=2",
-        L"-map", L"0:v", L"-map", L"1:a", L"-vf", L"noise=alls=12:allf=t",
-        L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", L"-crf", L"18",
+        L"-map", L"0:v", L"-map", L"1:a",
+        L"-vf", L"noise=alls=12:allf=t,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
+        L"-colorspace", L"bt709", L"-color_primaries", L"bt709", L"-color_trc", L"bt709",
+        L"-color_range", L"tv",
+        L"-c:v", L"libx264", L"-crf", L"18",
         L"-c:a", L"aac", L"-shortest", clip.wstring()});
     std::error_code existsError;
     return exitCode == 0 && fs::is_regular_file(clip, existsError) && !existsError;
