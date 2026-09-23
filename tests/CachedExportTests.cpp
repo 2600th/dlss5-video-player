@@ -1,4 +1,5 @@
 #include "MediaPipeline.h"
+#include "NeuralSegmentIndex.h"
 #include "RuntimePolicy.h"
 #include "SynchronizedPlayback.h"
 #include "VideoDecoder.h"
@@ -794,6 +795,102 @@ void SynchronizedPlaybackPairsRealMediaTest(const std::filesystem::path& helpers
     CHECK(!mismatched.NeuralAvailable());
 }
 
+
+// A live run is served from its segments until it is published, then from the
+// joined cache entry (NeuralSegmentIndex::ReplaceRun, P1.14). The entry is a
+// stream copy of the same segments, so after the switch every frame has to be
+// byte-for-byte the frame the segments decode to, at the same number and
+// timestamp - including where playback crosses into the entry mid-way and
+// where a seek lands inside it. Long-GOP H.264 with B-frames, one keyframe per
+// segment like the renderer's, so entering the entry at a segment boundary and
+// seeking inside it both have to find the right frame from a keyframe behind.
+void LivePlaybackSwitchesOntoTheJoinedRunTest(const std::filesystem::path& helpers)
+{
+    FixtureDirectory fixture;
+    const auto original = fixture.path / L"original.mkv";
+    const auto joined = fixture.path / L"joined.mkv";
+    const auto log = fixture.path / L"tool.log";
+    const auto ffmpeg = helpers / L"ffmpeg.exe";
+    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+        L"-i", L"testsrc=s=64x48:r=10:d=4", L"-c:v", L"ffv1", original.wstring()}, log));
+    // A short first segment and longer ones behind it, as a session renders.
+    struct Cut { uint64_t first, count; };
+    const std::vector<Cut> cuts{{0, 5}, {5, 20}, {25, 15}};
+    std::vector<std::filesystem::path> parts;
+    auto segments = std::make_shared<NeuralSegmentIndex>();
+    for (size_t index = 0; index < cuts.size(); ++index) {
+        const auto part = fixture.path / (L"neural-0000" + std::to_wstring(index) + L".mkv");
+        const std::wstring trim = L"trim=start_frame=" + std::to_wstring(cuts[index].first) + L":end_frame=" +
+                                  std::to_wstring(cuts[index].first + cuts[index].count) + L",setpts=PTS-STARTPTS";
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-i", original.wstring(), L"-vf", trim,
+            L"-c:v", L"libx264", L"-g", L"1000", L"-bf", L"2", L"-pix_fmt", L"yuv420p", part.wstring()}, log));
+        parts.push_back(part);
+        NeuralSegment record;
+        record.path = part;record.runId = 1;record.index = index;
+        record.firstFrameNumber = cuts[index].first;record.frameCount = cuts[index].count;
+        record.firstTimestamp100ns = int64_t(cuts[index].first) * 1000000;
+        record.end100ns = int64_t(cuts[index].first + cuts[index].count) * 1000000;
+        segments->Append(record);
+    }
+    CHECK(ConcatenateMedia(helpers, parts, joined, {}) == EncodeError::None);
+    if (!std::filesystem::exists(joined)) return;
+
+    const auto next = [](SynchronizedPlayback& playback) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        for (;;) {
+            const auto result = playback.ReadNextAvailable();
+            if (result != SynchronizedReadResult::NotReady || std::chrono::steady_clock::now() >= deadline)
+                return result;
+            std::this_thread::sleep_for(5ms);
+        }
+    };
+    // Every neural frame of one whole pass, by frame number.
+    const auto play = [&](const std::shared_ptr<NeuralSegmentIndex>& index, bool publishAfterFirstFrames) {
+        std::vector<std::vector<uint8_t>> frames;
+        SynchronizedPlayback playback;
+        CHECK(playback.OpenLive(original, index, SynchronizedRange{}));
+        SynchronizedReadResult result = SynchronizedReadResult::NotReady;
+        while ((result = next(playback)) == SynchronizedReadResult::PairReady) {
+            const SynchronizedFramePair* pair = playback.CurrentPair();
+            CHECK(pair != nullptr);
+            if (!pair || frames.size() > 50) break;
+            CHECK_EQ(uint64_t{frames.size()}, pair->frameNumber);
+            CHECK_EQ(pair->original.frameNumber, pair->neural.frameNumber);
+            CHECK_EQ(int64_t{1000000} * static_cast<int64_t>(frames.size()), pair->neural.timestamp100ns);
+            frames.push_back(pair->neural.bgra);
+            if (publishAfterFirstFrames && frames.size() == 2) CHECK(index->ReplaceRun(1, joined));
+        }
+        CHECK_EQ(SynchronizedReadResult::EndOfStream, result);
+        CHECK(playback.LastFault().empty());
+        if (publishAfterFirstFrames) {
+            // Everything retired is free: playback is inside the entry now.
+            for (const auto& part : parts) CHECK(!playback.HoldsFile(part));
+            CHECK(playback.HoldsFile(joined));
+            // A seek inside the entry lands on the frame the segment held.
+            CHECK(playback.SeekSeconds(3.3));
+            const SynchronizedFramePair* seeked = playback.CurrentPair();
+            CHECK(seeked != nullptr);
+            if (seeked && frames.size() > 33) {
+                CHECK_EQ(uint64_t{33}, seeked->frameNumber);
+                CHECK(seeked->neural.bgra == frames[33]);
+            }
+        }
+        return frames;
+    };
+    const auto fromSegments = play(segments, false);
+    auto republished = std::make_shared<NeuralSegmentIndex>();
+    for (size_t index = 0; index < segments->Count(); ++index)
+        if (const auto record = segments->At(index)) republished->Append(*record);
+    const auto fromEntry = play(republished, true);
+    CHECK_EQ(size_t{40}, fromSegments.size());
+    CHECK_EQ(fromSegments.size(), fromEntry.size());
+    size_t differing = 0;
+    for (size_t frame = 0; frame < std::min(fromSegments.size(), fromEntry.size()); ++frame)
+        if (fromSegments[frame] != fromEntry[frame]) ++differing;
+    CHECK_EQ(size_t{0}, differing);
+    CHECK_EQ(size_t{parts.size()}, republished->RetiredFiles().size());
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -820,6 +917,7 @@ int wmain(int argc, wchar_t** argv)
     PhotoAndAnimationTests(helpers);
     JoinedFrameCountMatchesDecodedCountTest(helpers);
     SynchronizedPlaybackPairsRealMediaTest(helpers);
+    LivePlaybackSwitchesOntoTheJoinedRunTest(helpers);
     if (test_support::failure_count != 0) return 1;
     std::cout << "Cached export real-media tests passed.\n";
     return 0;

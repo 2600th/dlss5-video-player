@@ -243,9 +243,11 @@ struct SynchronizedPlayback::Impl {
         return media;
     }
 
-    // Starts the open of `wanted` on another thread. Failures are silent: the
-    // boundary itself opens the file if this never produces one.
-    void StartAsyncOpen(NeuralSegment wanted)
+    // Starts the open of `wanted` on another thread, positioned at `entry100ns`
+    // on the source timeline - its own start unless the file began before the
+    // one playing now. Failures are silent: the boundary itself opens the file
+    // if this never produces one.
+    void StartAsyncOpen(NeuralSegment wanted,int64_t entry100ns)
     {
         if(pendingOpen||!makeSegmentSource)return;
         PendingOpen pending{};
@@ -255,15 +257,18 @@ struct SynchronizedPlayback::Impl {
         const VideoDecoder::KnownMedia media=MediaFor(wanted);
         const std::filesystem::path path=wanted.path;
         const bool nv12=preferNv12;
+        // The same half-frame rule AdoptSegment seeks by.
+        const int64_t local=entry100ns-wanted.firstTimestamp100ns;
+        const double seekSeconds=local>=tolerance100ns/2?double(local)*1e-7:0.0;
         try{
             pending.future=std::async(std::launch::async,
-                [factory,media,path,nv12,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
+                [factory,media,path,nv12,seekSeconds,stop=pending.stop.get_token()]()->std::unique_ptr<ISynchronizedFrameSource>{
                     auto source=factory();
                     if(!source)return nullptr;
                     source->PreferNv12(nv12);
                     const bool ready=media.Valid()?source->OpenKnown(path,media,stop)
                                                   :source->Open(path,stop);
-                    if(!ready){source->Close();return nullptr;}
+                    if(!ready||(seekSeconds>0.0&&!source->SeekSeconds(seekSeconds))){source->Close();return nullptr;}
                     return source;
                 });
         }catch(const std::system_error&){
@@ -427,9 +432,14 @@ struct SynchronizedPlayback::Impl {
     // A run numbers its own segments, so a segment's identity is the pair: two
     // runs both publishing an index 0 is the normal case once a session has been
     // retargeted at a hole.
+    //
+    // The path as well: a run whose segments were joined into its published
+    // entry keeps its first segment's run, number and start (ReplaceRun), but
+    // it is another file, and the decoder open on the old one cannot serve it.
     static bool SameSegment(const NeuralSegment& a,const NeuralSegment& b)
     {
-        return a.runId==b.runId&&a.index==b.index&&a.firstTimestamp100ns==b.firstTimestamp100ns;
+        return a.runId==b.runId&&a.index==b.index&&a.firstTimestamp100ns==b.firstTimestamp100ns&&
+               a.path==b.path;
     }
 
     bool SegmentCovers(const NeuralSegment& candidate,const Pending& pending)const
@@ -542,6 +552,23 @@ struct SynchronizedPlayback::Impl {
         return AdoptSegment(std::move(*covering),timestamp100ns,stop);
     }
 
+    // The record that serves the frames after the open file. Normally the next
+    // one along the timeline. Once the run this file belongs to has been joined
+    // into its published entry (NeuralSegmentIndex::ReplaceRun), the record
+    // that owns this file's start is the joined file instead: it began at or
+    // before this one and runs on past it, so it is entered mid-way, at this
+    // file's end.
+    std::optional<NeuralSegment> Continuation()const
+    {
+        if(auto owner=segments->Containing(segment.firstTimestamp100ns);
+           owner&&!SameSegment(*owner,segment)&&owner->end100ns>segment.end100ns)
+            return owner;
+        auto following=segments->After(segment.firstTimestamp100ns);
+        // Only the file that continues this region is worth a process start.
+        if(!following||following->firstTimestamp100ns>segment.end100ns)return std::nullopt;
+        return following;
+    }
+
     // A boundary costs a process start (and a probe, for the first segment of a
     // session), so the next file is opened on another thread once the playhead
     // enters the lead window, and warmed here once that open lands. Failures are
@@ -550,13 +577,20 @@ struct SynchronizedPlayback::Impl {
     {
         if(!segmentSource||stop.stop_requested())return;
         HarvestAsyncOpen();
+        // An open in flight is judged once it has landed, never waited for.
+        if(pendingOpen)return;
+        if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
+        const auto next=Continuation();
+        // A file warmed before its run was joined holds the right frames, but
+        // it is out of service and the boundary would pass it over for a
+        // synchronous open of the joined one. Open that here instead, while
+        // there is still lead to do it in.
+        if(prefetchSource&&(!next||!SameSegment(prefetchSegment,*next))){
+            prefetchSource->Close();prefetchSource.reset();
+            prefetchSegment=NeuralSegment{};prefetchPending.reset();
+        }
         if(!prefetchSource){
-            if(pendingOpen)return;
-            if(timestamp100ns<segment.end100ns-prefetchLead100ns)return;
-            auto following=segments->After(segment.firstTimestamp100ns);
-            // Only the file that continues this region is worth a process start.
-            if(!following||following->firstTimestamp100ns>segment.end100ns)return;
-            StartAsyncOpen(std::move(*following));
+            if(next)StartAsyncOpen(*next,segment.end100ns);
             return;
         }
         if(!prefetchPending)
@@ -887,6 +921,15 @@ bool SynchronizedPlayback::NeuralAvailable()const
 bool SynchronizedPlayback::Live()const{return impl_->opened&&impl_->live;}
 int64_t SynchronizedPlayback::LiveHead100ns()const
 {return impl_->live&&impl_->segments?impl_->segments->Head100ns():0;}
+
+bool SynchronizedPlayback::HoldsFile(const std::filesystem::path& path)const
+{
+    if(!impl_||path.empty())return false;
+    const Impl& impl=*impl_;
+    return (impl.segmentSource&&impl.segment.path==path)||
+           (impl.prefetchSource&&impl.prefetchSegment.path==path)||
+           (impl.pendingOpen&&impl.pendingOpen->segment.path==path);
+}
 
 std::string SynchronizedPlayback::LastFault()const
 {

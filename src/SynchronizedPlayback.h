@@ -129,6 +129,10 @@ public:
     bool NeuralAvailable() const;
     bool Live() const;
     int64_t LiveHead100ns() const;
+    // Whether a live segment decoder has `path` open, or is opening it on
+    // another thread. A file retired from the index is deleted only once this
+    // is false: until then a decoder may still be reading it.
+    bool HoldsFile(const std::filesystem::path& path) const;
     // Why the last read reported OutOfSync, empty when nothing failed.
     std::string LastFault() const;
 

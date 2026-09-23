@@ -179,6 +179,75 @@ public:
         paceStart_.reset();
     }
 
+    // Serves one finished run from `joined` - its segments concatenated and
+    // published as a cache entry - instead of from the segments themselves.
+    // Every rendered byte of a live session used to sit on disk twice until the
+    // session was released, and a retained session kept both copies across
+    // toggles: the segments, because playback read them, and the joined entry.
+    // With the run served from the entry, its segments have no reader left and
+    // are handed to RetiredFiles() for the caller to delete.
+    //
+    // Coverage does not move: the joined record spans exactly the window the
+    // run's records spanned, seams and clamps included, and carries every
+    // frame they carried. Refused - nothing changes - unless the run's records
+    // are adjacent here and number their frames without a gap, which is the
+    // only shape of which a concatenation is the same frames at the same
+    // timestamps. The joined file restarts at its own zero, like any segment.
+    bool ReplaceRun(uint64_t runId, std::filesystem::path joined)
+    {
+        const std::lock_guard lock(mutex_);
+        if (joined.empty()) return false;
+        const auto first = std::find_if(segments_.begin(), segments_.end(),
+                                        [runId](const NeuralSegment& segment) { return segment.runId == runId; });
+        if (first == segments_.end()) return false;
+        auto last = first;
+        uint64_t frames = first->frameCount;
+        while (std::next(last) != segments_.end() && std::next(last)->runId == runId) {
+            const NeuralSegment& next = *std::next(last);
+            if (!last->frameCount || next.firstFrameNumber != last->firstFrameNumber + last->frameCount)
+                return false;
+            frames += next.frameCount;
+            ++last;
+        }
+        if (std::any_of(std::next(last), segments_.end(),
+                        [runId](const NeuralSegment& segment) { return segment.runId == runId; }))
+            return false;
+        NeuralSegment merged = *first;
+        merged.path = std::move(joined);
+        merged.end100ns = last->end100ns;
+        merged.frameCount = frames;
+        for (auto it = first; it != std::next(last); ++it)
+            if (it->path != merged.path) retired_.push_back(it->path);
+        const auto at = segments_.erase(first, std::next(last));
+        segments_.insert(at, std::move(merged));
+        ++revision_;
+        return true;
+    }
+
+    // Segment files ReplaceRun took out of service and nobody has deleted yet.
+    std::vector<std::filesystem::path> RetiredFiles() const
+    {
+        const std::lock_guard lock(mutex_);
+        return retired_;
+    }
+
+    // The caller deleted it, or found it already gone.
+    void ForgetRetired(const std::filesystem::path& path)
+    {
+        const std::lock_guard lock(mutex_);
+        retired_.erase(std::remove(retired_.begin(), retired_.end(), path), retired_.end());
+    }
+
+    // Every file coverage is currently served from, in timeline order.
+    std::vector<std::filesystem::path> Files() const
+    {
+        const std::lock_guard lock(mutex_);
+        std::vector<std::filesystem::path> files;
+        files.reserve(segments_.size());
+        for (const NeuralSegment& segment : segments_) files.push_back(segment.path);
+        return files;
+    }
+
     // Bumped by every change to coverage. A repaint cannot be triggered off the
     // newest rendered timestamp any more: a run filling an earlier hole leaves
     // that unchanged while changing what the seek bar must show.
@@ -316,6 +385,7 @@ private:
     mutable std::vector<CoverageSpan> coverage_;
     mutable uint64_t coverageRevision_{};
     mutable bool coverageValid_{};
+    std::vector<std::filesystem::path> retired_;
     std::optional<std::chrono::steady_clock::time_point> paceStart_;
     std::chrono::steady_clock::time_point paceLatest_{};
     uint64_t paceBaseFrames_{};

@@ -609,6 +609,16 @@ whole source later is not a cache hit; only a session that rendered its range in
 one job produces that. Joining the union once coverage reaches the whole range is
 not implemented.
 
+Once that entry is published the run is served from it:
+`NeuralSegmentIndex::ReplaceRun` swaps the run's records for one record over the
+same window that points at the entry's payload, and retires the segment files.
+The player deletes each retired file once `SynchronizedPlayback::HoldsFile` says
+no decoder has it open; the one being played goes at the next boundary, where
+playback crosses into the entry through the same background open and warm-up as
+any other boundary, entering it mid-way at the playing file's end. The render is
+still written twice - the segments, then the join - but it no longer stays on
+disk twice for the life of the session, or across toggles while retained.
+
 Coverage is a **set of rendered regions**, not a head. A session renders the
 whole video (or the marked range) hole by hole, nearest the playhead first, and
 a viewer who seeks backwards makes the next job start behind an earlier one. So

@@ -53,7 +53,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 | --- | --- | :---: | --- | :---: |
 | **P0** | | | | |
 | **P1** | | | | |
-| [P1.14](#p114) | Live-session write amplification | M | Pipeline | 🔍 |
 | [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
 | [P1.23](#p123) | Screenshots and the last product-name drift | S | Docs, Release | 🔍 |
 | **P2** | | | | |
@@ -104,23 +103,6 @@ fetchable), 175 s. `site/test.ps1`: 31 pass.
 ## Player: reliability and quality-neutral performance
 
 ## Pipeline: helper, cache, runtime
-
-<a id="p114"></a>
-### P1.14 · Live-session write amplification
-
-`M` · **Pipeline** · 🔍 · _what is left of old 2.9_
-
-A live session writes every rendered byte twice and reads it three times.
-The segments are joined into a full `staging/neural.mkv` copy, and the
-segments stay until the session is released, because `SynchronizedPlayback`
-keeps reading them after the join. Peak disk is about twice the render.
-
-**Fix** — once the joined entry is published, switch playback onto the
-published payload (a `SynchronizedPlayback` retarget) and delete the
-segments, or publish by concatenating straight into the entry's staging
-directory with no intermediate copy.
-
----
 
 <a id="p116"></a>
 ### P1.16 · Duplicated helpers that behave differently

@@ -5672,6 +5672,18 @@ private:
     std::string LiveRetentionKey()const{
         return LiveSourceGeometryKey()+"|"+CanonicalNeuralSettings(m_neuralSettings)+"|"+CanonicalGuideControls(m_renderGuides);
     }
+    // Deletes the segment files a published run retired (ReplaceRun), except
+    // one a live decoder still has open or is opening: that one goes on a later
+    // pass, once playback has crossed into the joined entry. A file something
+    // else holds - a scanner, say - is simply tried again.
+    void SweepRetiredLiveSegments(const std::shared_ptr<NeuralSegmentIndex>& index){
+        if(!index)return;
+        for(const std::filesystem::path& path:index->RetiredFiles()){
+            if(m_synchronizedPlayback.HoldsFile(path))continue;
+            std::error_code ec;std::filesystem::remove(path,ec);
+            if(!ec)index->ForgetRetired(path);
+        }
+    }
     void DropRetainedLiveSegments(){
         m_retainedSegments.reset();m_retainedRange={};m_retainedKey.clear();
         if(!m_retainedDirectory.empty()){std::error_code ec;std::filesystem::remove_all(m_retainedDirectory,ec);m_retainedDirectory.clear();}
@@ -5753,11 +5765,24 @@ private:
         // them is what deleted a rendered tail the moment the user seeked back in
         // front of it, and then re-rendered ground that was already there.
         const std::string key=LiveRetentionKey();
-        const bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty();
+        bool adopt=m_retainedSegments&&m_retainedKey==key&&!m_retainedSegments->Empty();
+        // A published run is served from its cache entry, which lives outside
+        // the session directory: another instance's eviction can take it while
+        // the coverage sits retained. A region that cannot be opened is a hole
+        // that looks rendered, so the whole retained set goes instead.
+        if(adopt)
+            for(const std::filesystem::path& file:m_retainedSegments->Files()){
+                std::error_code ec;
+                if(!std::filesystem::is_regular_file(file,ec)){
+                    LOG("Retained neural coverage refers to a file that is gone ("<<WideToUtf8(file.wstring())<<"); rendering again.");
+                    adopt=false;break;
+                }
+            }
         if(!adopt)DropRetainedLiveSegments();
         if(adopt){
             m_liveSegments=m_retainedSegments;m_liveDirectory=m_retainedDirectory;
             m_retainedSegments.reset();m_retainedDirectory.clear();m_retainedKey.clear();m_retainedRange={};
+            SweepRetiredLiveSegments(m_liveSegments);
         }else{
             // Per process, and empty when there is no writable cache root. The
             // shared path let a second instance delete this one's segments, and
@@ -5804,6 +5829,7 @@ private:
                 if(!spans.empty())spans+=", ";
                 spans+="["+std::to_string(double(span.start100ns)*1e-7)+","+std::to_string(double(span.end100ns)*1e-7)+")";
             }
+            SweepRetiredLiveSegments(m_retainedSegments);
             LOG("Retained "<<m_retainedSegments->Count()<<" rendered segments in "<<covered.size()
                 <<" region(s) for the next toggle: "<<(spans.empty()?std::string("none"):spans)<<".");
         }
@@ -5878,6 +5904,8 @@ private:
     // never reload playback from the cache entry it just wrote - unless there is
     // no output, in which case that entry is the only thing there is to play.
     void CompleteLiveNeuralJob(const NeuralJobCompletion& completion){
+        // Everything the published run retired that playback is not reading.
+        SweepRetiredLiveSegments(m_liveSegments);
         const bool covered=m_liveSegments&&!m_liveSegments->Empty();
         // A job that ended without adding coverage must not be started again on
         // the same hole forever: a cache hit that publishes an entry but no
@@ -6138,6 +6166,9 @@ private:
         if(!m_liveSession)return;
         MaintainLiveRenderTarget();
         if(!m_liveSession)return;
+        // The file playback was reading when its run was published is freed
+        // at the next boundary; a second's latency on that costs nothing.
+        if(const ULONGLONG now=GetTickCount64();now-m_liveSweepTick>=1000){m_liveSweepTick=now;SweepRetiredLiveSegments(m_liveSegments);}
         // Coverage can change without the newest rendered timestamp moving - a
         // run filling an earlier hole does exactly that - so the repaint follows
         // the index's revision instead of a head.
@@ -6807,6 +6838,17 @@ private:
                     }
                     if(promotion.attempts>1)LOG("Neural cache entry published after "<<promotion.attempts<<" rename attempts; the entry was held by another process.");
                     if(promotion.entry){completion->neuralPath=promotion.entry->payloadPath;completion->receiptPath=promotion.entry->directory/L"receipt.json";}else{completion->result.ok=false;completion->result.detail=L"The neural cache entry could not be reopened.";}
+                    // The entry IS this run's segments, joined: same frames, same
+                    // timestamps. Serving the run from it retires the segments, so
+                    // a session stops holding every rendered byte twice until it is
+                    // released - and a retained one across toggles. The UI thread
+                    // deletes them once no decoder has them open.
+                    if(liveIndex&&promotion.entry){
+                        std::error_code sizeError;const auto entryBytes=std::filesystem::file_size(promotion.entry->payloadPath,sizeError);
+                        const bool replaced=liveIndex->ReplaceRun(liveRunId,promotion.entry->payloadPath);
+                        LOG("Live run "<<liveRunId<<(replaced?" now plays from its published entry; ":" keeps playing its segments; the entry could not replace ")
+                            <<joinedParts<<" segment files"<<(replaced?" retired":"")<<". entryBytes="<<(sizeError?uintmax_t{0}:entryBytes)<<".");
+                    }
                 }
             finish:
                 // A cache hit, a refusal or a prepared open never reached a
@@ -8017,7 +8059,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     HANDLE m_neuralPauseEvent=nullptr;
     // Active neural rendering: the render job runs while playback continues and
     // the player consumes finalized segments as they land. m_liveDirectory holds
-    // those segments; the promoted cache entry is a separate concatenated copy.
+    // those segments until their run is published: from then on the run plays
+    // from its cache entry and the segments are deleted (ReplaceRun).
     // Consecutive attaches that had a lead to work with and still produced no
     // picture. Non-zero means the coverage does not contain the playhead.
     int m_liveAttachFailures=0;
@@ -8066,6 +8109,8 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     // render pace is measured against, since adopted coverage was not rendered now.
     uint64_t m_livePaintedRevision=0;int64_t m_liveCoveredAtStart=0;
     ULONGLONG m_liveStartTick=0;double m_liveStartLead=kLiveStartLead;
+    // Last pass of SweepRetiredLiveSegments from the tick.
+    ULONGLONG m_liveSweepTick=0;
     // The forecast this session started on, kept so the cushion has a pace to
     // size against before RealtimeRatio has enough samples to report one.
     double m_liveForecastRatio=0.0;

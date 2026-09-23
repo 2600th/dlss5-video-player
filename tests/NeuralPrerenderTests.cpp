@@ -3996,6 +3996,123 @@ void live_seek_into_a_later_segment_lands_on_the_frame_not_the_first_segments_le
     CHECK(playback.LastFault().empty());
 }
 
+// A finished run is joined into its cache entry, and the entry then serves the
+// run's frames from one file (P1.14). Coverage must not move by a tick, and a
+// run whose files do not continue each other is left alone: joining those
+// would not be the same frames at the same timestamps.
+void neural_segment_index_serves_a_published_run_from_its_joined_entry_test()
+{
+    NeuralSegmentIndex index;
+    index.Append(LiveSegmentRecord(L"run1/neural-00000.mkv",0,20,5,1));
+    index.Append(LiveSegmentRecord(L"run1/neural-00001.mkv",1,25,5,1));
+    index.Append(RoundedSegmentRecord(L"run2/neural-00000.mkv",0,0,5,2));
+    index.Append(RoundedSegmentRecord(L"run2/neural-00001.mkv",1,5,5,2));
+    const auto coverage=index.CoveredRanges();
+    const uint64_t frames=index.TotalFrames(),revision=index.Revision();
+    const auto lastOfRun2=index.At(1);
+    CHECK(lastOfRun2.has_value());
+    if(!lastOfRun2)return;
+
+    CHECK(index.ReplaceRun(2,L"cache/run2.mkv"));
+    CHECK_EQ(size_t{3},index.Count());
+    CHECK(index.Revision()!=revision);
+    CHECK_EQ(frames,index.TotalFrames());
+    const auto after=index.CoveredRanges();
+    CHECK_EQ(coverage.size(),after.size());
+    for(size_t span=0;span<std::min(coverage.size(),after.size());++span){
+        CHECK_EQ(coverage[span].start100ns,after[span].start100ns);
+        CHECK_EQ(coverage[span].end100ns,after[span].end100ns);
+    }
+    if(const auto joined=index.At(0)){
+        CHECK(joined->path==std::filesystem::path(L"cache/run2.mkv"));
+        CHECK_EQ(uint64_t{2},joined->runId);
+        CHECK_EQ(uint64_t{0},joined->firstFrameNumber);
+        CHECK_EQ(uint64_t{10},joined->frameCount);
+        CHECK_EQ(int64_t{0},joined->firstTimestamp100ns);
+        CHECK_EQ(lastOfRun2->end100ns,joined->end100ns);
+    }
+    // Both files of the run, anywhere inside it, now resolve to the entry.
+    for(uint64_t frame:{0ull,4ull,5ull,9ull})
+        if(const auto owner=index.ContainingFrame(frame))CHECK(owner->path==std::filesystem::path(L"cache/run2.mkv"));
+    if(const auto other=index.ContainingFrame(22))CHECK_EQ(uint64_t{1},other->runId);
+    const std::vector<std::filesystem::path> retired{L"run2/neural-00000.mkv",L"run2/neural-00001.mkv"};
+    CHECK(retired==index.RetiredFiles());
+    index.ForgetRetired(L"run2/neural-00000.mkv");
+    CHECK_EQ(size_t{1},index.RetiredFiles().size());
+    CHECK_EQ(size_t{3},index.Files().size());
+
+    // Unknown run, and a run with a frame missing between its files.
+    CHECK(!index.ReplaceRun(9,L"cache/run9.mkv"));
+    NeuralSegmentIndex gapped;
+    gapped.Append(LiveSegmentRecord(L"run3/neural-00000.mkv",0,0,5,3));
+    gapped.Append(LiveSegmentRecord(L"run3/neural-00001.mkv",1,6,5,3));
+    const uint64_t before=gapped.Revision();
+    CHECK(!gapped.ReplaceRun(3,L"cache/run3.mkv"));
+    CHECK_EQ(size_t{2},gapped.Count());
+    CHECK_EQ(before,gapped.Revision());
+    CHECK(gapped.RetiredFiles().empty());
+}
+
+// The switch from a run's segments to its joined entry happens under a playing
+// session, and has to be invisible: every frame once, at its own timestamp, and
+// no process started on the presenting thread at the boundary where playback
+// crosses into the entry. The file warmed before the join is out of service
+// and is swapped for the entry while there is still lead to open it in.
+void live_playback_crosses_into_a_joined_run_without_a_gap_or_stall_test()
+{
+    constexpr uint8_t kJoinedTag=7;
+    LiveFrameLibrary library;library.Add(L"original.mkv",40);
+    library.Add(L"neural-00000.mkv",5);library.Add(L"neural-00001.mkv",5);library.Add(L"neural-00002.mkv",5);
+    TagLiveStream(library.Add(L"joined.mkv",15),kJoinedTag);
+    LiveLibrarySource original(library);
+    SynchronizedPlayback playback(original,LiveSegmentFactory(library));
+    const auto segments=std::make_shared<NeuralSegmentIndex>();
+    segments->Append(LiveSegmentRecord(L"neural-00000.mkv",0,10,5));
+    segments->Append(LiveSegmentRecord(L"neural-00001.mkv",1,15,5));
+    segments->Append(LiveSegmentRecord(L"neural-00002.mkv",2,20,5));
+    CHECK(playback.OpenLive(L"original.mkv",segments,
+                            SynchronizedRange{10*kLiveFrame100ns,25*kLiveFrame100ns},{}));
+    std::vector<uint64_t> played;
+    const auto readPair=[&](int expectedTag){
+        CHECK_EQ(SynchronizedReadResult::PairReady,playback.ReadNextAvailable({}));
+        const auto* pair=playback.CurrentPair();CHECK(pair!=nullptr);
+        if(!pair)return;
+        played.push_back(pair->frameNumber);
+        CHECK_EQ(pair->original.frameNumber,pair->neural.frameNumber);
+        CHECK_EQ(pair->original.timestamp100ns,pair->neural.timestamp100ns);
+        CHECK_EQ(expectedTag,LiveStreamTag(pair->neural));
+    };
+    readPair(0);
+    // The next segment is warming when the run is published.
+    CHECK(library.WaitForOpen(L"neural-00001.mkv",1));
+    // The open returns just after it counts; let its future settle so the next
+    // read harvests it rather than finding it still in flight.
+    std::this_thread::sleep_for(20ms);
+    CHECK(segments->ReplaceRun(0,L"joined.mkv"));
+    CHECK(playback.HoldsFile(L"neural-00000.mkv"));
+    readPair(0);
+    // The stale prefetch is dropped and the entry opened, off this thread,
+    // already positioned where the playing file ends.
+    CHECK(library.WaitForOpen(L"joined.mkv",1));
+    CHECK(!playback.HoldsFile(L"neural-00001.mkv"));
+    for(int index=0;index<3;++index)readPair(0);
+    for(int index=0;index<10;++index)readPair(kJoinedTag);
+    std::vector<uint64_t> expected;
+    for(uint64_t number=10;number<25;++number)expected.push_back(number);
+    CHECK_EQ(expected,played);
+    CHECK(library.OpenThread(L"joined.mkv")!=std::this_thread::get_id());
+    CHECK(library.OpenedKnown(L"joined.mkv"));
+    CHECK_EQ(1,library.Opens(L"joined.mkv"));
+    CHECK_EQ(1,library.Seeks(L"joined.mkv"));
+    CHECK_EQ(size_t{5},library.LandedIndex(L"joined.mkv"));
+    CHECK_EQ(0,library.Opens(L"neural-00002.mkv"));
+    // The retired files are free for the caller to delete; the entry is not.
+    CHECK(!playback.HoldsFile(L"neural-00000.mkv"));
+    CHECK(playback.HoldsFile(L"joined.mkv"));
+    CHECK_EQ(SynchronizedReadResult::EndOfStream,playback.ReadNextAvailable({}));
+    CHECK(playback.LastFault().empty());
+}
+
 // A session renders in runs, and a backward seek makes the next run start
 // behind an earlier one. Both rendered regions have to survive that, and each
 // one has to stay watchable from inside itself: the player used to hold a
@@ -4990,6 +5107,8 @@ int wmain(int argc, wchar_t* argv[])
     live_playback_crosses_a_seam_whose_end_rounds_below_the_next_start_test();
     live_seek_enters_a_rendered_segment_and_refuses_an_unrendered_target_test();
     live_seek_into_a_later_segment_lands_on_the_frame_not_the_first_segments_length_test();
+    neural_segment_index_serves_a_published_run_from_its_joined_entry_test();
+    live_playback_crosses_into_a_joined_run_without_a_gap_or_stall_test();
     neural_segment_index_keeps_two_disjoint_rendered_regions_test();
     neural_segment_index_after_finds_the_next_region_from_a_hole_test();
     neural_segment_index_revision_moves_when_a_run_fills_a_hole_behind_the_head_test();
