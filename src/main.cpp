@@ -4414,6 +4414,7 @@ private:
     // compare_gesture for how the three are told apart.
     void RenderMouseDown(HWND source,LPARAM position){
         m_fullscreenKeyboardFocus=false;SetFocus(m_hwnd);
+        if(m_keyboardCues){m_keyboardCues=false;InvalidateControls();}
         const bool compare=ComparisonModesAvailable(),zoomed=m_loaded&&Zoomed();
         if(!compare&&!zoomed)return;
         const POINT point{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
@@ -5445,6 +5446,7 @@ private:
         auto* app=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(GetParent(h),GWLP_USERDATA));
         if(app&&m==WM_MOUSEMOVE)app->FullscreenPointerMoved(h,l);
         if(app&&m==WM_LBUTTONDOWN){app->m_fullscreenKeyboardFocus=false;SetFocus(app->m_hwnd);return 0;}
+        if(app&&m==WM_SETFOCUS){SetFocus(app->m_hwnd);return 0;}
         switch(m){
         case WM_ERASEBKGND:return 1;
         case WM_PAINT:{
@@ -5477,7 +5479,11 @@ private:
             if(m==WM_MOUSELEAVE){a->RenderMouseLeft();return 0;}
             if(m==WM_CAPTURECHANGED){a->RenderCaptureLost();return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
-            if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN)return SendMessageW(a->m_hwnd,m,w,l);
+            // The picture never keeps the keyboard. Keys that reached it anyway went to the
+            // main window as WM_KEYDOWN, but the WM_CHAR TranslateMessage makes from them
+            // stayed here, so ? (a character, not a key) did nothing while F1 worked.
+            if(m==WM_SETFOCUS){SetFocus(a->m_hwnd);return 0;}
+            if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN||m==WM_CHAR)return SendMessageW(a->m_hwnd,m,w,l);
             if(m==WM_DROPFILES)return SendMessageW(a->m_hwnd,m,w,l); // main window owns DragFinish().
         }
         return DefWindowProcW(h,m,w,l);
@@ -6919,6 +6925,7 @@ private:
         if(visual.drawFocus&&action!=ToolbarAction::None)DrawRoundedFocusRing(dc,r,radius,visual.text,ActiveWindowDpi(m_hwnd));
     }
 
+    bool FocusCueFor(ToolbarAction action)const{return m_keyboardCues&&GetFocus()==m_hwnd&&m_focusedToolbarAction==action;}
     void DrawSolidEllipse(HDC dc,const RECT& bounds,COLORREF color,const char* stage){
         const int saved=SaveDC(dc);
         if(saved==0)LOG(stage<<" SaveDC failed winerr="<<GetLastError());
@@ -7261,14 +7268,14 @@ private:
             SetBkMode(dc,TRANSPARENT);
             SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_fontTitle?m_fontTitle:m_font);std::wstring tt=T(L"idle.title");RECT title=idle.title;DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
             SetTextColor(dc,ui_palette::SecondaryText);SelectObject(dc,m_fontSmall);std::wstring ss=m_youtubeLifecycle.IsResolving()?m_cachedStatus:(m_cacheNotice.empty()?T(L"idle.subtitle"):m_cacheNotice);RECT subtitle=idle.subtitle;DrawTextW(dc,ss.c_str(),-1,&subtitle,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
-            for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,false);}
+            for(const auto& item:idle.actions){const auto content=ButtonContent(item.action,true);DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,false,content.enabled&&m_hoverAction==item.action,m_pressedToolbarAction==item.action,FocusCueFor(item.action),false);}
             if(!YouTubePlaybackAvailable()){SetBkMode(dc,TRANSPARENT);SetTextColor(dc,ui_palette::SecondaryText);of=SelectObject(dc,m_fontSmall);const bool compactReason=idle.subtitle.top==idle.subtitle.bottom;std::wstring reason=T(compactReason?L"idle.youtube_unavailable_compact":L"idle.youtube_unavailable");RECT reasonRect=idle.youtubeReason;DrawTextW(dc,reason.c_str(),-1,&reasonRect,DT_CENTER|DT_TOP|DT_WORDBREAK|DT_END_ELLIPSIS|DT_NOPREFIX);SelectObject(dc,of);}return;
         }
         if(!ControlsVisible())return;
         RECT bar{0,c.bottom-ControlHeight(),c.right,c.bottom};HBRUSH bg=CreateSolidBrush(ui_palette::ControlSurface);FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
         if(CompareBarVisible())DrawCompareBar(dc);
         const auto toolbarItems=ToolbarItems();
-        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,GetFocus()==m_hwnd&&m_focusedToolbarAction==item.action,item.compact,content.working);}
+        for(const auto& item:toolbarItems){const auto content=ButtonContent(item.action);const bool hover=content.enabled&&m_hoverAction==item.action;DrawButton(dc,item.action,content.icon,content.label,item.bounds,content.enabled,content.active,hover,m_pressedToolbarAction==item.action,FocusCueFor(item.action),item.compact,content.working);}
         const auto volumeRect=LayoutVolumeSlider(static_cast<int>(c.right-c.left),static_cast<int>(c.bottom-c.top),ActiveWindowDpi(m_hwnd),toolbarItems);if(volumeRect){const RECT& vr=*volumeRect;HPEN vp=CreatePen(PS_SOLID,std::max(1,Dip(4)),RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));const int knob=std::max(3,Dip(5));DrawSolidEllipse(dc,RECT{vx-knob,(vr.top+vr.bottom)/2-knob,vx+knob,(vr.top+vr.bottom)/2+knob},RGB(230,232,235),"Volume knob");}
         double shown=playback_timing::TimelinePosition(m_dragSeek,m_seekPreview,m_seekPending,m_pendingSeekSec,m_currentSec);RECT tr=TimelineRect();double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;
         // A source that reports no length (a browser-recorded WebM) greys the
@@ -9830,7 +9837,7 @@ private:
 
     void FocusNextToolbarAction(bool reverse){
         RevealFullscreenControls();m_fullscreenKeyboardFocus=m_fullscreen;
-        const auto items=FocusableItems();m_focusedToolbarAction=NextFocusableToolbarAction(items,m_focusedToolbarAction,reverse,ToolbarState());InvalidateControls();
+        const auto items=FocusableItems();m_focusedToolbarAction=NextFocusableToolbarAction(items,m_focusedToolbarAction,reverse,ToolbarState());m_keyboardCues=true;InvalidateControls();
     }
 
     void ActivateFocusedToolbarAction(){
@@ -9840,6 +9847,7 @@ private:
 
     void MouseDown(int x,int y){
         SetFocus(m_hwnd);
+        if(m_keyboardCues){m_keyboardCues=false;InvalidateControls();}
         m_fullscreenKeyboardFocus=false;
         if(ActivityBusy()&&PtIn(m_neuralCancelBounds,x,y)){if(m_liveSession)StopLiveNeuralSession(true);else if(NeuralJobActive())CancelNeuralJob();else CancelYouTubeResolution();return;}
         if(!ControlsVisible())return;
@@ -10290,6 +10298,10 @@ case IDM_EXPORT_STAGES:if(m_exportWorker.joinable())CancelExport();else ShowExpo
     bool m_audioStaleAfterStep=false;
     Clock::time_point m_lastScrubSeek{};
     ToolbarAction m_pressedToolbarAction=ToolbarAction::None,m_focusedToolbarAction=ToolbarAction::None,m_hoverAction=ToolbarAction::None;
+    // Windows' own rule for focus cues: hidden until the keyboard is used to move
+    // between controls, hidden again by the mouse. The focused action is always the
+    // first enabled one, so without this the Open button wore a ring from launch on.
+    bool m_keyboardCues=false;
     HMENU m_fullscreenMenu=nullptr;
     UINT_PTR m_fullscreenTimer=0;
     bool m_fullscreenControlsHidden=false,m_fullscreenMenuLoop=false,m_fullscreenKeyboardFocus=false,m_fullscreenPointerKnown=false;

@@ -1088,6 +1088,14 @@ struct PlayerAppTestAccess {
         CHECK(app.m_shortcutSheetOpen);
         app.WndProc(app.m_hwnd, WM_CHAR, L'?', 0);
         CHECK(!app.m_shortcutSheetOpen);
+        // The same keys pressed while the picture holds the keyboard: the render
+        // window passed F1 on as a key but kept the ? character, so ? did nothing.
+        if (app.m_renderWnd) {
+            SendMessageW(app.m_renderWnd, WM_CHAR, L'?', 0);
+            CHECK(app.m_shortcutSheetOpen);
+            SendMessageW(app.m_renderWnd, WM_KEYDOWN, VK_F1, 0);
+            CHECK(!app.m_shortcutSheetOpen);
+        }
         app.HandleCommand(IDM_KEYBOARD_SHORTCUTS);
         CHECK(app.m_shortcutSheetOpen);
         // Esc closes the sheet and does nothing else: no fullscreen to leave,
