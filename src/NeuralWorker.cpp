@@ -3,6 +3,7 @@
 #include "PlatformPaths.h"
 #include "NeuralWorkerProtocol.h"
 #include "HardErrorSuppression.h"
+#include "KillOnCloseJob.h"
 #include "StrictJson.h"
 
 #include <windows.h>
@@ -79,19 +80,6 @@ std::wstring MakeCommandLine(const std::filesystem::path& executable,
         command += QuoteArgument(argument);
     }
     return command;
-}
-
-HANDLE CreateKillOnCloseJob()
-{
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (!job) return nullptr;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-        CloseHandle(job);
-        return nullptr;
-    }
-    return job;
 }
 
 bool ParseUnsigned(std::wstring_view text, uint64_t& value)

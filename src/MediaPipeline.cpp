@@ -1,6 +1,7 @@
 #include "MediaPipeline.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "KillOnCloseJob.h"
 
 #include <windows.h>
 
@@ -108,20 +109,6 @@ std::wstring CommandLine(const std::filesystem::path& executable,
         result += QuoteArgument(argument);
     }
     return result;
-}
-
-HANDLE CreateKillOnCloseJob()
-{
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (!job) return nullptr;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                 &limits, sizeof(limits))) {
-        CloseHandle(job);
-        return nullptr;
-    }
-    return job;
 }
 
 struct ChildProcess {

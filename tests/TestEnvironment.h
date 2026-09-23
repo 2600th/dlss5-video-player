@@ -6,6 +6,8 @@
 
 #include <windows.h>
 
+#include "KillOnCloseJob.h"
+
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -83,15 +85,11 @@ inline bool FixtureAbandoned(const std::filesystem::path& directory, std::wstrin
 inline void ContainChildProcesses()
 {
     static const bool contained = [] {
-        const HANDLE job = CreateJobObjectW(nullptr, nullptr);
-        if (!job) return false;
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) ||
-            !AssignProcessToJobObject(job, GetCurrentProcess())) {
+        const HANDLE job = CreateKillOnCloseJob();
+        if (!job || !AssignProcessToJobObject(job, GetCurrentProcess())) {
             std::cerr << "warning: children of this test are not contained, error "
                       << GetLastError() << '\n';
-            CloseHandle(job);
+            if (job) CloseHandle(job);
             return false;
         }
         return true; // The handle stays open until the process ends; that is the point.

@@ -1,6 +1,7 @@
 #include "AudioPlayer.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "KillOnCloseJob.h"
 #include "Log.h"
 #include <filesystem>
 #include <vector>
@@ -105,14 +106,7 @@ bool CaptureHelperOutput(const std::wstring& exe, const std::wstring& arguments,
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-            CloseHandle(job); job = nullptr;
-        }
-    }
+    HANDLE job = CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL started = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
@@ -318,7 +312,7 @@ bool AudioPlayer::StartProcess(double seekSeconds,const std::shared_ptr<ReaderSt
          << (asFloat ? L" -c:a pcm_f32le -f f32le pipe:1" : L" -c:a pcm_s16le -f s16le pipe:1");
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
-    HANDLE job=CreateJobObjectW(nullptr,nullptr);if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
+    HANDLE job=CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const ScopedHardErrorSuppression noHardErrorDialog;
     BOOL ok = job&&CreateProcessW(m_ffmpeg.c_str(), mutableCmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED,

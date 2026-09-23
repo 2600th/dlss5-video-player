@@ -1,6 +1,7 @@
 #include "YouTubeResolver.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "KillOnCloseJob.h"
 #include "NarrowText.h"
 #include "Log.h"
 
@@ -1075,15 +1076,8 @@ ResolveResult YouTubeResolver::Resolve(std::wstring_view youtubeUrl,
                               L"Could not start the YouTube resolver.");
     }
 
-    job = CreateJobObjectW(nullptr, nullptr);
+    job = CreateKillOnCloseJob();
     if (!job) {
-        return resolver_error(ResolveError::StartFailed,
-                              L"Could not start the YouTube resolver.");
-    }
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
-    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                 &jobLimits, sizeof(jobLimits))) {
         return resolver_error(ResolveError::StartFailed,
                               L"Could not start the YouTube resolver.");
     }

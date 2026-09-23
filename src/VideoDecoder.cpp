@@ -1,6 +1,7 @@
 #include "VideoDecoder.h"
 #include "PlatformPaths.h"
 #include "HardErrorSuppression.h"
+#include "KillOnCloseJob.h"
 #include "FrameRatePolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "Log.h"
@@ -349,14 +350,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
-            CloseHandle(job); job = nullptr;
-        }
-    }
+    HANDLE job = CreateKillOnCloseJob();
     const ScopedHardErrorSuppression noHardErrorDialog;
     const BOOL ok = job && CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr,
                                    TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
@@ -892,8 +886,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
 
-    HANDLE job=CreateJobObjectW(nullptr,nullptr);
-    if(job){JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits))){CloseHandle(job);job=nullptr;}}
+    HANDLE job=CreateKillOnCloseJob();
     PROCESS_INFORMATION pi{};
     const auto spawnStarted=std::chrono::steady_clock::now();
     const ScopedHardErrorSuppression noHardErrorDialog;
