@@ -1364,11 +1364,13 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
         // -y applies only to the exclusively reserved staging file.
         L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y",
         L"-i", request.video.wstring()};
-    // The trim CachedExportRequest documents: an input seek on the stream
-    // source only, then an output -ss 0 that discards the pre-roll a stream
-    // copy would otherwise keep as negative timestamps.
-    const bool seek = request.rangeStartSeconds > 0.0;
-    if (seek) arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+    // No trim here, ever: a range is cut out of the stream source first
+    // (BuildStageExportTrimArguments). The output -ss 0 the cached-range export
+    // trims with drops every packet of a stream-copied video that has B-frames:
+    // Matroska stores no decode timestamps, the keyframe's comes back unknown,
+    // so the cut discards it and then every frame up to the next keyframe - on
+    // an NVENC carrier with one keyframe per job, the whole video. A ranged
+    // export came out with audio and no picture.
     arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring(), L"-map", L"0:v:0"});
     // Codec options address OUTPUT stream indices, which are known only once
     // each source stream has been kept or left out; the video is output 0.
@@ -1392,15 +1394,45 @@ std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxReque
         }
     }
     arguments.insert(arguments.end(), {L"-map_metadata", L"1", L"-map_chapters", L"1"});
-    if (seek) arguments.insert(arguments.end(), {L"-ss", L"0"});
-    if (request.rangeDurationSeconds > 0.0)
-        arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
     arguments.insert(arguments.end(), codecs.begin(), codecs.end());
     if (*container == ExportContainer::Mp4)
         arguments.insert(arguments.end(), {L"-movflags", L"+faststart", L"-f", L"mp4"});
     else
         arguments.insert(arguments.end(), {L"-f", L"matroska"});
     arguments.push_back(staging.wstring());
+    return arguments;
+}
+
+std::vector<std::wstring> BuildStageExportTrimArguments(const StageExportMuxRequest& request,
+                                                        const std::filesystem::path& staging,
+                                                        const std::vector<MediaStreamInfo>& sourceStreams)
+{
+    // The trim CachedExportRequest documents - an input seek, then an output
+    // -ss 0 that discards the pre-roll a stream copy keeps as negative
+    // timestamps - applied to the source's own streams and nothing else, so
+    // no video is ever cut by it. Matroska holds what the source carries;
+    // MP4 timed text becomes SubRip, which the last step can still turn back.
+    std::vector<std::wstring> arguments{
+        L"-hide_banner", L"-nostdin", L"-loglevel", L"error", L"-xerror", L"-y"};
+    if (request.rangeStartSeconds > 0.0)
+        arguments.insert(arguments.end(), {L"-ss", FrameRateText(request.rangeStartSeconds)});
+    arguments.insert(arguments.end(), {L"-i", request.streamSource.wstring()});
+    std::vector<std::wstring> codecs;
+    uint32_t outputIndex = 0;
+    for (const MediaStreamInfo& stream : sourceStreams) {
+        const ExportStreamAction action = ExportStreamActionFor(ExportContainer::Matroska, stream.type, stream.codec);
+        if (action == ExportStreamAction::Drop) continue;
+        arguments.insert(arguments.end(), {L"-map", L"0:" + std::to_wstring(stream.index)});
+        codecs.insert(codecs.end(), {L"-c:" + std::to_wstring(outputIndex++),
+                                     action == ExportStreamAction::ToSubrip ? L"srt" : L"copy"});
+    }
+    if (!outputIndex) return {};
+    arguments.insert(arguments.end(), {L"-map_metadata", L"0", L"-map_chapters", L"0"});
+    if (request.rangeStartSeconds > 0.0) arguments.insert(arguments.end(), {L"-ss", L"0"});
+    if (request.rangeDurationSeconds > 0.0)
+        arguments.insert(arguments.end(), {L"-t", FrameRateText(request.rangeDurationSeconds)});
+    arguments.insert(arguments.end(), codecs.begin(), codecs.end());
+    arguments.insert(arguments.end(), {L"-f", L"matroska", staging.wstring()});
     return arguments;
 }
 
@@ -1454,6 +1486,41 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
         sourceStreams = *listed;
     }
 
+    // A range is cut out of the source's streams on their own first, so the
+    // mux below never trims the video (BuildStageExportTrimArguments says why).
+    ExportStagingFile trimmed;
+    const bool ranged = request.rangeStartSeconds > 0.0 || request.rangeDurationSeconds > 0.0;
+    if (ranged && !sourceStreams.empty()) {
+        trimmed.path = ReserveExportStaging(resolved.output.parent_path());
+        if (trimmed.path.empty())
+            return {false, MaterializeError::ProcessFailed, L"A temporary export file could not be created in the selected folder."};
+        const auto trimArguments = BuildStageExportTrimArguments(resolved, trimmed.path, sourceStreams);
+        if (trimArguments.empty()) {
+            // Nothing beside the video to carry; the video's own (empty)
+            // metadata stands in for chapters that would describe the whole.
+            resolved.streamSource = resolved.video;
+            sourceStreams.clear();
+        } else {
+            const CaptureResult trim = RunCapture(ffmpeg, trimArguments, stop,
+                MediaDeadline(double(videoMetadata.duration100ns) / 10000000.0, std::chrono::hours{1}, 4.0), 64 * 1024);
+            if (trim.cancelled || stop.stop_requested()) return cancelled();
+            if (!trim.started || trim.timedOut || trim.exitCode != 0) {
+                std::wstring detail = L"The source's audio and subtitles could not be cut to the rendered range.";
+                if (const std::wstring diagnostic = utf8_text::ToWide(trim.output); !diagnostic.empty())
+                    detail += L"\n" + diagnostic;
+                return {false, MaterializeError::ProcessFailed, std::move(detail)};
+            }
+            const auto trimmedStreams = ListMediaStreams(helperDirectory, trimmed.path, stop);
+            if (stop.stop_requested()) return cancelled();
+            if (!trimmedStreams)
+                return {false, MaterializeError::ProcessFailed, L"The streams to carry into the export could not be listed."};
+            resolved.streamSource = trimmed.path;
+            sourceStreams = *trimmedStreams;
+        }
+    } else if (ranged) {
+        resolved.streamSource = resolved.video;
+    }
+
     ExportStagingFile staging;
     staging.path = ReserveExportStaging(resolved.output.parent_path());
     if (staging.path.empty())
@@ -1489,6 +1556,16 @@ MaterializeResult MuxStageExport(const std::filesystem::path& helperDirectory,
             if (stream.type == "audio" && kept) ++audioKept;
             if (stream.type == "subtitle") { ++subtitlesInSource; if (kept) ++subtitlesKept; }
         }
+        // Every frame the passes rendered, too: a cut that drops a copied
+        // video's packets still leaves its track header behind, so a file
+        // with a video stream and no picture reads as a video until played.
+        const ProbeResult renderedVideo = ProbeMedia(helperDirectory, resolved.video, stop);
+        const ProbeResult writtenVideo = ProbeMedia(helperDirectory, staging.path, stop);
+        if (stop.stop_requested()) return cancelled();
+        if (!renderedVideo.ok || !writtenVideo.ok || writtenVideo.frameCount != renderedVideo.frameCount)
+            return {false, MaterializeError::ProcessFailed,
+                L"The export carries " + std::to_wstring(writtenVideo.frameCount) + L" of the " +
+                std::to_wstring(renderedVideo.frameCount) + L" rendered frames."};
         const MediaStreamSummary carried = SummarizeMediaStreams(helperDirectory, staging.path, stop);
         if (stop.stop_requested()) return cancelled();
         if (!carried.ok)

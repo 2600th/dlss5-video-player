@@ -582,13 +582,17 @@ void StageExportCarriesSourceStreamsTest(const std::filesystem::path& helpers)
         L"-map", L"0:v", L"-map", L"1:a", L"-map", L"1:a", L"-map", L"2:s", L"-map", L"2:s",
         L"-map_metadata", L"3", L"-map_chapters", L"3", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p",
         L"-c:a:0", L"pcm_s16le", L"-c:a:1", L"aac", L"-c:s", L"srt", source.wstring()}, log));
-    // What the neural worker writes: the picture alone, the whole length or a range.
+    // What the neural worker writes: the picture alone, the whole length or a
+    // range, with B-frames and one keyframe as NVENC writes it. That shape is
+    // what an output -ss cut emptied: a ranged export of a real carrier had
+    // its audio and not one video frame.
     const auto whole = fixture.path / L"carrier-whole.mkv";
     const auto ranged = fixture.path / L"carrier-range.mkv";
-    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
-        L"-i", L"color=blue:s=64x48:r=5:d=4", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", whole.wstring()}, log));
-    CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
-        L"-i", L"color=blue:s=64x48:r=5:d=2", L"-c:v", L"libx264", L"-pix_fmt", L"yuv420p", ranged.wstring()}, log));
+    for (const auto& [carrier, duration] : {std::pair{whole, L"4"}, std::pair{ranged, L"2"}}) {
+        CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-nostdin", L"-n", L"-f", L"lavfi",
+            L"-i", std::wstring(L"testsrc2=s=64x48:r=5:d=") + duration, L"-c:v", L"libx264",
+            L"-bf", L"3", L"-g", L"600", L"-pix_fmt", L"yuv420p", carrier.wstring()}, log));
+    }
     if (!std::filesystem::exists(source) || !std::filesystem::exists(whole) || !std::filesystem::exists(ranged)) return;
     const auto sourceStreams = SummarizeMediaStreams(helpers, source, {});
     CHECK(sourceStreams.ok);
@@ -631,6 +635,16 @@ void StageExportCarriesSourceStreamsTest(const std::filesystem::path& helpers)
         CHECK(result.ok);
         if (!result.ok) continue;
         CHECK_EQ(sourceStreams.audioStreams, SummarizeMediaStreams(helpers, output, {}).audioStreams);
+        // Every rendered frame arrived, bit for bit.
+        const std::vector<std::wstring> hashes{L"-select_streams", L"v:0", L"-show_packets",
+            L"-show_entries", L"packet=data_hash", L"-show_data_hash", L"sha256", L"-of", L"csv=p=0"};
+        const auto rendered = Probe(helpers, ranged, log, hashes);
+        CHECK_EQ(size_t{10}, Count(rendered, "SHA256:"));
+        CHECK_EQ(rendered, Probe(helpers, output, log, hashes));
+        // The chapter that starts before the range is cut to it.
+        const auto chapters = Probe(helpers, output, log, {L"-show_chapters"});
+        CHECK_EQ(size_t{1}, Count(chapters, "[CHAPTER]"));
+        CHECK(chapters.find("start_time=0.000000") != std::string::npos);
         const auto pcm = fixture.path / L"exported.pcm";
         CHECK(RunTool(ffmpeg, {L"-v", L"error", L"-y", L"-i", output.wstring(), L"-map", L"0:a:0",
             L"-ac", L"1", L"-ar", L"44100", L"-f", L"s16le", pcm.wstring()}, log));
@@ -706,6 +720,33 @@ void StageExportArgumentTests()
         CHECK(picture == BuildCachedExportArguments({video, source, name}, staging, false));
     }
     CHECK(BuildStageExportMuxArguments({video, source, L"C:/out/clip.avi"}, staging, "hevc", streams).empty());
+
+    // A range never reaches the mux: an output -ss there drops a copied
+    // video's frames. It is cut from the source's streams alone, first.
+    const StageExportMuxRequest rangedRequest{video, source, L"C:/out/clip.mp4", 12.5, 3.25};
+    const auto rangedMux = BuildStageExportMuxArguments(rangedRequest, staging, "hevc", streams);
+    CHECK_EQ(rangedMux.size(), IndexOf(rangedMux, L"-ss"));
+    CHECK_EQ(rangedMux.size(), IndexOf(rangedMux, L"-t"));
+    const auto trim = BuildStageExportTrimArguments(rangedRequest, staging, streams);
+    CHECK_EQ(std::ptrdiff_t{1}, std::count(trim.begin(), trim.end(), L"-i"));
+    CHECK_EQ(source.wstring(), at(trim, L"-i"));
+    CHECK(IndexOf(trim, L"-ss") < IndexOf(trim, L"-i"));
+    CHECK_EQ(std::wstring(L"12.5"), at(trim, L"-ss"));
+    CHECK_EQ(std::wstring(L"0"), trim[IndexOf(trim, L"-ss", IndexOf(trim, L"-i")) + 1]);
+    CHECK_EQ(std::wstring(L"3.25"), at(trim, L"-t"));
+    // No video; everything Matroska holds, in source order, output indices from 0.
+    CHECK_EQ(trim.size(), IndexOf(trim, L"0:0"));
+    for (const auto* kept : {L"0:1", L"0:2", L"0:3", L"0:4", L"0:5"}) CHECK(IndexOf(trim, kept) < trim.size());
+    CHECK_EQ(trim.size(), IndexOf(trim, L"0:6"));
+    CHECK_EQ(std::wstring(L"copy"), at(trim, L"-c:0"));
+    CHECK_EQ(trim.size(), IndexOf(trim, L"-c:5"));
+    CHECK_EQ(std::wstring(L"matroska"), at(trim, L"-f"));
+    CHECK_EQ(staging.wstring(), trim.back());
+    // Timed text is converted on the way in, and a source with nothing to cut
+    // needs no step at all.
+    const auto timedTrim = BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}, {1, "subtitle", "mov_text"}});
+    CHECK_EQ(std::wstring(L"srt"), at(timedTrim, L"-c:0"));
+    CHECK(BuildStageExportTrimArguments(rangedRequest, staging, {{0, "video", "h264"}}).empty());
 }
 
 void PhotoAndAnimationTests(const std::filesystem::path& helpers)

@@ -303,11 +303,21 @@ struct StageExportMuxRequest {
 
 // The FFmpeg arguments for MuxStageExport, from what the two inputs were
 // probed to carry. `staging` is the file FFmpeg writes. Empty when the
-// output's extension names no container this export writes.
+// output's extension names no container this export writes. The range is
+// not read here: MuxStageExport cuts it out of the stream source first.
 std::vector<std::wstring> BuildStageExportMuxArguments(const StageExportMuxRequest& request,
                                                        const std::filesystem::path& staging,
                                                        std::string_view videoCodec,
                                                        const std::vector<MediaStreamInfo>& sourceStreams);
+
+// The first step of a ranged export: the source's own audio, subtitles,
+// attachments and chapters cut to the range into a Matroska `staging` file,
+// which the mux above then reads in place of the source. Empty when the
+// source carries nothing to cut. The video is never in it: an output -ss on a
+// stream-copied video with B-frames drops every frame up to its next keyframe.
+std::vector<std::wstring> BuildStageExportTrimArguments(const StageExportMuxRequest& request,
+                                                        const std::filesystem::path& staging,
+                                                        const std::vector<MediaStreamInfo>& sourceStreams);
 
 // Writes the finished export. Unlike CachedVideoExporter this REPLACES an
 // existing output: the user confirmed the overwrite in the Save dialog, or
