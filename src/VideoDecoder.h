@@ -20,6 +20,7 @@
 #include <thread>
 #include "MediaSource.h"
 #include "FrameIdentity.h"
+#include "ChildStderrTail.h"
 
 // Which hardware decode paths are known dead for a given ffprobe codec/pixel
 // profile. Defined in the .cpp: callers only ever hold one, never look inside.
@@ -210,6 +211,11 @@ public:
         bool reusedChild = false;
     };
     SeekTiming LastSeekTiming() const;
+    // What the last ffmpeg child that failed - exited non-zero, died between or
+    // inside frames, or broke its pipe - wrote to stderr, as it was logged.
+    // Empty when nothing has failed this session. For a caller that wants to
+    // say more than "could not decode".
+    std::string LastErrorOutput() const;
 
     uint32_t Width() const { return m_source.width; }
     uint32_t Height() const { return m_source.height; }
@@ -358,6 +364,10 @@ private:
     VideoReadResult ReadNextFFmpegProcessAvailable(VideoFrame& out, std::stop_token stop,
                                                     bool block = false);
     VideoReadResult ClassifyFFmpegEnd(DWORD exitCode);
+    // Logs the running child's stderr tail once, under `what`, and keeps it for
+    // LastErrorOutput(). `waitMs` bounds the wait for the drain to reach the
+    // end of a child that has exited; a live child is not waited for.
+    void ReportChildFailure(const std::string& what, DWORD waitMs = 250);
     bool TryNextFFmpegAcceleration(DWORD exitCode);
     void StopFFmpeg(DWORD waitTimeout = 500);
     // Forward seeks shorter than a restart are served by the running child.
@@ -370,7 +380,9 @@ private:
     void FrameQueueLoop(std::stop_token stop);
 
     bool OpenMediaFoundation(const std::wstring& path);
-    bool ReadNextMediaFoundation(VideoFrame& out);
+    // EndOfStream only for the reader's own end-of-stream flag: a failed
+    // ReadSample is an Error, not the end of the file.
+    VideoReadResult ReadNextMediaFoundation(VideoFrame& out);
 
     std::wstring FindTool(const wchar_t* exeName) const;
     bool RunCapture(const std::wstring& exe, const std::wstring& arguments,
@@ -386,6 +398,10 @@ private:
     HANDLE m_ffmpegProcess = nullptr;
     HANDLE m_ffmpegStdout = nullptr;
     HANDLE m_ffmpegJob = nullptr;
+    // The running child's stderr. Replaced with the child and stopped with it.
+    std::unique_ptr<ChildStderrTail> m_ffmpegStderr;
+    mutable std::mutex m_errorOutputMutex;
+    std::string m_lastErrorOutput;
     // Frames this child has emitted, and the true CFR index of its first one.
     // The child emits headerless rawvideo, so the pair is the only position the
     // decoder has - and a forward seek that keeps the child running has to know

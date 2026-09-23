@@ -148,6 +148,11 @@ void VideoDecoder::Swap(VideoDecoder& other) noexcept {
     // enumerated here one by one and were the ones left behind.
     swap(m_source,other.m_source);
     swap(m_ffmpegExe,other.m_ffmpegExe);swap(m_ffprobeExe,other.m_ffprobeExe);swap(m_ffmpegProcess,other.m_ffmpegProcess);swap(m_ffmpegStdout,other.m_ffmpegStdout);swap(m_ffmpegJob,other.m_ffmpegJob);
+    swap(m_ffmpegStderr,other.m_ffmpegStderr);
+    if(this!=&other){
+        std::scoped_lock errorLock(m_errorOutputMutex,other.m_errorOutputMutex);
+        swap(m_lastErrorOutput,other.m_lastErrorOutput);
+    }
     swap(m_ffmpegEmittedFrames,other.m_ffmpegEmittedFrames);swap(m_ffmpegSeekBase100ns,other.m_ffmpegSeekBase100ns);swap(m_ffmpegAcceleration,other.m_ffmpegAcceleration);swap(m_sourceKind,other.m_sourceKind);
     swap(m_ffmpegSpawnFirstFrame,other.m_ffmpegSpawnFirstFrame);swap(m_ffmpegFirstSourceFrame,other.m_ffmpegFirstSourceFrame);
     swap(m_restartFirstFrameMs,other.m_restartFirstFrameMs);swap(m_drainMsPerFrame,other.m_drainMsPerFrame);
@@ -327,12 +332,17 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
 
+    // Why a probe failed is on its stderr ("No such file", "Invalid data found
+    // when processing input"); only the exit code used to reach the log.
+    ChildStderrTail errors;
+    HANDLE errorPipe = errors.Open(sa);
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = nul;
     si.hStdOutput = writePipe;
-    si.hStdError = nul;
+    si.hStdError = errorPipe ? errorPipe : nul;
 
     PROCESS_INFORMATION pi{};
     std::wstring command = Quote(exe) + L" " + arguments;
@@ -352,6 +362,7 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
                                    TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
+    errors.Start(ok != FALSE);
 
     if (!ok) {
         CloseHandle(readPipe);
@@ -415,6 +426,13 @@ bool VideoDecoder::RunCapture(const std::wstring& exe, const std::wstring& argum
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     if (exitCode) *exitCode = code;
+    // Never for a probe the caller cancelled: nothing failed there. A timed-out
+    // one did fail, and its stderr may say on what.
+    if (!cancelled && (timedOut || pipeError || overflowed || code != 0)) {
+        const std::string text = ChildStderrTail::ForLog(errors.Collect(250), "  ffprobe: ");
+        if (!text.empty()) LOG("ffprobe exitCode=" << code << " wrote to stderr:\n" << text);
+    }
+    errors.Stop();
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     CloseHandle(job);
@@ -756,16 +774,18 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     // kills it once the new one is spawned, so its death overlaps the new
     // child's container reopen instead of delaying it.
     struct HandedOverChild {
-        VideoDecoder* owner;HANDLE process,job,stdoutRead;
+        VideoDecoder* owner;HANDLE process,job,stdoutRead;std::unique_ptr<ChildStderrTail> stderrTail;
         ~HandedOverChild(){
             const auto started=std::chrono::steady_clock::now();
             StopFFmpegChild(process,job,stdoutRead,0);
+            // After the kill: a drain parked on a live child is unparked, not awaited.
+            stderrTail.reset();
             if(owner->m_seekTimingPending){
                 std::scoped_lock timingLock(owner->m_seekTimingMutex);
                 owner->m_seekTiming.teardownMs=ElapsedMs(started);
             }
         }
-    } handedOver{this,m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout};
+    } handedOver{this,m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout,std::move(m_ffmpegStderr)};
     m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
     m_pendingFrame.clear();m_pendingFrameBytes=0;
     seekSeconds = std::max(0.0, seekSeconds);
@@ -821,12 +841,17 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (nul == INVALID_HANDLE_VALUE) nul = nullptr;
 
+    // `-loglevel error` keeps this to the lines that say why a decode failed,
+    // which were going to NUL; they are logged when the child fails.
+    auto stderrTail = std::make_unique<ChildStderrTail>();
+    HANDLE errorPipe = stderrTail->Open(sa);
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = nul;
     si.hStdOutput = writePipe;
-    si.hStdError = nul;
+    si.hStdError = errorPipe ? errorPipe : nul;
 
     std::wostringstream args;
     args << L"-hide_banner -loglevel error -nostdin -threads 0 ";
@@ -876,6 +901,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
                                    TRUE, CREATE_NO_WINDOW|CREATE_SUSPENDED, nullptr, nullptr, &si, &pi);
     CloseHandle(writePipe);
     if (nul) CloseHandle(nul);
+    stderrTail->Start(ok != FALSE);
 
     if (!ok) {
         LOG("CreateProcess(ffmpeg) failed winerr=" << GetLastError());
@@ -907,6 +933,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
     m_ffmpegProcess = pi.hProcess;
     m_ffmpegStdout = readPipe;
     m_ffmpegJob = job;
+    m_ffmpegStderr = std::move(stderrTail);
     m_ffmpegEmittedFrames = 0;
     m_ffmpegSeekBase100ns = static_cast<int64_t>(seekSeconds * 10000000.0);
     m_ffmpegSpawnFirstFrame = m_ffmpegFirstSourceFrame = FirstFrameAtOrAfter(seekSeconds,m_source.fps);
@@ -925,6 +952,7 @@ bool VideoDecoder::StartFFmpeg(double seekSeconds, std::optional<FFmpegAccelerat
 
 void VideoDecoder::StopFFmpeg(DWORD waitTimeout) {
     StopFFmpegChild(m_ffmpegProcess,m_ffmpegJob,m_ffmpegStdout,waitTimeout);
+    m_ffmpegStderr.reset();
     m_ffmpegProcess=nullptr;m_ffmpegJob=nullptr;m_ffmpegStdout=nullptr;
     m_pendingFrame.clear();m_pendingFrameBytes=0;
 }
@@ -1054,6 +1082,10 @@ bool VideoDecoder::TryNextFFmpegAcceleration(DWORD exitCode) {
     const FFmpegAcceleration next = m_ffmpegAcceleration == FFmpegAcceleration::Cuda ?
         FFmpegAcceleration::D3D11Va : FFmpegAcceleration::Software;
     const double resumeSeconds = FFmpegHeadSeconds();
+    // The hardware path's own stderr is the only record of WHY it could not
+    // decode this codec - the memo above remembers that it could not.
+    ReportChildFailure("FFmpeg " + std::string(m_ffmpegAcceleration == FFmpegAcceleration::Cuda ? "CUDA" : "D3D11VA")
+        + " decode exited with code " + std::to_string(exitCode));
     LOG("FFmpeg hardware path exited with code " << exitCode << "; trying " <<
         (next == FFmpegAcceleration::D3D11Va ? "D3D11VA" : "software") << " fallback.");
     if (!StartFFmpeg(resumeSeconds, next)) return false;
@@ -1089,9 +1121,30 @@ bool VideoDecoder::ReadNextFFmpeg(VideoFrame& out) {
 }
 
 VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
-    if (!m_pendingFrameBytes) return VideoReadResult::EndOfStream;
     const double completedSeconds = FFmpegHeadSeconds();
     const double endTolerance = std::max(0.05, 1.5 / std::max(1.0, m_source.fps));
+    if (!m_pendingFrameBytes) {
+        if (exitCode == 0) {
+            // A clean exit is the end of the file as far as the decoder can
+            // tell, even a long way short of the declared duration - containers
+            // overstate it - but a truncated or damaged file lands here too,
+            // and its reason is on stderr.
+            if (m_source.durationSec > 0.0 && completedSeconds + std::max(2.0, endTolerance) < m_source.durationSec)
+                ReportChildFailure("FFmpeg ended cleanly at " + std::to_string(completedSeconds) +
+                                   " s of a declared " + std::to_string(m_source.durationSec) + " s");
+            return VideoReadResult::EndOfStream;
+        }
+        // A child that exits non-zero between two frames used to read as the
+        // end of the file, and playback stopped as if it had finished. Only
+        // where the file really ends - or where nobody knows where it ends -
+        // is that still the answer.
+        const bool atDeclaredEnd = m_source.durationSec > 0.0 &&
+                                   completedSeconds + endTolerance >= m_source.durationSec;
+        ReportChildFailure("FFmpeg exited with code " + std::to_string(exitCode) + " after " +
+                           std::to_string(m_ffmpegEmittedFrames) + " frames (" + std::to_string(completedSeconds) +
+                           " s of " + std::to_string(m_source.durationSec) + " s)");
+        return atDeclaredEnd ? VideoReadResult::EndOfStream : VideoReadResult::Error;
+    }
     if (m_sourceKind == MediaSourceKind::YouTube && exitCode == 0 && m_source.durationSec > 0.0 &&
         completedSeconds + endTolerance >= m_source.durationSec) {
         LOG("Discarding an incomplete trailing raw frame after the expected YouTube duration.");
@@ -1100,7 +1153,25 @@ VideoReadResult VideoDecoder::ClassifyFFmpegEnd(DWORD exitCode) {
     }
     LOG("FFmpeg ended in the middle of a raw video frame. exitCode="<<exitCode
         <<" emittedFrames="<<m_ffmpegEmittedFrames<<" pendingBytes="<<m_pendingFrameBytes);
+    ReportChildFailure("FFmpeg ended mid-frame with code " + std::to_string(exitCode));
     return VideoReadResult::Error;
+}
+
+void VideoDecoder::ReportChildFailure(const std::string& what, DWORD waitMs) {
+    if (!m_ffmpegStderr || !m_ffmpegStderr->TakeReport()) return;
+    const std::string raw = m_ffmpegStderr->Collect(waitMs);
+    if (raw.empty()) {
+        LOG(what << "; ffmpeg wrote nothing to stderr.");
+        return;
+    }
+    LOG(what << "; ffmpeg's stderr ended with:\n" << ChildStderrTail::ForLog(raw, "  ffmpeg: "));
+    std::scoped_lock lock(m_errorOutputMutex);
+    m_lastErrorOutput = ChildStderrTail::ForLog(raw, "");
+}
+
+std::string VideoDecoder::LastErrorOutput() const {
+    std::scoped_lock lock(m_errorOutputMutex);
+    return m_lastErrorOutput;
 }
 
 VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std::stop_token stop,bool block) {
@@ -1124,7 +1195,10 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     DWORD available=0;
     for(;;){
         if(!PeekNamedPipe(m_ffmpegStdout,nullptr,0,nullptr,&available,nullptr)){
-            if(GetLastError()!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+            if(const DWORD peekError=GetLastError();peekError!=ERROR_BROKEN_PIPE){
+                ReportChildFailure("Peeking ffmpeg's output failed winerr="+std::to_string(peekError),0);
+                return VideoReadResult::Error;
+            }
             // A child can close stdout just before its process handle becomes signaled.
             // Treat that short interval as an empty pipe so the existing nonblocking
             // exit/fallback path below observes the eventual exit code.
@@ -1157,7 +1231,10 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
                 // The child closing stdout surfaces here as ERROR_BROKEN_PIPE on this pipe
                 // type (not a TRUE/got==0 return); let the child-exit classification below
                 // decide what that means instead of reporting it as a read Error.
-                if(err!=ERROR_BROKEN_PIPE)return VideoReadResult::Error;
+                if(err!=ERROR_BROKEN_PIPE){
+                    ReportChildFailure("Reading ffmpeg's output failed winerr="+std::to_string(err),0);
+                    return VideoReadResult::Error;
+                }
                 break;
             }
             if(!got){
@@ -1176,7 +1253,10 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
         const DWORD want=static_cast<DWORD>(std::min<size_t>({frameBytes-m_pendingFrameBytes,static_cast<size_t>(available),size_t{16u<<20}}));
         DWORD got=0;
         ++m_frameReadCalls;
-        if(!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr))return VideoReadResult::Error;
+        if(!ReadFile(m_ffmpegStdout,m_pendingFrame.data()+m_pendingFrameBytes,want,&got,nullptr)){
+            ReportChildFailure("Reading ffmpeg's output failed winerr="+std::to_string(GetLastError()),0);
+            return VideoReadResult::Error;
+        }
         if(!got)break;
         m_pendingFrameBytes+=got;m_lastFrameByte=std::chrono::steady_clock::now();
         if(m_seekTimingPending){
@@ -1189,7 +1269,8 @@ VideoReadResult VideoDecoder::ReadNextFFmpegProcessAvailable(VideoFrame& out,std
     if(m_pendingFrameBytes<frameBytes){
         if(stop.stop_requested())return VideoReadResult::Cancelled;
         if(m_sourceKind==MediaSourceKind::YouTube&&std::chrono::steady_clock::now()-m_lastFrameByte>=m_networkStallTimeout){
-            LOG("FFmpeg YouTube stream stalled before a complete frame.");StopFFmpeg(0);
+            LOG("FFmpeg YouTube stream stalled before a complete frame.");
+            ReportChildFailure("FFmpeg's stream stalled",0);StopFFmpeg(0);
             PublishSeekTiming(false);return VideoReadResult::Stalled;
         }
         if(m_ffmpegProcess&&WaitForSingleObject(m_ffmpegProcess,0)==WAIT_OBJECT_0){
@@ -1468,8 +1549,8 @@ bool VideoDecoder::OpenMediaFoundation(const std::wstring& path) {
     return m_source.width > 0 && m_source.height > 0;
 }
 
-bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
-    if (!m_reader) return false;
+VideoReadResult VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
+    if (!m_reader) return VideoReadResult::Error;
 
     for (;;) {
         DWORD streamIndex = 0, flags = 0;
@@ -1479,9 +1560,13 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
                                           &streamIndex, &flags, &timestamp, &sample);
         if (FAILED(hr)) {
             LOG("ReadSample failed hr=0x" << std::hex << hr);
-            return false;
+            return VideoReadResult::Error;
         }
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
+        if (flags & MF_SOURCE_READERF_ERROR) {
+            LOG("Media Foundation reported a stream error.");
+            return VideoReadResult::Error;
+        }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return VideoReadResult::EndOfStream;
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
             LOG("Media Foundation video media type changed; continuing.");
             continue;
@@ -1523,19 +1608,19 @@ bool VideoDecoder::ReadNextMediaFoundation(VideoFrame& out) {
         out.frameNumber = static_cast<uint64_t>(std::llround(static_cast<double>(timestamp) * m_source.fps * 1e-7));
         out.sourceGeneration = m_sourceGeneration;
         out.layout = VideoPixelLayout::Bgra; // Media Foundation's reader only ever hands out BGRA.
-        return true;
+        return VideoReadResult::FrameReady;
     }
 }
 
 bool VideoDecoder::ReadNext(VideoFrame& out) {
     if (m_backend == Backend::FFmpeg) return ReadNextFFmpeg(out);
-    if (m_backend == Backend::MediaFoundation) return ReadNextMediaFoundation(out);
+    if (m_backend == Backend::MediaFoundation) return ReadNextMediaFoundation(out) == VideoReadResult::FrameReady;
     return false;
 }
 
 VideoReadResult VideoDecoder::ReadNextAvailable(VideoFrame& out,std::stop_token stop) {
     if(m_backend==Backend::FFmpeg)return ReadNextFFmpegAvailable(out,stop);
-    if(m_backend==Backend::MediaFoundation)return ReadNextMediaFoundation(out)?VideoReadResult::FrameReady:VideoReadResult::EndOfStream;
+    if(m_backend==Backend::MediaFoundation)return ReadNextMediaFoundation(out);
     return VideoReadResult::Error;
 }
 
@@ -1585,9 +1670,7 @@ VideoReadResult VideoDecoder::ReadNextBlocking(VideoFrame& out, std::stop_token 
             SleepPreciseMs(2);
         }
     }
-    if (m_backend == Backend::MediaFoundation) {
-        return ReadNextMediaFoundation(out) ? VideoReadResult::FrameReady : VideoReadResult::EndOfStream;
-    }
+    if (m_backend == Backend::MediaFoundation) return ReadNextMediaFoundation(out);
     return VideoReadResult::Error;
 }
 
@@ -1705,7 +1788,12 @@ VideoDecoder::SeekReuse VideoDecoder::ReuseRunningChildForSeek(double seconds)
 }
 
 bool VideoDecoder::SeekSeconds(double seconds) {
-    seconds = std::clamp(seconds, 0.0, std::max(0.0, m_source.durationSec));
+    if (!std::isfinite(seconds)) return false;
+    // An unknown duration is 0.0, and clamping to [0, 0] sent every seek in a
+    // browser-recorded WebM - which declares no duration - back to the start.
+    // Past the real end, the child simply ends: EndOfStream, not a wrong frame.
+    seconds = std::max(0.0, seconds);
+    if (m_source.durationSec > 0.0) seconds = std::min(seconds, m_source.durationSec);
     if (m_backend == Backend::FFmpeg) {
         const auto seekStarted=std::chrono::steady_clock::now();
         const bool restartQueue=m_frameQueueEnabled;

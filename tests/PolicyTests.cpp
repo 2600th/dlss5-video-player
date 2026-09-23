@@ -1,6 +1,7 @@
 #include "CacheEvictionPolicy.h"
 #include "VariableFrameRatePolicy.h"
 #include "DroppedFilesPolicy.h"
+#include "Log.h"
 #include "AudioFadePolicy.h"
 #include "AudioTrackPolicy.h"
 #include "SourceDigestMemo.h"
@@ -59,6 +60,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <iterator>
 #include <memory>
 #include <stop_token>
 #include <sstream>
@@ -6221,6 +6223,98 @@ void video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_t
     CHECK(plain->PixelLayout()==VideoPixelLayout::Bgra);
 }
 
+// Only the tail is kept, whatever the child writes, and it reaches the log as
+// printable lines with the helper's name in front of each.
+void child_stderr_tail_keeps_the_last_bytes_as_log_lines_test()
+{
+    std::string tail;
+    for(int index=0;index<100;++index)ChildStderrTail::Append(tail,std::string(100,char('a'+index%26))+"\n",256);
+    CHECK(tail.size()<=512);
+    CHECK(tail.ends_with(std::string(100,char('a'+99%26))+"\n"));
+    ChildStderrTail::Append(tail,std::string(1000,'z'),256);
+    CHECK_EQ(size_t{256},tail.size());
+    CHECK_EQ(std::string(256,'z'),tail);
+
+    const std::string text=ChildStderrTail::ForLog("first\r\n\n  \n\x1b[31mred\x1b[0m\nlast",">> ");
+    CHECK_EQ(std::string(">> first\n>> [31mred [0m\n>> last"),text);
+    CHECK(ChildStderrTail::ForLog("\n\n","x").empty());
+    // Only the last `capacity` bytes, even of text handed over whole.
+    CHECK_EQ(std::string("p: 6789"),ChildStderrTail::ForLog("0123456789","p: ",4));
+}
+
+// ffmpeg and ffprobe wrote stderr to NUL, so a decode that died mid-file left
+// nothing to diagnose it by - and a child that exited non-zero between two
+// frames read as the end of the file, so playback stopped as if finished.
+void video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test()
+{
+    MediaFixture fixture;
+    const auto drain=[](VideoDecoder& decoder,int& frames){
+        VideoFrame frame;VideoReadResult result=VideoReadResult::FrameReady;
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds{10};
+        while(std::chrono::steady_clock::now()<deadline){
+            result=decoder.ReadNextBlocking(frame);
+            if(result!=VideoReadResult::FrameReady)break;
+            ++frames;
+        }
+        return result;
+    };
+    {
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"stderrcase_diesmid",MediaSourceKind::LocalFile));
+        int frames=0;
+        CHECK(drain(*decoder,frames)==VideoReadResult::Error);
+        CHECK_EQ(3,frames);
+        CHECK(decoder->LastErrorOutput().find("Invalid data found when processing input (stderr-marker)")!=std::string::npos);
+        // The refused hardware paths said why too; the last failure is the one kept.
+        CHECK(decoder->LastErrorOutput().find("hwaccel unavailable")==std::string::npos);
+    }
+    {
+        // The same exit where the file ends is the end of the file.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"stderrcase_diesend",MediaSourceKind::LocalFile));
+        int frames=0;
+        CHECK(drain(*decoder,frames)==VideoReadResult::EndOfStream);
+        CHECK_EQ(3,frames);
+        CHECK(decoder->LastErrorOutput().find("stderr-marker")!=std::string::npos);
+    }
+    {
+        // 256 KiB of stderr ahead of the frames: an undrained pipe would have
+        // blocked the child on its first few KiB and no frame would arrive.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(decoder->Open(L"stderrcase_chatty",MediaSourceKind::LocalFile));
+        int frames=0;
+        CHECK(drain(*decoder,frames)==VideoReadResult::EndOfStream);
+        CHECK_EQ(5,frames);
+        // A clean end that is not early is not a failure, so nothing it wrote
+        // is kept; what is kept is the refused hardware path's reason.
+        CHECK(decoder->LastErrorOutput().find("chatty")==std::string::npos);
+        CHECK(decoder->LastErrorOutput().find("hwaccel unavailable")!=std::string::npos);
+    }
+    {
+        // A probe's reason reaches the log beside its exit code.
+        auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+        CHECK(!decoder->OpenMetadata(L"stderrcase_probefails",MediaSourceKind::LocalFile));
+        std::ifstream log(Log::Path(),std::ios::binary);
+        const std::string written((std::istreambuf_iterator<char>(log)),std::istreambuf_iterator<char>());
+        CHECK(written.find("  ffprobe: probefails: No such file or directory (probe-marker)")!=std::string::npos);
+    }
+}
+
+// A source with no duration (browser-recorded WebM) reported 0.0, and every
+// seek was clamped to [0, 0] - straight back to the first frame.
+void video_decoder_seeks_a_source_with_an_unknown_duration_test()
+{
+    MediaFixture fixture;
+    auto decoder=VideoDecoderTestAccess::Create(fixture.directory);
+    CHECK(decoder->Open(L"seekreuse_noduration",MediaSourceKind::LocalFile));
+    CHECK_EQ(0.0,decoder->DurationSeconds());
+    CHECK(decoder->SeekSeconds(12.0));
+    const VideoFrame frame=read_one_frame(*decoder);
+    CHECK_EQ(uint32_t{360},stamped_frame_index(frame));
+    CHECK_EQ(int64_t{120000000},frame.timestamp100ns);
+    CHECK(!decoder->SeekSeconds(std::numeric_limits<double>::quiet_NaN()));
+}
+
 // A drop of several files opened whatever Explorer listed first - a folder, a
 // subtitle - and silently discarded the rest.
 void dropped_files_open_the_first_supported_file_and_count_the_rest_test()
@@ -7338,6 +7432,15 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         if(all.find(L"largeburst")!=std::wstring::npos){
             std::cout<<geometry(1024,1024,"1:1")<<color("bt709","tv","bt709","bt709")<<std::flush;return 0;
         }
+        if(all.find(L"stderrcase_probefails")!=std::wstring::npos){
+            std::cerr<<"probefails: No such file or directory (probe-marker)\n"<<std::flush;return 1;
+        }
+        if(all.find(L"stderrcase_diesend")!=std::wstring::npos){std::cout<<geometry(2,2,"1:1","0.1")<<std::flush;return 0;}
+        if(all.find(L"stderrcase_chatty")!=std::wstring::npos){std::cout<<geometry(2,2,"1:1","0.166667")<<std::flush;return 0;}
+        // A browser-recorded WebM: no duration anywhere.
+        if(all.find(L"noduration")!=std::wstring::npos){
+            std::cout<<"width=2\nheight=2\ndisplay_aspect_ratio=1:1\nsample_aspect_ratio=1:1\navg_frame_rate=30/1\nr_frame_rate=30/1\nduration=N/A\n"<<std::flush;return 0;
+        }
         // Declared geometry at and past the ceilings a header is held to.
         if(all.find(L"geomcap_")!=std::wstring::npos){
             if(all.find(L"geomcap_huge")!=std::wstring::npos)std::cout<<geometry(20000,20000,"1:1");
@@ -7454,6 +7557,30 @@ int run_fake_media_child(int argc,wchar_t* argv[])
         const std::vector<char> frame(rawFrameBytes(1920,1080),'z');
         std::cout.write(frame.data(),static_cast<std::streamsize>(frame.size()));
         std::cout.flush();return 0;
+    }
+    // stderr scenarios. Hardware paths refuse at once, so the software child is
+    // the one whose ending is judged. diesmid/diesend write three 2x2 frames
+    // and exit 1 with a reason on stderr - in the middle of a 30 s file and
+    // right at the end of a 0.1 s one. chatty writes far more stderr than a
+    // pipe holds before its frames: nothing may stall on it.
+    if(all.find(L"stderrcase_")!=std::wstring::npos){
+        if(all.find(L"-hwaccel")!=std::wstring::npos){std::cerr<<"hwaccel unavailable in this test\n";return 7;}
+        const HANDLE out=GetStdHandle(STD_OUTPUT_HANDLE);
+        const auto frames=[&](int count){
+            for(int index=0;index<count;++index){
+                unsigned char frame[16]{};frame[0]=static_cast<unsigned char>(index);
+                DWORD written=0;if(!WriteFile(out,frame,sizeof(frame),&written,nullptr))return;
+            }
+        };
+        if(all.find(L"stderrcase_chatty")!=std::wstring::npos){
+            const std::string noise(1024,'n');
+            for(int index=0;index<256;++index)std::cerr<<noise<<'\n';
+            std::cerr<<"chatty-last-line\n"<<std::flush;
+            frames(5);return 0;
+        }
+        frames(3);
+        std::cerr<<"stream 0: Invalid data found when processing input (stderr-marker)\n"<<std::flush;
+        return 1;
     }
     if(all.find(L"exit")!=std::wstring::npos)return 7;
     if(all.find(L"partialend")!=std::wstring::npos){std::cout.write("1234567890abcdef1234567890abcdef12345678",40);std::cout.flush();return 0;}
@@ -9497,6 +9624,9 @@ constexpr test_support::TestCase kCases[] = {
     TEST_CASE(video_decoder_open_metadata_decides_the_playback_layout_without_a_decoder_test),
     TEST_CASE(video_decoder_bounds_declared_geometry_and_known_rates_test),
     TEST_CASE(dropped_files_open_the_first_supported_file_and_count_the_rest_test),
+    TEST_CASE(child_stderr_tail_keeps_the_last_bytes_as_log_lines_test),
+    TEST_CASE(video_decoder_reports_child_stderr_and_a_mid_file_failure_is_not_the_end_test),
+    TEST_CASE(video_decoder_seeks_a_source_with_an_unknown_duration_test),
     TEST_CASE(video_decoder_open_sequential_refuses_nv12_for_an_unconvertible_source_test),
     TEST_CASE(video_decoder_open_sequential_keeps_nv12_for_a_declared_source_test),
     TEST_CASE(video_decoder_swap_carries_probe_derived_state_test),

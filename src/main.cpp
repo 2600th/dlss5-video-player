@@ -1377,6 +1377,19 @@ public:
         // win a race it doubles the length of. See PlaybackCadence.h for the
         // measured collapse - 0.31 fps presented, 203 discarded in 11.6 s - and
         // for the two levers that replace it.
+        // A local read that stops for any reason but the end of the file says so.
+        // ReadNext's bool made a decode that died mid-file look exactly like the
+        // last frame: playback stopped as if finished, with nothing on screen.
+        const auto readLocal=[this]{
+            const VideoReadResult read=m_decoder.ReadNextBlocking(m_next);
+            if(read==VideoReadResult::FrameReady)return true;
+            if(read==VideoReadResult::Error||read==VideoReadResult::Stalled){
+                LOG("Playback stopped: decoding failed after "<<m_currentSec<<" s (result="<<static_cast<int>(read)<<").");
+                m_sourceNotice=L"Playback stopped: the video could not be decoded past "+
+                    FormatTimecode(static_cast<int64_t>(m_currentSec*1e7),m_decoder.FrameRate(),false)+L" (see the log)";
+            }
+            return false;
+        };
         if(m_cachedPlayback){
             if(!CadenceAdvanceCachedFrame(now,frameDur))return;
         }else{
@@ -1385,7 +1398,7 @@ public:
             if(now-due <= playback_timing::LateFrameThreshold(frameDur)) break;
             VideoFrame skip=std::move(m_next); (void)skip; ++m_droppedFrames; dropped=true;
             if(NetworkPlayback()){if(ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::BeforeRender)!=NetworkReadAction::UseFrame)break;}
-            else if(!m_decoder.ReadNext(m_next)){m_haveNext=false;break;}
+            else if(!readLocal()){m_haveNext=false;break;}
         }
         }
         if(dropped){m_guides.Reset();m_guideReset=true;m_dlssReset=true;}
@@ -1407,7 +1420,7 @@ public:
         m_currentSec=due; m_guideReset=false; m_dlssReset=false;
         if(m_cachedPlayback)m_haveNext=false;
         else if(NetworkPlayback())ApplyNetworkRead(m_decoder.ReadNextAvailable(m_next),NetworkReadPosition::AfterRender);
-        else if(!m_decoder.ReadNext(m_next)){m_haveNext=false;m_playing=false;Audio().Pause(true);}
+        else if(!readLocal()){m_haveNext=false;m_playing=false;Audio().Pause(true);}
         InvalidatePlaybackProgress();
         UpdateCachedStatus();
     }
