@@ -1,2282 +1,1549 @@
 # Improvement task list
 
-_Audited against 0.24.0 (dec9a87) on 2026-09-20._
+_Audited against 0.25.0 (23d71d9) on 2026-09-23._
 
-Findings from a six-agent review: two competitive/baseline web surveys, three
-code audits (correctness, performance, build & release), one duplication sweep.
+Open work only, highest priority first. Completed items are removed rather
+than ticked; what shipped is in `CHANGELOG.md` and git history. When a task
+lands, delete it from this file in the same change.
 
-**Confidence marks on every task:**
+Sources: three code audits (playback/audio/UI, neural helper/cache/runtime,
+build/CI/release/docs), two web surveys (pipeline and competitive landscape;
+player UX and comparison tooling), and the open items carried over from the
+2026-09-20 list after re-checking them against current source.
+
+## How to read it
 
 | Mark | Meaning |
 | --- | --- |
-| ✅ | Read back against source and confirmed during the review |
-| 🔍 | Audit finding, cited to file:line, not independently re-read |
+| **P0** | A bug users hit, or a published promise that is broken. Fix before the next release. |
+| **P1** | Reliability, quality-neutral performance, CI and docs. The next few weeks. |
+| **P2** | High-value features, from the research. Each is justified on its own. |
+| **P3** | Large or strategic, or waiting on something outside this repo. |
+| ✅ | Re-read against source at 23d71d9 while this list was written |
+| 🔍 | Audit finding cited to file:line, not independently re-read |
 
-**Checkbox state:** `[x]` done, `[~]` partly done, `[ ]` not started, on branch
-`fix/tier1-correctness-and-perf`. The nested `- [ ]` boxes inside a task are
-audited against source as of 2026-09-21, so a `[~]` heading tells you exactly
-which sub-items are left. All **24** tests - 13 portable, 10 `gpu` and 1
-`audio` - pass at every commit, with two `gpu` skips on Ada hardware that are
-explained in 2.14.
+**Impact** names what a task changes: **Player** (what the viewer sees and
+feels), **Pipeline** (render, cache, export, helper), **Release** (packaging,
+CI, supply chain), **Site** or **Docs**. File references are relative to
+`src/` unless a path is given.
 
-**Measured on this machine** (2560x1440 23.976 fps, plain playback), before
-and after the branch. These are **round one** only; round two's measurements
-are in the last section:
-
-| | main (ee1f393) | branch |
-| --- | ---: | ---: |
-| CPU during playback | 113% of one core | 9.5-17.8% |
-| Guide work per frame, SR off | 0.84 ms | 0.0001 ms |
-| NV12 comparison conversion | 66.11 ms/frame | 5.51 ms/frame |
-| Full clean rebuild, all targets | 103.2 s | 52.4 s |
-| Presented vs source | not reported | 23.83-24.43 of 23.9794, dropped=0 |
-
----
+**Baseline at this audit.** Release build clean with **0 warnings at /W4**.
+CTest: **26 tests, 24 pass, 2 expected skips** on an RTX 4080 SUPER
+(`DlssgEvaluateSmoke` needs Blackwell; `FrameGenerationSmoke`'s clip is not
+fetchable), 175 s. `site/test.ps1`: 31 pass.
 
 ## The rule that shapes this list
 
 > **Quality is the default. It is never traded for speed without the user
 > asking.**
 
-Every optimisation below is sorted into one of two piles.
-
-**Quality-neutral** — pure waste. Redundant copies, busy-spins, dead GPU
-passes, allocation churn, polling. Output is byte-identical.
-→ **Ship unconditionally. No setting, no prompt.**
-
-**Quality-affecting** — processing scale, NVENC preset, multi-pass, temporal
-blend.
-→ **Named ladder. Default to the near-best rung. Print the measured cost next
-to each rung. Label the default as the recommended one.**
-
-Good news: **the entire performance section is quality-neutral.** ~5-9 ms/frame
-at 1440p with identical pixels.
-
-One blocker sits directly on this rule and is listed first in Tier 1.
+- **Quality-neutral** work (copies, spins, polling, allocation churn) ships
+  unconditionally, with byte-identical output.
+- **Quality-affecting** work (processing scale, encoder settings, temporal
+  blend) ships as a named ladder whose default is the near-best rung, with
+  the measured cost printed beside each rung. A default never moves down the
+  ladder to buy speed.
+- Anything that changes output pixels becomes a cache-key term.
 
 ---
 
-## Contents
-
-| Tier | Theme | Tasks | When |
-| --- | --- | --- | --- |
-| [1](#tier-1--now) | Correctness + free wins | 12 | Days |
-| [2](#tier-2--next) | Perf, build, tests | 23 | Weeks |
-| [3](#tier-3--strategic) | Features and positioning | 15 | Months |
-| [4](#tier-4--parked) | Deliberately not doing | 8 | Never |
-
-**Do not re-suggest:** [What is already strong](#what-is-already-strong).
-
----
----
-
-# Tier 1 — Now
-
-Correctness bugs and zero-cost wins. Nothing here changes output quality.
-
----
-
-### [x] 1.1 · Cache key is missing two settings that change the pixels
-
-`BLOCKER` · ✅ verified · **effort: S** · **impact: high**
-
-**This blocks every quality feature below.** Fix it first.
-
-**Where** — `src/NeuralCache.cpp:573`
-
-```cpp
-std::string NeuralRenderPipelineIdentity(bool gpuSourceConversion)
-{
-    std::string pipeline =
-        "DLAA|strict-timeline-v3|armed-inline-interception-v3|bt709-export-v1";
-    if (gpuSourceConversion) pipeline += "|nv12-source-v1";
-    return pipeline;
-}
-```
-
-**What's wrong** — only the *source* conversion is keyed. Two other settings
-reach the render at `src/main.cpp:5791` and both change the encoded pixels:
-
-- `nvencPreset` — picks the NVENC preset. Your own tooltip quantifies it:
-  *"p7 takes twice the encode time of p5 and buys 0.12 VMAF."*
-- `gpuColorConversion` — picks between a GPU 2x2 box chroma downsample and
-  ffmpeg's CPU conversion. Two different filters over the neural output.
-
-**Failure** — set Encoder settings to p7 ("Applies to the next render"),
-re-render the same range → cache hit → you get the p5 file forever. The
-validity re-check at `main.cpp:5735` tests the same terms, so it agrees.
-
-**Fix** — append both to `NeuralRenderPipelineIdentity`, bump the key schema
-from `"2"` to `"3"` at `NeuralCache.cpp:585`.
-
----
-
-### [x] 1.2 · Heap over-read of ~5 MB on the DLSS Upscaling toggle
-
-`CRITICAL` · ✅ verified · **effort: XS** · **impact: crash**
-
-**Where** — `src/main.cpp:3691`
-
-```cpp
-if(candidate->guides.Generate(m_lastPlaybackFrame.bgra.data(),
-    m_decoder.Width(),m_decoder.Height(),
-    m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate(),
-    IdentityOf(...),guide)){            // <-- 8 args, no layout
-```
-
-**What's wrong** — the `layout` parameter defaults to
-`SourcePixelLayout::Bgra` (`src/TemporalGuides.h:98`). But playback opens with
-`preferNv12=true` (`main.cpp:3544`), so the buffer is NV12 — `w*h*3/2` bytes.
-The guide reader indexes to `(w*h-1)*4`.
-
-At 1080p: **byte 8,294,396 of a 3,110,400-byte allocation. 5.2 MB past the
-end.** A 3 MB vector gets its own VirtualAlloc region, so this lands in
-unmapped space with high probability.
-
-The sibling call site 96 lines later gets it right *and warns about this exact
-mistake* — `src/main.cpp:3784`:
-
-```cpp
-// The frame says which layout it is in; the guide generator has read
-// both since the export path started decoding to NV12, and reading a
-// NV12 buffer as BGRA is the kind of mistake that shows up as motion
-// estimated from noise rather than as a failure.
-if(!m_guides.Generate(f.bgra.data(), ..., g, f.layout)) return false;
-```
-
-**Repro** — open any YouTube video (BT.709 limited → NV12), press the DLSS
-Upscaling toggle. Also reached from `SetUpscaleTarget` and `RestoreUpscaling`.
-
-**Fix**
-
-1. Pass `m_lastPlaybackFrame.layout`.
-2. Call `ConfigureRendererSource()` on the candidate before `Initialize` —
-   currently never done, so playback SR can never engage on an NV12 source
-   even if the read survives.
-3. Harden: give `Generate` the buffer size and refuse a mismatch rather than
-   trusting the caller.
-
----
-
-### [x] 1.3 · Permanent deadlock on a resident helper's second job
-
-`HIGH` · ✅ verified · **effort: XS** · **impact: hang**
-
-**Where** — `src/OfflineNeuralRenderer.cpp:1735`
-
-```cpp
-void Shutdown(){
-    if(!m_worker.joinable())return;
-    {std::scoped_lock lock(m_mutex);m_quit=true;}   // never reset
-    m_wake.notify_one();
-    m_worker.join();
-}
-```
-
-**What's wrong** — `m_quit` is latched and never cleared. Traced sequence:
-
-1. Job 2's `Initialize` → `Release` → `Shutdown`. Sets `m_quit=true`, joins.
-2. First `Post` sees `!joinable()`, starts a thread. It does **one** copy,
-   re-waits, sees `m_quit` still true, and **exits** at `:1749`.
-3. `m_worker` is now joinable-but-finished.
-4. Second `Post` sees `joinable()==true` → starts nothing → sets `m_busy=true`
-   → notifies no one.
-5. `Join` blocks forever on `m_idle.wait(lock,[this]{return !m_busy;})`.
-
-**Repro** — render a 1080p range, then a 1440p range in the same session
-(any geometry / fps / layout / colour / capture-format change triggers the
-`Release`). Helper wedges on the third captured frame holding the D3D12 device
-and ~1 GiB of DLSS feature memory. `Pump` has no overall timeout.
-
-**Fix** — reset `m_quit=false` in `Post`, and `join()` the finished thread
-before restarting it.
-
----
-
-### [x] 1.4 · A stalled audio clock freezes video permanently
-
-`HIGH` · 🔍 reported · **effort: S** · **impact: playback stops**
-
-**Where** — `src/AudioPlayer.cpp:226`
-
-```cpp
-const auto state=m_reader;
-if (!state || !state->waveOut || !state->hasAudioData.load()) return -1.0;
-```
-
-**What's wrong** — `hasAudioData` is set once at `:191` and cleared only in
-`Stop()` at `:276`. When the reader thread ends (pipe EOF, ffmpeg child death,
-`waveOutWrite` failure at `:201`) the queued buffers drain, `waveOutGetPosition`
-stops advancing, and `PositionSeconds()` keeps returning the frozen value.
-
-That value is the master clock — `src/main.cpp:3896`:
-
-```cpp
-double audio=Audio().PositionSeconds();
-if(audio>=0.0){double d=m_decoder.DurationSeconds();
-               return d>0?std::clamp(audio,0.0,d):audio;}
-```
-
-and the presentation gate at `main.cpp:1315` is `if(now+0.001<due) return;`.
-
-**Repro** — a 60 s video with a 10 s audio track. At ~10.7 s the clock sticks
-and **video stops for the remaining 50 s**. No error, no log, no fallback to
-the steady clock sitting three lines below. Unplugging a USB headset
-mid-playback does the same via `MMSYSERR_NODRIVER`.
-
-**Fix** — treat a clock that has not advanced for >N frame intervals as dead:
-clear `hasAudioData`, log once, fall through to the steady-clock branch.
-
-**Pairs with 1.5** — right now the cause is completely invisible.
-
----
-
-### [~] 1.5 · ffmpeg stderr goes to NUL everywhere; audio exit code never checked
-
-`MEDIUM` · 🔍 reported · **effort: S** · **impact: undiagnosable bugs**
-
-**Where** — `src/VideoDecoder.cpp:358`, `:762`, `src/AudioPlayer.cpp:90`
-
-All three set `si.hStdError = nul;` and run with `-loglevel error`. The only
-diagnostic the child produces is discarded. The audio child's exit code is
-never queried (`AudioPlayer.cpp:182` just breaks).
-
-**Why it matters** — an ffmpeg audio failure is 100% invisible: no stderr, no
-exit code, no log. And per 1.4 it manifests as frozen *video*, so the symptom
-points at the wrong subsystem.
-
-**Fix** — capture stderr to the log (rate-limited), and check the exit code.
-
----
-
-### [x] 1.6 · A transient ffprobe failure deletes a hash-verified cache entry
-
-`HIGH` · 🔍 reported · **effort: S** · **impact: data loss**
-
-**Where** — `src/main.cpp:5735`
-
-```cpp
-const bool valid=cachedProbe.ok&&cached->manifest.sourceDigest==*sourceDigest&&...;
-if(valid){ ... goto finish;}
-if(!cache.Quarantine(*cached)){...}
-```
-
-**What's wrong** — `cached` already passed a full SHA-256 of the payload plus
-both sidecars inside `LookupRender` (`NeuralCache.cpp:973`). `ProbeMedia` then
-fails closed for reasons unrelated to the entry — including the helper simply
-not resolving (`MediaPipeline.cpp:1079`):
-
-```cpp
-if (ffprobe.empty() ...) { result.detail = L"FFmpeg tools are unavailable."; return result; }
-```
-
-`Quarantine` moves it to `staging/invalid-cache-*`, and `SweepStaging` deletes
-any `invalid*` name unconditionally on the next manager construction
-(`NeuralCache.cpp:866`).
-
-**Repro** — antivirus locks or quarantines the unsigned `ffprobe.exe`. User
-opens each of their five rendered videos. Every probe fails. Within a few
-manager constructions, **hours of GPU time — hash-verified as intact — are
-deleted.** Same pattern destroys downloaded source copies at `main.cpp:1128`.
-
-**Fix** — distinguish *"the probe could not run"* from *"the probe disagrees"*.
-Only quarantine on the latter.
-
----
-
-### [x] 1.7 · Adopting the local copy flips NV12 → BGRA under an NV12 renderer
-
-`HIGH` · 🔍 reported · **effort: XS** · **impact: corrupted picture**
-
-**Where** — `src/main.cpp:4560`
-
-```cpp
-VideoDecoder local;
-if(!local.Open(copy->wstring(),MediaSourceKind::LocalFile)){ ... }
-if(local.NativeWidth()!=m_decoder.NativeWidth()||
-   local.NativeHeight()!=m_decoder.NativeHeight()){ ... }   // geometry only
-...
-m_decoder.Swap(local);local.Close();
-```
-
-**What's wrong** — geometry is checked, **layout is not**. `Open`'s
-`preferNv12` defaults to `false` (`VideoDecoder.h:131`) while the streaming
-open used `true`. `Swap` swaps the whole `m_source` including layout
-(`VideoDecoder.cpp:166`), and nothing afterwards calls
-`ConfigureRendererSource()`.
-
-**Repro** — play a YouTube video, let background acquisition finish, then seek
-(`main.cpp:3931`) or hit live-session stall recovery (`:2457`, `:3976`).
-Renderer's `m_sourceLayout` is `Nv12`, frames arrive as BGRA. The size check
-passes (`w*h*4 >= w*h*1.5`), so the NV12 path uploads the first quarter of the
-BGRA image as a Y plane. **Severely corrupted picture, no error anywhere.**
-
-**Fix** — open the copy with `preferNv12` matching `m_decoder.PixelLayout()`,
-and refuse the swap on a layout mismatch the way geometry already does.
-
----
-
-### [x] 1.8 · `remove_all` runs against a relative path when there is no cache root
-
-`MEDIUM` · 🔍 reported · **effort: XS** · **impact: deletes user data**
-
-**Where** — `src/main.cpp:4938`
-
-```cpp
-m_liveDirectory=m_cacheRoot/L"live";
-std::error_code ec;std::filesystem::remove_all(m_liveDirectory,ec);
-```
-
-**What's wrong** — `m_cacheRoot` is assigned only inside `if(historyCache.Valid())`
-(`main.cpp:1191`) and is empty in the automatic configuration (`:2667`, `:2677`).
-`LiveSessionAvailable()` → `RangeRenderAvailable()` (`:4652`) does not check
-cache validity. So `m_liveDirectory` becomes the relative path `"live"`.
-
-**Repro** — portable install on a read-only share with LocalAppData redirected
-away (the exact case `PrepareWritableRoot`'s fallback exists for). Toggling
-neural rendering **recursively deletes whatever `live` directory sits in the
-process working directory.** Same at `ReleaseLiveSession`, `:4985`.
-
-**Fix** — refuse to build a live directory from an empty root; assert the path
-is absolute before any `remove_all`.
-
----
-
-### [x] 1.9 · Two player instances share `<cacheRoot>/live` and delete each other's work
-
-`HIGH` · 🔍 reported · **effort: S** · **impact: data loss**
-
-**Where** — `src/main.cpp:4938` (the `remove_all` above) and `:5587`
-
-```cpp
-const uint64_t liveRunId=liveIndex?uint64_t(++m_liveJobSerial):0u;  // per-process
-liveDirectory=m_liveDirectory/(L"job"+std::to_wstring(liveRunId));
-```
-
-**What's wrong** — the run id is a per-process counter and there is no
-single-instance guard. The named-mutex lease covers the runtime directory, not
-the cache root (`NeuralWorker.cpp:1641`).
-
-**Repro** — player open on two videos. Instance A is 4 minutes into a live
-session with 40 finalized segments. User enables neural rendering in instance
-B → B's `remove_all` deletes A's segments. A's `NeuralSegmentIndex` is pure
-in-memory arithmetic and still reports them covered, so A seeks into "covered"
-ground and fails to open the file. Both then write `job1/neural-00000.mkv`
-into the same directory.
-
-**Fix** — derive the live directory from the process id or a GUID. Never
-`remove_all` a shared path.
-
----
-
-### [x] 1.10 · Restore the deleted release script
-
-`BLOCKER` · ✅ verified · **effort: XS**
-
-Worse than first recorded: the deletion had been **committed**, swept into
-`6ab4267` (a swapchain commit). Merging the branch would have silently removed
-the release packager, which is referenced by `package_release.bat`,
-`package_public_release.bat`, `.github/workflows/release.yml` and
-`docs/BUILDING.md`.
-
-**Restored in `b796901`**, byte-identical to `main`
-(`git cat-file -e HEAD:tools/package_release.ps1`;
-`git diff --diff-filter=D main..HEAD` is empty).
-
-> ⚠️ **`git restore` does not work for this file on the maintainer's machine.**
-> Something local refuses to *create* a file at that path — `git checkout main
-> -- tools/package_release.ps1` returns "Permission denied" while the identical
-> bytes write fine under any other name. It was restored into the index with
-> `git update-index --add --cacheinfo`, so the committed tree is correct and a
-> fresh clone gets the file, but `git status` on that machine keeps reporting
-> ` D tools/package_release.ps1`. **Do not "fix" that by committing the
-> deletion again.**
-
----
-
-### [x] 1.11 · Make a bug report possible at all
-
-`HIGH` · 🔍 reported · **effort: M** · **impact: every future debug session**
-
-Three separate defects that compound.
-
-**(a) The log is destroyed on restart** — `src/Log.h:33`
-
-```cpp
-Log() : m_file(LogPath(), std::ios::out | std::ios::trunc) {}
-```
-
-User crashes → relaunches to collect the log → **evidence gone**. And
-`.github/ISSUE_TEMPLATE/bug_report.yml:38` asks for exactly that file.
-
-**(b) No fallback, no failure check** — `LogPath()` (`:26`) returns the module
-directory only. `Write()` (`:14`) never tests `m_file`. `NeuralCache.cpp:791`
-*does* fall back to `%LOCALAPPDATA%`, so in a Program Files install the cache
-works and the log silently vanishes — the exact scenario
-`docs/TROUBLESHOOTING.md:127` warns about.
-
-**(c) No crash dumps** — `grep -E "MiniDumpWriteDump|SetUnhandledExceptionFilter|AddVectoredExceptionHandler|__try" src/`
-returns **zero hits**. An access violation produces no artifact at all.
-
-**Also:** 13 large modules log nothing, including all **1,143 lines of
-`YouTubeResolver.cpp`** — the component most exposed to upstream breakage.
-Also `MediaPipeline.cpp`, `SynchronizedPlayback.cpp`, `NeuralWorker.cpp`,
-`RuntimeLock.cpp`.
-
-**Fix**
-
-- [x] `ios::app` + a session banner instead of `ios::trunc` — `Log.h:85`, `:90`
-- [x] `%LOCALAPPDATA%` fallback on open failure — `Log.h:49`
-- [x] Cap and roll at ~8 MB — `Log.h:43` `kMaxBytes`, `Roll()` at `:94`
-- [x] `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` — `src/CrashDump.h`,
-      installed in both processes (`main.cpp:7184`, `NeuralWorkerMain.cpp:513`)
-- [x] **`YouTubeResolver.cpp` logs, and says which refusal happened.**
-      `HelperFailure` names ten outcomes across the directory check, the two
-      helper opens and the cache creation, each mapping to a sentence a
-      viewer can act on - four of the five old causes were actively
-      misdescribed, including a read-only install being told its files were
-      missing. Every other refusal is covered by one log line in
-      `resolver_error`, which all twenty-five return through; cancellation is
-      excluded because it happens on every abandoned paste.
-
----
-
-### [x] 1.12 · Attest the package users actually download
-
-`CRITICAL` · 🔍 reported · **effort: M** · **impact: trust**
-
-`README.md:33` labels the 308 MB complete package **"This is the one you
-want."** It contains the unsigned, signature-stripped neural DLL.
-
-`release.yml:98` attests **only** the core zip:
-
-```yaml
-- name: Attest core package provenance
-  uses: actions/attest-build-provenance@4d101475... # v4.2.2
-  with:
-    subject-path: dist/DLSSVideoPlayer-v*-core-win64.zip
-```
-
-Checked live against the GitHub API for v0.24.0:
-
-| Asset | Downloads | Attestations |
-| --- | ---: | ---: |
-| `DLSSVideoPlayer-v0.24.0-core-win64.zip` | 0 | **1** |
-| `dlss5-video-player-v0.24.0-win64.zip` ← recommended | 7 | **404 — none** |
-
-The complete zip was uploaded at `19:35:25Z`, 8 minutes after the release job
-finished at `19:27:33Z` — by hand, exactly as `release.yml:118` describes. Its
-only integrity claim is a `.sha256` from that same machine, which proves
-nothing to a third party.
-
-**Compounding it** — `verify_package.ps1` is **not in its own `$expected`
-allowlist** (`tools/verify_package.ps1:17`), so it does not ship inside the
-zip. A user cannot verify what they downloaded without cloning the repo. And
-`README.md` never mentions `gh attestation verify`.
-
-**Fix**
-
-- [x] `workflow_dispatch` "attest an uploaded asset" job —
-      `.github/workflows/attest-release-asset.yml`, which is explicit in-file
-      about being a signed statement rather than build provenance
-- [x] `verify_package.ps1` is in both allowlists and staged into both
-      packages, and README says how to run it. A `.ps1` is not a PE, so the
-      Authenticode check reports N/A for it rather than failing
-- [x] `gh attestation verify` + `sha256sum -c` block in `README.md:44-48`
+## Summary
+
+| ID | Task | Effort | Impact | |
+| --- | --- | :---: | --- | :---: |
+| **P0** | | | | |
+| [P0.1](#p01) | The packaged `verify_package.ps1` cannot run | S | Release | ✅ |
+| [P0.2](#p02) | Audio restarts at a stale position after a paused seek | XS | Player | ✅ |
+| [P0.3](#p03) | WASAPI teardown races the endpoint callbacks | S | Player | ✅ |
+| [P0.4](#p04) | YouTube: the cache manager is still built on every paint | S | Player | ✅ |
+| [P0.5](#p05) | The software-encoder retry cannot pass the receipt gate | S | Pipeline | ✅ |
+| [P0.6](#p06) | The per-frame identity check compares a value with itself | S | Pipeline | ✅ |
+| [P0.7](#p07) | Cache housekeeping keeps dead entries and hits live ones | M | Pipeline | ✅ |
+| [P0.8](#p08) | VFR detection never decides on B-frame video | XS | Pipeline, Player | ✅ |
+| [P0.9](#p09) | Video freezes while a menu, drag or message box is open | S | Player | 🔍 |
+| [P0.10](#p010) | The swapchain is never resized, so DWM scales bilinearly | M | Player | ✅ |
+| **P1** | | | | |
+| [P1.1](#p11) | The decoder's buffer pool is never refilled | S | Player | ✅ |
+| [P1.2](#p12) | Remaining per-frame copies and allocations | M | Player | 🔍 |
+| [P1.3](#p13) | Opening a cached render spawns redundant decoders | S | Player | 🔍 |
+| [P1.4](#p14) | Audio clock and endpoint edge cases | S | Player | 🔍 |
+| [P1.5](#p15) | Waits on the UI thread | S | Player | 🔍 |
+| [P1.6](#p16) | Failures that look like success | S | Player, Pipeline | 🔍 |
+| [P1.7](#p17) | Bounds on untrusted media values | XS | Player, Pipeline | 🔍 |
+| [P1.8](#p18) | Segment names are reused across retries | XS | Pipeline, Player | 🔍 |
+| [P1.9](#p19) | The model-store digest covers every NGX model | S | Pipeline | 🔍 |
+| [P1.10](#p110) | The first-frame receipt gate: cost and reproducibility | S | Pipeline | 🔍 |
+| [P1.11](#p111) | The runtime lock ignores extra add-ons | S | Pipeline, Release | 🔍 |
+| [P1.12](#p112) | Helper robustness batch | S | Pipeline | 🔍 |
+| [P1.13](#p113) | Parent-side IPC polls at 20 ms | M | Pipeline, Player | 🔍 |
+| [P1.14](#p114) | Hashing and write amplification leftovers | M | Pipeline | 🔍 |
+| [P1.15](#p115) | Small render-thread costs | XS each | Pipeline | 🔍 |
+| [P1.16](#p116) | Duplicated helpers that behave differently | M | Pipeline | 🔍 |
+| [P1.17](#p117) | The GPU CI workflow cannot pass on a fresh runner | S | Release | 🔍 |
+| [P1.18](#p118) | The attestation workflow signs a digest someone typed | S | Release | ✅ |
+| [P1.19](#p119) | No PDBs for crash dumps; builds are not reproducible | S | Release, Player | 🔍 |
+| [P1.20](#p120) | CI hardening | M | Release | 🔍 |
+| [P1.21](#p121) | Build structure: one set of objects, one set of flags | M | Release | 🔍 |
+| [P1.22](#p122) | Test hygiene and coverage gaps | M | Release | 🔍 |
+| [P1.23](#p123) | Docs, screenshots and positioning drift | S | Docs, Site | ✅ |
+| **P2** | | | | |
+| [P2.1](#p21) | Supply a smoothed exposure instead of auto-exposure | S | Pipeline | ✅ |
+| [P2.2](#p22) | Dither wherever the image is cut to 8 bits | S | Pipeline, Player | ✅ |
+| [P2.3](#p23) | A quality ladder for cache and export: CQ, 10-bit, lossless | M | Pipeline | ✅ |
+| [P2.4](#p24) | Guide A/B harness, then evaluate Video Depth Anything | S / M-L | Pipeline | |
+| [P2.5](#p25) | Temporal stability with motion compensation | M | Pipeline, Player | |
+| [P2.6](#p26) | Spatial mask and feather; face protection later | S-M | Pipeline, Player | |
+| [P2.7](#p27) | Processing scale | S-M | Pipeline | |
+| [P2.8](#p28) | RTX Video Super Resolution as a second engine | M | Pipeline, Player | |
+| [P2.9](#p29) | Super Resolution-only export | M | Pipeline | |
+| [P2.10](#p210) | CLI / headless invocation | S | Pipeline | |
+| [P2.11](#p211) | Quality metrics in the app | M | Player, Pipeline | |
+| [P2.12](#p212) | Scene-cut controls and duplicate-frame handling | S / M | Pipeline | |
+| [P2.13](#p213) | Re-measure which settings change the image on RenoDX 6.5.3 | S | Pipeline | |
+| [P2.14](#p214) | A deband pre-pass for compressed sources | S-M | Pipeline | |
+| [P2.15](#p215) | An on-screen compare bar with press-and-hold A/B | S | Player | |
+| [P2.16](#p216) | Zoom, pan and a synced magnifier | M | Player | |
+| [P2.17](#p217) | A difference view | S-M | Player | |
+| [P2.18](#p218) | The timeline as a render map | S / M | Player | |
+| [P2.19](#p219) | Status chips instead of one overflowing line | S | Player | |
+| [P2.20](#p220) | A start screen with a capability check and tiles | M | Player | |
+| [P2.21](#p221) | Export the comparison itself | S / M | Player | |
+| [P2.22](#p222) | Dark, DPI-aware menus and dialogs | M | Player | |
+| [P2.23](#p223) | Keyboard discoverability | S-M | Player | |
+| [P2.24](#p224) | Media controls and taskbar buttons | S-M | Player | |
+| [P2.25](#p225) | Synced multi-pane comparison | M-L | Player | |
+| [P2.26](#p226) | A comparison gallery on the site, plus site fixes | M | Site | |
+| **P3** | | | | |
+| [P3.1](#p31) | HDR end to end | L | Pipeline, Player | |
+| [P3.2](#p32) | Subtitles via libass, composited after the network | M-L | Player | |
+| [P3.3](#p33) | WASAPI drift correction and passthrough | M | Player | |
+| [P3.4](#p34) | Extract testable units from `main.cpp` | M | Player | |
+| [P3.5](#p35) | Prefer NVIDIA's signed runtime on RTX 50 | M | Pipeline, Release | |
+| [P3.6](#p36) | Neural optical flow as an export-only rung | M-L | Pipeline | |
+| [P3.7](#p37) | Feed NVENC directly from D3D12 | M | Pipeline | |
+| [P3.8](#p38) | Repository media hygiene | S | Release | |
 
 ---
 ---
 
-# Tier 2 — Next
+# P0 — Fix now
 
-Performance, build, and test work. **Every perf item is quality-neutral:
-byte-identical output.**
+<a id="p01"></a>
+### P0.1 · The packaged `verify_package.ps1` cannot run
+
+`S` · **Release** · ✅
+
+**Where** — `tools/verify_package.ps1:13-14`, `:166`, `:199`, `:204`, `:213`;
+`README.md:52-56`
+
+The script ships inside both zips, and the README tells users to run
+`.\verify_package.ps1 -StageDirectory .` from the unpacked folder. On its
+first line it sets `$repositoryRoot` to its parent directory and reads
+`VERSION` from there. In a package that file does not exist, so the script
+fails before checking anything. It also reads `packaging/*.json` and
+`external/DLSS/...`, which are not packaged either. The README command also
+omits `-PublicCore` for the core zip.
+
+**Impact** — Release: the check the README offers users does not work, so
+nobody can verify what they downloaded.
+
+**Fix** — add a package mode that takes the version from `PACKAGE_MANIFEST.txt`
+or the folder name, and checks against the manifest's hashes. Have CI run it
+from an extracted zip with no repository around it. Correct the README command.
 
 ---
 
-## 2A · Performance
+<a id="p02"></a>
+### P0.2 · Audio restarts at a stale position after a paused seek
 
-Total recoverable: **~5-9 ms/frame at 1440p**, more at 4K.
+`XS` · **Player** · ✅
 
-Baseline for judging these: 16.68 ms at 59.94 fps, 8.34 ms at 119.88 fps.
+**Where** — `AudioPlayer.cpp:182` (`SelectAudioTrack`), `:527`
+(`ServiceDeviceChanges`), `:186` (`Start`), `:459`
+
+`m_lastKnownPosition` is written only by `PositionSeconds`, which is not
+called while paused. `Start()` never resets it.
+
+**Scenario** — play to 60 s, pause, seek to 10 s, then change the audio track
+or unplug the headphones. Audio restarts at 60 s. On resume the audio clock
+pulls video forward to 60 s. On a local file the drop loop (`main.cpp:1354`)
+decodes about 1,500 frames in one Tick and the UI freezes.
+
+**Impact** — Player: the seek is lost, followed by a multi-second freeze.
+Pipeline: none.
+
+**Fix** — `m_lastKnownPosition.store(seekSeconds)` in `Start()`. Add a policy
+test for the sequence pause → seek → change track.
 
 ---
 
-### [~] 2.1 · Four full-frame CPU deep copies per presented pair
+<a id="p03"></a>
+### P0.3 · WASAPI teardown races the endpoint callbacks
 
-🔍 reported · **effort: M** · **gain: 1.8-2.8 ms/pair @1440p, 4.1-6.2 ms @4K**
+`S` · **Player** · ✅ race · 🔍 deadlock
 
-`VideoFrame` holds `std::vector<uint8_t> bgra` (`VideoDecoder.h:44`), so every
-`=` is a deep copy.
+**Where** — `WasapiRenderer.cpp:283-298` (`Close`), `:84-113` (callbacks),
+`:63` (`Detach`), `:126`
 
-| # | Where | Line |
+`owner_` is a plain pointer. `Detach()` clears it under the renderer's mutex,
+but the callbacks read it without the lock. That is a data race.
+`Close()` also calls `Unregister*Notification` while holding `mutex_`, and
+each callback locks the same mutex. If Unregister waits for callbacks already
+running, the UI thread deadlocks.
+
+**Scenario** — a default-device change fires a burst of notifications (one
+per role, plus a property change). The first sets the lost flag, and
+`ServiceDeviceChanges` tears the renderer down while the rest are still
+running.
+
+**Impact** — Player: a hang or a crash when switching headphones or HDMI.
+
+**Fix** — make `owner_` `std::atomic`, and unregister outside `mutex_`. Keep
+the watcher alive, reference-counted, until Unregister has returned.
+
+---
+
+<a id="p04"></a>
+### P0.4 · YouTube: the cache manager is still built on every paint
+
+`S` · **Player** · ✅ · _the old 2.2(c) fix was incomplete_
+
+**Where** — `main.cpp:5086` (`CachedYouTubeSourceKey`), `:5152`
+(`AcquiredSourceCopyPath`)
+
+Both construct `NeuralCacheManager cache(m_cacheRoot)` **before** the memo
+check. The call chain runs `ToolbarState` → `LiveSessionAvailable` →
+`RangeRenderAvailable`, once per toolbar button on every paint, and
+`BuildStatusText` runs on every presented frame. Each construction runs
+`PrepareWritableRoot` (six directory creations and a probe file) and
+`SweepStaging` (`NeuralCache.cpp:842-866`).
+
+**Impact** — Player: stalls on the UI thread for any YouTube source with a
+recent-history entry. Pipeline: the staging sweep runs, and may remove files,
+on the UI thread.
+
+**Fix** — keep one manager per loaded source, built when the source loads.
+Check the memo before touching the disk.
+
+---
+
+<a id="p05"></a>
+### P0.5 · The software-encoder retry cannot pass the receipt gate
+
+`S` · **Pipeline** · ✅
+
+**Where** — `OfflineNeuralRenderer.cpp:1369-1406` (the gate), `:1496-1502`
+(the retry baseline), `:1540-1544` (the final check)
+
+The code's own comment records that the add-on logs its evaluation counter
+only at N=1 and N=60 in each process, then goes quiet. The NVENC → x264 retry
+sets its baseline to the last value logged, so the gate and the final check
+both wait for a line that never comes. The retry resubmits frame 0 120 times
+and then fails.
+
+**Scenario** — NVENC fails after the first 60 evaluations. That happens on
+every range render (60 preroll frames), every live session, and whenever
+another app holds the NVENC sessions.
+
+**Impact** — Pipeline: the fallback that exists for this case never works.
+Player: a live session or export ends with the misleading *"Feature 18
+evidence did not advance"*.
+
+**Fix** — hold the retry to the same test a reused evaluator gets: the
+backend's evaluation count plus `NeuralTimingClearsFloor`, not the log
+counter. Add a range-render case to `NeuralRangeRenderSmoke` with a forced
+encoder failure.
+
+---
+
+<a id="p06"></a>
+### P0.6 · The per-frame identity check compares a value with itself
+
+`S` · **Pipeline** · ✅
+
+**Where** — `D3D12Renderer.cpp:1130`, `OfflineNeuralRenderer.cpp:1281`,
+`:1197-1210`, `:1938-1976`
+
+`RenderFrameForCache` sets `capture.id=guide.id` **before** rendering, so
+`out.id.SameSource(id)` compares the input with an echo of itself.
+Pipelined frames carry no identity, and `drainOldest` never checks one.
+
+**Scenario** — if the readback ring falls out of step, which is the case the
+flag at `:1978` guards against, shuffled frames are published as verified.
+`NeuralRenderFailure::Identity` can never be reached.
+
+**Impact** — Pipeline: the cache's frame-order guarantee is not enforced.
+
+**Fix** — record the identity in the readback slot when the copy is queued,
+return it when the slot resolves, and compare it with the frame queued in
+that position.
+
+---
+
+<a id="p07"></a>
+### P0.7 · Cache housekeeping keeps dead entries and hits live ones
+
+`M` · **Pipeline** · ✅ items 1-2 · 🔍 items 3-5
+
+1. **Entries a driver update orphaned are never reclaimed.** `Evict` treats any
+   complete manifest as reusable (`NeuralCache.cpp:1247`, `:782`), and
+   `PlanEviction` skips reusable entries (`CacheEvictionPolicy.h:72-76`). The
+   manifest records none of the key's identity terms: driver, model store,
+   runtime, app version. After a driver update the whole old cache survives
+   until free space falls below the 20 GiB floor. The comment at
+   `main.cpp:1282` claims the opposite.
+2. **Startup eviction ignores the file being opened.** `StartCacheEviction()`
+   (`main.cpp:1273`) runs on a detached thread with no active keys, and the
+   next line loads the startup file. The comment "Nothing is loaded yet" is
+   wrong. Under space pressure the render being opened can be deleted while
+   it is being looked up.
+3. **Last use is never recorded** (`NeuralCache.cpp:1249-1252`), so eviction
+   by least recent use is really eviction by age.
+4. **`Clear()` removes all of `live/` and `staging/`** (`:1306-1314`),
+   including directories another running instance is using. That brings back
+   the cross-instance deletion the old 1.9 fixed.
+5. **Dead `live/pid<N>` directories are never swept.** `LiveSessionPolicy.h:333`
+   says they are "ours to clear", but only the current process's own is
+   removed (`main.cpp:5609`). A crash during a live session leaves gigabytes
+   behind.
+
+**Impact** — Pipeline: the cache grows without bound on disk, and renders are
+lost under space pressure or when a second instance runs.
+
+**Fix** — write the key's identity terms into the manifest and evict any
+entry whose terms differ from the current ones. Pass the startup file's key
+as active, or start eviction after the first load. Touch last-use when an
+entry is served. Put a named mutex per cache root around eviction, Clear and
+promotion. At startup, sweep `live/pid*` directories whose process is gone,
+using the existing `ProcessAlive`.
+
+---
+
+<a id="p08"></a>
+### P0.8 · VFR detection never decides on B-frame video
+
+`XS` · **Pipeline, Player** · ✅ · _the old 3.9 fix was incomplete_
+
+**Where** — `VideoDecoder.cpp:571-575`, `VariableFrameRatePolicy.h:88-95`
+
+The spacing probe reads `packet=pts_time`, which lists packets in decode
+order. With B-frames, more than 25% of the intervals come out non-positive,
+so `Classify` returns undecided and the code falls back to the declared
+rates that 3.9 said cannot be trusted.
+
+**Impact** — Pipeline: the frame-generation refusal is wrong on most films
+and phone video. Player: every open still pays the extra ffprobe run for
+nothing.
+
+**Fix** — sort the sampled PTS before `Classify`, or probe
+`frame=best_effort_timestamp_time`. Add a B-frame clip to the policy tests.
+
+---
+
+<a id="p09"></a>
+### P0.9 · Video freezes while a menu, drag or message box is open
+
+`S` · **Player** · 🔍
+
+**Where** — `main.cpp:7837-7846` (the only caller of `Tick`), `:7419`
+
+Modal loops (menus, window moves and resizes, `MessageBox`) never return to
+the message pump, so `Tick` stops while audio keeps playing. On return, a
+local file decodes and drops the whole backlog in one Tick. A neural pair
+re-anchors, and that counts toward the "cannot follow" limit.
+
+**Impact** — Player: every menu visit freezes the video, then it catches up
+with a hitch.
+
+**Fix** — start a `SetTimer` on `WM_ENTERMENULOOP` / `WM_ENTERSIZEMOVE` that
+drives `Tick`, and kill it on exit. Or pause the clocks for the duration.
+
+---
+
+<a id="p010"></a>
+### P0.10 · The swapchain is never resized, so DWM scales bilinearly
+
+`M` · **Player** · ✅
+
+**Where** — `D3D12Renderer.cpp:230-231` (`DXGI_SCALING_STRETCH`, sized to the
+output), no `ResizeBuffers` anywhere in `src/`; `main.cpp:4641`
+
+The backbuffers stay at the video's size, and the compositor stretches them
+to the window. A 4K source in the default 1440×880 window is downscaled about
+2.7× by a bilinear filter and aliases, and fullscreen upscaling is bilinear
+too.
+
+**Impact** — Player: in a product about fine detail, the last scaling step is
+the cheapest filter available. This softens and aliases exactly what the
+comparison is meant to show.
+
+**Fix** — resize the backbuffers to the client area on `WM_SIZE`, then scale
+in `PSPresent` with a proper filter (Catmull-Rom or a Mitchell-type
+downscale). Keep a 1:1 pixel mode for P2.16.
+
+---
+---
+
+# P1 — Next
+
+## Player: reliability and quality-neutral performance
+
+<a id="p11"></a>
+### P1.1 · The decoder's buffer pool is never refilled
+
+`S` · **Player** · ✅
+
+**Where** — `VideoDecoder.cpp:1498` (`out = std::move(...)`, with no recycle),
+`:1066-1068`, `SynchronizedPlayback.cpp:242`
+
+`ReadNextBlocking` moves each frame into the caller's buffer and frees the
+old one, and `SynchronizedPlayback` reads into a fresh `VideoFrame` every
+time. So `TakeRecycledBuffer` always misses, and every frame pays a `resize`
+zero-fill.
+
+**Impact** — Player: every frame allocates and zero-fills 5.5-31.6 MB, twice
+per neural pair. Pipeline: none; the export path does recycle.
+
+**Fix** — return `out`'s old buffer to the pool in `ReadNextBlocking`, and give
+the pairs' `shared_ptr`s a deleter that returns their buffers to the source.
+
+---
+
+<a id="p12"></a>
+### P1.2 · Remaining per-frame copies and allocations
+
+`M` · **Player** · 🔍 · _open parts of old 2.1, 2.4, 2.5_
+
+- **Copies 1 and 2** — `main.cpp:2541` `m_next=*visible` (this also runs for
+  pairs the cadence skips) and `:4372` `m_lastPlaybackFrame=f`. Together
+  about 11 MB per pair at 1440p. They are coupled: share `m_next` as
+  `shared_ptr<const VideoFrame>`, then `m_lastPlaybackFrame` can alias it.
+- **Guide allocations** — `GuideFrame g` is still a fresh local at
+  `main.cpp:4324`, a 230 KB allocation per guided frame. The `Generate` scratch
+  vectors `cur`, `fx`, `fy`, `confidence` and `depthGrid` are per-call locals
+  (`TemporalGuides.cpp:546-606`), and `:606` zero-fills a grid it then
+  overwrites. Promote them to members.
+- **Unused reference resources** — `m_reference` plus six upload buffers
+  (`D3D12Renderer.cpp:797-800`) are allocated on every load: 103 MB at 1440p,
+  232 MB at 4K. Allocate them lazily on the first non-neural comparison, and
+  use 3 uploads rather than 6.
+
+**Impact** — Player: headroom at 119.88 fps and 4K, and less VRAM and host
+memory. The pixels do not change.
+
+---
+
+<a id="p13"></a>
+### P1.3 · Opening a cached render spawns redundant decoders
+
+`S` · **Player** · 🔍
+
+**Where** — `main.cpp:6637`, `SynchronizedPlayback.cpp:553`, `:582`
+
+`LoadCachedPlayback` fully opens `m_decoder` (a probe, a spacing probe, and a
+running ffmpeg with its frame queue), and nothing reads it in cached mode.
+`SynchronizedPlayback::Open` then probes the same original and the neural file
+again with `Open`, not `OpenKnown`.
+
+**Impact** — Player: about six extra process spawns per open (around 0.7 s
+each where antivirus scans them), plus an idle NVDEC session held for the
+whole playback.
+
+**Fix** — open `m_decoder` with `OpenMetadata`, and pass the known media into
+`Open` the way `OpenLive` already does.
+
+---
+
+<a id="p14"></a>
+### P1.4 · Audio clock and endpoint edge cases
+
+`S` · **Player** · 🔍
+
+- **The clock jumps back after an underrun** — `main.cpp:4475`,
+  `AudioClockPolicy.h:41-45`. A stall over 0.5 s falls back to wall time, and
+  when audio resumes the clock snaps back to the audio position. After a 1 s
+  YouTube underrun, video runs ahead, then holds for a second. Anchor the
+  fallback at the last audio position and slew back instead of jumping.
+- **Frame-stepping restarts audio on every step** — `main.cpp:4616-4619` calls
+  `Stop()` then `Start()`, which spawns ffmpeg and reopens the endpoint each
+  step. Mark audio dirty and restart it once in `SetPaused(false)`.
+- **Audio never comes back after the last device disappears** —
+  `AudioPlayer.cpp:207`, `:513`. With `m_reader` null, `ServiceDeviceChanges`
+  returns early and nothing watches for a new device. Keep an enumerator
+  watching while there is no reader.
+- **A pause racing a write drops samples** — `WasapiRenderer.cpp:367` returns
+  true without writing, and `AudioPlayer.cpp:411-420` discards the chunk.
+  Return "not written" so the reader keeps it.
+- **WASAPI objects are created on a thread without COM** —
+  `PrepareYouTubeMedia` calls `audio->Start` on a worker (`main.cpp:6781`),
+  which reaches `CoCreateInstance` (`WasapiRenderer.cpp:187`). Call
+  `CoInitializeEx(COINIT_MULTITHREADED)` on that thread.
+
+---
+
+<a id="p15"></a>
+### P1.5 · Waits on the UI thread
+
+`S` · **Player** · 🔍
+
+| Wait | Where | Fix |
 | --- | --- | --- |
-| 1 | out of the synchronized pair | `main.cpp:2435` — `m_next=*visible;` |
-| 2 | inside `RenderVideoFrame` | `main.cpp:3807` — `m_lastPlaybackFrame=f;` |
-| 3,4 | `RememberRenderedCachedPair` | `main.cpp:2595` — both members |
-
-**Cost** — 4 × 5.53 MB = **22.1 MB memcpy/pair at 1440p**; 49.8 MB at 4K. At
-8-12 GB/s that is 11-17% of budget at 59.94 fps and **22-34% at 119.88 fps** —
-the exact rate `PlaybackCadence.h` was written to survive. Also evicts L2/L3
-four times per frame, taxing the guide pass and `CopyMappedRows` that follow.
-
-**Fix** — all four consumers want *a frame that outlives the pair*, not a
-private copy. Hand out `std::shared_ptr<const VideoFrame>` from
-`SynchronizedPlayback`. Three of the four are pure aliasing.
-
-**Start here (lowest risk):** delete copy 2 and have `RecoverUnusableRenderer`
-re-read from the pair.
-
-- [x] **Copies 3 and 4 deleted — half the total, 11 MB/pair at 1440p NV12.**
-      `SynchronizedPlayback::Impl::current` is now
-      `std::shared_ptr<const SynchronizedFramePair>` and
-      `CurrentPairShared()` hands it out, so `RememberRenderedCachedPair`
-      retains the pair by reference count instead of deep-copying both members
-      on every presented frame. `CurrentPair()` keeps its signature and its
-      meaning — a pointer the next read invalidates — so no other caller moved.
-      Cost is one control-block allocation per pair against two full-frame
-      memcpys per presented frame.
-      The two consumers were only ever read on a paused redraw and a view
-      toggle. The one neural frame that does **not** come from a pair — a
-      paused settings preview — keeps its own storage in
-      `m_previewNeuralFrame` and supersedes the pair's neural member while set,
-      which is what overwriting `m_lastNeuralFrame` used to do
-- [ ] Copies 1 and 2 (`m_next=*visible`, `m_lastPlaybackFrame=f`) are coupled:
-      `m_lastPlaybackFrame` can only alias if `m_next` is shared too, and
-      `m_next` is the core of every playback mode, not just the cached pair.
-      That is the larger half of this task and is not started
+| `CancelNeuralJob` joins the worker during a live retarget | `main.cpp:6227`, called from `:5938`, `:6021` | Request the stop, and retire the worker from its completion message, as frame generation does |
+| `AdoptSegment` waits on `future.wait()` with no limit (two 15 s probes behind it) | `SynchronizedPlayback.cpp:384-385` | `wait_for` with a deadline; return `NotReady` |
+| Closing the window joins the update check, whose WinHTTP stages each wait 8 s | `main.cpp:7430`, `:2357`; `UpdateCheck.cpp:306` | Close the WinHTTP handle from a `std::stop_callback` |
+| Dragging the split while paused converts and re-uploads the whole original on every mouse move | `main.cpp:3051-3055`, `:3019-3023` | Re-upload only when the pair changes |
+| Paused playback re-presents at 60 Hz | `main.cpp:1322-1327` | Present only when something invalidates the frame |
 
 ---
 
-### [~] 2.2 · Main loop busy-spins at 100% of a core, redoing work each spin
+<a id="p16"></a>
+### P1.6 · Failures that look like success
 
-🔍 reported · **effort: M** · **gain: one core + lock contention**
+`S` · **Player, Pipeline** · 🔍 · _includes old 1.5_
 
-`src/main.cpp:1336`
-
-```cpp
-DWORD TickSleepMs()const{
-    return (m_loaded&&!m_playing&&!m_seekPending&&!m_seeking)?8u:0u;
-}
-```
-
-While playing this is `Sleep(0)` — a yield, not a block. `Tick` returns
-immediately when the frame is not due, so the loop free-runs.
-
-**What each wasted iteration costs:**
-
-| | Cost |
-| --- | --- |
-| **(a)** `LiveCoverage()` (`main.cpp:4747`) | Allocates + `MergeSpans` sorts already-sorted data under `mutex_`, **2-4× per tick**. A 5-minute session at 2 s/segment holds ~150 segments. Hammers the same mutex the metadata reader needs to append. |
-| **(b)** `PositionSeconds()` (`AudioPlayer.cpp:225`) | `waveOutGetPosition` under `waveMutex` — the same lock the audio feeder holds across `waveOutWrite`. **≥4× per tick.** |
-| **(c)** YouTube only (`main.cpp:4466`) | Constructs a `NeuralCacheManager` **twice per tick**: `weakly_canonical`, **five** `create_directories`, a `CreateFileW` probe, and a full `directory_iterator` sweep of `staging/`. The SHA-256 memo at `:4494` sits *after* the construction, so none of it is avoided. |
-
-**Fix** — the mechanism already exists in this codebase. `PrecisionSleeper`
-(`VideoDecoder.cpp:41`) wraps `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
-sub-millisecond, without touching global timer resolution.
-
-- [x] `WaitForNextTick` (`main.cpp:1367`) blocks on `PrecisionSleeper`'s
-      high-resolution waitable timer at 2 ms while playing. **113% → 18% of one
-      core.** Note this is *not* the swapchain's frame-latency object the
-      original fix proposed — see **2.6**, that route kills neural rendering
-- [x] `CoveredRanges()` memoised against `revision_` **inside**
-      `NeuralSegmentIndex`, not in `PlayerApp`: `PlayableSpan` and the retained
-      index call it too, so caching at one call site would have missed them.
-      All three mutators already bumped `revision_` under the same mutex. The
-      merge no longer sorts already-sorted data on every call; the result is
-      still returned by value, because a reference to storage that mutex guards
-      would outlive the lock
-- [x] `NeuralCacheManager` construction hoisted out of the tick — it is now
-      built only in `RenderRangeOfCurrentSource` (`main.cpp:4815`), once per
-      render start, with the reason in-comment
+- **ffmpeg's stderr goes to NUL** in the decoders and the audio child
+  (`VideoDecoder.cpp:315`, `:792`; `AudioPlayer.cpp:67`, `:232`), so every
+  decode failure goes undiagnosed. Send it to the log, rate-limited.
+- **A decode error mid-file looks like the end of the file.** `ReadNext`
+  returns a bool (`VideoDecoder.cpp:1041`), and `main.cpp:1359`, `:1381` stop
+  playback silently. Use `ReadNextBlocking`'s result and say what failed.
+- **yt-dlp's stderr is merged into stdout** (`YouTubeResolver.cpp:1100`), and
+  the parser at `:761-765` accepts only metadata and URL lines. A single
+  Python warning turns a good run into "invalid output". Give stderr its own
+  pipe.
+- **Seeking with an unknown duration always goes to 0.** `durationSec` stays 0
+  (`VideoDecoder.cpp:506`), and `SeekSeconds` clamps to `[0, 0]` (`:1647`),
+  which hits browser-recorded WebM. Skip the upper clamp and disable the
+  timeline when the duration is unknown.
 
 ---
 
-### [x] 2.3 · Comparison-while-playing collapses to a slideshow
+<a id="p17"></a>
+### P1.7 · Bounds on untrusted media values
 
-🔍 reported · **effort: M** · **gain: 18-37 ms/frame @1440p** · `REGRESSION`
+`XS` · **Player, Pipeline** · 🔍 · _open parts of old 2.23_
 
-**Where** — `src/main.cpp:80`
+- `width`/`height` have no ceiling (`VideoDecoder.cpp:487-496`); a crafted
+  file declaring 20000×20000 asks for about 11 GB. Bound them the way the
+  Matroska path bounds duration.
+- `OpenKnown` assigns `fps` without the `[1, 240]` clamp its header documents
+  (`VideoDecoder.cpp:913`).
+- `WM_DROPFILES` discards every file after the first without a word, and keeps
+  a 64 KB buffer on the stack in `WndProc` (`main.cpp:7463`). Open the first
+  file and say that the rest were ignored.
 
-```cpp
-const double luminance = (double(luma[size_t(y) * width + x]) - 16.0) / 219.0;
-const double blueDiff  = (double(chromaRow[(x & ~1u)])      - 128.0) / 224.0;
-const double redDiff   = (double(chromaRow[(x & ~1u) + 1u]) - 128.0) / 224.0;
-...
-const auto clamp8 = [](double value) {
-    return uint8_t(std::lround(std::clamp(value, 0.0, 1.0) * 255.0));
-};
-```
+## Pipeline: helper, cache, runtime
 
-Scalar, `double`-precision, single-threaded, three `std::lround` per pixel.
+<a id="p18"></a>
+### P1.8 · Segment names are reused across retries
 
-Its own comment at `:2899` says it is a **paused-inspection** path — *"a paused
-inspection, where a CPU pass over one frame costs nothing anyone can
-perceive."* But the call site is **unconditional** inside `RenderVideoFrame`
-(`main.cpp:3801`), gated only by the pure-neural early-out at `:2903`.
+`XS` · **Pipeline, Player** · 🔍
 
-**So it runs every presented frame the moment a viewer picks Blend / Split /
-Wipe, or moves strength off 1.0.**
+**Where** — `OfflineNeuralRenderer.cpp:305-311`, `:349-365`, `:717-721`;
+`NeuralWorker.cpp:806`
 
-3.69 Mpx × ~20-40 cycles at 4 GHz = **18-37 ms/frame at 1440p**, 41-83 ms at
-4K. Cannot fit a 16.68 ms budget.
+Segment names come from the index alone. A retry or a helper relaunch deletes
+the old file and ignores the error. The player's ffmpeg holds the file open
+without delete sharing, so the delete fails and the new encoder truncates a
+file that is still being decoded.
 
-**This is a new exposure created by 0.24.0's NV12 playback change** — before
-it, `original.bgra` was already BGRA and `UploadReferenceFrame` took the
-pointer directly (still the case at `main.cpp:2911`).
+**Impact** — Player: corrupt frames or a decode error in place of a clean
+switch.
 
-**Fix** — the GPU already has the shader (`PSSourceNv12`,
-`D3D12Renderer.cpp:770`) and the two-plane upload machinery. Add a second plane
-pair for the reference and convert on the GPU.
-
-**Interim (~1 hour, 20-40× faster):** `float` not `double`, int truncation with
-a 0..255 LUT instead of `std::lround`, and wrap the row loop in
-`ParallelForRanges` like `CopyMappedRows` already does.
+**Fix** — include the attempt or launch number in the segment name.
 
 ---
 
-### [~] 2.4 · Guides and two full-res GPU passes run every frame with DLSS off
+<a id="p19"></a>
+### P1.9 · The model-store digest covers every NGX model
 
-🔍 reported · **effort: S** · **gain: 0.6 ms/frame CPU + ~44 MB/frame GPU**
+`S` · **Pipeline** · 🔍
 
-The player calls `SetDLSS(false)` on every media load (`main.cpp:3845`,
-`:5932`, `:6129`, `:3553`) and the runtime SR toggle defaults off.
+**Where** — `NeuralPreflight.cpp:157-188`, `:249-276`
 
-Yet:
+The digest walks every file under `%ProgramData%\NVIDIA\NGX\models`
+recursively, write times included. When the NVIDIA App updates an unrelated
+model (SR, frame generation, ray reconstruction), every key changes and the
+whole render cache is orphaned, and P0.7 then never cleans it up.
 
-- `main.cpp:3787` generates guides **unconditionally**
-- `D3D12Renderer.cpp:943` and `:976` record the expansion and depth passes
-  **unconditionally**
-
-The only consumers of `m_motion` / `m_depth` are `m_dlss.Evaluate` (`:1039`)
-and the debug views. **NVOF is already correctly gated** at `:916`:
-
-```cpp
-const bool nvofFrame=motionGuides&&m_nvofActive&&DLSSEnabled();
-```
-
-The CPU estimator and the two GPU passes are not.
-
-**Cost** — your own playback-health line measures `guide=0.6 ms` at 1440p.
-That is 3.6% of budget at 59.94 fps, **7.2% at 119.88 fps**, all wasted in the
-default state and in *every* cached-pair session. GPU side: motion 14.7 MB +
-depth clear 14.7 MB + depth write 14.7 MB ≈ 0.15 ms on a 288 GB/s card.
-
-**Also** — `Generate` reads every source pixel on the CPU and allocates ~8
-fresh `std::vector<float>` per call (`TemporalGuides.cpp:539`, `:589`, `:439`).
-`out.guideGridRGBA32F.assign(...)` zero-fills 230 KB that `:603` then
-overwrites element by element, and `GuideFrame g;` at `main.cpp:3774` is a
-fresh local — a real 230 KB malloc every frame.
-
-**Fix**
-
-- [x] `m_guides.Generate` gated on `GuidesRequired()` (`main.cpp:3863`), with a
-      `m_guidesSkipped` latch that declares the history discontinuity on resume
-- [x] Both guide passes gated on the same predicate —
-      `D3D12Renderer.h:317` `GuidesRequired() = DLSSEnabled() || m_debugView != Final`,
-      used at `D3D12Renderer.cpp:894` and `:972`
-- [ ] Promote the five `Generate` scratch vectors to generator members —
-      `cur`, `fx`, `fy`, `confidence`, `depthGrid` are still per-call locals
-      (`TemporalGuides.cpp:546-606`). Only the history buffers are members
-- [ ] Keep a reusable `GuideFrame` in `PlayerApp` — still a fresh local at
-      `main.cpp:3848`, so `guideGridRGBA32F.assign` is still a ~230 KB malloc
-      on every guided frame
-
-**Measured:** guide work per frame with SR off went 0.84 ms → 0.0001 ms. The
-two unticked items are allocation churn on the frames that *do* use guides.
-
-Guide history already resets when SR is toggled on, so no extra work there.
+**Fix** — restrict the walk to the neural-rendering model files. Drop the
+write time wherever a content hash is already taken.
 
 ---
 
-### [~] 2.5 · 177 MB (1440p) / 398 MB (4K) allocated and never touched
+<a id="p110"></a>
+### P1.10 · The first-frame receipt gate: cost and reproducibility
 
-🔍 reported · **effort: S** · **gain: see table**
+`S` · **Pipeline** · 🔍 · _includes the log-polling row of old 2.10_
 
-All allocated unconditionally in `CreateVideoResources`, in both processes.
+**Where** — `OfflineNeuralRenderer.cpp:1362-1406`, `:1886-1893`, `:2221-2244`
 
-| Resource | Where | 1440p | 4K | Heap |
-| --- | --- | ---: | ---: | --- |
-| `m_cacheOutput` | `D3D12Renderer.cpp:694` | 14.7 MB | 33.2 MB | VRAM |
-| `m_cacheReadback[4]` | `:755` | 59.0 MB | 132.8 MB | host READBACK |
-| `m_reference` | `:768` | 14.7 MB | 33.2 MB | VRAM |
-| `m_referenceUpload[6]` | `:770` | 88.5 MB | 199.1 MB | host UPLOAD |
-| | **total** | **177 MB** | **398 MB** | |
+Each resubmit of frame 0 is a synchronous full capture and readback. Each
+log read waits at least 200 ms for the file to stop growing. A cold job
+resubmits about 60 times with history building up, and the number depends
+on when the log flushes, so **the same cache key can produce different
+bytes on different runs**.
 
-- The BGRA capture target and readback ring are used **only** by
-  `OfflineNeuralRenderer` — the player never calls
-  `EnqueueEvaluatedFrameCapture`.
-- `FrameCount = 6` exists for the *export* path (`D3D12Renderer.h:334`: *"An
-  export source frame records two command lists… Six allocators keep three
-  complete source frames in flight."*). The player records one list per frame
-  and needs ~3.
-- The SR validation path builds a **second** renderer on a child window
-  (`main.cpp:6129`), so peak doubles during a toggle.
-
-**Note** — your own audit parked this as row 14, but that row covered only
-`m_cacheOutput`. The readback ring and the six reference uploads were out of
-that slice's scope.
-
-**Fix** — three independent low-risk changes:
-
-- [x] `bool captureOutput` added to `Initialize` (`D3D12Renderer.h:179`,
-      default `false`), gating `m_cacheOutput` + `m_cacheReadback[]`
-      (`D3D12Renderer.cpp:782`). **Saves 73.7 MB at 1440p / 166 MB at 4K in the
-      player process.**
-- [ ] Allocate `m_reference` + uploads lazily on the first non-neural
-      comparison mode — still unconditional at `D3D12Renderer.cpp:795`, `:799`
-- [ ] Cut reference uploads from 6 to 3 — `FrameCount` is still 6
-      (`D3D12Renderer.h:379`)
-
-Remaining: **103 MB at 1440p / 232 MB at 4K**, all in the comparison reference
-path that a plain-playback session never touches.
+**Fix** — resubmit without capturing, capture once when the gate opens, and
+reset history immediately before that capture. Tail the log from the last
+offset instead of re-reading it.
 
 ---
 
-### [x] 2.6 · `SetMaximumFrameLatency(2)` is a silent no-op — ~~fixed by adding the flag~~, fixed by deleting the call
+<a id="p111"></a>
+### P1.11 · The runtime lock ignores extra add-ons
 
-🔍 reported · **effort: S** · `THE PRESCRIBED FIX WAS WRONG AND WAS REVERTED`
+`S` · **Pipeline, Release** · 🔍 · security
 
-**Where** — `src/D3D12Renderer.cpp:230`
+**Where** — `packaging/ReShade.ini:2` (`AddonPath=.`),
+`RuntimeLock.cpp:378-418`, `NeuralWorkerMain.cpp:281-300`
 
-```cpp
-sd.Flags = m_allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-...
-// :233
-if(m_swapchain) m_swapchain->SetMaximumFrameLatency(2);
-```
+The lock checks only the files it knows about. A stray `*.addon64` in
+`neural-runtime/` gets loaded and can change what feature 18 produces, while
+the runtime digest, the cache key and the receipt still name the locked
+runtime.
 
-`IDXGISwapChain2::SetMaximumFrameLatency` is valid **only** on a chain created
-with `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT`. Otherwise it returns
-`DXGI_ERROR_INVALID_CALL` — and the return value is discarded. Latency stays at
-DXGI's default of 3.
-
-**The diagnosis was right. The prescribed fix broke the product.**
-
-Adding `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` shipped, and
-**stopped neural rendering producing a single frame.** Bisected to that one
-line. With the flag set, the RenoDX add-on's inline NR path allocates a fresh
-workset per evaluation instead of reusing one and exhausts its pool within
-three frames; `ReShade.log` reads *"NR workset pool exhausted; preserving game
-output for this evaluation"*, every later frame is the untouched source, the
-helper reports `frames=0/0`, and the player refuses the render with *"A frame
-was not produced by feature 18"*.
-
-**The add-on hooks this swapchain, so its flags are part of the contract with
-it, not a private presentation detail.** Reverted in `6ab4267`.
-
-**What actually landed**
-
-- [x] `SetMaximumFrameLatency` is **not called at all** — without the flag it
-      can only return `DXGI_ERROR_INVALID_CALL`, and a call that can only fail
-      is worse than none. Latency stays at DXGI's default of 3
-- [x] A `DO NOT ADD THIS FLAG` comment with the bisect result at
-      `D3D12Renderer.cpp:232`, mirrored in `D3D12Renderer.h:25` and
-      `PrecisionSleeper.h:25`
-- [x] `d3d12_renderer_detail::SwapchainFlags` — the flag set is now one
-      device-free function the `NeuralRangeRenderSmoke` failure message names
-- [x] **2.2 got its own signal instead**: a high-resolution waitable timer,
-      which needs nothing from the presentation path
-
-> ⚠️ **Do not re-propose the waitable swapchain.** It is a correct DXGI
-> technique that this product cannot use while the neural path is an add-on
-> hooking the same swapchain.
+**Fix** — allowlist the directory's contents (refuse unknown `.addon64` and
+`.dll` files) and fold the directory listing into the runtime digest.
 
 ---
 
-### [x] 2.7 · ~~682 ms of `waveOut` buffering sets the seek cost~~ — measured false, replaced anyway
+<a id="p112"></a>
+### P1.12 · Helper robustness batch
 
-🔍 reported · **effort: S cheap / L structural**
+`S` · **Pipeline** · 🔍
 
-**Where** — `src/AudioPlayer.cpp:157`
-
-```cpp
-constexpr size_t BufferCount = 8;
-constexpr size_t BytesPerBuffer = 16384; // ~85 ms stereo/48k/16-bit
-```
-
-8 × 85.3 ms = **682 ms of queued PCM** over legacy MME, with the master clock
-read from `waveOutGetPosition` and **no device-latency compensation**.
-
-A seek tears down and respawns both ffmpeg children (`main.cpp:3940`, `:3995`).
-`Stop` waits up to 200 ms twice; `Start` must fill ≥1 × 85 ms buffer before
-`hasAudioData` goes true.
-
-This is the measured half-second `PlaybackCadence.h:63` prices RE-ANCHOR
-against:
-
-```cpp
-// Lateness that says walking has lost - seek instead. One second is about two
-// seek costs here, so it is the point where covering the gap frame by frame
-// stops being the cheaper way to close it.
-inline constexpr double kReanchorSeconds = 1.0;
-```
-
-**Secondary** — `waveOutGetPosition` quantizes to the shared-mode engine period
-(~10 ms), which is **larger than a frame interval at 119.88 fps**. Several
-frames become due at once, then none.
-
-**Fix**
-
-- [x] ~~**Cheap:** drop `BytesPerBuffer` to 4096~~ — **superseded.** The
-      premise was measured false (see the corrected-claims table at the end):
-      seek cost is 60 ms, and `Seek` respawns ffmpeg rather than draining the
-      queue, so buffer size was never in that path.
-- [x] **Structural:** `src/WasapiRenderer.{h,cpp}` — shared-mode, event-driven,
-      float32 at the mix format, clocked from `IAudioClock`. Queue depth
-      682 ms → 22 ms; drift over 5 s −0.074 ms → −0.003 ms. See **3.8** for
-      what the WASAPI work did *not* cover.
+- **Preflight JSON has no size cap**, but the pipe rejects frames over 64 KiB
+  (`NeuralPreflight.cpp:328-352`, `NeuralWorkerProtocol.h:548`,
+  `NeuralWorker.cpp:206`). A failing probe that logs every frame reaches the
+  player as "malformed metadata". Keep the first and last N observations.
+- **The preflight verdict is written without temp, flush and rename**
+  (`NeuralWorker.cpp:1755-1760`), and loading only searches for `"ok":true`
+  (`:1743`). A truncated file is accepted as a pass. Write it atomically, and
+  parse it on load.
+- **The crash handler allocates and takes the log mutex** (`CrashDump.h:41`,
+  `:68-73`). A fault inside `Log::Write` deadlocks the handler, and the GPU is
+  held until the 120 s watchdog. Build the dump path at install time, and
+  `try_lock` the log.
+- **Frame generation frees GPU resources after a failed wait**
+  (`FrameGenerationPass.cpp:128-131`, `DLSSGBackend.cpp:524-526`). Keep them
+  alive on timeout, or check for device removal first.
+- **The resident path ignores `GetExitCodeProcess`'s return**
+  (`NeuralWorker.cpp:1487`), so a real crash reads as exit 0 and becomes a
+  `Protocol` failure that is never relaunched.
 
 ---
 
-### [ ] 2.8 · Parent-side IPC polls at 20 ms while the helper side is event-driven
+<a id="p113"></a>
+### P1.13 · Parent-side IPC polls at 20 ms
 
-🔍 reported · **effort: M** · **gain: ~10 ms mean off every segment handoff**
+`M` · **Pipeline, Player** · 🔍 · _old 2.8, not started_
 
-**Where** — `src/NeuralWorker.cpp:543`
+**Where** — `NeuralWorker.cpp:580` (`WaitForSingleObject(helper.process, 20)`),
+`:450`, `:151`; `NeuralWorkerProtocol.h:222-240`
 
-```cpp
-const DWORD wait = WaitForSingleObject(helper.process, 20);
-if (wait != WAIT_TIMEOUT) { outcome.exited = true; break; }
-```
+Every `Progress`, `Segment` and `Result` message reaches the parent 0-20 ms
+late. A `Segment` message is what makes a finished segment playable, so the
+delay comes straight out of the live buffer. The helper side already uses a
+reader thread blocked on an event.
 
-The process handle only signals on exit, so in steady state this **always**
-times out. Every `Progress`, `Segment`, `Result` and `Timeline` message is
-noticed 0-20 ms late. A `Segment` message is what makes a finalized
-`neural-NNNNN.mkv` visible to live playback — that latency lands directly in
-the live-session buffer budget.
-
-The helper side already does it right: a dedicated thread blocked in `ReadFile`
-signalling an event (`ResidentWorkerLoop.h:235`). **The cheap direction got the
-good mechanism.**
-
-**Three smaller items in the same path:**
-
-- `NeuralWorkerProtocol.h:225` — **two** `WriteFile` syscalls per message
-  (header, then payload) under a mutex on the render thread, once per encoded
-  frame. 120 syscalls/s to move 3.8 KB.
-- `NeuralWorker.cpp:426` — the **60 Hz metadata pipe takes the default 4 KiB**
-  while the low-traffic command pipe gets an explicit 16 KiB (`:436`). Backwards.
-- `NeuralWorker.cpp:143` — `std::array<std::byte, 4096> chunk{};`
-  value-initialized **inside** the drain loop. A 4 KiB memset per poll to
-  receive ~64 bytes.
-
-**Fix** — mirror the helper: a parent-side reader thread blocked in `ReadFile`.
-Or switch to `CreateNamedPipe` + `FILE_FLAG_OVERLAPPED` and use a real
-`WaitForMultipleObjects` — which is what the `ResidentWorkerLoop.h:63` comment
-says was unavailable. Coalesce header+payload (every message but
-`Result`/`Preflight` is ≤92 bytes). Give the metadata pipe 64 KiB.
+**Fix** — use a parent-side reader thread blocked in `ReadFile`, as the helper
+does. Coalesce header and payload into one `WriteFile` (and merge the two
+identical write functions). Give the 60 Hz metadata pipe 64 KiB rather than
+the default 4 KiB. Move the 4 KiB zero-filled chunk out of the drain loop.
 
 ---
 
-### [~] 2.9 · Cache hashes everything, every time
+<a id="p114"></a>
+### P1.14 · Hashing and write amplification leftovers
 
-🔍 reported · **effort: M** · **gain: 3-5 s per job start on a 5 GB source**
+`M` · **Pipeline** · 🔍 · _open parts of old 2.9 and 2.19_
 
-**Where** — `src/NeuralCache.cpp:519`, `:982`, `src/main.cpp:5686`
-
-- `Lookup` full-hashes the payload on **every** call — with **no stop token**,
-  so a multi-GB hash is uncancellable.
-- Every `StartNeuralJob` hashes the whole source first — **including the
-  `prepareOnly` cache check and every live-session retarget.**
-- No `FILE_FLAG_SEQUENTIAL_SCAN`, 1 MiB buffered `ifstream`.
-
-**Live-session write amplification: 2 full writes + 3 full reads per rendered
-byte.** Segment files → `ConcatenateMedia` copies all into
-`staging/neural.mkv` → `ProbeMedia` → `Sha256File` in `Promote` → post-rename
-manifest re-read. **The segment files are never deleted** (`main.cpp:6946`), so
-steady-state occupancy is ~2× the render output.
-
-**Cost** — ~40-80 ms per lookup on a 60 MB render (the code's own comment
-measures 63-86 ms); **3-5 s per job start on a 5 GB source**.
-
-**Fix**
-
-- [x] **Hashed once per loaded media** — `SourceDigestMemo.h`, owned by the
-      loaded file and forgotten in `Unload`, keyed on (path, size, write
-      time). Deliberately not `Sha256FileCached`, whose own header says never
-      to use it for user content: this digest is a cache-key term, so a stale
-      one hands back the render of a different file. Shared with the worker
-      by value - that thread captures nothing owned by the window
-- [ ] Promote to `Sha256FileCached` for payloads this process published this
-      session, keyed on `(path, size, mtime, promotionSequence)`. The
-      correctness objection in `NeuralCache.h:104` is about *user* content — a
-      just-promoted payload is not that.
-- [x] `FILE_FLAG_SEQUENTIAL_SCAN`, 4 MiB buffer — `Sha256File` now reads
-      through `CreateFileW`/`ReadFile` instead of `ifstream`, which was layering
-      its own buffering under a 1 MiB read. The flag matters because this hashes
-      whole media files: without it a multi-GB source is retained in the standby
-      list on the way past
-- [ ] Delete the joined `staging/neural.mkv` copy, or delete the segments after
-      the join
+- `Lookup` re-hashes the whole payload on every call, and a multi-GB hash
+  cannot be cancelled (`NeuralCache.cpp:1005`). Add a stop token, and memoise
+  payloads this process published, keyed on
+  `(path, size, mtime, promotionSequence)`.
+- Live sessions write every rendered byte twice and read it three times. The
+  joined `staging/neural.mkv` is a full copy, and the segments are never
+  deleted after the join. Delete one or the other.
+- `SweepStaging`'s `remove_all` cannot be interrupted (`:897-904`). Nothing is
+  flushed before the publishing rename (`:1073-1078`, `:419`). Quarantined
+  entries are deleted on the next sweep (`:887`), before anyone can inspect
+  them.
 
 ---
 
-### [ ] 2.10 · Smaller, cheap, worth doing
+<a id="p115"></a>
+### P1.15 · Small render-thread costs
 
-🔍 reported · **effort: XS each**
+`XS each` · **Pipeline** · 🔍 · _open rows of old 2.10_
 
-| Item | Where | Why |
+| Item | Where | Fix |
 | --- | --- | --- |
-| `Log::Write` holds a global mutex across `OutputDebugStringA` **and** a flushed file write | `Log.h:14` | `OutputDebugStringA` takes the system-wide `DBWinMutex`. Per-reset logging (`D3D12Renderer.cpp:1020`) becomes per-frame in a degraded session. Buffer + flush on a timer; skip unless `IsDebuggerPresent()` |
-| Capture fence wait is on the **render** thread | `OfflineNeuralRenderer.cpp:2020` | Only the memcpy is offloaded; any GPU hiccup lands on the loop. Move `BeginResolveOldestCapture` into the `DeferredCapture` worker |
-| Recycle pool is 4 buffers against a ~30-frame queue | `:444` vs `:318` | A miss makes `CopyCaptureView`'s `resize` zero-fill a whole frame first — **33 MB memset at 4K.** Size the pool to the queue depth, as the single-file path already does (`:2189`) |
-| First-frame receipt gate polls a log file at 100 ms, up to 2 s, needing 3 stable samples | `:1379` → `:2264` | Seconds on frame 0 of a cold job, re-reading up to 4 MiB with a `LowerAscii` copy each time. Use `ReadDirectoryChangesW` or a tail read from the last offset |
-| ~~`ChildProcess::Wait` polls at 25 ms~~ **done** | `MediaPipeline.cpp:223` | Up to 25 ms per segment publish. Now `WaitForMultipleObjects(process, cancelEvent, INFINITE)` with a `std::stop_callback` setting the event — the same pattern already used at `:909`. The 25 ms timeout existed only to look at the stop token; cancellation is now observed by the wait itself, so the token is no less responsive. Keeps the old poll as a fallback if the event cannot be created |
-| Telemetry vectors: 10 `push_back`/frame, no `reserve` | `OfflineNeuralRenderer.cpp:116`, `:1220` | ~7 MB at 100k frames + realloc-and-copy on the render thread |
-| `SelectSegment` returns `NeuralSegment` **by value** per decoded pair | `SynchronizedPlayback.cpp:429` | A `std::filesystem::path` wide-string allocation per frame **under the index mutex**. Return the index or a `string_view` |
+| The capture fence wait runs on the render thread | `OfflineNeuralRenderer.cpp:1984` → `D3D12Renderer.cpp:1290` | Move `BeginResolveOldestCapture` into the `DeferredCapture` worker |
+| The recycle pool holds 4 buffers against a queue of about 30 frames | `:446` vs `:320` | Size the pool to the queue depth (a miss is a 33 MB memset at 4K) |
+| Telemetry vectors have no `reserve` | `:118-135` | Reserve for the frame count |
+| `SelectSegment` returns a segment by value under the index mutex | `SynchronizedPlayback.cpp:429` | Return an index |
+| `Log::Write` holds a global mutex across `OutputDebugStringA` and a flushed write | `Log.h:14-18` | Skip `OutputDebugStringA` unless a debugger is attached; flush on a timer |
 
 ---
 
-## 2B · Build system
+<a id="p116"></a>
+### P1.16 · Duplicated helpers that behave differently
+
+`M` · **Pipeline** · 🔍 · _open parts of old 2.21_
+
+These matter because the copies **disagree**, not because they are repeated.
+
+- **Wide/narrow conversion**: the parent and child of the same IPC channel
+  handle non-ASCII differently. `NeuralWorker.cpp:109` rejects it;
+  `NeuralWorkerMain.cpp:149` substitutes `?`.
+- **`JsonEscape`**: `NeuralCache.cpp:120-139` returns an empty string for a
+  control character, while `NeuralPreflight.cpp:469-492` escapes it.
+- **Hex and NGX error formatting**: 24 ad-hoc `std::hex` sites drop leading
+  zeros, so their log lines cannot be grepped against receipts.
+- **`CreateKillOnCloseJob`**: identical copies at `MediaPipeline.cpp:114` and
+  `NeuralWorker.cpp:79`.
+- **Atomic file writes**: five copies, and only two of them flush.
+- **`AudioPlayer.cpp:34`'s ffmpeg lookup** lacks the `neural-runtime` guard the
+  other two lookups have, and falls back to `SearchPathW`, so it can pick up
+  an arbitrary ffmpeg from PATH.
+
+**Fix** — one shared header per helper, following `Sha256File`'s single
+implementation.
+
+## Release and CI
+
+<a id="p117"></a>
+### P1.17 · The GPU CI workflow cannot pass on a fresh runner
+
+`S` + owner decision · **Release** · 🔍 · _includes the open runner item of old 2.14_
+
+**Where** — `.github/workflows/gpu-tests.yml`,
+`tools/fetch_neural_runtime.ps1:160`
+
+- It never stages the runtime and the ReShade inis into
+  `build-upscaling/Release/neural-runtime`. `fetch_neural_runtime.ps1` only
+  validates, and checkout's `git clean -ffdx` wipes that folder, so the
+  neural smokes fail.
+- The "refuse skips" step runs the whole hardware suite a second time and
+  ignores that run's exit code. Its threshold says 10 tests; there are 13.
+- There is still no self-hosted runner. Registering one needs the owner's
+  credentials, so that part is the owner's decision.
+
+**Fix** — add `stage_runtime.ps1 -Destination build-upscaling/Release/neural-runtime`
+and copy the ini files. Parse `--output-junit` from the first run instead of
+running the suite again.
 
 ---
 
-### [~] 2.11 · A reachable path to a fully unoptimized shipping binary
+<a id="p118"></a>
+### P1.18 · The attestation workflow signs a digest someone typed
 
-🔍 reported · **effort: S** · **impact: measurement integrity**
+`S` · **Release** · ✅
 
-`CMakeLists.txt:184` and `:206` are the **complete** compile-option set for
-both shipped binaries:
+**Where** — `.github/workflows/attest-release-asset.yml:50-69`
 
-```cmake
-target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-```
+The workflow attests whatever digest the operator enters, and never downloads
+the published asset to confirm it. Its inputs are also interpolated straight
+into bash (`digest='${{ inputs.asset-digest }}'`). Only people with write
+access can trigger it, but that is the classic script-injection shape.
 
-Zero hits across the file for `/O2`, `/GL`, `/LTCG`, `/Gy`, `/OPT:ICF`,
-`/arch:`, `/fp:`, `/MP`, `/GENPROFILE`, `target_precompile_headers`,
-`UNITY_BUILD`, `CMAKE_INTERPROCEDURAL_OPTIMIZATION`.
-
-**`CMAKE_BUILD_TYPE` is never set, defaulted, or validated.** And
-`build_windows.bat:102` has a branch that passes **no generator**:
-
-```bat
-) else (
-  echo [4/5] Configuring with CMake's default generator...
-  "%CMAKE_EXE%" -S . -B build-upscaling -DBUILD_TESTING=ON ...
-)
-```
-
-This fires when `cmake.exe` came from `PATH` (`:30`). If that CMake defaults to
-Ninja or NMake:
-
-- `CMAKE_BUILD_TYPE` is empty → **no `/O2`, no `/Ob2`, no `NDEBUG`** (asserts live)
-- `--build --config Release` at `:117` is **silently ignored** by single-config
-  generators
-- The script then prints `[OK] ...\Release\DLSSVideoPlayer.exe` **without
-  checking the path exists**
-
-CI is safe (both workflows pin `-G "Visual Studio 17 2022"`). This only bites
-local builds — and anything packaged from one. **For a project that measures
-this carefully, that is a correctness-of-measurement hazard.**
-
-**Fix, in order**
-
-- [x] `CMakeLists.txt:34-37` defaults `CMAKE_BUILD_TYPE` to Release on a
-      single-config generator, and offers the `STRINGS` property
-- [x] Existence check on the output in `build_windows.bat:131`, which now names
-      the single-config generator as the likely cause
-- [x] `add_compile_options(/MP)` — `CMakeLists.txt:49`. **Clean rebuild
-      103.2 s → 52.4 s**
-- [ ] `set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)` behind
-      `check_ipo_supported` — LTCG inlines across `NeuralCache.cpp` ↔ `main.cpp`
-      and `SynchronizedPlayback.cpp` ↔ `VideoDecoder.cpp`; typically 2-5%.
-      **Not started** (zero hits for `check_ipo_supported`)
-- [ ] `/Gy` + `/OPT:ICF` — **not started** (zero hits)
-
-> ⚠️ **Leave `/arch:AVX2` and `/fp:fast` alone.** The first excludes pre-Haswell
-> CPUs. The second would perturb the bit-identical-render property the
-> benchmark relies on.
+**Fix** — `gh release download` the asset, compute its SHA-256 inside the
+job, and attest that. Pass inputs through `env:`.
 
 ---
 
-### [ ] 2.12 · 5.2× compile amplification — there is no `add_library` anywhere
+<a id="p119"></a>
+### P1.19 · No PDBs for crash dumps; builds are not reproducible
 
-🔍 reported · **effort: M** · **gain: ~halve a 10-minute CI**
+`S` · **Release, Player** · 🔍
 
-`grep -c add_library CMakeLists.txt` → **0**. 20 `add_executable`.
+`CrashDump.h` writes minidumps from both processes, but Release links without
+`/DEBUG`, so the dumps cannot be symbolised. There is no `/Brepro`, and zip
+entries keep file mtimes (`tools/package_release.ps1:329-334`), so nobody can
+rebuild the core zip to check it against the attestation.
 
-Measured in the existing build tree: **162 `.obj` files for 31 `.cpp` sources,
-76.7 MB.**
-
-| Source | Compiled |
-| --- | ---: |
-| `VideoDecoder.cpp` (1,661 lines) | **9×** |
-| `NeuralCache.cpp` | 8× |
-| `NeuralPreflight.cpp` | 7× |
-| `MediaPipeline.cpp` | 6× |
-| `D3D12Renderer.cpp` | 5× |
-
-Roughly 104k TU-lines against 27.8k lines of source — an undercount, since
-`PlayerUiRegressionTests` pulls the whole player list again via
-`get_target_property` at `:641`. Recent CI runs: **10m04s and 10m23s**.
-
-**Verified safe** — only 5 files reference a per-target define:
-
-- `DLSS_VIDEO_PLAYER_VERSION` → `main.cpp`, `NeuralPreflightProbe.cpp`,
-  `UpdateCheck.cpp`, `resources.rc`
-- `DLSS_VIDEO_PLAYER_HAS_NVOF` → `OpticalFlowNvof.cpp` only
-- `*_TESTING` → `main.cpp`, `YouTubeResolver.cpp`
-
-No source references `__cplusplus`, so the `/Zc:__cplusplus` inconsistency at
-`:274`/`:376` is harmless.
-
-**Not started.** `grep -c add_library CMakeLists.txt` → still **0**. `/MP`
-(**2.11**) cut the wall time roughly in half by parallelising the redundant
-work; it did not remove the redundancy, and it does nothing for a single-core
-CI runner.
-
-**Fix** — three `OBJECT` libraries:
-
-- [ ] `player_media` — VideoDecoder, MediaSource, MediaPipeline,
-      SynchronizedPlayback, AudioPlayer
-- [ ] `player_render` — D3D12Renderer, OpticalFlowNvof, DLSSBackend,
-      DLSSGBackend, TemporalGuides, RuntimePolicy
-- [ ] `player_neural` — NeuralCache, NeuralPreflight, NeuralWorker,
-      NeuralReceipt, OfflineNeuralRenderer, RuntimeLock, ReShadeConfig,
-      NeuralSettings
+**Fix** — build both shipped targets with `/Zi` and link with
+`/DEBUG /OPT:REF /OPT:ICF`. Adding `/DEBUG` turns off the linker's default
+REF/ICF, so state those explicitly. Publish the PDBs as a CI artifact, not
+in the zip. Add `/Brepro` and fixed zip timestamps.
 
 ---
 
-## 2C · Tests and CI
+<a id="p120"></a>
+### P1.20 · CI hardening
+
+`M` · **Release** · 🔍 · _old 2.17, plus new items_
+
+- [ ] **Split permissions.** `release.yml` gives `contents: write` and
+      `id-token: write` to the job that builds and runs the fetch scripts, and
+      `pages.yml` grants `pages`/`id-token` to the whole workflow. Separate a
+      read-only build job from a small publish job.
+- [ ] Set `timeout-minutes` on build, release and pages; today only
+      gpu-tests has one, and the rest get the 6-hour default.
+- [ ] Add `.github/dependabot.yml` for `github-actions`, so the SHA pins can
+      be refreshed.
+- [ ] **Turn on `/WX`.** The /W4 count is now 0, so this is free.
+- [ ] Run `/analyze` on `DLSSVideoPlayer` and `NeuralWorker`, and
+      `/fsanitize=address` on the device-free suites, in a separate quality job.
+- [ ] Cache the pinned downloads (about 300 MB per run), keyed on
+      `tool-lock.json`.
+- [ ] Add a `pull_request` trigger to `pages.yml`, so the 31 site tests run
+      on PRs.
+- [ ] Set `persist-credentials: false` on `actions/checkout`.
+- [ ] Add a `CMakePresets.json` and pin the MSVC toolset version.
 
 ---
 
-### [x] 2.13 · Zero A/V sync coverage
+<a id="p121"></a>
+### P1.21 · Build structure: one set of objects, one set of flags
 
-🔍 reported · **effort: M** · **impact: the most user-visible property**
+`M` · **Release** · 🔍 · _old 2.11 and 2.12_
 
-`SynchronizedPlayback` is **not** A/V sync — it pairs the *original* and
-*neural* video streams.
+There is no `add_library` anywhere, so 175 compiles build about 53 unique
+files: `VideoDecoder` and `MediaSource` 12× each, `NeuralCache` 10×. Worse,
+**the copies are built with different flags**. Six test targets lack
+`/Zc:__cplusplus`, and `UpscalingGpuSmoke` lacks the generated include
+directory (`CMakeLists.txt:294`, `:314`). So the tests are not exercising the
+object code that ships.
 
-`AudioPlayer` is tested only for process/pipe lifetime
-(`PolicyTests.cpp:5547`). The sole timing assertion is:
-
-```cpp
-CHECK_EQ(7.5, AudioPlayerTestAccess::SeekBase(*audio))
-```
-
-— that a value was **stored**. Never correlated to a video PTS. No drift
-measurement, no clock-master test, no resync-after-seek assertion.
-`CONTRIBUTING.md:15` asks contributors to test this **by hand**.
-
-**Why the arithmetic is unforgiving** — drift = **7.2 ms per ppm** over a
-2-hour film. A typical 50 ppm consumer crystal drifts **360 ms**, past ITU-R
-BT.1359-1's acceptability window (+90/-185 ms).
-
-**Landed as `tests/AudioClockSmoke.cpp`** — its own target under the `audio`
-label with `SKIP_RETURN_CODE 125`, rather than folded into `CachedExportTests`,
-because it needs a real render endpoint and the portable suite must not
-require one. Tolerance is one frame at 24 fps, the player's own acceptance
-bound for a paired frame.
-
-- [x] start — clock answers, then advances at real time from standing start
-- [x] after a forward seek — at or past 20 s, and not run away past it
-- [x] after a backward seek — the assertion that catches a clock which never
-      rebased, since it would still read ~20 s
-- [x] after pause/resume — holds still while paused, resumes from where it
-      paused
-- [x] **beyond the original scope:** drift over 5 s, EOF (the clock never runs
-      backwards as the queue drains), `ServiceDeviceChanges` inertness over 200
-      ticks, and a stopped player reporting no clock
-- [x] **Corrected 2026-09-21: as landed, this test could not pass anywhere
-      ffmpeg was not already on `PATH`.** It took the helper directory as
-      `argv[1]`, used it to generate the clip, then constructed a default
-      `AudioPlayer` — which finds ffmpeg beside its own module or on `PATH`,
-      and this target stages neither. Every `Start()` returned false with
-      `Audio: ffmpeg.exe not found.` in `AudioClockSmoke.log` and all eight
-      assertions failed on a machine whose audio was fine. `Settings::
-      helperDirectory` existed for exactly this and was never set. Now passes
-      on hardware: start 46 ms, forward seek 53 ms, backward seek 49 ms,
-      **drift 0.027 ms over 5 s**, device-change recovery 45 ms
-
-**What it does not prove** — acoustic sync. It asserts the *clock contract*,
-which every video frame's due time is computed from. Correlating samples
-leaving the endpoint against a marked frame is a different harness;
-`tools/verification/loopback-probe.cpp` is the instrument for the part of that
-gap that matters most — that the renderer is not silently outputting zeroes.
+**Fix** — three `OBJECT` libraries (`player_media`, `player_render`,
+`player_neural`) with one shared set of options. Then enable
+`CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE` behind `check_ipo_supported` and
+measure the change. Leave `/arch:AVX2` and `/fp:fast` alone: the first drops
+pre-Haswell CPUs, and the second breaks the bit-identical renders the
+benchmark relies on. Update the stale counts in the comments at
+`CMakeLists.txt:46`.
 
 ---
 
-### [~] 2.14 · 8 GPU tests never run anywhere, and hard-fail instead of skipping
+<a id="p122"></a>
+### P1.22 · Test hygiene and coverage gaps
 
-🔍 reported · **effort: S for the skip, M for the runner**
+`M` · **Release** · 🔍
 
-_As audited:_ `CMakeLists.txt` registered 21 tests, 13 portable and **8
-labelled `gpu`**; CI ran `ctest -LE gpu`, and **no self-hosted or GPU runner
-existed.** _Today it registers **24**: 13 portable, **10 `gpu`**, **1 `audio`**.
-The runner still does not exist._
+- **Wall-clock ceilings that can flake on a loaded runner**:
+  `PolicyTests.cpp:6020` (under 2,000 ms), `NeuralWorkerTests.cpp:786`,
+  `:939`.
+- **Sleep-then-stop at `NeuralPrerenderTests.cpp:1308`, `:2538`** can end up
+  testing cancel-before-block instead of the blocked path. Use a latch.
+- `assertion_count` (`tests/TestSupport.h:23`) is counted but never enforced,
+  and `harness_sanity_test` (`PolicyTests.cpp`) counts `CHECK(true)` as a
+  test.
+- **Never run by CI**: `DLSSGBackend`, `FrameGenerationPass`, `WasapiRenderer`,
+  `NeuralPreflightProbe` and `NeuralWorkerMain` run only under the `gpu`/`audio`
+  labels (see P1.17). `CrashDump.h` and `PrecisionSleeper.h` have no tests.
+  `stage_runtime.ps1` and the full-package path of `verify_package.ps1` never
+  run (see P0.1). The Debug configuration is never built.
+- **`FrameGenerationSmoke`'s clip cannot be obtained**, so the test skips
+  permanently. Generate the clip in the test, or fetch it with a pinned hash.
+- `tools/fetch_youtube_helpers.ps1` has four `# TEST-SEAM:` markers and no
+  harness uses them. Add a Pester test for the restore-failure path.
 
-Two modules live almost entirely behind that label:
+## Docs and site
 
-- `src/DLSSGBackend.cpp` — 27 KB
-- `src/FrameGenerationPass.cpp` — 49 KB
+<a id="p123"></a>
+### P1.23 · Docs, screenshots and positioning drift
 
-**76 KB with no CI-executed assertion, in the newest and most complex feature.**
+`S` · **Docs, Site** · ✅ rows 1 and 4 · 🔍 the rest
 
-Worse: `tests/DlssgProbeSmoke.cpp:104` prints `probe=unreachable` and
-`return 2` — but `SKIP_RETURN_CODE` is set on **exactly one test** in the whole
-file (`CMakeLists.txt:287`, `CachedExportTests`). On a GPU-less machine
-`ctest -L gpu` reports **hard failures, not skips**.
-
-**Mitigating** — the manual substitute is unusually rigorous: 7 dated
-`docs/VERIFICATION-*.md` records, 11 measurement sets, and a 77 KB
-`tools/verification/player_session.ps1` that drives the real player via
-`SendInput` and parses the log. **The automation already exists; only the
-runner is missing.**
-
-**Fix**
-
-- [x] `SKIP_RETURN_CODE 125` on every hardware smoke, each opening with a
-      no-adapter check. `ctest -L "gpu|audio"` on a GPU-less box now skips
-      rather than hard-failing
-- [x] **The gate covered "no adapter" but not "this adapter cannot be asked".**
-      `DlssgEvaluateSmoke` exited 5 on every RTX 40 and earlier: multi-frame
-      generation is Blackwell-only, so `MultiFrameCountMax()` is 1 and the
-      three phase indices it separates are unreachable. Measured here on an
-      RTX 4080 SUPER — the single-frame evaluate above it still runs and still
-      asserts, only the phase table skips. `FrameGenerationSmoke` had the same
-      shape for a different reason: its default clip lives under the gitignored
-      `external/` tree, is fetched by no script and named in no document, so a
-      fresh checkout hard-failed a test whose input cannot be obtained. It now
-      skips on `!exists` only — a file that is present but unreadable still
-      exits 2
-- [x] **`NetworkPreparedRendererSmoke` — nothing in the suite opened a network
-      source.** The prepared-renderer commit path is reached by nothing else,
-      and four defects lived in it at once while 23 tests stayed green: the
-      open did not ask for NV12, the candidate renderer was never told the
-      layout, the geometry check measured every frame at four bytes per pixel,
-      and the guide generator was handed the frame without its layout. The new
-      cases drive the real `PrepareYouTubeMedia`, `CreateRendererCandidate` and
-      `ValidatePreparedFrame` against generated clips and assert the layout
-      each stage settled on — BT.709 limited must reach NV12 end to end, and
-      BT.601 must fall back to BGRA and still validate. Registered as the
-      `--gpu` case set of the existing `PlayerUiRegressionTests` binary rather
-      than a new target, because a second target compiles `main.cpp` again,
-      which is the amplification **2.12** is about.
-      One production change was needed to make it reachable: `NetworkInputOptions`
-      applied `-protocol_whitelist https,tls,tcp` to every `YouTube`-kind open,
-      URL or not, so no local clip could ever be opened through that path. It is
-      now conditioned on the path actually being an `http(s)://` URL — the check
-      `AudioPlayer::StartProcess` has always made on the same option set. A URL
-      gets the identical string it got before
-- [x] `gpu-tests.yml` refused *any* skip, which was right when a skip could
-      only mean a lost adapter. With the two above it would fail on correct
-      hardware, so it now allowlists exactly those two by name and still throws
-      for every other skip — verified both ways against real `ctest` output
-- [x] `docs/BUILDING.md:45` now runs `-LE "gpu|audio"`, matching `:79`;
-      `CONTRIBUTING.md:21`/`:24` agree
-- [x] **New coverage, not in the original fix:** `NeuralRangeRenderSmoke`. Every
-      existing GPU test rendered *whole-source*; only a *range* render runs the
-      60-frame preroll that exhausts the add-on's workset pool, which is what
-      live playback always does. It is the test that would have caught
-      **2.6**'s reverted fix
-- [ ] **Self-hosted runner on the RTX 4080 SUPER.** `.github/workflows/gpu-tests.yml`
-      is written and takes `gpu` and `audio`, with `timeout-minutes` set, and
-      refuses a run in which anything reported itself skipped. **It needs a
-      runner registered against the repository, which needs the owner's GitHub
-      credentials and means that machine accepts CI jobs — a decision for the
-      owner, not for this branch.** Until then the 10 hardware tests run only
-      when a human runs them.
-
----
-
-### [x] 2.15 · Nothing structurally guards cache-key completeness
-
-🔍 reported · **effort: S** · **impact: the failure the whole receipt
-architecture exists to prevent**
-
-`BuildNeuralCacheKey` (`NeuralCache.cpp:581`) is a **hand-maintained field
-list**. Tests discriminate 11 fields individually
-(`NeuralPrerenderTests.cpp:291`, `RenderSettingsTests.cpp:212`) — genuinely
-good — but nothing is derived from the struct.
-
-**Adding a 14th field to `NeuralCacheIdentity` compiles and passes green.**
-
-And the gap is already live: `NeuralPrerenderTests.cpp:267` sets
-`identity.height = 1080`, but the mutation loop varies only
-`changed.width = 2560`. **`height` is never varied.**
-
-**Fix**
-
-- [x] A canary near `BuildNeuralCacheKey`. **Not the `static_assert(sizeof(...))`
-      prescribed here** — `sizeof` moves with `_ITERATOR_DEBUG_LEVEL` because
-      the struct holds a `std::string`, so the pin would fire on a Debug build
-      and say nothing about field *count*. It is a **structured binding** that
-      destructures all thirteen fields: adding a fourteenth fails to compile,
-      with the instruction in the adjacent comment.
-- [x] `identity.height` varied in the mutation loop — and `quality`, `range`
-      and `guides`, which were also never varied. Proved by deleting those four
-      terms from the key and watching exactly four assertions fail.
-
----
-
-### [x] 2.16 · One 1,894-line test function with no crash guard
-
-🔍 reported · **effort: M**
-
-`tests/PlayerUiRegressionTests.cpp:118-2012` is a **single**
-`PlayerAppTestAccess::Run()` holding all **485 assertions**, called once from
-`main()`. No case names, no isolation, no SEH guard.
-
-`PolicyTests.cpp:7130` already solved exactly this and it was never backported:
-
-```cpp
-void run_case_guarded(void (*run)(), CaseOutcome& outcome) noexcept
-{ __try { run_case_catching(run, outcome); }
-  __except (EXCEPTION_EXECUTE_HANDLER) { outcome.exceptionCode = GetExceptionCode(); } }
-```
-
-with the comment at `:7127`: *"An access violation or a stack overflow in one
-case used to take every case after it, and the failing name, with it."*
-
-**Related harness issue** — `CHECK` is **non-fatal** (`TestSupport.h:21` only
-increments a counter), which forces **~218** `CHECK(x.has_value()); if (!x) return;`
-pairs across the suite. Each one silently converts a failure into *abandoning
-the rest of the case*. There is no `REQUIRE`.
-
-**Fix**
-
-- [x] `TestCase` / `TEST_CASE` / `run_case_guarded` lifted into
-      `tests/TestSupport.h`, which includes `<excpt.h>` rather than
-      `<windows.h>` because 6 of the 13 targets lack `NOMINMAX`
-- [x] `Run()` split into **33 named cases over an explicit fixture, at an
-      identical 798 assertions.** Verified by faulting one case: all 33 still
-      run, the failing one is named, 775 assertions survive. Deleting the
-      `__try` reproduces the old behaviour — exit 139, no name
-- [x] Fatal `REQUIRE` added — throws `RequirementFailed` after counting and
-      reporting, so a failed precondition ends its case instead of silently
-      abandoning the rest of it
-
----
-
-### [ ] 2.17 · Missing CI guardrails
-
-🔍 reported · **effort: M**
-
-Verified absent: no sanitizers (`/fsanitize=address`), no static analysis (no
-`/analyze`, no `.clang-tidy`, no `.clang-format`, no CodeQL), no
-warnings-as-errors (`/W4` on all 20 targets, never `/WX`), **no Dependabot** (so
-SHA-pinned actions have no refresh path), no `timeout-minutes`, no
-`CMakePresets.json`, no `CMAKE_EXPORT_COMPILE_COMMANDS`.
-
-For **33 mutexes / 36 `jthread` / 17 atomics / 13 condition variables** across
-23 files, and **zero `assert()` in all of `src/`**, that is a thin net.
-
-**ASan is viable today** — `PolicyTests`, `NeuralPrerenderTests`, and
-`PlayerUiRegressionTests` create **no D3D12 device** (verified: no
-`D3D12CreateDevice` in any of them).
-
-**Also** — `tools/fetch_youtube_helpers.ps1` carries four `# TEST-SEAM:` markers
-(`:90`, `:155`, `:164`, `:181`) around its transactional backup/restore swap,
-and **no harness uses them**. No Pester anywhere. The most intricate failure
-path in `tools/` (`:159`, restore-failure preserving the backup) is untested.
-`stage_runtime.ps1` and the non-`-PublicCore` path of `verify_package.ps1` are
-likewise never exercised.
-
-**Fix** — a separate quality job so it cannot slow the main path:
-
-- [ ] `/fsanitize=address` on the three device-free suites
-- [ ] `/analyze` on `DLSSVideoPlayer` + `NeuralWorker`
-- [ ] `.github/dependabot.yml` for `github-actions`
-- [ ] `timeout-minutes: 30` on every job
-- [ ] Defer `/WX` until the current `/W4` count is measured —
-      `CONTRIBUTING.md:11`'s *"when possible"* suggests it is non-zero
-
----
-
-## 2D · Correctness follow-ups
-
----
-
-### [x] 2.18 · Renderer recovery cannot work — it reuses the HWND
-
-🔍 reported · **effort: S** · **impact: the recovery path is dead on arrival**
-
-`D3D12Renderer.cpp:122` deliberately **leaks** the renderer when the drain does
-not complete:
-
-```cpp
-if(D3D12Renderer::s_retainedRenderers.fetch_add(1)==0){
-    LOG("Renderer retirement retained after bounded GPU drain failure.");
-    return;
-}
-```
-
-`DrainForRetirement` short-circuits on an already-latched failure (`:1529`),
-returning `TimedOut`/`WaitFailed`/`EventRegistrationFailed` — none of which is
-`Completed` or `DeviceRemoved`. **So the old swapchain stays alive.**
-
-`main.cpp:3835` then rebuilds with the **same** `m_renderWnd`, and
-`D3D12Renderer.cpp:232` calls `CreateSwapChainForHwnd`. DXGI allows **one
-flip-model swapchain per HWND** → `DXGI_ERROR_INVALID_CALL` → `Unload()` +
-*"the GPU has been lost"* dialog.
-
-**Every other candidate-renderer path** (`EnableUpscaling`,
-`CreateRendererCandidate`) correctly creates a fresh child window. **Only the
-recovery path reuses.**
-
-**Repro** — a fence wait fails without device removal (e.g.
-`SetEventOnCompletion` → `E_OUTOFMEMORY`, or a >20 s stall on a TDR-extended
-machine). Media unloads and a whole D3D12 device + swapchain leaks.
-
-**Fix** — create a fresh child render window in `RecoverUnusableRenderer`,
-mirroring `EnableUpscaling`. Destroy the old one only after a retained renderer
-is confirmed dead.
-
----
-
-### [x] 2.19 · No cache eviction at all
-
-🔍 reported · **effort: M** · **impact: unbounded disk**
-
-`RemoveSource` / `RemoveRender` exist (`NeuralCache.h:203`) but have **no
-production callers** — only `PlayerUiRegressionTests.cpp` and
-`RenderSettingsTests.cpp`. The only production reclamation is `Clear()`
-(`main.cpp:6448`), which is all-or-nothing.
-
-Meanwhile the key **deliberately retires entries wholesale**:
-`applicationVersion`, `driverVersion`, `modelStoreDigest`, `runtimeDigest` and
-the manifest schema are all key terms (`NeuralCache.cpp:581`). `Promote` only
-reclaims a directory whose key is *re-rendered* (`:1079`).
-
-**Repro** — a user with 40 GB of renders takes an NVIDIA driver update. Every
-key changes. **All 40 GB becomes unreachable dead weight**, everything
-re-renders, disk grows to 80 GB. The only remedy offered destroys the new
-renders too.
-
-`docs/ARCHITECTURE.md:444` still claims displaced keys are removed.
-
-**Fix**
-
-- [x] `NeuralCacheManager::Evict` runs at startup on its own thread, removing
-      entries this build can never serve again — retired schema, unparsable
-      manifest — unconditionally
-- [x] LRU eviction, **triggered by a free-space floor rather than a size cap**
-      (`CacheEvictionPolicy.h`, `kDefaultFreeFloorBytes` = 20 GiB). A cap would
-      have to be either small enough to delete renders on a half-empty disk or
-      large enough never to fire on the machine that needed it. Entries owned
-      by an active job are never targets
-- [x] `ARCHITECTURE.md` corrected — the displaced-keys claim is replaced by a
-      description of the actual rules
-
-**Verified against the real cache:** a planted retired entry was removed on one
-launch, the good entry survived, and the removal was logged.
-
-**Related smaller cache bugs:**
-
-| Item | Where | Note |
+| Item | Where | Fix |
 | --- | --- | --- |
-| `Clear()` skips `live/` but `SizeBytes()` counts it | `NeuralCache.cpp:1187` | Exactly the bug the comment two lines above says was fixed for `frame-generation` — *"Leaving it out made the Clear prompt lie"* |
-| `SizeBytes()` returns 0 for the whole cache after one unreadable entry | `:1174` | Shared, never-cleared `error_code`. "Delete 0 MiB" for a 40 GB cache |
-| `SweepStaging`'s 100 ms budget is checked only *between* candidates | `:876` | A single `remove_all` of a 30 GB abandoned staging dir is uninterruptible — **and it runs on the UI thread**, from 6 call sites |
-| No `FlushFileBuffers` before the publishing rename | `:1050`, `:416` | `MOVEFILE_WRITE_THROUGH` flushes the *rename*, not contents. Detected on read (payload is hashed), but the dead entry is never reclaimed |
-| Quarantine has no forensic window | `:866` | `invalid*` names are reaped by the very next manager construction, seconds later |
+| Says `NvencPreset` defaults to 7; the player's default is 5 (`NeuralCache.h:139`). The helper's fallback of 7 is a deliberate wire contract | `docs/USAGE.md:281` | Say 5 |
+| Screenshots show the old menus ("Upcoming games", File > Export cached video) and a v0.21.0 capture, while the README says they show "screens that haven't changed" | `docs/screenshots/current/recent-videos.jpg`, `neural-strength.jpg`; site "How it works" | Re-shoot |
+| The site's `<title>`, `og:title` and `twitter:title` lead with "AI video upscaling", which is commoditised and not what the product does by default | `site/src/index.html:16`, `:24` | Lead with neural rendering and the same-frame comparison |
+| The window title and error boxes read "DLSS Video Player" | `Localization.h:20` (`app.title`), `main.cpp:948`, `:7818` | "DLSS 5 Video Player" |
+| The related-projects page is three weeks stale and says so. It also ships in both packages while pointing at this file, which is not packaged | `docs/RELATED_PROJECTS.md` | Rewrite it against the landscape below. Narrow the claim to: *the only one that renders the whole video progressively, keeps every frame, and shows the original and the render on the same frame while it is still rendering*. Lead with verifiability. Stop implying frame generation is part of live playback |
+| The changelog is 189 KB (0.24.0 alone is 50 KB) and ships in the zips | `CHANGELOG.md` | Keep user-visible bullets; move the rationale into commits or `ARCHITECTURE.md` |
+| Stale counts: "ten tests" (there are 13), "twenty executables" | `gpu-tests.yml:5`, `CMakeLists.txt:46` | Update them |
 
----
-
-### [x] 2.20 · Two `MAX_PATH` truncation bugs, and 13 copies of one function
-
-🔍 reported · **effort: S**
-
-`DLSSBackend.cpp:24` and `DLSSGBackend.cpp:61` are **byte-identical** and both
-wrong:
-
-```cpp
-wchar_t exePath[MAX_PATH]{};
-GetModuleFileNameW(nullptr, exePath, MAX_PATH);   // no return check
-std::filesystem::path logDir =
-    std::filesystem::path(exePath).parent_path() / L"ngx_logs";
-```
-
-On a path over 260 chars this truncates silently and creates `ngx_logs`
-somewhere wrong.
-
-`NeuralCache.cpp:793` **already does it correctly** with a 32768 buffer and a
-length check. The codebase knows the right pattern; these two predate it.
-
-**13 `GetModuleFileNameW` sites total, 3 incompatible buffer strategies.** Three
-of them (`MediaPipeline.cpp:55`, `NeuralWorkerMain.cpp:31`,
-`OfflineNeuralRenderer.cpp:2197`) are literally the same 6 lines with `!length`
-vs `length == 0` as the only difference.
-
-**Fix** — add `src/PlatformPaths.h` with one checked `ModuleDirectory()`, and
-convert all 13. Start with the two truncation bugs.
-
----
-
-### [~] 2.21 · Other verified duplication worth collapsing
-
-🔍 reported · **effort: M** · **impact: divergence, not compile time**
-
-These matter because **the copies behave differently**, not because they are
-repeated.
-
-| Duplicate | Copies | The divergence that bites |
-| --- | ---: | --- |
-| **Wide↔narrow converters** | 18 | 3 incompatible ASCII semantics. `NeuralWorker.cpp:109` **rejects** a non-ASCII string; `NeuralWorkerMain.cpp:149` substitutes `'?'`. **These two are the parent and child of the same IPC channel.** |
-| **`JsonEscape`** | 2 | `NeuralPreflight.cpp:469` emits `\u00XX` for a control char; `NeuralCache.cpp:117` **returns an empty string**. Same byte, two outcomes. |
-| **Hex / NGX error formatting** | 1 canonical + 24 ad-hoc | `NeuralPreflight.cpp:522` emits `0xbad00002`; the 24 `<<std::hex<<` sites drop leading zeros, so `0x00000015` logs as `0x15` and **cannot be grepped against the receipt**. The header comment at `NeuralPreflight.h:113` claims it is the only place formatting lives — it is not. |
-| **`CreateKillOnCloseJob`** | 6 | `MediaPipeline.cpp:114` and `NeuralWorker.cpp:74` are character-for-character identical |
-| **`QuoteArgument`** | 5 | 2 correct (byte-identical), 2 naive `L"\"" + s + L"\""` applied to **resolved YouTube URLs**. Safe *only* because `YouTubeResolver.cpp:445` rejects `"`, `\`, `'` and whitespace first — **that coupling is undocumented at the ffmpeg call sites** |
-| **Atomic file write** | 5 | Only `RecentMedia.cpp:174` and `ReShadeConfig.cpp:556` actually `FlushFileBuffers`. `NeuralWorker.cpp:1613` writes the live receipt path with a plain truncating `ofstream` — no temp, no rename |
-| **Full `CreateProcess` launch sequence** | 7 | — |
-| **Pipe drain loop** | 6 | — |
-| **Hex nibble table** `"0123456789abcdef"` | 5 | — |
-| **`WriteMessage` / `WriteCommand`** | 2 | `NeuralWorkerProtocol.h:222` and `:235` have **identical bodies three lines apart**; only the enum parameter type differs |
-
-**Also worth noting:** `AudioPlayer.cpp:34`'s helper lookup lacks the
-`neural-runtime` guard that `MediaPipeline.cpp:65` and `VideoDecoder.cpp:302`
-both have, then falls back to `SearchPathW` — **it will pick an arbitrary PATH
-ffmpeg that the other two deliberately refuse.**
-
----
-
-### [~] 2.22 · Documentation drift
-
-🔍 reported · **effort: XS** · _re-checked 2026-09-21_
-
-**Fixed**
-
-| Doc | Now |
-| --- | --- |
-| `docs/BUILDING.md:79`, `CONTRIBUTING.md:21`/`:24` | Say **nine `gpu` + one `audio`**, and name `NeuralRangeRenderSmoke` as the one to run for renderer/swapchain/helper changes |
-| `docs/BUILDING.md:45` | Runs `-LE "gpu\|audio"`, matching `:79` |
-| `docs/ARCHITECTURE.md` (displaced keys) | Replaced by a description of `NeuralCacheManager::Evict` and the free-space floor |
-
-**Still wrong**
-
-| Doc | Says | Reality |
-| --- | --- | --- |
-| `docs/RELATED_PROJECTS.md:5` | reviewed 2026-09-01 | **Three weeks stale.** Rewriting it is **3.1**; until then the page says plainly that its comparisons are September 1 facts rather than current ones |
-
-_Also fixed since:_ `ARCHITECTURE.md`'s identity list now names all thirteen
-terms and points at the canary that pins them; its offline-decode paragraph
-says CUDA, which is what `VideoDecoder.cpp:203` requests; and every
-`runtime-lock.json` entry names its release, the archive digest verified
-before extraction and the per-file digest verified after staging, so the copy
-`SECURITY.md` points auditors at is the true one.
-
----
-
-### [~] 2.23 · Smaller confirmed items
-
-🔍 reported · **effort: XS each**
-
-- **`WM_DROPFILES` discards a multi-file drop silently** — `main.cpp:6701`
-  computes `count`, checks it, then ignores it. Also a 64 KB stack buffer
-  inside `WndProc`.
-- **Zero coverage on two shipped files** — `NeuralWorkerMain.cpp` (633 lines,
-  the helper's real `wmain`) and `NeuralPreflightProbe.cpp` (163 lines) are in
-  **no** test target. `ParallelFor.h` is listed in `PolicyTests`' sources but
-  never included or called.
-- **`harness_sanity_test`** (`PolicyTests.cpp:2066`) is `CHECK(true); CHECK_EQ(2+2, 4);`
-  registered as a real case and counted in the pass line.
-- **Unbounded on-disk values** — `VideoDecoder.cpp:482` parses `width`/`height`
-  with no ceiling anywhere (a crafted MKV declaring 20000×20000 asks for ~11 GB);
-  `:500` checks `duration` only for `isfinite && > 0`, unlike the Matroska path
-  at `:148` which correctly bounds against `INT64_MAX/1e7`.
-- **`OpenKnown` bypasses the fps clamp its own header documents** —
-  `VideoDecoder.cpp:881` assigns `fps` directly; the `std::clamp(fps, 1.0, 240.0)`
-  lives in `ProbeFFmpeg` (`:584`), which a known open skips.
-  `VideoDecoder.h:216` states the opposite invariant.
-- **`MetadataReader::ReadAvailable` is an unbounded drain loop** —
-  `NeuralWorker.cpp:132`, no iteration cap, byte cap or time budget. It is the
-  first statement of every `Pump` iteration, **before** the stop check. A chatty
-  helper makes the render uncancellable.
-- **`EndHelper` does an unbounded blocking `WriteFile` before any kill** —
-  `NeuralWorker.cpp:382`, on a synchronous anonymous pipe, before
-  `TerminateJobObject`. Once ~16 KiB accumulates the job thread hangs at shutdown.
-- **Exit-code misclassification** — `NeuralWorker.cpp:577` calls
-  `GetExitCodeProcess` on a **still-running** helper and reports *"exited with
-  code 259"*. `:1402` ignores the return value, turning a genuine crash into
-  non-relaunchable `Protocol`.
-- **A read-only install hard-fails YouTube as "helper files are missing"** —
-  `YouTubeResolver.cpp:110` tolerates only `ERROR_ALREADY_EXISTS`;
-  `ERROR_ACCESS_DENIED` propagates. Five distinct causes (**including detecting
-  a junction attack**) share one opaque string, with no log line and no
-  LocalAppData fallback.
+**Landscape since 2026-09-01, for the rewrite.**
+- **NVIDIA:** DLSS 5 shipped officially on 2026-09-03 (driver 616.64, RTX 50
+  only, one game), with RTX 40 support promised "later this fall" and no
+  public SDK yet.
+- **Merserk Visual Enhancer:** v2.1 → v11. It now has frame generation,
+  10-bit HDR, RTX VSR, a Live mode, masks, shimmer suppression, a 2-Up view,
+  and ProRes and FFV1 export.
+- **NeuralScreen:** about 944★.
+- **video2dlssnr:** GPU-resident pipeline.
+- **dlss5-nr-player and its forks:** split and wipe views plus VSR.
+- **A fork of this project:** ctype-lab.
+- **ComfyUI packs:** new ones, including one with an automatic skin mask.
+- **OptiScaler-DLSSNR:** issue #100 shows it failing on an offscreen DLAA
+  harness like this one. RenoDX is still the only runtime known to work here.
 
 ---
 ---
 
-# Tier 3 — Strategic
+# P2 — High-value features
 
-Features, positioning, and the subsystems that need real design.
+Each of these is quality-first. Anything that changes pixels becomes a
+cache-key term, and any trade-off ships as a ladder with a labelled default.
 
----
+## Pipeline quality
 
-### [ ] 3.0 · Let the helper render its carrier without the neural add-on
+<a id="p21"></a>
+### P2.1 · Supply a smoothed exposure instead of auto-exposure
 
-`FEATURE` · ✅ measured 2026-09-22 · **effort: M** · **impact: unlocks one export combination**
+`S` · **Pipeline** · ✅ current state
 
-The export dialog offers Super Resolution, neural rendering and frame
-generation in any combination — except Super Resolution on its own, which is
-refused with a message saying why.
+`DLSSBackend.cpp:254` sets `AutoExposure`, and `:377` passes a null exposure
+texture. NVIDIA's guide says to supply exposure whenever it is known. An
+OptiScaler-DLSSNR PR found that the neural renderer's white point drifts under
+lighting changes without it. On video, auto-exposure is a likely cause of
+brightness pumping and of slow recovery after a cut.
 
-The refusal is honest rather than lazy. `NeuralRenderRequest::requireNeural`
-looks like it should skip the neural pass, but it only skips the four verdicts
-that run *after* the render. The render itself is neural regardless, for two
-reasons that both live in the helper:
+**Do** — a GPU luminance meter, temporally smoothed (libplacebo's
+`peak_smoothing_period` is the model), reset on `ClassifySceneCut`, written to
+a 1×1 exposure texture. **Measure first**: `docs/BENCHMARK.md` already lists
+this A/B as undecided. Ship it only if the benchmark's added-sigma and
+flicker numbers improve.
 
-- `NeuralWorkerMain.cpp` calls `ConfigureNeuralAddon(ini, /*enable=*/true)` for
-  every job it runs, so RenoDX is loaded and intercepting whatever happens.
-- `OfflineNeuralRenderer.cpp` refuses to start capture unless feature 18 is
-  armed, and that check is not conditional on anything the request says.
+Refs: [DLSS guide](https://github.com/NVIDIA-RTX/Streamline/blob/main/docs/ProgrammingGuideDLSS.md) ·
+[OptiScaler PR #77](https://github.com/wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass/pull/77) ·
+[libplacebo options](https://libplacebo.org/options/)
 
-Measured, not assumed: an upscale-only and an upscale-plus-neural export of the
-same clip came back byte-for-byte identical at 9,548,373 bytes.
-`ExportMatrixSmoke` asserts that equality, so whoever fixes this will see the
-assertion fail and know to drop `ExportRefusal::UpscaleNeedsNeural` with it.
-
-**What it needs.** The add-on has to be off for that job, which means passing
-`requireNeural` into `ConfigureNeuralAddon`, gating the pre-capture arming check
-and the priming loop on it, and reporting `verifiedNeuralFrames` and
-`feature18ArmedBeforeCapture` honestly when it is off. The awkward part is that
-ReShade reads its ini when the proxy loads, so flipping the add-on means the
-helper has to relaunch — the code already does that dance when it repairs the
-config, and this would reuse it. A resident helper alternating between neural
-and non-neural jobs would pay a relaunch each time it switches.
-
-**Why it is worth doing.** Plain DLSS Super Resolution on a video, with no
-neural look applied, is a reasonable thing to want, and it is the only one of
-the seven combinations the player cannot produce.
+**Impact** — Pipeline: steadier tone across cuts and lighting changes.
+Player: less visible pumping.
 
 ---
 
-### [ ] 3.1 · Update the competitive framing — do this first, it costs an hour
+<a id="p22"></a>
+### P2.2 · Dither wherever the image is cut to 8 bits
 
-`POSITIONING` · ✅ verified via GitHub API · **effort: XS** · **impact: credibility**
+`S` · **Pipeline, Player** · ✅ current state
 
-`docs/RELATED_PROJECTS.md` treats **Merserk/dlss5-visual-enhancer** as an
-integration reference reviewed 2026-09-01. That framing is now wrong.
+The only dithering in `src/` is the GIF palette (`MediaPipeline.cpp:693`). The
+neural output goes from FP16 straight to an 8-bit capture, and the image
+adjustments go straight to an `R8G8B8A8` swapchain. Add blue-noise dithering
+(libplacebo's default, a 64×64 LUT) at both points.
 
-| | this project | Merserk |
-| --- | ---: | ---: |
-| Stars / forks | 131 / 12 | **942 / 75** |
-| Release downloads | 5,492 / 17 releases | **42,154 / 12 releases in 18 days** |
-| Cadence | ~0.5/week | v0.1 → v10.0 in 18 days |
-| Stack | C++20 / D3D12 / Win32 | Python + QML + embedded mpv |
-| License | MIT | custom, `NOASSERTION` |
-
-Plus [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) (891★, DLSS 5
-NR on the whole desktop), [video2dlssnr](https://github.com/DaniilSokolyuk/video2dlssnr)
-(168★), a DaVinci OFX plugin, an OBS filter, 20+ ComfyUI packs.
-
-**`README.md`'s "neighboring products do offline upscaling with a progress bar"
-is no longer true.**
-
-**But the moat is real — it is just narrower than the current claim.** Merserk's
-Live mode is `mpv_embed.py` + a loopback HLS server with `Cache-Control:
-no-store`, a 720p default input cap, no cross-session cache, and no
-original/neural pairing during Live. Its Split/2-Up viewer compares finished
-*files* in the batch workflow.
-
-**Genuinely unique, verified:**
-
-1. **Progressive whole-video coverage with seek-anywhere, nothing discarded.**
-   `NeuralCoverage.h`'s span algebra has no counterpart anywhere.
-2. **A persistent, settings-hashed, validated render cache** reused across
-   sessions.
-3. **Frame-accurate split/wipe/blend comparison *while a live session runs*.**
-   `main.cpp:5123` sets `m_cachedPlayback=true` on live attach. mpv's
-   side-by-side request [#3854](https://github.com/mpv-player/mpv/issues/3854)
-   has been open for years; madVR offers only profile-toggle hotkeys;
-   VLC/PotPlayer have nothing; Topaz compares two *finished* renders.
-4. **Render receipts and a published validation contract.** Merserk's tracker
-   contains a literal request for source verification because it cannot offer
-   this.
-5. **The measurement culture as product** — `tools/benchmark/` has no equivalent,
-   commercial or free.
-6. **MIT + provenance** against a closed-source competitor with an
-   antivirus-flagged bundled DLL.
-
-**Already commoditized — stop leading with these:** "AI upscaling while you
-watch" (RTX VSR ships in VLC, PotPlayer, mpv 0.39+, Chrome, Edge, Firefox
-126+); "DLSS 5 on video"; before/after comparison as a *concept*; 2×-5×
-interpolation (SVP does it **live** for $25 into five players).
-
-**Fix**
-
-- [ ] Rewrite `docs/RELATED_PROJECTS.md` against today's field
-- [ ] Narrow the README claim to: *the only one that renders the whole video
-      progressively, keeps every frame it renders, and puts the original and
-      the render on the same frame at the same moment while it is still running*
-- [ ] Lead with verifiability — MIT, reproducible build, hash-locked runtime,
-      published receipts, seven dated hardware records. Currently buried in
-      `docs/`.
-- [ ] **Stop implying frame generation is part of the live story.** It writes a
-      whole new file, competing against SVP's real-time switch. Your
-      cadence-aware multiple selection is the better *engineering* — say that
-      instead.
+**Impact** — Pipeline: less banding in the dark gradients the model lifts;
+the capture-side dither is a cache-key term. Player: the same on screen,
+where it costs nothing to the cache.
 
 ---
 
-### [x] 3.2 · Named presets — the quality ladder lives here
+<a id="p23"></a>
+### P2.3 · A quality ladder for cache and export: CQ, 10-bit, lossless
 
-`FEATURE` · **effort: XS** · **impact: highest polish-per-hour on the list**
+`M` · **Pipeline** · ✅ current state
 
-**Depends on 1.1.**
+The cache is always HEVC 8-bit at `-cq 16` (`MediaPipeline.cpp:589`). Issue #13
+reports visible blocking on the official GTA VI trailer. Merserk now offers
+ProRes HQ and FFV1 10-bit; video2dlssnr defaults to HEVC 10-bit at CQ19.
 
-You expose six model controls with measured tooltips. Excellent for an expert,
-paralysing on a first run. Your own issue
-[#1](https://github.com/2600th/dlss5-video-player/issues/1) is literally *"So
-what resolution do I have to give to this?"*
+**Do** — P010 capture with HEVC Main10, a CQ ladder, and a lossless rung
+(FFV1 or NVENC lossless), all in the cache key. Score every rung with VMAF
+against a lossless intermediate (libvmaf_cuda), and print the cost beside
+each, as the NVENC preset tooltip already does. Main10 is also the first half
+of P3.1.
 
-Merserk ships three NR Styles plus a Detail-Only preset. Topaz surfaces
-resolution-based recommendations in a carousel.
-
-**This is where the quality rule gets implemented.**
-
-- [x] Named presets shipped — `src/NeuralPresets.h`: Natural, Detail only,
-      Gentle, Strong, each with a stable ini key so renaming a label cannot
-      silently change what a user had selected
-- [x] **Default is the near-best rung and says so** — `"Natural (recommended)"`,
-      `kDefaultPresetIndex = 0`, every control at its default
-- [x] **The measured cost is printed beside the ladder.** Measured, not
-      assumed: `tools/verification/preset-cost.cpp` runs the same range
-      render three times per preset with the player's own add-on overrides.
-      natural 6.29/6.30/6.35 s, detail-only 6.27/6.31/6.40 s, gentle
-      6.28/6.30/6.33 s, strong 6.31/6.31/6.35 s - 0.6% between presets,
-      less than the spread between passes of one. "They all cost the same" is
-      the answer worth printing: without it "Strong" reads as the expensive
-      rung and nobody picks it. The existing NVENC tooltip is the model:
-
-  > *"Measured at 2560x1440 on an RTX 5090: p7 takes twice the encode time of
-  > p5 and buys 0.12 VMAF on ordinary content, 0.53 on noise-heavy content, at
-  > 95-98 VMAF."*
-
-- [ ] Never move a default down the ladder to buy speed
+**Impact** — Pipeline: fixes the one quality complaint users have filed
+about export.
 
 ---
 
-### [ ] 3.3 · Spatial masking and protection compositing
+<a id="p24"></a>
+### P2.4 · Guide A/B harness, then evaluate Video Depth Anything
 
-`FEATURE` · **effort: S-M** · **impact: most-requested unmet feature in the category**
+`S` harness · `M-L` to ship a model · **Pipeline**
 
-Per-region control of how much neural output is applied: a loadable mask image,
-a feather radius, face/skin protection, and a detail-only mode that keeps source
-colour and tone while keeping structural detail.
+Add `depth=file:` / `mv=file:` guide modes, so depth and flow computed offline
+in Python can be A/B'd in `tools/benchmark` without shipping a model. Add
+near/far test clips; your reply on issue #8 sets exactly that bar.
 
-**Who has it** — Merserk only (Custom NR Mask, Mask Feather 0-128px, Face/Skin
-Protection 0-1, Tone Preservation 0-1). **Nobody else in the entire category.**
+The candidate is **Video Depth Anything Small**: Apache-2.0 (Base and Large
+are non-commercial), 28.4M parameters, about 7.5 ms per frame at 518².
+- **Normalise over the clip, not per frame.** Its inverse depth must use a
+  stable scale, or depth will pump.
+- **Map to the convention `DLSSBackend.cpp:255` expects**: 0 = near, 1 = far.
+- **Deployment:** ONNX Runtime's TensorRT-RTX execution provider, which
+  covers RTX 30 and newer.
 
-**Demand evidence**
+Refs: [Video-Depth-Anything](https://github.com/DepthAnything/Video-Depth-Anything) ·
+[TensorRT-RTX EP](https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html)
 
-- Topaz: [*"Masking areas for less enhancement… would be a killer super nice new
-  feature"*](https://community.topazlabs.com/t/masking-areas-for-less-enhancement-and-masking-areas-for-more-enhancement-would-be-a-nice-feature/53511)
-  — Oct 2023, still open
-- SVP: [subtitles visibly *"vibrating/shaking"*](https://www.svp-team.com/forum/viewtopic.php?id=7240),
-  no fix offered
-- Doom9: [*"when motion estimation fails, it fails catastrophically"*](https://forum.doom9.org/showthread.php?t=174410)
-  — naming hardcoded subtitles and credits
-
-**Why it is cheap for you** — Neural strength (0-200%) is **already** a
-per-frame blend between the neural and original members in the presentation
-shader. Making that weight spatially varying is **one extra texture and a lerp**.
-
-**And it sidesteps a known dead end** — `docs/ARCHITECTURE.md:772` records that
-NGX mask inputs are inert. You do this in *your* compositor, not in the model.
-
-- [ ] Ship the manual mask + feather first
-- [ ] Face detection is a separate dependency — defer it
+**Impact** — Pipeline: the deciding test for better depth and flow, and a
+prerequisite for P3.6.
 
 ---
 
-### [ ] 3.4 · RTX Video Super Resolution as a second, comparable engine
+<a id="p25"></a>
+### P2.5 · Temporal stability with motion compensation
 
-`FEATURE` · **effort: M** · **impact: makes your comparison surface unmatchable**
+`M` · **Pipeline, Player** · _supersedes old 3.6_
 
-Expose NVIDIA's *video*-trained model alongside DLSS 5 NR, including at 1×
-(enhance without enlarging).
+The old plan ("one history texture, one lerp") ghosts on anything that moves.
+The player already computes a reverse flow field and a round-trip trust test
+(`FlowGate.h`).
 
-**Two reasons, and the second is the real one:**
+**Do** — warp the previous neural frame by that flow, blend only where the
+flow is trusted, and reset on `ClassifySceneCut`. Tune the default on the
+benchmark's added-sigma metric. It ships as a ladder with Off available,
+because this is quality-affecting.
 
-1. DLSS SR is trained on **rendered game frames**. RTX VSR is trained on
-   **compressed video** and does artifact reduction as part of upscaling — the
-   correct model for your dominant source. Your primary acquisition path is
-   YouTube, and 0.21.0 exists because you were getting 3899 kbps trailers.
-2. **It feeds your one genuine differentiator.** Original vs DLSS 5 NR vs RTX
-   VSR, on one frame, at one timestamp, during a live render. **Nothing on earth
-   can currently show that — including Merserk.**
+This is the defining failure mode of neural video: Merserk ships shimmer
+suppression, and Topaz has said on the record that it has no deflicker.
 
-**API** — the [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
-supports **D3D11, D3D12 and Vulkan** on Windows. You already own the D3D12
-resources. NGX also carries `NVSDK_NGX_Feature_VideoSuperResolution`, but that
-path is CUDA-only per the [NGX programming guide](https://docs.nvidia.com/rtx/ngx/programming-guide/index.html).
-NVIDIA has [confirmed there is no NVAPI toggle](https://forums.developer.nvidia.com/t/implement-feature-to-switch-nvidia-video-super-resolution-via-nvapi/289524)
-— the SDK is the only sanctioned route.
-
-`docs/ARCHITECTURE.md:773` already lists "RTX Video modes" as remaining work.
-
-**Bonus** — this also delivers a compression-artifact pre-pass for free (RTX VSR
-at 1×), which otherwise needs a hand-written deband/deblock compute shader.
+Refs: [Lai et al., ECCV 2018](https://arxiv.org/pdf/1808.00449)
 
 ---
 
-### [ ] 3.5 · Processing scale — with the quality rule attached
+<a id="p26"></a>
+### P2.6 · Spatial mask and feather; face protection later
 
-`FEATURE` · **effort: S-M** · **impact: converts "cannot keep up" into working sessions**
+`S-M` · **Pipeline, Player** · _old 3.3_
 
-**Depends on 1.1** (it must be a cache-key term).
+Neural strength is already a per-frame blend in the presentation shader, so
+making it vary across the frame is one texture and a lerp, done in *our*
+compositor (NGX mask inputs are inert, `docs/ARCHITECTURE.md`).
 
-A selector for what resolution the model runs at, independent of output.
-
-**Why** — it directly attacks your #1 published limit. Your own numbers: 4K30
-heavy re-encode measured 24 fps and *"could not keep up"*; 1440p59.94 runs at
-0.814× real time. Running NR at 75% and letting DLSS SR carry the rest converts
-several refusals into sessions that work.
-
-Merserk offers 25-200%. The [DLSS5-Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot)
-"Neural Upstream" route exists in the game-mod world for the same reason —
-vanilla NR runs at *output* resolution and costs ~50% FPS.
-
-> ⚠️ **Per the quality rule: the default is Source / 100%.** Sub-100% is an
-> explicit, labelled rung with its measured cost printed. Above-100% is offered
-> for people who want to spend more time for more quality.
+**Do** — ship a manual mask with feathering first. Face and skin protection
+is now the loudest criticism of DLSS 5 ("beautified" faces), and NVIDIA's own
+answer is masking. A ComfyUI pack already ships an automatic skin mask, and
+Merserk has an open mask issue (#65). Detection is a separate dependency;
+defer it.
 
 ---
 
-### [ ] 3.6 · Temporal stability control
+<a id="p27"></a>
+### P2.7 · Processing scale
 
-`FEATURE` · **effort: S-M** · **impact: the defining failure mode of neural video**
+`S-M` · **Pipeline** · _old 3.5_
 
-A dial that blends the current neural output against the previous one, gated by
-your existing cut detector.
-
-**Who has it** — Merserk (Shimmer Suppression 0.00-1.00, default 0.70). **Topaz
-staff confirmed on the record there is [no deflicker tool](https://community.topazlabs.com/t/is-there-a-way-to-deflicker-videos-in-topaz-video-ai/89338)**
-and suggested users run frame interpolation to mask it.
-
-**Why it is cheap for you** — one history texture, one lerp, guarded by
-`ClassifySceneCut` which already exists. You removed jitter in 0.20.0 and you
-already **measure per-pixel temporal sigma** in `tools/benchmark/`.
-
-**And you can tune the default against your own harness, which nobody else can.**
+A selector for the resolution the model runs at, independent of the output,
+and a cache-key term. It goes straight at the "4K30 could not keep up" limit.
+**The default is Source / 100%.** Below 100% is an explicit, labelled rung
+with its measured cost; above 100% is offered for more quality.
 
 ---
 
-### [ ] 3.7 · Subtitles via libass — composited *after* the network
+<a id="p28"></a>
+### P2.8 · RTX Video Super Resolution as a second engine
 
-`BASELINE` · **effort: M-L** · **impact: highest-pain gap in the baseline survey**
+`M` · **Pipeline, Player** · _old 3.4_
 
-No libass anywhere. Subtitles are only stream-copied during FG export
-(`FrameGenerationPass.cpp:902`).
+RTX VSR is trained on compressed video, which is the right model for YouTube
+sources, and the RTX Video SDK supports D3D12. VSR itself is now common;
+**what nobody else can show is the original, DLSS 5 NR and RTX VSR on the
+same frame during a live render.** At 1× it also doubles as a
+compression-cleanup pre-pass.
 
-**A player that cannot show subtitles forces "export and watch elsewhere",
-which structurally undercuts the watch-while-it-renders positioning.**
-
-`docs/ARCHITECTURE.md:792` already names this as pending **with the correct
-design**.
-
-**The critical detail for this project** — composite subtitles **after** the
-network. NVIDIA is explicit:
-
-> *"For the best image quality, it is **critical** to provide a Hudless (pre-UI)
-> buffer and a UI buffer… expect image quality degradation on those elements."*
-> — [Streamline ProgrammingGuideDLSS_G.md §5.1](https://github.com/NVIDIAGameWorks/Streamline/blob/main/docs/ProgrammingGuideDLSS_G.md)
-
-Subtitles are HUD. Interpolated text warps, ghosts and shimmers — optical flow
-has no correspondence for a caption that appears from nothing and is static
-while the scene moves under it.
-
-**Three implementation details routinely got wrong:**
-
-- `ass_set_storage_size` is **mandatory**, not optional — the header says
-  *"storage size must be configured to get correct results, otherwise libass is
-  forced to make a fallible guess"*
-- `ASS_FONTPROVIDER_DIRECTWRITE` is the Windows backend; embedded MKV attachment
-  fonts need `ass_add_font` or typeset signs collapse
-- Render at **output** resolution, not video resolution, or text is soft on 4K
-
-**Baseline UX users treat as non-negotiable:** delay adjust (±0.1 s), track
-switch mid-playback, external auto-load, encoding detection (uchardet), scale /
-position.
-
-**Must-have formats:** SRT, **ASS/SSA**, PGS, VobSub, WebVTT, `mov_text`. ASS is
-not optional — a player that renders SRT but flattens ASS has, from the user's
-perspective, no subtitle support for that content.
+Ref: [RTX Video SDK](https://developer.nvidia.com/blog/enhancing-low-resolution-sdr-video-with-the-nvidia-rtx-video-sdk/)
 
 ---
 
-### [~] 3.8 · WASAPI audio
+<a id="p29"></a>
+### P2.9 · Super Resolution-only export
 
-`BASELINE` · **effort: L** · **impact: severe, affects everyone**
+`M` · **Pipeline** · _old 3.0_
 
-Current: `waveOut` (winmm) fed by an `ffmpeg.exe` subprocess
-(`AudioPlayer.cpp:67`). No WASAPI, no device-change handling, no passthrough, no
-drift correction.
+Super Resolution on its own is the only one of the seven export combinations
+the player refuses. The helper always runs `ConfigureNeuralAddon(ini, true)`,
+and `OfflineNeuralRenderer` requires feature 18 to be armed before capture.
 
-**Four of six landed.** Still `[~]` for the two that are genuinely absent:
-drift correction and bitstream passthrough.
-
-- [x] **Shared-mode WASAPI, event-driven, float32 at the mix format.** ffmpeg
-      now emits `pcm_f32le` at the endpoint's own rate, so the two format
-      conversions are gone. The renderer **refuses** a non-float32 mix format
-      rather than guessing at one. Queue depth 682 ms → 22 ms, drift over 5 s
-      −0.074 ms → −0.003 ms, position after a seek to 20 s 20.047 s → 20.000 s
-- [x] **Device change, notified rather than polled.** `IMMNotificationClient`
-      (including `OnPropertyValueChanged` for `PKEY_AudioEngine_DeviceFormat`)
-      and `IAudioSessionEvents::OnSessionDisconnected` both run, plus the
-      dead-sink watchdog at Kodi's 1100 ms for drivers that stop signalling
-      without erroring. `AudioEndpointPolicy.h` holds the decisions, so which
-      roles the player follows is arguable in a test rather than by
-      unplugging things — it follows console and multimedia and deliberately
-      not communications, or taking a call would move a film's audio.
-      `ServiceDeviceChanges` consults the renderer's latch as well as the
-      reader's, without which a default-device change is never serviced at
-      all: the old endpoint keeps working, so nothing ever fails.
-      **Verified end to end**, which is the gap this list has carried since
-      the WASAPI change. The handler is the same entry point the OS calls, so
-      `AudioClockSmoke` delivers a default-device change through it and
-      asserts the whole path: 56 ms to recover, resuming at 8.00465 s from
-      8.00465 s, then advancing at real time. No machine's audio settings are
-      touched to do it
-- [ ] **Drift correction** — the clock is `IAudioClock`-based, but there is no
-      `swr_set_compensation` resampling. Nothing corrects a crystal offset over
-      a long film; it is only *measured* not to be present over 5 s
-- [x] **Multi-track** — `AudioTrackPolicy.h` reads the four dispositions and
-      never opens on one, preferring the container's default among the
-      ordinary tracks. Playback > Audio track lists them with labels that
-      distinguish two English tracks. The old `-map 0:a:0?` played whatever
-      was listed first, so a rip with the commentary first played the
-      commentary with no way out
-- [x] A 4 ms raised-cosine fade on every seek, pause and resume.
-      `AudioFadePolicy.h`; measured with `tools/verification/fade-probe.cpp`
-      at 0.910 → ~0.32 largest sample-to-sample step, 9.6 dB off the
-      discontinuity. The residual is the audio engine's own teardown
-      transient: a ten-times-longer ramp does not move it
-- [ ] Bitstream passthrough behind a toggle — use FFmpeg's `spdif` muxer, do not
-      hand-roll MAT framing.
-
-**Two known bugs worth designing against:** mpv
-[#1773](https://github.com/mpv-player/mpv/issues/1773) — `IAudioClient::Release()`
-**hangs indefinitely** after a format change during exclusive playback. Kodi
-[#18453](https://github.com/xbmc/xbmc/issues/18453) — ending fullscreen playback
-switches display refresh, dropping the HDMI audio sink → access violation.
-**Directly applicable to a D3D12 player that changes display mode.**
+**Do** — pass `requireNeural` into `ConfigureNeuralAddon`, which forces a
+helper relaunch because ReShade reads its ini at load. Gate the arming check
+and the priming loop on it, and report the neural evidence honestly when it
+is off. `ExportMatrixSmoke` asserts today's byte-equality, so remove that
+assertion together with `ExportRefusal::UpscaleNeedsNeural`.
 
 ---
 
-### [x] 3.9 · Detect VFR and refuse frame generation on it
+<a id="p210"></a>
+### P2.10 · CLI / headless invocation
 
-`BASELINE` · **effort: S** · **impact: sharper for this product than for a normal player**
+`S` · **Pipeline** · _old 3.10_
 
-`r_frame_rate` and `avg_frame_rate` are both lies for screen recordings (OBS,
-ShadowPlay, Game Bar), phone video, and mixed-telecine anime.
+`DLSSVideoPlayer.exe --input X --range A-B --preset Y --stages sr,nr,fg --out Z`
 
-**Why this is worse for you than for other players** — interpolating between two
-frames whose real spacing is 16 ms and then 83 ms, while assuming uniform
-spacing, produces motion that **speeds up and lurches**.
-
-**Fix** — detect VFR from PTS-delta variance over a window, and **refuse frame
-generation with a stated reason** rather than producing wrong motion.
-
-This fits what 0.24.0 already does: *"When it cannot, it says why instead of
-greying out."* VFR is simply one more reason on that list.
+This is the cheapest route to batch work without building a queue UI, and it
+makes the benchmark harness a first-class consumer. Merserk's issue #64 asks
+for exactly this chain (upscale → interpolate → enhance → export), which
+**Export with DLSS stages** already runs.
 
 ---
 
-### [ ] 3.10 · CLI / headless invocation
+<a id="p211"></a>
+### P2.11 · Quality metrics in the app
 
-`FEATURE` · **effort: S** · **impact: cheapest route to batch**
+`M` · **Player, Pipeline** · _old 3.11, expanded_
 
-`DLSSVideoPlayer.exe --input X --range A-B --settings Y --out Z`
+PSNR and VMAF against the source penalise the very change the user asked for.
+Measure what the model did to **motion** instead:
+- **tOF** — the difference between the output's flow and the source's flow;
+  NVOFA can compute it in the app.
+- **Warping-error delta** — how much more the output flickers than the
+  source did.
+- **Temporal sigma** — already computed in `tools/benchmark`.
 
-- Cheapest possible route to the batch use case **without building queue UI**
-- Makes your own benchmark harness a first-class consumer
-- You already parse argv (`ParseRuntimeArguments`) for safe mode
+Show them next to a blind A/B for the current settings on the current clip.
+For offline work, add CGVQM and ColorVideoVDP error maps to `tools/benchmark`.
 
-video2x is CLI-first; Topaz exposes its `tvai_up`/`tvai_fi` command line, which
-is what every third-party wrapper wraps.
-
----
-
-### [ ] 3.11 · Surface quality metrics in-app
-
-`FEATURE` · **effort: M** · **impact: a differentiator disguised as a gap**
-
-Show flicker, temporal sigma, colour delta, and a blind A/B for the current
-settings on the current clip.
-
-**Nobody does this.** Topaz users cannot tell whether a setting helped, which is
-why [three](https://community.topazlabs.com/t/good-way-to-compare-preview-results/39250)
-[separate](https://community.topazlabs.com/t/preview-bulk-settings-and-comparison/44706)
-[threads](https://community.topazlabs.com/t/can-i-do-a-side-by-side-display-of-original-and-processed-video-as-in-the-previde-mode/44059)
-ask for better comparison.
-
-**You already compute all of this in `tools/benchmark/`.** It fits
-`PRODUCT.md`'s *"Numbers over adjectives"* better than anything else on this
-list.
+Refs: [CGVQM](https://github.com/IntelLabs/cgvqm) ·
+[ColorVideoVDP](https://github.com/gfxdisp/ColorVideoVDP)
 
 ---
 
-### [ ] 3.12 · Exposed scene-change controls and duplicate-frame handling
+<a id="p212"></a>
+### P2.12 · Scene-cut controls and duplicate-frame handling
 
-`FEATURE` · **effort: S for the slider, M for dedup**
+`S` slider · `M` dedup · **Pipeline** · _old 3.12_
 
-0.24.0 added cut detection. Expose the threshold you already compute.
-
-**The evidence that one fixed threshold satisfies nobody is unusually clean:**
-SVP [#7411](https://www.svp-team.com/forum/viewtopic.php?id=7411) wants cut
-detection **more** aggressive; [#6615](https://www.svp-team.com/forum/viewtopic.php?id=6615)
-wants it **disabled entirely**. Same product, same year.
-
-Separately, animation shot on twos/threes needs dedup — which is why
-[ddfi-rife](https://github.com/Mr-Z-2697/ddfi-rife) and
-[MultiPassDedup](https://github.com/routineLife1/MultiPassDedup) exist.
-
-**Your advantage** — `cutlab.py --sweep` already scores cut precision/recall, so
-you can ship a **defensible default**, which is itself a differentiator.
+Expose the cut threshold that is already computed, and ship a defensible
+default from `cutlab.py --sweep`. SVP users ask both for more aggressive cut
+detection and for none at all, so one fixed value satisfies nobody. Animation
+drawn on twos and threes needs duplicate-frame handling before frame
+generation.
 
 ---
 
-### [ ] 3.13 · HDR end to end
+<a id="p213"></a>
+### P2.13 · Re-measure which settings change the image on RenoDX 6.5.3
 
-`BASELINE` · **effort: L** · **impact: highest cost, narrowest audience, most
-technically distinctive**
+`S` · **Pipeline**
 
-**Structurally blocked today:** `DXGI_FORMAT_R8G8B8A8_UNORM` swapchain
-(`D3D12Renderer.cpp:229`), no `SetColorSpace1`, and `colorBuffersHDR = false`
-hardcoded at `DLSSGBackend.cpp:410` while
-`NVSDK_NGX_DLSS_Feature_Flags_IsHDR` exists.
-
-Your README already states the consequence plainly: *"The current cache is
-8-bit; another container or bit-depth label cannot recover lost precision."*
-
-**Four traps specific to neural processing — not hypothetical:**
-
-1. **Auto-exposure over PQ is meaningless.** Without a tagged exposure buffer,
-   DLSS auto-enables `AutoExposure`. Statistics over PQ code values are not
-   luminance statistics — PQ puts 1000 nits at ~0.75 and 10000 at 1.0, so the
-   network **under-weights exactly the region HDR exists to show**.
-2. **Per-frame peak detection + frame generation = brightness flicker.**
-   libplacebo ships `peak_smoothing_period` and `black_cutoff` precisely because
-   naive peak detection shimmers. Generated frames beat against the detector.
-3. **Cache poisoning.** Storing tone-mapped output bakes in a **display-dependent
-   mapping**. The same cached segment is permanently wrong on a second monitor,
-   or after the user changes SDR white level. → **Cache scene-referred, or key
-   the cache on display parameters.**
-4. **NVIDIA's own video path took multiple driver generations to reach HDR.**
-   MPC-VR's changelog: *"'Super Resolution' will only be enabled for 8-bit video
-   due to driver limitations"* → later *"now works with HDR passthrough.
-   Requires GeForce driver 572 or newer."* Assume it is hard.
-
-**Correct approach, briefly** — detect via `IDXGIOutput6::GetDesc1` (Microsoft
-explicitly says **do not** use `GetContainingOutput`); use
-`DXGI_FORMAT_R10G10B10A2_UNORM` + explicit
-`SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)` — Microsoft names
-the video-player case for this; match SDR reference white via
-`DISPLAYCONFIG_SDR_WHITE_LEVEL` (libplacebo hardcodes `PL_COLOR_SDR_WHITE 203.0f`
-per BT.2408); do **not** call `SetHDRMetaData` — its docs now carry a warning
-banner recommending apps tone-map into the monitor's reported range instead.
-
-> ⚠️ **Default to not touching the OS HDR toggle.** MPC-VR's hard-won setting is
-> *"Windows HDR: Do not change"* — *"This will prevent unexpected screen
-> flickering."*
-
-**The opening** — Merserk's own issue #35 is HDR export dropping colour-space /
-VUI / SEI metadata. **Your colour-probe discipline is exactly the culture that
-gets this right when the leader gets it wrong.**
+`docs/BENCHMARK.md`'s table of which controls change the image was measured
+on RenoDX 4.70, and it still decides which controls are hidden. Community
+tools now expose `SkinStructure`, `AutoMask` and `UICorrection` as live
+controls. Re-run the table on the pinned runtime. It may also give P2.6 its
+face protection for free.
 
 ---
 
-### [ ] 3.14 · Extract testable units from `main.cpp`
+<a id="p214"></a>
+### P2.14 · A deband pre-pass for compressed sources
 
-`MAINTAINABILITY` · **effort: M** · **impact: velocity**
+`S-M` · **Pipeline**
 
-**The diagnosis is not what you would expect.** `main.cpp` has **zero global
-mutable state** — every file-scope `static` is `constexpr`/`const`, no anonymous
-namespaces.
+A libplacebo-style deband (1 iteration, threshold 3, radius 16, grain 4)
+before the model, off by default until measured. It is cheaper than running
+RTX VSR at 1× as a cleanup step. Measure first whether the neural pass
+amplifies banding; P2.11's metrics are the tool.
 
-The barrier is a single god object: **`class PlayerApp` spans L1179-7008 = 5,830
-lines (83%), ~265 methods, ~188 members.**
+## Player UX
 
-And 7,049 lines **understates** it: 660 lines exceed 120 chars, 207 exceed 200,
-the longest is **1,731 chars**. `main.cpp:6825` declares 16 booleans on one
-line; `:6864` declares 24 members. By contrast `NeuralWorker.cpp` has **zero**
-lines over 120. Reformatted to the rest of the tree's style, main.cpp is
-~11-12k lines.
+<a id="p215"></a>
+### P2.15 · An on-screen compare bar with press-and-hold A/B
 
-**You already know how to do this.** `IFrameSource` / `INeuralFrameEvaluator` /
-`IFrameEncoder` (`OfflineNeuralRenderer.h:142`) and `ISynchronizedFrameSource`
-are exactly why `NeuralPrerenderTests` can be portable. Policy extraction is
-already house style: `PlaybackTiming.h`, `FrameRatePolicy.h`,
-`LiveSessionPolicy.h`, `UpscalingPolicy.h`, `AppMenu.h` — each with matching
-tests.
+`S` · **Player**
 
-**Start with three, following the existing `*Policy.h` pattern — not a new
-abstraction layer:**
+Comparison is the product, and today it sits behind Video > Compare. The
+split and wipe modes draw no labels (`D3D12Renderer.cpp:284`). Neural strength
+is the seventh slider in Image adjustments, and it overlaps conceptually with
+Compare > Blend.
 
-- [ ] `ClampSeek` (`main.cpp:3905`, 15 lines, documented past bugs, depends on 5
-      scalars)
-- [ ] `LoadRenderPace` / `SaveRenderPace` (`:2783`, a string format with a
-      legacy fallback)
-- [ ] `ParseArgs` (`:848`, the loop at `:856` is already pure)
+**Do** — a compact bar holding mode, blend or strength, zoom and swap, with
+"Original" and "DLSS 5" labels drawn on the image. Holding the mouse on the
+picture shows the original, as Topaz and NVIDIA ICAT do. Merge strength and
+blend into one control.
 
-Then decompose the two real outliers:
+---
 
-- [ ] `StartNeuralJob` (`main.cpp:5566-5923` — **358 lines, 7 parameters**)
-- [ ] `RunJob` (`OfflineNeuralRenderer.cpp:866-1549` — **684 lines, 11
-      parameters**, containing a **337-line `[&]` lambda** at `:1126`)
+<a id="p216"></a>
+### P2.16 · Zoom, pan and a synced magnifier
 
-Everything else in the `Neural*` files is under 200 lines. There is **no
-commented-out code and no `#if 0` anywhere in the tree.**
+`M` · **Player**
+
+Today there is a single 2× toggle, anchored where it was pressed, with no pan
+(`main.cpp:3058-3065`). Add 1:1, 2×, 4× and 8× zoom, wheel zoom at the cursor,
+drag to pan, and a loupe that shows the same spot on both sides. Pixel-peeping
+faces is the core use; see [video-compare](https://github.com/pixop/video-compare)
+and [Improve-ImgSLI](https://github.com/Loganavter/improve-imgsli). It depends
+on P0.10 for a true 1:1.
+
+---
+
+<a id="p217"></a>
+### P2.17 · A difference view
+
+`S-M` · **Player**
+
+`|neural − original|` as amplified luma or colour, as one more mode in the
+existing compare shader, optionally with an SSIM map. It answers *where did
+the model change the picture*, which is the question visitors ask, and it is
+the natural authoring view for P2.6's masks.
+
+---
+
+<a id="p218"></a>
+### P2.18 · The timeline as a render map
+
+`S` band · `M` thumbnails · **Player**
+
+Progressive whole-video coverage is the project's real advantage, yet on
+screen it is a thin teal line (`neural-playback.jpg`).
+
+**Do** — a thicker coverage band with a hatched "rendering now" segment at
+the render head, the time on hover, time-to-full-coverage, and chapter
+markers. Then hover thumbnails: the cached neural frame where one exists,
+otherwise the original. uosc with thumbfast is the model.
+
+---
+
+<a id="p219"></a>
+### P2.19 · Status chips instead of one overflowing line
+
+`S` · **Player**
+
+`BuildPlayerStatusText` (`UiLayout.cpp:526`) is trimmed for width and still
+overflows ("…Frame Generat…" in `neural-playback.jpg`). The three feature
+buttons are 264-270 dip wide each (`UiLayout.cpp:29-50`), which forces a
+minimum width of about 1,070 dip.
+
+**Do** — fixed chips (`Render 16% · ETA`, `fps`, `Dropped`) that flash briefly
+when a value changes, and narrower buttons.
+
+---
+
+<a id="p220"></a>
+### P2.20 · A start screen with a capability check and tiles
+
+`M` · **Player**
+
+The idle screen offers only Open file and Open YouTube URL
+(`player-start.jpg`).
+
+**Do** — show the GPU, the driver against the 610.47 minimum, whether the
+runtime is present and its lock state, and a predicted render speed at 1080p
+and 1440p; offer safe mode when a check fails. Below that, tiles for game
+trailers and recent videos, each with a cached neural frame and a coverage
+badge, plus the `D` hint. The preset strip previews its four presets on the
+paused frame; they all measured the same cost (6.3 s). This answers issue #1
+("what resolution do I have to give to this?").
+
+---
+
+<a id="p221"></a>
+### P2.21 · Export the comparison itself
+
+`S` PNG · `M` clip · **Player**
+
+Save the composed split exactly as shown, with labels and a provenance footer
+(frame, settings digest, runtime), and later a short wipe clip. The demo video
+is assembled by hand today (`docs/media/README.md`). This turns every user
+into a source of verifiable evidence.
+
+---
+
+<a id="p222"></a>
+### P2.22 · Dark, DPI-aware menus and dialogs
+
+`M` · **Player**
+
+The title bar is dark (`main.cpp:1268`), but the menu bar and the dialogs
+are light Win32 classics. The dialogs use raw pixel positions, the 96-dpi
+`DEFAULT_GUI_FONT` and an unscaled client size (`main.cpp:3291`, `:3390`), so
+they are tiny at 200%. Scale the dialogs to DPI first; that is a correctness
+fix. Then darken them, and draw the menu bar via `WM_UAHDRAWMENU` (an
+undocumented API; guard it).
+
+---
+
+<a id="p223"></a>
+### P2.23 · Keyboard discoverability
+
+`S-M` · **Player**
+
+About 25 shortcuts are spread across 5 menus. Add a `?` cheat-sheet overlay
+first, and a searchable command palette later (as uosc and Improve-ImgSLI do).
+
+---
+
+<a id="p224"></a>
+### P2.24 · Media controls and taskbar buttons
+
+`S-M` · **Player**
+
+Taskbar progress already exists (`ITaskbarList3`, `main.cpp:2279`). Add System
+Media Transport Controls via
+[`ISystemMediaTransportControlsInterop`](https://learn.microsoft.com/en-us/windows/win32/api/systemmediatransportcontrolsinterop/nf-systemmediatransportcontrolsinterop-isystemmediatransportcontrolsinterop-getforwindow),
+and thumbnail-toolbar buttons for play/pause, neural on/off and compare
+(at most 7, fixed when created).
+
+---
+
+<a id="p225"></a>
+### P2.25 · Synced multi-pane comparison
+
+`M-L` · **Player** · _pays off with P2.8_
+
+Side-by-side and 2×2 layouts, for example Original | NR | NR at another
+strength | RTX VSR, all on one timestamp. NVIDIA ICAT supports four synced
+inputs. This is the view that turns P2.8 into something no other tool offers.
+
+---
+
+<a id="p226"></a>
+### P2.26 · A comparison gallery on the site, plus site fixes
+
+`M` · **Site**
+
+- **Gallery** — several scenes (a face, a photo, a low-bitrate clip, and one
+  honest failure case), each with an A/B flip, a 1:1 loupe, and its own link
+  and social card. The site shows one hero slider and one video today. A flip
+  is a state change, so it stays within the design system's One Moment rule.
+- **Fixes**
+  - The two 1920×1080 hero JPEGs (295 KB and 255 KB) are preloaded on every
+    viewport, with no `srcset` or AVIF/WebP (`site/src/index.html:30-31`,
+    `:133-137`).
+  - The fixed full-viewport SVG noise layer sits at z-index 60
+    (`styles.css:107-114`).
+  - The comparison slider has no `aria-valuetext` (`index.html:149`).
+  - The skip link targets `#download` instead of the main content.
 
 ---
 ---
 
-# Tier 4 — Parked
+# P3 — Strategic or large
 
-Researched, and deliberately **not** doing. Recorded so they do not get
-re-proposed.
+<a id="p31"></a>
+### P3.1 · HDR end to end
+
+`L` · **Pipeline, Player** · _old 3.13_
+
+**Blocked today:**
+- the swapchain is `R8G8B8A8_UNORM` (`D3D12Renderer.cpp:229`), with no
+  `SetColorSpace1`;
+- `colorBuffersHDR = false` is hardcoded (`DLSSGBackend.cpp:410`);
+- the cache is 8-bit.
+
+**The traps specific to neural processing:**
+1. **Auto-exposure over PQ is meaningless.** Do P2.1 first.
+2. **Per-frame peak detection flickers once frame generation is added.**
+   Smooth the peak, as libplacebo does with `peak_smoothing_period`.
+3. **A tone-mapped cache is tied to one display.** Cache scene-referred
+   output, or key the cache on the display's parameters.
+4. **NVIDIA's own video path took several driver generations to reach HDR.**
+
+**Approach:**
+- Detect HDR with `IDXGIOutput6::GetDesc1`.
+- Output `R10G10B10A2` with `SetColorSpace1(RGB_FULL_G2084_NONE_P2020)`.
+- Match SDR white via `DISPLAYCONFIG_SDR_WHITE_LEVEL` (203 nits per BT.2408).
+- Do not call `SetHDRMetaData`.
+- **Never toggle the OS HDR setting.**
+
+P2.3's Main10 export is the first half of this task.
+
+---
+
+<a id="p32"></a>
+### P3.2 · Subtitles via libass, composited after the network
+
+`M-L` · **Player** · _old 3.7_
+
+A player that cannot show subtitles pushes people to export and watch
+elsewhere, which undercuts the whole idea of watching while it renders.
+
+**Composite after the network.** Subtitles are HUD, and the model warps and
+shimmers static text.
+
+**Details that are routinely got wrong:**
+- `ass_set_storage_size` is mandatory;
+- use `ASS_FONTPROVIDER_DIRECTWRITE`, plus `ass_add_font` for fonts embedded
+  in MKV attachments;
+- render at output resolution, not video resolution.
+
+**Formats:** SRT, ASS/SSA, PGS, VobSub, WebVTT and `mov_text`.
+
+**Baseline UX:** delay adjustment, switching track mid-play, loading external
+files automatically, and detecting the text encoding.
+
+---
+
+<a id="p33"></a>
+### P3.3 · WASAPI drift correction and passthrough
+
+`M` · **Player** · _open parts of old 3.8_
+
+- **Drift correction**: resample with `swr_set_compensation` against the
+  `IAudioClock` error. Nothing corrects a crystal offset over a full-length
+  film today.
+- **Bitstream passthrough**, behind a toggle, via FFmpeg's `spdif` muxer.
+
+**Design against two known bugs:**
+- mpv #1773: `IAudioClient::Release` can hang after a format change;
+- Kodi #18453: a display-mode change drops the HDMI audio sink.
+
+---
+
+<a id="p34"></a>
+### P3.4 · Extract testable units from `main.cpp`
+
+`M` · **Player** · _old 3.14_
+
+`main.cpp` is now 7,852 lines, and `PlayerApp` holds about 83% of it. `Tick`,
+`Position` and `PerformSeek` depend on the concrete decoder, audio and renderer
+members, which is why P0.2 and P1.4 cannot be tested without hardware.
+
+**Do** — follow the existing `*Policy.h` pattern, not a new abstraction layer.
+Start with `ClampSeek` (`main.cpp:4480`), the render-pace load/save, and
+`ParseArgs`. Then split `StartNeuralJob` (`:6258`) and
+`OfflineNeuralRenderer::RunJob`.
+
+---
+
+<a id="p35"></a>
+### P3.5 · Prefer NVIDIA's signed runtime on RTX 50
+
+`M` · **Pipeline, Release** · unverified
+
+Driver 616.64 enables DLSS 5 officially on RTX 50 and downloads its models to
+`%ProgramData%\NVIDIA\NGX\models`. If a usable signed neural-rendering DLL can
+be found there for an app that is not on NVIDIA's list, preferring it on RTX
+50 would remove the "modified, unsigned" warning for those users. Record
+which runtime ran in the receipt. Keep the community build for RTX 20-40.
+**Nobody has yet confirmed the signed DLL is usable this way.** Check that
+before planning any work.
+
+---
+
+<a id="p36"></a>
+### P3.6 · Neural optical flow as an export-only rung
+
+`M-L` · **Pipeline** · _gated by P2.4_
+
+SEA-RAFT's smallest model runs 1080p at about 21 fps on a 3090, and an ONNX
+export exists. That is too slow for live playback, but acceptable for export.
+Keep NVOFA for live. Build this only if P2.4's harness shows a gain: motion
+vectors measured only +0.297 dB on the cuts-motion clip.
+
+---
+
+<a id="p37"></a>
+### P3.7 · Feed NVENC directly from D3D12
+
+`M` · **Pipeline** · _a narrow form of the parked zero-copy rewrite_
+
+Keep the ffmpeg child for decoding and codec coverage, but encode the cache
+straight from the D3D12 texture. NVENC has accepted D3D12 input with fence
+synchronisation since SDK 11.1. This removes the readback and pipe copy on
+the busiest path. Do it only if P2.7 and P1.x still leave 4K30 short of real
+time.
+
+---
+
+<a id="p38"></a>
+### P3.8 · Repository media hygiene
+
+`S` · **Release**
+
+- **Media in history:** `docs/media/neural-comparison-demo.mp4` is stored
+  three times (9.1, 7.9 and 7.2 MB). There is also a 5.3 MB benchmark fixture
+  and a 4.2 MB webp, and the pack is 60 MB.
+- **Stray build output:** a 775 MB `build/` directory sits in the tree
+  (gitignored, but still there).
+
+Serve media that can be re-shot from release assets or LFS, and run `git gc`.
+Delete the stray `build/`.
+
+---
+---
+
+# Parked
+
+Researched and deliberately **not** being done. They are recorded here so they
+are not proposed again.
 
 | Item | Why not |
 | --- | --- |
-| **Custom model loading (.pth/.onnx)** | Structurally impossible. You call NGX feature 18 with NVIDIA's fixed weights. chaiNNer / Spandrel / OpenModelDB are a different product category. Do not pretend otherwise. |
-| **Watch folders** | Requested at Topaz since [May 2022](https://community.topazlabs.com/t/feature-request-watch-folder/31932), re-requested 2023/2024/2025, never shipped, no official reply. Four years of asking with no revealed urgency. |
-| **Stabilization, deinterlacing, colorization, face restoration** | Each needs a model you cannot obtain. Building inferior versions dilutes a single-model product. |
-| **8K/16K output, 480 fps frame generation** | Marketing checkboxes. No panel shows them. Your cadence-aware multiple selection is the **correct** design — say so rather than matching the number-go-up menu. |
-| **Cloud rendering / credits / tiering** | Topaz's [subscription transition thread](https://community.topazlabs.com/t/topaz-studio-transition-questions/95039) runs 1,200+ replies of pure anger. Your MIT/free position is an asset against a 942★ competitor with a Patreon and a bespoke license. |
-| **Linux / mobile ports, multi-GPU splitting of one render, "auto" model recommendation** | NGX feature 18 on Windows D3D12 is the whole product. Multi-GPU splitting is meaningless for a single NGX session (**separate AI-GPU and NVENC-GPU selection is the useful version** — you already have `GpuPreference.cpp`). Auto-recommendation needs ~25 models; you have one. |
-| **Full zero-copy decode/encode rewrite** | ~6 full-frame copies/frame today; no `CreateSharedHandle` / `cuGraphics` anywhere. Worth maybe 3-4 ms more — but it is a rewrite of both boundaries, and the ffmpeg-child architecture is load-bearing for codec coverage, the process isolation the runtime lock depends on, and the benchmark harness. **Revisit only if 119.88 fps still misses budget after Tier 2A.** |
-| **AV1 export** | Requires 40-series NVENC. HEVC Main10 gets you HDR (**3.13**) and works on everything. Do that first. |
+| **Custom model loading (.pth/.onnx)** | Structurally impossible: NGX feature 18 has fixed weights. chaiNNer-style tools are a different category. |
+| **Watch folders** | Requested at Topaz since 2022 and never shipped, with no sign that users urgently need it. P2.10's CLI covers the batch case. |
+| **Stabilization, deinterlacing, colorization, face restoration** | Each needs a model we cannot obtain. Inferior versions dilute a single-model product. |
+| **8K/16K output, 480 fps frame generation** | Marketing checkboxes that no panel can show. Cadence-aware multiple selection is the right design, so say that instead. |
+| **Cloud rendering / credits / tiering** | Being MIT and free is an asset against a closed competitor. |
+| **Linux or mobile ports, multi-GPU splitting of one render, "auto" model recommendation** | Feature 18 on Windows D3D12 is the product. Separate GPU choices for AI and for NVENC is the useful form (`GpuPreference.cpp`). |
+| **Full zero-copy decode/encode rewrite** | The ffmpeg child is load-bearing: codec coverage, process isolation for the runtime lock, and the benchmark harness. Only the narrow encode side is worth doing (P3.7). |
+| **AV1 export** | Needs a 40-series NVENC. HEVC Main10 (P2.3) covers the need everywhere. |
 
 ---
 ---
 
 # What is already strong
 
-Verified during the audit. **Do not "fix" these, and do not re-suggest them.**
+Verified in the 2026-09-20 and 2026-09-23 audits. **Do not "fix" these, and
+do not suggest them again.**
 
-### Architecture and protocol
+**Architecture and protocol**
+- **The IPC wire format:** magic number plus an exact version gate,
+  `static_assert` on every struct size, and decoders that reject trailing
+  bytes, oversized counts and overflow. One shared header rather than two
+  schemas.
+- **No reachable command injection:** no `cmd.exe`, `system()` or `_popen`.
+  `lpApplicationName` is always a handle-verified absolute path. yt-dlp runs
+  with `--no-config --no-plugin-dirs`, and URLs are allowlisted and filtered.
+- **Helper TOCTOU is closed:** `FILE_FLAG_OPEN_REPARSE_POINT`, canonicalised
+  through the same handle, which stays open with `FILE_SHARE_READ` across the
+  whole resolve.
+- **No cache path is ever read from disk.** Every path is
+  `root/<bucket>/<hex-digest>`, re-checked with a component-wise descendant
+  test.
+- **Publication is a directory rename**, and SHA-256 covers the payload and
+  both sidecars on every read.
+- `SegmentWriter`'s three-thread handshake, `CompletionRegistry`'s scalar
+  tokens, and `ParallelFor.h`'s pool have each been walked for every
+  interleaving and hold.
 
-- **The IPC wire format is exemplary.** Magic `0x3152574Eu` + exact-version gate
-  (`NeuralWorkerProtocol.h:28`), `static_assert` on all 7 struct sizes (`:167`),
-  decoders that reject trailing bytes, odd lengths, oversized counts,
-  un-flagged reserved bytes, and overflow. One shared header, not two schemas.
-- **No command injection is reachable.** No `cmd.exe` / `system()` / `_popen`
-  anywhere. `lpApplicationName` is always a handle-verified absolute path.
-  yt-dlp runs with `--no-config --no-cache-dir --no-plugin-dirs --no-playlist`.
-  URL is allowlisted (HTTPS + dot-bound host + exact route + 11-char id) **and**
-  filtered for quotes, backslashes and control chars.
-- **Helper TOCTOU is properly closed** — `FILE_FLAG_OPEN_REPARSE_POINT`,
-  canonicalization via `GetFinalPathNameByHandleW` on that same handle, and the
-  handle **kept open with `FILE_SHARE_READ` only** across the whole resolve.
-- **No cache path ever comes off disk.** The manifest has no path fields; every
-  path is `root/<bucket>/<hex-digest>` re-checked with `weakly_canonical` + a
-  component-wise descendant test.
-- **Publication is a directory rename** with full SHA-256 of payload and both
-  sidecars on every read, plus a double manifest re-parse-and-compare.
-- **`SegmentWriter`'s three-thread handshake is sound** — every interleaving of
-  Cancel/Finish/Fail/Rotate/ClaimWarm/Finalize was walked; no lost wakeup, no
-  deadlock, no orphaned armed encoder.
-- **`CompletionRegistry`** is the right cross-thread pattern — posted messages
-  carry scalar tokens, never addresses.
-- **`ParallelFor.h`'s pool is correct** — the `busy_` guard, the
-  `pending_.wait(remaining)` re-load loop, and `InPoolWorkerFlag` nested-dispatch
-  suppression all hold.
+**GPU**
+- **D3D12 slot discipline:** a slot wait before every mapped write and
+  allocator reset, and a drain before releasing DLSS.
+- **DRED is wired up.**
+- **GDI objects are always released**, including on failure paths.
+- NVDEC runs on both the playback and offline paths.
 
-### GPU
+**Already optimised; these do not need doing again:**
+- the capture readback ring;
+- NV12 over the pipe;
+- guide fan-out via per-worker semaphores;
+- segment rotation with a warm encoder;
+- event-driven resident-helper waits;
+- NVOF on its own command list with a GPU-side fence;
+- `WaitForNextTick` on a high-resolution waitable timer (113% → 18% of one
+  core);
+- guides and guide passes gated on `GuidesRequired()`;
+- `CoveredRanges()` memoised inside `NeuralSegmentIndex`;
+- `/MP`.
 
-- D3D12 slot discipline: `WaitForFrameSlot` before every mapped write and
-  allocator reset; slot published on every exit after the first
-  `ExecuteCommandLists`; `ReleaseDLSSFeatureForIdle` drains before releasing
-  (DLSS guide §5.5); `~D3D12Renderer` tears `m_nvof` down while device and queue
-  are alive, with the reason in-comment.
-- **DRED already wired** (`D3D12Renderer.cpp:200`, `:1427`), queried once on the
-  loss transition.
-- **GDI is meticulous** — every `CreateSolidBrush`/`CreatePen`/`CreateFontW`/
-  `CreateCompatibleDC` site is deselected and deleted, including failure paths.
-- NVDEC on **both** playback and offline paths.
+**Tests and supply chain**
+- **Tests are real, not smoke.**
+  - A release-notes body with a planted `tag_name` forces a correct parser.
+  - Byte-identical pixels are asserted across two seek paths.
+  - Cache corruption is covered: tamper, interrupted staging, nonce
+    collision, dead-owner sweep.
+- **Everything is pinned and checked.** Every action is SHA-pinned.
+  - Every download is hash-checked before it runs and again after staging.
+  - Runtime archives are checked, then each extracted file and its
+    Authenticode state.
+  - The DLSS SDK is pinned to a commit.
+  - The package has an exact allowlist and zip-bomb and traversal limits.
+  - CMake refuses to ship a build with test seams compiled in.
+- **SHA-256 has exactly one implementation.** That is the pattern P1.16
+  should copy.
+- **The update check** uses `WINHTTP_FLAG_SECURE`, bounded timeouts, a
+  body-size cap, and downgrade protection.
+- **Zero /W4 warnings**, `#pragma once` everywhere, no `#if 0`, and no
+  commented-out code.
 
-### Already-optimized (excluded from Tier 2A)
-
-Capture readback ring (4 persistently-mapped slots, per-slot fence — 0.17.0
-measured 48.6 → 109.4 frames/s) · redundant clears removed, depth clear
-correctly kept for hi-Z · timestamp readback persistently mapped · guide fan-out
-via per-worker semaphores · `CopyMappedRows` single contiguous parallel memcpy ·
-decoder pipe sizing and buffer recycling · NV12 over the pipe (14.7 → 5.5 MB per
-1440p frame) · `gpuSourceConversion`/`gpuColorConversion` defaults (measured,
-priced, decided — leave FALSE) · segment rotation with a warm encoder armed a
-segment ahead · offline pipelining sized from measurement · resident-helper
-waits event-driven · NVOF on a separate command list with a GPU-side fence.
-
-### Tests and supply chain
-
-- **Test quality is genuinely high, not smoke.** `UpdateCheckTests.cpp:60`
-  plants `"tag_name": "...v9.9.9"` **inside a release-notes body** so a naive
-  substring parser passes and the correct one is required.
-  `PolicyTests.cpp:5459` asserts two seek mechanisms produce **byte-identical
-  pixels**. `NeuralPrerenderTests.cpp:759` discovers a genuinely dead PID by
-  probing the kernel.
-- **Cache corruption is well covered** — payload tamper, in-place manifest
-  rewrite, interrupted staging, nonce collision, dead-vs-live owner sweep,
-  AV-hold rename retry.
-- All 4 GitHub Actions **SHA-pinned**. Every download in `tools/fetch_*.ps1` is
-  SHA-256 verified **before** execution **and** re-verified after staging;
-  `fetch_youtube_helpers.ps1` additionally runs `--version` on the staged binary.
-- Exactly **one** `BCryptOpenAlgorithmProvider` in the whole tree. SHA-256 has a
-  single implementation — **this is the pattern the rest of the codebase should
-  follow.**
-- `tools/verify_package.ps1` enforces an exact file allowlist, per-file
-  Authenticode state, and zip-bomb guards (128 entries / 512 MB / ratio 250).
-- **CI is real** — builds from a clean runner, runs 13 suites, then assembles
-  **and verifies** the package on every PR, so packaging breaks surface on the
-  PR not the tag.
-- `UpdateCheck` is safe by construction: `WINHTTP_FLAG_SECURE`, 8 s timeouts,
-  256 KiB body cap, downgrade protection.
-
-### Hygiene
-
-57/57 headers use `#pragma once`. **Zero `TODO`/`FIXME`/`HACK` in `src/`.** Zero
-commented-out code, zero `#if 0`. `WIN32_LEAN_AND_MEAN`/`NOMINMAX` on every
-target. No ODR hazards — the three shared-mutable-state sites all correctly use
-function-local statics in inline functions. **381 commits in 22 days.**
-
-`docs/TROUBLESHOOTING.md` is outstanding — it quotes literal log lines and tells
-the user how to read them.
+`docs/TROUBLESHOOTING.md` quotes literal log lines and tells the user how to
+read them. Keep that standard. The docs' menu paths and shortcuts match
+`AppMenu.cpp` and `main.cpp`, and every repository path they cite exists.
 
 ---
 
 ## Method
 
-Six agents, 2026-09-20, against `dec9a87`:
+**2026-09-23, against 23d71d9.** Five agents ran in parallel, then the lead
+re-read the top findings (✅) against source:
 
 | Agent | Scope |
 | --- | --- |
-| Competitive research | Topaz, video2x, Anime4K, chaiNNer, SVP, RIFE, FlowFrames, mpv/madVR/VLC, RTX VSR, the DLSS 5 community field. Live GitHub API for all competitor metrics. |
-| Player baseline research | HDR/colour, subtitles, audio, decode robustness, presentation timing, crash engineering, distribution trust. Primary sources: Microsoft Learn, mpv/libass/libplacebo/FFmpeg headers, NVIDIA Streamline & NGX, live issue trackers. |
-| Correctness audit | Concurrency, D3D12 lifetime, error handling, leaks, untrusted input, integer/buffer, shutdown, cache correctness. |
-| Performance audit | Frame path, sync stalls, IPC, pacing, memory, encode path, disk I/O, build flags. |
-| Build/test/release audit | Coverage mapping, testability, CI/CD, build system, supply chain, observability, code health. |
-| Duplication sweep | Hex formatting, path resolution, SHA-256, JSON, process spawning, string conversion, atomic writes, header hygiene, function length. |
+| Playback audit | `main.cpp`, `SynchronizedPlayback`, audio/WASAPI, `D3D12Renderer`, `VideoDecoder`, `MediaPipeline`, UI |
+| Neural audit | Helper, IPC, `OfflineNeuralRenderer`, cache, guides, frame generation, runtime lock, YouTube |
+| Build/CI/docs | Built Release, ran all 26 CTest tests and the site tests; reviewed CMake, workflows, packaging scripts, docs drift, site, repository size |
+| Pipeline research | The DLSS 5 ecosystem as of September 2026, depth and flow models, libplacebo/mpv, RTX Video, NVENC, neural-video metrics |
+| UX research | ICAT, video-compare, Improve-ImgSLI, Topaz, uosc/mpv, Windows shell integration, and the current UI, screenshots and site |
 
-**Note on sourcing:** reddit.com was unreachable in this environment. All
-user-demand evidence is from directly fetched Topaz Discourse, the SVP forum,
-Doom9, VideoHelp, Plex forums, NVIDIA developer forums and GitHub trackers. No
-Reddit content is quoted.
-
----
-
-## Round two — what this branch closed after the regression
-
-Written after the swapchain regression, which is the fact that shaped the
-order: the suite stayed green through a total outage, so verification came
-before features.
-
-**Corrected claims.** Two statements in this document turned out to be wrong
-when measured, and both had been repeated to the user before being checked:
-
-| Claim | Measured |
-| --- | --- |
-| 2.7: 682 ms of `waveOut` buffering "sets the seek cost" | **60 ms.** `Seek` restarts ffmpeg and resets the device, so the queue depth was never in that path. The 682 ms was buffering the clock does not read. |
-| "No automated test renders a frame through feature 18" | **False.** `MediaGpuSmoke` does, and asserts on the runtime evidence. It passed with the regression reinstated. The real gap was that every GPU test rendered *whole-source*, and only a *range* render runs the preroll that exhausts the add-on's workset pool. |
-| 2.6: add `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` and wait on the frame-latency object | **The fix was shipped and it killed neural rendering.** The add-on hooks this swapchain; with the flag set it exhausts its workset pool in three frames and every later frame is the untouched source. Reverted in `6ab4267`. The diagnosis (the call is a no-op) was right; the prescription was harmful. 2.2 uses a waitable timer instead. |
-
-**What landed** — `✔` closed, `½` partly, with the remainder in the task and in
-"Still open" below.
-
-| Item | | What landed |
-| --- | --- | --- |
-| 2.13 | ✔ | `AudioClockSmoke`: the audio clock asserted against a real endpoint at start, forward seek, backward seek, pause, resume, drift and EOF |
-| 2.14 | ½ | `NeuralRangeRenderSmoke` — a range render, the shape nothing covered — plus `SKIP_RETURN_CODE` on every hardware smoke. **The runner is still unregistered** |
-| 2.15 | ✔ | Structured binding pinning all thirteen identity fields; `height`, `quality`, `range`, `guides` added to the mutation loop |
-| 2.16 | ✔ | `REQUIRE`, the SEH case guard and `TestCase` lifted into `TestSupport.h`; `Run()` split into 33 named cases at an identical 798 assertions |
-| 2.18 | ✔ | `renderer_recovery::Rebuild` — recovery makes a fresh child window instead of reusing the dead one |
-| 2.19 | ✔ | `NeuralCacheManager::Evict` + `CacheEvictionPolicy.h`; `Clear()`/`SizeBytes()` agree |
-| 2.20 | ✔ | `PlatformPaths.h`; all fourteen `GetModuleFileNameW` sites converted, two truncation bugs gone |
-| 2.21 | ½ | The one divergence that bites: `PreflightIdentity` gave two GPUs one identity. `NarrowText.h` names all three conversions |
-| 2.23 | ½ | The two hangs (`ReadAvailable`, `EndHelper`) and the exit-code 259 misreport |
-| 1.10 | ✔ | `tools/package_release.ps1` restored — the deletion had been committed into an unrelated commit |
-| 3.8 | ½ | WASAPI shared-mode, event-driven, at the endpoint's mix format. **Device-change recovery is polled, not notified, and five of six sub-items are untouched** |
-
-**Measured**
-
-| | before | after |
-| --- | ---: | ---: |
-| audio format delivered | 16-bit 48 kHz, converted twice | 32-bit float at the mix format |
-| audio queue depth | 682 ms | 22 ms |
-| clock drift over 5 s | −0.074 ms | −0.003 ms |
-| position after seek to 20 s | 20.047 s | 20.000 s |
-| render-cache reclamation | none | unreachable entries at startup |
-| UI-regression cases | 1 | 33 |
-| `gpu`/`audio` tests | 8 | 10 |
-| a crashing test case | kills the run | named, run continues |
-
-**Still open**
-
-- **2.14 · Register the self-hosted runner.** `gpu-tests.yml` takes `gpu` and
-  `audio` and refuses a run in which anything skipped. It needs a runner
-  registered against the repository, which needs the owner's credentials and
-  means that machine accepts CI jobs. _(This bullet previously cited "1.2",
-  which is the heap over-read. The runner is 2.14.)_
-- **3.8 residue** — five of six WASAPI sub-items: no `IMMNotificationClient`
-  or `IAudioSessionEvents`, no dead-sink watchdog, no `swr_set_compensation`
-  drift correction, no track-disposition filtering, no seek/pause fade, no
-  passthrough. Device-change recovery is polled and **unverified end to end**.
-- **2.19 residue** — `SweepStaging`'s uninterruptible `remove_all` on the UI
-  thread, no `FlushFileBuffers` before the publishing rename, quarantine's
-  missing forensic window.
-- **2.21 residue** — the 18 wide/narrow converters outside the helper channel,
-  `JsonEscape`, hex formatting, `CreateKillOnCloseJob`, `QuoteArgument`.
-- **1.11 residue** — `YouTubeResolver.cpp` still has **zero** log lines, and
-  still returns one opaque string for five distinct refusal causes.
-- **3.2 residue** — the presets ship, but no rung prints its measured cost, so
-  half the quality rule is still unimplemented in the UI.
-- **`SizeBytes` unreadable-entry handling has no test.** A denied ACL does not
-  make `file_size` fail on Windows — the size comes from the directory entry —
-  and no portable injection was found.
-- **1.12 residue** — `verify_package.ps1` still is not in its own `$expected`
-  allowlist, so it does not ship inside the zip and a user cannot verify a
-  download without cloning the repository.
-
----
-
-## Round three — the release gate
-
-Six items chosen for what a viewer hits on the first evening, plus three
-smaller ones. All nine landed. `ctest` is **23/23** with 9 `gpu` and 1
-`audio`; portable **13/13**; clean rebuild 1m35s, zero warnings.
-
-**Corrected claim.** One more statement of mine that measurement disproved,
-recorded beside the other three:
-
-| Claim | Measured |
-| --- | --- |
-| `FrameGenerationRefusal::VariableFrameRate` is unreachable dead code | **False.** `SourceCadence` is aggregate-initialised positionally at `main.cpp:1670`, so a grep on the field name missed it; `VideoDecoder::ConstantFrameRate()` does feed it. The real gap was narrower and is what **3.9** always said: the signal it used - `avg_frame_rate` against `r_frame_rate` - is wrong in both directions on the sources the question is asked about. |
-
-**What landed**
-
-| Item | | |
-| --- | --- | --- |
-| 3.9 | ✔ | Frame-rate constancy decided from packet spacing, not the two declared rates. Wrong in both directions before: a capture declaring a flat 60/60 was called constant, and a film declaring 23 against 24 was called variable |
-| 3.8 | ½ | The 4 ms raised-cosine de-click; track selection that never opens on the commentary; endpoint notifications with the dead-sink watchdog, **verified end to end** |
-| 1.11 | ✔ | `YouTubeResolver` says which of five refusals happened, and logs |
-| 3.2 | ✔ | The measured cost printed beside the ladder |
-| 2.9 | ½ | The source hashed once per loaded media instead of once per job |
-| 1.12 | ✔ | `verify_package.ps1` ships inside the package it checks |
-| 2.22 | ½ | Three of four remaining drift rows corrected |
-
-**Measured**
-
-| | before | after |
-| --- | ---: | ---: |
-| largest discontinuity at a stop | 0.910 | ~0.32 (9.6 dB off) |
-| device-change recovery | unverified | 56 ms, resumes at the same position |
-| audio track on a commentary-first rip | the commentary | the feature |
-| VFR capture declaring 60/60 | frame generation allowed | refused, with the reason |
-| source hashes per job on one file | one each | one per file |
-| `YouTubeResolver` log lines | 0 | every refusal, named |
-| preset render cost | unknown | 6.30-6.31 s median, all four within 0.6% |
-
-**Still open after this pass**
-
-- **2.14 · the self-hosted runner.** Unchanged: it needs the owner's
-  credentials.
-- **3.8 residue** — `swr_set_compensation` drift correction and bitstream
-  passthrough. Neither is a first-evening problem; drift is the one that
-  matters over a two-hour film.
-- **3.1** — the competitive review, which `RELATED_PROJECTS.md` now warns
-  about rather than pretending currency.
-- **2.19, 2.21 residue** and the untestable `SizeBytes` path, all unchanged.
+Everything open on the 2026-09-20 list was re-checked against current source
+and carried over, with updated line numbers, or dropped once done.

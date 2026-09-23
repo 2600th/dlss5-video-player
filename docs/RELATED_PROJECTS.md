@@ -6,9 +6,10 @@ These projects were reviewed on September 1, 2026 to avoid duplicating solved
 integration work and to compare real-time performance strategies.
 
 > ⚠️ **That review is three weeks old and the field moved.** A survey on
-> 2026-09-20 found the competitive picture materially changed - see task 3.1
-> in `docs/IMPROVEMENT-TASKS.md` for what it found and what needs rewriting
-> here. Treat the comparisons below as September 1 facts, not current ones,
+> 2026-09-20, re-run on 2026-09-23, found the competitive picture materially
+> changed - see task P1.23 in the repository's
+> [`docs/IMPROVEMENT-TASKS.md`](https://github.com/2600th/dlss5-video-player/blob/main/docs/IMPROVEMENT-TASKS.md#p123)
+> for what it found and what needs rewriting here. Treat the comparisons below as September 1 facts, not current ones,
 > until that rewrite lands.
 
 This is the maintained comparison. The longer September 2026 survey it was
